@@ -2230,6 +2230,13 @@ pub(crate) fn advance_settled_graphs(
     let Some(settled) = holder.settled()? else {
         return Ok(());
     };
+    advance_graphs_after_settlement(&settled, workers)
+}
+
+fn advance_graphs_after_settlement(
+    settled: &provenant_run::HolderContext,
+    workers: &'static dyn WorkerObserver,
+) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_fabric_runtime::graph::{FileJournal, advance};
 
     let Some(host) = &settled.launch else {
@@ -2242,7 +2249,7 @@ pub(crate) fn advance_settled_graphs(
     )?;
     // A lane's settlement must not stop unrelated graphs from advancing.
     // Settlement records its own retention reason on the attempt.
-    let settlement_error = settle_owned_worktree(&settled, &roots, workers, None).err();
+    let settlement_error = settle_owned_worktree(settled, &roots, workers, None).err();
     let settlement_reason = settlement_error.as_ref().map(|error| error.to_string());
     let mut first_error = settlement_error;
     for id in FileJournal::graph_ids(&roots.state, settled.project_id)? {
@@ -3597,6 +3604,103 @@ mod peer_tests {
         worktree: PathBuf,
     }
 
+    fn publish_success(
+        rig: &crate::worktree_tests::support::TestRig,
+        store: &RunStore,
+        record: &provenant_run::AttemptRecord,
+        head: provenant_core::GitOid,
+        call: &provenant_run::Request<'_>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let attempt = rig
+            .state
+            .join("runs")
+            .join(record.run_id.to_string())
+            .join("attempts")
+            .join(record.attempt_id.to_string());
+        let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
+        use provenant_supervisor::custody::{
+            ExitObservation, PublicationState, Scope, SettlementEvidence,
+        };
+        let exit = ExitObservation {
+            publication: PublicationState::Durable,
+            scope: Scope {
+                run: record.run_id,
+                attempt: record.attempt_id,
+                generation: record.generation,
+            },
+            termination: Some(provenant_os::exec::Termination::Exit(0)),
+            never_spawned: false,
+            stop_reason: None,
+            delivered_signals: vec![],
+            reaped: vec![],
+            omitted_reaped: 0,
+            spared: vec![],
+            omitted_spared: 0,
+            warnings: vec![],
+            omitted_warnings: 0,
+            terminal_observed: false,
+            unresolved_cleanup: false,
+            unresolved_pids: vec![],
+            settlement_evidence: SettlementEvidence::DarwinCensusAndCustodyLease,
+            stdout: Default::default(),
+            stderr: Default::default(),
+        };
+        let mut exit_wire = serde_json::to_value(&exit)?;
+        let object = exit_wire.as_object_mut().ok_or("exit object")?;
+        object.remove("publication");
+        object.insert("schema_version".into(), 1.into());
+        for (name, wire) in [
+            ("process-exit.json", exit_wire),
+            (
+                "writer-terminal.json",
+                serde_json::json!({"schema_version":1,"head":head,"protected_paths":[]}),
+            ),
+        ] {
+            directory
+                .atomic_write(
+                    std::ffi::OsStr::new(name),
+                    ".fixture-",
+                    &serde_json::to_vec(&wire)?,
+                    provenant_os::fs::PublishMode::NoReplace,
+                )?
+                .require_durable()?;
+        }
+        drop(directory.lock(
+            std::ffi::OsStr::new("custody.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+            call.budget,
+            call.cancel,
+            call.clock,
+        )?);
+        let route = provenant_run::RouteRecord {
+            provider: Some("fixture".into()),
+            model: Some("fixture/model".into()),
+            ..Default::default()
+        };
+        store.publish_terminal(
+            record.attempt_id,
+            record.revision,
+            &provenant_run::TerminalPublication {
+                outcome: Outcome::Succeeded,
+                finished_at: call.clock.wall_now()?,
+                started_at: None,
+                provider_ms: None,
+                reason: None,
+                result: "OK",
+                complete: true,
+                redacted: false,
+                resolved_route: Some(route.clone()),
+                applied_route: Some(route.clone()),
+                observed_route: Some(route),
+                usage: Default::default(),
+                session: None,
+            },
+            &exit,
+            call,
+        )?;
+        Ok(())
+    }
+
     impl SettlementFixture {
         fn resumed() -> Result<Self, Box<dyn std::error::Error>> {
             use provenant_confinement::worktrees::{
@@ -3727,93 +3831,7 @@ mod peer_tests {
             };
             store.resume_fresh(&resume, "fixture", &call)?;
             let record = store.record(resume.attempt_id, &call)?;
-            let attempt = rig
-                .state
-                .join("runs")
-                .join(record.run_id.to_string())
-                .join("attempts")
-                .join(record.attempt_id.to_string());
-            let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
-            use provenant_supervisor::custody::{
-                ExitObservation, PublicationState, Scope, SettlementEvidence,
-            };
-            let exit = ExitObservation {
-                publication: PublicationState::Durable,
-                scope: Scope {
-                    run: record.run_id,
-                    attempt: record.attempt_id,
-                    generation: record.generation,
-                },
-                termination: Some(provenant_os::exec::Termination::Exit(0)),
-                never_spawned: false,
-                stop_reason: None,
-                delivered_signals: vec![],
-                reaped: vec![],
-                omitted_reaped: 0,
-                spared: vec![],
-                omitted_spared: 0,
-                warnings: vec![],
-                omitted_warnings: 0,
-                terminal_observed: false,
-                unresolved_cleanup: false,
-                unresolved_pids: vec![],
-                settlement_evidence: SettlementEvidence::DarwinCensusAndCustodyLease,
-                stdout: Default::default(),
-                stderr: Default::default(),
-            };
-            let mut exit_wire = serde_json::to_value(&exit)?;
-            let object = exit_wire.as_object_mut().ok_or("exit object")?;
-            object.remove("publication");
-            object.insert("schema_version".into(), 1.into());
-            for (name, wire) in [
-                ("process-exit.json", exit_wire),
-                (
-                    "writer-terminal.json",
-                    serde_json::json!({"schema_version":1,"head":info.head,"protected_paths":[]}),
-                ),
-            ] {
-                directory
-                    .atomic_write(
-                        std::ffi::OsStr::new(name),
-                        ".fixture-",
-                        &serde_json::to_vec(&wire)?,
-                        provenant_os::fs::PublishMode::NoReplace,
-                    )?
-                    .require_durable()?;
-            }
-            drop(directory.lock(
-                std::ffi::OsStr::new("custody.lock"),
-                provenant_os::fs::LockMode::Exclusive,
-                call.budget,
-                &cancel,
-                &clock,
-            )?);
-            let route = provenant_run::RouteRecord {
-                provider: Some("fixture".into()),
-                model: Some("fixture/model".into()),
-                ..Default::default()
-            };
-            store.publish_terminal(
-                record.attempt_id,
-                record.revision,
-                &provenant_run::TerminalPublication {
-                    outcome: Outcome::Succeeded,
-                    finished_at: clock.wall_now()?,
-                    started_at: None,
-                    provider_ms: None,
-                    reason: None,
-                    result: "OK",
-                    complete: true,
-                    redacted: false,
-                    resolved_route: Some(route.clone()),
-                    applied_route: Some(route.clone()),
-                    observed_route: Some(route),
-                    usage: Default::default(),
-                    session: None,
-                },
-                &exit,
-                &call,
-            )?;
+            publish_success(&rig, &store, &record, info.head, &call)?;
             let settled = provenant_run::HolderContext {
                 schema_version: 1,
                 roots: provenant_run::RootSeed {
@@ -3837,6 +3855,167 @@ mod peer_tests {
                 worktree: info.path,
             })
         }
+    }
+
+    #[test]
+    fn settlement_failure_in_one_graph_does_not_stop_another_graph()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::settlement_failure_in_one_graph_does_not_stop_another_graph",
+        )? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{
+            self, AttemptKey, AttemptObservation, AttemptOwner, FileJournal, GraphDocument,
+            GraphExecution, GraphRoute, NodeState, Replay,
+        };
+        struct SeedAttempt {
+            reference: String,
+            actor: String,
+        }
+        impl AttemptOwner for SeedAttempt {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String {
+                self.actor.clone()
+            }
+            fn observe_or_start(
+                &mut self,
+                _: &AttemptKey,
+                _: &str,
+                _: &GraphRoute,
+                _: graph::AccessMode,
+                _: Option<&str>,
+                _: Replay<'_>,
+            ) -> Result<AttemptObservation, Self::Error> {
+                Ok(AttemptObservation::Pending {
+                    attempt_ref: Some(self.reference.clone()),
+                })
+            }
+        }
+        let mut fixture = SettlementFixture::resumed()?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+            budget: WaitBudget::cli(clock.mono_now(), 30)?,
+        };
+        let identity = Context::open(
+            fixture.roots.clone(),
+            &fixture.rig.home,
+            &fixture.rig.project,
+        )?
+        .identity;
+        // Two different terminal attempts let the settlement error be attributed
+        // to A alone. B's journal still needs its running node to be observed.
+        let continuation = provenant_run::Resume {
+            prior: fixture.settled.attempt_id,
+            expected_generation: 0,
+            operation_id: "graph-b-attempt".parse()?,
+            run_id: RunId::from_bytes([40; 16]),
+            attempt_id: AttemptId::from_bytes([41; 16]),
+            prompt: "continue".into(),
+            created_at: clock.wall_now()?,
+        };
+        fixture
+            .store
+            .resume_fresh(&continuation, "fixture", &call)?;
+        let second = fixture.store.record(continuation.attempt_id, &call)?;
+        let head = fixture
+            .store
+            .record(fixture.settled.attempt_id, &call)?
+            .head
+            .ok_or("head")?;
+        publish_success(&fixture.rig, &fixture.store, &second, head, &call)?;
+        for (id, attempt) in [
+            ("a-settlement-error", fixture.settled.attempt_id),
+            ("b-completes", continuation.attempt_id),
+        ] {
+            let document: GraphDocument = serde_json::from_value(serde_json::json!({
+                "schema_version":1,"graph_id":id,"nodes":[{"id":"one","prompt":"reply OK","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]
+            }))?;
+            let mut journal = FileJournal::open(
+                &fixture.roots.state,
+                fixture.settled.project_id,
+                id,
+                call.budget,
+                &cancel,
+                &clock,
+            )?;
+            journal.bind(GraphExecution {
+                integration_base: None,
+                directory: fixture.rig.project.clone(),
+                document: document.clone(),
+            })?;
+            let mut seed = SeedAttempt {
+                reference: format!("{}/{attempt}", identity.host),
+                actor: identity.inbox.actor.to_string(),
+            };
+            let seeded = graph::advance(&document, &mut seed, &mut journal)?;
+            assert_eq!(seeded.checkpoint.nodes[0].state, NodeState::Running);
+        }
+        // An unsafe receipt path makes settlement itself fail before the graph
+        // loop. It must leave A observable and still allow B to complete.
+        let receipt_path = fixture
+            .rig
+            .state
+            .join("runs")
+            .join(fixture.settled.run_id.to_string())
+            .join("attempts")
+            .join(fixture.settled.attempt_id.to_string())
+            .join("worktree-settlement.json");
+        std::fs::create_dir(&receipt_path)?;
+        let settlement_error =
+            settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)
+                .err()
+                .ok_or("settlement should fail")?
+                .to_string();
+        fixture.settled.launch = Some(provenant_run::HostLaunchContext {
+            configuration_root: fixture.rig.state.clone(),
+            cwd: fixture.rig.project.clone(),
+            executables: Default::default(),
+            git: provenant_os::git::git_executable().ok_or("git")?,
+            codex_home: None,
+            fixture_state_write: false,
+        });
+        let error = advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)
+            .err()
+            .ok_or("settlement failure must propagate")?;
+        assert_eq!(error.to_string(), settlement_error);
+        assert_eq!(
+            FileJournal::read_advance_error(
+                &fixture.roots.state,
+                fixture.settled.project_id,
+                "a-settlement-error"
+            )?
+            .as_deref(),
+            Some(settlement_error.as_str())
+        );
+        let completed = FileJournal::read_checkpoint(
+            &fixture.roots.state,
+            fixture.settled.project_id,
+            "b-completes",
+        )?
+        .ok_or("B checkpoint")?;
+        assert_eq!(completed.nodes[0].state, NodeState::Succeeded);
+        assert!(
+            FileJournal::pending_execution(
+                &fixture.roots.state,
+                fixture.settled.project_id,
+                "b-completes"
+            )?
+            .is_none()
+        );
+        assert!(
+            FileJournal::read_advance_error(
+                &fixture.roots.state,
+                fixture.settled.project_id,
+                "b-completes"
+            )?
+            .is_none()
+        );
+        assert!(fixture.worktree.exists());
+        Ok(())
     }
 
     #[test]

@@ -165,10 +165,12 @@ writer keeps its worktree. Graph writers deliver only when their node explicitly
 After a run settles and its supervisor releases custody and writer locks,
 the supervisor advances pending graphs from the journal's retained document. A
 failed advance is recorded as `advance_error` until the next success;
-`resume` is the manual path.
+`resume` is the manual path. A lane settlement error is recorded only on graphs
+containing that attempt and does not stop other graphs from advancing.
 - Why: dependants progress without a daemon.
 - Test: `crates/fabric-runtime/src/graph.rs::advance_error_is_recorded_replaced_and_cleared_and_rebind_moves_directory`;
-  `tests/dispatch_provider.rs::graph_settlement_advances_writer_and_account_routed_review`
+  `tests/dispatch_provider.rs::graph_settlement_advances_writer_and_account_routed_review`;
+  `src/fabric.rs::settlement_failure_in_one_graph_does_not_stop_another_graph`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
 ## Landing
