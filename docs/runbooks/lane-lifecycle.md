@@ -24,6 +24,30 @@ refs intact. Inspect the failure and resolve it through the owning lane.
 Legacy `--deliver-remote`, `--deliver-branch` and `--open-pr` remain available
 as an alternative to `--deliver`.
 
+Writer lanes with open network can also publish during the attempt. They get
+read-only access to the existing gh configuration, with Git credentials supplied
+by the pinned `gh auth git-credential` helper. Setup never reads or copies the
+token. Provider-only and local network lanes retain the gh credential deny.
+
+The lane's Git pre-push hook permits only its checked-out branch on `origin`.
+It refuses default and protected branches, tags, deletions and updates that
+would discard remote history, including forced rewinds. GitHub protection
+lookups must succeed before a push proceeds. The hook checks active rules even
+when the branch has not been created on GitHub yet.
+
+Use `gh pr create`, `gh pr comment`, `gh pr view` and `gh pr checks` to manage
+the pull request. Merge through `provenant pr merge --head SHA N` or `pr land`,
+which require green CI for the exact head. The Provenant executable is not on
+the lane's shell PATH; use the host's gated path, handing the merge to the chair
+when that path is unavailable. GitHub's required checks still apply to raw
+`gh pr merge`.
+
+Publishing defaults on. Disable it for a dispatch with
+`--knob lanes.publish=false` or Fabric `knobs: ["lanes.publish=false"]`.
+Set `[knobs] "lanes.publish" = false` in the host configuration for a persistent
+opt-out. Disabling it removes the writer's gh read allowance and publishing
+setup. Read-only lanes keep their existing open-network gh read access.
+
 After a settled writer without delivery, run:
 
 ```sh
