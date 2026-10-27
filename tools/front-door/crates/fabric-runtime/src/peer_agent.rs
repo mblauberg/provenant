@@ -1031,6 +1031,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn kickstart_without_a_new_pid_boots_out_and_bootstraps() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let mut calls = Vec::new();
+        bootstrap_with(root.path(), root.path(), false, |args, _| {
+            calls.push(args[0].to_owned());
+            Ok((true, "state = spawn scheduled\n last exit code = 78".into()))
+        })
+        .unwrap();
+        assert_eq!(calls[0], OsStr::new("print"));
+        assert_eq!(calls[1], OsStr::new("kickstart"));
+        assert!(calls[2..calls.len() - 2].iter().all(|call| call == "print"));
+        assert_eq!(
+            &calls[calls.len() - 2..],
+            ["bootout", "bootstrap"].map(OsString::from)
+        );
+    }
+
     /// A stand-in for the worktree owner's registry entry name.
     fn name(path: &std::path::Path) -> std::ffi::OsString {
         path.to_string_lossy().replace('/', "_").into()
