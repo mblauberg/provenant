@@ -298,7 +298,9 @@ recorded head is reachable from the pinned delivered ref or its creation base.
 Local branch deletion additionally requires proof of landed integration;
 pushes and open PRs retain local branches. Settlement rechecks ownership, terminal state, absent live lanes,
 registration, writer custody, Git sequencer state and head under the existing
-removal locks. Ignored output uses GC's existing declared-regenerable walker
+removal locks. Resumed attempts may settle a worktree whose owner is in their
+recorded continuation lineage, using the same bounded ancestry proof as resume.
+Ignored output uses GC's existing declared-regenerable walker
 and keep paths. Only the project's declared regenerable output may be removed;
 other ignored files retain the tree. Other worktrees keep the existing
 GC/removal policy. A host lifecycle receipt records intent before removal,
