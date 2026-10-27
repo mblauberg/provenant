@@ -1625,18 +1625,28 @@ fn verify_shared_writes(
     Ok(())
 }
 
+/// GitHub CLI configuration roots that networked read-only lanes may read.
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+fn gh_config_paths(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".config/gh"),
+        home.join("Library/Application Support/GitHub CLI"),
+    ]
+}
+
 /// Credential and preservation paths denied to lanes by default. Rendered
 /// last so they override every allow, except the scoped gh read below.
 /// `Library/Keychains` stays out: Agy reads its login keychain through an
 /// exact authentication grant.
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
-fn hard_denied(home: &Path) -> [(PathBuf, PathScope); 11] {
+fn hard_denied(home: &Path) -> [(PathBuf, PathScope); 12] {
     [
         (".ssh", PathScope::Subtree),
         (".aws", PathScope::Subtree),
         (".azure", PathScope::Subtree),
         (".gnupg", PathScope::Subtree),
         (".config/gh", PathScope::Subtree),
+        ("Library/Application Support/GitHub CLI", PathScope::Subtree),
         (".kube", PathScope::Subtree),
         (".secrets", PathScope::Subtree),
         ("Monero", PathScope::Subtree),
@@ -1927,6 +1937,18 @@ fn render_profile(
         source.push_str("(allow network-outbound (remote ip \"*:*\"))\n");
     }
 
+    // The gh read comes before the secret-root denies: Seatbelt is
+    // last-match-wins, so an overlapping secret root must still hide it.
+    let gh_paths =
+        if matches!(plan.mode, AccessMode::ReadOnly) && plan.network == NetworkAccess::Open {
+            gh_config_paths(home)
+        } else {
+            Vec::new()
+        };
+    for path in &gh_paths {
+        push_rule(&mut source, "allow", "file-read*", path, PathScope::Subtree)?;
+    }
+
     // Protected controls stay readable but immutable; secret roots stay hidden
     // and immutable even if another profile grant overlaps them.
     for grant in &plan.secret_roots {
@@ -1936,30 +1958,8 @@ fn render_profile(
     for grant in &plan.protected_roots {
         push_rule(&mut source, "deny", "file-write*", &grant.path, grant.scope)?;
     }
-    let gh_read = matches!(plan.mode, AccessMode::ReadOnly) && plan.network == NetworkAccess::Open;
-    if gh_read {
-        for path in [
-            home.join(".config/gh"),
-            home.join("Library/Application Support/GitHub CLI"),
-        ] {
-            push_rule(
-                &mut source,
-                "allow",
-                "file-read*",
-                &path,
-                PathScope::Subtree,
-            )?;
-            push_rule(
-                &mut source,
-                "deny",
-                "file-write*",
-                &path,
-                PathScope::Subtree,
-            )?;
-        }
-    }
     for (path, scope) in hard_denied(home) {
-        if !gh_read || path != home.join(".config/gh") {
+        if !gh_paths.contains(&path) {
             push_rule(&mut source, "deny", "file-read*", &path, scope)?;
         }
         push_rule(&mut source, "deny", "file-write*", &path, scope)?;
@@ -4639,6 +4639,25 @@ mod tests {
             assert!(open.contains(&deny_write), "{path}");
             assert!(!provider.contains(&read), "{path}");
             assert!(!local.contains(&read), "{path}");
+            assert!(provider.contains(&deny_read), "{path}");
+        }
+        let ssh_read = "(deny file-read* (subpath \"/Users/fixture/.ssh\"))";
+        assert!(
+            open.find(ssh_read).expect("ssh deny")
+                > open.rfind("(allow file-read*").expect("allow")
+        );
+
+        // A secret root overlapping the gh config must be denied after the allow.
+        for secret in [
+            "/Users/fixture/.config/gh",
+            "/Users/fixture/.config/gh/hosts.yml",
+            "/Users/fixture/.config",
+        ] {
+            plan.secret_roots = vec![grant(secret)];
+            let hidden = render(&plan);
+            let deny = format!("(deny file-read* (subpath \"{secret}\"))");
+            let allow = "(allow file-read* (subpath \"/Users/fixture/.config/gh\"))";
+            assert!(hidden.find(&deny).expect(secret) > hidden.find(allow).expect(allow));
         }
     }
 
