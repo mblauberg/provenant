@@ -43,7 +43,9 @@ read-only start, so a burst of provider launches is still staggered but a
 read-only lane never waits behind a writer. The memory floor (5 %) and disk
 floor (500 MiB) refuse both classes. A ledger row or ticket with no class is a
 writer; opening a version 1 ledger upgrades it in place and keeps its last
-start as the writer start.
+start as the writer start. A run's own batch concurrency (1 to 16) defaults to
+8 when any lane writes and to 16 when none does, from `lanes.max_concurrency`
+and `lanes.max_concurrency_read_only`; an explicit value wins.
 - Why: an accepted receipt must mean durable admission, and read-only lanes
   must not queue behind writer spacing that exists to pace worktree and
   provider startup.
@@ -54,6 +56,8 @@ start as the writer start.
   `::memory_floor_refuses_both_lane_classes`;
   `::project_cap_allows_up_to_32_active_lanes`;
   `::legacy_rows_without_a_class_are_treated_as_writers`;
+  `::batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins`;
+  `::sixteen_read_only_lanes_run_in_one_batch_two_seconds_apart`;
   `crates/run/src/tests.rs::full_database_retains_admission_and_recovers_original_terminal_intent`
 - Owner: `crates/run/src/admission.rs`, `crates/run/src/ledger.rs`
 

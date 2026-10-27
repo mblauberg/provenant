@@ -582,7 +582,7 @@ fn bounds(path: &str, name: &str) -> Option<(u64, u64)> {
     match name {
         "wait" | "provider_timeout" => Some((1, 14400)),
         "limit" => Some((1, 100)),
-        "concurrency" => Some((1, 8)),
+        "concurrency" => Some((1, 16)),
         "max_bytes" => Some((1, 65536)),
         "read_root" | "write_root" => Some((0, 32)),
         "capability" => Some((0, 16)),

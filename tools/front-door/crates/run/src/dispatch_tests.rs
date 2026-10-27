@@ -2564,6 +2564,62 @@ fn project_cap_allows_up_to_32_active_lanes() -> TestResult {
 }
 
 #[test]
+fn batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins() {
+    let profile = |knobs: &[(&str, u64)]| HarnessProfile {
+        name: "test".into(),
+        knobs: knobs
+            .iter()
+            .map(|(k, v)| ((*k).into(), (*v).into()))
+            .collect(),
+        ..HarnessProfile::default()
+    };
+    let registry = profile(&[
+        ("lanes.max_concurrency", 8),
+        ("lanes.max_concurrency_read_only", 16),
+    ]);
+    assert_eq!(concurrency(None, &registry, false), 8, "writer batch");
+    assert_eq!(concurrency(None, &registry, true), 16, "read-only batch");
+    assert_eq!(concurrency(Some(3), &registry, false), 3);
+    assert_eq!(concurrency(Some(3), &registry, true), 3);
+    let tuned = profile(&[
+        ("lanes.max_concurrency", 2),
+        ("lanes.max_concurrency_read_only", 5),
+    ]);
+    assert_eq!(concurrency(None, &tuned, false), 2);
+    assert_eq!(concurrency(None, &tuned, true), 5);
+    let bare = HarnessProfile::default();
+    assert_eq!(concurrency(None, &bare, false), 8);
+    assert_eq!(concurrency(None, &bare, true), 16);
+}
+
+#[test]
+fn sixteen_read_only_lanes_run_in_one_batch_two_seconds_apart() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut run = batch(90, 16);
+    run.request.concurrency = 16;
+    store.create(&run, &call)?;
+    for (index, attempt) in run.attempts.iter().enumerate() {
+        let id = attempt.attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        assert!(
+            store.claim(id, at(index as i64 * 2_000), &call)?.is_some(),
+            "lane {index} of a 16-lane read-only batch"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn legacy_rows_without_a_class_are_treated_as_writers() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir()?;

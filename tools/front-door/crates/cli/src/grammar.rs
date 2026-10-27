@@ -317,8 +317,8 @@ pub struct Dispatch {
     /// Provider timeout in seconds
     #[arg(long, default_value = "3600", default_value_if("mode", "worktree-write", "10800"), value_parser = clap::value_parser!(u64).range(1..=14400))]
     pub provider_timeout: u64,
-    /// Manifest lanes to run at once (1 to 8)
-    #[arg(long, requires = "manifest", conflicts_with_all = ["prompt_file", "prompt_stdin"], value_parser = clap::value_parser!(u64).range(1..=8))]
+    /// Manifest lanes to run at once (1 to 16)
+    #[arg(long, requires = "manifest", conflicts_with_all = ["prompt_file", "prompt_stdin"], value_parser = clap::value_parser!(u64).range(1..=16))]
     pub concurrency: Option<u64>,
     /// Override an effective harness knob for this dispatch (NAME=VALUE).
     #[arg(long = "knob")]

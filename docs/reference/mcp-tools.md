@@ -1263,7 +1263,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json`.
           "concurrency": {
             "anyOf": [
               {
-                "maximum": 8,
+                "maximum": 16,
                 "minimum": 1,
                 "type": "integer"
               },

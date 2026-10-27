@@ -9,9 +9,19 @@ use provenant_supervisor::custody::{
 use rusqlite::{OptionalExtension, params};
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 
-/// An explicit dispatch argument wins over the effective profile default.
-pub fn concurrency(explicit: Option<u64>, profile: &HarnessProfile) -> u64 {
-    explicit.unwrap_or_else(|| profile.knob_u64("lanes.max_concurrency").unwrap_or(8))
+/// An explicit dispatch argument wins over the effective profile default. A
+/// batch with no writer defaults from `lanes.max_concurrency_read_only`
+/// (16); any batch with a writer defaults from `lanes.max_concurrency` (8).
+pub fn concurrency(explicit: Option<u64>, profile: &HarnessProfile, read_only: bool) -> u64 {
+    explicit.unwrap_or_else(|| {
+        if read_only {
+            profile
+                .knob_u64("lanes.max_concurrency_read_only")
+                .unwrap_or(16)
+        } else {
+            profile.knob_u64("lanes.max_concurrency").unwrap_or(8)
+        }
+    })
 }
 
 pub fn capture_plan(task: &TaskRequest) -> CapturePlan {

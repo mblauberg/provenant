@@ -903,7 +903,8 @@ pub fn submit_with_host(
     let profile = config
         .dispatch_profile(&submission.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
-    let concurrency = run::concurrency(submission.concurrency, &profile);
+    let read_only = submission.tasks.iter().all(|task| task.worktree.is_none());
+    let concurrency = run::concurrency(submission.concurrency, &profile, read_only);
     let tasks = submission
         .tasks
         .into_iter()

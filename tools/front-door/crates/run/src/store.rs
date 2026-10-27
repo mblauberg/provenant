@@ -740,7 +740,7 @@ fn validate_request(input: &PreparedRun) -> Result<()> {
         return Err(RunError::Validation("a continuation has one task"));
     }
     if !(1..=64).contains(&input.request.tasks.len())
-        || !(1..=8).contains(&input.request.concurrency)
+        || !(1..=16).contains(&input.request.concurrency)
         || input.attempts.len() != input.request.tasks.len()
     {
         return Err(RunError::Validation("task/concurrency bounds"));

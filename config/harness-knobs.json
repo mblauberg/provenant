@@ -40,8 +40,14 @@
     "lanes.max_concurrency": {
       "type": "int", "min": 1, "max": 8, "default": 8, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run.rs, tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/run/src/admission.rs",
-      "effect": "Default number of lanes one batch runs at once, resolved from the profile. An explicit dispatch concurrency wins.",
+      "effect": "Default number of lanes one batch runs at once when any lane in it writes a worktree, resolved from the profile. An explicit dispatch concurrency wins.",
       "trade_off": "Lower paces quota and memory and lengthens wall time; total tokens are unchanged."
+    },
+    "lanes.max_concurrency_read_only": {
+      "type": "int", "min": 1, "max": 16, "default": 16, "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/run.rs, tools/front-door/crates/run/src/launch.rs",
+      "effect": "Default number of lanes one batch runs at once when no lane in it writes a worktree, resolved from the profile. An explicit dispatch concurrency wins.",
+      "trade_off": "Lower paces quota and memory and lengthens wall time; total tokens are unchanged. Read-only lanes start 2 s apart whatever this value."
     },
     "lanes.max_depth": {
       "type": "int", "min": 1, "default": 2, "status": "wired",
@@ -85,6 +91,7 @@
       "description": "Less usage per task, accepting slower runs and no polish lane.",
       "knobs": {
         "lanes.max_concurrency": 4,
+        "lanes.max_concurrency_read_only": 8,
         "review.polish": "off"
       }
     },

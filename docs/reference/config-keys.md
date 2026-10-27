@@ -55,12 +55,25 @@ Source: `config/harness-knobs.json`.
 | Field | Value |
 |---|---|
 | `default` | `8` |
-| `effect` | `"Default number of lanes one batch runs at once, resolved from the profile. An explicit dispatch concurrency wins."` |
+| `effect` | `"Default number of lanes one batch runs at once when any lane in it writes a worktree, resolved from the profile. An explicit dispatch concurrency wins."` |
 | `max` | `8` |
 | `min` | `1` |
 | `reader` | `"tools/front-door/crates/cli/src/run.rs, tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/run/src/admission.rs"` |
 | `status` | `"wired"` |
 | `trade_off` | `"Lower paces quota and memory and lengthens wall time; total tokens are unchanged."` |
+| `type` | `"int"` |
+
+## `lanes.max_concurrency_read_only`
+
+| Field | Value |
+|---|---|
+| `default` | `16` |
+| `effect` | `"Default number of lanes one batch runs at once when no lane in it writes a worktree, resolved from the profile. An explicit dispatch concurrency wins."` |
+| `max` | `16` |
+| `min` | `1` |
+| `reader` | `"tools/front-door/crates/cli/src/run.rs, tools/front-door/crates/run/src/launch.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"Lower paces quota and memory and lengthens wall time; total tokens are unchanged. Read-only lanes start 2 s apart whatever this value."` |
 | `type` | `"int"` |
 
 ## `lanes.max_depth`
@@ -164,6 +177,7 @@ Source: `config/harness-knobs.json`.
       "description": "Less usage per task, accepting slower runs and no polish lane.",
       "knobs": {
         "lanes.max_concurrency": 4,
+        "lanes.max_concurrency_read_only": 8,
         "review.polish": "off"
       }
     },

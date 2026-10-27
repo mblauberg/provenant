@@ -33,9 +33,18 @@ overrides win over configuration. Each sealed task and attempt records the
 profile name, effective knob values and exact dispatch overrides, and
 continuations keep that stamp.
 
-Batch concurrency resolves `lanes.max_concurrency` from the profile. The
-registry default is 8, and an explicit `--concurrency N` or Fabric
-`concurrency` wins.
+Batch concurrency resolves from the profile by batch class. A batch with any
+`worktree-write` lane uses `lanes.max_concurrency` (registry default 8); a
+batch with none uses `lanes.max_concurrency_read_only` (registry default 16).
+An explicit `--concurrency N` (1 to 16) or Fabric `concurrency` wins for
+either. The `economy` preset sets 4 and 8 respectively.
+
+Batch concurrency is separate from host admission. Each lane has a class, and
+spacing is measured only against the last start of the same class: writers
+wait 20 s after the last writer start, read-only lanes 2 s after the last
+read-only start, so a read-only lane never waits behind a writer. The host
+allows 64 active lanes and 32 per project, and the memory (5 %) and disk
+(500 MiB) floors apply to both classes.
 
 ## Knob registry
 
@@ -47,7 +56,8 @@ knobs take effect when a skill reads `provenant config show`.
 
 The registry holds only knobs that code or a skill reads: `chair.auto_switch`,
 `chair.switch_threshold`, `chair.switch_accounts`, `lanes.silence_seconds`,
-`lanes.max_concurrency`, `lanes.max_depth`, `review.extra_reviewers`,
+`lanes.max_concurrency`, `lanes.max_concurrency_read_only`, `lanes.max_depth`,
+`review.extra_reviewers`,
 `review.cross_family`, `review.rereview_scope`, `review.polish`,
 `fabric.accept_handoff` and `usage.project_attribution`. Effort, council size,
 repair cycles, summary size, pool spreading, prose polish, context ceilings and

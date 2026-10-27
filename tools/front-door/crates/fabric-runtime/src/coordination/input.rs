@@ -362,7 +362,7 @@ impl ValidateInput for SubmitInput {
                 if tasks.is_empty() || tasks.len() > 64 {
                     return Err(field("tasks"));
                 }
-                if concurrency.is_some_and(|n| n == 0 || n > 8 || usize::from(n) > tasks.len()) {
+                if concurrency.is_some_and(|n| n == 0 || n > 16 || usize::from(n) > tasks.len()) {
                     return Err(field("concurrency"));
                 }
                 if knobs.len() > 64 {
