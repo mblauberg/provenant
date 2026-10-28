@@ -3189,7 +3189,22 @@ const TAIL_MAX: u64 = 500;
 fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
     let site = match command.host.as_deref() {
         Some(host) => Some(remote::site(edge, host)?),
-        None => None,
+        None => command
+            .attempt
+            .0
+            .run
+            .or_else(|| {
+                command
+                    .attempt
+                    .0
+                    .selection
+                    .as_deref()?
+                    .split_once('/')?
+                    .0
+                    .parse()
+                    .ok()
+            })
+            .and_then(|host| remote::qualifier_site(edge, host)),
     };
     if command.attempt.0.selection.is_some() {
         command.attempt.0 = match site {
