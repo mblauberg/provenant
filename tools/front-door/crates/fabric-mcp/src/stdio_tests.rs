@@ -1429,3 +1429,5 @@ fn configured_frame_limit_stops_at_one_byte_beyond_the_cap() {
     framer.push(b"1234\n").unwrap();
     assert_eq!(framer.next_frame().unwrap(), Some(b"1234".to_vec()));
 }
+
+impl crate::tools::McpFacade for FakeFacade {}

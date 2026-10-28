@@ -56,6 +56,7 @@ struct Factory {
     cwd: std::path::PathBuf,
     assets: PathBuf,
     host_launch: Option<provenant_run::HostLaunchContext>,
+    mcp_project: Option<PathBuf>,
     workers: &'static dyn WorkerObserver,
 }
 impl Factory {
@@ -101,7 +102,7 @@ impl stdio::Factory for Factory {
     }
     type Facade<'a> = BoundFacade<'a>;
     fn preflight(&self, call: &provenant_fabric_mcp::tools::ToolCall) -> Result<(), ServiceError> {
-        if let provenant_fabric_mcp::tools::ToolCall::Inbox(input) = call {
+        if let provenant_fabric_mcp::tools::ToolCall::Inbox(input, _) = call {
             let ctx = &self.context;
             provenant_fabric_runtime::inbox::validate_request(
                 &ctx.identity,
@@ -137,6 +138,287 @@ impl stdio::Factory for Factory {
 }
 struct BoundFacade<'a> {
     factory: &'a Factory,
+}
+impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
+    fn console(
+        &mut self,
+        input: provenant_fabric_mcp::tools::ConsoleInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<serde_json::Value, ServiceError> {
+        use provenant_fabric_mcp::tools::ConsoleInput;
+        let mut args = vec!["console".to_owned()];
+        match input {
+            ConsoleInput::Projects => args.push("projects".into()),
+            ConsoleInput::Overview => args.push("overview".into()),
+            ConsoleInput::Sessions {
+                session,
+                limit,
+                cursor,
+            } => {
+                args.push("sessions".into());
+                if let Some(session) = session {
+                    args.push(session);
+                }
+                args.extend(["--limit".into(), limit.to_string()]);
+                if let Some(cursor) = cursor {
+                    args.extend(["--cursor".into(), cursor]);
+                }
+            }
+            ConsoleInput::Board {
+                all,
+                limit,
+                cursor,
+                hosts,
+            } => {
+                args.push("board".into());
+                if all {
+                    args.push("--all".into());
+                }
+                args.extend(["--limit".into(), limit.to_string()]);
+                if let Some(cursor) = cursor {
+                    args.extend(["--cursor".into(), cursor]);
+                }
+                if let Some(hosts) = hosts {
+                    args.extend(["--hosts".into(), hosts]);
+                }
+            }
+            ConsoleInput::Tree {
+                max_depth,
+                max_nodes,
+                detail,
+                hosts,
+            } => {
+                args.extend([
+                    "tree".into(),
+                    "--max-depth".into(),
+                    max_depth.to_string(),
+                    "--max-nodes".into(),
+                    max_nodes.to_string(),
+                ]);
+                if detail {
+                    args.push("--detail".into());
+                }
+                if let Some(hosts) = hosts {
+                    args.extend(["--hosts".into(), hosts]);
+                }
+            }
+        }
+        self.cli_service(args, None, budget, cancel)
+    }
+    fn chair(
+        &mut self,
+        input: provenant_fabric_mcp::tools::ChairInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<serde_json::Value, ServiceError> {
+        use provenant_fabric_mcp::tools::ChairInput;
+        let mut args = vec!["chair".to_owned()];
+        let mut body = None;
+        match input {
+            ChairInput::SummaryShow { session } => {
+                args.extend(["summary".into(), "show".into(), session])
+            }
+            ChairInput::SummaryDiff { session, from, to } => {
+                args.extend([
+                    "summary".into(),
+                    "diff".into(),
+                    session,
+                    "--from".into(),
+                    from.to_string(),
+                ]);
+                if let Some(to) = to {
+                    args.extend(["--to".into(), to.to_string()]);
+                }
+            }
+            ChairInput::SummaryUpdate {
+                session,
+                patch,
+                expect_revision,
+            } => {
+                args.extend([
+                    "summary".into(),
+                    "update".into(),
+                    session,
+                    "--file".into(),
+                    "-".into(),
+                    "--expect-revision".into(),
+                    expect_revision.to_string(),
+                ]);
+                body = Some(serde_json::to_vec(&patch)?);
+            }
+            ChairInput::LogList {
+                session,
+                after,
+                limit,
+            } => {
+                args.extend([
+                    "log".into(),
+                    "list".into(),
+                    "--session".into(),
+                    session,
+                    "--limit".into(),
+                    limit.to_string(),
+                ]);
+                if let Some(after) = after {
+                    args.extend(["--after".into(), after.to_string()]);
+                }
+            }
+            ChairInput::LogAppend {
+                session,
+                entry,
+                operation_id,
+                issued_at,
+            } => {
+                args.extend([
+                    "log".into(),
+                    "append".into(),
+                    "--session".into(),
+                    session,
+                    "--file".into(),
+                    "-".into(),
+                ]);
+                if let Some(id) = operation_id {
+                    args.extend(["--operation-id".into(), id]);
+                }
+                if let Some(time) = issued_at {
+                    args.extend(["--issued-at".into(), time.to_string()]);
+                }
+                body = Some(serde_json::to_vec(&entry)?);
+            }
+        }
+        self.cli_service(args, body, budget, cancel)
+    }
+    fn inbox_owner(
+        &mut self,
+        input: provenant_fabric_runtime::inbox::InboxInput,
+        host: Option<String>,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<provenant_fabric_runtime::inbox::InboxResult, ServiceError> {
+        use provenant_fabric_runtime::inbox::{InboxInput, InboxReply};
+
+        let ctx = &self.factory.context;
+        let Some(host) =
+            host.filter(|host| host != "local" && host != &ctx.identity.host.to_string())
+        else {
+            return self.inbox(input, budget, cancel).map_err(Into::into);
+        };
+        let error = |code: &str, message: String| ServiceError::InboxOwner {
+            code: code.into(),
+            message,
+        };
+        let remote =
+            Context::open_read_only(ctx.roots.clone(), &self.factory.home, &self.factory.cwd)
+                .map_err(|failure| error("inbox_unavailable", failure.to_string()))?;
+        if matches!(
+            input,
+            InboxInput::Close { .. } | InboxInput::Acknowledge { .. }
+        ) {
+            return Err(error(
+                "owner_local_only",
+                format!(
+                    "inbox owner {host}: run this operation on the owner host or from the owning chair session"
+                ),
+            ));
+        }
+        let target = remote.peer_host(&host).ok_or_else(|| {
+            error(
+                "owner_unavailable",
+                format!("inbox owner {host} is not configured"),
+            )
+        })?;
+        match remote.peer(
+            &self.factory.clock,
+            target,
+            PeerAction::Inbox { input },
+            budget,
+            cancel,
+        ) {
+            Ok(PeerResult::Inbox(InboxReply::Ok { result })) => Ok(*result),
+            Ok(PeerResult::Inbox(InboxReply::Error { code, message })) => {
+                Err(error(&code, message))
+            }
+            Ok(_) => Err(error(
+                "unsupported_owner",
+                "peer does not support inbox operations".into(),
+            )),
+            Err(failure) => {
+                let code = match failure.error {
+                    FacadeError::LaunchUnknown { .. } => "ambiguous_outcome",
+                    FacadeError::PeerVersion | FacadeError::PeerProtocolMismatch { .. } => {
+                        "unsupported_owner"
+                    }
+                    _ => "owner_unavailable",
+                };
+                Err(error(
+                    code,
+                    failure.detail.unwrap_or_else(|| failure.error.to_string()),
+                ))
+            }
+        }
+    }
+}
+impl BoundFacade<'_> {
+    // Reuse the process-edge composition so peer coverage and chair custody
+    // follow exactly the same path as the CLI, with fixed argv and bounded IO.
+    fn cli_service(
+        &self,
+        args: Vec<String>,
+        body: Option<Vec<u8>>,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<serde_json::Value, ServiceError> {
+        use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
+        let executable = std::env::current_exe().map_err(|_| FacadeError::OwnerUnavailable)?;
+        let mut argv = vec![
+            executable.into_os_string(),
+            "--json".into(),
+            "--state-dir".into(),
+            self.factory.context.roots.state.as_path().into(),
+        ];
+        if let Some(project) = &self.factory.mcp_project {
+            argv.extend(["--project".into(), project.as_os_str().into()]);
+        }
+        argv.extend(args.into_iter().map(Into::into));
+        let timeout = std::time::Duration::from_micros(
+            budget.remaining(self.factory.clock.mono_now()).as_micros(),
+        );
+        if timeout.is_zero() {
+            return Err(FacadeError::Timeout.into());
+        }
+        let mut options = ExecOptions::new(&argv, &self.factory.cwd, timeout);
+        options.stdin = body.as_deref();
+        options.cancel = Some(cancel);
+        options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };
+        options.stderr = StreamPolicy::Capture { limit: 16 * 1024 };
+        let output = self
+            .factory
+            .executor
+            .execute(options)
+            .map_err(|_| FacadeError::OwnerUnavailable)?;
+        if output.timed_out {
+            return Err(FacadeError::Timeout.into());
+        }
+        if cancel.is_cancelled() {
+            return Err(FacadeError::Cancelled.into());
+        }
+        if output.stdout.truncated {
+            return Err(ServiceError::ResultTooLarge);
+        }
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)
+            .map_err(|_| FacadeError::OwnerUnavailable)?;
+        if output.termination != Termination::Exit(0) {
+            return Err(FacadeError::DispatchRefused {
+                reason: value["error"]["message"]
+                    .as_str()
+                    .unwrap_or("CLI service refused the request")
+                    .to_owned(),
+            }
+            .into());
+        }
+        Ok(value["data"].clone())
+    }
 }
 impl F3Facade for BoundFacade<'_> {
     fn inbox(
@@ -500,9 +782,10 @@ fn factory(
         backoff: ThreadWait,
         executor: SystemExecutor::new(4)?,
         home: resolved.home,
-        cwd: resolved.project,
+        cwd: resolved.project.clone(),
         assets: resolved.assets,
         host_launch: None,
+        mcp_project: globals.project.as_ref().map(|_| resolved.project),
         workers,
     })
 }
@@ -670,6 +953,7 @@ pub fn peer(
             cwd: cwd.clone(),
             assets,
             host_launch: None,
+            mcp_project: None,
             workers,
         };
         let context = &peer_factory.context;
@@ -2829,6 +3113,7 @@ fn advance_graphs_after_settlement(
                 cwd: execution.directory,
                 assets: settled.roots.checkout.clone(),
                 host_launch: Some(host),
+                mcp_project: None,
                 workers,
             };
             let cancel = CancelToken::new();
@@ -5359,6 +5644,7 @@ mod peer_tests {
             cwd: fixture.rig.project.clone(),
             assets: fixture.rig.project.clone(),
             host_launch: None,
+            mcp_project: None,
             workers: &FreeWorkers,
         };
         let cancel = CancelToken::new();
@@ -5661,6 +5947,7 @@ mod peer_tests {
             cwd: fixture.rig.project.clone(),
             assets: fixture.rig.project.clone(),
             host_launch: None,
+            mcp_project: None,
             workers: &FreeWorkers,
         };
         let cancel = CancelToken::new();
@@ -5948,6 +6235,7 @@ mod peer_tests {
             cwd: fixture.rig.project.clone(),
             assets: fixture.rig.project.clone(),
             host_launch: None,
+            mcp_project: None,
             workers: &FreeWorkers,
         };
         let document = fixture.rig.project.join("protected-push-graph.json");
@@ -6004,6 +6292,7 @@ mod peer_tests {
             cwd: fixture.rig.project.clone(),
             assets: fixture.rig.project.clone(),
             host_launch: None,
+            mcp_project: None,
             workers: &FreeWorkers,
         };
         let document = fixture.rig.project.join("replay-push-graph.json");
@@ -6091,6 +6380,7 @@ mod peer_tests {
             cwd: fixture.rig.project.clone(),
             assets: fixture.rig.project.clone(),
             host_launch: None,
+            mcp_project: None,
             workers: &FreeWorkers,
         };
         let document = fixture.rig.project.join("base-graph.json");

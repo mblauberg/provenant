@@ -39,8 +39,9 @@ For a peer owner, use `--host HOST` for list, show or answer, or qualify a
 request ID as `HOST_ID:REQUEST_ID`. Preserve the operation ID for retries.
 Close and acknowledgement must run on the owner host or in the owning chair
 session; remote attempts return `owner_local_only`.
-The MCP `fabric_inbox` tool has no host selector and operates on the local
-host only. Use the CLI to address a peer owner.
+The MCP `fabric_inbox` tool accepts `host` for list, answer, close and
+acknowledge; list with an ID shows one request. The same owner-local restriction
+applies to close and acknowledgement.
 
 Use the explicit originating session ID. It is a declared delivery target;
 posting does not discover, register or authenticate a live provider session.

@@ -1012,7 +1012,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json and
   "_meta": {
     "io.provenant/schemaVersion": 2
   },
-  "description": "Discover inbox, graph, task, lease and event tools. Call discovered tools by name.",
+  "description": "Discover inbox, console, chair, graph, task, lease and event tools. Call discovered tools by name.",
   "inputSchema": {
     "additionalProperties": false,
     "properties": {
@@ -1827,7 +1827,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json and
   "_meta": {
     "io.provenant/schemaVersion": 2
   },
-  "description": "Post human requests, list the local inbox, answer, close or acknowledge. Fabric mail is queued, not live injection; peers are unsupported.",
+  "description": "Post human requests, list, answer, close or acknowledge; route to an owner host when needed.",
   "inputSchema": {
     "$defs": {
       "Id": {
@@ -1845,6 +1845,17 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json and
         "properties": {
           "answer_id": {
             "$ref": "#/$defs/Id"
+          },
+          "host": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "id": {
             "$ref": "#/$defs/Id"
@@ -1902,6 +1913,17 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json and
             "maximum": 18446744073709551615,
             "minimum": 1,
             "type": "integer"
+          },
+          "host": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "id": {
             "$ref": "#/$defs/Id"
@@ -2188,6 +2210,17 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json and
             "minimum": 1,
             "type": "integer"
           },
+          "host": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "id": {
             "$ref": "#/$defs/Id"
           },
@@ -2233,6 +2266,17 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json and
             "anyOf": [
               {
                 "pattern": "^[0-9a-f]{32}\\.sha256:[0-9a-f]{64}\\.[0-9]{1,20}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "host": {
+            "anyOf": [
+              {
+                "maxLength": 128,
                 "type": "string"
               },
               {
@@ -2287,5 +2331,441 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json and
     "type": "object"
   },
   "name": "fabric_inbox"
+}
+```
+
+### `fabric_console`
+
+```json
+{
+  "_meta": {
+    "io.provenant/schemaVersion": 2
+  },
+  "description": "Read projects, sessions, board, tree and overview; board and tree can include peers.",
+  "inputSchema": {
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "all": {
+            "type": "boolean"
+          },
+          "cursor": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hosts": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "board"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "op": {
+            "const": "overview"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "op": {
+            "const": "projects"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "sessions"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "pattern": "^[a-z0-9]([a-z0-9_-]|\\.[a-z0-9_-])*\\.?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "type": "boolean"
+          },
+          "hosts": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "max_depth": {
+            "maximum": 16,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_nodes": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "tree"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "type": "object"
+      }
+    ],
+    "type": "object"
+  },
+  "name": "fabric_console"
+}
+```
+
+### `fabric_chair`
+
+```json
+{
+  "_meta": {
+    "io.provenant/schemaVersion": 2
+  },
+  "description": "Read and update chair summaries and append or list chair logs.",
+  "inputSchema": {
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "entry": {
+            "additionalProperties": false,
+            "properties": {
+              "attempt_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "channel": {
+                "type": "string"
+              },
+              "correction_of": {
+                "anyOf": [
+                  {
+                    "maximum": 18446744073709551615,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "issue_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "markdown": {
+                "type": "string"
+              },
+              "pr_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "request_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "channel",
+              "kind",
+              "markdown"
+            ],
+            "type": "object"
+          },
+          "issued_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "op": {
+            "const": "log_append"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session": {
+            "maxLength": 128,
+            "pattern": "^[a-z0-9]([a-z0-9_-]|\\.[a-z0-9_-])*\\.?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry",
+          "op",
+          "session"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "anyOf": [
+              {
+                "maximum": 18446744073709551615,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "log_list"
+          },
+          "session": {
+            "maxLength": 128,
+            "pattern": "^[a-z0-9]([a-z0-9_-]|\\.[a-z0-9_-])*\\.?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "session"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "from": {
+            "maximum": 18446744073709551615,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "summary_diff"
+          },
+          "session": {
+            "maxLength": 128,
+            "pattern": "^[a-z0-9]([a-z0-9_-]|\\.[a-z0-9_-])*\\.?$",
+            "type": "string"
+          },
+          "to": {
+            "anyOf": [
+              {
+                "maximum": 18446744073709551615,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "from",
+          "op",
+          "session"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "op": {
+            "const": "summary_show"
+          },
+          "session": {
+            "maxLength": 128,
+            "pattern": "^[a-z0-9]([a-z0-9_-]|\\.[a-z0-9_-])*\\.?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "session"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "expect_revision": {
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "op": {
+            "const": "summary_update"
+          },
+          "patch": {
+            "additionalProperties": false,
+            "properties": {
+              "needs_you": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "next": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "now": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "risk": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [],
+            "type": "object"
+          },
+          "session": {
+            "maxLength": 128,
+            "pattern": "^[a-z0-9]([a-z0-9_-]|\\.[a-z0-9_-])*\\.?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expect_revision",
+          "op",
+          "patch",
+          "session"
+        ],
+        "type": "object"
+      }
+    ],
+    "type": "object"
+  },
+  "name": "fabric_chair"
 }
 ```

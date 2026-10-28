@@ -984,7 +984,7 @@
     "_meta": {
       "io.provenant/schemaVersion": 2
     },
-    "description": "Discover inbox, graph, task, lease and event tools. Call discovered tools by name.",
+    "description": "Discover inbox, console, chair, graph, task, lease and event tools. Call discovered tools by name.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

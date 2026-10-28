@@ -360,3 +360,6 @@ fn five_tools_reach_the_real_store_through_runtime_and_keep_fences_scoped()
     );
     Ok(())
 }
+
+impl crate::tools::McpFacade for SubmitFacade {}
+impl crate::tools::McpFacade for FakeFacade {}
