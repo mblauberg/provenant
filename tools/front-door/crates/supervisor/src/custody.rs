@@ -1281,6 +1281,67 @@ pub fn acquire_recovery(
         guardian_quiescent: false,
     })
 }
+
+/// Acquire a reservation for reboot recovery at the expected custody slot.
+pub fn acquire_reboot_recovery(
+    directory: Directory,
+    attempt: &Directory,
+    scope: Scope,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+) -> Result<Recovery> {
+    acquire_reboot_recovery_with(
+        directory,
+        attempt,
+        scope,
+        budget,
+        cancel,
+        clock,
+        &SystemProcessObserver,
+    )
+}
+
+pub(crate) fn acquire_reboot_recovery_with(
+    directory: Directory,
+    attempt: &Directory,
+    scope: Scope,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+    observer: &dyn ProcessObserver,
+) -> Result<Recovery> {
+    let lease = directory.lock(
+        OsStr::new("writer.lock"),
+        LockMode::Exclusive,
+        budget,
+        cancel,
+        clock,
+    )?;
+    let reservation: Reservation = read_record(&directory, "reservation.json", RECORD_LIMIT)?;
+    reservation.validate()?;
+    let slot = directory.metadata()?;
+    let target = attempt.metadata()?;
+    let boot = observer
+        .boot_identity()
+        .map_err(|e| CustodyError::Io(io::Error::other(e.to_string())))?;
+    if boot.is_empty()
+        || boot == reservation.boot
+        || reservation.scope != scope
+        || reservation.reservation_inode != slot.inode
+        || reservation.attempt_inode != Some(target.inode)
+        || reservation.attempt_device != Some(reservation.reservation_device)
+        || slot.device != target.device
+    {
+        return Err(CustodyError::InvalidRecord);
+    }
+    Ok(Recovery {
+        directory,
+        lease,
+        reservation,
+        guardian_quiescent: false,
+    })
+}
 /// Writer exclusion over an attempt directory that holds no reservation, launch
 /// summary or exit. Reservations precede every guardian handoff, so none began;
 /// while this lease lives no reservation can be created.
@@ -1405,10 +1466,7 @@ impl Recovery {
             return Ok(None);
         }
         let metadata = attempt.metadata()?;
-        if self.scope() != scope
-            || self.reservation.attempt_device != Some(metadata.device)
-            || self.reservation.attempt_inode != Some(metadata.inode)
-        {
+        if self.scope() != scope || self.reservation.attempt_inode != Some(metadata.inode) {
             return Ok(None);
         }
         let boot = observer.boot_identity().map_err(|error| {
@@ -1418,6 +1476,15 @@ impl Recovery {
         })?;
         if boot == self.reservation.boot {
             return Ok(None);
+        }
+        if self.reservation.attempt_device != Some(metadata.device) {
+            let slot = self.directory.metadata()?;
+            if self.reservation.reservation_inode != slot.inode
+                || self.reservation.attempt_device != Some(self.reservation.reservation_device)
+                || slot.device != metadata.device
+            {
+                return Ok(None);
+            }
         }
         let custody = match attempt.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive) {
             Ok(custody) => custody,
