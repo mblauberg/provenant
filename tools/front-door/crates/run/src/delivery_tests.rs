@@ -1783,7 +1783,8 @@ impl PrepareFixture {
         .into_recovery()?;
         assert_eq!(recovery.observe(), RecoveryState::Absent);
         write()?;
-        let review = launch.terminal(&state, &attempt, &recovery, remote, base_ref)?;
+        let settlement = recovery.try_settlement_guard()?;
+        let review = launch.terminal(&state, &attempt, &recovery, &settlement, remote, base_ref)?;
         let archive = attempt.open_verified_directory(OsStr::new("quarantine"))?;
         let manifest: serde_json::Value = serde_json::from_slice(
             &archive.read_bounded(OsStr::new("manifest.json"), RECORD_LIMIT)?,

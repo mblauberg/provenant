@@ -104,6 +104,7 @@ fn verification_deadline(generation: &[(PathBuf, Metadata)], extra: u64) -> Dead
 thread_local! {
     pub(crate) static TEST_VERIFICATION_BUDGET: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
     pub(crate) static TEST_STAGED_HASH_BUDGET: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+    pub(crate) static TEST_VERIFICATION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Publication rehashes staged files and checks connectivity under the lock.
@@ -158,8 +159,22 @@ fn command_stream(
     alternates: &[&Path],
     deadline: Option<Deadline>,
     input: Option<&[u8]>,
-    decoder: Option<&mut hash::Batch>,
+    decoder: Option<&mut dyn provenant_os::exec::CaptureFilter>,
 ) -> Result<Vec<u8>> {
+    if decoder.is_none() && args.first().is_some_and(|arg| arg == "for-each-ref") {
+        let mut refs = RefList(Vec::new());
+        command_stream(
+            git,
+            git_dir,
+            cwd,
+            args,
+            alternates,
+            deadline,
+            input,
+            Some(&mut refs),
+        )?;
+        return Ok(refs.0);
+    }
     let streaming = decoder.is_some();
     let mut env: Vec<(OsString, OsString)> = [
         ("GIT_CONFIG_NOSYSTEM", "1"),
@@ -223,18 +238,7 @@ fn command_stream(
     options.stdout = if streaming {
         StreamPolicy::Tail { limit: 4096 }
     } else {
-        StreamPolicy::Capture {
-            limit: if args.first().is_some_and(|arg| {
-                arg == "rev-list"
-                    || (arg == "cat-file" && args.iter().any(|arg| arg == "--batch-all-objects"))
-            }) {
-                hash::LIST_LIMIT
-            } else if args.first().is_some_and(|arg| arg == "for-each-ref") {
-                1024 * 1024
-            } else {
-                4096
-            },
-        }
+        StreamPolicy::Capture { limit: 4096 }
     };
     options.stderr = StreamPolicy::Tail { limit: 4096 };
     options.stop_on_output_limit = !streaming;
@@ -268,6 +272,17 @@ fn command_stream(
     Ok(output.stdout.bytes)
 }
 
+struct RefList(Vec<u8>);
+impl provenant_os::exec::CaptureFilter for RefList {
+    fn filter(
+        &mut self,
+        bytes: &[u8],
+    ) -> std::result::Result<Vec<u8>, provenant_os::exec::FilterError> {
+        self.0.extend_from_slice(bytes);
+        Ok(Vec::new())
+    }
+}
+
 fn args(values: &[&str]) -> Vec<OsString> {
     values.iter().map(Into::into).collect()
 }
@@ -290,9 +305,11 @@ fn quote_alternate(path: &Path) -> String {
 }
 
 #[derive(Clone, Copy)]
-struct Verification {
+struct Verification<'a> {
     deadline: Deadline,
     mode: VerificationMode,
+    existing: &'a [GitOid],
+    staged: &'a [GitOid],
 }
 
 #[derive(Clone, Copy)]
@@ -308,7 +325,7 @@ fn verify(
     cwd: &Path,
     head: GitOid,
     alternates: &[&Path],
-    check: Verification,
+    check: Verification<'_>,
 ) -> Result<()> {
     // Callers supply a host-owned bare view without lane refs or a lane index.
     hash::verify(git, git_dir, cwd, head, alternates, check)?;
@@ -330,6 +347,7 @@ fn verify(
 
 /// The caller supplies the host's common directory, never a worktree admin
 /// directory whose lane-writable commondir could redirect verification.
+#[cfg(test)]
 pub(crate) fn verify_graph(git: &Path, common_path: &Path, cwd: &Path, head: GitOid) -> Result<()> {
     VerificationCache::default().verify_graph(git, common_path, cwd, head)
 }
@@ -343,12 +361,24 @@ pub(crate) struct VerificationCache {
 }
 
 impl VerificationCache {
+    #[cfg(test)]
     pub(crate) fn verify_graph(
         &mut self,
         git: &Path,
         common_path: &Path,
         cwd: &Path,
         head: GitOid,
+    ) -> Result<()> {
+        self.verify_graph_since(git, common_path, cwd, head, &[])
+    }
+
+    pub(crate) fn verify_graph_since(
+        &mut self,
+        git: &Path,
+        common_path: &Path,
+        cwd: &Path,
+        head: GitOid,
+        baseline: &[GitOid],
     ) -> Result<()> {
         let common = Directory::open_anchor(common_path)?;
         let _lock = object_lock(&common, LockMode::Shared)?;
@@ -360,6 +390,8 @@ impl VerificationCache {
             } else if self.heads.contains(&head) && !shared_alternates(&common)? {
                 return Ok(());
             }
+            let mut existing = shared_tips(git, common_path, cwd, Some(head))?;
+            existing.extend_from_slice(baseline);
             let result = verify_shared(
                 git,
                 &common,
@@ -369,6 +401,8 @@ impl VerificationCache {
                 Verification {
                     deadline: verification_deadline(&generation.1, 0),
                     mode: VerificationMode::Reachable,
+                    existing: &existing,
+                    staged: &[],
                 },
                 None,
             );
@@ -388,6 +422,88 @@ impl VerificationCache {
             return Ok(());
         }
         Err(invalid())
+    }
+}
+
+/// In-memory proof, valid only while the shared files and shallow boundary
+/// still match. Rechecked after reacquiring writer exclusion.
+pub(crate) struct VerifiedObjects(Vec<(PathBuf, Metadata)>);
+impl VerifiedObjects {
+    pub(crate) fn recheck(&self, repo: &VerifiedRepo) -> Result<()> {
+        #[allow(clippy::disallowed_methods)]
+        let at = Instant::now() + Duration::from_secs(1);
+        let _lock = object_lock_before(repo.common_dir(), LockMode::Shared, Some(at))?;
+        if store_generation(repo.common_dir())? != self.0 {
+            return Err(RunError::ObjectVerificationRetry(
+                "shared object store changed after verification; retry settlement",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Snapshot shared refs before publication. A legacy mutable tip is excluded;
+/// private publication may trust a tip already present in the shared store.
+/// Missing refs are not exclusions (e.g. shallow updates).
+fn shared_tips(git: &Path, common: &Path, cwd: &Path, head: Option<GitOid>) -> Result<Vec<GitOid>> {
+    let refs = command(
+        git,
+        common,
+        cwd,
+        &args(&["for-each-ref", "--format=%(objectname)"]),
+        None,
+    )?;
+    let mut tips = TipNames::default();
+    command_stream(
+        git,
+        common,
+        cwd,
+        &args(&["cat-file", "--batch-check=%(objectname) %(objecttype)"]),
+        &[],
+        None,
+        Some(&refs),
+        Some(&mut tips),
+    )?;
+    if !tips.pending.is_empty() {
+        return Err(invalid());
+    }
+    if let Some(head) = head {
+        tips.names.remove(&head.to_string());
+    }
+    tips.names
+        .into_iter()
+        .map(|name| GitOid::parse(&name).map_err(|_| invalid()))
+        .collect()
+}
+
+#[derive(Default)]
+struct TipNames {
+    names: BTreeSet<String>,
+    pending: Vec<u8>,
+}
+impl provenant_os::exec::CaptureFilter for TipNames {
+    fn filter(
+        &mut self,
+        bytes: &[u8],
+    ) -> std::result::Result<Vec<u8>, provenant_os::exec::FilterError> {
+        use provenant_os::exec::FilterError;
+        for byte in bytes {
+            if *byte == b'\n' {
+                let line = std::str::from_utf8(&self.pending).map_err(|_| FilterError)?;
+                let (name, kind) = line.split_once(' ').ok_or(FilterError)?;
+                let name = GitOid::parse(name).map_err(|_| FilterError)?;
+                if matches!(kind, "commit" | "tag") {
+                    self.names.insert(name.to_string());
+                }
+                self.pending.clear();
+            } else {
+                if self.pending.len() > 80 {
+                    return Err(FilterError);
+                }
+                self.pending.push(*byte);
+            }
+        }
+        Ok(Vec::new())
     }
 }
 
@@ -768,7 +884,7 @@ fn verify_shared(
     common_path: &Path,
     cwd: &Path,
     head: GitOid,
-    check: Verification,
+    check: Verification<'_>,
     fallback: Option<&Path>,
 ) -> Result<()> {
     let name = staging_name()?;
@@ -815,6 +931,7 @@ fn import_objects(
         head,
         Instant::now() + IMPORT_BUDGET,
     )
+    .map(|_| ())
 }
 
 fn import_before(
@@ -825,7 +942,7 @@ fn import_before(
     staging_path: &Path,
     head: GitOid,
     deadline: Instant,
-) -> Result<()> {
+) -> Result<VerifiedObjects> {
     let deadline = Some(Deadline {
         at: deadline,
         import: true,
@@ -924,15 +1041,55 @@ fn import_before(
     // Bind the files before Git hashes them. A still-live pre-v11 lane can
     // reach the common directory even though current lane policies cannot.
     let snapshot = snapshot_files(&objects)?;
+    let pack_deadline = verification_deadline(&[], MAX_BYTES - bytes);
+    for file in &snapshot {
+        if Path::new(&file.name).extension() == Some(OsStr::new("idx")) {
+            let mut verify_pack = args(&["verify-pack"]);
+            verify_pack.push(
+                staging_path
+                    .join("objects")
+                    .join(&file.fanout)
+                    .join(&file.name)
+                    .into(),
+            );
+            command_before(
+                git,
+                staging_path,
+                repo.root_path(),
+                &verify_pack,
+                Some(&shared),
+                Some(pack_deadline),
+            )?;
+        }
+    }
     let staged_bytes = snapshot.iter().fold(0_u64, |total, file| {
         total.saturating_add(file.stamp.metadata.size)
     });
+    let staged_names = hash::names(
+        git,
+        staging_path,
+        repo.root_path(),
+        head,
+        &[],
+        Verification {
+            deadline: verification_deadline(&[], MAX_BYTES - bytes),
+            mode: VerificationMode::Local,
+            existing: &[],
+            staged: &[],
+        },
+    )?
+    .into_iter()
+    .map(|name| GitOid::parse(&name).map_err(|_| invalid()))
+    .collect::<Result<Vec<_>>>()?;
+    let existing = shared_tips(git, repo.common_git_dir(), repo.root_path(), None)?;
     let mut retried = false;
     let (_generation, _lock, connectivity) = loop {
         let generation = store_generation(repo.common_dir())?;
         let check = Verification {
-            deadline: verification_deadline(&generation, staged_bytes),
+            deadline: verification_deadline(&[], staged_bytes),
             mode: VerificationMode::Local,
+            existing: &[],
+            staged: &[],
         };
         let result = verify(git, staging_path, repo.root_path(), head, &[&shared], check);
         // Only publication and the final shared check exclude other lanes.
@@ -963,6 +1120,8 @@ fn import_before(
             Verification {
                 deadline: connectivity,
                 mode: VerificationMode::Reachable,
+                existing: &existing,
+                staged: &staged_names,
             },
             Some(&staging_path.join("objects")),
         )?;
@@ -1011,13 +1170,15 @@ fn import_before(
         Verification {
             deadline: connectivity,
             mode: VerificationMode::Connectivity,
+            existing: &existing,
+            staged: &[],
         },
         None,
     )?;
     for file in &published {
         file.check(&shared_dir, connectivity)?;
     }
-    Ok(())
+    Ok(VerifiedObjects(store_generation(repo.common_dir())?))
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1254,7 +1415,12 @@ pub(crate) fn settle(
     repo: &VerifiedRepo,
     source: Option<&Directory>,
     head: GitOid,
-) -> Result<()> {
+    base: GitOid,
+) -> Result<VerifiedObjects> {
+    #[cfg(test)]
+    if let Some(hook) = TEST_VERIFICATION_HOOK.take() {
+        hook();
+    }
     if let Some(source) = source {
         sweep_staging(repo.common_dir(), SystemTime::now());
         let name = staging_name()?;
@@ -1271,12 +1437,14 @@ pub(crate) fn settle(
             Instant::now() + IMPORT_BUDGET,
         );
         let cleanup = crate::artifacts::remove_entry_tree(repo.common_dir(), &name);
-        result?;
+        let verified = result?;
         cleanup?;
+        Ok(verified)
     } else {
-        verify_graph(git, repo.common_git_dir(), repo.root_path(), head)?;
+        let mut cache = VerificationCache::default();
+        cache.verify_graph_since(git, repo.common_git_dir(), repo.root_path(), head, &[base])?;
+        Ok(VerifiedObjects(cache.generation.ok_or_else(invalid)?.1))
     }
-    Ok(())
 }
 
 pub(crate) fn bind(attempt: &Directory, scratch: &Path) -> Result<()> {

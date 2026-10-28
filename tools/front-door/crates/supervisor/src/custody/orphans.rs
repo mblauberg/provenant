@@ -224,6 +224,7 @@ impl Recovery {
         attempt: &Directory,
         observer: &dyn ProcessObserver,
     ) -> Result<()> {
+        self.require_writer_lease()?;
         self.reservation.validate()?;
         let metadata = attempt.metadata()?;
         if self.reservation.attempt_device != Some(metadata.device)
@@ -259,6 +260,7 @@ impl Recovery {
         probe: &dyn OrphanProbe,
         patience: Duration,
     ) -> Result<OrphanReport> {
+        self.require_writer_lease()?;
         self.reservation.validate()?;
         let same_boot =
             observer.boot_identity().map_err(|_| CustodyError::Fenced)? == self.reservation.boot;

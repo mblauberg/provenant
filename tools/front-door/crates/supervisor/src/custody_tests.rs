@@ -102,6 +102,70 @@ fn acquire(root: &std::path::Path) -> Result<CustodyLease> {
         &clock,
     )
 }
+
+#[test]
+fn settlement_verification_releases_writer_but_excludes_other_settlers() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let recovery = acquire(root.path())?.into_recovery()?;
+    let guard = recovery.try_settlement_guard()?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let outcome = recovery.without_writer_lease(&guard, || -> TestResult {
+        assert_eq!(recovery.observe(), RecoveryState::Unknown);
+        assert!(matches!(
+            recovery.try_settlement_guard(),
+            Err(CustodyError::Fenced)
+        ));
+        let concurrent = acquire_recovery(
+            Directory::open_anchor(root.path())?,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )?;
+        assert!(matches!(
+            concurrent.try_settlement_guard(),
+            Err(CustodyError::Busy)
+        ));
+        Ok(())
+    })?;
+    outcome?;
+    assert_eq!(recovery.observe(), RecoveryState::Absent);
+    assert!(matches!(
+        Directory::open_anchor(root.path())?
+            .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive),
+        Err(FsError::LockTimeout { .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn settlement_verification_refuses_a_changed_reservation() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let recovery = acquire(root.path())?.into_recovery()?;
+    let guard = recovery.try_settlement_guard()?;
+    let result = recovery.without_writer_lease(&guard, || -> TestResult {
+        let mut changed = recovery.reservation.clone();
+        changed.scope.generation += 1;
+        Publication::require_durable(write_record(
+            &recovery.directory,
+            "reservation.json",
+            &changed,
+            PublishMode::Replace,
+        )?)?;
+        Ok(())
+    });
+    assert!(matches!(result, Err(CustodyError::Fenced)));
+    assert_eq!(recovery.observe(), RecoveryState::Unknown);
+    assert!(matches!(
+        recovery.try_settlement_guard(),
+        Err(CustodyError::Fenced)
+    ));
+    let _writer = Directory::open_anchor(root.path())?
+        .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
+    assert!(root.path().join("reservation.json").exists());
+    Ok(())
+}
+
 #[test]
 fn missing_or_malformed_reservation_does_not_reopen_a_writer() -> TestResult {
     let root = tempfile::tempdir()?;

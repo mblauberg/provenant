@@ -1137,7 +1137,13 @@ impl HostDeliveryContext {
         self.verification
             .lock()
             .map_err(|_| RunError::Delivery(stage))?
-            .verify_graph(git, &common, &writer.project, head)
+            .verify_graph_since(
+                git,
+                &common,
+                &writer.project,
+                head,
+                &[self.bound.as_ref().map_or(head, |bound| bound.base_head)],
+            )
             .map_err(|_| RunError::Delivery(stage))
     }
     fn trusted_common_git_dir(&self, writer: &WriterRequest, stage: Stage) -> Result<PathBuf> {

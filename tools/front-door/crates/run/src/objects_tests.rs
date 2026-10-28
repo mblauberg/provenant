@@ -47,7 +47,7 @@ fn verification_has_a_fresh_budget_after_import() -> TestResult {
             .lines()
             .filter(|line| line.contains("--batch-all-objects"))
             .count(),
-        1
+        2
     );
     assert_eq!(
         calls
@@ -159,6 +159,10 @@ fn object_path(directory: &Path, oid: GitOid) -> PathBuf {
 
 impl Fixture {
     fn new(format: &str) -> TestResult<Self> {
+        Self::with_history(format, 1)
+    }
+
+    fn with_history(format: &str, commits: usize) -> TestResult<Self> {
         let temp = tempfile::tempdir()?;
         let root = fs::canonicalize(temp.path())?;
         let home = root.join("home");
@@ -182,6 +186,9 @@ impl Fixture {
         fs::write(project.join("file"), "trusted base blob\n")?;
         host_git(&["add", "file"])?;
         host_git(&["commit", "-qm", "base"])?;
+        for _ in 1..commits {
+            host_git(&["commit", "--allow-empty", "-qm", "trusted history"])?;
+        }
         let base = oid(host_git(&["rev-parse", "HEAD"])?)?;
         let base_blob = oid(host_git(&["rev-parse", "HEAD:file"])?)?;
         host_git(&[
@@ -407,6 +414,211 @@ fn altered_private_pack_refuses_before_publication() -> TestResult {
     Ok(())
 }
 
+fn sha1_bytes(bytes: &[u8]) -> TestResult<[u8; 20]> {
+    let mut hash = sha1collisiondetection::Sha1CD::default();
+    hash.update(bytes);
+    Ok(hash
+        .finalize_cd()
+        .map_err(|_| "fixture SHA1 collision")?
+        .into())
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0_u32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & 0_u32.wrapping_sub(crc & 1));
+        }
+    }
+    !crc
+}
+
+/// Stored DEFLATE blocks make the pack bytes explicit without a compressor
+/// dependency. Every checksum remains valid in the forged pair, so only
+/// per-entry object-name verification exposes the wrong content.
+fn pack_pair(entries: &[(&[u8], [u8; 20])]) -> TestResult<(Vec<u8>, Vec<u8>)> {
+    let mut pack = b"PACK\0\0\0\x02".to_vec();
+    pack.extend_from_slice(&u32::try_from(entries.len())?.to_be_bytes());
+    let mut index_entries = Vec::new();
+    for (bytes, name) in entries {
+        let offset = u32::try_from(pack.len())?;
+        let start = pack.len();
+        let mut size = bytes.len();
+        let first = 0x30 | (size & 15) as u8;
+        size >>= 4;
+        pack.push(first | if size == 0 { 0 } else { 0x80 });
+        while size != 0 {
+            let value = (size & 127) as u8;
+            size >>= 7;
+            pack.push(value | if size == 0 { 0 } else { 0x80 });
+        }
+        pack.extend_from_slice(&[0x78, 0x01, 0x01]);
+        let length = u16::try_from(bytes.len())?;
+        pack.extend_from_slice(&length.to_le_bytes());
+        pack.extend_from_slice(&(!length).to_le_bytes());
+        pack.extend_from_slice(bytes);
+        let (mut a, mut b) = (1_u32, 0_u32);
+        for byte in *bytes {
+            a = (a + u32::from(*byte)) % 65521;
+            b = (b + a) % 65521;
+        }
+        pack.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        index_entries.push((*name, crc32(&pack[start..]), offset));
+    }
+    let digest = sha1_bytes(&pack)?;
+    pack.extend_from_slice(&digest);
+    // Duplicate names deliberately index the first physical copy last, so
+    // Git's normal name lookup resolves the correct first copy in that case.
+    index_entries.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| right.2.cmp(&left.2)));
+    let mut index = b"\xfftOc\0\0\0\x02".to_vec();
+    for first in 0..=u8::MAX {
+        let count = index_entries
+            .iter()
+            .filter(|entry| entry.0[0] <= first)
+            .count();
+        index.extend_from_slice(&u32::try_from(count)?.to_be_bytes());
+    }
+    for (name, _, _) in &index_entries {
+        index.extend_from_slice(name);
+    }
+    for (_, crc, _) in &index_entries {
+        index.extend_from_slice(&crc.to_be_bytes());
+    }
+    for (_, _, offset) in &index_entries {
+        index.extend_from_slice(&offset.to_be_bytes());
+    }
+    index.extend_from_slice(&digest);
+    index.extend_from_slice(&sha1_bytes(&index)?);
+    Ok((pack, index))
+}
+
+fn packed_duplicate_fixture(non_first: bool) -> TestResult {
+    let mut fixture = Fixture::new("sha1")?;
+    let correct = b"private lane blob\n";
+    let wrong = b"forged lane bytes\n";
+    let mut object = format!("blob {}\0", correct.len()).into_bytes();
+    object.extend_from_slice(correct);
+    let blob = sha1_bytes(&object)?;
+    let first = b"first independent pack entry\n";
+    let mut object = format!("blob {}\0", first.len()).into_bytes();
+    object.extend_from_slice(first);
+    let first_name = sha1_bytes(&object)?;
+    let entries: Vec<(&[u8], [u8; 20])> = if non_first {
+        vec![(correct, blob), (first, first_name)]
+    } else {
+        vec![(first, first_name), (correct, blob)]
+    };
+    let (valid, _) = pack_pair(&entries)?;
+    let digest = valid[valid.len() - 20..]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let packs = fixture.source.join("pack");
+    fs::create_dir(&packs)?;
+    fs::write(packs.join(format!("pack-{digest}.pack")), valid)?;
+    let forged_entries: Vec<(&[u8], [u8; 20])> = if non_first {
+        // The first packed copy resolves correctly. Enumeration by name can
+        // never establish that the second copy's bytes match that same name.
+        fs::remove_file(object_path(&fixture.source, fixture.blob))?;
+        vec![(correct, blob), (wrong, blob)]
+    } else {
+        // A correct loose copy wins over the wrong packed duplicate.
+        vec![(first, first_name), (wrong, blob)]
+    };
+    let (forged_pack, forged_index) = pack_pair(&forged_entries)?;
+    let bad_pack = fixture.root.join("forged.pack");
+    let bad_index = fixture.root.join("forged.idx");
+    fs::write(&bad_pack, forged_pack)?;
+    fs::write(&bad_index, forged_index)?;
+    let log = fixture.root.join("verify-pack-called");
+    let wrapper = fixture.root.join("forge-after-indexing-git");
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\noperation=\npack=\nfor arg do\ncase \"$arg\" in index-pack|verify-pack) operation=$arg;; *.pack) pack=$arg;; esac\ndone\nif [ \"$operation\" = index-pack ] && [ \"${{pack##*/}}\" = 'pack-{digest}.pack' ]; then\n{} \"$@\" || exit $?\n/bin/chmod u+w \"$pack\" \"${{pack%.pack}}.idx\" || exit $?\n/bin/cp {} \"$pack\" || exit $?\n/bin/cp {} \"${{pack%.pack}}.idx\" || exit $?\nexit 0\nfi\nif [ \"$operation\" = verify-pack ]; then : > {}; fi\nexec {} \"$@\"\n",
+            quote(&fixture.git),
+            quote(&bad_pack),
+            quote(&bad_index),
+            quote(&log),
+            quote(&fixture.git),
+        ),
+    )?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+    let native = fixture.git.clone();
+    fixture.git = wrapper;
+    let result = fixture.import();
+    assert!(result.is_err());
+    assert!(
+        log.exists(),
+        "corruption must reach staged verify-pack: {result:?}"
+    );
+    let visible = git(
+        &native,
+        &fixture.home,
+        &fixture.staging,
+        None,
+        &["cat-file", "blob", &fixture.blob.to_string()],
+    )?;
+    assert_eq!(
+        visible.stdout, correct,
+        "ordinary object lookup must hide the bad duplicate"
+    );
+    fixture.assert_not_published();
+    Ok(())
+}
+
+#[test]
+fn staged_pack_wrong_content_duplicate_cannot_hide_behind_a_loose_copy() -> TestResult {
+    packed_duplicate_fixture(false)
+}
+
+#[test]
+fn staged_pack_corrupt_non_first_entry_cannot_hide_behind_a_valid_first_copy() -> TestResult {
+    packed_duplicate_fixture(true)
+}
+
+#[test]
+fn strict_check_temporary_files_are_removed_on_command_and_digest_errors() -> TestResult {
+    for failure in ["pack-objects", "digest", "index-pack"] {
+        let mut fixture = Fixture::new("sha1")?;
+        let marker = fixture.root.join("strict-failure-injected");
+        let wrapper = fixture.root.join("failing-strict-git");
+        let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+        fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nfor arg do\ncase \"$arg\" in\npack-objects)\nif [ '{failure}' = pack-objects ]; then\n{} \"$@\" || exit $?\n: > {}\nexit 93\nfi\nif [ '{failure}' = digest ]; then\n{} \"$@\" >/dev/null || exit $?\n: > {}\nprintf 'invalid-digest\\n'\nexit 0\nfi;;\nindex-pack) if [ '{failure}' = index-pack ]; then : > {}; exit 93; fi;;\nesac\ndone\nexec {} \"$@\"\n",
+                quote(&fixture.git),
+                quote(&marker),
+                quote(&fixture.git),
+                quote(&marker),
+                quote(&marker),
+                quote(&fixture.git),
+            ),
+        )?;
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+        fixture.git = wrapper;
+        assert!(fixture.import().is_err());
+        assert!(
+            marker.exists(),
+            "injected failure was not reached: {failure}"
+        );
+        for entry in fs::read_dir(&fixture.staging)? {
+            assert!(
+                !entry?
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(super::STAGING_PREFIX),
+                "strict temporary directory survived {failure}"
+            );
+        }
+        fixture.assert_not_published();
+    }
+    Ok(())
+}
+
 #[test]
 fn excessive_private_pack_count_refuses_before_indexing_or_publication() -> TestResult {
     let fixture = Fixture::new("sha1")?;
@@ -486,7 +698,16 @@ fn legacy_verification_and_ref_resolution_ignore_tampered_worktree_commondir() -
     );
     // The fake store is valid, but the bound shared store contains corruption.
     verify_graph(&fixture.git, &fake, &fixture.root, fixture.head)?;
-    assert!(super::settle(&fixture.git, fixture.worktree.repo(), None, fixture.head).is_err());
+    assert!(
+        super::settle(
+            &fixture.git,
+            fixture.worktree.repo(),
+            None,
+            fixture.head,
+            fixture.base
+        )
+        .is_err()
+    );
     Ok(())
 }
 
@@ -974,8 +1195,9 @@ fn missing_reachable_private_object_refuses_before_publication() -> TestResult {
 
 #[test]
 fn verification_object_set_excludes_unrelated_shared_loose_and_packed_objects() -> TestResult {
-    for format in ["sha1", "sha256"] {
-        let mut fixture = Fixture::new(format)?;
+    let mut previous_counts = None;
+    for (format, history) in [("sha1", 1), ("sha1", 100), ("sha256", 1)] {
+        let mut fixture = Fixture::with_history(format, history)?;
         let unrelated_file = fixture.root.join("unrelated");
         fs::write(&unrelated_file, b"unrelated shared object\n")?;
         let unrelated = oid(git(
@@ -1011,13 +1233,19 @@ fn verification_object_set_excludes_unrelated_shared_loose_and_packed_objects() 
         fs::set_permissions(&unrelated_path, fs::Permissions::from_mode(0o600))?;
         fs::write(unrelated_path, b"corrupt unrelated loose object")?;
         let log = fixture.root.join("checked-object-names");
+        let walks = fixture.root.join("revision-walk-input");
+        let strict = fixture.root.join("strict-object-names");
         let wrapper = fixture.root.join("logging-verifier");
         let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
         fs::write(
             &wrapper,
             format!(
-                "#!/bin/sh\nfor arg do\ncase \"$arg\" in fsck) exit 93;; --batch) /usr/bin/tee -a {} | {} \"$@\"; exit $?;; esac\ndone\nexec {} \"$@\"\n",
+                "#!/bin/sh\nfor arg do\ncase \"$arg\" in fsck) exit 93;; --batch) /usr/bin/tee -a {} | {} \"$@\"; exit $?;; rev-list) /usr/bin/tee -a {} | {} \"$@\"; exit $?;; pack-objects) /usr/bin/tee -a {} | {} \"$@\"; exit $?;; esac\ndone\nexec {} \"$@\"\n",
                 quote(&log),
+                quote(&fixture.git),
+                quote(&walks),
+                quote(&fixture.git),
+                quote(&strict),
                 quote(&fixture.git),
                 quote(&fixture.git)
             ),
@@ -1034,11 +1262,30 @@ fn verification_object_set_excludes_unrelated_shared_loose_and_packed_objects() 
         let checked = fs::read_to_string(log)?;
         assert!(checked.lines().any(|name| name == fixture.blob.to_string()));
         assert!(
-            checked
+            !checked
                 .lines()
                 .any(|name| name == fixture.base_blob.to_string())
         );
+        assert!(!checked.lines().any(|name| name == fixture.base.to_string()));
         assert!(!checked.lines().any(|name| name == unrelated.to_string()));
+        let strict = fs::read_to_string(strict)?;
+        assert!(strict.lines().any(|name| name == fixture.head.to_string()));
+        assert!(!strict.lines().any(|name| name == fixture.base.to_string()));
+        let walks = fs::read_to_string(walks)?;
+        assert!(
+            walks
+                .lines()
+                .any(|name| name == format!("^{}", fixture.base))
+        );
+        let counts = (checked.lines().count(), strict.lines().count());
+        assert_eq!(counts, (9, 6), "explicit lane verification work changed");
+        if let Some(previous) = previous_counts {
+            assert_eq!(
+                counts, previous,
+                "verification scaled with {history} commits"
+            );
+        }
+        previous_counts = Some(counts);
     }
     Ok(())
 }
@@ -1243,6 +1490,7 @@ fn host_preparation_initialises_objects_without_adapter_git_setup() -> TestResul
         &fixture.git,
         fixture.worktree.repo(),
         Some(&source.objects),
+        fixture.base,
         fixture.base,
     )?;
     Ok(())
@@ -1521,4 +1769,47 @@ fn verification_budgets_scale_and_cap() {
     assert_eq!(connectivity_budget(0), Duration::from_secs(60));
     assert_eq!(connectivity_budget(50 * GIB), Duration::from_secs(560));
     assert_eq!(connectivity_budget(u64::MAX), Duration::from_secs(1200));
+}
+
+#[test]
+fn unchanged_tip_skips_history_hashing_and_recheck_refuses_a_changed_pack_set() -> TestResult {
+    let fixture = Fixture::with_history("sha1", 100)?;
+    let empty = fixture.root.join("empty-source");
+    fs::create_dir(&empty)?;
+    let wrapper = fixture.root.join("no-history-hashing-git");
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nfor arg do\ncase \"$arg\" in --batch|pack-objects) exit 91;; esac\ndone\nexec {} \"$@\"\n",
+            quote(&fixture.git)
+        ),
+    )?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+    let proof = super::settle(
+        &wrapper,
+        fixture.worktree.repo(),
+        Some(&Directory::open_anchor(&empty)?),
+        fixture.base,
+        fixture.base,
+    )?;
+    proof.recheck(fixture.worktree.repo())?;
+    // Legacy settlement also has the sealed launch base when head == base.
+    super::settle(
+        &wrapper,
+        fixture.worktree.repo(),
+        None,
+        fixture.base,
+        fixture.base,
+    )?
+    .recheck(fixture.worktree.repo())?;
+    fs::write(
+        fixture.common_objects().join("pack/new.pack"),
+        b"changed pack set",
+    )?;
+    assert!(matches!(
+        proof.recheck(fixture.worktree.repo()),
+        Err(crate::RunError::ObjectVerificationRetry(_))
+    ));
+    Ok(())
 }

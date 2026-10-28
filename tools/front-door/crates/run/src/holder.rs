@@ -23,10 +23,8 @@ fn settlement_retries(
     call: &Request<'_>,
     increment: Option<bool>,
 ) -> Result<(i64, i64)> {
-    // Live holders retain Recovery's exclusive writer.lock. Reconcile obtains
-    // that same lease in recover_writer_exit before finish_in_custody, and
-    // retains it through terminal publication. Concurrent settlers therefore
-    // cannot observe/increment retries for this writer at the same time.
+    // The settlement guard serialises live and recovered settlers, including
+    // while slow object verification temporarily releases writer.lock.
     use rusqlite::{OptionalExtension, params};
     let (_, db, _initialisation) =
         crate::db::open_database(host, "object-settlement.sqlite3", call)?;
@@ -589,8 +587,20 @@ impl RunStore {
         providers: &dyn Providers,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
-        let record =
-            self.finish_in_custody_inner(id, attempt, exit, completion, providers, call)?;
+        let settlement = completion
+            .custody()
+            .map(|recovery| recovery.try_settlement_guard())
+            .transpose()
+            .map_err(|_| RunError::Contention)?;
+        let record = self.finish_in_custody_inner(
+            id,
+            attempt,
+            exit,
+            completion,
+            settlement.as_ref(),
+            providers,
+            call,
+        )?;
         if matches!(record.state, AttemptState::Terminal { .. }) {
             // Also runs on terminal replay, repairing a crash between publishing
             // the terminal transaction and pruning the host-owned retry rows.
@@ -599,12 +609,15 @@ impl RunStore {
         Ok(record)
     }
 
+    // Keep the settlement guard explicit beside the custody-bearing completion.
+    #[allow(clippy::too_many_arguments)]
     fn finish_in_custody_inner(
         &self,
         id: AttemptId,
         attempt: &Directory,
         exit: &ExitObservation,
         completion: Completion<'_>,
+        settlement: Option<&custody::SettlementGuard>,
         providers: &dyn Providers,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
@@ -784,6 +797,8 @@ impl RunStore {
                             attempt,
                             recovery
                                 .ok_or(RunError::Validation("writer terminal custody missing"))?,
+                            settlement
+                                .ok_or(RunError::Validation("writer settlement guard missing"))?,
                             task.deliver
                                 .as_ref()
                                 .map_or("origin", |deliver| deliver.remote.as_str()),
@@ -1027,13 +1042,24 @@ impl RunStore {
             } = &completion
             && let (Some(writer), Some(deliver)) = (&task.writer, &task.deliver)
         {
-            crate::delivery::deliver_once(
-                host,
-                writer,
-                deliver,
-                attempt,
-                &format!("Run {}\nAttempt {id}", record.run_id),
-            )?;
+            // Delivery can refresh and verify another object graph. Preserve
+            // the reservation and settlement guard while letting cancellation
+            // and other custody observers take writer.lock during this work.
+            recovery
+                .ok_or(RunError::Validation("delivery custody missing"))?
+                .without_writer_lease(
+                    settlement.ok_or(RunError::Validation("delivery settlement guard missing"))?,
+                    || {
+                        crate::delivery::deliver_once(
+                            host,
+                            writer,
+                            deliver,
+                            attempt,
+                            &format!("Run {}\nAttempt {id}", record.run_id),
+                        )
+                    },
+                )
+                .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))??;
         }
         // Terminal state is also published as a run event. Record this host
         // warning there without changing validation of the provider's result.
@@ -1227,6 +1253,7 @@ mod writer_recovery_tests {
         StagedBytes,
         ExpiredCall,
         LegacyPolicy,
+        ConcurrentCancel,
     }
 
     #[test]
@@ -1290,6 +1317,12 @@ mod writer_recovery_tests {
     fn verification_can_outlive_reconcile_budget_and_still_publish_terminal()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         object_import_refusal_fixture(ImportCase::ExpiredCall)
+    }
+
+    #[test]
+    fn concurrent_cancel_and_reconcile_progress_while_verification_is_paused()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        object_import_refusal_fixture(ImportCase::ConcurrentCancel)
     }
 
     #[test]
@@ -1413,6 +1446,42 @@ mod writer_recovery_tests {
         if case == ImportCase::Deadline {
             crate::objects::TEST_VERIFICATION_BUDGET.set(Some(std::time::Duration::ZERO));
         }
+        if case == ImportCase::ConcurrentCancel {
+            let execution = execution.clone();
+            let writer = fixture.writer.clone();
+            let observed = observed.clone();
+            let slot = store.writer_custody_directory(&record, &writer)?;
+            crate::objects::TEST_VERIFICATION_HOOK.replace(Some(Box::new(move || {
+                // The verifier is paused until both calls complete. No timing
+                // race can accidentally let them run after verification ends.
+                let (send, receive) = std::sync::mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    let result = (|| -> std::result::Result<(), String> {
+                        let clock = SystemClock::new();
+                        let cancel = CancelToken::new();
+                        let call = Request {
+                            clock: &clock, cancel: &cancel,
+                            budget: WaitBudget::cli(clock.mono_now(), 2).map_err(|e| e.to_string())?,
+                        };
+                        let lease = slot.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
+                            .map_err(|e| format!("verification still holds writer.lock: {e}"))?;
+                        drop(lease);
+                        let store = RunStore::open(&execution, &call).map_err(|e| e.to_string())?;
+                        let receipt = store.cancel(id, "concurrent cancel", &call).map_err(|e| e.to_string())?;
+                        assert!(!matches!(&receipt, CancelReceipt::Unobservable { reason } if reason.contains("budget") || reason.contains("contended")));
+                        let attempt = store.attempt_dir(scope.run, id, false).map_err(|e| e.to_string())?;
+                        assert!(matches!(store.finish(id, &attempt, &observed,
+                            &crate::dispatch_tests::Fake::default(), &call), Err(RunError::Contention)));
+                        Ok(())
+                    })();
+                    let _ = send.send(result);
+                });
+                receive.recv_timeout(std::time::Duration::from_secs(1))
+                    .expect("cancel/reconcile blocked behind paused verification")
+                    .expect("concurrent custody calls");
+                worker.join().expect("concurrent custody worker");
+            })));
+        }
         let first = store.finish_in_custody(
             id,
             &attempt,
@@ -1424,6 +1493,12 @@ mod writer_recovery_tests {
         crate::objects::TEST_LOCK_BUDGET.set(None);
         crate::objects::TEST_VERIFICATION_BUDGET.set(None);
         crate::objects::TEST_STAGED_HASH_BUDGET.set(None);
+        if case == ImportCase::ConcurrentCancel {
+            assert!(matches!(first?.state, AttemptState::Terminal { .. }));
+            store.settle_recovered(&attempt, recovery)?;
+            assert!(store.writer_fence_listing()?.reservations.is_empty());
+            return Ok(());
+        }
         if case == ImportCase::ExpiredCall {
             let terminal = first?;
             assert!(matches!(terminal.state, AttemptState::Terminal { .. }));

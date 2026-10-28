@@ -1310,13 +1310,18 @@ impl Driver<'_> {
         };
         let recovery = crate::custody::Recovery {
             directory,
-            lease,
+            lease: std::cell::RefCell::new(Some(lease)),
             reservation: self.reservation.clone(),
             guardian_quiescent: true,
         };
         // About 30 s in all, so a contended store does not strand custody.
         let mut delay = Duration::from_millis(50);
         for attempt in 0..12 {
+            // A failed reacquisition must never authorise fence clearing or
+            // another terminal publication without writer exclusion.
+            if recovery.lease.borrow().is_none() {
+                break;
+            }
             if attempt > 0 {
                 let _ = self.reactor.wait(&[], delay);
                 delay = delay.saturating_mul(2).min(Duration::from_secs(5));
@@ -1339,13 +1344,13 @@ impl Driver<'_> {
                         &quarantine,
                     )
                 });
-            if verified.is_ok() {
+            if verified.is_ok() && recovery.lease.borrow().is_some() {
                 let _ = clear_reservation(&self.writer_dir, self.reservation.scope);
-                self.writer = Some(recovery.lease);
+                self.writer = recovery.lease.into_inner();
                 return;
             }
         }
-        self.writer = Some(recovery.lease);
+        self.writer = recovery.lease.into_inner();
     }
     /// Retry without a time limit: custody survives ENOSPC and signals until
     /// the immutable exit is durable. process.json exposes publication_pending.

@@ -8,6 +8,7 @@ use provenant_os::{
 };
 use provenant_records::{Limits, decode_v1};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -315,7 +316,7 @@ impl CustodyLease {
         validate_anchor(&self.directory, &reservation)?;
         Ok(Recovery {
             directory: self.directory,
-            lease: self.lease.ok_or(CustodyError::Fenced)?,
+            lease: RefCell::new(Some(self.lease.ok_or(CustodyError::Fenced)?)),
             reservation,
             guardian_quiescent: false,
         })
@@ -1238,11 +1239,12 @@ fn observe_checkpoint(
     })
 }
 
-/// Recovery holds the same writer exclusion; no decision relies on free flock.
+/// Recovery holds writer exclusion except during scoped object verification.
+/// A suspended or failed capability cannot authorise custody decisions.
 #[derive(Debug)]
 pub struct Recovery {
     pub(crate) directory: Directory,
-    pub(crate) lease: LockGuard,
+    pub(crate) lease: RefCell<Option<LockGuard>>,
     pub(crate) reservation: Reservation,
     // The guardian's durable cleanup or native reboot proof establishes this.
     pub(crate) guardian_quiescent: bool,
@@ -1261,6 +1263,7 @@ impl RebootRecovery {
     /// The trusted Run owner calls this only after its canonical terminal
     /// transaction. No attempt artefacts or worktree contents are removed.
     pub fn release(self) -> Result<()> {
+        self.recovery.require_writer_lease()?;
         clear_reservation(&self.recovery.directory, self.scope())
     }
     /// Keep writer exclusion for normal terminal settlement, which reacquires
@@ -1288,7 +1291,7 @@ pub fn acquire_recovery(
     validate_anchor(&directory, &reservation)?;
     Ok(Recovery {
         directory,
-        lease,
+        lease: RefCell::new(Some(lease)),
         reservation,
         guardian_quiescent: false,
     })
@@ -1360,7 +1363,7 @@ pub(crate) fn acquire_reboot_recovery_with(
     }
     Ok(Recovery {
         directory,
-        lease,
+        lease: RefCell::new(Some(lease)),
         reservation,
         guardian_quiescent: false,
     })
@@ -1468,7 +1471,82 @@ pub enum RecoveryState {
     Absent,
     Unknown,
 }
+/// Serialises settlers while verification temporarily releases writer exclusion.
+/// Cancellation and custody observation do not take this lock.
+#[derive(Debug)]
+pub struct SettlementGuard {
+    _lease: LockGuard,
+    scope: Scope,
+    device: u64,
+    inode: u64,
+}
 impl Recovery {
+    fn require_writer_lease(&self) -> Result<()> {
+        if self.lease.borrow().is_none() {
+            return Err(CustodyError::Fenced);
+        }
+        Ok(())
+    }
+
+    /// Refuse concurrent settlers promptly instead of repeating expensive work.
+    pub fn try_settlement_guard(&self) -> Result<SettlementGuard> {
+        self.require_writer_lease()?;
+        let lease = match self
+            .directory
+            .try_lock(OsStr::new("settlement.lock"), LockMode::Exclusive)
+        {
+            Ok(lease) => lease,
+            Err(FsError::LockTimeout { .. }) => return Err(CustodyError::Busy),
+            Err(error) => return Err(error.into()),
+        };
+        let anchor = self.directory.metadata()?;
+        Ok(SettlementGuard {
+            _lease: lease,
+            scope: self.scope(),
+            device: anchor.device,
+            inode: anchor.inode,
+        })
+    }
+
+    /// Run slow verification without writer exclusion, then reacquire it for
+    /// up to five seconds and require the exact reservation to remain current.
+    /// Failure fences this capability and retains the reservation for recovery.
+    /// The caller must recheck its verified tip and files before publication.
+    pub fn without_writer_lease<T>(
+        &self,
+        guard: &SettlementGuard,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T> {
+        self.require_writer_lease()?;
+        let anchor = self.directory.metadata()?;
+        if guard.scope != self.scope()
+            || guard.device != anchor.device
+            || guard.inode != anchor.inode
+            || self.observe() != RecoveryState::Absent
+        {
+            return Err(CustodyError::Fenced);
+        }
+        let expected =
+            serde_json::to_vec(&self.reservation).map_err(|_| CustodyError::InvalidRecord)?;
+        drop(self.lease.borrow_mut().take());
+        let output = operation();
+        let clock = provenant_os::clock::SystemClock::new();
+        let lease = self.directory.lock(
+            OsStr::new("writer.lock"),
+            LockMode::Exclusive,
+            WaitBudget::cli(clock.mono_now(), 5).map_err(|_| CustodyError::InvalidRecord)?,
+            &CancelToken::new(),
+            &clock,
+        )?;
+        let current: Reservation = read_record(&self.directory, "reservation.json", RECORD_LIMIT)?;
+        validate_anchor(&self.directory, &current)?;
+        if serde_json::to_vec(&current).map_err(|_| CustodyError::InvalidRecord)? != expected {
+            return Err(CustodyError::Fenced);
+        }
+        *self.lease.borrow_mut() = Some(lease);
+        Ok(output)
+    }
+
     pub fn scope(&self) -> Scope {
         self.reservation.scope
     }
@@ -1484,6 +1562,7 @@ impl Recovery {
         scope: Scope,
         observer: &dyn ProcessObserver,
     ) -> Result<Option<RebootRecovery>> {
+        self.require_writer_lease()?;
         self.reservation.validate()?;
         if self.reservation.attempt_device.is_none() {
             return Ok(None);
@@ -1527,6 +1606,9 @@ impl Recovery {
         }))
     }
     pub(crate) fn observe_with(&self, observer: &dyn ProcessObserver) -> RecoveryState {
+        if self.require_writer_lease().is_err() {
+            return RecoveryState::Unknown;
+        }
         if self.guardian_quiescent {
             return RecoveryState::Absent;
         }
@@ -1540,6 +1622,7 @@ impl Recovery {
         git: &Directory,
         branch: &str,
     ) -> Result<GitOid> {
+        self.require_writer_lease()?;
         let root = worktree.metadata()?;
         let git = git.metadata()?;
         match &self.reservation.binding {
@@ -1762,6 +1845,7 @@ impl Recovery {
     /// Prepared is durable before handoff. Writer exclusion and this state
     /// prove no guardian or provider launched, even without attempt binding.
     pub fn withdraw_prepared(self) -> Result<()> {
+        self.require_writer_lease()?;
         if self.reservation.launch_state != LaunchState::Prepared
             || self.reservation.guardian.is_some()
             || self.reservation.provider.is_some()
@@ -1786,6 +1870,7 @@ impl Recovery {
         clear_reservation(&self.directory, self.scope())
     }
     pub fn verify_settlement(&self, attempt: &Directory) -> Result<SettlementCommit> {
+        self.require_writer_lease()?;
         let metadata = attempt.metadata()?;
         if self.reservation.attempt_device != Some(metadata.device)
             || self.reservation.attempt_inode != Some(metadata.inode)
@@ -1942,6 +2027,7 @@ impl Recovery {
         decision: ReconcileDecision,
         authority: &dyn ReconcileAuthority,
     ) -> Result<ReconcileReceipt> {
+        self.require_writer_lease()?;
         if decision.schema_version != 1
             || decision.scope != self.scope()
             || !authority.permits(&decision)?
@@ -1990,6 +2076,7 @@ impl Recovery {
         self.finish_settlement(scratch)
     }
     fn finish_settlement(self, scratch: &mut provenant_os::scratch::Scratch) -> Result<()> {
+        self.require_writer_lease()?;
         scratch.settle()?;
         clear_reservation(&self.directory, self.scope())?;
         drop(self.lease);

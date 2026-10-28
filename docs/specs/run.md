@@ -600,22 +600,36 @@ requires absent custody, reads the selected private branch as raw metadata
 without executing its mutable config, and copies canonical loose objects and
 packs into a fresh host-owned snapshot. Traversal
 refuses symlinks and non-regular object files; it copies neither lane alternates
-nor pack indices. The host rebuilds indices with `index-pack --strict` and pins
-the shared store as the only alternate. Verification enumerates the staged
-objects without alternates, then streams `cat-file --batch` to check each object's
-canonical Git hash. Commits, trees and tags are packed into a temporary validation
-pack and parsed by `index-pack --strict`; blob contents stay streamed. A separate
-`rev-list --objects --no-object-names <head>` walk checks the reachable graph,
-including shared objects, with the same hash and strict format checks. The
-object-name list is bounded at 64 MiB independently of streamed content size.
-No verification command enumerates unrelated objects in the shared store. In
-particular, `fsck --no-full` is insufficient: Git 2.53 still enumerates loose
-objects in alternates. Verification uses host-owned bare views without another
-lane's refs, index or unfinished operation markers. Before publication, the
-shared store precedes the staged snapshot in the alternate search order, so a
-private duplicate cannot hide corrupt shared content. Ref and unfinished-operation
-validation remain separate settlement checks. A non-commit head or any verification failure
-refuses settlement certification and delivery.
+nor pack indices. The host rebuilds indices with `index-pack --strict`, checks
+each staged pack with `verify-pack` (including every duplicate entry, pack
+trailer and index checksum), and pins the shared store as the only alternate.
+Verification enumerates the staged objects without alternates, then streams
+`cat-file --batch` to check each object's canonical Git hash. SHA-1 checks use
+collision detection and refuse a detected collision. Commits, trees and tags
+are packed into a temporary validation pack and parsed by `index-pack --strict`;
+blob contents stay streamed. Temporary strict-check packs and indices are
+removed on success and every error path.
+
+Before private-object publication the host snapshots existing shared ref tips,
+excluding missing refs. Legacy settlement uses the sealed launch base and
+excludes its mutable proposed tip from the shared-ref boundary. Both the strict/hash pass and final
+connectivity walk use `rev-list --objects --no-object-names --stdin` with the new
+tip and negative revisions for that snapshot, equivalent to
+`rev-list --objects <new tip> --not <pre-existing tips>`. Only objects beyond
+that boundary are rehashed and checked for strict format. Existing shared
+history is trusted; it is not rehashed on every settlement. Missing objects in
+the walked difference refuse settlement. Object names and connectivity output
+are streamed without a fixed total name-list limit; hash inputs retain only the
+selected difference and staged names in memory.
+
+No verification command enumerates unrelated shared-store objects. Host-owned
+bare views exclude lane refs, indices, configuration and unfinished operation
+markers. The shared store precedes staging in the alternate search order, and
+every staged name is rechecked using that order, including duplicates of
+baseline objects. A clean private duplicate therefore cannot hide corrupt
+shared content that would win after publication. Ref and unfinished-operation
+validation remain separate settlement checks. A non-commit head or a failed
+check refuses settlement certification and delivery.
 
 Copying, indexing and snapshot verification run in host-owned staging before
 taking the exclusive object-store lock. Only a verified snapshot is published,
@@ -638,8 +652,9 @@ lane-supplied boundaries cannot excuse missing history. Import is bounded by
 100,000 directory entries, 2 GiB of source objects, 64 packs and a 120-second
 wall-clock budget for copying and `index-pack`, including initialisation and
 preflight. Object verification has a separate deadline: 120 seconds plus 60
-seconds per started GiB of object files (shared plus staged for import), capped
-at one hour. Hashing staged files alone has the same size-scaled allowance;
+seconds per started GiB of staged object files, capped at one hour.
+Shared-graph cache misses scale their allowance with the shared object files.
+Hashing staged files alone has the same size-scaled allowance;
 exhausting it immediately refuses the import. Delivery cache misses get a fresh
 verification deadline. The locked publication and connectivity check has a
 deadline of 60 seconds plus 10 seconds per started GiB, capped at 20 minutes,
@@ -652,11 +667,22 @@ custody. Each refusal seals `object-import-refused.json` in the attempt director
 release is distinguished from the resource refusals that retain custody.
 These counts are separate and persist in host-owned settlement state across
 restarts. Terminal publication and replay prune all counter generations for
-that attempt. The exclusive writer lease spans verification, counter updates
-and terminal publication, serialising live and recovered settlers. Thirty
-ordinary lock waits can span up to an hour. Object work uses its own deadlines;
-afterwards the terminal database transaction gets a fresh 30-second budget, so
-verification outliving the reconcile call cannot prevent terminal publication.
+that attempt. A nonblocking settlement guard serialises live and recovered
+settlers across verification, counter updates and terminal publication. The
+writer reservation remains in place, but verification releases the exclusive
+`writer.lock` lease. Concurrent cancel can proceed and another settler returns
+promptly without repeating the scan. Resumption waits at most five seconds for
+the writer lease, then checks the complete reservation and directory identity.
+A changed or missing reservation fences the suspended capability. Before branch
+publication, the host rechecks the verified tip and shared object-file generation
+(including packs and the trusted shallow boundary); this metadata recheck waits
+at most one second for the object-store lock. Live delivery also releases the
+writer lease because it can refresh and verify another object graph, while the
+settlement guard and reservation continue to exclude another settler or writer.
+Thirty ordinary object-lock waits can span up to an hour. Object work uses its
+own deadlines; afterwards the terminal database transaction gets a fresh
+30-second budget, so verification outliving the reconcile call cannot prevent
+terminal publication.
 Exceeding either the pack limit or the copy/index budget terminally refuses
 the import with the limit named in the reason. Import snapshots are
 removed after each attempt; a later import attempts to sweep at most 32 exact
@@ -675,11 +701,13 @@ certification refuses it, so its evidence can be sealed and the failed attempt
 can release custody. Other object verification failures or a competing shared
 ref change keep custody and scratch for recovery.
 
-Host integration and delivery hash-check the lane and target graphs before
-reading commit messages, merging or pushing. Remote refresh checks the advertised
-OID and full object contents; existence or connectivity-only checks do not prove
-content integrity. Within one settlement or delivery, a successful check is
-reused only for the same head and shared-store generation. The generation
+Host integration and delivery check lane and target objects beyond the
+pre-existing shared tips using the same strict/hash and connectivity boundary.
+The sealed delivery base is also a trusted boundary; preparation trusts the
+host's existing tip. A remote refresh binds the advertised OID and verifies the
+difference before reading commit messages, merging or pushing. Within one
+settlement or delivery, a successful check is reused only for the same head
+and shared-store generation. The generation
 includes object and shallow-file identities, sizes, permissions, mtime and
 ctime, so restoring mtime cannot hide a write. Stores with external alternates
 receive a fresh check because their external generation is not tracked. Cached
@@ -690,7 +718,7 @@ directly; lane-writable worktree metadata cannot select the store. Lanes whose
 compiled confinement policy predates v11 retain their old write grants until
 they exit. Settlement and delivery name that legacy policy, run and attempt in
 a diagnostic. Settlement also records the warning in its terminal run event.
-Both run full strict verification against the shared store. Operators
+Both use the scoped shared-store checks described above. Operators
 should [drain writers before upgrading](../runbooks/install.md#bootstrap-and-upgrade);
 the host does not force-cancel running lanes.
 - Why: Git's ordinary reads do not prove that stored content matches its OID.

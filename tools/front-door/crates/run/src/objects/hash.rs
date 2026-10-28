@@ -3,8 +3,33 @@ use super::*;
 use provenant_os::exec::{CaptureFilter, FilterError};
 use sha2::Digest as _;
 
-// Bound host memory for object names independently of streamed object contents.
-pub(super) const LIST_LIMIT: usize = 64 * 1024 * 1024;
+/// Stream names without a fixed history-size limit. Connectivity retains none.
+#[derive(Default)]
+pub(super) struct Names {
+    pub(super) names: BTreeSet<String>,
+    pending: Vec<u8>,
+    discard: bool,
+}
+impl CaptureFilter for Names {
+    fn filter(&mut self, bytes: &[u8]) -> std::result::Result<Vec<u8>, FilterError> {
+        for byte in bytes {
+            if *byte == b'\n' {
+                let name = std::str::from_utf8(&self.pending).map_err(|_| FilterError)?;
+                let name = GitOid::parse(name).map_err(|_| FilterError)?;
+                if !self.discard {
+                    self.names.insert(name.to_string());
+                }
+                self.pending.clear();
+            } else {
+                if self.pending.len() == 64 {
+                    return Err(FilterError);
+                }
+                self.pending.push(*byte);
+            }
+        }
+        Ok(Vec::new())
+    }
+}
 
 pub(super) fn verify(
     git: &Path,
@@ -12,9 +37,27 @@ pub(super) fn verify(
     cwd: &Path,
     head: GitOid,
     alternates: &[&Path],
-    check: Verification,
+    check: Verification<'_>,
 ) -> Result<()> {
-    let (list_args, list_alternates) = match check.mode {
+    let mut names = names(git, view, cwd, head, alternates, check)?;
+    // Check staged duplicates with the shared-first search order as well.
+    names.extend(check.staged.iter().map(ToString::to_string));
+    verify_names(git, view, cwd, alternates, check.deadline, names)
+}
+
+pub(super) fn names(
+    git: &Path,
+    view: &Path,
+    cwd: &Path,
+    head: GitOid,
+    alternates: &[&Path],
+    check: Verification<'_>,
+) -> Result<BTreeSet<String>> {
+    let mut names = Names {
+        discard: matches!(check.mode, VerificationMode::Connectivity),
+        ..Names::default()
+    };
+    let (list_args, list_alternates, input) = match check.mode {
         VerificationMode::Local => (
             args(&[
                 "cat-file",
@@ -22,37 +65,43 @@ pub(super) fn verify(
                 "--batch-check=%(objectname)",
             ]),
             &[][..],
+            None,
         ),
         VerificationMode::Reachable | VerificationMode::Connectivity => (
-            args(&[
-                "rev-list",
-                "--objects",
-                "--no-object-names",
-                &head.to_string(),
-            ]),
+            args(&["rev-list", "--objects", "--no-object-names", "--stdin"]),
             alternates,
+            Some(
+                std::iter::once(format!("{head}\n"))
+                    .chain(check.existing.iter().map(|tip| format!("^{tip}\n")))
+                    .collect::<String>(),
+            ),
         ),
     };
-    let list = command_stream(
+    command_stream(
         git,
         view,
         cwd,
         &list_args,
         list_alternates,
         Some(check.deadline),
-        None,
-        None,
+        input.as_deref().map(str::as_bytes),
+        Some(&mut names),
     )?;
-    let mut names = BTreeSet::new();
-    for name in list
-        .split(|byte| *byte == b'\n')
-        .filter(|name| !name.is_empty())
-    {
-        let name = std::str::from_utf8(name).map_err(|_| invalid())?;
-        GitOid::parse(name).map_err(|_| invalid())?;
-        names.insert(name.to_owned());
+    if !names.pending.is_empty() {
+        return Err(invalid());
     }
-    if matches!(check.mode, VerificationMode::Connectivity) || names.is_empty() {
+    Ok(names.names)
+}
+
+fn verify_names(
+    git: &Path,
+    view: &Path,
+    cwd: &Path,
+    alternates: &[&Path],
+    deadline: Deadline,
+    names: BTreeSet<String>,
+) -> Result<()> {
+    if names.is_empty() {
         return Ok(());
     }
     let names: Vec<_> = names
@@ -70,7 +119,7 @@ pub(super) fn verify(
         cwd,
         &args(&["cat-file", "--batch"]),
         alternates,
-        Some(check.deadline),
+        Some(deadline),
         Some(input.as_bytes()),
         Some(&mut batch),
     )?;
@@ -88,7 +137,36 @@ pub(super) fn verify(
     // parser supplies format and reference-type checks for commits/trees/tags.
     // Blobs have no internal format, and stay streamed rather than being copied.
     // Rebuild the index, never trust pack-objects' index as verification evidence.
-    let prefix = view.join("strict-check");
+    // A separate directory also owns partial packs on every error path.
+    let held = Directory::open_anchor(view)?;
+    let temporary = staging_name()?;
+    held.mkdir(&temporary, 0o700)?;
+    let path = view.join(&temporary);
+    let result = strict(
+        git,
+        view,
+        cwd,
+        alternates,
+        deadline,
+        &path,
+        &batch.structured,
+    );
+    let cleanup = crate::artifacts::remove_entry_tree(&held, &temporary);
+    result?;
+    cleanup?;
+    Ok(())
+}
+
+fn strict(
+    git: &Path,
+    view: &Path,
+    cwd: &Path,
+    alternates: &[&Path],
+    deadline: Deadline,
+    temporary: &Path,
+    structured: &str,
+) -> Result<()> {
+    let prefix = temporary.join("strict-check");
     let mut pack = args(&[
         "pack-objects",
         "--no-reuse-object",
@@ -103,23 +181,23 @@ pub(super) fn verify(
         cwd,
         &pack,
         alternates,
-        Some(check.deadline),
-        Some(batch.structured.as_bytes()),
+        Some(deadline),
+        Some(structured.as_bytes()),
         None,
     )?;
     let digest = std::str::from_utf8(&digest).map_err(|_| invalid())?.trim();
     GitOid::parse(digest).map_err(|_| invalid())?;
-    let held = Directory::open_anchor(view)?;
+    let held = Directory::open_anchor(temporary)?;
     held.unlink(OsStr::new(&format!("strict-check-{digest}.idx")))?;
     let mut index = args(&["index-pack", "--strict", "--threads=1"]);
-    index.push(view.join(format!("strict-check-{digest}.pack")).into());
+    index.push(temporary.join(format!("strict-check-{digest}.pack")).into());
     command_stream(
         git,
         view,
         cwd,
         &index,
         alternates,
-        Some(check.deadline),
+        Some(deadline),
         None,
         None,
     )?;
@@ -246,5 +324,48 @@ impl CaptureFilter for Batch {
             return Err(FilterError);
         }
         Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collision_finalization_is_a_verification_failure() {
+        // First five SHA-1 blocks of the published SHAttered PDF pair, also
+        // shipped as test vectors by sha1collisiondetection 0.3.4. Their collision
+        // blocks trigger detection without storing the rest of either PDF.
+        let pair = [
+            include_bytes!("testdata/shattered-1-prefix.bin"),
+            include_bytes!("testdata/shattered-2-prefix.bin"),
+        ];
+        let mut digests = Vec::new();
+        for prefix in pair {
+            let mut ordinary = sha1collisiondetection::Sha1CD::configure()
+                .detect_collisions(false)
+                .build();
+            ordinary.update(prefix);
+            digests.push(ordinary.finalize_cd().expect("ordinary digest"));
+            let mut hash = ObjectHash::Sha1(Box::default());
+            hash.update(prefix);
+            assert!(
+                hash.finish().is_none(),
+                "collision must not become a digest"
+            );
+            let name = digests
+                .last()
+                .expect("ordinary digest")
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let mut hash = ObjectHash::Sha1(Box::default());
+            hash.update(prefix);
+            let mut batch = Batch::new(vec![GitOid::parse(&name).expect("digest OID")]);
+            batch.object = Some(Object { remaining: 0, hash });
+            assert!(batch.filter(b"\n").is_err());
+            assert!(batch.failed);
+        }
+        assert_eq!(digests[0], digests[1]);
     }
 }

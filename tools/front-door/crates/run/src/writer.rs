@@ -1168,6 +1168,7 @@ impl WriterLaunch {
         state: &Path,
         attempt: &Directory,
         custody: &provenant_supervisor::custody::Recovery,
+        settlement: &provenant_supervisor::custody::SettlementGuard,
         remote: &str,
         base_ref: Option<&str>,
     ) -> Result<bool> {
@@ -1211,12 +1212,36 @@ impl WriterLaunch {
         {
             return Err(RunError::Validation("writer HEAD is not the lane branch"));
         }
-        crate::objects::settle(
-            &git_executable,
-            self.worktree.repo(),
-            source.as_ref().map(|source| &source.objects),
-            verified_tip,
-        )?;
+        let verified = custody
+            .without_writer_lease(settlement, || {
+                crate::objects::settle(
+                    &git_executable,
+                    self.worktree.repo(),
+                    source.as_ref().map(|source| &source.objects),
+                    verified_tip,
+                    base,
+                )
+            })
+            .map_err(error(
+                "resume writer after object verification",
+                Some(self.worktree.path()),
+            ))??;
+        verified.recheck(self.worktree.repo())?;
+        // Only the sealed private source selects the verified tip. A changed
+        // raw tip requires another complete check before any branch mutation.
+        let current = match &source {
+            Some(source) => crate::objects::private_tip(source, self.branch.as_str())?,
+            None => crate::objects::resolve_ref(
+                &git_executable,
+                self.worktree.repo(),
+                self.branch.as_str(),
+            )?,
+        };
+        if current != verified_tip {
+            return Err(RunError::ObjectVerificationRetry(
+                "lane tip changed during verification; retry settlement",
+            ));
+        }
         if source.is_some() {
             crate::objects::publish_branch(
                 &git_executable,
