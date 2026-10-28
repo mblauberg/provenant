@@ -12,6 +12,168 @@ pub enum PacingPolicy {
     Pace,
     Spend,
     Max,
+    Off,
+}
+
+/// Provider defaults remain directly under `[pacing]`; account profiles live
+/// under `[pacing.accounts.<account>]`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PacingSettings {
+    pub accounts: BTreeMap<String, PacingProfile>,
+    pub free: BTreeMap<String, PacingProfile>,
+    #[serde(flatten)]
+    pub providers: BTreeMap<String, PacingPolicy>,
+}
+impl std::ops::Deref for PacingSettings {
+    type Target = BTreeMap<String, PacingPolicy>;
+    fn deref(&self) -> &Self::Target {
+        &self.providers
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PacingWindow {
+    FiveHour,
+    SevenDay,
+    Monthly,
+    Rolling,
+    Daily,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AfterDeadline {
+    #[default]
+    Standby,
+    Continue,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PacingProfile {
+    pub policy: Option<PacingPolicy>,
+    pub windows: Option<Vec<PacingWindow>>,
+    pub reserve: BTreeMap<PacingWindow, u8>,
+    pub deadline: Option<PacingDeadline>,
+    pub after_deadline: AfterDeadline,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PacingOverride {
+    pub account: Option<String>,
+    pub provider: Option<String>,
+    pub policy: PacingPolicy,
+    pub expires_unix_seconds: i64,
+}
+
+/// Fixed deadlines use host-local time. Reset references use fresh quota facts.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum PacingDeadline {
+    ResetOf(ResetDeadline),
+    Fixed(FixedDeadline),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResetDeadline {
+    pub reset_of: String,
+    #[serde(default = "default_deadline_window")]
+    pub window: PacingWindow,
+}
+fn default_deadline_window() -> PacingWindow {
+    PacingWindow::SevenDay
+}
+
+impl<'de> Deserialize<'de> for PacingDeadline {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = PacingDeadline;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "a weekly, monthly or absolute deadline string, or { reset_of, window? }",
+                )
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                FixedDeadline::try_from(value.to_owned())
+                    .map(PacingDeadline::Fixed)
+                    .map_err(E::custom)
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                map: M,
+            ) -> Result<Self::Value, M::Error> {
+                ResetDeadline::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(PacingDeadline::ResetOf)
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum FixedDeadline {
+    Weekly { weekday: u8, hour: i8, minute: i8 },
+    Monthly { day: i8 },
+    Absolute(jiff::civil::DateTime),
+}
+const WEEKDAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+impl TryFrom<String> for FixedDeadline {
+    type Error = &'static str;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let parts: Vec<_> = value.split_whitespace().collect();
+        match parts.as_slice() {
+            [day, time] if WEEKDAYS.contains(day) => {
+                if let Some((hour, minute)) = time.split_once(':')
+                    && hour.len() == 2
+                    && minute.len() == 2
+                    && let (Ok(hour), Ok(minute)) = (hour.parse::<i8>(), minute.parse::<i8>())
+                    && (0..24).contains(&hour)
+                    && (0..60).contains(&minute)
+                {
+                    return Ok(Self::Weekly {
+                        weekday: WEEKDAYS.iter().position(|d| d == day).unwrap_or(0) as u8,
+                        hour,
+                        minute,
+                    });
+                }
+            }
+            ["day", day] => {
+                if let Ok(day) = day.parse::<i8>()
+                    && (1..=31).contains(&day)
+                {
+                    return Ok(Self::Monthly { day });
+                }
+            }
+            [_] => {
+                if let Ok(datetime) = value.parse::<jiff::civil::DateTime>() {
+                    return Ok(Self::Absolute(datetime));
+                }
+            }
+            _ => {}
+        }
+        Err(
+            "deadline must be 'thu 00:00', 'day 25', a local ISO datetime, or { reset_of = 'ACCOUNT', window = 'seven_day' }",
+        )
+    }
+}
+impl From<FixedDeadline> for String {
+    fn from(value: FixedDeadline) -> Self {
+        match value {
+            FixedDeadline::Weekly {
+                weekday,
+                hour,
+                minute,
+            } => format!("{} {hour:02}:{minute:02}", WEEKDAYS[usize::from(weekday)]),
+            FixedDeadline::Monthly { day } => format!("day {day}"),
+            FixedDeadline::Absolute(datetime) => datetime.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -22,8 +184,9 @@ pub struct RoutingConfig {
     pub suppress_opus_writer_warning: bool,
     pub routes: BTreeMap<String, NamedRoute>,
     pub pools: BTreeMap<String, Vec<RoutePoolMember>>,
-    pub pacing: BTreeMap<String, PacingPolicy>,
+    pub pacing: PacingSettings,
     pub pacing_reserve: BTreeMap<String, PacingReserve>,
+    pub pacing_overrides: Vec<PacingOverride>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -232,6 +395,43 @@ impl DomainConfig for RoutingConfig {
                 });
             }
         }
+        for (account, profile) in &self.pacing.accounts {
+            if !identifier(account) {
+                errors.push(SectionError {
+                    field: format!("pacing.accounts.{account}"),
+                    code: "selector",
+                });
+            }
+            validate_profile(&format!("pacing.accounts.{account}"), profile, &mut errors);
+        }
+        for (provider, profile) in &self.pacing.free {
+            validate_profile(&format!("pacing.free.{provider}"), profile, &mut errors);
+            if !provenant_providers::REGISTRY
+                .iter()
+                .any(|r| r.adapter.id() == provider)
+            {
+                errors.push(SectionError {
+                    field: format!("pacing.free.{provider}"),
+                    code: "unknown_provider",
+                });
+            }
+        }
+        for (index, override_) in self.pacing_overrides.iter().enumerate() {
+            if override_.account.as_deref().is_some_and(|a| !identifier(a))
+                || override_.account.is_some() && override_.provider.is_some()
+                || override_.provider.as_deref().is_some_and(|p| {
+                    !provenant_providers::REGISTRY
+                        .iter()
+                        .any(|r| r.adapter.id() == p)
+                })
+                || override_.expires_unix_seconds <= 0
+            {
+                errors.push(SectionError {
+                    field: format!("pacing_overrides[{index}]"),
+                    code: "selector",
+                });
+            }
+        }
         for (provider, reserve) in &self.pacing_reserve {
             if !provenant_providers::REGISTRY
                 .iter()
@@ -252,8 +452,118 @@ impl DomainConfig for RoutingConfig {
         errors
     }
 }
+fn validate_profile(field: &str, profile: &PacingProfile, errors: &mut Vec<SectionError>) {
+    if profile.reserve.values().any(|percent| *percent > 100) {
+        errors.push(SectionError {
+            field: format!("{field}.reserve"),
+            code: "range",
+        });
+    }
+    if profile
+        .deadline
+        .as_ref()
+        .is_some_and(|deadline| matches!(deadline, PacingDeadline::ResetOf(reset) if !identifier(&reset.reset_of)))
+    {
+        errors.push(SectionError {
+            field: format!("{field}.deadline"),
+            code: "selector",
+        });
+    }
+    if profile
+        .windows
+        .as_ref()
+        .is_some_and(|windows| windows.iter().collect::<BTreeSet<_>>().len() != windows.len())
+    {
+        errors.push(SectionError {
+            field: format!("{field}.windows"),
+            code: "duplicate",
+        });
+    }
+}
+
+#[cfg(test)]
+mod pacing_profile_tests {
+    use super::*;
+
+    #[test]
+    fn provider_and_account_pacing_share_a_table() {
+        let config: RoutingConfig = toml_edit::de::from_str(
+            "[pacing]\nclaude = 'pace'\n[pacing.accounts.pro]\npolicy = 'pace'\nwindows = ['five_hour']\nreserve = { five_hour = 15 }\ndeadline = 'thu 00:00'\n[pacing.free.opencode]\npolicy = 'max'\n",
+        ).unwrap();
+        assert_eq!(config.pacing.get("claude"), Some(&PacingPolicy::Pace));
+        assert_eq!(
+            config.pacing.accounts["pro"].reserve[&PacingWindow::FiveHour],
+            15
+        );
+        assert_eq!(
+            config.pacing.free["opencode"].policy,
+            Some(PacingPolicy::Max)
+        );
+        assert!(config.validate().is_empty());
+    }
+
+    #[test]
+    fn deadline_forms_and_unknown_keys_are_validated_together() {
+        for deadline in [
+            "'thu 00:00'",
+            "'day 25'",
+            "'2026-11-02T09:00'",
+            "{reset_of='anese'}",
+            "{reset_of='anese',window='monthly'}",
+        ] {
+            let profile: PacingProfile =
+                toml_edit::de::from_str(&format!("deadline={deadline}")).unwrap();
+            assert!(profile.deadline.is_some());
+        }
+        let profile: PacingProfile =
+            toml_edit::de::from_str("windows=['daily', 'five_hour']").unwrap();
+        assert_eq!(
+            profile.windows,
+            Some(vec![PacingWindow::Daily, PacingWindow::FiveHour])
+        );
+        assert!(toml_edit::de::from_str::<PacingProfile>("windows=['hourly']").is_err());
+        for invalid in [
+            "deadline='thu 25:00'",
+            "deadline='day 32'",
+            "deadline={reset_of='anese',when='weekly'}",
+            "policy='unlimited'",
+            "after_deadline='stop'",
+            "window=['five_hour']",
+        ] {
+            assert!(
+                toml_edit::de::from_str::<PacingProfile>(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+        let error =
+            toml_edit::de::from_str::<PacingProfile>("deadline={reset_of='anese',when='weekly'}")
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error.contains("reset_of") && error.contains("window"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn invalid_profile_is_rejected() {
+        let mut config = RoutingConfig::default();
+        config.pacing.accounts.insert(
+            "pro".into(),
+            PacingProfile {
+                deadline: Some(PacingDeadline::ResetOf(ResetDeadline {
+                    reset_of: "bad account".into(),
+                    window: PacingWindow::SevenDay,
+                })),
+                reserve: BTreeMap::from([(PacingWindow::FiveHour, 101)]),
+                ..PacingProfile::default()
+            },
+        );
+        assert_eq!(config.validate().len(), 2);
+    }
+}
 fn defaults(_: Profile) -> &'static str {
-    "suppress_opus_writer_warning = false\n[routes]\n[pools]\n[pacing]\n"
+    "suppress_opus_writer_warning = false\npacing_overrides = []\n[routes]\n[pools]\n[pacing]\n[pacing_reserve]\n"
 }
 pub const SECTION: DomainSection = DomainSection::new::<RoutingConfig>("routing", defaults);
 
