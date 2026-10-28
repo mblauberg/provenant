@@ -233,11 +233,11 @@ at least 50 GiB. See [configuration](configuration.md#lane-cache-collection).
 Install quietly boots out and deletes an existing
 `~/Library/LaunchAgents/dev.provenant.disk-guard.plist` on upgrade. Disk checks
 now run inside active lane supervisors. There is no periodic disk-guard agent.
-If the old checker still owns paused builds, install or uninstall keeps it
-running and names the recovery command. Run `provenant gc --apply`, allow that
-checker to resume its saved builds, then retry. It is retired under its lock,
-so a new pause cannot race with bootout. Uninstall also performs this one-time
-retirement when an installation was last managed by an older release.
+After bootout, install waits up to three seconds for the checker's recovery
+lock, resumes saved builds after checking their process identities, then removes
+the recovery state and plist. Stopping the checker first prevents another pause
+during recovery. Uninstall also performs this one-time retirement when an
+installation was last managed by an older release.
 See [configuration](configuration.md#disk-pressure) for the shared floor.
 
 To remove an installation, run

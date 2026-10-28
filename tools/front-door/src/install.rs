@@ -1066,9 +1066,6 @@ fn retire_disk_guard_with(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     }
-    // Keep the old checker's recovery custody until it has resumed its builds.
-    // Holding the same lock also prevents a final pause racing with bootout.
-    let _recovery = legacy_guard_ready(home)?;
     let service = format!(
         "gui/{}/dev.provenant.disk-guard",
         provenant_os::fs::effective_uid()
@@ -1079,6 +1076,10 @@ fn retire_disk_guard_with(
             return Err(AgentError::Launchctl("bootout", error));
         }
     }
+    // A live checker holds guard.lock while builds remain paused, so stop it
+    // before taking recovery custody. Once bootout prevents another pause,
+    // resume the durable identities ourselves and only then remove the plist.
+    let _recovery = legacy_guard_ready(home)?;
     std::fs::remove_file(plist)?;
     Ok(())
 }
@@ -1087,35 +1088,115 @@ fn legacy_guard_ready(home: &Path) -> io::Result<provenant_os::fs::LockGuard> {
     use provenant_os::fs::LockMode;
     let path = home.join(".local/share/provenant/v1/disk-guard");
     let guard = provenant_config::private_directory(&path, true).map_err(io::Error::other)?;
-    let repair = "run `provenant gc --apply`, let the existing disk guard resume its saved builds, then retry";
+    let clock = SystemClock::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 3).map_err(io::Error::other)?;
     let lock = guard
-        .try_lock("guard.lock".as_ref(), LockMode::Exclusive)
-        .map_err(|error| {
-            io::Error::other(format!(
-                "disk guard still owns recovery custody: {error}; {repair}"
-            ))
-        })?;
+        .lock("guard.lock".as_ref(), LockMode::Exclusive, budget, &CancelToken::new(), &clock)
+        .map_err(|error| io::Error::other(format!("disk guard recovery lock unavailable after bootout: {error}; retry after the checker exits")))?;
     for name in ["paused.json", "state.json"] {
         let bytes = match guard.read_stable(name.as_ref(), 1024 * 1024) {
             Ok(bytes) => bytes,
             Err(error) if error.is_not_found() => continue,
-            Err(error) => {
-                return Err(io::Error::other(format!(
-                    "cannot inspect disk guard recovery: {error}; {repair}"
-                )));
-            }
+            Err(error) => return Err(io::Error::other(error)),
         };
-        let state: serde_json::Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-        if !state["paused"].as_array().is_some_and(Vec::is_empty) {
-            return Err(io::Error::other(format!(
-                "disk guard has saved paused builds in {}; {repair}",
-                path.join(name).display()
-            )));
+        #[derive(serde::Deserialize)]
+        struct State {
+            paused: Vec<LegacyPausedBuild>,
         }
-        // paused.json superseded the earlier state.json in the old checker.
+        let state: State = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        for process in state.paused {
+            resume_legacy_build(&process)?;
+        }
+        // paused.json superseded state.json. Remove both so a retry cannot
+        // resurrect an older snapshot once the newer one has been consumed.
+        for name in ["paused.json", "state.json"] {
+            match guard.unlink(name.as_ref()) {
+                Ok(()) => {}
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(io::Error::other(error)),
+            }
+        }
+        guard.sync().map_err(io::Error::other)?;
         break;
     }
     Ok(lock)
+}
+
+#[derive(serde::Deserialize)]
+struct LegacyPausedBuild {
+    pid: u32,
+    uid: u32,
+    name: String,
+    started: String,
+    #[serde(default)]
+    started_unix: Option<i64>,
+}
+
+fn resume_legacy_build(saved: &LegacyPausedBuild) -> io::Result<()> {
+    use provenant_supervisor::census::{ProcessObservation, SystemProcessObserver};
+    if saved.pid <= 1 || saved.uid != provenant_os::fs::effective_uid() {
+        return Ok(());
+    }
+    let boot = provenant_os::clock::boot_unix_seconds()?;
+    let observer = SystemProcessObserver;
+    let identity = match observer.observe(i64::from(saved.pid)) {
+        ProcessObservation::Present(fact) if !fact.zombie => {
+            // LaunchAgent records use ps start seconds. Darwin's native stamp
+            // carries the same UNIX seconds plus microseconds. A different
+            // start time or command proves this PID no longer owns the pause.
+            let started = legacy_start_seconds(&fact.identity)?;
+            let same_start = match saved.started_unix {
+                Some(saved) => saved == started,
+                // The first checker stored local ps text without an offset.
+                // Compare the live timestamp in that same local time zone.
+                None => jiff::Timestamp::from_second(started)
+                    .map_err(io::Error::other)?
+                    .to_zoned(jiff::tz::TimeZone::system())
+                    .strftime("%a %b %e %T %Y")
+                    .to_string()
+                    .split_whitespace()
+                    .eq(saved.started.split_whitespace()),
+            };
+            if started < boot || !same_start || fact.command.as_deref() != Some(saved.name.as_str())
+            {
+                return Ok(());
+            }
+            fact.identity
+        }
+        ProcessObservation::Absent | ProcessObservation::Present(_) => return Ok(()),
+        ProcessObservation::Unknown(_) => {
+            return Err(io::Error::other("cannot inspect saved build identity"));
+        }
+    };
+    match observer.observe(identity.pid) {
+        ProcessObservation::Present(fact) if fact.identity == identity && !fact.zombie => {
+            provenant_os::pid::signal_process(
+                identity.pid,
+                provenant_os::pid::ProcessSignal::Continue,
+            )
+            .map_err(io::Error::other)?;
+        }
+        ProcessObservation::Unknown(_) => {
+            return Err(io::Error::other("cannot recheck saved build identity"));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn legacy_start_seconds(
+    identity: &provenant_supervisor::census::ProcessIdentity,
+) -> io::Result<i64> {
+    i64::try_from(identity.native_start / 1_000_000).map_err(io::Error::other)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn legacy_start_seconds(_: &provenant_supervisor::census::ProcessIdentity) -> io::Result<i64> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "legacy LaunchAgent recovery requires macOS",
+    ))
 }
 
 #[cfg(test)]
@@ -1135,22 +1216,40 @@ mod retired_disk_guard_tests {
         for _ in 0..2 {
             retire_disk_guard_with(home.path(), |args, _| {
                 calls.push(args[0].to_owned());
-                let path = home.path().join(".local/share/provenant/v1/disk-guard");
-                assert!(
-                    path.is_dir(),
-                    "retirement must establish recovery custody before bootout"
-                );
-                let directory = provenant_os::fs::Directory::open_anchor(&path).unwrap();
-                assert!(
-                    directory
-                        .try_lock("guard.lock".as_ref(), provenant_os::fs::LockMode::Exclusive)
-                        .is_err()
-                );
                 Ok((true, String::new()))
             })
             .unwrap();
         }
         assert_eq!(calls, [OsStr::new("print"), OsStr::new("bootout")]);
+        assert!(!plist.exists());
+    }
+
+    #[test]
+    fn retirement_boots_out_a_live_checker_before_taking_recovery_custody() {
+        let home = tempfile::tempdir().unwrap();
+        let plist = home
+            .path()
+            .join("Library/LaunchAgents/dev.provenant.disk-guard.plist");
+        std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        std::fs::write(&plist, b"old plist").unwrap();
+        let path = home.path().join(".local/share/provenant/v1/disk-guard");
+        let directory = provenant_config::private_directory(&path, true).unwrap();
+        let mut checker_lock = Some(
+            directory
+                .try_lock("guard.lock".as_ref(), provenant_os::fs::LockMode::Exclusive)
+                .unwrap(),
+        );
+        std::fs::write(path.join("paused.json"), br#"{"paused":[]}"#).unwrap();
+        retire_disk_guard_with(home.path(), |args, _| {
+            if args[0] == "bootout" {
+                // A low-disk checker releases this lease only when stopped.
+                checker_lock.take();
+            }
+            Ok((true, String::new()))
+        })
+        .unwrap();
+        assert!(checker_lock.is_none());
+        assert!(!path.join("paused.json").exists());
         assert!(!plist.exists());
     }
 
@@ -1170,13 +1269,37 @@ mod retired_disk_guard_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
+#[allow(dead_code)] // Also included by the harness=false worktree driver.
+#[allow(clippy::disallowed_methods)] // Real stopped-child and bounded wall-clock integration tests.
 mod legacy_pause_retirement_tests {
     #[allow(unused_imports)]
     use super::*;
-    #[test]
-    fn retirement_keeps_a_guard_with_saved_paused_builds_and_names_recovery()
-    -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    struct Build(std::process::Child);
+    impl Drop for Build {
+        fn drop(&mut self) {
+            let _ = provenant_os::pid::signal_process(
+                i64::from(self.0.id()),
+                provenant_os::pid::ProcessSignal::Continue,
+            );
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    fn wait_for(path: &Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !path.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "build did not reach {}",
+                path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    fn retirement_case(reused: bool, local: bool) -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_supervisor::census::{ProcessObservation, SystemProcessObserver};
         use std::os::unix::fs::PermissionsExt;
         let home = tempfile::tempdir()?;
         let plist = home
@@ -1187,30 +1310,58 @@ mod legacy_pause_retirement_tests {
         let guard = home.path().join(".local/share/provenant/v1/disk-guard");
         std::fs::create_dir_all(&guard)?;
         std::fs::set_permissions(&guard, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::write(guard.join("paused.json"), br#"{"paused":[{"pid":42}]}"#)?;
-        let mut calls = 0;
-        let result = retire_disk_guard_with(home.path(), |_, _| {
-            calls += 1;
-            Ok((true, String::new()))
-        });
-        assert!(matches!(result, Err(AgentError::Io(_))));
-        let error = result.err().ok_or("retired paused guard")?;
-        let result =
-            install_error_result("install", &InstallError::AgentRetirement(error.to_string()));
-        let mut rendered = Vec::new();
-        provenant_cli::render(
-            &result,
-            provenant_cli::RenderMode::Human {
-                text: "",
-                read_only: false,
-            },
-            &mut rendered,
-        )?;
-        let rendered = String::from_utf8(rendered)?;
-        assert!(rendered.contains("saved paused builds"), "{rendered}");
-        assert!(rendered.contains("provenant gc --apply"), "{rendered}");
-        assert_eq!(calls, 0, "the existing checker must keep recovery custody");
-        assert!(plist.exists());
+        let ready = home.path().join("ready");
+        let resumed = home.path().join("resumed");
+        let mut build = Build(
+            std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "printf ready > \"$1\"; read value; printf resumed > \"$2\"",
+                    "legacy-build",
+                ])
+                .arg(&ready)
+                .arg(&resumed)
+                .stdin(std::process::Stdio::piped())
+                .spawn()?,
+        );
+        wait_for(&ready);
+        let pid = build.0.id();
+        let ProcessObservation::Present(fact) = SystemProcessObserver.observe(i64::from(pid))
+        else {
+            return Err("build identity unavailable".into());
+        };
+        let started_unix = i64::try_from(fact.identity.native_start / 1_000_000)?;
+        let saved = serde_json::json!({"paused": [{
+            "pid": pid, "uid": provenant_os::fs::effective_uid(), "name": fact.command,
+            "started": jiff::Timestamp::from_second(started_unix)?.to_zoned(jiff::tz::TimeZone::system()).strftime("%a %b %e %T %Y").to_string(),
+            "started_unix": if local { None } else { Some(if reused { started_unix - 1 } else { started_unix }) }
+        }]});
+        std::fs::write(guard.join("paused.json"), serde_json::to_vec(&saved)?)?;
+        provenant_os::pid::signal_process(i64::from(pid), provenant_os::pid::ProcessSignal::Stop)?;
+        writeln!(build.0.stdin.as_mut().ok_or("build stdin")?, "continue")?;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!resumed.exists(), "build must be stopped before retirement");
+        retire_disk_guard_with(home.path(), |_, _| Ok((true, String::new())))?;
+        assert!(!guard.join("paused.json").exists());
+        assert!(!plist.exists());
+        if reused {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            assert!(!resumed.exists(), "reused PID must not receive CONT");
+        } else {
+            wait_for(&resumed);
+        }
         Ok(())
+    }
+    #[test]
+    fn retirement_resumes_saved_paused_builds() -> Result<(), Box<dyn std::error::Error>> {
+        retirement_case(false, false)
+    }
+    #[test]
+    fn retirement_resumes_a_legacy_local_start_record() -> Result<(), Box<dyn std::error::Error>> {
+        retirement_case(false, true)
+    }
+    #[test]
+    fn retirement_does_not_resume_a_reused_pid() -> Result<(), Box<dyn std::error::Error>> {
+        retirement_case(true, false)
     }
 }
