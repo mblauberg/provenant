@@ -2287,6 +2287,20 @@ fn graph_journal_error(error: provenant_fabric_runtime::graph::JournalError) -> 
     }
 }
 
+fn graph_result_warning(error: &provenant_run::RunError) -> &'static str {
+    match error {
+        provenant_run::RunError::ArtifactMismatch => {
+            "artifact digest or length does not match its record"
+        }
+        provenant_run::RunError::NotFound => "result artifact is missing",
+        provenant_run::RunError::Filesystem(source) if source.is_not_found() => {
+            "result artifact is missing"
+        }
+        provenant_run::RunError::TooLarge { .. } => "result artifact exceeds the byte limit",
+        _ => "result artifact could not be verified",
+    }
+}
+
 pub(crate) fn advance_settled_graphs(
     holder: &provenant_cli::run::HostHolder<'_>,
     workers: &'static dyn WorkerObserver,
@@ -3212,28 +3226,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 {
                     match store.stream_result(attempt.attempt_id, &call, node.required_verdict) {
                         Ok(result) => (Some(result), None),
-                        Err(error) => (
-                            None,
-                            Some(
-                                match error {
-                                    provenant_run::RunError::ArtifactMismatch => {
-                                        "artifact digest or length does not match its record"
-                                    }
-                                    provenant_run::RunError::NotFound => {
-                                        "result artifact is missing"
-                                    }
-                                    provenant_run::RunError::TooLarge { .. } => {
-                                        "result artifact exceeds the byte limit"
-                                    }
-                                    _ => "result artifact could not be verified",
-                                }
-                                .to_owned(),
-                            ),
-                        ),
+                        Err(error) => (None, Some(graph_result_warning(&error).to_owned())),
                     }
                 } else {
                     (None, None)
                 };
+                // An unverifiable artifact is an integrity failure regardless
+                // of the provider outcome. In particular, it must not trigger
+                // route fallback for authentication or quota failures.
                 Ok(AttemptObservation::Terminal {
                     launched,
                     attempt_ref: reference,
@@ -3949,6 +3949,27 @@ pub fn events(
 #[cfg(test)]
 mod result_tests {
     #[test]
+    fn graph_result_errors_produce_safe_specific_warnings() {
+        use provenant_run::RunError;
+        for (error, warning) in [
+            (
+                RunError::ArtifactMismatch,
+                "artifact digest or length does not match its record",
+            ),
+            (RunError::NotFound, "result artifact is missing"),
+            (
+                RunError::TooLarge { limit: 1 },
+                "result artifact exceeds the byte limit",
+            ),
+            (
+                RunError::Validation("output redaction failed"),
+                "result artifact could not be verified",
+            ),
+        ] {
+            assert_eq!(super::graph_result_warning(&error), warning);
+        }
+    }
+    #[test]
     fn missing_graph_price_table_reports_its_path_and_failure() {
         let assets = tempfile::tempdir().unwrap();
         let reason = super::load_graph_prices(assets.path()).unwrap_err();
@@ -4056,6 +4077,17 @@ mod peer_tests {
         head: provenant_core::GitOid,
         call: &provenant_run::Request<'_>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        publish_outcome(rig, store, record, head, Outcome::Succeeded, call)
+    }
+
+    fn publish_outcome(
+        rig: &crate::worktree_tests::support::TestRig,
+        store: &RunStore,
+        record: &provenant_run::AttemptRecord,
+        head: provenant_core::GitOid,
+        outcome: Outcome,
+        call: &provenant_run::Request<'_>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let attempt = rig
             .state
             .join("runs")
@@ -4126,7 +4158,7 @@ mod peer_tests {
             record.attempt_id,
             record.revision,
             &provenant_run::TerminalPublication {
-                outcome: Outcome::Succeeded,
+                outcome,
                 finished_at: call.clock.wall_now()?,
                 started_at: None,
                 provider_ms: None,
@@ -4635,7 +4667,7 @@ mod peer_tests {
             "runs/{}/attempts/{}/result.md",
             fixture.settled.run_id, fixture.settled.attempt_id
         ));
-        std::fs::write(artifact, b"XX")?;
+        std::fs::write(&artifact, b"XX")?;
         for required in [None, Some("VERDICT: PASS")] {
             let id = if required.is_some() {
                 "corrupt-required"
@@ -4709,6 +4741,162 @@ mod peer_tests {
                 graph::NodeState::Failed
             );
         }
+
+        // A corrupt authentication failure must not consume a fallback route,
+        // even for a read-only node where that provider outcome normally would.
+        let call = provenant_run::Request {
+            clock: &factory.clock,
+            cancel: &cancel,
+            budget,
+        };
+        let continuation = provenant_run::Resume {
+            prior: fixture.settled.attempt_id,
+            expected_generation: 0,
+            operation_id: "graph-corrupt-auth".parse()?,
+            run_id: RunId::from_bytes([43; 16]),
+            attempt_id: AttemptId::from_bytes([44; 16]),
+            prompt: "continue".into(),
+            created_at: factory.clock.wall_now()?,
+        };
+        fixture
+            .store
+            .resume_fresh(&continuation, "fixture", &call)?;
+        let record = fixture.store.record(continuation.attempt_id, &call)?;
+        let head = fixture
+            .store
+            .record(fixture.settled.attempt_id, &call)?
+            .head
+            .ok_or("head")?;
+        publish_outcome(
+            &fixture.rig,
+            &fixture.store,
+            &record,
+            head,
+            Outcome::AuthRequired,
+            &call,
+        )?;
+        let artifact = fixture.rig.state.join(format!(
+            "runs/{}/attempts/{}/result.md",
+            continuation.run_id, continuation.attempt_id
+        ));
+        std::fs::write(&artifact, b"XX")?;
+        let id = "corrupt-auth";
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":id,"nodes":[
+                {"id":"parent","prompt":"work","access":"read_only","routes":[
+                    {"adapter":"fixture","model":"fixture/model"},
+                    {"adapter":"fixture","model":"fixture/other"}
+                ]}
+            ]
+        }))?;
+        let mut journal = graph::FileJournal::open(
+            &fixture.roots.state,
+            fixture.settled.project_id,
+            id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(graph::GraphExecution {
+            integration_base: None,
+            directory: fixture.rig.project.clone(),
+            document: document.clone(),
+        })?;
+        let mut seed = Seed(format!(
+            "{}/{}",
+            factory.context.identity.host, continuation.attempt_id
+        ));
+        graph::advance_with_budget(
+            &document,
+            &mut seed,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )?;
+        let mut owner = BoundGraphOwner {
+            factory: &factory,
+            integration_base: None,
+            budget,
+            cancel: &cancel,
+            prices: None,
+        };
+        let run = graph::advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )?;
+        let parent = &run.checkpoint.nodes[0];
+        assert_eq!(parent.state, graph::NodeState::Failed);
+        assert_eq!(parent.attempts.len(), 1);
+        assert_eq!(
+            parent.attempts[0].outcome,
+            Some(graph::AttemptOutcome::OtherFailure)
+        );
+        assert!(
+            parent
+                .outputs
+                .as_ref()
+                .ok_or("outputs")?
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("digest or length"))
+        );
+        std::fs::remove_file(&artifact)?;
+        let mut missing_document = document.clone();
+        missing_document.graph_id = "missing-auth-result".into();
+        let mut journal = graph::FileJournal::open(
+            &fixture.roots.state,
+            fixture.settled.project_id,
+            &missing_document.graph_id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(graph::GraphExecution {
+            integration_base: None,
+            directory: fixture.rig.project.clone(),
+            document: missing_document.clone(),
+        })?;
+        let mut seed = Seed(format!(
+            "{}/{}",
+            factory.context.identity.host, continuation.attempt_id
+        ));
+        graph::advance_with_budget(
+            &missing_document,
+            &mut seed,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )?;
+        let run = graph::advance_with_budget(
+            &missing_document,
+            &mut owner,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )?;
+        let parent = &run.checkpoint.nodes[0];
+        assert_eq!(parent.state, graph::NodeState::Failed);
+        assert_eq!(parent.attempts.len(), 1);
+        assert_eq!(
+            parent.attempts[0].outcome,
+            Some(graph::AttemptOutcome::OtherFailure)
+        );
+        assert!(
+            parent
+                .outputs
+                .as_ref()
+                .ok_or("outputs")?
+                .warnings
+                .iter()
+                .any(|warning| warning == "result artifact is missing")
+        );
         Ok(())
     }
 

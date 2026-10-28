@@ -82,13 +82,12 @@ and `commit`. Omit `inputs` for ordering without passing data. The result has a
 SHA-256 digest of the complete stored result, a bounded credential-redacted
 excerpt and a run-file path when available. The digest identifies the raw
 stored artifact; hashing the redacted output may yield a different digest.
-The path is available for a local attempt with a result; remote attempts may
-have no local path. Selected outputs appear in a block marked as untrusted
-data. The rendered brief is bounded by the effective
-`node_prompt_bytes` limit; whole input sections that do not fit are omitted.
-If a dependency's outputs are unavailable or use the older version 1 schema,
-the pending dependent node fails with an actionable error. Resume cannot repair
-the older checkpoint; rerun the graph and dependency using a new graph ID.
+The path is available in status for a local attempt with a result; remote
+attempts may have no local path. Paths are omitted from downstream briefs.
+Selected outputs appear in a block marked as untrusted data. The rendered brief
+is bounded by the effective `node_prompt_bytes`
+limit; if the selected data does not fit, the node fails before admission with
+an advance error.
 Inspect the checkpoint's node outputs with `provenant fabric graph status --json`.
 
 To report findings, include a fenced `findings` block in the result containing
@@ -102,7 +101,7 @@ JSON with `schema_version: 1` and a `findings` array. Each finding has `id`,
 ````
 
 The runtime accepts at most 32 findings. A missing or invalid block produces
-an empty list and a warning rather than failing the node. See the
+an empty list and, when a result exists, a warning rather than failing the node. See the
 [graph spec](../specs/fabric.md#typed-node-outputs) for the output contract.
 
 ```sh

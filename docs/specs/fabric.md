@@ -226,36 +226,37 @@ have a run-file path. The runtime retains only the excerpt and a 16 KiB tail
 of the redacted text for parsing.
 
 When `required_verdict` matches, the recorded verdict is that exact trimmed
-line. Otherwise the optional verdict is a `VERDICT:` line in one of those
-windows, and may be absent. Findings
-use a fenced `findings` JSON block with `schema_version: 1` and a `findings`
-array; each item has `id`, `severity`, `file`, `line`, `summary` and `status`;
-`line` may be null. Parsing only uses complete lines and blocks within a
-window, so content in the middle of a large result may not be captured. A
-block may contain at most 32 findings and 8 KiB of JSON, and text fields are
-bounded to 1024 bytes. Missing or invalid findings produce an empty list and a
-warning, not a node failure. The separate `required_verdict` contract checks
-for its exact line across the complete redacted stream. Writers can also
-provide a branch or commit.
+line. Otherwise the optional verdict is the last `VERDICT:` line in the tail
+window, falling back to the last such line in the head window, and may be
+absent. Findings use a fenced `findings` JSON block with `schema_version: 1`
+and a `findings` array; each item has string fields `id`, `severity`, `file`, `summary` and
+`status`, and an optional non-negative integer `line` (which may be null).
+Unknown fields or a different schema version make the block invalid. Parsing
+only uses complete lines and blocks within a window, so content in the middle
+of a large result may not be captured. A block may contain at most 32 findings
+and 8 KiB of JSON, and text fields are
+limited to 1024 bytes each; a block with an overlong field is invalid. Missing
+or invalid findings produce an empty list and, when a result exists, a warning,
+not a node failure. The final findings block in the tail window takes
+precedence; if it is absent, the final block in the head window is used. An
+invalid final block yields an empty list and warning.
+The separate `required_verdict` contract checks for its exact line across the
+complete redacted stream. Writers can also provide a branch or commit.
 
 A node's `inputs` list selects `result`, `verdict`, `findings`, `branch` or
 `commit` from named direct dependencies. Each dependency and output selector
 may occur only once. The selected data is rendered into its brief, which is
-bounded by the effective per-node prompt byte limit; whole input sections that
-do not fit are omitted. Selected outputs appear in a delimited block labelled
-as untrusted data, with delimiter collisions escaped. If a selected dependency
-has no recorded outputs, or has version 1 outputs from an older checkpoint,
-the pending dependent node fails with an actionable per-node advance error.
-Version 1 outputs remain visible in status but cannot feed selected inputs.
-Resuming cannot repair those outputs; rerun the graph and dependency under a
-new graph ID. Result digests, excerpts and paths are passed instead of
-transcripts.
+bounded by the effective per-node prompt byte limit. If selected outputs do not
+fit, the node fails before admission with a per-node advance error. Selected
+outputs appear in a delimited block labelled as untrusted data, with delimiter
+collisions escaped. Result digests and excerpts are passed instead of
+transcripts. Paths remain visible in status but
+are omitted from downstream briefs.
 - Why: downstream nodes can use bounded evidence without copying transcripts.
 - Test: `crates/fabric-runtime/src/graph.rs::outputs_feed_direct_dependants_and_survive_replay`;
   `::output_parsing_is_lenient_and_rendering_is_bounded`;
   `::findings_and_verdict_at_the_end_of_a_large_result_are_parsed`;
   `::matched_required_verdict_takes_precedence_even_in_middle`;
-  `::stale_parent_outputs_fail_pending_child_and_preserve_running_custody`;
   `::upstream_data_boundary_cannot_be_closed_by_result_content`;
   `crates/records/src/result_capture.rs::hashes_all_bytes_and_keeps_bounded_windows`;
   `crates/run/src/tests.rs::streamed_result_is_verified_and_redacted_across_chunks`;
@@ -280,6 +281,8 @@ moves a node to the next route. Model capacity failures are treated as model
 unavailability for this purpose. Task failure, input requirements and uncertain
 launches never fall back; after launch only read-only nodes may fall back. A failed
 writer keeps its worktree. Graph writers deliver only when their node explicitly requests it.
+An unreadable or integrity-invalid result fails the node without fallback,
+regardless of the provider outcome.
 - Why: retrying a writer elsewhere would duplicate edits.
 - Test: `crates/fabric-runtime/src/graph.rs::writer_limit_after_launch_never_tries_a_second_route`;
   `::terminal_task_failure_does_not_try_a_fallback_route`

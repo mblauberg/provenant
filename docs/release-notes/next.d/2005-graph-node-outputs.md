@@ -5,5 +5,4 @@
   digests and bounded excerpts. Selected outputs are delimited as untrusted data.
 - The digest identifies the raw stored result; excerpts and output reads are
   statefully credential-redacted and may not hash to that digest.
-- Version 1 outputs from earlier checkpoints cannot feed selected inputs.
-  Resume cannot repair them; rerun the graph with a new graph ID.
+- Result paths are visible in graph status and omitted from downstream briefs.
