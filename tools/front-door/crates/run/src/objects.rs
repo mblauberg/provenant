@@ -341,18 +341,8 @@ pub(crate) fn publish_branch(
     if current != base && current != head {
         return Err(invalid());
     }
-    command(
-        git,
-        repo.common_git_dir(),
-        repo.root_path(),
-        &args(&[
-            "merge-base",
-            "--is-ancestor",
-            &base.to_string(),
-            &head.to_string(),
-        ]),
-        None,
-    )?;
+    // Content is verified before publication. Ancestry is certified after
+    // quarantine so a lane rewind can archive evidence and fail terminally.
     command(
         git,
         repo.common_git_dir(),

@@ -502,7 +502,10 @@ After verification, the host publishes the lane branch with a compare-and-swap
 against its launch base. A replay may retain the same verified head; a divergent
 shared ref refuses publication. Private HEAD must still select the authorised
 branch. Shared ref publication precedes the host's instruction recovery and
-ancestry reads. Verification failure keeps custody and scratch for recovery.
+ancestry reads. A hash-verified rewind is quarantined before ancestry
+certification refuses it, so its evidence can be sealed and the failed attempt
+can release custody. Object verification failure or a competing shared ref
+change keeps custody and scratch for recovery.
 
 Host integration and delivery hash-check the lane and target graphs before
 reading commit messages, merging or pushing. Remote refresh checks the advertised

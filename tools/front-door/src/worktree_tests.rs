@@ -797,7 +797,19 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
         Duration::from_secs(8),
         "sequencer writer hold point",
     )?;
-    git(&rig, &["-C", path_text, "reset", "--mixed", "HEAD^"])?;
+    // A lane now rewinds its private ref. Rewinding the shared ref instead is
+    // a competing host update, which correctly blocks CAS publication.
+    let previous = git(&rig, &["-C", path_text, "rev-parse", "HEAD^"])?;
+    let private_ref = context
+        .state_root
+        .as_path()
+        .join("runs")
+        .join(record.run_id.to_string())
+        .join("attempts")
+        .join(attempt.to_string())
+        .join("tmp/candidate-0/git-common")
+        .join(writer.branch.as_str());
+    fs::write(private_ref, format!("{previous}\n"))?;
     fs::write(release, b"release")?;
     let terminal = await_terminal(&store, attempt, &call)?;
     assert_terminal_outcome(&terminal, provenant_run::Outcome::Failed)?;

@@ -139,6 +139,61 @@ fn terminal_imports_private_objects_before_quarantine_reads_the_lane()
 }
 
 #[test]
+fn terminal_archives_a_verified_private_rewind_before_refusing_ancestry()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let previous = fixture.prepare()?.head(&fixture.writer)?;
+    fixture.commit(&fixture.writer.worktree, "new writer base")?;
+    let error = fixture
+        .terminal(|| {
+            let attempt = fixture.root.join("attempt");
+            let scratch = attempt.join("tmp/candidate-0");
+            std::fs::create_dir_all(&scratch)?;
+            let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+            let runtime =
+                provenant_confinement::UtilityRuntime::new(&executable, fixture.root.join("home"))?;
+            let repo = runtime.open_repo(
+                &SystemExecutor::new(1)?,
+                &fixture.writer.project,
+                provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
+                &provenant_core::CancelToken::new(),
+            )?;
+            let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
+            let base =
+                crate::objects::resolve_ref(&executable, worktree.repo(), "refs/heads/lane")?;
+            crate::objects::prepare_bound(
+                &executable,
+                worktree.repo(),
+                &Directory::open_anchor(&attempt)?,
+                &scratch,
+                "refs/heads/lane",
+                base,
+            )?;
+            std::fs::write(
+                scratch.join("git-common/refs/heads/lane"),
+                format!("{previous}\n"),
+            )?;
+            Ok(())
+        })
+        .expect_err("private rewind must fail ancestry certification");
+    assert!(
+        error
+            .to_string()
+            .contains("no longer descends from its recorded base"),
+        "{error}"
+    );
+    assert!(
+        fixture
+            .root
+            .join("attempt/quarantine/manifest.json")
+            .is_file()
+    );
+    assert!(!fixture.root.join("attempt/writer-terminal.json").exists());
+    assert_eq!(fixture.prepare()?.head(&fixture.writer)?, previous);
+    Ok(())
+}
+
+#[test]
 fn delivery_refuses_corrupt_reachable_content_before_log_or_integration()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
