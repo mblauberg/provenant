@@ -31,7 +31,8 @@ struct GuardInput {
     tool_name: String,
     tool_input: serde_json::Value,
     cwd: Option<PathBuf>,
-    session_id: Option<String>,
+    // Delivery metadata is advisory; an unexpected type must not deny a tool.
+    session_id: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 struct AdvisoryInput {
@@ -160,6 +161,7 @@ fn guard_reply(
     }
     let Some((session, cwd)) = event
         .session_id
+        .and_then(|value| value.as_str().map(str::to_owned))
         .zip(event.cwd.filter(|cwd| cwd.is_absolute()))
     else {
         return Ok(None);
@@ -936,6 +938,31 @@ mod answer_delivery_tests {
         );
         f.acknowledge()?;
         assert!(guard_reply(&f.globals, f.event("Read", ""), deadline(), false)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_delivery_metadata_is_advisory_and_preserves_denials() -> Result<(), Error> {
+        let f = Fixture::new()?;
+        for session in [
+            json!(42),
+            json!({"id":"chair"}),
+            json!(["chair"]),
+            json!(true),
+        ] {
+            for command in ["git status", "rm -rf /"] {
+                let event: GuardInput = serde_json::from_value(json!({
+                    "hook_event_name":"PreToolUse", "tool_name":"Bash",
+                    "tool_input":{"command":command}, "cwd":f.cwd, "session_id":session
+                }))?;
+                let result = guard_reply(&f.globals, event, Instant::now() + LOCAL_BUDGET, false);
+                if command == "git status" {
+                    assert_eq!(result, Ok(None));
+                } else {
+                    assert!(result.is_err());
+                }
+            }
+        }
         Ok(())
     }
 }
