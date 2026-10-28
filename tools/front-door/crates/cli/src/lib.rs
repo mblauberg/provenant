@@ -380,6 +380,8 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                 "explain",
                 "route",
                 "model",
+                "effort",
+                "network",
                 "worktree",
                 "branch",
                 "base",
@@ -1197,6 +1199,32 @@ mod tests {
                 "accepted {flag:?}"
             );
         }
+    }
+    #[test]
+    fn run_accepts_dispatch_effort_and_network() {
+        let invocation = valid(&[
+            "run",
+            "--prompt-stdin",
+            "--model",
+            "codex/id",
+            "--effort",
+            "high",
+            "--network",
+            "off",
+        ]);
+        let Command::Run(request) = invocation.command else {
+            panic!("run")
+        };
+        assert_eq!(request.route.effort.as_deref(), Some("high"));
+        assert!(matches!(request.access.network, Some(Switch::Off)));
+        invalid(&[
+            "run",
+            "--prompt-stdin",
+            "--model",
+            "codex/id",
+            "--network",
+            "invalid",
+        ]);
     }
     #[test]
     fn task_title_flags_are_optional_and_per_task() {

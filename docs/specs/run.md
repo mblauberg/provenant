@@ -13,6 +13,11 @@ stores chair associations, with execution facts owned by Run ([fabric](fabric.md
 itself. Grammar and bounds are in the generated [CLI
 reference](../reference/cli.md). Paths are relative to `tools/front-door/`.
 
+`run` accepts the same effort and network controls as `dispatch`. An explicit
+model without an effort uses its configured route or pool default when those
+defaults agree; conflicting defaults leave the provider default in place.
+The receipt reports the applied effort and effective network access.
+
 ## Cargo home seed
 
 An opted-in macOS writer may seed its private Cargo registry and Git store from
