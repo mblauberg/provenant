@@ -152,7 +152,9 @@ stay closed; there is no background polling or provider launch.
 Use `inbox close` with a reason and expected revision to withdraw, supersede or
 expire an item. Closure grants no approval and does not discard its answer or
 pending delivery. A request may also carry `"deadline":"2033-05-18T03:33:20.000000Z"` in CLI or
-MCP request JSON. This is explicit UTC with six fractional digits. At or after
+MCP request JSON. This is explicit UTC with six fractional digits and must be
+in the future when created. An elapsed deadline refuses the entire creation,
+including any supersession. At or after
 the deadline an unresolved item reads as `expired`, disappears from the open
 list and refuses new answers. Use `inbox REQUEST_ID` or `inbox --state all` to
 see it. Answered, confirmed, overridden and closed items retain their state,

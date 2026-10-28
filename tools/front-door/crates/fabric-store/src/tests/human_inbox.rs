@@ -175,9 +175,8 @@ fn human_inbox_migration_preserves_existing_mail_and_refuses_old_binary_version(
 
 #[test]
 fn request_correlation_expiry_filter_precedes_page_limit() {
-    let f = Fixture::new();
+    let mut f = Fixture::new();
     let store = f.open();
-    let call = f.request();
     let mut value: HumanRequest = serde_json::from_value(serde_json::json!({
         "schema_version":1,"id":HumanRequestId::from_bytes([1;16]),"revision":1,
         "operation_id":"fixture","created_at":f.now(),"updated_at":f.now(),
@@ -190,12 +189,20 @@ fn request_correlation_expiry_filter_precedes_page_limit() {
     for n in 1..=5 {
         value.id = HumanRequestId::from_bytes([n; 16]);
         value.request.deadline = if n == 1 || n == 4 {
-            Some(f.now())
+            Some(
+                f.now()
+                    .checked_add(provenant_core::DurationMicros::from_micros(1))
+                    .unwrap(),
+            )
         } else {
             None
         };
-        store.create_human_request(&value, &call).unwrap();
+        store.create_human_request(&value, &f.request()).unwrap();
     }
+    f.clock
+        .advance(provenant_core::DurationMicros::from_micros(1))
+        .unwrap();
+    let call = f.request();
     let mut after = None;
     for n in [2, 3, 5] {
         let page = store

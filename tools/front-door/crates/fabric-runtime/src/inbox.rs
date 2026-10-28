@@ -240,6 +240,7 @@ impl From<provenant_fabric_store::Error> for InboxError {
     fn from(error: provenant_fabric_store::Error) -> Self {
         match error {
             provenant_fabric_store::Error::Conflict => Self::Conflict,
+            provenant_fabric_store::Error::Invalid("deadline") => Self::Invalid("deadline"),
             provenant_fabric_store::Error::Invalid(
                 "operation ID reused with a different request",
             ) => Self::OperationConflict,

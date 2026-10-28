@@ -1147,16 +1147,16 @@ fn request_correlation_deadline_expires_on_read_without_rewriting_answers_or_his
             assert!(!truncated);
         }
     }
-    let already_expired = receipt(
-        f.call(extended_ask(
-            "past",
-            serde_json::json!({"deadline":deadline}),
-        ))
-        .unwrap(),
-    );
-    assert_eq!(already_expired.state, RequestState::Expired);
-    assert_eq!(
-        item(&f, already_expired.request_id).request.state,
-        RequestState::Expired
-    );
+    let replaceable = receipt(f.call(ask(RequestKind::Decision, "replaceable")).unwrap());
+    let original = item(&f, replaceable.request_id);
+    for fields in [
+        serde_json::json!({"deadline":deadline}),
+        serde_json::json!({"deadline":deadline,"supersedes":{"id":replaceable.request_id,"expect_revision":1}}),
+    ] {
+        assert_eq!(
+            f.call(extended_ask("elapsed", fields)).unwrap_err().code(),
+            "invalid_input"
+        );
+        assert_eq!(item(&f, replaceable.request_id), original);
+    }
 }

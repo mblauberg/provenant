@@ -190,6 +190,11 @@ impl Store {
     /// Called inside coordination_operation so the effect and replay receipt commit together.
     pub fn create_human_request(&self, value: &HumanRequest, request: &Request<'_>) -> Result<()> {
         self.write(request, |tx| {
+            if let Some(deadline) = value.request.deadline
+                && deadline <= request.clock.wall_now()?
+            {
+                return Err(Error::Invalid("deadline"));
+            }
             let count: i64 = tx.query_row(
                 "SELECT count(*) FROM human_requests WHERE project=?1",
                 [value.project_id.to_string()],
