@@ -222,6 +222,8 @@ pub struct LaunchConfinement {
     pub writer: Option<WriterLaunch>,
     /// Canonical host home; the writer's lane cargo cache derives from it.
     pub home: PathBuf,
+    /// Opt in to cloning the host Cargo registry into a fresh writer cache.
+    pub cargo_registry_seed: bool,
 }
 impl LaunchConfinement {
     pub(crate) fn command(
@@ -229,6 +231,7 @@ impl LaunchConfinement {
         argv: &[OsString],
         attempt: &provenant_core::AttemptId,
         cancel: &CancelToken,
+        attempt_dir: &Directory,
     ) -> Result<Vec<OsString>> {
         let executor =
             SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
@@ -247,6 +250,23 @@ impl LaunchConfinement {
         {
             prepare_writer_directories(worktree, branch, authority, &self.home)
                 .map_err(RunError::Confinement)?;
+        }
+        let outcome = match &self.plan.permissions().mode {
+            AccessMode::WorktreeWrite(authority) => crate::cargo_seed::seed_registry(
+                self.cargo_registry_seed,
+                &self.home,
+                &authority.cargo_cache().path,
+            ),
+            AccessMode::ReadOnly => crate::cargo_seed::Outcome::skipped("read_only_lane"),
+        };
+        // Diagnostic only: seed failure must never prevent lane launch.
+        if let Ok(bytes) = serde_json::to_vec(&outcome) {
+            let _ = attempt_dir.atomic_write(
+                OsStr::new("cargo-setup.json"),
+                ".cargo-setup-",
+                &bytes,
+                provenant_os::fs::PublishMode::Replace,
+            );
         }
         let directories = required_anchors(self.plan.permissions(), &self.profile, writer)
             .into_iter()

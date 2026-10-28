@@ -97,6 +97,22 @@ directory, so setting only the target directory still queues behind test and
 build runs. Worktree removal and `provenant gc` remove this directory with the
 cache. Read-only lanes have no lane cache and get no variable.
 
+On macOS, a host may opt writer lanes into cloning the host Cargo registry
+into a fresh private Cargo home by setting this in its state `config.toml`:
+
+```toml
+[domains.fabric.lanes.cargo_seed]
+enabled = true
+```
+
+The default is false. Only `~/.cargo/registry` is seeded; Cargo Git stores and
+build targets are unchanged. Existing lane registries are retained. Cloning
+requires filesystem support for copy-on-write clones and falls back to an
+empty registry when unavailable or a source entry cannot be cloned. Other
+platforms skip this setting. Each attempt's `cargo-setup.json` records a
+`status` (`seeded`, `skipped`, or `fallback`) and a `reason`. Read-only lanes
+retain their existing read-only registry access.
+
 `provenant worktree remove` deletes only the removed worktree's own lane cache,
 derived from its verified identity before Git removes it. Cache cleanup holds
 the writer lock and uses verified detachment before deletion. A cleanup failure

@@ -351,6 +351,14 @@ pub fn mkdir(dir: &File, name: &OsStr, mode: u32) -> io::Result<()> {
     retry(|| unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), mode as libc::mode_t) })
         .map(|_| ())
 }
+#[cfg(target_os = "macos")]
+pub fn clone_file(source: &File, dir: &File, name: &OsStr) -> io::Result<()> {
+    let name = string(name)?;
+    // SAFETY: both descriptors and the NUL-terminated name remain live for
+    // the call. fclonefileat retains no pointers and refuses an existing name.
+    retry(|| unsafe { libc::fclonefileat(source.as_raw_fd(), dir.as_raw_fd(), name.as_ptr(), 0) })
+        .map(|_| ())
+}
 pub fn unlink(dir: &File, name: &OsStr, directory: bool) -> io::Result<()> {
     let name = string(name)?;
     // SAFETY: live borrowed fd/name; unlinkat acts on the directory entry, never
