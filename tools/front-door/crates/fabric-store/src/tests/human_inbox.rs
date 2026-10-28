@@ -119,14 +119,19 @@ fn overview_read_only_does_not_create_or_migrate() {
 fn overview_reads_committed_wal_and_limits_rows() {
     let f = Fixture::new();
     let writer = f.open();
-    for n in 0..2 {
+    for n in 0..3 {
         let id = HumanRequestId::from_bytes([n + 1; 16]).to_string();
         let project = project().to_string();
-        let record = serde_json::json!({
+        let mut record = serde_json::json!({
             "schema_version": 1, "id": id, "project_id": project,
             "project_key": "demo", "request": { "title": format!("Title {n}"), "body": "secret" }
-        })
-        .to_string();
+        });
+        if n == 1 {
+            record["chair_session_id"] = "chair".into();
+        } else if n == 2 {
+            record["chair_session_id"] = "different-from-routing".into();
+        }
+        let record = record.to_string();
         writer
             .db
             .execute(
@@ -142,14 +147,44 @@ fn overview_reads_committed_wal_and_limits_rows() {
     assert!(page.truncated);
     assert_eq!(page.items[0].title, "Title 0");
     assert_eq!(page.items[0].project_key.as_deref(), Some("demo"));
-    assert_eq!(
-        reader
-            .pending_human_requests(100, 1_048_576, &f.request())
-            .unwrap()
-            .items
-            .len(),
-        2
-    );
+    assert_eq!(page.items[0].chair_session_id.as_deref(), Some("chair"));
+    let all = reader
+        .pending_human_requests(100, 1_048_576, &f.request())
+        .unwrap();
+    assert_eq!(all.items.len(), 3);
+    assert_eq!(all.items[1].chair_session_id.as_deref(), Some("chair"));
+    assert_eq!(all.items[2].chair_session_id.as_deref(), Some("chair"));
+}
+
+#[test]
+fn overview_rejects_non_text_session_in_record() {
+    let f = Fixture::new();
+    let store = f.open();
+    let id = HumanRequestId::from_bytes([1; 16]).to_string();
+    let project = project().to_string();
+    for value in [
+        serde_json::json!(42),
+        serde_json::json!({}),
+        serde_json::json!(false),
+        serde_json::Value::Null,
+    ] {
+        let record = serde_json::json!({
+            "schema_version": 1, "id": id, "project_id": project,
+            "chair_session_id": value, "request": { "title": "Question" }
+        })
+        .to_string();
+        store
+            .db
+            .execute(
+                "INSERT OR REPLACE INTO human_requests VALUES(?1,?2,1,'chair','open',?3)",
+                params![project, id, record.as_bytes()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.pending_human_requests(1, 1_048_576, &f.request()),
+            Err(Error::Invalid(_))
+        ));
+    }
 }
 
 #[test]
