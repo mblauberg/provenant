@@ -1933,6 +1933,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
 | `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
@@ -1959,6 +1960,7 @@ bounds are null. Positional arguments have no long flag.
 | `--knob` | `{"name": "knobs", "repeatable": true}` |
 | `--host` | `{"name": "host"}` |
 | `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "name": "worktree_branch"}` |
+| `--head` | `{"name": "head"}` |
 | `--base` | `{"name": "base"}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
@@ -2103,6 +2105,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
 | `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
@@ -2131,6 +2134,7 @@ bounds are null. Positional arguments have no long flag.
 | `--host` | `{"name": "host"}` |
 | `--branch` | `{"name": "branch"}` |
 | `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "name": "worktree_branch"}` |
+| `--head` | `{"name": "head"}` |
 | `--base` | `{"name": "base"}` |
 | `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
@@ -2450,6 +2454,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `--claude-subagents` | `{"conflicts": ["usage", "since", "until", "run_id"], "name": "claude_subagents"}` |
 | `--usage` | `{"defaults": ["false"], "name": "usage", "values": ["true", "false"]}` |
 | `--since` | `{"name": "since"}` |
 | `--until` | `{"name": "until"}` |
@@ -2470,6 +2475,7 @@ bounds are null. Positional arguments have no long flag.
   "groups": [
     {
       "arguments": [
+        "claude_subagents",
         "usage",
         "since",
         "until",
@@ -2669,6 +2675,81 @@ bounds are null. Positional arguments have no long flag.
 | `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
+
+## `provenant chair log`
+
+| Argument | Contract |
+|---|---|
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant chair log append`
+
+| Argument | Contract |
+|---|---|
+| `--session` | `{"name": "session", "required": true}` |
+| `--file` | `{"name": "file", "required": true}` |
+| `--operation-id` | `{"name": "operation_id", "requires": ["issued_at"]}` |
+| `--issued-at` | `{"name": "issued_at", "requires": ["operation_id"]}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "constraints": [
+    "operation-id and issued-at are generated when omitted; supply both for planned retries"
+  ],
+  "groups": [
+    {
+      "arguments": [
+        "session",
+        "file",
+        "operation_id",
+        "issued_at"
+      ],
+      "multiple": true,
+      "name": "Append",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant chair log list`
+
+| Argument | Contract |
+|---|---|
+| `--session` | `{"name": "session", "required": true}` |
+| `--after` | `{"name": "after"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "session",
+        "after",
+        "limit"
+      ],
+      "multiple": true,
+      "name": "List",
+      "required": false
+    }
+  ]
+}
+```
 
 ## `provenant chair switch`
 

@@ -12,6 +12,7 @@ mod disk_guard;
 mod fabric;
 mod gc_agent;
 
+mod chair_log_retention;
 mod gc_support;
 mod handoff;
 mod hook_state;
@@ -176,7 +177,15 @@ fn run_edge(
     globals: &provenant_cli::Globals,
     action: impl FnOnce(&provenant_cli::run::Edge<'_>) -> provenant_cli::run::Reply,
 ) -> u8 {
-    match roots::resolve(globals, Workspace::Project, Product::Required) {
+    run_edge_workspace(leaf, globals, Workspace::Project, action)
+}
+fn run_edge_workspace(
+    leaf: &str,
+    globals: &provenant_cli::Globals,
+    workspace: Workspace<'_>,
+    action: impl FnOnce(&provenant_cli::run::Edge<'_>) -> provenant_cli::run::Reply,
+) -> u8 {
+    match roots::resolve(globals, workspace, Product::Required) {
         Ok(resolved) => {
             let mut reply = action(&provenant_cli::run::Edge {
                 roots: &resolved.roots,
@@ -622,7 +631,12 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             if cmd.usage {
                 usage::run(&cmd, globals)
             } else {
-                run_edge(&inv.leaf, globals, |edge| {
+                let workspace = if cmd.claude_subagents.is_some() {
+                    Workspace::Directory
+                } else {
+                    Workspace::Project
+                };
+                run_edge_workspace(&inv.leaf, globals, workspace, |edge| {
                     provenant_cli::run::stats(cmd, edge)
                 })
             }

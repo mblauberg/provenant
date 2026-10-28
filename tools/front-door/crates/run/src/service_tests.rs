@@ -4,15 +4,88 @@ use provenant_core::{CancelToken, OperationId, TaskId};
 
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn dispatch_validates_review_commits() -> TestResult {
+    use std::process::Command;
+    let temp = tempfile::tempdir()?;
+    let git = |args: &[&str]| -> TestResult {
+        assert!(
+            Command::new("git")
+                .current_dir(temp.path())
+                .args(args)
+                .status()?
+                .success()
+        );
+        Ok(())
+    };
+    git(&["init", "-q"])?;
+    git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.org",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "test",
+    ])?;
+    let output = Command::new("git")
+        .current_dir(temp.path())
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    assert!(output.status.success());
+    let head = String::from_utf8(output.stdout)?.trim().to_owned();
+    git(&["update-ref", "refs/remotes/origin/main", &head])?;
+    git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+    ])?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let service = Service::new(&store);
+    let mut valid = submission("review");
+    valid.tasks[0].head = Some(head.clone());
+    valid.tasks[0].base = Some(head.clone());
+    let run = service.dispatch(valid, temp.path(), &call)?;
+    let task = &store.request(run.run_id, &call)?.tasks[0];
+    assert_eq!(task.head.as_deref(), Some(head.as_str()));
+    assert_eq!(task.base.as_deref(), Some(head.as_str()));
+    let mut head_only = submission("head only");
+    head_only.operation_id = OperationId::parse("head-only")?;
+    head_only.tasks[0].head = Some(head.clone());
+    let run = service.dispatch(head_only, temp.path(), &call)?;
+    assert_eq!(
+        store.request(run.run_id, &call)?.tasks[0].base.as_deref(),
+        Some(head.as_str())
+    );
+    for (head, base) in [
+        ("a".repeat(40), None),
+        (head.clone(), Some("b".repeat(40))),
+        ("HEAD".into(), None),
+    ] {
+        let mut invalid = submission("review");
+        invalid.operation_id = OperationId::parse("invalid-review")?;
+        invalid.tasks[0].head = Some(head);
+        invalid.tasks[0].base = base;
+        assert!(service.dispatch(invalid, temp.path(), &call).is_err());
+    }
+    Ok(())
+}
+
 fn submission(prompt: &str) -> DispatchRequest {
     DispatchRequest {
         chair: None,
         operation_id: OperationId::parse("service-dispatch").unwrap(),
         tasks: vec![DispatchTask {
+            build_heavy: false,
             title: None,
             task_id: TaskId::from_bytes([3; 16]),
             prompt: prompt.into(),
             base: None,
+            head: None,
             route: RequestedRoute::Named {
                 name: "senior".into(),
                 effort: None,

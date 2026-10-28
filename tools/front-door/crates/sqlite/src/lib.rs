@@ -55,6 +55,7 @@ pub fn retry<T, E>(
 
 /// Retry incomplete observations on the same schedule as `retry`.
 /// The real elapsed cap also bounds a frozen or inaccurate injected clock.
+/// An explicit nonblocking budget makes one observation without retrying.
 // An injected clock cannot replace the hard wall-time safety cap.
 #[allow(clippy::disallowed_methods)]
 pub fn observe<T, E>(
@@ -64,6 +65,14 @@ pub fn observe<T, E>(
     wait: &dyn RetryWait,
     mut action: impl FnMut() -> Result<Option<T>, E>,
 ) -> Result<T, RetryError<E>> {
+    if budget.is_nonblocking() {
+        if cancel.is_cancelled() {
+            return Err(RetryError::Cancelled);
+        }
+        return action()
+            .map_err(RetryError::Action)?
+            .ok_or(RetryError::Busy);
+    }
     let started = Instant::now();
     let cap = Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
     let mut delay = 1_000_u64;
@@ -283,6 +292,100 @@ mod tests {
         fn wait(&self, _: DurationMicros, _: &CancelToken) {
             self.0.set(self.0.get() + 1);
         }
+    }
+
+    #[test]
+    fn nonblocking_retry_attempts_once_without_waiting() -> Result<(), Box<dyn std::error::Error>> {
+        let mut clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+        let budget = WaitBudget::nonblocking(clock.mono_now());
+        clock.advance(DurationMicros::from_micros(10))?;
+        for (outcome, expected) in [
+            (Ok(42), Ok(42)),
+            (Err(true), Err(RetryError::Busy)),
+            (Err(false), Err(RetryError::Action(false))),
+        ] {
+            for cancelled in [false, true] {
+                let cancel = CancelToken::new();
+                if cancelled {
+                    cancel.cancel();
+                }
+                let wait = CountingWait::default();
+                let mut attempts = 0;
+                let result = retry(
+                    &clock,
+                    budget,
+                    &cancel,
+                    &wait,
+                    |busy: &bool| *busy,
+                    || {
+                        attempts += 1;
+                        outcome
+                    },
+                );
+                if cancelled {
+                    assert_eq!(result, Err(RetryError::Cancelled));
+                } else {
+                    assert_eq!(result, expected);
+                }
+                assert_eq!(attempts, usize::from(!cancelled));
+                assert_eq!(wait.0.get(), 0);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn nonblocking_observe_attempts_once_without_waiting() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        for (outcome, expected) in [
+            (Ok(Some(42)), Ok(42)),
+            (Ok(None), Err(RetryError::Busy)),
+            (Err(false), Err(RetryError::Action(false))),
+        ] {
+            let wait = CountingWait::default();
+            let mut attempts = 0;
+            let result = observe(
+                &clock,
+                WaitBudget::nonblocking(clock.mono_now()),
+                &cancel,
+                &wait,
+                || {
+                    attempts += 1;
+                    outcome
+                },
+            );
+            assert_eq!(result, expected);
+            assert_eq!(attempts, 1);
+            assert_eq!(wait.0.get(), 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn expired_retry_budget_never_starts_an_action() -> Result<(), Box<dyn std::error::Error>> {
+        let mut clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+        let budget = WaitBudget::cli(clock.mono_now(), 1)?;
+        clock.advance(DurationMicros::from_seconds(1)?)?;
+        let cancel = CancelToken::new();
+        let wait = CountingWait::default();
+        let mut attempts = 0;
+        let result = retry(
+            &clock,
+            budget,
+            &cancel,
+            &wait,
+            |busy: &bool| *busy,
+            || {
+                attempts += 1;
+                Ok(42)
+            },
+        );
+        assert_eq!(result, Err(RetryError::Busy));
+        assert_eq!(attempts, 0);
+        assert_eq!(wait.0.get(), 0);
+        Ok(())
     }
 
     #[test]

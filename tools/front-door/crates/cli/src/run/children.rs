@@ -808,8 +808,10 @@ mod tests {
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    build_heavy: false,
                     title: None,
                     base: None,
+                    head: None,
                     base_ref: None,
                     task_id,
                     prompt_digest: CanonicalV1::file_digest(b"child"),

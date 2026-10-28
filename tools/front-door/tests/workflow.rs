@@ -76,6 +76,180 @@ fn session_reads_allocate_nothing() -> Result {
 }
 
 #[test]
+fn chair_log_cli_replay_and_pages() -> Result {
+    let rig = TestRig::new()?;
+    let first = request(
+        &rig,
+        "log.json",
+        json!({"kind":"progress", "markdown":"First update", "channel":"chat"}),
+    )?;
+    use provenant_core::Clock;
+    let issued_at = provenant_os::clock::SystemClock::new()
+        .wall_now()?
+        .as_timestamp()
+        .as_second()
+        .to_string();
+    let append = |file: &str, operation: &str| {
+        call(
+            &rig,
+            &[
+                "chair",
+                "log",
+                "append",
+                "--session",
+                "chair",
+                "--file",
+                file,
+                "--operation-id",
+                operation,
+                "--issued-at",
+                &issued_at,
+            ],
+            0,
+        )
+    };
+    // Planned retries require the caller to keep both identity and issue time.
+    let missing_time = rig.command(&[
+        "chair",
+        "log",
+        "append",
+        "--session",
+        "chair",
+        "--file",
+        &first,
+        "--operation-id",
+        "missing-time",
+    ])?;
+    assert_ne!(code(&missing_time), 0);
+    let old = call(
+        &rig,
+        &[
+            "chair",
+            "log",
+            "append",
+            "--session",
+            "chair",
+            "--file",
+            &first,
+            "--operation-id",
+            "old",
+            "--issued-at",
+            "1",
+        ],
+        1,
+    )?;
+    assert!(
+        old["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("expired")
+    );
+    let original = append(&first, "first")?;
+    assert_eq!(append(&first, "first")?["data"], original["data"]);
+    let correction = request(
+        &rig,
+        "correction.json",
+        json!({"kind":"correction", "markdown":"Corrected", "channel":"chat", "correction_of":1}),
+    )?;
+    append(&correction, "correction")?;
+    call(
+        &rig,
+        &[
+            "chair",
+            "log",
+            "append",
+            "--session",
+            "chair",
+            "--file",
+            &correction,
+            "--operation-id",
+            "first",
+            "--issued-at",
+            &issued_at,
+        ],
+        1,
+    )?;
+    let page = call(
+        &rig,
+        &["chair", "log", "list", "--session", "chair", "--limit", "1"],
+        0,
+    )?;
+    assert_eq!(page["data"]["entries"][0]["markdown"], "First update");
+    assert_eq!(page["data"]["next_cursor"], 1);
+    let next = call(
+        &rig,
+        &["chair", "log", "list", "--session", "chair", "--after", "1"],
+        0,
+    )?;
+    assert_eq!(next["data"]["entries"][0]["correction_of"], 1);
+    assert!(next["data"]["next_cursor"].is_null());
+    Ok(())
+}
+
+#[test]
+fn chair_log_cli_retention_replay_and_lane_refusal() -> Result {
+    let mut rig = TestRig::new()?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[retention]\nchair_log_entries=1\n",
+    )?;
+    let first = request(
+        &rig,
+        "first.json",
+        json!({"kind":"progress", "markdown":"First", "channel":"chat"}),
+    )?;
+    let second = request(
+        &rig,
+        "second.json",
+        json!({"kind":"progress", "markdown":"Second", "channel":"chat"}),
+    )?;
+    use provenant_core::Clock;
+    let issued_at = provenant_os::clock::SystemClock::new()
+        .wall_now()?
+        .as_timestamp()
+        .as_second()
+        .to_string();
+    let append = |rig: &TestRig, file: &str, operation: &str, expected| {
+        call(
+            rig,
+            &[
+                "chair",
+                "log",
+                "append",
+                "--session",
+                "chair",
+                "--file",
+                file,
+                "--operation-id",
+                operation,
+                "--issued-at",
+                &issued_at,
+            ],
+            expected,
+        )
+    };
+    let original = append(&rig, &first, "first", 0)?;
+    append(&rig, &second, "second", 0)?;
+    let page = call(&rig, &["chair", "log", "list", "--session", "chair"], 0)?;
+    assert_eq!(
+        page["data"]["entries"].as_array().ok_or("entries")?.len(),
+        1
+    );
+    assert_eq!(page["data"]["entries"][0]["markdown"], "Second");
+    assert_eq!(page["data"]["total_pruned"], 1);
+    assert_eq!(append(&rig, &first, "first", 0)?["data"], original["data"]);
+    rig.env.push(("PROVENANT_LANE_DEPTH".into(), "1".into()));
+    let refused = append(&rig, &first, "lane", 1)?;
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("lane cannot append")
+    );
+    Ok(())
+}
+
+#[test]
 fn session_show_honours_project_and_state_dir_without_allocating() -> Result {
     let rig = TestRig::new()?;
     let other = rig.root.join("other");

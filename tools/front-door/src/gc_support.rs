@@ -4,7 +4,7 @@ use provenant_confinement::worktrees::WorktreeContext;
 use provenant_core::{ActorId, CancelToken, Clock, GitOid, Roots, WaitBudget};
 use provenant_os::{
     clock::SystemClock,
-    exec::{ExecOptions, StreamPolicy, Termination},
+    exec::{ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination},
     fs::{Directory, FileKind, LockMode, Metadata, PublishMode, entry_names},
 };
 use provenant_run::{AttemptState, ExecutionContext, LaneQuery, RunStore};
@@ -16,11 +16,22 @@ use std::{
     time::Duration,
 };
 
-/// Fetch the remote's actual default branch, independently of local main or a
-/// stale origin/HEAD. Only this branch's remote-tracking ref is updated.
-pub(crate) fn fetch_default(
-    context: &WorktreeContext<'_>,
-) -> Result<Option<(String, GitOid)>, Error> {
+fn host_git(
+    repo: &Path,
+    executor: &dyn Executor,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<ExecOutcome, Error> {
+    host_git_with_stderr(repo, executor, args, timeout, false)
+}
+
+fn host_git_with_stderr(
+    repo: &Path,
+    executor: &dyn Executor,
+    args: &[&str],
+    timeout: Duration,
+    capture_stderr: bool,
+) -> Result<ExecOutcome, Error> {
     let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
     let environment: Vec<(OsString, OsString)> = [
         "HOME",
@@ -47,8 +58,8 @@ pub(crate) fn fetch_default(
         ("LANG".into(), "C".into()),
     ])
     .collect();
-    let run = |args: &[&str], timeout: Duration| -> Result<_, Error> {
-        let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
+
+    let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
             .chain(
                 [
                     "-c",
@@ -77,23 +88,91 @@ pub(crate) fn fetch_default(
                 .map(OsString::from),
             )
             .collect();
-        let mut options = ExecOptions::new(&argv, context.repo.root_path(), timeout);
-        options.env = Some(&environment);
-        options.stdin = Some(b"");
-        options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
-        options.stderr = StreamPolicy::Discard;
-        options.stop_on_output_limit = true;
-        let output = context.executor.execute(options)?;
-        if output.timed_out
-            || output.cancelled
-            || output.stdout.truncated
-            || output.drain_truncated
-            || output.overflow_stopped
-            || output.stdout.sink_lost_bytes > 0
-        {
-            return Err(Error::GcObservation("upstream fetch incomplete"));
+    let mut options = ExecOptions::new(&argv, repo, timeout);
+    options.env = Some(&environment);
+    options.stdin = Some(b"");
+    options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
+    options.stderr = if capture_stderr {
+        StreamPolicy::Capture { limit: 64 * 1024 }
+    } else {
+        StreamPolicy::Discard
+    };
+    options.stop_on_output_limit = true;
+    let output = executor.execute(options)?;
+    if output.timed_out
+        || output.cancelled
+        || output.stdout.truncated
+        || output.stderr.truncated
+        || output.drain_truncated
+        || output.overflow_stopped
+        || output.stdout.sink_lost_bytes > 0
+    {
+        return Err(Error::GcObservation("host git operation incomplete"));
+    }
+    Ok(output)
+}
+
+/// Refresh only the writer's tracking ref. An absent remote branch is normal.
+pub(crate) fn refresh_writer_tracking_ref(
+    context: &WorktreeContext<'_>,
+    branch: &str,
+) -> Result<(), Error> {
+    refresh_branch(context.repo.root_path(), context.executor, branch)
+        .map_err(|_| Error::GcObservation("cannot refresh writer tracking ref"))
+}
+
+fn refresh_branch(repo: &Path, executor: &dyn Executor, branch: &str) -> Result<(), Error> {
+    provenant_confinement::repo::GitRefName::branch(branch)
+        .map_err(|_| Error::GcObservation("invalid writer branch"))?;
+    if branch == "HEAD" {
+        return Err(Error::GcObservation("invalid writer branch"));
+    }
+    let remote = host_git(
+        repo,
+        executor,
+        &["config", "--get", "remote.origin.url"],
+        Duration::from_secs(5),
+    )?;
+    if remote.termination == Termination::Exit(1) {
+        return Ok(());
+    }
+    if remote.termination != Termination::Exit(0) {
+        return Err(Error::GcObservation("cannot read origin"));
+    }
+    let source = format!("refs/heads/{branch}");
+    let refspec = format!("+{source}:refs/remotes/origin/{branch}");
+    let fetched = host_git_with_stderr(
+        repo,
+        executor,
+        &[
+            "fetch",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "--refmap=",
+            "origin",
+            &refspec,
+        ],
+        Duration::from_secs(15),
+        true,
+    )?;
+    if fetched.termination != Termination::Exit(0) {
+        let missing = format!("fatal: couldn't find remote ref {source}\n");
+        if fetched.stderr.bytes == missing.as_bytes() {
+            return Ok(());
         }
-        Ok(output)
+        return Err(Error::GcObservation("cannot fetch writer branch"));
+    }
+    Ok(())
+}
+
+/// Fetch the remote's actual default branch, independently of local main or a
+/// stale origin/HEAD. Only this branch's remote-tracking ref is updated.
+pub(crate) fn fetch_default(
+    context: &WorktreeContext<'_>,
+) -> Result<Option<(String, GitOid)>, Error> {
+    let run = |args: &[&str], timeout: Duration| {
+        host_git(context.repo.root_path(), context.executor, args, timeout)
     };
     let remote = run(
         &["config", "--get", "remote.origin.url"],
@@ -538,6 +617,122 @@ pub(crate) fn disk_alert(
 mod tests {
     #[allow(unused_imports)] // The worktree driver includes this module without libtest.
     use super::*;
+
+    #[test]
+    fn writer_tracking_refresh_handles_remote_branch_absence_and_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::exec::SystemExecutor;
+        struct TestExecutor {
+            inner: SystemExecutor,
+            home: PathBuf,
+        }
+        impl Executor for TestExecutor {
+            fn execute(
+                &self,
+                options: ExecOptions<'_>,
+            ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+                let mut env = options.env.unwrap_or_default().to_vec();
+                env.retain(|(key, _)| key != "HOME");
+                env.push(("HOME".into(), self.home.as_os_str().to_owned()));
+                let mut adjusted = ExecOptions::new(options.argv, options.cwd, options.timeout);
+                adjusted.env = Some(&env);
+                adjusted.stdin = options.stdin;
+                adjusted.stdout = options.stdout;
+                adjusted.stderr = options.stderr;
+                adjusted.stop_on_output_limit = options.stop_on_output_limit;
+                self.inner.execute(adjusted)
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let executor = TestExecutor {
+            inner: SystemExecutor::new(1)?,
+            home: temp.path().into(),
+        };
+        let bare = temp.path().join("remote.git");
+        let repo = temp.path().join("repo");
+        let git = |cwd: &Path, args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+            let out = host_git(cwd, &executor, args, Duration::from_secs(10))?;
+            if out.termination != Termination::Exit(0) {
+                return Err(format!("git failed: {args:?}").into());
+            }
+            Ok(String::from_utf8(out.stdout.bytes)?.trim().to_owned())
+        };
+        git(
+            temp.path(),
+            &["init", "--bare", bare.to_str().ok_or("bare path")?],
+        )?;
+        git(temp.path(), &["init", repo.to_str().ok_or("repo path")?])?;
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "test",
+            ],
+        )?;
+        git(
+            &repo,
+            &[
+                "push",
+                bare.to_str().ok_or("bare path")?,
+                "HEAD:refs/heads/other/secret",
+            ],
+        )?;
+        refresh_branch(&repo, &executor, "lane/test")?;
+        for invalid in ["a*b", "../x", "-x", "HEAD"] {
+            assert!(
+                refresh_branch(&repo, &executor, invalid).is_err(),
+                "{invalid}"
+            );
+        }
+        git(
+            &repo,
+            &["remote", "add", "origin", bare.to_str().ok_or("bare path")?],
+        )?;
+        git(&repo, &["push", "origin", "HEAD:refs/heads/lane/test"])?;
+        let expected = git(&repo, &["rev-parse", "HEAD"])?;
+        git(
+            &repo,
+            &["update-ref", "-d", "refs/remotes/origin/lane/test"],
+        )?;
+        refresh_branch(&repo, &executor, "lane/test")?;
+        assert_eq!(
+            git(&repo, &["rev-parse", "refs/remotes/origin/lane/test"])?,
+            expected
+        );
+        let other = host_git(
+            &repo,
+            &executor,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/other/secret",
+            ],
+            Duration::from_secs(10),
+        )?;
+        assert_ne!(other.termination, Termination::Exit(0));
+        refresh_branch(&repo, &executor, "missing")?;
+        git(
+            &repo,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                temp.path()
+                    .join("absent.git")
+                    .to_str()
+                    .ok_or("absent path")?,
+            ],
+        )?;
+        assert!(refresh_branch(&repo, &executor, "lane/test").is_err());
+        Ok(())
+    }
 
     #[test]
     fn terminal_age_must_be_newer_than_worktree_creation() {

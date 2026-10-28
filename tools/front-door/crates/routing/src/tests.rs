@@ -34,6 +34,54 @@ fn request(model: &str) -> Result<RouteRequest, RoutingError> {
     })
 }
 #[test]
+fn effort_errors_report_recorded_controls_and_nearest_models()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let context = context(&catalogue, &config, now()?);
+    for (model, expected) in [
+        ("codex/gpt-6.1-luna", "codex/gpt-6-luna"),
+        ("codex/gpt-6-luna", "supported efforts: low"),
+        ("opencode/opencode-go/glm-5.2", "takes no effort"),
+    ] {
+        let mut query = request(model)?;
+        query.effort = Some("unsupported".into());
+        let message = resolve(&query, &context)
+            .expect_err("effort must be refused")
+            .to_string();
+        assert!(message.contains(model), "{message}");
+        assert!(message.contains("unsupported"), "{message}");
+        assert!(message.contains(expected), "{message}");
+    }
+    assert_eq!(
+        catalogue
+            .nearest_models(&ModelId::parse("codex/gpt-6.1-luna")?)
+            .first()
+            .map(String::as_str),
+        Some("codex/gpt-6-luna")
+    );
+    Ok(())
+}
+#[test]
+fn nearest_models_respect_namespace_and_distance() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let nearest = |id: &str| -> Result<Vec<String>, RoutingError> {
+        Ok(catalogue.nearest_models(&ModelId::parse(id)?))
+    };
+    assert_eq!(
+        nearest("opencode/openrouter/~anthropic/claude-haiku-latestt")?,
+        vec!["opencode/openrouter/~anthropic/claude-haiku-latest"]
+    );
+    assert!(nearest("opencode/openrouter/~openai/claude-haiku-latest")?.is_empty());
+    assert!(
+        nearest("opencode/opencode-go/claude-haiku-latest")?
+            .iter()
+            .all(|id| id.starts_with("opencode/opencode-go/"))
+    );
+    assert!(nearest("codex/completely-unrelated-model")?.is_empty());
+    Ok(())
+}
+#[test]
 fn opus_advisory_uses_the_applied_pool_tier() -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
@@ -216,7 +264,7 @@ fn explicit_unlisted_model_is_ready_without_provider_listing()
     with_effort.effort = Some("high".into());
     assert!(matches!(
         resolve(&with_effort, &context),
-        Err(RoutingError::UnsupportedEffort)
+        Err(RoutingError::UnsupportedEffort { .. })
     ));
     let mut confidential = query;
     confidential.confidential = true;
@@ -294,7 +342,7 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
     query.effort = Some("invented".into());
     assert!(matches!(
         resolve(&query, &context),
-        Err(RoutingError::UnsupportedEffort)
+        Err(RoutingError::UnsupportedEffort { .. })
     ));
     query.choice = RouteChoice::NamedRoute(RouteName::parse("typo")?);
     assert!(matches!(
@@ -960,23 +1008,23 @@ fn candidate_errors_and_fallback_effort_match_request_fixtures()
     let fixtures = [
         (
             r#"{"choice":{"kind":"model","value":"invented/id"},"effort":"bad effort"}"#,
-            Err(RoutingError::UnknownAdapter),
+            Err("unknown adapter"),
         ),
         (
             r#"{"choice":{"kind":"model","value":"codex/unlisted"},"effort":"high"}"#,
-            Err(RoutingError::UnsupportedEffort),
+            Err("unsupported effort"),
         ),
         (
             r#"{"choice":{"kind":"model","value":"codex/gpt-6.1-sol"},"effort":"bad effort"}"#,
-            Err(RoutingError::UnsupportedEffort),
+            Err("unsupported effort"),
         ),
         (
             r#"{"choice":{"kind":"model","value":"codex/gpt-6.1-sol"},"effort":null,"fallback":{"kind":"models","models":["invented/id"]}}"#,
-            Err(RoutingError::UnknownAdapter),
+            Err("unknown adapter"),
         ),
         (
             r#"{"choice":{"kind":"named_route","value":"review"},"effort":null,"fallback":{"kind":"models","models":["codex/gpt-6-luna"]}}"#,
-            Err(RoutingError::UnsupportedEffort),
+            Err("unsupported effort"),
         ),
         (
             r#"{"choice":{"kind":"named_route","value":"review"},"effort":"high","fallback":{"kind":"models","models":["codex/gpt-6-luna"]}}"#,
@@ -1000,10 +1048,13 @@ fn candidate_errors_and_fallback_effort_match_request_fixtures()
                 }
                 route.effort
             })
-            .map_err(|error| error.to_string());
+            .map_err(|error| match error {
+                RoutingError::UnsupportedEffort { .. } => "unsupported effort".to_owned(),
+                error => error.to_string(),
+            });
         let expected = expected
             .map(|effort| effort.map(str::to_owned))
-            .map_err(|error| error.to_string());
+            .map_err(str::to_owned);
         assert_eq!(actual, expected, "{wire}");
     }
     let context = RoutingContext {
@@ -1042,7 +1093,7 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
     query.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse("agy/unknown")?])?);
     assert!(matches!(
         resolve(&query, &context),
-        Err(RoutingError::UnsupportedEffort)
+        Err(RoutingError::UnsupportedEffort { .. })
     ));
     Ok(())
 }
@@ -1367,8 +1418,13 @@ fn account_spend_and_expiring_override_ignore_reserve() -> Result<(), Box<dyn st
         ("spend", serde_json::json!([]), false),
         (
             "pace",
-            serde_json::json!([{"account":"opaque-account", "policy":"spend", "expires_unix_seconds":101}]),
+            serde_json::json!([{"account":"codex/opaque-account", "policy":"spend", "expires_unix_seconds":101}]),
             false,
+        ),
+        (
+            "pace",
+            serde_json::json!([{"account":"claude/opaque-account", "policy":"spend", "expires_unix_seconds":101}]),
+            true,
         ),
         (
             "pace",
@@ -2057,6 +2113,44 @@ fn probe_adapters_include_only_requested_routes_pools_and_fallbacks()
     ));
     query = request("unknown/fixture")?;
     assert!(names(&query, &config)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn qualified_pacing_and_reset_references_respect_adapter() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let model = "claude/claude-haiku-5-5";
+    let window = QuotaWindow {
+        pool: "seven_day".into(),
+        window_seconds: Some(604_800),
+        used_basis_points: 5_000,
+        resets_unix_seconds: Some(604_900),
+    };
+    let mut matching = quota(model, "shared", QuotaStatus::Available, 1, 80, 120)?;
+    matching.snapshot.account.adapter = "claude".into();
+    matching.snapshot.windows = vec![QuotaWindow {
+        resets_unix_seconds: Some(90),
+        ..window.clone()
+    }];
+    let mut other = quota(model, "shared", QuotaStatus::Available, 1, 90, 120)?;
+    other.snapshot.account.adapter = "codex".into();
+    other.snapshot.windows = vec![window.clone()];
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({"pacing":{"accounts":{
+        "claude/michael":{"policy":"pace", "windows":["seven_day"], "deadline":{"reset_of":"claude/shared", "window":"seven_day"}, "after_deadline":"standby"},
+        "codex/michael":{"policy":"off"}
+    }}}))?;
+    let route = profile_preview(
+        config,
+        model,
+        "michael",
+        vec![window],
+        vec![matching, other],
+    )?;
+    assert_eq!(
+        route.pool_selection.ok_or("receipt")?.candidates[0].factor_basis_points,
+        0
+    );
     Ok(())
 }
 

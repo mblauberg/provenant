@@ -240,7 +240,7 @@ impl LaneRuntime<'_> {
         setup.push(if scrubbed_git_config {
             SetupStep::WriteExecutable {
                 path: bin.join("git"),
-                bytes: self.git_wrapper(env)?,
+                bytes: self.git_wrapper(env, &[])?,
             }
         } else {
             SetupStep::Symlink {
@@ -265,17 +265,24 @@ impl LaneRuntime<'_> {
         Ok(())
     }
 
-    fn git_wrapper(&self, env: &[(OsString, OsString)]) -> Result<Vec<u8>, ProviderError> {
+    pub(crate) fn git_wrapper(
+        &self,
+        env: &[(OsString, OsString)],
+        before_exec: &[u8],
+    ) -> Result<Vec<u8>, ProviderError> {
         let git = self.git.to_str().ok_or(ProviderError::InvalidPath)?;
         if git.contains(['\'', '\n']) {
             return Err(ProviderError::InvalidPath);
         }
         let identity = identity_exports(env)?;
-        Ok(format!(
+        let mut bytes = format!(
             "#!/bin/sh\nGIT_CONFIG_GLOBAL=/dev/null\nGIT_CONFIG_NOSYSTEM=1\n\
-             export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM\n{identity}exec '{git}' \"$@\"\n"
+             export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM\n{identity}"
         )
-        .into_bytes())
+        .into_bytes();
+        bytes.extend_from_slice(before_exec);
+        bytes.extend_from_slice(format!("exec '{git}' \"$@\"\n").as_bytes());
+        Ok(bytes)
     }
 
     /// Rust Fabric uses stdio and SQLite, so it needs no daemon socket grant.
@@ -594,10 +601,13 @@ mod tests {
         let wrapper = dir.path().join("wrapper");
         std::fs::write(
             &wrapper,
-            lane.git_wrapper(&[
-                ("GIT_AUTHOR_NAME".into(), "O'Brien".into()),
-                ("GIT_COMMITTER_EMAIL".into(), "lane@example.org".into()),
-            ])
+            lane.git_wrapper(
+                &[
+                    ("GIT_AUTHOR_NAME".into(), "O'Brien".into()),
+                    ("GIT_COMMITTER_EMAIL".into(), "lane@example.org".into()),
+                ],
+                &[],
+            )
             .unwrap(),
         )
         .unwrap();

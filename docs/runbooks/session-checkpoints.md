@@ -39,6 +39,35 @@ fails after the checkpoint and revision manifest commit, the save succeeds with
 a warning. Repeat the save to repair discovery (repeat `--rebind` if used).
 Readers report stale discovery explicitly; reads never repair it.
 
+## Chair log
+
+Append a substantive update once using `provenant chair log append --session
+SESSION --file update.json --operation-id ID --issued-at ISSUED_AT --json`.
+Set `ISSUED_AT` to UTC Unix seconds when the operation is first created. The
+JSON has required `kind`, `markdown` and `channel` strings and optional `request_ids`,
+`attempt_ids`, `issue_ids`, `pr_ids` arrays and `correction_of` sequence.
+Use `-` as the file for standard input. A correction is a new entry referencing
+an earlier sequence. Keep the operation ID, issued time and identical input
+for retries. Within the replay horizon, a retry returns the original entry even
+after its payload is pruned; a different input with the same ID is refused.
+An append older than the replay horizon returns an explicit expired result;
+an issued time more than five minutes in the future is refused. Increasing the
+replay horizon does not restore operations whose receipts have been pruned.
+When the operation ID is omitted the CLI generates both an ID and an issued time for that invocation.
+Supply and persist both values for planned retries.
+
+Read with `provenant chair log list --session SESSION --json`. Pages default
+to 50 entries and accept `--limit` from 1 to 100. Continue with `--after` and
+the returned `next_cursor`; a byte limit may shorten a page. Entries are
+limited to 16 KiB. Log contents are not copied into demand telemetry.
+
+Each append applies the per-session age, count and size limits documented in
+[configuration](configuration.md#lane-cache-collection). Listing applies all
+three limits without changing storage, and full `gc` removes excess payloads
+even for idle sessions. Operation receipts are kept for the configured replay horizon,
+then pruned; aggregate appended/pruned counts survive. There is no lifetime
+operation limit.
+
 ## Earlier saves
 
 A save keeps the checkpoint it replaces as a numbered revision. Each revision

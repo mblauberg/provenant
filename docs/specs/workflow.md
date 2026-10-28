@@ -1,14 +1,14 @@
 # Workflow
 
-Owner: `crates/workflow` (coverage, receipts, sessions, writing),
+Owner: `crates/workflow` (coverage, receipts, sessions, chair logs, writing),
 `crates/fabric-runtime/src/handoff/session` (session handoff)
 Anchor: `crates/workflow/src/coverage.rs`, `crates/workflow/src/store/tests.rs`,
-`crates/workflow/src/session.rs`, `tests/workflow.rs`
+`crates/workflow/src/session.rs`, `crates/workflow/src/log.rs`, `tests/workflow.rs`
 
-Workflow is a small synchronous policy library: a pure review coverage check,
-a minimal delivery receipt, bounded session checkpoints and a writing
-matcher that runs on JSON rules, with no SQLite, process runner or MCP tool. Pull requests carry their own
-evidence. This spec grants no merge,
+Workflow is a small synchronous library: a pure review coverage check,
+a minimal delivery receipt, bounded session checkpoints, a SQLite-backed chair
+log and a writing matcher that runs on JSON rules, with no process runner or MCP
+tool. Pull requests carry their own evidence. This spec grants no merge,
 install or release authority. Paths are relative to `tools/front-door/`.
 
 ## Review coverage
@@ -317,6 +317,35 @@ following it reaches the store the hook used; one that cannot is not printed.
   `crates/workflow/src/session.rs::the_save_command_carries_a_custom_state_dir_or_refuses_to_show_one`;
   `::the_excerpt_notice_carries_the_state_dir_and_stays_within_the_cap`
 - Owner: `crates/workflow/src/session/state.rs`, `crates/workflow/src/session.rs`, `src/hooks.rs`
+
+## Chair logs
+
+Chair updates are scoped to a project and session. Each operation has an opaque
+operation ID and caller-supplied `issued_at` time, fixed when it is created and
+reused on retry. While the operation remains inside the configured horizon
+and the persisted expiry boundary, the same ID and payload return the original
+sequence, including after payload pruning; a different payload with that ID must
+be refused. Appends older than the replay horizon
+return an explicit expired result, and timestamps more than five minutes in the
+future are refused. Receipts expire after the replay horizon; no lifetime
+operation limit may prevent appends. Persisted expiry boundaries must not move
+backwards when the clock or configuration changes.
+
+Entries are returned in sequence order with bounded pagination. Retention
+removes oldest payloads under the configured age, count and byte limits.
+Listing applies these limits before pagination without changing storage, and
+full GC applies them to idle sessions. A correction is a new entry referencing an earlier sequence, which may have been
+pruned. Lanes must not append chair updates. Listing must not create state or
+require write access. The cost of append and list must depend on retained data
+and the replay horizon, not the session's lifetime history.
+- Why: retries must not duplicate updates, and inactive or long-lived sessions
+  must remain bounded without preventing read-only use.
+- Test: `crates/workflow/src/log.rs::log_operation_replay_pagination_correction_pruning_and_restart`;
+  `::replay_horizon_expires_receipts_and_survives_clock_and_config_changes`;
+  `::replay_store_has_no_lifetime_receipt_cap`;
+  `tests/workflow.rs::chair_log_cli_replay_and_pages`;
+  `::chair_log_cli_retention_replay_and_lane_refusal`
+- Owner: `crates/workflow/src/log.rs`, `src/chair.rs`
 
 ## Session handoff
 

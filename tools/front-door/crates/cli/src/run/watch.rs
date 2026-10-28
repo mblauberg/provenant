@@ -172,17 +172,17 @@ pub(super) type Fetch<'a> = dyn FnMut(Duration) -> Result<Vec<run::AttemptRecord
 
 pub(super) enum Tick {
     Lanes(Vec<run::AttemptRecord>),
-    /// A transient peer failure, to retry while the budget lasts.
+    /// A transient read failure, to retry while the budget lasts.
     Retry(Fail),
 }
-/// One fetch, given what is left of the budget. A transient peer failure is
-/// retried within the budget, and the last cause is reported only if the
-/// budget runs out on it.
+/// One fetch, given what is left of the budget. Transient read failures are
+/// retried within the budget.
 // A reader deadline is a real transport boundary.
 #[allow(clippy::disallowed_methods)]
 pub(super) fn tick(fetch: &mut Fetch<'_>, deadline: Instant) -> Result<Tick, Fail> {
     match fetch(deadline.saturating_duration_since(Instant::now())) {
         Ok(lanes) => Ok(Tick::Lanes(lanes)),
+        Err(fail) if fail.kind == ErrorKind::Contention => Ok(Tick::Retry(fail)),
         Err(fail) if fail.kind == ErrorKind::PeerUnavailable && Instant::now() < deadline => {
             Ok(Tick::Retry(fail))
         }
@@ -193,6 +193,29 @@ pub(super) fn tick(fetch: &mut Fetch<'_>, deadline: Instant) -> Result<Tick, Fai
 #[allow(clippy::disallowed_methods)]
 pub(super) fn pause(poll: Duration, deadline: Instant) {
     std::thread::park_timeout(poll.min(deadline.saturating_duration_since(Instant::now())));
+}
+/// Retry a store operation until it succeeds or contention outlasts the wait.
+#[allow(clippy::disallowed_methods)]
+pub(super) fn retry_contention(
+    deadline: Instant,
+    poll: Duration,
+    mut operation: impl FnMut() -> Result<(), Fail>,
+) -> Result<bool, Fail> {
+    loop {
+        match operation() {
+            Ok(()) => return Ok(true),
+            Err(fail) if fail.kind == ErrorKind::Contention => {
+                if Instant::now() >= deadline {
+                    return Ok(false);
+                }
+                pause(poll, deadline);
+                if Instant::now() >= deadline {
+                    return Ok(false);
+                }
+            }
+            Err(fail) => return Err(fail),
+        }
+    }
 }
 /// Arm on the first successful fetch. No fetch starts after the deadline: the
 /// last transient cause is reported instead.
@@ -231,8 +254,8 @@ fn arm(
 }
 
 /// Sleep out the poll, then, if the deadline has not passed, read the lanes
-/// again. A transient peer failure leaves `lanes` as they were and is kept in
-/// `stale` until a later read succeeds, so a wait that ends on it reports it.
+/// again. A transient read failure leaves `lanes` as they were and is kept in
+/// `stale` until a later read succeeds, so a peer failure can be reported.
 // A reader deadline is a real transport boundary.
 #[allow(clippy::disallowed_methods)]
 fn refresh(
@@ -272,12 +295,21 @@ pub(super) fn wait(
     poll: Duration,
 ) -> Result<Waited, Fail> {
     let deadline = Instant::now() + budget;
-    let (armed, mut lanes) = arm(&mut fetch, scope, deadline, poll)?;
+    let (armed, mut lanes) = match arm(&mut fetch, scope, deadline, poll) {
+        Err(fail) if fail.kind == ErrorKind::Contention => {
+            return Ok(Waited {
+                lanes: Vec::new(),
+                met: false,
+                ignored: 0,
+            });
+        }
+        result => result?,
+    };
     let mut stale = None;
     loop {
         let met = condition_met(&lanes, condition);
         if met || Instant::now() >= deadline {
-            if let Some(fail) = stale {
+            if let Some(fail) = stale.filter(|fail: &Fail| fail.kind != ErrorKind::Contention) {
                 return Err(fail);
             }
             return Ok(Waited {
@@ -306,7 +338,15 @@ pub(super) fn watch(
     emit: &mut dyn FnMut(&run::AttemptRecord) -> Result<(), Fail>,
 ) -> Result<Watched, Fail> {
     let deadline = Instant::now() + budget;
-    let (armed, mut lanes) = arm(&mut fetch, scope, deadline, poll)?;
+    let (armed, mut lanes) = match arm(&mut fetch, scope, deadline, poll) {
+        Err(fail) if fail.kind == ErrorKind::Contention => {
+            return Ok(Watched {
+                lanes: Vec::new(),
+                settled: false,
+            });
+        }
+        result => result?,
+    };
     let mut seen: BTreeMap<AttemptId, String> = BTreeMap::new();
     let mut stale = None;
     loop {
@@ -319,7 +359,7 @@ pub(super) fn watch(
         }
         let all_settled = lanes.iter().all(|lane| settled(&lane.state).0);
         if all_settled || Instant::now() >= deadline {
-            if let Some(fail) = stale {
+            if let Some(fail) = stale.filter(|fail: &Fail| fail.kind != ErrorKind::Contention) {
                 return Err(fail);
             }
             return Ok(Watched {
@@ -585,6 +625,92 @@ mod tests {
         .unwrap();
         assert!(waited.met);
         assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn store_contention_is_retried_before_and_during_a_wait() {
+        let mut calls = 0;
+        let waited = wait(
+            |_| {
+                calls += 1;
+                match calls {
+                    1 | 3 => Err(run::RunError::Contention.into()),
+                    2 => Ok(vec![running(1)]),
+                    _ => Ok(vec![done(1, 20)]),
+                }
+            },
+            scope(&[1], None, true),
+            Condition::All,
+            Duration::from_secs(5),
+            POLL,
+        )
+        .unwrap();
+        assert!(waited.met);
+        assert_eq!(calls, 4);
+    }
+
+    #[test]
+    fn persistent_store_contention_stops_at_the_deadline() {
+        let mut calls = 0;
+        let waited = wait(
+            |_| {
+                calls += 1;
+                Err(run::RunError::Contention.into())
+            },
+            scope(&[1], None, true),
+            Condition::All,
+            Duration::from_millis(20),
+            Duration::from_millis(1),
+        )
+        .expect("contention expires as a wait timeout");
+        assert!(!waited.met);
+        assert!(calls > 1);
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn acknowledgement_retries_contention_and_honours_the_deadline() {
+        let mut calls = 0;
+        let done = retry_contention(Instant::now() + Duration::from_secs(5), POLL, || {
+            calls += 1;
+            if calls < 3 {
+                Err(run::RunError::Contention.into())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert!(done);
+        assert_eq!(calls, 3);
+        let done = retry_contention(Instant::now() + Duration::from_millis(10), POLL, || {
+            Err(run::RunError::Contention.into())
+        })
+        .unwrap();
+        assert!(!done);
+    }
+
+    #[test]
+    fn persistent_store_contention_expires_a_watch_without_failure() {
+        for armed in [false, true] {
+            let mut calls = 0;
+            let watched = watch(
+                |_| {
+                    calls += 1;
+                    if armed && calls == 1 {
+                        Ok(vec![running(1)])
+                    } else {
+                        Err(run::RunError::Contention.into())
+                    }
+                },
+                scope(&[1], None, true),
+                Duration::from_millis(20),
+                POLL,
+                &mut |_| Ok(()),
+            )
+            .expect("contention expires as a watch timeout");
+            assert!(!watched.settled);
+            assert_eq!(watched.lanes.len(), usize::from(armed));
+        }
     }
 
     #[test]

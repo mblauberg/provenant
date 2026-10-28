@@ -188,6 +188,9 @@ pub struct PrOpen {
 }
 #[derive(Debug, Subcommand)]
 pub enum Chair {
+    /// Append and read a chair session's authored updates.
+    #[command(subcommand)]
+    Log(ChairLog),
     /// Checkpoint and continue under an allowed registered Claude account.
     Switch {
         /// Registered Claude account to switch to
@@ -199,6 +202,36 @@ pub enum Chair {
         /// Source session; required for real runs unless CLAUDE_SESSION_ID is set.
         #[arg(long)]
         session_id: Option<String>,
+    },
+}
+#[derive(Debug, Subcommand)]
+pub enum ChairLog {
+    /// Append an update from a JSON file, or standard input with `-`.
+    Append {
+        /// Chair session ID
+        #[arg(long)]
+        session: String,
+        /// JSON containing markdown, kind, channel and optional links
+        #[arg(long)]
+        file: String,
+        /// Stable retry key; generated when omitted
+        #[arg(long, requires = "issued_at", value_parser = explicit_operation_id)]
+        operation_id: Option<OperationId>,
+        /// Original operation creation time in UTC Unix seconds; reuse for retries
+        #[arg(long, requires = "operation_id")]
+        issued_at: Option<i64>,
+    },
+    /// List a bounded page of updates in sequence order.
+    List {
+        /// Chair session ID
+        #[arg(long)]
+        session: String,
+        /// Return entries after this sequence
+        #[arg(long)]
+        after: Option<u64>,
+        /// Maximum entries in this page
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u64).range(1..=100))]
+        limit: u64,
     },
 }
 #[derive(Debug, Subcommand)]
@@ -297,6 +330,9 @@ pub struct DispatchInput {
 #[derive(Debug, Args)]
 #[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
 pub struct Dispatch {
+    /// Use the build-heavy scheduling priority
+    #[arg(long)]
+    pub build_heavy: bool,
     #[command(flatten)]
     pub input: DispatchInput,
     /// Caller-chosen ID that makes retries idempotent
@@ -348,6 +384,9 @@ pub struct Dispatch {
     /// Create or reuse a clean local writer worktree owned by this lane
     #[arg(long, conflicts_with_all = ["worktree", "branch", "host", "manifest"])]
     pub worktree_branch: Option<String>,
+    /// Chair-verified full commit SHA to review (must exist on the executing host)
+    #[arg(long)]
+    pub head: Option<String>,
     /// Git base for attempt history and a new writer branch
     #[arg(long)]
     pub base: Option<String>,
@@ -683,6 +722,9 @@ pub struct Trace {
 }
 #[derive(Debug, Args)]
 pub struct Stats {
+    /// Report native Claude subagents from one session's subagents directory instead of supervised attempts
+    #[arg(long, conflicts_with_all = ["usage", "since", "until", "run_id"])]
+    pub claude_subagents: Option<PathBuf>,
     /// Count local CLI verbs and MCP tools, including unused installed units.
     #[arg(long)]
     pub usage: bool,
@@ -948,6 +990,10 @@ mod target_tests {
             assert!(invalid.parse::<Target>().is_err(), "{invalid}");
         }
     }
+}
+
+fn explicit_operation_id(value: &str) -> Result<OperationId, String> {
+    OperationId::parse(value).map_err(|error| error.to_string())
 }
 
 /// Generate at parse time so help remains deterministic.

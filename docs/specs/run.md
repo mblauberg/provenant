@@ -169,6 +169,23 @@ action simply shows none.
   `crates/run/src/tests.rs::full_database_retains_admission_and_recovers_original_terminal_intent`
 - Owner: `crates/run/src/admission.rs`, `crates/run/src/ledger.rs`, `crates/os/src/sys/clock.rs`
 
+## Lane priority
+
+The host selects a configured nice value for each lane: 10 for writers, 5 for
+read-only lanes and 15 for build-heavy lanes by default. The guardian applies
+it to the provider before confinement; the provider's descendants inherit it.
+An inherited higher nice value is preserved. Failure to read or change priority
+must never refuse a lane: launch proceeds and the reason is recorded. Launch
+evidence reports the applied value when known and the requested value when it
+differs.
+- Why: lanes should yield CPU without requiring new privileges or preventing
+  nested work from starting.
+- Test: `crates/supervisor/src/process_os/provider.rs::provider_and_descendant_inherit_priority`;
+  `::priority_failures_degrade_and_preserve_evidence`;
+  `crates/run/src/tests.rs::lanes_read_last_output_time_from_supervisor_checkpoint`;
+  `crates/cli/src/run.rs::render_lanes_removes_peer_terminal_controls`
+- Owner: `crates/supervisor/src/process_os/provider.rs`, `crates/run/src/launch.rs`
+
 ## Immutable attempts, no writer replay
 
 Terminal attempts are immutable; a retry or continued turn is a new attempt
@@ -251,6 +268,29 @@ refused, and the attempt records every granted path.
 - Test: `crates/confinement/src/plan/read_only.rs::policy_defaults_and_refuses_escape_control_paths_and_symlinks`;
   `crates/run/src/dispatch_tests.rs::read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt`
 - Owner: `crates/confinement/src/plan/read_only.rs`
+
+Read-only runs with a verified Git binding prepare `scratch/git-objects` with
+the bound common directory's `objects` as an alternate. The shell Git wrapper
+sets `GIT_OBJECT_DIRECTORY` for `show`, `log`, `diff`, `merge-tree` and
+`hash-object` only when Git resolves that common directory, including linked
+worktrees. Aliases and external subcommands receive no override. The launch
+environment has no lane-wide override, so other repositories and submodules
+retain their own object stores. The wrapper honours recognised Git global
+options; unknown options and direct
+absolute-path Git calls run without this temporary-object convenience.
+Configured callbacks of those builtins inherit their repository-local Git
+environment; callbacks entering another repository must clear Git-local
+variables.
+The shared Git directories remain write-denied, and symlink creation in the
+scratch object store is denied. No quarantine write exception is granted.
+The lane can alter its scratch objects and alternates; lane Git output must
+never serve as trusted host evidence. The host uses its own Git environment.
+- Why: `show --remerge-diff` needs temporary objects, while #1532 requires the
+  shared store to remain unwritable. Repository scoping preserves other reads.
+- Test: `crates/providers/src/tests.rs::prepared_git_objects_are_repository_scoped_for_every_adapter`;
+  `::prepared_git_reads_linked_and_other_repositories`;
+  `crates/providers/src/seatbelt_snapshots.rs::agy_read_only_linked_worktree_git_directories_are_not_writable`
+- Owner: `crates/providers/src/launch.rs`, `crates/confinement/src/permissions.rs`
 
 ## Writer hard-link refusal
 
@@ -363,10 +403,22 @@ other ignored files retain the tree. Other worktrees keep the existing
 GC/removal policy. A host lifecycle receipt records intent before removal,
 then pruning or the retention reason in `worktree-settlement.json` beside the
 attempt result. An interrupted intent whose checkout is gone replays as pruned.
+At settlement the host best-effort refreshes the exact `origin` tracking ref
+for every writer with a branch, including explicit and adopted worktrees,
+before any prune upstream pin. The bounded fetch runs outside the collection
+lock and does not affect the lane outcome. A missing `origin` or remote branch
+is silently skipped. Other failures may add a fixed, redacted
+`tracking_ref_warning` to a lane-owned settlement receipt; they never create
+or change an adopted worktree's receipt. Concurrent refreshes of the same
+branch may race and produce a warning.
 - Why: a lane may reclaim only work it owns and commits proven retained elsewhere.
 - Test: `crates/confinement/src/worktrees.rs::adopted_owner_proves_membership_and_enables_custody`;
   `::owned_cleanup_refuses_dirty_unmerged_and_adopted_trees`;
-  `tests/dispatch_provider.rs::owned_dispatch_creates_and_replays_after_pruning`.
+  `tests/dispatch_provider.rs::owned_dispatch_creates_and_replays_after_pruning`;
+  `tools/front-door/src/gc_support.rs::writer_tracking_refresh_handles_remote_branch_absence_and_failure`;
+  `tools/front-door/src/fabric.rs::settlement_records_tracking_ref_failure_without_failing_lane`;
+  `tools/front-door/src/fabric.rs::explicit_writer_refreshes_tracking_ref_while_collection_is_busy`;
+  `tools/front-door/src/fabric.rs::adopted_writer_refresh_failure_does_not_change_receipt`.
 - Owner: `crates/confinement/src/worktrees/owner.rs`, `crates/cli/src/run.rs`, `src/fabric.rs`
 
 ## Delivery modes and settled pickup

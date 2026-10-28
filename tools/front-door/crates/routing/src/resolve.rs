@@ -347,7 +347,16 @@ fn effective_profile<'a>(
     &'static str,
     Option<i64>,
 ) {
-    let account_profile = account.and_then(|a| context.config.pacing.accounts.get(a));
+    // Direct library callers may supply legacy bare keys. These match any
+    // adapter; callers with an account registry should qualify them first.
+    let account_profile = account.and_then(|a| {
+        context
+            .config
+            .pacing
+            .accounts
+            .get(&format!("{}/{a}", model.adapter()))
+            .or_else(|| context.config.pacing.accounts.get(a))
+    });
     let free_profile = context
         .catalogue
         .is_free_model(model)
@@ -358,7 +367,15 @@ fn effective_profile<'a>(
     let profile = account_profile.or(free_profile);
     let active = context.config.pacing_overrides.iter().rev().find(|o| {
         o.expires_unix_seconds > context.now_seconds()
-            && o.account.as_deref().is_none_or(|a| Some(a) == account)
+            && o.account.as_deref().is_none_or(|selector| {
+                account.is_some_and(|key| {
+                    selector
+                        .split_once('/')
+                        .map_or(selector == key, |(adapter, selected)| {
+                            adapter == model.adapter() && selected == key
+                        })
+                })
+            })
             && o.provider.as_deref().is_none_or(|p| p == model.adapter())
     });
     if let Some(o) = active {
@@ -494,8 +511,14 @@ fn reference_observation<'a>(
         .quota
         .iter()
         .filter(|o| {
-            o.snapshot.account.account_key == deadline.reset_of
-                && o.snapshot.schema_version == 1
+            // Bare keys are supported for direct library callers without a
+            // registry and can match any adapter. Qualify when one is available.
+            deadline.reset_of.split_once('/').map_or_else(
+                || o.snapshot.account.account_key == deadline.reset_of,
+                |(adapter, key)| {
+                    o.snapshot.account.adapter == adapter && o.snapshot.account.account_key == key
+                },
+            ) && o.snapshot.schema_version == 1
                 && o.snapshot.observed_unix_seconds <= context.now_seconds()
                 && o.snapshot.observed_unix_seconds < o.expires_unix_seconds
                 && o.expires_unix_seconds > context.now_seconds()
@@ -983,11 +1006,30 @@ fn admissible<'c>(
         .find(|r| r.adapter.id() == model.adapter())
         .ok_or(RoutingError::UnknownAdapter)?;
     let entry = context.catalogue.model(model);
-    if effort.is_some_and(|e| {
+    if let Some(effort) = effort.filter(|e| {
         !crate::request::effort_valid(e)
             || entry.is_none_or(|row| !row.efforts.iter().any(|v| v == e))
     }) {
-        return Err(RoutingError::UnsupportedEffort);
+        let support = match entry {
+            Some(row) if row.efforts.is_empty() => "this model takes no effort".to_owned(),
+            Some(row) => format!("supported efforts: {}", row.efforts.join(", ")),
+            None => {
+                let nearest = context.catalogue.nearest_models(model);
+                if nearest.is_empty() {
+                    "model is not in the catalogue; no effort controls are recorded".to_owned()
+                } else {
+                    format!(
+                        "model is not in the catalogue; nearest catalogued IDs: {}",
+                        nearest.join(", ")
+                    )
+                }
+            }
+        };
+        return Err(RoutingError::UnsupportedEffort {
+            model: model.as_str().to_owned(),
+            effort: effort.to_owned(),
+            support,
+        });
     }
     Ok(entry)
 }
@@ -1410,7 +1452,7 @@ fn classify_pool(
                     option = Some(resolved);
                     None
                 }
-                Err(RoutingError::UnsupportedEffort) => {
+                Err(RoutingError::UnsupportedEffort { .. }) => {
                     classified.exclusions.push("unsupported effort".into());
                     Some("effort".into())
                 }

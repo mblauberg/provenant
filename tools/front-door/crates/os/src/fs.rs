@@ -596,11 +596,42 @@ impl Directory {
     /// Observe a stable existing lock using a read-only descriptor. This never
     /// creates a missing lock or changes its contents, mode or timestamps.
     pub fn try_lock_existing(&self, name: &OsStr, mode: LockMode) -> Result<LockGuard> {
+        self.lock_existing_with_timeout(name, mode, Duration::ZERO, &CancelToken::new())
+    }
+
+    /// Acquire an existing stable lock through a read-only descriptor, waiting
+    /// within the supplied budget without creating or changing the lock.
+    pub fn lock_existing(
+        &self,
+        name: &OsStr,
+        mode: LockMode,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<LockGuard> {
+        let timeout = Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
+        self.lock_existing_with_timeout(name, mode, timeout, cancel)
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    fn lock_existing_with_timeout(
+        &self,
+        name: &OsStr,
+        mode: LockMode,
+        timeout: Duration,
+        cancel: &CancelToken,
+    ) -> Result<LockGuard> {
         let name = component(name)?;
         if !name.as_bytes().ends_with(b".lock") {
             return Err(FsError::InvalidLockName { name: name.into() });
         }
         let path = self.path.join(name);
+        if cancel.is_cancelled() {
+            return Err(FsError::Cancelled { path });
+        }
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| FsError::LockDeadlineOverflow { path: path.clone() })?;
         let owner_uid = os::effective_uid();
         verify_lock_directory(name, self.metadata()?, owner_uid)?;
         let before = self.metadata_at(name, false)?;
@@ -611,15 +642,27 @@ impl Directory {
             .map_err(error("fstat existing lock", &path))?;
         let after = self.metadata_at(name, false)?;
         verify_owner_lock_metadata(name, Some(before), opened, after, self.device, owner_uid)?;
-        match os::try_flock(&file, mode) {
-            Ok(()) => Ok(LockGuard { _file: file }),
-            Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
-                Err(FsError::LockTimeout {
-                    path,
-                    timeout: Duration::ZERO,
-                })
+        loop {
+            match os::try_flock(&file, mode) {
+                Ok(()) => {
+                    if cancel.is_cancelled() {
+                        return Err(FsError::Cancelled { path });
+                    }
+                    return Ok(LockGuard { _file: file });
+                }
+                Err(source)
+                    if source.kind() == io::ErrorKind::WouldBlock
+                        || source.raw_os_error() == Some(errno::EINTR) => {}
+                Err(source) => return Err(error("flock existing lock", &path)(source)),
             }
-            Err(source) => Err(error("flock existing lock", &path)(source)),
+            if cancel.is_cancelled() {
+                return Err(FsError::Cancelled { path });
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(FsError::LockTimeout { path, timeout });
+            }
+            os::wait(remaining.min(Duration::from_millis(5)));
         }
     }
 

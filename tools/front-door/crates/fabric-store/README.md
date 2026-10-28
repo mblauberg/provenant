@@ -47,6 +47,13 @@ cap at 100 and stop at 512 KiB of stored request bytes before envelope rendering
 No chair log is stored by this slice. The runtime owns filter/snapshot-bound
 cursors and explicit local-only coverage.
 
+`offer_human_answers` records offers in an immediate transaction, serialised
+with acknowledgement. Runtime validates the exact registered target first.
+Offers contain at most 100 answers and 8 KiB of compact JSON; overflow keeps its
+previous state. Acknowledged answers never return. Pending answers remain
+eligible after restart or adapter failure. Mail read cursors stay independent.
+This uses the existing outbox without another schema migration.
+
 Tasks start Open. Claims atomically activate them, increment the persistent
 generation and bind actor, token and expiry. Callers supply a lease duration;
 claim/fence decisions and mutation timestamps use `Request.clock` inside the store.

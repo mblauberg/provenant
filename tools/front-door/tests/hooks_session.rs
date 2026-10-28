@@ -103,8 +103,10 @@ fn create_lane(rig: &TestRig) -> Result<String> {
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    build_heavy: false,
                     title: None,
                     base: None,
+                    head: None,
                     base_ref: None,
                     profile: Default::default(),
                     task_id,

@@ -47,6 +47,10 @@ support effort, so an explicit value is refused before launch.
 `--confidential` excludes training or unclassified members and fallbacks.
 There is no classifier or route-synonym inference. Effort is set only when the
 catalogue contains an exact recorded control; unsupported effort is refused.
+`route resolve MODEL` reports the recorded supported efforts, including when a
+model takes none. Uncatalogued exact IDs remain available as unverified models;
+resolution and dispatch suggest nearby catalogue IDs, and an explicit effort
+is refused because no controls are recorded for the unlisted ID.
 
 The bundled Rust catalogue (`tools/front-door/crates/routing/assets/catalogue.toml`)
 owns default pool membership, weights, pacing and effort controls. Override a
@@ -127,6 +131,14 @@ These profiles illustrate how different accounts can share a provider:
 | opencode free | Use whenever available; a daily window can be added when observable. |
 | agy | Set host-specific deadlines to stagger accounts, or pace both to their weekly limits. Gemini and Claude pools apply on both. |
 
+Account profile keys and `reset_of` accept registered account keys, entry IDs,
+or labels unique across adapters. Register the accounts before using the example;
+unknown or ambiguous names are reported with the available labels and keys.
+Use `adapter/key` to disambiguate a key shared by providers. Do not configure
+multiple profiles for the same account under different names. Remove or update
+stale profile and `reset_of` references when unregistering accounts: an unknown
+or ambiguous reference prevents route resolution and dispatch for all providers.
+
 For example, in the selected state's `config.toml`:
 
 ```toml
@@ -163,11 +175,14 @@ policy = "max"
 For a temporary change, use for example
 `provenant route pacing override --all --policy spend --until 1d`. Select a
 single account with `--account` or a provider with `--provider` instead of
-`--all`. The expiry accepts a duration in seconds, minutes, hours or days, or
+`--all`. Account selectors accept the same keys, entry IDs, labels and
+`adapter/key` references as profiles; ambiguous references are rejected. The
+expiry accepts a duration in seconds, minutes, hours or days, or
 an RFC 3339 timestamp. `provenant route pacing override clear` removes the
 overrides early. Overrides are stored with their expiry in the same routing
 configuration using atomic writes, and stop applying automatically when they
 expire. Inspect the effective profile and active overrides with `route list`;
+its JSON `configured_accounts` keys and `reset_of` references use `adapter/key`.
 `route resolve` names the governing source, window and deadline for each
 pacing factor or exclusion. The console settings editor uses the same
 validated configuration path.

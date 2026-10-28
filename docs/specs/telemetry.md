@@ -2,7 +2,7 @@
 
 Owner: `crates/telemetry` (reducer, prices, trace, usage log)
 Anchor: `crates/telemetry/src/tests.rs`, `crates/telemetry/src/usage/tests.rs`,
-`tests/usage.rs`
+`crates/telemetry/src/native.rs`, `tests/usage.rs`, `tests/telemetry_native.rs`
 
 Telemetry summarises run's terminal attempt records into per-route outcomes,
 usage and API-equivalent cost (the cost of the same tokens at published API
@@ -37,8 +37,12 @@ priced and no partial cost contribution is known, `known_lower_bound` is null
 and the CLI prints `cost unknown (N attempts missing cost data)`. With partial
 coverage it prints `at least $X (N of M attempts priced)`. Known contributions
 from partially priced attempts remain in the lower bound. Measured zero and
-an empty report retain a numeric zero. An unpriced subscription is not free. The latest task outcome is the highest-numbered
-attempt.
+an empty report retain a numeric zero. An unpriced subscription is not free.
+The latest task outcome is the highest-numbered attempt.
+`subscription_attempts` counts attempts whose exact provider and model have a
+subscription entry in the price table, even when usage or rates are missing.
+Unknown identities are not classified as subscriptions, and this classification
+does not verify account billing.
 - Why: a partial or zero-filled total reads as a real one.
 - Test: `crates/telemetry/src/tests.rs::attempt_and_group_limits_are_enforced_before_insertion`;
   `::missing_usage_and_prices_preserve_known_lower_bounds`
@@ -55,6 +59,24 @@ regex or alias. Cost is an estimate, not a bill.
 - Test: `crates/telemetry/src/tests.rs::rounding_occurs_once_across_categories_attempts_and_groups`;
   `::price_validation_refuses_unsupported_units_duplicates_and_unverified_zero`
 - Owner: `crates/telemetry/src/`, `../../config/telemetry-prices.toml`
+
+## Native Claude Code sub-agents
+
+An explicit `--claude-subagents PATH` report reads usage metadata from one
+Claude session's `subagents` directory and groups usage and estimated cost by
+model. Message bodies are not used. Message IDs are deduplicated. These records
+are a standalone report, independent of the project and run store, and the
+option cannot be combined with attempt filters or `--usage`. The report must
+count and skip an incomplete, unterminated final JSON record while rejecting
+malformed interior records. Native model costs use the same money object as
+other telemetry costs and identify the reviewed price table. Pricing uses
+exact model identities, including dated snapshots present in the table;
+unknown or incomplete prices remain unknown.
+- Why: native sub-agent usage should be visible without counting it as a
+  Provenant attempt or collecting conversation content.
+- Test: `crates/telemetry/src/native.rs::tests::imports_metadata_once_per_message_and_prices_exact_model`;
+  `tests/telemetry_native.rs::native_stats_runs_without_a_project_or_store_and_sanitises_output`
+- Owner: `crates/telemetry/src/`
 
 ## Trace export
 
