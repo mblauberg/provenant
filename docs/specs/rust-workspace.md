@@ -50,8 +50,10 @@ path, never secret values. Publication and recovery never rely on `Drop`.
 
 ## Unsafe code
 
-First-party `unsafe` lives only in `os::sys` and supervisor's private
-`process_os`, behind safe wrappers; every other crate forbids it. Only
+First-party `unsafe` lives only in `os::sys`, supervisor's private
+`process_os` and SQLite's private `read_only_vfs`, behind safe wrappers;
+every other crate forbids it. The SQLite boundary narrows native file opens
+to read-only and retains writer-owned WAL companions for idle readers. Only
 supervisor may use OS `sys::{fs, child, raw_exec, reaper}`, `handoff_file`
 and `from_handoff`. `std::process::Command::new` is disallowed outside
 those boundaries. Each `unsafe` block documents its invariants and needs a second

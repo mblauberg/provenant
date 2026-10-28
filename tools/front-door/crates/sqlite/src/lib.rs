@@ -1,4 +1,6 @@
 use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
+#[allow(unsafe_code)]
+mod read_only_vfs;
 use provenant_os::fs::{Directory, FileKind, FsError, Metadata, verify_directory_identity};
 use rusqlite::{Connection, OpenFlags};
 use std::{
@@ -195,15 +197,23 @@ pub fn open_read_only_connection(path: &Path) -> rusqlite::Result<Connection> {
         let _ = write!(uri, "%{byte:02X}");
     }
     uri.push_str("?mode=ro&readonly_shm=1");
-    let db = Connection::open_with_flags(
+    read_only_vfs::register()?;
+    let db = Connection::open_with_flags_and_vfs(
         uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_URI
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        "provenant-read-only",
     )?;
     db.busy_timeout(Duration::ZERO)?;
     Ok(db)
+}
+
+/// Writer-only preparation for a read-only WAL consumer after the last close.
+pub fn retain_read_only_wal(db: &Connection) -> rusqlite::Result<()> {
+    read_only_vfs::persist_wal(db)?;
+    db.pragma_update(None, "journal_size_limit", 0)
 }
 
 #[derive(Debug)]

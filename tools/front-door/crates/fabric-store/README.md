@@ -62,6 +62,10 @@ uninitialised WAL shared memory fails closed. `read_human_answers` requires
 the migration-10 index and reads at most limit+1 pending rows for an exact
 host/project/session/actor. It leaves state, attempts and timestamps untouched.
 The composition edge validates the current session-discovery registration.
+The private SQLite VFS forces main/WAL file opens to read-only and refuses
+creation, temporary files, journals and deletion. Normal coordination writers
+retain WAL/shared-memory companions and truncate WAL after the final checkpoint,
+so the idle reader works without allocating them.
 
 Tasks start Open. Claims atomically activate them, increment the persistent
 generation and bind actor, token and expiry. Callers supply a lease duration;

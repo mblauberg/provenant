@@ -8,7 +8,12 @@ pub const PRE_TOOL_USE: &str = "pre-tool-use";
 /// Composed delivery capabilities. Records owns the Fabric mail fallback;
 /// provider hook support belongs to this catalogue beside its registration.
 pub fn delivery_capabilities() -> Vec<provenant_records::inbox::DeliveryCapability> {
-    provenant_records::inbox::delivery_capabilities()
+    let mut capabilities = provenant_records::inbox::delivery_capabilities();
+    for capability in &mut capabilities {
+        // Library readiness only; live injection requires the hook adapter.
+        capability.local_offer_reader = capability.provider == Harness::Claude;
+    }
+    capabilities
 }
 pub const PRE_COMPACT: &str = "pre-compact";
 pub const COMPACT: &str = "compact";

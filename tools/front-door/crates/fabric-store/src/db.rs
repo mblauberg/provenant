@@ -183,8 +183,8 @@ impl Store {
         )?;
         let db = provenant_sqlite::open_read_only_connection(&path.join("fabric.sqlite3"))?;
         db.progress_handler(100, Some(move || std::time::Instant::now() >= deadline))?;
-        // Pin one read snapshot across target lookup, discovery validation and
-        // answer reads, including concurrent acknowledgements and new answers.
+        // Pin one answer snapshot, including concurrent acknowledgements.
+        // Filesystem discovery was validated before this connection opened.
         db.execute_batch("BEGIN")?;
         let store = Self {
             db,
@@ -269,6 +269,9 @@ impl Store {
         // Refuse future versions before journal-mode changes or schema writes.
         request.retry(|| schema_version(&db))?;
         request.retry(|| enable_wal(&db))?;
+        if database == "fabric.sqlite3" {
+            provenant_sqlite::retain_read_only_wal(&db)?;
+        }
         let locks = if let Some(locks_name) = locks_name {
             match fabric.mkdir(OsStr::new(locks_name), 0o700) {
                 Ok(()) => fabric.sync()?,

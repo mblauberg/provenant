@@ -261,3 +261,61 @@ fn local_delivery_open_allocates_nothing_and_observes_deadline() {
         9
     );
 }
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Fresh processes exercise native SQLite VFS opens.
+fn local_delivery_fresh_process() -> Result<()> {
+    use std::{
+        process::Command,
+        time::{Duration, Instant},
+    };
+    if let Some(path) = std::env::var_os("PROVENANT_READER_ROOT") {
+        let path = PathBuf::from(path);
+        let mut inputs = RootInputs::new(path.join("home"), path.join("assets"));
+        inputs.state_dir = Some(path);
+        let roots = inputs.resolve(&Resolver).unwrap();
+        let reader =
+            Store::open_read_only(&roots.state, Instant::now() + Duration::from_millis(100))?
+                .unwrap();
+        assert_eq!(
+            reader
+                .db
+                .query_row("SELECT value FROM probe", [], |row| row.get::<_, i64>(0))?,
+            42
+        );
+        return Ok(());
+    }
+    let f = Fixture::new();
+    let writer = f.open();
+    writer
+        .db
+        .execute_batch("CREATE TABLE probe(value INTEGER); INSERT INTO probe VALUES(42)")?;
+    let child = || {
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::human_inbox::local_delivery_fresh_process",
+                "--nocapture",
+            ])
+            .env("PROVENANT_READER_ROOT", f.root.as_path())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    };
+    child(); // Uncheckpointed WAL remains visible from a different process.
+    drop(writer);
+    child(); // The ordinary idle state must also support local delivery.
+    // Missing companions may defer delivery, but may never be recreated.
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", f.path().display()));
+    }
+    assert!(Store::open_read_only(&f.root, Instant::now() + Duration::from_millis(100)).is_err());
+    assert!(!f.path().with_extension("sqlite3-wal").exists());
+    assert!(!f.path().with_extension("sqlite3-shm").exists());
+    Ok(())
+}

@@ -43,7 +43,7 @@ pub fn delivery_capabilities() -> Vec<DeliveryCapability> {
             provider: spec.id,
             transport: AnswerTransport::FabricMail,
             live_injection: false,
-            local_offer_reader: true,
+            local_offer_reader: false,
         })
         .collect()
 }

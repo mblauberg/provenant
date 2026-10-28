@@ -113,11 +113,11 @@ The records-level matrix supplies Fabric mail fallback:
 
 | Provider | Transport | Local offer reader | Live injection |
 |---|---|---|---|
-| Claude | Fabric mail | Available | Unavailable |
-| Codex | Fabric mail | Available | Unavailable |
-| Cursor | Fabric mail | Available | Unavailable |
-| Agy | Fabric mail | Available | Unavailable |
-| OpenCode | Fabric mail | Available | Unavailable |
+| Claude | Fabric mail | Library API | Unavailable |
+| Codex | Fabric mail | Unavailable | Unavailable |
+| Cursor | Fabric mail | Unavailable | Unavailable |
+| Agy | Fabric mail | Unavailable | Unavailable |
+| OpenCode | Fabric mail | Unavailable | Unavailable |
 
 The local reader observes up to 16 indexed pending answers within an explicit
 deadline. It creates no state and never records an offer attempt or acknowledges
