@@ -307,6 +307,47 @@ fn checkpoint_store(
         .with_revisions(provenant_cli::workflow::session_revisions(roots))
 }
 
+fn checkpoint_repair(
+    globals: &Globals,
+    cwd: &Path,
+    session: &HostSessionId,
+    client: Option<provenant_records::Harness>,
+) -> String {
+    let client = client
+        .map(|harness| format!(" --client {}", harness.spec().name))
+        .unwrap_or_else(|| " --client HARNESS".into());
+    let rest = format!(
+        "workflow session save {}{client} --rebind",
+        session.as_str()
+    );
+    let commands =
+        provenant_workflow::session::CommandPrefix::new(globals.state_dir.as_deref(), cwd);
+    let project = if globals.project.is_some() {
+        cwd.to_str()
+            .map(|path| format!("--project '{}' ", path.replace('\'', "'\\''")))
+    } else {
+        Some(String::new())
+    };
+    match project.and_then(|project| commands.runnable(&format!("{project}{rest}"))) {
+        Some(command) => format!("{command} --file <checkpoint.md>"),
+        None => format!(
+            "{rest} --file <checkpoint.md> with this handoff's --project and --state-dir options (a path cannot be shown safely)"
+        ),
+    }
+}
+
+fn checkpoint_identity(store: &SessionStore, repair: &str) -> Result<(), Refusal> {
+    store.validate_chair().map_err(|error| match error {
+        provenant_workflow::session::SessionError::DiscoveryIdentity => Refusal::refused(
+            "IDENTITY",
+            format!(
+                "session discovery identity does not match the registered chair; first run {repair}"
+            ),
+        ),
+        error => error.into(),
+    })
+}
+
 fn session_id(explicit: Option<&str>) -> Result<Option<HostSessionId>, Refusal> {
     let text = match explicit {
         Some(text) => Some(text.to_owned()),
@@ -365,7 +406,11 @@ fn execute(
     if args.model.as_deref().is_some_and(|m| !valid_model(m)) {
         return Err(Refusal::invalid("invalid --model"));
     }
-    let src = open_source(globals)?;
+    let mut src = open_source(globals)?;
+    src.context.identity.inbox = src
+        .context
+        .inbox_address(args.client)
+        .map_err(|error| Refusal::invalid(error.to_string()))?;
     let context = &src.context;
     let local = context.identity.host;
     let peers: Vec<&str> = context.config.peers.keys().map(String::as_str).collect();
@@ -414,10 +459,16 @@ fn execute(
         .map(|(_, lanes)| lanes)
         .map_err(|fail| fail.message);
     let project = context.identity.project;
-    let store = session
-        .as_ref()
-        .filter(|_| !args.no_checkpoint)
-        .map(|id| checkpoint_store(&src.roots, project, id.clone()));
+    let actor = context.identity.inbox.actor;
+    let store = session.as_ref().filter(|_| !args.no_checkpoint).map(|id| {
+        checkpoint_store(&src.roots, project, id.clone()).with_chair(context.identity.host, actor)
+    });
+    if let (Some(store), Some(session)) = (&store, &session) {
+        checkpoint_identity(
+            store,
+            &checkpoint_repair(globals, &src.cwd, session, args.client),
+        )?;
+    }
     let checkpoint = store
         .as_ref()
         .map(SessionStore::read)
@@ -703,17 +754,20 @@ fn execute(
         HandoffReceipt::Delivered { .. } => {}
     }
     // The peer holds the hand-off: record it as this session's checkpoint.
+    let mut checkpoint_warnings = Vec::new();
     let checkpoint_error = store.as_ref().and_then(|store| {
         WaitBudget::cli(clock.mono_now(), 30)
             .map_err(|e| e.to_string())
             .and_then(|budget| {
                 store
-                    .save(prompt.as_bytes(), budget, &cancel, &clock)
+                    .save_revision(prompt.as_bytes(), budget, &cancel, &clock)
+                    .map(|saved| checkpoint_warnings = saved.warnings)
                     .map_err(|e| e.to_string())
             })
             .err()
     });
     data["checkpoint_error"] = json!(checkpoint_error);
+    data["checkpoint_warnings"] = json!(checkpoint_warnings);
     data["receipt"] = serde_json::to_value(&receipt)?;
     if let Some(failure) = launch_failure(&args.to, &receipt, args.no_launch, &mut data) {
         return Err(failure);
@@ -755,6 +809,9 @@ fn execute(
         "Handed off to {} as account {}. Prompt on the peer: {prompt_path}\n",
         args.to, args.account
     );
+    for warning in &checkpoint_warnings {
+        let _ = writeln!(human, "Warning: {warning}");
+    }
     for tree in worktrees {
         let _ = match (&tree.path, &tree.error) {
             (Some(path), Some(warning)) => {
@@ -1186,6 +1243,10 @@ mod tests {
             &roots,
             ProjectId::from_bytes([3; 16]),
             HostSessionId::parse("handoff-session").unwrap(),
+        )
+        .with_chair(
+            provenant_core::HostId::from_bytes([4; 16]),
+            provenant_core::ActorId::from_bytes([5; 16]),
         );
         let (clock, cancel) = (SystemClock::new(), CancelToken::new());
         for text in ["one\n", "two\n", "three\n", "four\n"] {
@@ -1201,6 +1262,40 @@ mod tests {
             .map(|revision| revision.revision)
             .collect();
         assert_eq!(kept, [3, 4], "[retention] session_revisions applies");
+        let repair = checkpoint_repair(
+            &Globals {
+                state_dir: Some(PathBuf::from("/custom state")),
+                project: Some(PathBuf::from("/selected project")),
+                ..Default::default()
+            },
+            Path::new("/selected project"),
+            &HostSessionId::parse("handoff-session").unwrap(),
+            Some(provenant_records::Harness::Codex),
+        );
+        assert!(checkpoint_identity(&store, &repair).is_ok());
+        let other = checkpoint_store(
+            &roots,
+            ProjectId::from_bytes([3; 16]),
+            HostSessionId::parse("handoff-session").unwrap(),
+        )
+        .with_chair(
+            provenant_core::HostId::from_bytes([4; 16]),
+            provenant_core::ActorId::from_bytes([6; 16]),
+        );
+        let refusal = checkpoint_identity(&other, &repair).err().unwrap();
+        assert_eq!(refusal.code, "IDENTITY");
+        assert!(refusal.message.contains("provenant --state-dir '/custom state' --project '/selected project' workflow session save handoff-session --client codex --rebind --file <checkpoint.md>"));
+    }
+
+    #[test]
+    fn checkpoint_repair_without_a_client_requires_a_harness() {
+        let repair = checkpoint_repair(
+            &Globals::default(),
+            Path::new("/project"),
+            &HostSessionId::parse("chair").unwrap(),
+            None,
+        );
+        assert!(repair.contains("workflow session save chair --client HARNESS --rebind"));
     }
 
     #[test]

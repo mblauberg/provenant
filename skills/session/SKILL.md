@@ -34,6 +34,9 @@ Use the host session ID and the bounded save command:
 provenant workflow session save <session-id> --file <checkpoint.md>
 ```
 
+Without an explicit Fabric agent label, pass `--client HARNESS` on saves and
+handoffs to match your MCP inbox actor. Keep the same client for this session.
+
 Use the actual ID supplied by the host or its injected save command. Do not
 substitute a guessed ID, scan transcripts, or fall back to another session's
 file. PreCompact reports whether this checkpoint needs saving and saves the
@@ -52,7 +55,7 @@ answer by reusing a label. Inbox target transfer is not implemented: consume and
 acknowledge through the original chair identity, or leave delivery queued and
 report it during handoff. The [human inbox runbook](../../docs/runbooks/human-inbox.md)
 describes revision-safe chat answers and acknowledgement. Session saves do not
-yet create an inbox session index or structured chair summary.
+create structured chair summaries; they register explicit chair identities.
 
 Put durable decisions in their existing owner: a decision in its spec or ADR,
 a domain fact in its project documentation, and live work status in the run or

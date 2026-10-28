@@ -44,8 +44,10 @@ const PLACEMENT_LIMIT: u64 = 64 * 1024;
 const POLL: Duration = Duration::from_secs(2);
 
 pub(super) struct Task {
+    pub(super) build_heavy: bool,
     pub(super) title: Option<String>,
     pub(super) base: Option<String>,
+    pub(super) head: Option<String>,
     pub(super) prompt: String,
     pub(super) route: run::RequestedRoute,
     pub(super) account: Option<String>,
@@ -729,13 +731,15 @@ fn submitted_task(
     timeout_seconds: u64,
 ) -> SubmittedTask {
     SubmittedTask {
+        build_heavy: task.build_heavy,
         title: task.title,
         // A writer's base belongs to its new worktree request.
-        base: if new_worktree.is_none() {
+        base: if new_worktree.is_none() || task.head.is_some() {
             task.base
         } else {
             None
         },
+        head: task.head,
         account: task.account,
         access: if new_worktree.is_some() {
             AccessMode::WorktreeWrite
@@ -1565,8 +1569,10 @@ mod tests {
         };
         let task = submitted_task(
             Task {
+                build_heavy: true,
                 title: Some("Make the change".into()),
                 base: Some("main".into()),
+                head: None,
                 prompt: "write the change".into(),
                 route: route.clone(),
                 account: None,
@@ -1592,6 +1598,7 @@ mod tests {
             actual["tasks"][0],
             json!({
                 "access": "worktree_write",
+                "build_heavy": true,
                 "account": null,
                 "deliver": null,
                 "delivery_id": null,
@@ -1610,8 +1617,10 @@ mod tests {
     fn read_only_peer_forwards_the_context_ref_and_original_prompt() {
         let task = submitted_task(
             Task {
+                build_heavy: false,
                 title: None,
                 base: Some("main".into()),
+                head: None,
                 prompt: "review".into(),
                 route: run::RequestedRoute::Named {
                     name: "utility".into(),

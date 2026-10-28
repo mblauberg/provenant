@@ -538,6 +538,8 @@ impl PublicationReservation {
 /// Ephemeral launch input. Environment and prompt bytes travel only on a pipe.
 #[derive(Debug)]
 pub struct ProviderCommand {
+    /// Nice value inherited by the provider and its descendants.
+    pub priority: u8,
     /// Lease held continuously from provider preparation through completion.
     pub provider_lease: Option<LockGuard>,
     pub resolved_route: String,
@@ -912,6 +914,8 @@ pub enum SettlementEvidence {
 /// Bounded, immutable OS facts. No field certifies its own publication durability.
 #[derive(Clone, Debug, Serialize)]
 pub struct ProcessExit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
     pub schema_version: u64,
     pub scope: Scope,
     pub termination: Option<Termination>,
@@ -944,6 +948,7 @@ impl ProcessExit {
         warnings: Vec<String>,
     ) -> Self {
         Self {
+            priority: None,
             schema_version: 1,
             scope,
             termination: None,

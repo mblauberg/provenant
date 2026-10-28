@@ -272,6 +272,7 @@ struct GcData {
     report: provenant_confinement::cache::CacheGcReport,
     idle_days: u64,
     provider_state: provenant_run::ProviderStateGc,
+    chair_logs: crate::chair_log_retention::Report,
     worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
     alerts: Vec<String>,
     unobserved_projects: Vec<PathBuf>,
@@ -300,9 +301,10 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
     match gc(&command, globals, workers) {
         Ok(data) => {
             let human = gc_data_summary(&data);
-            let failed = !data.provider_state.errors.is_empty();
+            let failed =
+                !data.provider_state.errors.is_empty() || !data.chair_logs.errors.is_empty();
             let result = if failed {
-                gc_failure(&data, "provider-state retention incomplete", globals.json)
+                gc_failure(&data, "retention incomplete", globals.json)
             } else {
                 CommandResult::new("gc", Outcome::Ok, gc_result_data(&data, globals.json))
             };
@@ -324,6 +326,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 unobserved_projects,
                 skipped_transient,
                 provider_state: *provider_state,
+                chair_logs: Default::default(),
                 worktree_cleanup,
                 alerts,
                 notice: None,
@@ -384,6 +387,20 @@ fn gc_data_summary(data: &GcData) -> String {
             },
             data.provider_state.expired_events
         ));
+    }
+    if data.chair_logs.expired > 0 {
+        human.push_str(&format!(
+            "{} {} chair log entries\n",
+            if data.report.dry_run {
+                "would expire"
+            } else {
+                "expired"
+            },
+            data.chair_logs.expired
+        ));
+    }
+    for error in &data.chair_logs.errors {
+        human.push_str(&format!("{}: {}\n", error.path.display(), error.reason));
     }
     for error in &data.provider_state.errors {
         human.push_str(&format!("{}: {}\n", error.path.display(), error.reason));
@@ -1134,10 +1151,28 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             .iter()
             .all(|project| project.output.is_empty() && project.idle_output.is_empty()))
     .then(|| "pressure collection: no eligible data in scope".into());
+    // Full GC visits all session logs, including those belonging to projects
+    // that are no longer registered. Pressure GC stays within its short budget.
+    let chair_logs = if command.pressure {
+        Default::default()
+    } else {
+        crate::chair_log_retention::collect(
+            &roots.state,
+            provenant_workflow::log::Retention {
+                max_age_seconds: config.retention.chair_log_days * 86_400,
+                replay_horizon_seconds: config.retention.chair_log_replay_seconds(),
+                max_entries: config.retention.chair_log_entries,
+                max_bytes: config.retention.chair_log_bytes,
+            },
+            i64::try_from(now_ns / 1_000_000_000).map_err(|_| Error::Budget)?,
+            command.dry_run,
+        )
+    };
     Ok(GcData {
         report,
         idle_days: command.idle_days,
         provider_state,
+        chair_logs,
         unobserved_projects,
         skipped_transient,
         worktree_cleanup,

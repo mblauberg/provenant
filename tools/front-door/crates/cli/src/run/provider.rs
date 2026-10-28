@@ -144,7 +144,10 @@ fn prepare_with(
     let git_context = task
         .base
         .as_deref()
-        .map(|base| run::GitContext::capture(&git, &cwd, base))
+        .map(|base| match task.head.as_deref() {
+            Some(head) => run::GitContext::capture_at(&git, &cwd, base, head),
+            None => run::GitContext::capture(&git, &cwd, base),
+        })
         .transpose()
         .map_err(|error| error.to_string())?;
     let user = provenant_os::sys::account(provenant_os::sys::Account::Current)
@@ -628,9 +631,23 @@ fn prepare_with(
                 continue;
             }
         };
+        if !chair_index_protected(
+            roots.state.as_path(),
+            &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
+        ) {
+            return Err("write grants overlap the host chair index".into());
+        }
+        if let Some(head) = &task.head {
+            spec.env.push(("PROVENANT_LANE_HEAD".into(), head.into()));
+            if let Some(base) = &task.base {
+                spec.env.push(("PROVENANT_LANE_BASE".into(), base.into()));
+            }
+        }
         if let Some(gh) = publishing_gh.as_ref() {
+            let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
+                .map_err(|error| error.to_string())?;
             let publishing = spec
-                .configure_publishing(scratch, &git, gh, &home)
+                .configure_publishing(scratch, &git, gh, &home, &policy)
                 .map_err(|error| error.to_string());
             if let Err(error) = publishing {
                 reasons.push(skip(&label, SkipKind::Setup, error));
@@ -1540,6 +1557,61 @@ struct ConfinementRoots<'a> {
     prompt_file: Option<&'a Path>,
 }
 
+fn chair_index_protected(
+    state: &Path,
+    grants: &[provenant_confinement::permissions::WriteGrant],
+) -> bool {
+    let resolve = |path: &Path| {
+        provenant_core::PathResolver::resolve_existing_ancestor(
+            &provenant_os::fs::SystemPathResolver,
+            path,
+        )
+        .ok()
+    };
+    ["", "-wal", "-shm", "-journal"].iter().all(|suffix| {
+        let Some(path) = resolve(&state.join("fabric").join(format!("host.sqlite3{suffix}")))
+        else {
+            return false;
+        };
+        grants.iter().all(|grant| {
+            resolve(&grant.path).is_some_and(|root| match grant.scope {
+                PathScope::Exact => root != path && !(root.is_dir() && path.starts_with(root)),
+                PathScope::Subtree => !path.starts_with(root),
+            })
+        })
+    })
+}
+
+#[test]
+fn configured_grants_cannot_expose_the_chair_index() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::permissions::WriteGrant;
+    for path in [
+        "/state/fabric",
+        "/state/fabric/host.sqlite3",
+        "/state/fabric/host.sqlite3-wal",
+        "/state/fabric/host.sqlite3-shm",
+        "/state/fabric/host.sqlite3-journal",
+    ] {
+        let grant = WriteGrant {
+            source: run::WriteSource::WriteRoot,
+            path: path.into(),
+            scope: PathScope::Subtree,
+        };
+        assert!(!chair_index_protected(Path::new("/state"), &[grant]));
+    }
+    assert!(chair_index_protected(Path::new("/state"), &[]));
+    let temp = tempfile::tempdir()?;
+    let fabric = temp.path().join("fabric");
+    std::fs::create_dir(&fabric)?;
+    let grant = WriteGrant {
+        source: run::WriteSource::StateWrite,
+        path: fabric,
+        scope: PathScope::Exact,
+    };
+    assert!(!chair_index_protected(temp.path(), &[grant]));
+    Ok(())
+}
+
 /// Read access to the primary checkout's project scratch (`.provenant/scratch`, or
 /// `.agent-run`), where briefs and graph documents live. Git excludes it, so a
 /// writer's linked worktree does not hold it. Final-component links are refused;
@@ -2309,8 +2381,10 @@ mod tests {
         for entry in REGISTRY {
             let adapter = entry.adapter.id();
             let requested = run::TaskRequest {
+                build_heavy: false,
                 title: None,
                 base: None,
+                head: None,
                 base_ref: None,
                 task_id: provenant_core::TaskId::from_bytes([3; 16]),
                 profile: Default::default(),
@@ -2667,9 +2741,12 @@ mod tests {
                 .create(path)?;
         }
         let prompt = "é".repeat(75_000);
+        let review_oid = run::resolve_git_base(&git, &project, "HEAD")?;
         let task = run::TaskRequest {
+            build_heavy: false,
             title: None,
-            base: Some("HEAD".into()),
+            base: Some(review_oid.clone()),
+            head: Some(review_oid.clone()),
             base_ref: None,
             task_id: TaskId::from_bytes([3; 16]),
             profile: provenant_records::run::HarnessProfile {
@@ -2727,6 +2804,7 @@ mod tests {
                 run_id,
                 operation_id: paths.operation_id.clone(),
                 request: run::CanonicalRequest {
+                    chair: None,
                     fresh_continuation: None,
                     schema_version: 1,
                     tasks: vec![task.clone()],
@@ -2786,6 +2864,89 @@ mod tests {
             },
             None,
         )?;
+        assert!(
+            launch
+                .environment
+                .iter()
+                .any(|(key, value)| key == "PROVENANT_LANE_HEAD" && value == review_oid.as_str())
+        );
+        assert!(
+            launch
+                .environment
+                .iter()
+                .any(|(key, value)| key == "PROVENANT_LANE_BASE" && value == review_oid.as_str())
+        );
+        // Exercise the host project policy through preparation and the actual
+        // generated shim, with a fake gh so no GitHub access is needed.
+        std::fs::create_dir_all(home.join(".config/gh"))?;
+        let gh = assets.join("gh");
+        std::fs::write(&gh, b"#!/bin/sh\nprintf 'forwarded\\n'\n")?;
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700))?;
+        let policy_dir = state
+            .join("projects")
+            .join(binding.project_id().to_string());
+        std::fs::create_dir_all(&policy_dir)?;
+        std::fs::write(policy_dir.join("github.json"), r#"{"deny_labels":["ci"]}"#)?;
+        let publishing_paths = run::LaunchPaths {
+            attempt_id: paths.attempt_id,
+            operation_id: paths.operation_id.clone(),
+            task_index: paths.task_index,
+            lane_depth: paths.lane_depth,
+            run_id: paths.run_id,
+            deadline_unix_ms: paths.deadline_unix_ms,
+            scratch: attempt.join("publishing-scratch"),
+            provider_state: attempt.join("publishing-provider-state"),
+            temporary: attempt.join("publishing-tmp"),
+        };
+        for path in [
+            &publishing_paths.scratch,
+            &publishing_paths.provider_state,
+            &publishing_paths.temporary,
+        ] {
+            std::fs::DirBuilder::new().mode(0o700).create(path)?;
+        }
+        let mut publishing_task = task.clone();
+        publishing_task.profile.knobs.remove("lanes.publish");
+        let _publishing = prepare_with(
+            &registry,
+            &publishing_task,
+            "publishing policy fixture",
+            &publishing_paths,
+            None,
+            |name| {
+                Ok(if name == "gh" {
+                    gh.clone()
+                } else {
+                    executable.clone()
+                })
+            },
+            None,
+        )?;
+        let shim = publishing_paths.temporary.join("candidate-0/bin/gh");
+        let run_shim = |label: &str| {
+            use provenant_os::exec::{ExecOptions, Executor};
+            let argv = [
+                shim.as_os_str().to_owned(),
+                "pr".into(),
+                "create".into(),
+                "-l".into(),
+                label.into(),
+            ];
+            executor.execute(ExecOptions::new(
+                &argv,
+                &attempt,
+                std::time::Duration::from_secs(5),
+            ))
+        };
+        let denied = run_shim("ci")?;
+        assert_eq!(denied.termination, provenant_os::exec::Termination::Exit(1));
+        assert_eq!(denied.stderr.bytes, b"github.deny_labels\n");
+        let allowed = run_shim("docs")?;
+        assert_eq!(
+            allowed.termination,
+            provenant_os::exec::Termination::Exit(0)
+        );
+        assert_eq!(allowed.stdout.bytes, b"forwarded\n");
         // The preferred provider is updating, so preparation must select the
         // explicit fallback rather than just omit an unrelated busy adapter.
         let mut fallback_task = task.clone();
@@ -2836,6 +2997,42 @@ mod tests {
         assert_eq!(
             fallback_launch.route.model.as_deref(),
             Some("cursor/gpt-5.3-codex-low")
+        );
+        let mut review_task = task.clone();
+        review_task.writer = None;
+        let review_paths = run::LaunchPaths {
+            scratch: attempt.join("review-scratch"),
+            provider_state: attempt.join("review-provider-state"),
+            temporary: attempt.join("review-tmp"),
+            ..fallback_paths
+        };
+        for path in [
+            &review_paths.scratch,
+            &review_paths.provider_state,
+            &review_paths.temporary,
+        ] {
+            std::fs::DirBuilder::new().mode(0o700).create(path)?;
+        }
+        let review = prepare_with(
+            &registry,
+            &review_task,
+            "short review",
+            &review_paths,
+            None,
+            |_| Ok(executable.clone()),
+            None,
+        )?;
+        assert!(
+            review
+                .environment
+                .iter()
+                .any(|(key, value)| key == "PROVENANT_LANE_HEAD" && value == review_oid.as_str())
+        );
+        assert!(
+            review
+                .environment
+                .iter()
+                .any(|(key, value)| key == "PROVENANT_LANE_BASE" && value == review_oid.as_str())
         );
         let executed = executor.execute(ExecOptions::new(
             &launch.argv,

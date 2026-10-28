@@ -113,15 +113,51 @@ impl<'a> Service<'a> {
                 })
                 .transpose()?;
             let base_ref = task.base.clone();
-            let previous_base = previous.as_ref().and_then(|request| {
+            let prior = previous.as_ref().and_then(|request| {
                 request.tasks.iter().find(|prior| {
-                    base_ref.is_some()
-                        && prior.task_id == task.task_id
+                    prior.task_id == task.task_id
                         && prior.base_ref == base_ref
+                        && prior.head == task.head
                 })
             });
-            let base = if let Some(prior) = previous_base {
+            let git_cwd = writer.as_ref().map_or(cwd, |writer| &writer.worktree);
+            if prior.is_none()
+                && let Some(head) = &task.head
+            {
+                let validate = |sha: &str, label: &str| -> Result<()> {
+                    provenant_core::GitOid::parse(sha).map_err(|_| {
+                        input_error(
+                            ErrorKind::Invalid,
+                            format!("{label} must be a full Git SHA"),
+                        )
+                    })?;
+                    let git = provenant_os::git::git_executable()
+                        .ok_or_else(|| input_error(ErrorKind::Git, "Git unavailable"))?;
+                    let resolved = resolve_git_base(&git, git_cwd, sha).map_err(|_| {
+                        input_error(
+                            ErrorKind::Invalid,
+                            format!("invalid Git {label}: expected a resolvable commit SHA"),
+                        )
+                    })?;
+                    if resolved != sha {
+                        return Err(input_error(
+                            ErrorKind::Invalid,
+                            format!("{label} SHA must name a commit"),
+                        ));
+                    }
+                    Ok(())
+                };
+                validate(head, "head")?;
+                if let Some(base) = &task.base {
+                    validate(base, "base")?;
+                }
+            }
+            let base = if let Some(prior) = prior {
                 prior.base.clone()
+            } else if let Some(head) = task.head.as_deref().filter(|_| task.base.is_none()) {
+                let git = provenant_os::git::git_executable()
+                    .ok_or_else(|| input_error(ErrorKind::Git, "Git unavailable"))?;
+                Some(review_merge_base(&git, git_cwd, head)?)
             } else if input.parent_attempt.is_some() {
                 task.base
             } else {
@@ -130,11 +166,7 @@ impl<'a> Service<'a> {
                     .map(|base| {
                         let git = provenant_os::git::git_executable()
                             .ok_or_else(|| input_error(ErrorKind::Git, "Git unavailable"))?;
-                        resolve_git_base(
-                            &git,
-                            writer.as_ref().map_or(cwd, |writer| &writer.worktree),
-                            base,
-                        )
+                        resolve_git_base(&git, git_cwd, base)
                     })
                     .transpose()?
             };
@@ -160,12 +192,14 @@ impl<'a> Service<'a> {
             .map_err(|error| input_error(ErrorKind::Io, error.to_string()))?;
 
             requests.push(TaskRequest {
+                build_heavy: task.build_heavy,
                 title: task.title,
                 profile: task.profile,
                 task_id: task.task_id,
                 prompt_digest: CanonicalV1::file_digest(task.prompt.as_bytes()),
                 base_ref,
                 base,
+                head: task.head,
                 route: task.route,
                 account: task.account,
                 fallback: task.fallback,
@@ -186,6 +220,9 @@ impl<'a> Service<'a> {
             run_id: fresh(RunId::from_bytes)?,
             operation_id: input.operation_id,
             request: CanonicalRequest {
+                chair: previous
+                    .as_ref()
+                    .map_or(input.chair, |request| request.chair.clone()),
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: requests,
@@ -438,10 +475,12 @@ impl From<&RunError> for ErrorKind {
 
 /// Prepared transport-independent dispatch input.
 pub struct DispatchTask {
+    pub build_heavy: bool,
     pub title: Option<String>,
     pub task_id: provenant_core::TaskId,
     pub prompt: String,
     pub base: Option<String>,
+    pub head: Option<String>,
     pub route: RequestedRoute,
     pub account: Option<String>,
     pub fallback: Vec<RouteRecord>,
@@ -453,6 +492,7 @@ pub struct DispatchTask {
     pub access: LaneAccess,
 }
 pub struct DispatchRequest {
+    pub chair: Option<ChairBinding>,
     pub operation_id: OperationId,
     pub tasks: Vec<DispatchTask>,
     pub concurrency: u64,

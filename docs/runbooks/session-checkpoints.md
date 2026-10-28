@@ -8,6 +8,74 @@ and read it with `provenant workflow session show SESSION`. Each checkpoint is
 limited to 256 KiB. Session hooks and hand-off prompts can include a shorter
 excerpt.
 
+Chair session start and a successful session save show one disk warning when
+free space on the state, checkout or lane Cargo cache volume falls below twice
+the dispatch floor, `gc.free_floor`, capped at half that volume's capacity.
+The warning identifies the volume, gives its free space and threshold, and
+points to `provenant disk report` and `provenant gc`. It samples free space
+without scanning files; an unavailable observation is silently skipped. See
+the [disk runbook](disk.md) to inspect and reclaim space.
+
+Session saves, MCP callers, hooks and handoff use the same Fabric inbox actor:
+host plus `PROVENANT_AGENT_LABEL`, configured `fabric.agent_label`, the harness client,
+then configured `fabric.client_label` (default `agent`), in that order.
+Pass `--client claude` or `--client codex` to select the harness explicitly.
+Hook-generated save commands carry their installing harness's `--client`.
+Without it, `CODEX_THREAD_ID` identifies Codex; `CLAUDECODE=1`,
+`CLAUDE_CODE_SESSION_ID` or `CLAUDE_SESSION_ID` identifies Claude. If both
+families have markers, pass `--client`; no harness is inferred.
+Configuration directory variables are not active harness markers.
+Unlabelled Claude and Codex chairs on one host have different inbox actors.
+Lanes cannot save or register chairs (`IN_LANE`).
+
+Ordinary CLI Fabric and lane commands retain their configured actor and
+`identity.client` (default `agent`) regardless of harness markers.
+
+An old binding under `agent` or a changed label can return `IDENTITY`.
+Before retrying handoff, or to recover a save, run
+`provenant workflow session save SESSION --file FILE --client HARNESS --rebind`;
+the record keeps the last 8 previous host/actor bindings and change times.
+Longer histories are truncated to the newest 8 on read. Handoff recovery
+commands include `--client HARNESS` when no explicit client was supplied.
+Legacy single-hop audit records upgrade to a list on the next save.
+Corrupt discovery JSON returns `HISTORY`; unreadable discovery files return
+`IO`. Restore a readable
+discovery record from backup before retrying those errors.
+
+Discovery is advisory and scoped to the host's state directory. If publication
+fails after the checkpoint and revision manifest commit, the save succeeds with
+a warning. Repeat the save to repair discovery (repeat `--rebind` if used).
+Readers report stale discovery explicitly; reads never repair it.
+
+## Chair log
+
+Append a substantive update once using `provenant chair log append --session
+SESSION --file update.json --operation-id ID --issued-at ISSUED_AT --json`.
+Set `ISSUED_AT` to UTC Unix seconds when the operation is first created. The
+JSON has required `kind`, `markdown` and `channel` strings and optional `request_ids`,
+`attempt_ids`, `issue_ids`, `pr_ids` arrays and `correction_of` sequence.
+Use `-` as the file for standard input. A correction is a new entry referencing
+an earlier sequence. Keep the operation ID, issued time and identical input
+for retries. Within the replay horizon, a retry returns the original entry even
+after its payload is pruned; a different input with the same ID is refused.
+An append older than the replay horizon returns an explicit expired result;
+an issued time more than five minutes in the future is refused. Increasing the
+replay horizon does not restore operations whose receipts have been pruned.
+When the operation ID is omitted the CLI generates both an ID and an issued time for that invocation.
+Supply and persist both values for planned retries.
+
+Read with `provenant chair log list --session SESSION --json`. Pages default
+to 50 entries and accept `--limit` from 1 to 100. Continue with `--after` and
+the returned `next_cursor`; a byte limit may shorten a page. Entries are
+limited to 16 KiB. Log contents are not copied into demand telemetry.
+
+Each append applies the per-session age, count and size limits documented in
+[configuration](configuration.md#lane-cache-collection). Listing applies all
+three limits without changing storage, and full `gc` removes excess payloads
+even for idle sessions. Operation receipts are kept for the configured replay horizon,
+then pruned; aggregate appended/pruned counts survive. There is no lifetime
+operation limit.
+
 ## Earlier saves
 
 A save keeps the checkpoint it replaces as a numbered revision. Each revision

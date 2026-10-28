@@ -1,5 +1,45 @@
 mod support;
 use support::{Result, TestRig, code};
+
+#[test]
+fn terminal_status_sees_lanes_submitted_under_harness_markers() -> Result {
+    let mut rig = TestRig::new()?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
+    for (marker, value) in [("CLAUDECODE", "1"), ("CODEX_THREAD_ID", "chair-fixture")] {
+        rig.env.push((marker.into(), value.into()));
+        let out = rig.execute(
+            std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &[
+                "run",
+                "--prompt-stdin",
+                "--model",
+                "codex/id",
+                "--wait",
+                "1s",
+                "--json",
+            ],
+            Some(b"fixture"),
+        )?;
+        assert_eq!(code(&out), 1);
+        let submitted: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+        let attempt = &submitted["data"]["lanes"][0]["attempt_id"];
+        assert!(attempt.is_string(), "{submitted}");
+        rig.env.retain(|(key, _)| key != marker);
+        let out = rig.command(&["status", "--json"])?;
+        assert_eq!(code(&out), 0);
+        let status: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert_eq!(status["data"]["lanes"][0]["attempt_id"], *attempt);
+        rig.env.push((marker.into(), value.into()));
+        let out = rig.command(&["fabric", "identity", "--json"])?;
+        assert_eq!(code(&out), 0);
+        let identity: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert_eq!(identity["data"]["client"], "agent");
+        assert_eq!(identity["data"]["inbox"]["agent"], "agent");
+        rig.env.retain(|(key, _)| key != marker);
+    }
+    Ok(())
+}
+
 #[test]
 fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     let mut rig = TestRig::new()?;

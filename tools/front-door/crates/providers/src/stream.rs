@@ -26,6 +26,9 @@ pub enum ProviderEvent {
     ModelUnavailable {
         message: String,
     },
+    ModelOverloaded {
+        message: String,
+    },
     AuthRequired,
     Denied {
         action: String,
@@ -228,7 +231,8 @@ impl StreamState {
                 ProviderEvent::Refusal
                 | ProviderEvent::QuotaLimited { .. }
                 | ProviderEvent::RateLimited { .. }
-                | ProviderEvent::ModelUnavailable { .. } => self.refusal = true,
+                | ProviderEvent::ModelUnavailable { .. }
+                | ProviderEvent::ModelOverloaded { .. } => self.refusal = true,
                 ProviderEvent::AuthRequired => self.auth_required = true,
                 _ => {}
             }

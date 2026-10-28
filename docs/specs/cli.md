@@ -10,6 +10,35 @@ define the envelope, exit codes and wait budgets. The machine-readable help
 catalogue owns command syntax; the generated [CLI reference](../reference/cli.md)
 lists every leaf, flag and bound. Paths are relative to `tools/front-door/`.
 
+## Local console catalogue
+
+`console projects` lists registered project IDs and their canonical Git common
+directories. Linked worktrees share a binding. `console sessions [SESSION]`
+lists only explicitly registered chairs, with the discovery record and its
+checkpoint consistency. Summary is null with `summary_status: unavailable`;
+provider, lifecycle and lane facts are not inferred. Legacy checkpoints without
+discovery remain readable through `workflow session show` and are not chairs
+inferred by the catalogue. Both commands cover local state only. `--project`
+selects an existing binding by checkout path; without it all registered local
+projects are included. Reads create no state or identity and do not repair
+stale discovery. The registry is limited to 16,384 entries (excluding its
+lock); an invalid project entry name fails the whole catalogue. Valid
+in-progress binding stages are skipped.
+
+Session pages default to 50 rows and cap at 100. The cursor binds the selected
+project, session filter, page size and observed session records; an invalid or
+changed snapshot requires restarting without the cursor. A scan is limited to
+16,384 directory entries across projects, including invalid or unregistered
+names. Exhaustion conservatively sets `scan_truncated` and `truncated`; it does
+not provide a cursor beyond the scanned subset. Directory iteration order is not
+guaranteed, so a repeated truncated scan can invalidate its cursor. An oversized
+result over 1 MiB is refused without publishing an artefact. Unreadable
+owner records return an error rather than implying complete coverage. Directory
+paths are tagged as UTF-8 or hex-encoded native bytes.
+
+- Test: `tests/catalogue_read_only.rs::catalogue_read_only`
+- Owner: `crates/cli/src/console.rs`, `src/console.rs`
+
 ## Parsing
 
 ### Pure entry points, one spelling

@@ -198,7 +198,7 @@ pub enum PermissionError {
     )]
     HardLinkedWritableFile(PathBuf),
     #[error(
-        "hard-link write denials exceed the {bound} limit ({limit}) in {directory:?}; delete or move disposable build/dependency output from this directory (for Rust, set CARGO_TARGET_DIR outside the worktree), then retry"
+        "hard-link write denials exceed the {bound} limit ({limit}) in {directory:?}; delete or move disposable build/dependency output from this directory, then retry; Rust lanes should use Fabric's Cargo environment"
     )]
     HardLinkDenyBound {
         directory: PathBuf,
@@ -2040,6 +2040,12 @@ fn render_profile(
     }
 
     if let Some(read_only) = &plan.read_only {
+        // The attempt object store is writable, but must not redirect writes
+        // through a lane-planted symlink into the common object store.
+        source.push_str(&format!(
+            "(deny file-write-create (require-all (vnode-type SYMLINK) (subpath \"{}\")))\n",
+            sbpl_path(&plan.scratch.path.join("git-objects"))?
+        ));
         for grant in &read_only.writes {
             for operation in ["file-read*", "file-write*"] {
                 push_rule(&mut source, "allow", operation, &grant.path, grant.scope)?;
@@ -2754,7 +2760,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("CARGO_TARGET_DIR outside the worktree")
+                .contains("Rust lanes should use Fabric's Cargo environment")
         );
         Ok(())
     }
@@ -2820,7 +2826,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("CARGO_TARGET_DIR outside the worktree")
+                .contains("Rust lanes should use Fabric's Cargo environment")
         );
         Ok(())
     }
@@ -4501,7 +4507,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("CARGO_TARGET_DIR outside the worktree")
+                .contains("Rust lanes should use Fabric's Cargo environment")
         );
         for index in 0..MAX_HARD_LINK_DENIES {
             std::fs::remove_file(overflow.join(index.to_string()))?;

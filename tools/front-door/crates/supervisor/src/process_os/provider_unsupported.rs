@@ -48,6 +48,8 @@ pub(crate) struct AdoptedCleanup {
 }
 
 pub(crate) struct ProviderGroup {
+    pub(crate) priority: Option<i32>,
+    pub(crate) priority_error: Option<i32>,
     pub(crate) stdin: Option<ChildStdin>,
     pub(crate) stdout: Option<ChildStdout>,
     pub(crate) stderr: Option<ChildStderr>,
@@ -59,6 +61,7 @@ impl ProviderGroup {
         _spec: provenant_os::sys::raw_exec::SpawnSpec<'_>,
         _lease: &provenant_os::fs::LockGuard,
         _boot: &str,
+        _priority: u8,
     ) -> io::Result<Self> {
         Err(unsupported())
     }
@@ -178,6 +181,7 @@ mod tests {
             },
             &lease,
             "boot",
+            0,
         )
         .err()
         .ok_or_else(|| io::Error::other("provider spawned"))?;

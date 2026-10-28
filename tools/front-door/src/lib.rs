@@ -7,11 +7,13 @@ mod chair;
 mod checks;
 #[cfg(test)]
 mod compose_tests;
+mod console;
 mod disk;
 mod disk_guard;
 mod fabric;
 mod gc_agent;
 
+mod chair_log_retention;
 mod gc_support;
 mod handoff;
 mod hook_state;
@@ -176,7 +178,15 @@ fn run_edge(
     globals: &provenant_cli::Globals,
     action: impl FnOnce(&provenant_cli::run::Edge<'_>) -> provenant_cli::run::Reply,
 ) -> u8 {
-    match roots::resolve(globals, Workspace::Project, Product::Required) {
+    run_edge_workspace(leaf, globals, Workspace::Project, action)
+}
+fn run_edge_workspace(
+    leaf: &str,
+    globals: &provenant_cli::Globals,
+    workspace: Workspace<'_>,
+    action: impl FnOnce(&provenant_cli::run::Edge<'_>) -> provenant_cli::run::Reply,
+) -> u8 {
+    match roots::resolve(globals, workspace, Product::Required) {
         Ok(resolved) => {
             let mut reply = action(&provenant_cli::run::Edge {
                 roots: &resolved.roots,
@@ -622,7 +632,12 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             if cmd.usage {
                 usage::run(&cmd, globals)
             } else {
-                run_edge(&inv.leaf, globals, |edge| {
+                let workspace = if cmd.claude_subagents.is_some() {
+                    Workspace::Directory
+                } else {
+                    Workspace::Project
+                };
+                run_edge_workspace(&inv.leaf, globals, workspace, |edge| {
                     provenant_cli::run::stats(cmd, edge)
                 })
             }
@@ -633,6 +648,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             })
         }
         Command::Chair(cmd) => chair::run(cmd, globals),
+        Command::Console(cmd) => console::run(cmd, globals),
         Command::Quota { command } => {
             let cmd = command.unwrap_or(provenant_cli::Quota::Show(provenant_cli::quota::Filter {
                 adapter: None,
@@ -679,13 +695,23 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         )) => handoff::run(*args, globals, process.workers()),
         Command::Workflow(cmd) => {
             match roots::resolve(globals, Workspace::Project, Product::Required) {
-                Ok(resolved) => provenant_cli::workflow::run(
-                    cmd,
-                    globals,
-                    &resolved.roots,
-                    &resolved.home,
-                    &resolved.project,
-                ),
+                Ok(resolved) => {
+                    let state = resolved.roots.state.as_path().to_owned();
+                    let home = resolved.home.clone();
+                    let project = resolved.project.clone();
+                    provenant_cli::workflow::run(
+                        cmd,
+                        globals,
+                        &resolved.roots,
+                        &resolved.home,
+                        &resolved.project,
+                        move || {
+                            bounded_session_warning(move || {
+                                disk_guard::session_warning(&state, &home, &project)
+                            })
+                        },
+                    )
+                }
                 Err(error) => fail(
                     &inv.leaf,
                     Outcome::Error,
@@ -704,6 +730,37 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Hook(hook) => hooks::run(hook, globals),
     }
 }
+
+/// Disk observations are best-effort and may stall on an unhealthy volume.
+fn bounded_session_warning(
+    observe: impl FnOnce() -> Option<String> + Send + 'static,
+) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("session-disk-warning".into())
+        .spawn(move || {
+            let _ = tx.send(observe());
+        })
+        .ok()?;
+    rx.recv_timeout(std::time::Duration::from_millis(250))
+        .ok()
+        .flatten()
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod session_warning_tests {
+    #[test]
+    fn stalled_observation_does_not_hold_save() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let warning = super::bounded_session_warning(move || {
+            let _ = rx.recv();
+            Some("late".to_owned())
+        });
+        assert_eq!(warning, None);
+        drop(tx);
+    }
+}
 /// Run one parsed command line and count it, returning the exit status.
 // CLI reporting measures real elapsed time for operational diagnostics.
 #[allow(clippy::disallowed_methods)]
@@ -717,7 +774,16 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     };
     let verb = verb.to_owned();
     // No product installation, Git probe or provider access is needed to count.
-    let usage_roots = roots::resolve(globals, Workspace::Directory, Product::Optional).ok();
+    // Read-only catalogue and checkpoint observation must not record demand
+    // telemetry, including on an otherwise empty state root.
+    let usage_roots = if matches!(
+        verb.as_str(),
+        "workflow session show" | "workflow session diff" | "console projects" | "console sessions"
+    ) {
+        None
+    } else {
+        roots::resolve(globals, Workspace::Directory, Product::Optional).ok()
+    };
     let usage_project = usage_roots.as_ref().and_then(usage::project_id);
     let status = match parsed {
         ParseOutcome::Invocation(inv) => run(inv, process),

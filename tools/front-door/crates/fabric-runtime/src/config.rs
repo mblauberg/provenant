@@ -14,6 +14,44 @@ pub struct FabricConfig {
     pub home_hosts: BTreeMap<String, HostId>,
     pub peers: BTreeMap<String, Peer>,
     pub limits: Limits,
+    #[serde(default)]
+    pub lanes: Lanes,
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Lanes {
+    pub priority: LanePriority,
+}
+
+/// Nice values applied by the host before entering lane confinement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct LanePriority {
+    pub writer: u8,
+    pub read_only: u8,
+    pub build_heavy: u8,
+}
+
+impl Default for LanePriority {
+    fn default() -> Self {
+        Self {
+            writer: 10,
+            read_only: 5,
+            build_heavy: 15,
+        }
+    }
+}
+
+impl LanePriority {
+    pub fn for_lane(&self, writer: bool, build_heavy: bool) -> u8 {
+        if build_heavy {
+            self.build_heavy
+        } else if writer {
+            self.writer
+        } else {
+            self.read_only
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -140,6 +178,15 @@ impl DomainConfig for FabricConfig {
         if l.graph_timeout_seconds == 0 || l.graph_timeout_seconds > 14_400 {
             reject("limits.graph_timeout_seconds".into());
         }
+        for (name, value) in [
+            ("writer", self.lanes.priority.writer),
+            ("read-only", self.lanes.priority.read_only),
+            ("build-heavy", self.lanes.priority.build_heavy),
+        ] {
+            if value > 19 {
+                reject(format!("lanes.priority.{name}"));
+            }
+        }
         errors
     }
 }
@@ -162,6 +209,35 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    #[test]
+    fn inbox_identity_uses_agent_then_harness_then_client_defaults() {
+        use crate::identity::{Address, inbox_address};
+        use std::ffi::OsStr;
+        let host = HostId::from_bytes([1; 16]);
+        let mut config = config();
+        config.agent_label = "configured-chair".into();
+        let address = |config: &FabricConfig, agent, client| {
+            inbox_address(host, config, agent, client).unwrap()
+        };
+        assert_eq!(
+            address(&config, Some(OsStr::new("explicit-chair")), Some("codex")),
+            Address::new(host, "explicit-chair").unwrap()
+        );
+        assert_eq!(
+            address(&config, Some(OsStr::new("")), Some("codex")),
+            Address::new(host, "configured-chair").unwrap()
+        );
+        config.agent_label.clear();
+        assert_eq!(
+            address(&config, None, Some("codex")),
+            Address::new(host, "codex").unwrap()
+        );
+        assert_eq!(
+            address(&config, None, None),
+            Address::new(host, "agent").unwrap()
+        );
+    }
+
     fn config() -> FabricConfig {
         let host = HostId::from_bytes([1; 16]);
         FabricConfig {
@@ -178,6 +254,7 @@ mod tests {
                 },
             )]),
             ssh_executable: Some(PathBuf::from("/opt/homebrew/bin/ssh")),
+            lanes: Lanes::default(),
             limits: Limits {
                 body_bytes: 65536,
                 input_frame_bytes: 1048576,
@@ -192,6 +269,38 @@ mod tests {
                 bundle_bytes: 67108864,
             },
         }
+    }
+
+    #[test]
+    fn lane_priority_defaults_and_bounds() {
+        let mut config = config();
+        assert_eq!(config.lanes.priority.for_lane(true, false), 10);
+        assert_eq!(config.lanes.priority.for_lane(false, false), 5);
+        assert_eq!(config.lanes.priority.for_lane(true, true), 15);
+        assert_eq!(config.lanes.priority.for_lane(false, true), 15);
+        let mut value = serde_json::to_value(&config).unwrap();
+        value.as_object_mut().unwrap().remove("lanes");
+        assert_eq!(
+            serde_json::from_value::<FabricConfig>(value)
+                .unwrap()
+                .lanes
+                .priority,
+            LanePriority {
+                writer: 10,
+                read_only: 5,
+                build_heavy: 15
+            }
+        );
+        config.lanes.priority.writer = 20;
+        assert!(
+            config
+                .validate()
+                .iter()
+                .any(|e| e.field == "lanes.priority.writer")
+        );
+        config.lanes.priority.writer = 0;
+        config.lanes.priority.read_only = 19;
+        assert!(config.validate().is_empty());
     }
 
     #[test]

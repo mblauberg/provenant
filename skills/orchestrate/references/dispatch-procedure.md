@@ -198,6 +198,12 @@ push|reconcile`. A terminal without MCP cancels with `provenant cancel ATTEMPT`.
   checkout separately for uncommitted edits. They are removed at settlement, so
   put review evidence in the final answer. Peer writers (`--host` with
   `--branch`) get no context files.
+- For a review of a chair-verified commit, pass `--head SHA` and optionally
+  `--base SHA` to dispatch. Both must be full commit SHAs available on the
+  executing host. Without a base, the host records the merge base with
+  `origin/HEAD`; supply a base if that default branch is unavailable. The host
+  injects the resolved range into the brief and exports `PROVENANT_LANE_BASE`
+  and `PROVENANT_LANE_HEAD`. The lane does not need to fetch.
 - A chair running lanes across many wakes follows
   [chair-loop.md](chair-loop.md), including its reviewer git-verb denylist and
   decision council.
@@ -229,17 +235,17 @@ these task-specific fields inline in the Fabric task `prompt`:
 
 ```text
 Goal: <bounded task>
-Scope/paths: <target, base/head and allowed paths>
+Scope/paths: <target and allowed paths; for review, $PROVENANT_LANE_BASE..$PROVENANT_LANE_HEAD>
 Constraints: <authority, isolation, governing skill and stop condition>
 Output: <shape, length and durable evidence location>
 Verification: <checks; for review, the rubric path or full rubric>
 Review provenance: the chair records `provenant output RUN/TASK/ATTEMPT --part receipt` after settlement.
-Cargo (writer lanes): batch targeted tests into one invocation
-(`cargo test -p a -p b FILTER`) and never run two cargo commands on the same
-target directory at once. Run `cargo check` and `cargo clippy` with both
-`CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` set to
-`$PROVENANT_LANE_CARGO_LINT_TARGET`, so they can run beside a test build. Keep incremental builds on: the sandbox's hard-link
-warning only means rustc copies instead.
+Cargo (Fabric lanes): Fabric supplies lane-private CARGO_TARGET_DIR,
+CARGO_BUILD_BUILD_DIR and CARGO_HOME. Do not override them. For lint-only
+runs, writer lanes may set both build directories to
+$PROVENANT_LANE_CARGO_LINT_TARGET to run beside a test build. Batch targeted
+tests into one invocation and keep incremental builds on. The sandbox's
+hard-link warning only means rustc copies instead.
 Agent-filed issues: when filing is authorised, apply source:agent and end the
 issue body with Filed-by: <PROVENANT_AGENT_LABEL> <run> using the actual label
 and originating run ID. This applies to any issue an agent files.

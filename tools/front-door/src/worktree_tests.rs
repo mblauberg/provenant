@@ -1085,11 +1085,14 @@ pub(super) fn writer_run(
         run_id: provenant_core::RunId::from_bytes([seed.wrapping_add(2); 16]),
         operation_id: provenant_core::OperationId::parse(operation)?,
         request: provenant_run::CanonicalRequest {
+            chair: None,
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![provenant_run::TaskRequest {
+                build_heavy: false,
                 title: None,
                 base: None,
+                head: None,
                 base_ref: None,
                 account: None,
                 profile: provenant_run::HarnessProfile::default(),
@@ -2782,14 +2785,27 @@ fn lane_prepare_isolates_nested_state() -> Result {
         let selected_git =
             fs::canonicalize(provenant_os::git::git_executable().ok_or("host Git")?)?;
         let scratch_git = confinement.plan.permissions().scratch.path.join("bin/git");
+        let needs_wrapper = !writer || adapter == "claude" || publishing;
+        let git_entry = fs::symlink_metadata(&scratch_git)?.file_type();
+        if needs_wrapper {
+            // Read-only lanes scope their object store through a regular
+            // wrapper too, including Codex without publishing.
+            assert!(
+                git_entry.is_file(),
+                "Git wrapper for {adapter} writer={writer} publishing={publishing}"
+            );
+        } else {
+            assert!(
+                git_entry.is_symlink(),
+                "Git symlink for {adapter} writer={writer} publishing={publishing}"
+            );
+            assert_eq!(fs::read_link(&scratch_git)?, selected_git);
+        }
         if adapter == "claude" || publishing {
             // Claude's env scrub and publishing both need a Git wrapper.
             let wrapper = fs::read_to_string(&scratch_git)?;
             assert!(wrapper.contains("GIT_CONFIG_GLOBAL=/dev/null"));
             assert!(wrapper.contains(&format!("exec '{}'", selected_git.display())));
-            assert!(!fs::symlink_metadata(&scratch_git)?.file_type().is_symlink());
-        } else {
-            assert_eq!(fs::read_link(&scratch_git)?, selected_git);
         }
         let scratch = &confinement.plan.permissions().scratch.path;
         assert_eq!(scratch.join("publishing.gitconfig").exists(), publishing);

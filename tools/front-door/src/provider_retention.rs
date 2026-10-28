@@ -253,6 +253,20 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
         events_before.len() > 1,
         "child attempt records multiple events"
     );
+    let index_call = provenant_fabric_runtime::chairs::Request {
+        clock: &clock,
+        budget: WaitBudget::cli(clock.mono_now(), 30)?,
+        cancel: &cancel,
+        backoff: &provenant_fabric_store::ThreadWait,
+    };
+    let index = provenant_fabric_runtime::chairs::ChairIndex::open(&roots.state, &index_call)?;
+    index.submit(
+        context.project_id,
+        run,
+        &store.request(run, &call)?,
+        &index_call,
+    )?;
+    let association = index.read(context.project_id, run, &index_call)?;
     drop(store);
     let temporary = candidate
         .parent()
@@ -284,6 +298,16 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
     assert!(!temporary.exists());
     assert!(!candidate.exists());
     let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("child store")?;
+    assert_eq!(
+        reader.run(run, &call)?.run_id,
+        run,
+        "payload GC retains run metadata"
+    );
+    assert_eq!(
+        index.read(context.project_id, run, &index_call)?,
+        association,
+        "retained runs keep chair associations"
+    );
     let retained = reader.events(0, 64, Some(attempt), &call)?;
     assert_eq!(retained.len(), 1, "child store keeps newest event");
     assert_eq!(

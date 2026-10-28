@@ -502,6 +502,45 @@ fn existing_lock_observation_through_directory_never_creates_a_lock() {
 }
 
 #[test]
+fn existing_read_lock_waits_for_writer_and_respects_timeout() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    let name = OsStr::new("writer.lock");
+    let clock = FixedClock(provenant_core::MonoTime::from_micros(0));
+    let cancel = CancelToken::new();
+    assert!(
+        dir.lock_existing(name, LockMode::Shared, one_second_budget(), &cancel, &clock)
+            .unwrap_err()
+            .is_not_found()
+    );
+    assert!(!temp.path().join(name).exists());
+    let writer = dir.try_lock(name, LockMode::Exclusive).unwrap();
+    assert!(matches!(
+        dir.lock_existing(name, LockMode::Shared, one_second_budget(), &cancel,
+            &FixedClock(provenant_core::MonoTime::from_micros(1_000_000))),
+        Err(FsError::LockTimeout { timeout, .. }) if timeout.is_zero()
+    ));
+    std::thread::scope(|scope| {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (dir, cancel, clock) = (&dir, &cancel, &clock);
+        let waiter = scope.spawn(move || {
+            ready_tx.send(()).unwrap();
+            dir.lock_existing(name, LockMode::Shared, one_second_budget(), cancel, clock)
+                .unwrap()
+        });
+        ready_rx.recv().unwrap();
+        os::wait(Duration::from_millis(30));
+        drop(writer);
+        drop(waiter.join().unwrap());
+    });
+    cancel.cancel();
+    assert!(matches!(
+        dir.lock_existing(name, LockMode::Shared, one_second_budget(), &cancel, &clock),
+        Err(FsError::Cancelled { .. })
+    ));
+}
+
+#[test]
 fn owner_lock_is_nonblocking_bounded_and_releases_only_when_its_guard_drops() {
     let temp = tempfile::tempdir().unwrap();
     let dir = Directory::open_anchor(temp.path()).unwrap();

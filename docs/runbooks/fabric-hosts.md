@@ -43,13 +43,15 @@ as a graph file in the project:
   "nodes": [
     {
       "id": "write",
+      "title": "Implement change",
       "prompt": "Implement the approved change and commit it.",
       "access": "worktree_write",
       "worktree": ".worktrees/feature",
-      "route": {"adapter": "codex", "model": "codex/gpt-6.1-sol"}
+      "route": {"alias": "senior"}
     },
     {
       "id": "review",
+      "title": "Review change",
       "prompt": "Review the change in .worktrees/feature.",
       "access": "read_only",
       "depends_on": ["write"],
@@ -64,8 +66,14 @@ as a graph file in the project:
 }
 ```
 
-Register `pro` with `provenant accounts register` before running the graph.
-Both `route` and each entry in `routes` accept `account`.
+Configure the `senior` routing pool and register `pro` with `provenant accounts
+register` before running the graph. An alias-only route resolves its adapter
+through the same routing configuration as `dispatch --route`. Explicit
+adapter and model routes also work. A route must include an adapter or alias;
+`route` selects one route, while `routes` provides an ordered fallback list
+that can mix both forms. Both forms accept `account`. A node's optional `title`
+appears in `lanes` and graph status; it defaults to the node ID and must pass
+the task title validation, including the prohibition on control characters.
 
 ```sh
 provenant fabric graph run --document graph.json
@@ -193,13 +201,13 @@ bounds frames to 1 MiB and refuses identity or version mismatches.
 Tasks and messages have no `legacy` or `legacy_output_path` members. A store
 or peer reply that still carries one, even as null, is refused.
 
-Every request and reply envelope carries integer `protocol`, currently 5.
+Every request and reply envelope carries integer `protocol`, currently 6.
 Ingress refuses a different protocol before decoding or executing the action,
 replying with `peer_version` and its own version. The client checks the reply
 protocol; a missing field or the released peer's decode refusal means protocol
 1. Each call uses one SSH connection. A difference fails the call with
 `peer_version` (`PEER_VERSION` on the CLI), for example: "peer workshop speaks
-protocol 1, this host speaks 5; upgrade both". Peers must be upgraded together.
+protocol 1, this host speaks 6; upgrade both". Peers must be upgraded together.
 There is no capability negotiation or support for older peers. The framing
 envelope's `version` remains 1.
 
@@ -307,7 +315,14 @@ all its peer reads (one per host and per 100 lanes, plus the lookup of lanes
 that left the newest page). Each read is bounded by the time the earlier reads
 left, as well as by `limits.peer_seconds`, and no read after the first starts
 at or after the deadline; the poll then fails as a transient peer error, which
-the wait retries until its own budget ends. The time a read has left covers
+the wait retries until its own budget ends.
+Local run-store contention is also retried between polls until the wait's
+deadline. Each local store operation makes an immediate attempt without
+waiting on contention, so a successful poll still observes settlement;
+persistent contention ends the wait or watch as a timeout. Optional wait
+details in the final reply use the same nonblocking reads. If peer reads
+remain unavailable at the deadline, the last failure is reported.
+The time a peer read has left covers
 the whole SSH child, including its termination and reap, so a hung `ssh` that
 ignores `TERM` is killed by the deadline. Only the first read of `--wait 0`
 keeps a one-second minimum, with a further half second of termination and reap
@@ -479,10 +494,16 @@ release, archive the store and let Fabric create a fresh one:
    archive=~/fabric-store-archive-$(date +%Y%m%d)
    mkdir -m 700 "$archive"
    mv "$state"/fabric/fabric.sqlite3* "$archive"/
+   # Include the host-owned chair index when present.
+   for file in "$state"/fabric/host.sqlite3 "$state"/fabric/host.sqlite3-wal "$state"/fabric/host.sqlite3-shm "$state"/fabric/host.sqlite3-journal; do
+     if [ -e "$file" ]; then mv "$file" "$archive"/; fi
+   done
    ```
 
 4. Run the newer release. It starts with no tasks, mail, events, claims or peer
-   journal; create again any work you still need.
+   journal. The host chair association index also starts empty, so retained runs
+   display as unbound until an explicit root replay repairs their association;
+   create again any coordination work you still need.
 
 On a project's home host, the archive removes that project's tasks and mail for
 every peer, and their in-flight operations against it report `launch_unknown`.

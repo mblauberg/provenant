@@ -17,6 +17,28 @@ again. `provenant status` shows active lanes and the twenty newest settled
 lanes, newest first. `--json` returns full records for the same selection.
 Use `--all` with `--limit N` and the returned `--cursor N` to page all history.
 
+On macOS, the host selects a nice value for the lane, and the guardian applies
+it to the provider process before confinement. Its descendants inherit that
+value.
+Configure the lane classes in the selected state directory's `config.toml`:
+
+```toml
+[domains.fabric.lanes.priority]
+writer = 10
+read-only = 5
+build-heavy = 15
+```
+
+Values range from 0 to 19, with higher values yielding more CPU time to other
+work. These are the defaults. A worktree-write lane uses `writer`; other lanes
+use `read-only`. Set `--build-heavy` to use `build-heavy` for either mode.
+Fabric tasks and manifests accept `"build_heavy": true`. `lanes --json` reports
+the applied value as `priority`, and `requested_priority` when it differs. The
+value is null before it is known and for older records without this evidence.
+If the guardian already has a higher nice value, the provider inherits that
+lower scheduling priority. If changing priority fails, the provider still
+launches at its inherited priority and the reason is recorded as a warning.
+
 The receipt names the worktree. `--worktree PATH` uses an existing checkout
 without taking over its lifecycle. A missing branch name creates an owned
 checkout; for an absolute path or a path below `.worktrees/`, use
@@ -43,6 +65,32 @@ head. Publishing defaults on; disable it with
 configuration `[knobs] "lanes.publish" = false`. Read-only lanes retain their
 existing open-network gh read access.
 
+For a project, the host can configure an advisory GitHub CLI deny list in
+`projects/<ProjectId>/github.json` under its state root. The project ID is
+host-local. Find it in the `projects` array of `provenant quota usage --json`,
+matched to the repository's Git common directory. For example:
+
+```json
+{
+  "deny_verbs": ["release create", "workflow run"],
+  "deny_labels": ["ci"]
+}
+```
+
+Both lists default to empty. A denied verb matches a command token prefix. For
+pull request and issue creation and editing, label checks recognise long label
+flags with separate or `=` values, including comma-separated lists. For
+creation, they also recognise `-l` with separate, `=` or attached values. A
+policy label and each value in a comma-separated list are trimmed; empty policy
+labels are ignored. A refusal exits 1 and prints `github.deny_verbs` or
+`github.deny_labels` on standard error; other commands continue to the host's
+GitHub CLI. The shim and policy are active only when publishing is available,
+so disabling publishing or running without the host's gh configuration leaves
+the policy inactive. This is an advisory guard against accidental use, not a
+security boundary: a lane can invoke the real `gh` directly or use another
+GitHub API client. Use GitHub permissions and repository rules to enforce
+restrictions.
+
 After a settled writer without delivery, run:
 
 ```sh
@@ -51,6 +99,16 @@ provenant lane deliver ATTEMPT --deliver pr
 
 This refuses a dirty checkout, a changed head or live custody. Repeating a
 successful delivery returns its receipt, including after checkout cleanup.
+When a writer settles as `review_required`, the chair can review its protected
+changes and then deliver the reviewed head with:
+
+```sh
+provenant lane deliver --accept-review ATTEMPT
+```
+
+The delivery receipt records who accepted the review and the protected paths.
+Lanes and peers cannot accept review. The same clean checkout and exact head
+checks apply.
 PR bodies contain bounded commit messages and run and attempt IDs. Default
 and primary checkout branches require PR delivery. Owned checkout cleanup
 requires a succeeded lane and successful requested delivery, with the recorded
@@ -64,7 +122,9 @@ worktrees retain their existing GC policy.
 `provenant resume ATTEMPT --prompt-file followup.md` generates and prints an
 operation ID; supply `--operation-id ID` for a planned retry. It pins the prior
 attempt's applied provider, model and account, including when dispatch selected
-a named route pool. Targets accept unique hex prefixes of at least eight
+a named route pool. A model capacity failure appears as `model_unavailable`
+with its reason in lanes; resume can continue its provider session when supported.
+Targets accept unique hex prefixes of at least eight
 characters and `RUN/ATTEMPT`; an ambiguous prefix lists candidates. Resume
 starts fresh by default when continuation state is unavailable, preserving authority with
 original context and the previous result attached. Ownership must match the
@@ -76,6 +136,9 @@ A missing or reassigned checkout uses a fresh owned worktree when fallback is
 allowed. Its receipt records `continuation: fresh`. Add `--no-fallback` to require
 provider resume.
 Custody, policy or launch refusals still need their named cause addressed.
+An accepted continuation that is rejected during launch remains listed by
+`provenant lanes --all`, with the reason on its attempt. Its result is empty
+when no provider ran; `provenant output ATTEMPT` can still address it.
 `provenant cancel ATTEMPT` generates and prints its operation ID. Cancel and
 `provenant reconcile --id RUN` infer project scope from the run record.
 

@@ -2,6 +2,376 @@ use super::*;
 use provenant_records::ResolvedRoute;
 use serde::Deserialize;
 
+#[test]
+fn prepared_git_objects_are_repository_scoped_for_every_adapter() -> Result<(), ProviderError> {
+    use provenant_confinement::plan::ReadOnlyGrants;
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    let prompt = Prompt::new("fixture".into());
+    let token = fixture_token();
+    for entry in REGISTRY {
+        let id = entry.adapter.id();
+        let mut route = route(id, "fixture-model");
+        route.account_key = None;
+        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+            let base = fixture_access_plan(
+                access,
+                provenant_records::AdapterSpec::get(id).and_then(|spec| spec.authentication),
+                false,
+            );
+            let mut permissions = base.permissions().clone();
+            if access == Access::ReadOnly {
+                permissions.read_only =
+                    Some(ReadOnlyGrants::for_test("/fixture/repo".into(), vec![]));
+            }
+            let plan = ConfinedPlan::new(PlanRequest {
+                scope: base.scope(),
+                permissions,
+                codex: CodexPolicy::Clean,
+                extensions: ExtensionPolicy::Deny,
+                agy_state: None,
+            })
+            .unwrap();
+            let spec = entry.adapter.prepare(fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                (id == "claude").then_some(&token),
+            ))?;
+            // A lane-global override would replace every other repository's store.
+            assert!(
+                !spec
+                    .env
+                    .iter()
+                    .any(|(key, _)| key == "GIT_OBJECT_DIRECTORY"),
+                "{id} {access:?}"
+            );
+            let object_setup: Vec<_> = spec
+                .setup
+                .iter()
+                .filter(|step| match step {
+                    SetupStep::CreateDir(path) | SetupStep::WriteFile { path, .. } => {
+                        path.starts_with("/fixture/scratch/git-objects")
+                    }
+                    _ => false,
+                })
+                .collect();
+            if access == Access::ReadOnly {
+                assert_eq!(
+                    object_setup,
+                    vec![
+                        &SetupStep::CreateDir("/fixture/scratch/git-objects/info".into()),
+                        &SetupStep::WriteFile {
+                            path: "/fixture/scratch/git-objects/info/alternates".into(),
+                            bytes: b"\"/fixture/repo/.git/objects\"\n".to_vec(),
+                        },
+                    ],
+                    "{id}"
+                );
+                assert!(spec.setup.iter().any(|step| matches!(step,
+                    SetupStep::WriteExecutable { path, .. } if path == Path::new("/fixture/scratch/bin/git")
+                )), "{id} must route shell Git through the scoped wrapper");
+                let path = &spec.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
+                assert_eq!(
+                    std::env::split_paths(path).next().unwrap(),
+                    Path::new("/fixture/scratch/bin")
+                );
+            } else {
+                assert!(object_setup.is_empty(), "{id}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn prepared_git_accepts_non_utf8_scratch() -> Result<(), ProviderError> {
+    use provenant_confinement::plan::ReadOnlyGrants;
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    use std::os::unix::ffi::OsStringExt;
+    let base = read_only_plan("/fixture", None);
+    let mut permissions = base.permissions().clone();
+    permissions.scratch.path =
+        std::ffi::OsString::from_vec(b"/fixture/scratch-\xff".to_vec()).into();
+    permissions.read_only = Some(ReadOnlyGrants::for_test("/fixture/repo".into(), vec![]));
+    let plan = ConfinedPlan::new(PlanRequest {
+        scope: base.scope(),
+        permissions,
+        codex: CodexPolicy::Clean,
+        extensions: ExtensionPolicy::Deny,
+        agy_state: None,
+    })
+    .unwrap();
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture".into());
+    let token = fixture_token();
+    claude::Claude.prepare(fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        Some(&token),
+    ))?;
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn prepared_git_reads_linked_and_other_repositories() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::permissions::{PathGrant, PathScope};
+    use provenant_confinement::plan::ReadOnlyGrants;
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    for entry in REGISTRY {
+        let id = entry.adapter.id();
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let repo = root.join("repo café: '\"\\\nend");
+        let other = root.join("other");
+        let linked = root.join("linked");
+        let host_git = |cwd: &Path, args: &[&std::ffi::OsStr]| {
+            let output = Command::new("/usr/bin/git")
+                .current_dir(cwd)
+                .env_clear()
+                .env(
+                    "PATH",
+                    "/Library/Developer/CommandLineTools/usr/bin:/usr/bin:/bin",
+                )
+                .env("TMPDIR", &root)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .envs(std::env::var_os("DEVELOPER_DIR").map(|value| ("DEVELOPER_DIR", value)))
+                .args([
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.test",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{id}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        };
+        for dir in [&repo, &other] {
+            std::fs::create_dir(dir)?;
+            host_git(dir, &["init".as_ref(), "-q".as_ref()]);
+            host_git(
+                dir,
+                &[
+                    "commit".as_ref(),
+                    "--allow-empty".as_ref(),
+                    "-qm".as_ref(),
+                    dir.as_os_str(),
+                ],
+            );
+        }
+        host_git(
+            &repo,
+            &[
+                "-c".as_ref(),
+                "protocol.file.allow=always".as_ref(),
+                "submodule".as_ref(),
+                "add".as_ref(),
+                "-q".as_ref(),
+                other.as_os_str(),
+                "vendor/lib".as_ref(),
+            ],
+        );
+        host_git(
+            &repo,
+            &["commit".as_ref(), "-qam".as_ref(), "submodule".as_ref()],
+        );
+        host_git(
+            &repo,
+            &[
+                "worktree".as_ref(),
+                "add".as_ref(),
+                "-qb".as_ref(),
+                "linked".as_ref(),
+                linked.as_os_str(),
+            ],
+        );
+        let scratch = root.join("scratch");
+        let base = read_only_plan(
+            root.to_str().unwrap(),
+            provenant_records::AdapterSpec::get(id).and_then(|spec| spec.authentication),
+        );
+        let mut permissions = base.permissions().clone();
+        permissions.scratch.path = scratch.clone();
+        permissions.read_roots = [&linked, &other, &repo]
+            .into_iter()
+            .map(|path| PathGrant {
+                path: path.clone(),
+                scope: PathScope::Subtree,
+            })
+            .collect();
+        permissions.read_only = Some(ReadOnlyGrants::for_test(repo.clone(), vec![]));
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: base.scope(),
+            permissions,
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+        })?;
+        let mut route = route(id, "fixture-model");
+        route.account_key = None;
+        let prompt = Prompt::new("fixture".into());
+        let token = fixture_token();
+        let mut input = fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            &linked,
+            (id == "claude").then_some(&token),
+        );
+        let clt_git = Path::new("/Library/Developer/CommandLineTools/usr/bin/git");
+        let git = if clt_git.is_file() {
+            clt_git
+        } else {
+            Path::new("/usr/bin/git")
+        };
+        input.provenant.git = git;
+        let spec = entry.adapter.prepare(input)?;
+        for step in &spec.setup {
+            match step {
+                SetupStep::CreateDir(path)
+                    if path.starts_with(scratch.join("git-objects"))
+                        || path == &scratch.join("bin") =>
+                {
+                    std::fs::create_dir_all(path).unwrap()
+                }
+                SetupStep::WriteFile { path, bytes }
+                    if path.starts_with(scratch.join("git-objects")) =>
+                {
+                    std::fs::write(path, bytes).unwrap()
+                }
+                SetupStep::WriteExecutable { path, bytes } if path == &scratch.join("bin/git") => {
+                    std::fs::write(path, bytes).unwrap();
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+                }
+                _ => {}
+            }
+        }
+        let lane_git = |args: &[&std::ffi::OsStr]| {
+            let output = Command::new("/bin/sh")
+                .arg(scratch.join("bin/git"))
+                .current_dir(&linked)
+                .env_clear()
+                .envs(spec.env.iter().cloned())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{id}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                output.stderr.is_empty(),
+                "{id}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        };
+        let bound_head = host_git(&linked, &["rev-parse".as_ref(), "HEAD".as_ref()]);
+        assert_eq!(
+            lane_git(&["rev-parse".as_ref(), "HEAD".as_ref()]),
+            bound_head
+        );
+        assert_eq!(
+            lane_git(&["log".as_ref(), "-1".as_ref(), "--format=%H".as_ref()]),
+            bound_head
+        );
+        lane_git(&["cat-file".as_ref(), "-e".as_ref(), "HEAD^{commit}".as_ref()]);
+        let other_head = host_git(&other, &["rev-parse".as_ref(), "HEAD".as_ref()]);
+        let old_global = Command::new(git)
+            .current_dir(&other)
+            .env_clear()
+            .envs(spec.env.iter().cloned())
+            .env("GIT_OBJECT_DIRECTORY", scratch.join("git-objects"))
+            .args(["cat-file", "-e", "HEAD^{commit}"])
+            .output()?;
+        assert!(
+            !old_global.status.success(),
+            "fixture must reproduce the lane-global override defect"
+        );
+        // Real reads, not rev-parse alone, detect a missing object database.
+        for selectors in [
+            vec!["-C".into(), other.clone().into_os_string()],
+            vec!["--git-dir".into(), other.join(".git").into_os_string()],
+            vec![format!("--git-dir={}", other.join(".git").display()).into()],
+            vec![
+                "-C".into(),
+                root.clone().into_os_string(),
+                "-C".into(),
+                "other".into(),
+                "-c".into(),
+                "core.abbrev=40".into(),
+            ],
+        ] {
+            let args: Vec<_> = selectors
+                .iter()
+                .map(|arg: &std::ffi::OsString| arg.as_os_str())
+                .chain(["log".as_ref(), "-1".as_ref(), "--format=%H".as_ref()])
+                .collect();
+            assert_eq!(lane_git(&args), other_head, "{id}");
+        }
+        assert_eq!(
+            lane_git(&[
+                "-C".as_ref(),
+                repo.as_os_str(),
+                "-C".as_ref(),
+                "vendor/lib".as_ref(),
+                "log".as_ref(),
+                "-1".as_ref(),
+                "--format=%H".as_ref()
+            ]),
+            other_head
+        );
+        // Git itself exports linked-worktree selectors to shell aliases. Clear
+        // those while deliberately retaining any leaked object-dir override.
+        let alias = format!(
+            "alias.other=!unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE; git -C '{}' log -1 --format=%H",
+            other.display()
+        );
+        assert_eq!(
+            lane_git(&["-c".as_ref(), alias.as_ref(), "other".as_ref()]),
+            other_head
+        );
+        assert_eq!(
+            lane_git(&[
+                "-C".as_ref(),
+                repo.as_os_str(),
+                "submodule".as_ref(),
+                "foreach".as_ref(),
+                "--quiet".as_ref(),
+                "git log -1 --format=%H".as_ref()
+            ]),
+            other_head
+        );
+        let input = scratch.join("input");
+        std::fs::write(&input, "lane scratch object")?;
+        let oid = lane_git(&["hash-object".as_ref(), "-w".as_ref(), input.as_os_str()]);
+        let oid = std::str::from_utf8(&oid)?.trim();
+        let relative = PathBuf::from(&oid[..2]).join(&oid[2..]);
+        assert!(
+            scratch.join("git-objects").join(&relative).is_file(),
+            "{id}"
+        );
+        assert!(!repo.join(".git/objects").join(&relative).exists(), "{id}");
+    }
+    Ok(())
+}
+
 macro_rules! fixture {
     ($file:literal) => {
         include_str!(concat!(
@@ -111,6 +481,37 @@ fn recovered_transport_retry_succeeds_but_turn_failure_stays_failed() -> Result<
             fixture!("codex/success.jsonl")
         );
         assert_eq!(replay(&codex::Codex, &raw, EXIT)?.1.status(), expected);
+    }
+    Ok(())
+}
+#[test]
+fn codex_capacity_failure_is_typed_without_misclassifying_other_failures()
+-> Result<(), ProviderError> {
+    for raw in [
+        r#"{"type":"turn.failed","error":{"message":"Selected model is at capacity. Please try a different model.","codex_error_info":"server_overloaded"}}"#,
+        r#"{"type":"turn.failed","error":{"message":"Temporarily unavailable","codex_error_info":"server_overloaded"}}"#,
+    ] {
+        let (events, outcome) = replay(&codex::Codex, &format!("{raw}\n"), EXIT)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Refused);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::ModelOverloaded { .. }))
+        );
+    }
+    for raw in [
+        r#"{"type":"turn.failed","error":{"message":"upstream cache is at capacity"}}"#,
+        r#"{"type":"turn.failed","error":{"codex_error_info":"server_overloaded"}}"#,
+        r#"{"type":"turn.failed","error":{"codex_error_info":{"code":"server_overloaded"}}}"#,
+        r#"{"type":"turn.failed","error":"unexpected"}"#,
+    ] {
+        let (events, outcome) = replay(&codex::Codex, &format!("{raw}\n"), EXIT)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Failed);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::ModelOverloaded { .. }))
+        );
     }
     Ok(())
 }
@@ -906,6 +1307,299 @@ pub(super) fn fixture_access_plan(
 }
 
 const FIXTURE_TOKEN: &str = "fixture-access-token";
+
+pub(super) fn fixture_network_plan(
+    access: Access,
+    authentication: Option<&str>,
+    network: provenant_confinement::permissions::NetworkAccess,
+) -> provenant_confinement::ConfinedPlan {
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    let plan = fixture_access_plan(access, authentication, false);
+    let mut permissions = plan.permissions().clone();
+    permissions.network = network;
+    ConfinedPlan::new(PlanRequest {
+        scope: plan.scope(),
+        permissions,
+        codex: CodexPolicy::Clean,
+        extensions: ExtensionPolicy::Deny,
+        agy_state: None,
+    })
+    .expect("fixture network plan")
+}
+
+#[test]
+fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants()
+-> Result<(), ProviderError> {
+    use provenant_confinement::permissions::NetworkAccess;
+    let prompt = Prompt::new("fixture".into());
+    let token = fixture_token();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap();
+    for path in [
+        ".cargo/bin",
+        ".cargo/registry",
+        ".cargo/git",
+        ".rustup/toolchains",
+    ] {
+        std::fs::create_dir_all(home.join(path)).unwrap();
+    }
+    let repo = Path::new("/fixture/repo");
+    let mut claude_route = route("claude", "fixture-model");
+    claude_route.account_key = None;
+    let mut codex_route = route("codex", "fixture-model");
+    codex_route.account_key = None;
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        for network in [
+            NetworkAccess::Provider,
+            NetworkAccess::Local,
+            NetworkAccess::Open,
+        ] {
+            let plan = fixture_network_plan(access, None, network);
+            let launch = claude::Claude.prepare(PrepareInput {
+                home: &home,
+                ..fixture_input(&claude_route, &plan, &prompt, repo, Some(&token))
+            })?;
+            for flag in ["--tools", "--allowedTools"] {
+                let list = launch.argv.windows(2).find(|pair| pair[0] == flag).unwrap();
+                let tools: Vec<_> = list[1].to_str().unwrap().split(',').collect();
+                for tool in ["WebFetch", "WebSearch"] {
+                    assert_eq!(
+                        tools.contains(&tool),
+                        network == NetworkAccess::Open,
+                        "{access:?} {network:?} {flag} {tool}"
+                    );
+                }
+                if access == Access::ReadOnly {
+                    assert!(!tools.contains(&"Edit") && !tools.contains(&"Write"));
+                }
+            }
+            assert!(launch.profile.spec.authentication.is_empty());
+            assert!(launch.profile.spec.deny_keychain_access);
+            assert!(launch.profile.spec.tool_writes.is_empty());
+            let rendered = provenant_confinement::permissions::snapshot::render(
+                plan.permissions(),
+                &launch.profile,
+                &home,
+            )
+            .unwrap();
+            assert!(rendered.contains(&format!(
+                "(deny file-read* (literal \"{}/.cargo/credentials.toml\"))",
+                home.display()
+            )));
+            assert_eq!(
+                rendered.contains(&format!(
+                    "(allow file-read* (subpath \"{}/.config/gh\"))",
+                    home.display()
+                )),
+                network == NetworkAccess::Open,
+                "the existing gh policy still controls credential reads"
+            );
+            if access == Access::ReadOnly {
+                for path in [
+                    repo.to_owned(),
+                    home.join(".cargo"),
+                    home.join(".rustup"),
+                    Path::new("/private/etc/ssl").to_owned(),
+                ] {
+                    assert!(!rendered.contains(&format!(
+                        "(allow file-write* (subpath \"{}\"))",
+                        path.display()
+                    )));
+                }
+            }
+            if access == Access::ReadOnly && network != NetworkAccess::Open {
+                assert!(launch.env.iter().all(|(key, _)| key != "CARGO_HOME"));
+                assert_eq!(
+                    launch.env.iter().find(|(key, _)| key == "PATH").unwrap().1,
+                    "/fixture/scratch/bin:/usr/bin:/bin"
+                );
+                continue;
+            }
+            let codex_plan = fixture_network_plan(access, Some("login"), network);
+            let codex = codex::Codex.prepare(PrepareInput {
+                home: &home,
+                ..fixture_input(&codex_route, &codex_plan, &prompt, repo, None)
+            })?;
+            for key in [
+                "PATH",
+                "CARGO_HOME",
+                "CARGO_TARGET_DIR",
+                "CARGO_BUILD_BUILD_DIR",
+                "CARGO_NET_OFFLINE",
+                "RUSTUP_HOME",
+                "DEVELOPER_DIR",
+                "SDKROOT",
+                "npm_config_cache",
+                "COREPACK_HOME",
+            ] {
+                let env = |spec: &LaunchSpec| {
+                    spec.env
+                        .iter()
+                        .find(|(k, _)| k == key)
+                        .map(|(_, value)| value.clone())
+                };
+                assert_eq!(env(&launch), env(&codex), "{access:?} {network:?} {key}");
+            }
+            let package = Path::new("/opt/homebrew/Cellar/provider/1.0");
+            for grant in &codex.profile.spec.runtime_reads {
+                assert!(
+                    launch.profile.spec.runtime_reads.contains(grant),
+                    "missing read: {grant:?}"
+                );
+            }
+            for grant in &codex.profile.spec.tool_exec_roots {
+                if grant.path != package {
+                    assert!(
+                        launch.profile.spec.tool_exec_roots.contains(grant),
+                        "missing exec: {grant:?}"
+                    );
+                }
+            }
+            for secret in [
+                ".config/gh",
+                "Library/Keychains",
+                ".codex/auth.json",
+                ".claude/.credentials.json",
+            ] {
+                assert!(
+                    !launch
+                        .profile
+                        .spec
+                        .runtime_reads
+                        .iter()
+                        .any(|grant| covers(grant, &home.join(secret))),
+                    "new credential read: {secret}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn claude_network_on_without_complete_rust_keeps_public_system_tools()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::permissions::NetworkAccess;
+    let prompt = Prompt::new("fixture".into());
+    let token = fixture_token();
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
+    for installed in [None, Some(".cargo/bin"), Some(".rustup/toolchains")] {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        if let Some(path) = installed {
+            std::fs::create_dir_all(home.join(path))?;
+        }
+        let plan = fixture_network_plan(Access::ReadOnly, None, NetworkAccess::Open);
+        let launch = claude::Claude.prepare(PrepareInput {
+            home: &home,
+            ..fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                Some(&token),
+            )
+        })?;
+        assert!(launch.env.iter().all(|(key, _)| key != "CARGO_HOME"));
+        assert!(
+            launch
+                .profile
+                .spec
+                .tool_exec_roots
+                .contains(&crate::launch::subtree("/fixture/repo"))
+        );
+        assert!(launch.profile.spec.tool_writes.is_empty());
+        for grant in launch
+            .profile
+            .spec
+            .runtime_reads
+            .iter()
+            .chain(&launch.profile.spec.tool_exec_roots)
+        {
+            assert!(
+                !grant.path.starts_with(home.join(".cargo"))
+                    && !grant.path.starts_with(home.join(".rustup"))
+            );
+        }
+        #[cfg(target_os = "macos")]
+        assert!(
+            launch
+                .profile
+                .spec
+                .runtime_reads
+                .contains(&crate::launch::subtree("/private/etc/ssl"))
+        );
+    }
+    Ok(())
+}
+
+/// Exercises the actual Seatbelt file-open decision without a provider login
+/// or an external HTTPS service. An inherited lane cannot install a nested
+/// sandbox; CI requires this probe instead of accepting that limitation.
+#[cfg(target_os = "macos")]
+#[test]
+#[allow(clippy::disallowed_methods)]
+#[allow(clippy::print_stderr)] // Test-only sandbox skip diagnostic.
+fn claude_network_on_native_tls_files_are_readable() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::permissions::{NetworkAccess, snapshot::render};
+    let prompt = Prompt::new("fixture".into());
+    let token = fixture_token();
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
+    for network in [
+        NetworkAccess::Open,
+        NetworkAccess::Provider,
+        NetworkAccess::Local,
+    ] {
+        let plan = fixture_network_plan(Access::ReadOnly, None, network);
+        let launch = claude::Claude.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            Some(&token),
+        ))?;
+        let profile = render(
+            plan.permissions(),
+            &launch.profile,
+            Path::new("/fixture/home"),
+        )?;
+        for file in ["/private/etc/ssl/openssl.cnf", "/private/etc/ssl/cert.pem"] {
+            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", &profile, "/bin/cat", file])
+                .env_clear()
+                .output()?;
+            let diagnostic = String::from_utf8_lossy(&output.stderr);
+            if diagnostic.contains("sandbox_apply: Operation not permitted")
+                && std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").as_deref()
+                    != Some("1".as_ref())
+            {
+                eprintln!(
+                    "native TLS file probe unavailable under inherited sandbox: {diagnostic}"
+                );
+                return Ok(());
+            }
+            assert_eq!(
+                output.status.success(),
+                network == NetworkAccess::Open,
+                "{network:?} {file}: {diagnostic}"
+            );
+            if network == NetworkAccess::Open {
+                assert!(
+                    !output.stdout.is_empty(),
+                    "{file} must have been opened and read"
+                );
+            } else {
+                assert!(
+                    diagnostic.contains("Operation not permitted"),
+                    "{diagnostic}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
 
 pub(super) fn fixture_token() -> crate::claude::OauthToken {
     let item = format!(
@@ -3558,6 +4252,23 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
                 .unwrap()
                 .adapter
                 .prepare(input)?;
+
+            // Provider runtime grants must exclude the host association
+            // database and every SQLite companion.
+            let grants = &spec.profile.spec.state_writes;
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                let host_index =
+                    Path::new("/fixture/state/fabric").join(format!("host.sqlite3{suffix}"));
+                assert!(
+                    grants.iter().all(|grant| match grant.scope {
+                        provenant_records::run::PathScope::Exact => grant.path != host_index,
+                        provenant_records::run::PathScope::Subtree =>
+                            !host_index.starts_with(&grant.path),
+                    }),
+                    "{adapter} can write {}",
+                    host_index.display()
+                );
+            }
 
             if adapter == "claude" {
                 let mut unattributed_route = route.clone();

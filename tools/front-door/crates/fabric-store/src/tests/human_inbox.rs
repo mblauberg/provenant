@@ -105,6 +105,35 @@ fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
         .coordination_operation(project(), actor(3), &operation, &"answer", &request, action)
         .unwrap();
     assert_eq!(resolved.answer_id, Some(answer.id));
+    let target = AnswerTarget {
+        host: delivery.target_host,
+        project: project(),
+        session: delivery.target_session.clone(),
+        actor: delivery.target_actor,
+    };
+    store.db.execute_batch("CREATE TRIGGER reject_offer BEFORE UPDATE ON human_answer_outbox BEGIN SELECT RAISE(ABORT,'offer refused'); END;").unwrap();
+    assert!(
+        store
+            .offer_human_answers(&target, 50, MAX_OFFER_BYTES, f.now(), &request)
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .human_item(project(), id, &request)
+            .unwrap()
+            .delivery
+            .unwrap(),
+        delivery
+    );
+    store.db.execute_batch("DROP TRIGGER reject_offer").unwrap();
+    let offered = store
+        .offer_human_answers(&target, 50, MAX_OFFER_BYTES, f.now(), &request)
+        .unwrap();
+    assert_eq!(offered.items.len(), 1);
+    assert_eq!(
+        offered.items[0].delivery.state,
+        AnswerDeliveryState::Offered
+    );
     let plan:Vec<String>=store.db.prepare("EXPLAIN QUERY PLAN SELECT substr(record,1,?6) FROM human_requests WHERE project=?1 AND (?2 IS NULL OR session=?2) AND (?3 OR state='open') AND (?4 IS NULL OR id>?4) ORDER BY id LIMIT ?5").unwrap().query_map(params![project().to_string(),"chair-a",false,id.to_string(),51,MAX_RECORD_READ_BYTES],|row|row.get(3)).unwrap().map(|row|row.unwrap()).collect();
     assert!(
         plan.iter()
@@ -133,9 +162,9 @@ fn human_inbox_migration_preserves_existing_mail_and_refuses_old_binary_version(
         .db
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, crate::db::MIGRATIONS.len() as i64);
     assert!(matches!(
         provenant_sqlite::read_version(&store.db, 7),
-        Err(provenant_sqlite::VersionError::Unsupported(8))
+        Err(provenant_sqlite::VersionError::Unsupported(found)) if found == version
     ));
 }

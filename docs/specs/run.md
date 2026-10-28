@@ -9,7 +9,7 @@ Run turns a request into bounded provider attempts and keeps the exact
 prompt, route and result of each, so completion and cancellation survive a
 disconnected caller. Routing resolves models ([routing](routing.md));
 supervisor owns every process and signal ([supervisor](supervisor.md)); Fabric
-keeps no second registry ([fabric](fabric.md)). Run starts no process
+stores chair associations, with execution facts owned by Run ([fabric](fabric.md)). Run starts no process
 itself. Grammar and bounds are in the generated [CLI
 reference](../reference/cli.md). Paths are relative to `tools/front-door/`.
 
@@ -38,6 +38,42 @@ absent titles remain absent in older records. Titles are never inferred from
 prompts.
 - Test: `crates/run/src/service_tests.rs::task_title_roundtrip`
 - Owner: `crates/run/src/service.rs`, `crates/records/src/run.rs`
+
+## Chair associations
+
+Local CLI and MCP submissions seal a chair's host and Fabric inbox actor with
+the request. CLI selection matches session discovery; MCP uses its bound inbox.
+This actor-scoped association identifies no particular live chair session and
+does not change run ownership. Worker provider sessions never establish it.
+
+The Fabric `run_chairs` index in `<state>/fabric/host.sqlite3` is authoritative,
+keyed by project and run. This database and its companions are outside the exact
+coordination database write grants lanes receive. It seals the request digest
+and optional chair before launch. Each nested launch inherits from the host
+index using the parent's host-sealed request
+digest. A disagreeing child proposal is refused. Lane-local requests and even a
+lane-local Fabric database or the shared mail database cannot replace this
+association. A retry preserves the original proposal; continuations copy the
+original host index binding.
+Index failures or exposing write grants refuse launch. Replay a root submission with the
+same operation ID: launch repairs its index from the immutable host request,
+including owned-worktree replay. Lane stores cannot repair it.
+Transient index errors leave queued children available for a later scan.
+
+Launch validation reads `fabric-runtime::chairs::ChairIndex`; missing records
+and older runs are unbound. Display readers arrive in a later slice. Provider handles and child requests are never fallbacks. Graph and
+peer executions remain unbound until they retain an originating chair separately
+from the actor owning operation replay. Board and tree rendering are separate.
+
+Association rows live as long as run metadata. Current GC removes provider
+payloads, logs, events and worktrees; it never removes run/attempt metadata.
+Whole-run collection must delete its association in the same host-owned removal
+workflow. Lane-writable missing child records alone cannot authorise deletion.
+
+- Test: `crates/fabric-runtime/src/chairs.rs::nested_chair_binding`;
+  `crates/run/src/service_tests.rs::chair_binding_replays_the_original_submission`
+- Owner: `crates/fabric-runtime/src/chairs.rs`, `crates/fabric-store/src/chairs.rs`,
+  `crates/cli/src/run.rs`, `crates/cli/src/run/children.rs`
 
 ## Atomic admission
 
@@ -133,6 +169,23 @@ action simply shows none.
   `crates/run/src/tests.rs::full_database_retains_admission_and_recovers_original_terminal_intent`
 - Owner: `crates/run/src/admission.rs`, `crates/run/src/ledger.rs`, `crates/os/src/sys/clock.rs`
 
+## Lane priority
+
+The host selects a configured nice value for each lane: 10 for writers, 5 for
+read-only lanes and 15 for build-heavy lanes by default. The guardian applies
+it to the provider before confinement; the provider's descendants inherit it.
+An inherited higher nice value is preserved. Failure to read or change priority
+must never refuse a lane: launch proceeds and the reason is recorded. Launch
+evidence reports the applied value when known and the requested value when it
+differs.
+- Why: lanes should yield CPU without requiring new privileges or preventing
+  nested work from starting.
+- Test: `crates/supervisor/src/process_os/provider.rs::provider_and_descendant_inherit_priority`;
+  `::priority_failures_degrade_and_preserve_evidence`;
+  `crates/run/src/tests.rs::lanes_read_last_output_time_from_supervisor_checkpoint`;
+  `crates/cli/src/run.rs::render_lanes_removes_peer_terminal_controls`
+- Owner: `crates/supervisor/src/process_os/provider.rs`, `crates/run/src/launch.rs`
+
 ## Immutable attempts, no writer replay
 
 Terminal attempts are immutable; a retry or continued turn is a new attempt
@@ -215,6 +268,43 @@ refused, and the attempt records every granted path.
 - Test: `crates/confinement/src/plan/read_only.rs::policy_defaults_and_refuses_escape_control_paths_and_symlinks`;
   `crates/run/src/dispatch_tests.rs::read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt`
 - Owner: `crates/confinement/src/plan/read_only.rs`
+
+Read-only runs with a verified Git binding prepare `scratch/git-objects` with
+the bound common directory's `objects` as an alternate. The shell Git wrapper
+sets `GIT_OBJECT_DIRECTORY` for `show`, `log`, `diff`, `merge-tree` and
+`hash-object` only when Git resolves that common directory, including linked
+worktrees. Aliases and external subcommands receive no override. The launch
+environment has no lane-wide override, so other repositories and submodules
+retain their own object stores. The wrapper honours recognised Git global
+options; unknown options and direct
+absolute-path Git calls run without this temporary-object convenience.
+Configured callbacks of those builtins inherit their repository-local Git
+environment; callbacks entering another repository must clear Git-local
+variables.
+The shared Git directories remain write-denied, and symlink creation in the
+scratch object store is denied. No quarantine write exception is granted.
+The lane can alter its scratch objects and alternates; lane Git output must
+never serve as trusted host evidence. The host uses its own Git environment.
+- Why: `show --remerge-diff` needs temporary objects, while #1532 requires the
+  shared store to remain unwritable. Repository scoping preserves other reads.
+- Test: `crates/providers/src/tests.rs::prepared_git_objects_are_repository_scoped_for_every_adapter`;
+  `::prepared_git_reads_linked_and_other_repositories`;
+  `crates/providers/src/seatbelt_snapshots.rs::agy_read_only_linked_worktree_git_directories_are_not_writable`
+- Owner: `crates/providers/src/launch.rs`, `crates/confinement/src/permissions.rs`
+
+## Project GitHub policy
+
+`projects/<ProjectId>/github.json` holds an optional host-owned advisory deny
+list of GitHub CLI verb prefixes and labels for writer lanes. Missing policy
+defaults to empty. When publishing is available, the lane's `gh` shim refuses
+matching calls with the policy key on standard error. This is an accidental-use
+guard, not a security boundary: a lane can invoke the real `gh` directly.
+
+- Why: projects can reserve GitHub actions for people or workflows without
+  relying on instructions in a lane's prompt.
+- Test: `crates/config/src/tests.rs::github_policy_is_scoped_to_project_and_defaults_only_when_absent`;
+  `crates/providers/src/lane.rs::github_policy_guards_labels_and_verb_prefixes`
+- Owner: `crates/config/src/github_policy.rs`; `crates/providers/src/lane.rs`
 
 ## Writer hard-link refusal
 
@@ -327,10 +417,22 @@ other ignored files retain the tree. Other worktrees keep the existing
 GC/removal policy. A host lifecycle receipt records intent before removal,
 then pruning or the retention reason in `worktree-settlement.json` beside the
 attempt result. An interrupted intent whose checkout is gone replays as pruned.
+At settlement the host best-effort refreshes the exact `origin` tracking ref
+for every writer with a branch, including explicit and adopted worktrees,
+before any prune upstream pin. The bounded fetch runs outside the collection
+lock and does not affect the lane outcome. A missing `origin` or remote branch
+is silently skipped. Other failures may add a fixed, redacted
+`tracking_ref_warning` to a lane-owned settlement receipt; they never create
+or change an adopted worktree's receipt. Concurrent refreshes of the same
+branch may race and produce a warning.
 - Why: a lane may reclaim only work it owns and commits proven retained elsewhere.
 - Test: `crates/confinement/src/worktrees.rs::adopted_owner_proves_membership_and_enables_custody`;
   `::owned_cleanup_refuses_dirty_unmerged_and_adopted_trees`;
-  `tests/dispatch_provider.rs::owned_dispatch_creates_and_replays_after_pruning`.
+  `tests/dispatch_provider.rs::owned_dispatch_creates_and_replays_after_pruning`;
+  `tools/front-door/src/gc_support.rs::writer_tracking_refresh_handles_remote_branch_absence_and_failure`;
+  `tools/front-door/src/fabric.rs::settlement_records_tracking_ref_failure_without_failing_lane`;
+  `tools/front-door/src/fabric.rs::explicit_writer_refreshes_tracking_ref_while_collection_is_busy`;
+  `tools/front-door/src/fabric.rs::adopted_writer_refresh_failure_does_not_change_receipt`.
 - Owner: `crates/confinement/src/worktrees/owner.rs`, `crates/cli/src/run.rs`, `src/fabric.rs`
 
 ## Delivery modes and settled pickup
@@ -364,8 +466,12 @@ ancestry proof. Remote delivery refreshes and verifies its tracking ref.
 `lane deliver ATTEMPT [--deliver MODE]` uses the recorded destination, or
 origin push when the settled lane recorded none. It requires a succeeded
 writer, released custody, no new reservation, a clean tree and the exact
-receipt head. It persists a keyed host pickup receipt separately from the
-immutable terminal record. Successful pickup replays without repeating
+receipt head. After reviewing a `review_required` writer, the chair can use
+`lane deliver --accept-review ATTEMPT` to accept its protected changes and
+deliver the same exact head. The delivery receipt records the acceptance and
+protected paths. Lanes and peers cannot accept review. Delivery persists a
+keyed host pickup receipt separately from the immutable terminal record.
+Successful pickup replays without repeating
 external effects, while failures remain explicitly retryable. A worktree
 already pruned by its own lifecycle may replay its successful receipt.
 PR bodies use commit subjects and bodies with run and attempt IDs, capped at

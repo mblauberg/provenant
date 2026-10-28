@@ -26,6 +26,7 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
         session_id: i64::MAX,
     };
     let exit = ProcessExit {
+        priority: None,
         schema_version: 1,
         scope: scope(),
         termination: Some(Termination::Exit(0)),
@@ -334,6 +335,7 @@ fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
     let failure = launch(
         OwnedLaunch {
             command: ProviderCommand {
+                priority: 0,
                 provider_lease: None,
                 resolved_route: "fixture/provider".into(),
                 permission_plan_digest: Digest::from_bytes([0; 32]),
