@@ -1664,6 +1664,23 @@ fn prepare_labels_unsupported_ssh_command() -> std::result::Result<(), Box<dyn s
 }
 
 #[test]
+fn delivery_diagnostics_redact_url_userinfo() {
+    for (input, expected) in [
+        ("https://u:pa/ss@h/repo", "https://[REDACTED]@h/repo"),
+        ("https://u:pa?ss@h/repo", "https://[REDACTED]@h/repo"),
+        ("https://u:a@b@h/repo", "https://[REDACTED]@h/repo"),
+        ("u:pa/ss@h:repo", "[REDACTED]@h:repo"),
+        ("u:pa?ss@h:repo", "[REDACTED]@h:repo"),
+        ("u:a@b@h:repo", "[REDACTED]@h:repo"),
+        ("https://truncated-secret/path", "https://[REDACTED]/path"),
+    ] {
+        assert_eq!(super::delivery::redact_url_userinfo(input), expected);
+        let error = super::delivery::prepare_error("test", input).to_string();
+        assert!(error.ends_with(expected), "{error}");
+    }
+}
+
+#[test]
 fn prepare_refuses_remote_urls_with_embedded_credentials()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
@@ -1788,7 +1805,7 @@ fn prepare_failures_name_step_and_bound_git_stderr()
         ("symbolic-ref --quiet", "HEAD"),
         ("rev-parse --absolute-git-dir", "git dir"),
         ("config --get-regexp", "credential helper"),
-        ("fetch --no-tags", "fetch"),
+        ("fetch --no-auto-maintenance", "fetch"),
     ] {
         let mut fixture = PrepareFixture::new()?;
         let git = fixture.root.join("git");
@@ -1912,6 +1929,15 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
             "+refs/heads/base:refs/remotes/origin/base",
         ],
     )?;
+    git(
+        &project,
+        &[
+            "config",
+            "--add",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/heads/injected/*",
+        ],
+    )?;
     git(&project, &["push", "-q", "origin", "HEAD:refs/heads/base"])?;
     let initial = git(&project, &["rev-parse", "HEAD"])?;
     git(&project, &["update-ref", "-d", "refs/remotes/origin/base"])?;
@@ -1936,6 +1962,13 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         open_pr: false,
     };
     let host = host.prepare(&writer, &request)?;
+    assert!(
+        !git(
+            &lane,
+            &["for-each-ref", "--format=%(refname)", "refs/heads/injected"]
+        )?
+        .contains("injected")
+    );
     assert_eq!(
         git(&lane, &["rev-parse", "refs/remotes/origin/base"])?,
         initial

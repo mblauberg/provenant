@@ -106,6 +106,8 @@ branch and its upstream. A lane can commit on its branch and run
 local tracking ref after the remote push succeeds. That local denial is expected.
 To pick up upstream changes, run `git fetch --refmap= origin main` and use
 `FETCH_HEAD` in the linked worktree's private Git directory.
+Host delivery preparation constrains fetches to the selected remote's tracking
+refs and redacts URL userinfo from preparation errors.
 
 Fabric sets `CARGO_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR` and `CARGO_HOME` for
 each lane. Do not override them: confinement may deny other paths. Confined writers use

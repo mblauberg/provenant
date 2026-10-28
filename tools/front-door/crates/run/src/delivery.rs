@@ -576,14 +576,34 @@ impl HostDeliveryContext {
         });
         self.validate_transport_helpers(writer)?;
         if fetch && !matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
+            let uploadpack = format!("remote.{}.uploadpack=git-upload-pack", request.remote);
+            let refspec = format!("+refs/heads/*:refs/remotes/{}/*", request.remote);
             self.command(
                 &writer.worktree,
                 "git",
                 &[
+                    "-c",
+                    "protocol.allow=never",
+                    "-c",
+                    "protocol.ssh.allow=always",
+                    "-c",
+                    "protocol.https.allow=always",
+                    "-c",
+                    "protocol.http.allow=always",
+                    "-c",
+                    "protocol.file.allow=always",
+                    "-c",
+                    &uploadpack,
+                    "-c",
+                    "core.logAllRefUpdates=false",
                     "fetch",
+                    "--no-auto-maintenance",
                     "--no-tags",
                     "--no-recurse-submodules",
+                    "--refmap=",
+                    "--",
                     &request.remote,
+                    &refspec,
                 ],
                 stage,
             )?;
@@ -942,7 +962,7 @@ impl HostDeliveryContext {
                     Some("rev-parse") if args.contains(&"--absolute-git-dir") => "git dir",
                     Some("rev-parse") => "HEAD",
                     Some("config") => "credential helper",
-                    Some("fetch") => "fetch",
+                    _ if args.contains(&"fetch") => "fetch",
                     _ => "git executable",
                 };
                 prepare_error(step, reason)
@@ -1045,10 +1065,7 @@ impl HostDeliveryContext {
             let stderr = if output.stderr.filter_failed {
                 "diagnostic redaction failed".into()
             } else {
-                redact_url_userinfo(
-                    &String::from_utf8_lossy(&output.stderr.bytes),
-                    output.stderr.truncated,
-                )
+                redact_url_userinfo(&String::from_utf8_lossy(&output.stderr.bytes))
             };
             return Err(failure(format!(
                 "{tool} {:?} (timed out: {}): {stderr}",
@@ -1553,27 +1570,27 @@ pub(super) fn cap_pr_body(mut body: String) -> String {
 
 // Git may include remote URLs in diagnostics. Usernames alone can be access
 // tokens, so remove all URL userinfo, including passwordless userinfo.
-fn redact_url_userinfo(detail: &str, _truncated: bool) -> String {
+pub(super) fn redact_url_userinfo(detail: &str) -> String {
     let mut result = String::with_capacity(detail.len());
     let mut rest = detail;
     while let Some(scheme_end) = rest.find("://") {
         let authority_start = scheme_end + 3;
         result.push_str(&rest[..authority_start]);
         rest = &rest[authority_start..];
-        let authority_end = rest
-            .find(|c: char| {
-                c.is_whitespace() || matches!(c, '/' | '?' | '#' | '\'' | '"' | '<' | '>')
-            })
+        let token_end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '<' | '>' | '(' | ')'))
             .unwrap_or(rest.len());
-        let authority = &rest[..authority_end];
-        if let Some(at) = authority.rfind('@') {
+        let token = &rest[..token_end];
+        if let Some(at) = token.rfind('@') {
             result.push_str("[REDACTED]");
-            result.push_str(&authority[at..]);
+            result.push_str(&token[at..]);
+            rest = &rest[token_end..];
         } else {
             // A malformed or truncated authority may have lost its '@'.
             result.push_str("[REDACTED]");
+            let authority_end = token.find(['/', '?', '#']).unwrap_or(token.len());
+            rest = &rest[authority_end..];
         }
-        rest = &rest[authority_end..];
     }
     result.push_str(rest);
     // Git also accepts scp-style remotes such as user@host:path. The user
@@ -1582,9 +1599,9 @@ fn redact_url_userinfo(detail: &str, _truncated: bool) -> String {
     for token in result.split_inclusive(|c: char| {
         c.is_whitespace() || matches!(c, '\'' | '"' | '<' | '>' | '(' | ')')
     }) {
-        if let Some(at) = token.find('@')
+        if let Some(at) = token.rfind('@')
             && token[at + 1..].contains(':')
-            && !token[..at].contains('/')
+            && !token.contains("://")
         {
             safe.push_str("[REDACTED]");
             safe.push_str(&token[at..]);
@@ -1595,14 +1612,12 @@ fn redact_url_userinfo(detail: &str, _truncated: bool) -> String {
     safe
 }
 
-fn prepare_error(step: &'static str, detail: impl std::fmt::Display) -> RunError {
+pub(super) fn prepare_error(step: &'static str, detail: impl std::fmt::Display) -> RunError {
     let detail = detail.to_string();
     let safe = provenant_confinement::redact::known_shapes(detail.as_bytes())
         .unwrap_or_else(|_| b"diagnostic redaction failed".to_vec());
-    let mut reason = String::from_utf8_lossy(&safe)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let redacted = redact_url_userinfo(&String::from_utf8_lossy(&safe));
+    let mut reason = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
     if reason.len() > 1024 {
         reason.truncate(reason.floor_char_boundary(1024));
         reason.push_str("...");
