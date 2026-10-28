@@ -44,16 +44,17 @@ pub struct HumanAcknowledgement<'a> {
 impl Store {
     /// Exclude answers that cannot fit a hook envelope without consuming mail.
     /// Re-read each row so acknowledgement and destination changes win races.
-    pub fn mark_hook_undeliverable(
-        &self,
+    pub fn mark_hook_undeliverable_once(
+        root: &provenant_core::StateRoot,
         target: &AnswerTarget,
         ids: &[String],
         deadline: std::time::Instant,
     ) -> Result<Vec<String>> {
         use crate::local_delivery::before;
         before(deadline)?;
+        let store = Self::open_hook_delivery(root, deadline)?.ok_or(Error::NotFound)?;
         let tx = rusqlite::Transaction::new_unchecked(
-            &self.db,
+            &store.db,
             rusqlite::TransactionBehavior::Immediate,
         )?;
         let mut marked = Vec::new();
@@ -73,11 +74,11 @@ impl Store {
                 || delivery.target_actor != target.actor
                 || delivery.target_session != target.session
                 || delivery.state == AnswerDeliveryState::Acknowledged
-                || delivery.error.as_deref() == Some("hook_envelope_too_large")
+                || delivery.error.is_some()
             {
                 continue;
             }
-            delivery.error = Some("hook_envelope_too_large".to_owned());
+            delivery.error = Some(crate::local_delivery::HOOK_ENVELOPE_TOO_LARGE.to_owned());
             tx.execute(
                 "UPDATE human_answer_outbox SET record=?3 WHERE project=?1 AND answer=?2",
                 params![target.project.to_string(), id, encode(&delivery)?],

@@ -180,10 +180,11 @@ fn hook_page_reports_individually_oversized_answer_and_revisits_overflow() {
             String::from_utf8_lossy(&output.stderr)
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains(&format!(
-                "answer delivery: skipping invalid answer {oversized_id}"
-            )),
+        assert_eq!(
+            stderr.matches(&format!(
+                "answer delivery: answer {oversized_id} exceeds internal page limit; retained for Fabric mail"
+            )).count(),
+            1,
             "{stderr}"
         );
         return;
@@ -273,6 +274,24 @@ fn hook_page_reports_individually_oversized_answer_and_revisits_overflow() {
     );
     assert!(second.truncated);
     assert_eq!(oversized, vec![oversized_id.to_string()]);
+    let existing_id = HumanAnswerId::from_bytes([1; 16]).to_string();
+    store.db.execute(
+        "UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.error','prior failure') AS BLOB) WHERE answer=?1",
+        [&existing_id],
+    ).unwrap();
+    let marked = Store::mark_hook_undeliverable_once(
+        &f.root,
+        &target,
+        &[existing_id.clone(), oversized_id.to_string()],
+        deadline,
+    )
+    .unwrap();
+    assert_eq!(marked, vec![oversized_id.to_string()]);
+    let error: String = store.db.query_row(
+        "SELECT json_extract(CAST(record AS TEXT),'$.error') FROM human_answer_outbox WHERE answer=?1",
+        [&existing_id], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(error, "prior failure");
 }
 
 #[test]

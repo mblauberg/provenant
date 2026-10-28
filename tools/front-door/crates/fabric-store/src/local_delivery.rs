@@ -3,6 +3,9 @@ use crate::*;
 use provenant_records::inbox::*;
 use std::time::Instant;
 
+// Keep this value in sync with the partial index predicates in migration 012.
+pub(crate) const HOOK_ENVELOPE_TOO_LARGE: &str = "hook_envelope_too_large";
+
 #[derive(Clone, Copy)]
 enum Candidates {
     Pending,
@@ -137,10 +140,12 @@ impl Store {
                     Candidates::Offered => "human_hook_pending",
                     Candidates::Pending => unreachable!(),
                 },
-                "AND coalesce(json_extract(CAST(o.record AS TEXT),'$.error'),'') != 'hook_envelope_too_large'",
+                format!(
+                    "AND coalesce(json_extract(CAST(o.record AS TEXT),'$.error'),'') != '{HOOK_ENVELOPE_TOO_LARGE}'"
+                ),
             )
         } else {
-            (index, "")
+            (index, String::new())
         };
         // An absent index is an error, never a fallback scan.
         let mut statement = self.db.prepare(&format!(
@@ -222,7 +227,7 @@ impl Store {
                         truncated: false,
                     };
                     if CanonicalV1::bytes(&single)?.as_bytes().len() > max_bytes {
-                        invalid_answer(&key);
+                        oversized_answer(&key);
                         oversized.push(key);
                     } else {
                         // Revisit a candidate that fits alone on the next page.
@@ -245,5 +250,14 @@ pub(crate) fn invalid_answer(id: &str) {
     let _ = writeln!(
         std::io::stderr().lock(),
         "answer delivery: skipping invalid answer {id}"
+    );
+}
+
+fn oversized_answer(id: &str) {
+    use std::io::Write;
+    let id: String = id.chars().take(64).flat_map(char::escape_default).collect();
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "answer delivery: answer {id} exceeds internal page limit; retained for Fabric mail"
     );
 }

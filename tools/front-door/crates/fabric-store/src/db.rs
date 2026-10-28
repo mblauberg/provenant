@@ -209,11 +209,11 @@ impl Store {
             provenant_sqlite::open_read_only_connection(&path)?
         };
         db.progress_handler(100, Some(move || std::time::Instant::now() >= deadline))?;
-        // Pin one answer snapshot, including concurrent acknowledgements.
         // Filesystem discovery was validated before this connection opened.
         if writable {
             provenant_sqlite::retain_read_only_wal(&db)?;
         } else {
+            // Pin the answer walk to one snapshot despite concurrent writes.
             db.execute_batch("BEGIN")?;
         }
         let store = Self {

@@ -67,8 +67,9 @@ observation readers return an error for invalid records.
 `read_hook_answer_page` returns a continuation after the last scanned key,
 including skipped invalid or oversized rows. Hooks use it to advance past
 pages with no deliverable answer while retaining the same target and deadline.
-Answers too large for the hook are marked in the delivery error field and
-excluded from subsequent hook scans, while their state and Fabric mail remain.
+Answers proved too large for every hook context are marked in the delivery
+error field when it is empty and excluded from subsequent hook scans, while
+their state and Fabric mail remain. Context-dependent failures remain eligible.
 Hook replay preserves `attempts` and `last_attempt_at`: those fields record the
 queued-to-offered transition, rather than counting injections or replays.
 
