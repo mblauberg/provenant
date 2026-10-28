@@ -24,6 +24,8 @@ mod transcript;
 pub use service::{DispatchRequest, DispatchTask, ErrorKind, Service};
 pub use transcript::locate as locate_transcript;
 mod cargo_seed;
+pub mod target_seed;
+pub mod target_seed_gc;
 mod writer;
 
 pub use admission::{
@@ -160,7 +162,7 @@ pub enum RunError {
     ProviderEvidence(String),
     #[error("confinement refused: {0}")]
     Confinement(#[from] provenant_confinement::permissions::PermissionError),
-    #[error("writer scope refused: {0}")]
+    #[error("writer scope refused: {}", .0.with_repair())]
     Writer(#[from] provenant_confinement::worktrees::WorktreeError),
     #[error("local worktree {0} does not exist; create it with `provenant worktree create <name>`")]
     WorktreeMissing(std::path::PathBuf),

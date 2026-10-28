@@ -217,6 +217,16 @@ pub enum SessionError {
         "session discovery identity does not match the registered chair; repeat workflow session save <id> with the same options and add --rebind to explicitly replace the binding"
     )]
     DiscoveryIdentity,
+    #[error("summary update requires a bound chair identity")]
+    ChairIdentityRequired,
+    #[error("summary revision is stale; current revision is {current_revision}")]
+    SummaryStale { current_revision: u64 },
+    #[error("{0}")]
+    Summary(#[from] SummaryError),
+    #[error("checkpoint for session {session} not found")]
+    MissingCheckpoint { session: String },
+    #[error("summary update would exceed the 8192-byte frontmatter limit")]
+    SummaryTooLarge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -318,7 +328,7 @@ impl SessionStore {
         if text.len() as u64 > CHECKPOINT_LIMIT {
             return Err(SessionError::TooLarge);
         }
-        let markdown = std::str::from_utf8(text)?;
+        std::str::from_utf8(text)?;
         let dir = self.directory(true)?;
         let _lock = dir.lock(
             OsStr::new("checkpoint.lock"),
@@ -333,20 +343,36 @@ impl SessionStore {
             }),
             WaitStop::Deadline => SessionError::Deadline,
         })?;
+        self.publish_revision_locked(&dir, text, clock, false, publish_discovery)
+    }
+
+    /// Publish a replacement while holding the checkpoint lock.
+    fn publish_revision_locked(
+        &self,
+        dir: &Directory,
+        text: &[u8],
+        clock: &dyn Clock,
+        field_update: bool,
+        publish_discovery: impl FnOnce(&Directory, &SessionDiscovery) -> Result<(), SessionError>,
+    ) -> Result<Saved, SessionError> {
+        if text.len() as u64 > CHECKPOINT_LIMIT {
+            return Err(SessionError::TooLarge);
+        }
+        let markdown = std::str::from_utf8(text)?;
         let now = clock.wall_now()?;
         // A checkpoint that cannot be read (a symlink, say) is replaced, not kept.
-        let existing = read_current(&dir).ok().flatten();
-        let discovery = self.load_discovery(&dir)?;
+        let existing = read_current(dir).ok().flatten();
+        let discovery = self.load_discovery(dir)?;
         self.check_discovery_identity(discovery.as_ref())?;
-        let mut manifest = load(&dir).unwrap_or_default();
-        let floor = highest_revision_file(&dir)?;
+        let mut manifest = load(dir).unwrap_or_default();
+        let floor = highest_revision_file(dir)?;
         let mut chain = reconcile(&manifest, existing.as_ref(), floor);
         let digest = provenant_records::CanonicalV1::file_digest(text);
         let unchanged = chain.last().is_some_and(|last| last.sha256 == digest);
         if !unchanged {
             // Keep the text being replaced before replacing it.
             if let (Some(last), Some((bytes, _))) = (chain.last(), existing.as_ref()) {
-                publish(&dir, &revision_file(last.revision), bytes)?;
+                publish(dir, &revision_file(last.revision), bytes)?;
             }
             let parent = chain.last().map(|last| last.revision);
             chain.push(Revision {
@@ -357,14 +383,14 @@ impl SessionStore {
                 saved_at: now,
             });
         }
-        publish(&dir, "checkpoint.md", text)?;
+        publish(dir, "checkpoint.md", text)?;
         let current = chain.last().cloned().ok_or(SessionError::History)?;
         let keep = usize::try_from(self.keep).unwrap_or(usize::MAX);
         let pruned: Vec<Revision> = chain.drain(..chain.len().saturating_sub(keep)).collect();
         manifest.schema_version = 1;
         manifest.revisions = chain;
         let manifest_bytes = serde_json::to_vec(&manifest).map_err(|_| SessionError::History)?;
-        publish(&dir, MANIFEST, &manifest_bytes)?;
+        publish(dir, MANIFEST, &manifest_bytes)?;
         let mut warnings = Vec::new();
         let summary = match parse_summary(markdown) {
             Ok(summary) => summary,
@@ -374,21 +400,26 @@ impl SessionStore {
             }
         };
         if let Some(record) = self.saved_discovery(discovery, &current, summary, now)
-            && let Err(error) = publish_discovery(&dir, &record)
+            && let Err(error) = publish_discovery(dir, &record)
         {
             let rebind = if self.rebind {
                 " (including --rebind)"
             } else {
                 ""
             };
-            warnings.push(format!("checkpoint saved; discovery publication failed: {error}; repeat the same command{rebind} to repair discovery"));
+            let repair = if field_update {
+                "reread the current checkpoint and save its Markdown".to_string()
+            } else {
+                format!("repeat the same command{rebind}")
+            };
+            warnings.push(format!("checkpoint saved; discovery publication failed: {error}; {repair} to repair discovery"));
         }
         // The history is durable, so these files are unreachable. A failed
         // delete leaves an orphan that the next save removes.
         for old in &pruned {
             let _ = dir.unlink(OsStr::new(&revision_file(old.revision)));
         }
-        remove_orphans(&dir, &manifest);
+        remove_orphans(dir, &manifest);
         Ok(Saved {
             revision: current.revision,
             parent: current.parent,
@@ -413,6 +444,57 @@ impl SessionStore {
         };
         let floor = highest_revision_file(&dir)?;
         Ok(reconcile(&manifest, existing.as_ref(), floor))
+    }
+    /// Capture current text once, then read retained files from one manifest.
+    /// A concurrent save may prune or replace a file between these reads.
+    fn summary_snapshot(&self) -> Result<(String, Vec<String>), SessionError> {
+        self.summary_snapshot_with(|| {})
+    }
+    fn summary_snapshot_with(
+        &self,
+        after_snapshot: impl FnOnce(),
+    ) -> Result<(String, Vec<String>), SessionError> {
+        let missing = || SessionError::MissingCheckpoint {
+            session: self.session.as_str().into(),
+        };
+        let dir = match self.directory(false) {
+            Ok(dir) => dir,
+            Err(error) if error.is_not_found() => return Err(missing()),
+            Err(error) => return Err(error.into()),
+        };
+        let current = read_current(&dir)?.ok_or_else(missing)?;
+        let manifest = match load(&dir) {
+            Ok(manifest) => manifest,
+            Err(SessionError::Filesystem(error)) if error.is_not_found() => Manifest::default(),
+            Err(error) => return Err(error),
+        };
+        let chain = reconcile(&manifest, Some(&current), highest_revision_file(&dir)?);
+        after_snapshot();
+        let mut history = Vec::new();
+        for revision in chain.iter().take(chain.len().saturating_sub(1)) {
+            let bytes = match dir.read_bounded(
+                OsStr::new(&revision_file(revision.revision)),
+                CHECKPOINT_LIMIT,
+            ) {
+                Ok(bytes) => bytes,
+                Err(error) if error.is_not_found() => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if provenant_records::CanonicalV1::file_digest(&bytes) != revision.sha256 {
+                // Preserve corruption detection when the snapshot is stable.
+                // If it moved, this revision cannot be trusted in this scan.
+                let latest = read_current(&dir)?;
+                let latest_manifest = load(&dir)?;
+                if latest.as_ref().map(|(bytes, _)| bytes) == Some(&current.0)
+                    && latest_manifest.revisions == manifest.revisions
+                {
+                    return Err(SessionError::History);
+                }
+                continue;
+            }
+            history.push(std::str::from_utf8(&bytes)?.to_owned());
+        }
+        Ok((std::str::from_utf8(&current.0)?.to_owned(), history))
     }
     /// The text of one retained revision, checked against its recorded hash.
     pub fn read_revision(&self, revision: u64) -> Result<Option<RevisionText>, SessionError> {
@@ -549,7 +631,8 @@ impl SessionStore {
     /// concurrent `save` is never overwritten from a stale read. `edit` gets the
     /// current Markdown and returns the replacement, or `None` to leave the file
     /// alone. Directories are created only when `create` is set and the
-    /// checkpoint is missing; returns whether a replacement was written.
+    /// checkpoint is missing. Returns publication details when a replacement
+    /// was written, including any advisory discovery warning.
     pub fn update(
         &self,
         create: bool,
@@ -557,10 +640,10 @@ impl SessionStore {
         budget: WaitBudget,
         cancel: &CancelToken,
         clock: &dyn Clock,
-    ) -> Result<bool, SessionError> {
+    ) -> Result<Option<Saved>, SessionError> {
         let dir = match self.directory(create) {
             Ok(dir) => dir,
-            Err(error) if !create && error.is_not_found() => return Ok(false),
+            Err(error) if !create && error.is_not_found() => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         let _lock = dir.lock(
@@ -570,6 +653,7 @@ impl SessionStore {
             cancel,
             clock,
         )?;
+        self.check_discovery_identity(self.load_discovery(&dir)?.as_ref())?;
         let current = match dir.open_read(OsStr::new("checkpoint.md")) {
             Ok(mut file) => {
                 let text = file.read_bounded(CHECKPOINT_LIMIT)?;
@@ -579,7 +663,7 @@ impl SessionStore {
             Err(error) => return Err(error.into()),
         };
         let Some(next) = edit(current.as_deref())? else {
-            return Ok(false);
+            return Ok(None);
         };
         if next.len() as u64 > CHECKPOINT_LIMIT {
             return Err(SessionError::TooLarge);
@@ -590,15 +674,11 @@ impl SessionStore {
             }),
             WaitStop::Deadline => SessionError::Deadline,
         })?;
-        dir.atomic_write(
-            OsStr::new("checkpoint.md"),
-            ".checkpoint.",
-            next.as_bytes(),
-            PublishMode::Replace,
-        )?
-        .require_durable()
-        .map_err(SessionError::Durability)?;
-        Ok(true)
+        let saved =
+            self.publish_revision_locked(&dir, next.as_bytes(), clock, true, |dir, record| {
+                self.publish_discovery(dir, record)
+            })?;
+        Ok(Some(saved))
     }
 }
 #[cfg(test)]
@@ -1051,6 +1131,366 @@ mod tests {
         );
     }
     #[test]
+    fn retained_summary_diff_compares_fields_and_reports_missing() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "chair").with_revisions(3);
+        let header = |revision, now, needs| {
+            format!(
+                "---\nprovenant_summary:\n  schema_version: 1\n  revision: {revision}\n  updated_at: \"2026-10-28T03:00:00Z\"\n  now: \"{now}\"\n  next: \"Next\"\n  needs_you: {needs}\n  risk: \"None\"\n---\nBody\n"
+            )
+        };
+        let first = header(1, "First", "[]");
+        saved(&selected, &first);
+        saved(&selected, &first.replace("Body", "Other body"));
+        saved(&selected, &header(2, "Second", "[\"request\"]"));
+        let diff = serde_json::to_value(selected.summary_diff(1, Some(2)).unwrap()).unwrap();
+        assert_eq!(diff["unavailable"], serde_json::json!([]));
+        assert_eq!(
+            diff["now"],
+            serde_json::json!({"from":"First","to":"Second"})
+        );
+        assert_eq!(
+            diff["needs_you"],
+            serde_json::json!({"added":["request"],"removed":[]})
+        );
+        assert!(diff["next"].is_null());
+        saved(&selected, &header(3, "Third", "[]"));
+        saved(&selected, &header(4, "Fourth", "[]"));
+        let diff = selected.summary_diff(1, None).unwrap();
+        assert_eq!(diff.unavailable, vec![1]);
+        assert!(diff.now.is_none());
+        saved(&selected, &header(4, "Conflicting", "[]"));
+        assert!(matches!(
+            selected.summary_diff(4, Some(4)),
+            Err(SessionError::History)
+        ));
+    }
+    #[test]
+    fn summary_diff_skips_invalid_history_and_snapshots_during_save() {
+        let (_temp, root, project) = setup();
+        let missing = store(&root, project, "missing");
+        assert!(matches!(
+            missing.summary_diff(1, Some(2)),
+            Err(SessionError::MissingCheckpoint { .. })
+        ));
+        let selected = store(&root, project, "chair").with_revisions(6);
+        saved(&selected, "A checkpoint without a summary");
+        assert!(matches!(
+            selected.summary_diff(1, Some(2)),
+            Err(SessionError::Summary(_))
+        ));
+        let header = |revision, needs: &str| {
+            format!(
+                "---\nprovenant_summary:\n  schema_version: 1\n  revision: {revision}\n  updated_at: \"2026-10-28T03:00:00Z\"\n  now: \"Working\"\n  next: \"Next\"\n  needs_you: {needs}\n  risk: \"None\"\n---\nBody\n"
+            )
+        };
+        saved(&selected, &header(1, "[\"old\",\"same\"]"));
+        saved(&selected, "---\nprovenant_summary: invalid\n---\nBody\n");
+        saved(&selected, &header(2, "[\"new\",\"same\"]"));
+        let diff = serde_json::to_value(selected.summary_diff(1, None).unwrap()).unwrap();
+        assert_eq!(
+            diff["needs_you"],
+            serde_json::json!({"added":["new"],"removed":["old"]})
+        );
+        assert_eq!(diff["to"], 2);
+        let (current, history) = selected
+            .summary_snapshot_with(|| {
+                saved(&selected, &header(3, "[]"));
+            })
+            .unwrap();
+        assert_eq!(parse_summary(&current).unwrap().unwrap().revision, 2);
+        assert!(history.iter().any(|text| {
+            parse_summary(text)
+                .ok()
+                .flatten()
+                .is_some_and(|s| s.revision == 1)
+        }));
+        std::fs::write(path(&root, project, "chair").join("rev-2.md"), "corrupt").unwrap();
+        assert!(matches!(
+            selected.summary_diff(1, Some(3)),
+            Err(SessionError::History)
+        ));
+    }
+    #[test]
+    fn field_update_publishes_revision_and_discovery() {
+        use provenant_core::{ActorId, HostId};
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "chair")
+            .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([4; 16]));
+        let first = "---\nprovenant_summary:\n  schema_version: 1\n  revision: 1\n  updated_at: \"2026-10-28T03:00:00Z\"\n  now: \"First\"\n  next: \"Next\"\n  needs_you: []\n  risk: \"None\"\n---\nBody\n";
+        saved(&selected, first);
+        let clock = clock(10);
+        let result = selected
+            .update(
+                false,
+                |current| Ok(Some(current.unwrap().replace("First", "Second"))),
+                WaitBudget::cli(clock.mono_now(), 1).unwrap(),
+                &CancelToken::new(),
+                &clock,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.revision, 2);
+        assert!(result.warnings.is_empty());
+        assert_eq!(selected.read_revision(1).unwrap().unwrap().markdown, first);
+        let discovery = selected.discovery().unwrap().unwrap();
+        assert_eq!(discovery.consistency, DiscoveryConsistency::Current);
+        assert_eq!(discovery.record.checkpoint.revision, 2);
+        assert_eq!(discovery.record.summary.unwrap().now, "Second");
+        let dir = selected.directory(false).unwrap();
+        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+        let lock = dir
+            .lock(
+                OsStr::new("checkpoint.lock"),
+                LockMode::Exclusive,
+                budget,
+                &CancelToken::new(),
+                &clock,
+            )
+            .unwrap();
+        let current = selected.read().unwrap().unwrap().markdown;
+        let interrupted = selected
+            .publish_revision_locked(&dir, current.as_bytes(), &clock, true, |_, _| {
+                Err(SessionError::Deadline)
+            })
+            .unwrap();
+        assert!(
+            interrupted.warnings[0].contains("reread the current checkpoint and save its Markdown")
+        );
+        drop(lock);
+        assert!(saved(&selected, &current).warnings.is_empty());
+    }
+    #[test]
+    fn summary_requires_chair_and_rechecks_identity_after_preflight() {
+        use provenant_core::{ActorId, HostId};
+        let (_temp, root, project) = setup();
+        let host = HostId::from_bytes([3; 16]);
+        let original =
+            store(&root, project, "chair").with_chair(host, ActorId::from_bytes([4; 16]));
+        let rebound = store(&root, project, "chair")
+            .with_chair(host, ActorId::from_bytes([5; 16]))
+            .with_rebind(true);
+        let unbound = store(&root, project, "chair");
+        let text = "---\nprovenant_summary:\n  schema_version: 1\n  revision: 1\n  updated_at: \"2026-10-28T03:00:00Z\"\n  now: \"First\"\n  next: \"Next\"\n  needs_you: []\n  risk: \"None\"\n---\nBody\n";
+        saved(&original, text);
+        let clock = clock(10);
+        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+        let patch = || SummaryPatch {
+            now: Some("changed".into()),
+            ..Default::default()
+        };
+        let before = original.read().unwrap();
+        let history = original.revisions().unwrap();
+        let discovery = original.discovery().unwrap();
+        assert!(matches!(
+            unbound.update_summary(patch(), 1, budget, &CancelToken::new(), &clock),
+            Err(SessionError::ChairIdentityRequired)
+        ));
+        assert_eq!(original.read().unwrap(), before);
+        assert_eq!(original.revisions().unwrap(), history);
+        assert_eq!(original.discovery().unwrap(), discovery);
+
+        original.validate_chair().unwrap();
+        // Rebind after preflight and before the old chair acquires the lock.
+        saved(&rebound, text);
+        let before = original.read().unwrap();
+        let history = original.revisions().unwrap();
+        let discovery = unbound.discovery().unwrap();
+        // A stale revision would otherwise return SummaryStale from the edit
+        // closure, before the publication path can check the new binding.
+        let result = original.update_summary(patch(), 999, budget, &CancelToken::new(), &clock);
+        assert!(
+            matches!(&result, Err(SessionError::DiscoveryIdentity)),
+            "{result:?}"
+        );
+        assert_eq!(original.read().unwrap(), before);
+        assert_eq!(original.revisions().unwrap(), history);
+        assert_eq!(unbound.discovery().unwrap(), discovery);
+    }
+    #[test]
+    fn summary_save_race() {
+        use provenant_core::{ActorId, Clock, HostId};
+        use provenant_os::clock::SystemClock;
+        use std::sync::{Arc, Barrier, mpsc};
+        struct SignallingClock(mpsc::Sender<()>);
+        impl Clock for SignallingClock {
+            fn wall_now(&self) -> Result<UtcMicros, provenant_core::TimeError> {
+                SystemClock::new().wall_now()
+            }
+            fn mono_now(&self) -> MonoTime {
+                let _ = self.0.send(());
+                SystemClock::new().mono_now()
+            }
+            fn wait_until(&self, deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
+                SystemClock::new().wait_until(deadline)
+            }
+        }
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "chair")
+            .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([4; 16]));
+        let first = "---\r\nother: \"keep\"\r\n\"provenant_summary\":\r\n  schema_version: 1\r\n  # interior comment\r\n\r\n  revision: 1\r\n  updated_at: \"2026-10-28T03:00:00Z\"\r\n  now: \"First\"\r\n  next: \"Next\"\r\n  needs_you: []\r\n  risk: \"None\"\r\n# retain comment\r\nafter: \"keep too\"\r\n---\r\nBody\r\n";
+        saved(&selected, first);
+        let changed = first.replace("Body", "Saved concurrently");
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (waiting_tx, waiting_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let selected_ref = &selected;
+            let changed_ref = &changed;
+            let saving = scope.spawn(move || {
+                let clock = SystemClock::new();
+                selected_ref
+                    .save_revision_with(
+                        changed_ref.as_bytes(),
+                        WaitBudget::cli(clock.mono_now(), 5).unwrap(),
+                        &CancelToken::new(),
+                        &clock,
+                        |dir, record| {
+                            entered_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                            selected_ref.publish_discovery(dir, record)
+                        },
+                    )
+                    .unwrap()
+            });
+            entered_rx.recv().unwrap();
+            // A zero-budget contender proves the save holds the same lock.
+            let expired = TestClock::new(
+                UtcMicros::from_micros(0).unwrap(),
+                MonoTime::from_micros(1_000_000),
+            );
+            let budget = WaitBudget::cli(MonoTime::from_micros(0), 1).unwrap();
+            assert!(matches!(
+                selected.update_summary(
+                    SummaryPatch {
+                        now: Some("contender".into()),
+                        ..Default::default()
+                    },
+                    1,
+                    budget,
+                    &CancelToken::new(),
+                    &expired
+                ),
+                Err(SessionError::Filesystem(FsError::LockTimeout { .. }))
+            ));
+            let selected_ref = &selected;
+            let editing = scope.spawn(move || {
+                let budget = WaitBudget::cli(SystemClock::new().mono_now(), 5).unwrap();
+                let clock = SignallingClock(waiting_tx);
+                let result = selected_ref.update_summary(
+                    SummaryPatch {
+                        now: Some("Edited".into()),
+                        ..Default::default()
+                    },
+                    1,
+                    budget,
+                    &CancelToken::new(),
+                    &clock,
+                );
+                done_tx.send(()).unwrap();
+                result
+            });
+            waiting_rx.recv().unwrap();
+            assert!(matches!(
+                done_rx.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            release_tx.send(()).unwrap();
+            saving.join().unwrap();
+            editing.join().unwrap().unwrap();
+        });
+        let checkpoint = selected.read().unwrap().unwrap().markdown;
+        assert!(checkpoint.contains("Saved concurrently\r\n"));
+        assert!(checkpoint.contains("other: \"keep\"\r\n"));
+        assert!(checkpoint.contains("  # interior comment\r\n\r\nprovenant_summary:"));
+        assert!(checkpoint.contains("# retain comment\r\nafter: \"keep too\"\r\n"));
+        assert_eq!(parse_summary(&checkpoint).unwrap().unwrap().now, "Edited");
+        let barrier = Arc::new(Barrier::new(2));
+        std::thread::scope(|scope| {
+            let attempt = |value: &'static str, barrier: Arc<Barrier>| {
+                let selected = &selected;
+                scope.spawn(move || {
+                    let clock = SystemClock::new();
+                    barrier.wait();
+                    selected.update_summary(
+                        SummaryPatch {
+                            next: Some(value.into()),
+                            ..Default::default()
+                        },
+                        2,
+                        WaitBudget::cli(clock.mono_now(), 5).unwrap(),
+                        &CancelToken::new(),
+                        &clock,
+                    )
+                })
+            };
+            let one = attempt("one", barrier.clone());
+            let two = attempt("two", barrier);
+            let results = [one.join().unwrap(), two.join().unwrap()];
+            assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|r| matches!(
+                        r,
+                        Err(SessionError::SummaryStale {
+                            current_revision: 3
+                        })
+                    ))
+                    .count(),
+                1
+            );
+        });
+        let current = selected.read().unwrap().unwrap().markdown;
+        let discovery = selected.discovery().unwrap().unwrap();
+        assert_eq!(discovery.consistency, DiscoveryConsistency::Current);
+        assert_eq!(discovery.record.summary, parse_summary(&current).unwrap());
+        assert_eq!(
+            discovery.record.checkpoint,
+            *selected.revisions().unwrap().last().unwrap()
+        );
+        assert_eq!(
+            selected.read_revision(2).unwrap().unwrap().markdown,
+            changed
+        );
+    }
+    #[test]
+    fn summary_empty_header_and_oversize_are_safe() {
+        use provenant_core::{ActorId, HostId};
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "chair")
+            .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([4; 16]));
+        let original = "---\r\n# existing comment\r\n\r\n---\r\nBody\r\n";
+        saved(&selected, original);
+        assert!(parse_summary(original).unwrap().is_none());
+        let clock = clock(10);
+        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+        let patch = SummaryPatch {
+            now: Some("started".into()),
+            ..Default::default()
+        };
+        selected
+            .update_summary(patch, 0, budget, &CancelToken::new(), &clock)
+            .unwrap();
+        let before = selected.read().unwrap().unwrap().markdown;
+        assert!(before.contains("# existing comment\r\n\r\nprovenant_summary:"));
+        assert!(before.ends_with("---\r\nBody\r\n"));
+        let revisions = selected.revisions().unwrap();
+        let discovery = selected.discovery().unwrap().unwrap();
+        let patch = SummaryPatch {
+            now: Some("x".repeat(8192)),
+            ..Default::default()
+        };
+        assert!(matches!(
+            selected.update_summary(patch, 1, budget, &CancelToken::new(), &clock),
+            Err(SessionError::SummaryTooLarge)
+        ));
+        assert_eq!(selected.read().unwrap().unwrap().markdown, before);
+        assert_eq!(selected.revisions().unwrap(), revisions);
+        assert_eq!(selected.discovery().unwrap().unwrap(), discovery);
+    }
+    #[test]
     fn enforces_utf8_and_byte_bounds_on_read_and_write() {
         let (_temp, root, project) = setup();
         let selected = store(&root, project, "host-1");
@@ -1447,7 +1887,7 @@ mod tests {
                 &clock,
             )
             .unwrap();
-        assert!(!wrote && !path(&root, project, "host-1").exists());
+        assert!(wrote.is_none() && !path(&root, project, "host-1").exists());
         let wrote = selected
             .update(
                 true,
@@ -1460,7 +1900,7 @@ mod tests {
                 &clock,
             )
             .unwrap();
-        assert!(wrote);
+        assert!(wrote.is_some());
         // A concurrent save cannot interleave: the lock is held while editing.
         let expired = TestClock::new(
             UtcMicros::from_micros(0).unwrap(),
@@ -1485,9 +1925,10 @@ mod tests {
         assert_eq!(selected.read().unwrap().unwrap().markdown, "second");
         // Declining, failing and oversize edits keep the previous bytes.
         assert!(
-            !selected
+            selected
                 .update(true, |_| Ok(None), budget, &cancel, &clock)
                 .unwrap()
+                .is_none()
         );
         assert!(
             selected

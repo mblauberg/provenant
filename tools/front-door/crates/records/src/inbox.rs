@@ -10,6 +10,8 @@ pub const ANSWER_TEXT_BYTES: usize = 4096;
 pub const REQUEST_REPOSITORY_BYTES: usize = 4096;
 pub const MAX_OPTIONS: usize = 16;
 pub const MAX_OFFER_BYTES: usize = 8192;
+pub const MAX_LOCAL_OFFER_ITEMS: u64 = 16;
+pub const MAX_LOCAL_OFFER_BYTES: usize = MAX_OFFER_BYTES * MAX_LOCAL_OFFER_ITEMS as usize;
 
 /// Exact registered destination. An actor label alone never selects a session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,7 +239,11 @@ pub struct AnswerDelivery {
     pub transport: AnswerTransport,
     pub message_id: provenant_core::MessageId,
     pub state: AnswerDeliveryState,
+    /// Recorded offers, not proven injections or consumption. The hook records
+    /// one queued-to-offered transition; its idempotent replays do not increment.
+    /// The default delivery service records each offer invocation.
     pub attempts: u64,
+    /// Time of the last recorded offer; hook replay preserves this timestamp.
     pub last_attempt_at: Option<WallTime>,
     pub acknowledged_at: Option<WallTime>,
     pub error: Option<String>,

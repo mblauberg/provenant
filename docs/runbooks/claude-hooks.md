@@ -5,17 +5,39 @@ Anchor: tools/front-door/tests/hooks_session.rs
 `provenant install --harness claude --hooks on` registers the hooks below in
 the Claude settings (see [install](install.md)). Rerun it after an upgrade to
 register new handlers. Every handler exits 0 on its own failure except the
-worktree hooks, prints only the protocol response on stdout and sends
+worktree hooks and the guard's exit-2 denial fallback, prints only the protocol response on stdout and sends
 diagnostics to stderr.
 
 | Event | Handler | What it does |
 |---|---|---|
+| `PreToolUse` (`Bash`) | `hook claude pre-tool-use` | Enforces the guard, then optionally offers human answers |
 | `SessionStart` (`startup`, `resume`, `clear`) | `hook claude session-start` | Reports the checkpoint status, then the state digest |
 | `SessionStart` (`compact`) | `hook claude compact` | The same report after compaction |
 | `PreCompact` | `hook claude pre-compact` | Saves the current state into the checkpoint |
 | `Stop` | `hook claude stop` | Refreshes an existing checkpoint's state if it is 10 minutes quiet |
 | `WorktreeCreate` | `hook claude worktree-create` | Runs `provenant worktree create claude/<name>` |
 | `WorktreeRemove` | `hook claude worktree-remove` | Runs `provenant worktree remove <name>` |
+
+The guard keeps its one-second deadline and enforces policy independently of
+answer-delivery support. A malformed `cwd` is rejected rather than evaluated
+against the hook process's directory. Optional delivery gets at most 50 ms
+off-thread, including blocking identity reads and offer recording. Final JSON,
+escaping and newline fit 8 KiB. Queued answers take priority; when no queued answer
+fits the final hook output, offered answers may be re-offered to the same session
+until explicitly acknowledged. Deduplicate by answer ID before acting. Denials
+take priority.
+Errors, timeouts, oversized candidates and output failures diagnose on stderr;
+a committed answer remains eligible for a later hook after a deadline or stdout
+failure. Fabric mail remains available. Injected answers are escaped untrusted
+data and confer no new authority; see the [human inbox](human-inbox.md#consume-once)
+for acknowledgement commands.
+
+If every Bash call is denied with `guard policy unavailable`, policy root
+resolution has failed. From a terminal outside Claude, check that `HOME` resolves
+and that `PROVENANT_STATE_DIR` or the hook's `--state-dir` names the intended
+current state root. Correct mistyped, protected legacy or aliased paths, then
+retry the hook. Policy-resolution failures deny tool calls until corrected;
+unreadable guard configuration still uses the default rules.
 
 ## What the SessionStart digest shows
 

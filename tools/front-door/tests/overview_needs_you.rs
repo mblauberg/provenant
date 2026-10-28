@@ -18,6 +18,116 @@ fn call(rig: &TestRig, args: &[&str]) -> Result<Value> {
 }
 
 #[test]
+fn summary_comparison_uses_local_host_and_reports_missing_identity() -> Result {
+    let rig = TestRig::new()?;
+    let checkpoint = rig.root.join("checkpoint.md");
+    std::fs::write(&checkpoint, "# Checkpoint\n")?;
+    call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "chair-a",
+            "--file",
+            checkpoint.to_str().ok_or("checkpoint")?,
+        ],
+    )?;
+    let draft = rig.root.join("draft.json");
+    std::fs::write(
+        &draft,
+        serde_json::to_vec(&json!({
+            "kind":"decision", "title":"Question", "body":"Details", "blocking":true,
+            "options":[], "recommended_option_id":null, "proceeding_with":null
+        }))?,
+    )?;
+    let ask = call(
+        &rig,
+        &[
+            "ask",
+            "--file",
+            draft.to_str().ok_or("draft")?,
+            "--session",
+            "chair-a",
+        ],
+    )?;
+    let id = ask["data"]["request_id"].as_str().ok_or("request ID")?;
+    let patch = rig.root.join("patch.json");
+    std::fs::write(
+        &patch,
+        serde_json::to_vec(&json!({"needs_you":["old-request"]}))?,
+    )?;
+    call(
+        &rig,
+        &[
+            "chair",
+            "summary",
+            "update",
+            "chair-a",
+            "--file",
+            patch.to_str().ok_or("patch")?,
+            "--expect-revision",
+            "0",
+        ],
+    )?;
+    let show = call(&rig, &["chair", "summary", "show", "chair-a"])?;
+    assert_eq!(show["data"]["comparison"]["coverage"], "complete");
+    assert_eq!(show["data"]["comparison"]["stale"], json!(["old-request"]));
+    assert_eq!(show["data"]["comparison"]["missing"], json!([id]));
+    std::fs::write(&patch, serde_json::to_vec(&json!({"now":"Working"}))?)?;
+    call(
+        &rig,
+        &[
+            "chair",
+            "summary",
+            "update",
+            "chair-a",
+            "--file",
+            patch.to_str().ok_or("patch")?,
+            "--expect-revision",
+            "1",
+        ],
+    )?;
+    let diff = call(
+        &rig,
+        &[
+            "chair", "summary", "diff", "chair-a", "--from", "1", "--to", "2",
+        ],
+    )?;
+    assert_eq!(
+        diff["data"]["diff"]["now"],
+        json!({"from":"", "to":"Working"})
+    );
+    assert_eq!(diff["data"]["diff"]["unavailable"], json!([]));
+    let current = call(
+        &rig,
+        &["chair", "summary", "diff", "chair-a", "--from", "1"],
+    )?;
+    assert_eq!(current["data"]["diff"], diff["data"]["diff"]);
+    for args in [
+        &["chair", "summary", "diff", "chair-a", "--from", "0"][..],
+        &[
+            "chair", "summary", "diff", "chair-a", "--from", "1", "--to", "0",
+        ][..],
+    ] {
+        assert_eq!(code(&rig.command(args)?), 2);
+    }
+    std::fs::remove_file(rig.state.join("host-id"))?;
+    let unavailable = call(&rig, &["chair", "summary", "show", "chair-a"])?;
+    assert_eq!(
+        unavailable["data"]["comparison"]["coverage"],
+        "host_unavailable"
+    );
+    assert_eq!(unavailable["data"]["comparison"]["stale"], json!([]));
+    assert_eq!(
+        unavailable["data"]["comparison"]["unknown"],
+        json!(["old-request"])
+    );
+    assert!(!rig.state.join("host-id").exists());
+    Ok(())
+}
+
+#[test]
 fn overview_needs_you() -> Result {
     let empty = TestRig::new()?.without_state()?;
     let overview = call(&empty, &["console", "overview"])?;

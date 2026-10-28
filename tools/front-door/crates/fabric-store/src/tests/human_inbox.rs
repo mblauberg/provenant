@@ -3,6 +3,147 @@ use provenant_core::{HostId, HumanAnswerId, HumanRequestId, OperationId};
 use provenant_records::inbox::*;
 
 #[test]
+#[allow(clippy::disallowed_methods)] // Native deadlines are part of this store API.
+fn invalid_hook_candidates_do_not_block_valid_answers() {
+    use std::time::{Duration, Instant};
+    const CHILD: &str = "PROVENANT_INVALID_ANSWER_DIAGNOSTIC_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::human_inbox::invalid_hook_candidates_do_not_block_valid_answers",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for n in [1, 2] {
+            let diagnostic = format!(
+                "answer delivery: skipping invalid answer {}",
+                HumanAnswerId::from_bytes([n; 16])
+            );
+            // Both the observation and transaction boundaries diagnose the row.
+            assert_eq!(stderr.matches(&diagnostic).count(), 2, "{stderr}");
+        }
+        return;
+    }
+    let f = Fixture::new();
+    let store = f.open();
+    let target = AnswerTarget {
+        host: HostId::from_bytes([8; 16]),
+        project: project(),
+        actor: actor(2),
+        session: "chair".into(),
+    };
+    for n in 1..=3 {
+        let id = HumanAnswerId::from_bytes([n; 16]);
+        let request = HumanRequestId::from_bytes([n; 16]);
+        let answer: HumanAnswer = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"id":id,"request_id":request,"request_revision":1,
+            "action":"reply","option_id":null,"text":"Reply","actor":actor(3),
+            "channel":"cli","answered_at":f.now(),"operation_id":format!("answer-{n}")
+        }))
+        .unwrap();
+        let delivery = AnswerDelivery {
+            schema_version: 1,
+            answer_id: id,
+            target_host: target.host,
+            target_session: target.session.clone(),
+            target_actor: target.actor,
+            transport: AnswerTransport::FabricMail,
+            message_id: message(&f, n).id,
+            state: AnswerDeliveryState::Queued,
+            attempts: 0,
+            last_attempt_at: None,
+            acknowledged_at: None,
+            error: None,
+        };
+        store
+            .db
+            .execute(
+                "INSERT INTO human_requests VALUES(?1,?2,1,'chair','answered',?3)",
+                params![project().to_string(), request.to_string(), b"{}".as_slice()],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO human_answers VALUES(?1,?2,?3,?4)",
+                params![
+                    project().to_string(),
+                    id.to_string(),
+                    request.to_string(),
+                    encode(&answer).unwrap()
+                ],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO human_answer_outbox VALUES(?1,?2,?3)",
+                params![
+                    project().to_string(),
+                    id.to_string(),
+                    encode(&delivery).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    let deadline = || Instant::now() + Duration::from_secs(1);
+    let candidates = store
+        .read_queued_human_answers(&target, deadline())
+        .unwrap();
+    assert_eq!(candidates.items.len(), 3);
+    let other_session = AnswerTarget {
+        session: "another-chair".into(),
+        ..target.clone()
+    };
+    assert!(
+        store
+            .read_queued_human_answers(&other_session, deadline())
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    store.db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.schema_version',99) AS BLOB) WHERE answer=?1",
+        [HumanAnswerId::from_bytes([1;16]).to_string()]).unwrap();
+    store.db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.attempts','invalid') AS BLOB) WHERE answer=?1",
+        [HumanAnswerId::from_bytes([2;16]).to_string()]).unwrap();
+    let valid = store
+        .read_queued_human_answers(&target, deadline())
+        .unwrap();
+    assert_eq!(valid.items.len(), 1);
+    assert_eq!(valid.items[0].answer.id, HumanAnswerId::from_bytes([3; 16]));
+    // Revalidate selected rows at the write boundary too: a row may have been
+    // repaired or corrupted since the read snapshot.
+    let offered =
+        Store::offer_human_answers_once(&f.root, &target, candidates, f.now(), deadline()).unwrap();
+    assert_eq!(offered.items.len(), 1);
+    assert_eq!(offered.items[0].answer.id, valid.items[0].answer.id);
+    assert_eq!(
+        store
+            .read_offered_human_answers(&target, deadline())
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .read_offered_human_answers(&other_session, deadline())
+            .unwrap()
+            .items
+            .is_empty()
+    );
+}
+
+#[test]
 fn overview_read_only_does_not_create_or_migrate() {
     let f = Fixture::new();
     assert!(matches!(
@@ -518,6 +659,13 @@ fn request_correlation_expiry_filter_precedes_page_limit() {
     assert_eq!(all.items[3].state, RequestState::Expired);
     let pending = store.pending_human_requests(10, 1_048_576, &call).unwrap();
     assert_eq!(pending.items.len(), 3);
+    let owner_host = HostId::from_bytes([8; 16]).to_string();
+    assert!(
+        pending
+            .items
+            .iter()
+            .all(|item| item.owner_host.as_deref() == Some(owner_host.as_str()))
+    );
     let bounded = store.pending_human_requests(1, 1_048_576, &call).unwrap();
     assert!(bounded.items.is_empty());
     assert!(bounded.truncated);

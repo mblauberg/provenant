@@ -607,7 +607,7 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
                     None,
                     2
                 )?["error"]["code"],
-                "invalid_input"
+                "work_mismatch"
             );
             assert_eq!(
                 mcp_call(
@@ -615,7 +615,7 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
                     "fabric_inbox",
                     json!({"op":"ask","session":"chair-a","request":bad})
                 )?["structuredContent"]["code"],
-                "invalid_input"
+                "work_mismatch"
             );
         }
     }

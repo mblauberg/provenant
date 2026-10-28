@@ -29,6 +29,7 @@ mod pr_land_tests;
 mod provider_retention;
 mod release_smoke;
 mod roots;
+mod target_seed_build;
 mod usage;
 #[cfg(test)]
 pub mod worktree_tests;
@@ -140,12 +141,22 @@ fn fail(
     message: &str,
     globals: &provenant_cli::Globals,
 ) -> u8 {
+    fail_with_repair(command, status, code, message, None, globals)
+}
+fn fail_with_repair(
+    command: &str,
+    status: Outcome,
+    code: &str,
+    message: &str,
+    repair: Option<&str>,
+    globals: &provenant_cli::Globals,
+) -> u8 {
     let mut result = CommandResult::new(command, status, ());
     result.error = Some(CommandError {
         code: code.into(),
         message: message.into(),
         cause: None,
-        repair: None,
+        repair: repair.map(Into::into),
     });
     if let Some(error) = &mut result.error {
         apply_repair(command, error, globals.json);
@@ -781,6 +792,8 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
         verb.as_str(),
         "workflow session show"
             | "workflow session diff"
+            | "chair summary show"
+            | "chair summary diff"
             | "console projects"
             | "console sessions"
             | "console overview"

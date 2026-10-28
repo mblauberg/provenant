@@ -20,6 +20,7 @@ pub struct OverviewItem {
     pub project_id: String,
     pub title: String,
     pub chair_session_id: Option<String>,
+    pub owner_host: Option<String>,
 }
 
 pub struct OverviewBatch {
@@ -64,6 +65,7 @@ pub fn overview(
                 project_id: item.project_id,
                 title: item.title,
                 chair_session_id: item.chair_session_id,
+                owner_host: item.owner_host,
             })
             .collect(),
         truncated: page.truncated,
@@ -218,6 +220,8 @@ pub enum InboxError {
     OwnerUnavailable,
     #[error("work membership lookup failed: {0}")]
     WorkLookup(String),
+    #[error("work repository or head mismatch")]
+    WorkMismatch,
     #[error(
         "project has reached the 10000-request retention limit; no history or pending delivery was pruned"
     )]
@@ -324,6 +328,7 @@ impl InboxError {
             Self::UnsupportedOwner => "unsupported_owner",
             Self::RequestLimit => "request_limit",
             Self::WorkLookup(_) => "work_lookup_failed",
+            Self::WorkMismatch => "work_mismatch",
             Self::Store(provenant_fabric_store::Error::NotFound) => "not_found",
             Self::Store(provenant_fabric_store::Error::Busy) => "busy",
             Self::Store(provenant_fabric_store::Error::Cancelled) => "cancelled",
@@ -662,7 +667,7 @@ impl<'a> InboxService<'a> {
                         let coverage =
                             self.work_lookup.ok_or(InboxError::OwnerUnavailable)?(work, &request)?;
                         if coverage == WorkCoverage::Mismatch {
-                            return Err(InboxError::Invalid("work repository or head mismatch"));
+                            return Err(InboxError::WorkMismatch);
                         }
                         Ok(coverage)
                     })

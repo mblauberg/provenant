@@ -2740,6 +2740,102 @@ bounds are null. Positional arguments have no long flag.
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
+## `provenant chair summary`
+
+| Argument | Contract |
+|---|---|
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant chair summary show`
+
+| Argument | Contract |
+|---|---|
+| `session` | `{"name": "session", "positional": true, "required": true}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "session"
+      ],
+      "multiple": true,
+      "name": "Show",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant chair summary diff`
+
+| Argument | Contract |
+|---|---|
+| `session` | `{"name": "session", "positional": true, "required": true}` |
+| `--from` | `{"name": "from", "required": true}` |
+| `--to` | `{"name": "to"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "session",
+        "from",
+        "to"
+      ],
+      "multiple": true,
+      "name": "Diff",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant chair summary update`
+
+| Argument | Contract |
+|---|---|
+| `session` | `{"name": "session", "positional": true, "required": true}` |
+| `--file` | `{"name": "file", "required": true}` |
+| `--expect-revision` | `{"name": "expect_revision", "required": true}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "session",
+        "file",
+        "expect_revision"
+      ],
+      "multiple": true,
+      "name": "Update",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant chair log`
 
 | Argument | Contract |
@@ -2846,6 +2942,16 @@ bounds are null. Positional arguments have no long flag.
 ```
 
 ## `provenant worktree`
+
+| Argument | Contract |
+|---|---|
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant worktree seed-build`
 
 | Argument | Contract |
 |---|---|

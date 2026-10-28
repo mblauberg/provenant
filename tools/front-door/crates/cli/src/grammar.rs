@@ -191,6 +191,9 @@ pub struct PrOpen {
 }
 #[derive(Debug, Subcommand)]
 pub enum Chair {
+    /// Read and update a chair session's structured summary.
+    #[command(subcommand)]
+    Summary(ChairSummary),
     /// Append and read a chair session's authored updates.
     #[command(subcommand)]
     Log(ChairLog),
@@ -205,6 +208,36 @@ pub enum Chair {
         /// Source session; required for real runs unless CLAUDE_SESSION_ID is set.
         #[arg(long)]
         session_id: Option<String>,
+    },
+}
+#[derive(Debug, Subcommand)]
+pub enum ChairSummary {
+    /// Show the current structured summary.
+    Show {
+        /// Chair session ID
+        session: String,
+    },
+    /// Compare two retained summary revisions.
+    Diff {
+        /// Chair session ID
+        session: String,
+        /// Earlier summary revision
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        from: u64,
+        /// Later summary revision (defaults to current)
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        to: Option<u64>,
+    },
+    /// Update selected fields from a JSON patch.
+    Update {
+        /// Chair session ID
+        session: String,
+        /// JSON patch file, or - for standard input
+        #[arg(long)]
+        file: String,
+        /// Expected summary revision; use 0 to create a summary
+        #[arg(long)]
+        expect_revision: u64,
     },
 }
 #[derive(Debug, Subcommand)]
@@ -751,6 +784,8 @@ pub struct Stats {
 }
 #[derive(Debug, Subcommand)]
 pub enum Worktree {
+    /// Build and publish a host-owned Cargo target seed from origin/main
+    SeedBuild,
     /// Record custody and ownership for an existing linked worktree
     Adopt {
         /// Existing linked worktree in this project

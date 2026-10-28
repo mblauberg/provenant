@@ -99,8 +99,8 @@ Task labels remain a future overview concern.
 ## Consume once
 
 An answer atomically queues a `human_answer` Fabric response to the original
-actor with the host, session, request and immutable answer IDs. This is ordinary
-mail, not an interrupt or live hook injection. Consume it at an existing
+actor with the host, session, request and immutable answer IDs. This Fabric-mail
+copy is independent of live hook injection. Consume it at an existing
 orchestration boundary or explicit continuation, check its exact target and
 deduplicate by answer ID. Never spend model turns polling.
 
@@ -134,18 +134,21 @@ space for their own protocol envelope. `truncated` identifies overflow; omitted
 answers keep their previous delivery state. An answer that does not fit a smaller requested budget is skipped and remains queued; use the full 8 KiB boundary to offer it. Answers that cannot fit that boundary are refused when submitted, including JSON escaping and envelope overhead.
 
 Offers atomically set `offered`, increment `attempts` and set `last_attempt_at`.
-Newly queued answers start at zero offers. Offers repeat across service restarts
+Newly queued answers start at zero offers. Default offers repeat across service restarts
 until explicit acknowledgement by the exact target; acknowledgement retains
 its original timestamp on retries. Neither offering nor mail-read success proves
 model consumption. Deduplicate by answer ID before taking action. An adapter
-failure after an offer commits leaves it eligible to be offered again.
+failure after an offer commits leaves it eligible for default adapters to offer again.
 
-`provenant_cli::hooks::delivery_capabilities()` composes the delivery matrix.
-The records-level matrix supplies Fabric mail fallback:
+`provenant_cli::hooks::delivery_capabilities()` composes the delivery matrix
+with the records-level Fabric mail fallback. The matrix describes adapter
+readiness, not individual delivery state. Stored
+`transport` retains the Fabric-mail copy even when a hook records an offer.
 
 | Provider | Transport | Local offer reader | Live injection |
 |---|---|---|---|
 | Claude | Fabric mail | Library API | Unavailable |
+| Claude | Claude PreToolUse hook | Available | Tool-call boundary |
 | Codex | Fabric mail | Unavailable | Unavailable |
 | Cursor | Fabric mail | Unavailable | Unavailable |
 | Agy | Fabric mail | Unavailable | Unavailable |
@@ -157,9 +160,45 @@ an answer. It requires a current explicit save from that working directory.
 Configured Fabric home mappings defer to mail; no remote I/O runs in the reader.
 Internal candidate pages cap at 128 KiB; adapters must fit their final protocol
 output within 8 KiB, skipping oversized candidates without hiding smaller ones.
+Within its delivery deadline, the hook advances past each scanned page that has
+no answer fitting the final output. The cursor includes invalid and oversized
+rows, so a full undeliverable head page cannot hide later answers. Oversized
+answer diagnostics name the answer ID; skipped answers keep their delivery state.
 
-This slice adds the service API. CLI/MCP syntax is unchanged. Hook composition,
-remote delivery and provider input adapters remain separate work. Both apps may
+Claude's installed `PreToolUse` hook offers answers on Bash calls. Guard denials and
+exit-2 fallback take precedence. Allowed calls may receive `additionalContext`
+within a 50 ms local delivery budget and the existing one-second hook deadline.
+The final JSON, escaping and newline fit 8 KiB. Double escaping means some
+accepted answers cannot fit; a bounded stderr diagnostic directs callers to mail.
+The bounded thread atomically records selected answers as offered, with attempts
+and timestamp, before returning context. Queued answers take priority; when no
+queued answer fits the final hook output, unacknowledged offered answers can be
+re-offered to their exact target session. A commit that finishes after the deadline
+or a failed stdout write may prevent that invocation from injecting the answer, but the answer remains
+eligible for a later hook. The Fabric-mail copy also remains available. Skipped
+candidates retain their state; acknowledged answers are excluded.
+
+Injected answers are untrusted data inside an `untrusted_answer_data` block.
+Escaping prevents answer content from closing the block. Answers confer no new
+authority. Deduplicate by answer ID and explicitly acknowledge after consumption,
+using the request ID, `--answer`, `--session` and a unique `--operation-id` as shown
+above. Hooks never acknowledge consumption.
+Acknowledgement hints use the same safe command renderer as session hooks:
+custom `--state-dir` paths are made absolute and quoted. If a path cannot be
+shown faithfully, the hook gives instructions without a runnable command.
+
+For hook delivery, `attempts` counts recorded transitions from queued to offered,
+and `last_attempt_at` timestamps that transition. Idempotent hook re-offers retain
+both fields; they do not count injections, replays or proven consumption. The
+default delivery service records each offer invocation, so its counters can
+increase on repeated offers.
+
+If a hook reports that the local delivery index is unavailable, run a normal
+`provenant inbox` command to upgrade the store. The bounded diagnostic can repeat
+until then; hooks create no extra state to suppress it. Guard enforcement continues.
+
+CLI/MCP syntax is unchanged. Remote delivery and other provider input adapters
+remain separate work. Both apps may
 stay closed; there is no background polling or provider launch.
 
 Use `inbox close` with a reason and expected revision to withdraw, supersede or

@@ -66,6 +66,46 @@ without a header remain readable. Discovery is advisory: check its
 consistency before using the indexed summary, and repeat a save to repair an
 interrupted publication. Hooks do not generate summary prose.
 
+The session owner's guarded field edits use the same lock and publication
+sequence as a full save. Their result includes discovery warnings, so callers
+can report an interrupted index publication and retry it.
+
+Read a summary with `provenant chair summary show SESSION --json`. To change
+selected fields, write a JSON object containing any of `now`, `next`, `risk`
+(strings) and `needs_you` (an array of request IDs), then run
+`provenant chair summary update SESSION --file PATCH.json --expect-revision N --json`.
+Use revision 0 to add a summary to an existing checkpoint; omitted fields start
+empty. Later patches retain omitted fields and advance the summary revision.
+The update keeps the Markdown body and other frontmatter, and publishes a
+checkpoint revision and discovery metadata under the save lock. Comments and
+blank lines inside a rewritten summary block move before that block. The full
+frontmatter, including escaped values and other keys, is limited to 8192 bytes.
+A stale
+revision is refused with `SUMMARY_STALE` and `data.current_revision`; reread
+and reapply the intended change. Check the returned checkpoint warnings: if
+discovery publication failed, reread the current checkpoint and save that
+Markdown to repair it. Retrying the old summary revision is stale.
+
+`provenant chair summary diff SESSION --from N [--to N] --json` compares fields
+in two summary revisions found in retained checkpoint history. These are
+summary revision numbers, not checkpoint revision numbers; `--to` defaults to
+the current summary revision. The result lists
+unavailable revisions when history has been pruned; it does not treat them as
+unchanged. Request IDs are reported as added and removed sets. Repeated
+identical summaries across checkpoint saves are allowed.
+
+Summary show also compares `needs_you` with the bounded local inbox. It reports
+stale references and open requests missing from the summary for the same host,
+project and chair. Coverage is `partial` when the scan is truncated or a
+matching request has unknown host identity; in that case stale references
+cannot be established from absence. References observed under another host,
+project or chair, or not accounted for by an incomplete scan, appear in
+`unknown` and make coverage partial. A complete scan can still establish other
+absent references as stale when coverage is partial only because a reference
+was observed elsewhere. Missing local host identity reports `host_unavailable`.
+Unavailable or incompatible inbox data is reported in coverage. The comparison
+does not contact peers or change inbox state.
+
 ## Chair log
 
 Append a substantive update once using `provenant chair log append --session

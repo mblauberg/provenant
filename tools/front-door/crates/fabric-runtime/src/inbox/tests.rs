@@ -374,13 +374,10 @@ fn delivery_capabilities_publish_only_tested_fabric_fallback_for_each_provider()
     let capabilities = delivery_capabilities();
     assert_eq!(
         capabilities.iter().map(|c| c.provider).collect::<Vec<_>>(),
-        vec![
-            provenant_records::Harness::Claude,
-            provenant_records::Harness::Codex,
-            provenant_records::Harness::Cursor,
-            provenant_records::Harness::Agy,
-            provenant_records::Harness::Opencode
-        ]
+        provenant_records::ADAPTER_SPECS
+            .iter()
+            .map(|spec| spec.id)
+            .collect::<Vec<_>>()
     );
     for capability in capabilities {
         assert_eq!(capability.transport, AnswerTransport::FabricMail);
@@ -908,7 +905,7 @@ fn request_correlation_saves_exact_coverage_once_and_requires_host_lookup() {
         }
         let result = service.execute(input.clone(), f.budget(), &f.cancel);
         if coverage == WorkCoverage::Mismatch {
-            assert_eq!(result.unwrap_err().code(), "invalid_input");
+            assert_eq!(result.unwrap_err().code(), "work_mismatch");
             continue;
         }
         let saved = receipt(result.unwrap());
@@ -945,6 +942,67 @@ fn request_correlation_saves_exact_coverage_once_and_requires_host_lookup() {
             .items
             .len(),
         6
+    );
+}
+
+#[test]
+fn request_correlation_v2_survives_answer_close_and_acknowledgement() {
+    let f = Fixture::new();
+    let work = RequestWork {
+        run_id: provenant_core::RunId::from_bytes([3; 16]),
+        task_id: Some(provenant_core::TaskId::from_bytes([4; 16])),
+        attempt_id: None,
+        repository: None,
+        head: None,
+    };
+    let mut input = ask(RequestKind::Decision, "linked-roundtrip");
+    if let InboxInput::Ask { request, .. } = &mut input {
+        request.work = Some(work.clone());
+    }
+    let created = receipt(
+        f.service()
+            .with_work_lookup(&|_, _| Ok(WorkCoverage::Verified))
+            .execute(input, f.budget(), &f.cancel)
+            .unwrap(),
+    );
+    let check = |history_len| {
+        let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+            panic!("item")
+        };
+        assert_eq!(item.history.len(), history_len);
+        for record in std::iter::once(&item.request).chain(&item.history) {
+            assert_eq!(record.schema_version, 2);
+            assert_eq!(record.request.work.as_ref(), Some(&work));
+            assert_eq!(record.work_coverage, Some(WorkCoverage::Verified));
+            assert_eq!(record.verified_work(), Some(&work));
+        }
+        item
+    };
+    check(1);
+    let answered = receipt(f.call(answer(created.request_id, "linked-answer")).unwrap());
+    check(2);
+    f.call(InboxInput::Close {
+        id: created.request_id,
+        state: RequestState::Superseded,
+        reason: "Replaced by a new scoped request".into(),
+        expect_revision: 2,
+        operation_id: op("linked-close"),
+    })
+    .unwrap();
+    check(3);
+    f.call(InboxInput::Acknowledge {
+        id: created.request_id,
+        answer_id: answered.answer_id.unwrap(),
+        session: "session-a".into(),
+        operation_id: op("linked-ack"),
+    })
+    .unwrap();
+    let item = check(3);
+    assert_eq!(item.request.state, RequestState::Superseded);
+    assert_eq!(item.answer.unwrap().id, answered.answer_id.unwrap());
+    assert_eq!(
+        item.delivery.unwrap().state,
+        AnswerDeliveryState::Acknowledged
     );
 }
 
@@ -1092,6 +1150,43 @@ fn item(f: &Fixture, id: HumanRequestId) -> InboxItem {
         InboxResult::Item { item } => *item,
         _ => panic!("item"),
     }
+}
+
+#[test]
+fn replacement_work_mismatch_leaves_original_open_and_unindexed_is_saved() {
+    let f = Fixture::new();
+    let old = receipt(f.call(ask(RequestKind::Decision, "original-work")).unwrap());
+    let original = item(&f, old.request_id);
+    let mut input = replacement(old.request_id, 1, "replace-work");
+    if let InboxInput::Ask { request, .. } = &mut input {
+        request.work = Some(RequestWork {
+            run_id: provenant_core::RunId::from_bytes([3; 16]),
+            task_id: None,
+            attempt_id: None,
+            repository: None,
+            head: None,
+        });
+    }
+    assert_eq!(
+        f.service()
+            .with_work_lookup(&|_, _| Ok(WorkCoverage::Mismatch))
+            .execute(input.clone(), f.budget(), &f.cancel)
+            .unwrap_err()
+            .code(),
+        "work_mismatch"
+    );
+    assert_eq!(item(&f, old.request_id), original);
+    let saved = receipt(
+        f.service()
+            .with_work_lookup(&|_, _| Ok(WorkCoverage::Unindexed))
+            .execute(input, f.budget(), &f.cancel)
+            .unwrap(),
+    );
+    assert_eq!(saved.work_coverage, Some(WorkCoverage::Unindexed));
+    assert_eq!(
+        item(&f, old.request_id).request.state,
+        RequestState::Superseded
+    );
 }
 
 #[test]
@@ -1287,4 +1382,72 @@ fn request_correlation_deadline_expires_on_read_without_rewriting_answers_or_his
         );
         assert_eq!(item(&f, replaceable.request_id), original);
     }
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // The bounded hook offer API uses real deadlines.
+fn hook_offers_retry_idempotently_without_hiding_later_queued_answers() {
+    use std::time::{Duration, Instant};
+    let f = Fixture::new();
+    for n in 0..18 {
+        let created = receipt(
+            f.call(ask(RequestKind::Decision, &format!("once-ask-{n}")))
+                .unwrap(),
+        );
+        f.call(answer(created.request_id, &format!("once-answer-{n}")))
+            .unwrap();
+    }
+    let target = AnswerTarget {
+        host: f.identity.host,
+        project: f.identity.project,
+        actor: f.identity.inbox.actor,
+        session: "session-a".into(),
+    };
+    let deadline = || Instant::now() + Duration::from_secs(2);
+    let read = || {
+        let store = Store::open_read_only(&f.root, deadline()).unwrap().unwrap();
+        store
+            .read_queued_human_answers(&target, deadline())
+            .unwrap()
+    };
+    let first = read();
+    assert_eq!(first.items.len(), 16);
+    let claim = |page, until| {
+        Store::offer_human_answers_once(&f.root, &target, page, f.clock.wall_now().unwrap(), until)
+    };
+    let barrier = std::sync::Barrier::new(2);
+    let claimed = std::thread::scope(|scope| {
+        let worker = || {
+            barrier.wait();
+            claim(first.clone(), deadline())
+        };
+        let a = scope.spawn(worker);
+        let b = scope.spawn(worker);
+        [a.join().unwrap(), b.join().unwrap()]
+            .into_iter()
+            .filter_map(Result::ok)
+            .map(|page| page.items.len())
+            .sum::<usize>()
+    });
+    assert_eq!(claimed, 16);
+    assert!(claim(first, deadline()).unwrap().items.is_empty());
+    let remaining = read();
+    assert_eq!(remaining.items.len(), 2);
+    assert!(matches!(
+        claim(remaining.clone(), Instant::now()),
+        Err(provenant_fabric_store::Error::Busy)
+    ));
+    assert_eq!(read(), remaining);
+    assert_eq!(claim(remaining, deadline()).unwrap().items.len(), 2);
+    // A committed offer that missed the host's deadline or stdout is still
+    // eligible for the exact same session, without recording another attempt.
+    let retries = Store::open_read_only(&f.root, deadline())
+        .unwrap()
+        .unwrap()
+        .read_offered_human_answers(&target, deadline())
+        .unwrap();
+    assert_eq!(retries.items.len(), 16);
+    let retried = claim(retries.clone(), deadline()).unwrap();
+    assert_eq!(retried, retries);
+    assert!(retried.items.iter().all(|item| item.delivery.attempts == 1));
 }

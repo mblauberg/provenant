@@ -136,6 +136,19 @@ marks it. A revision whose text fails its hash is refused with `HISTORY`.
   `tests/workflow.rs::session_checkpoints_keep_bounded_revisions_and_show_what_changed`
 - Owner: `crates/workflow/src/session.rs`, `crates/workflow/src/session/diff.rs`
 
+### Structured summary revisions and inbox coverage
+
+Summary field edits retain the checkpoint body and use the same save lock and
+revision guard. A bounded comparison of retained summary revisions reports
+unavailable history, scalar changes and added or removed request IDs. Inbox
+reconciliation compares the local host, project and chair; references observed
+elsewhere or unaccounted for by an incomplete scan are unknown, not stale.
+- Why: concurrent saves and incomplete or differently scoped observations must
+  not overwrite chair work or represent a live request as resolved.
+- Test: `crates/workflow/src/session.rs::retained_summary_diff_compares_fields_and_reports_missing`;
+  `crates/cli/src/console/overview.rs::compares_only_matching_host_project_and_chair_and_respects_partial_coverage`
+- Owner: `crates/workflow/src/session/summary.rs`, `crates/cli/src/console/overview.rs`
+
 ### Explicit chairs are discoverable
 
 Catalogue composition uses the bounded discovery reader with a shared entry
