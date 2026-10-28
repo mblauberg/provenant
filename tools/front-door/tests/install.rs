@@ -826,6 +826,17 @@ fn bootstrap_help_and_unsupported_hosts_need_no_download() -> Result {
     Ok(())
 }
 
+/// Reports the published release platform so the download path runs on any CI host.
+fn fake_supported_uname(fake_bin: &Path) -> Result {
+    let uname = fake_bin.join("uname");
+    fs::write(
+        &uname,
+        "#!/bin/sh\ncase \"$1\" in -s) echo Darwin ;; -m) echo arm64 ;; esac\n",
+    )?;
+    fs::set_permissions(&uname, fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
 #[test]
 fn bootstrap_verifies_release_checksum() -> Result {
     let mut rig = TestRig::new()?;
@@ -914,6 +925,7 @@ esac
         ),
     )?;
     fs::set_permissions(curl, fs::Permissions::from_mode(0o755))?;
+    fake_supported_uname(&fake_bin)?;
     for (key, value) in &mut rig.env {
         if key == "PATH" {
             *value = format!("{}:/usr/bin:/bin", fake_bin.display()).into();
@@ -1226,6 +1238,7 @@ esac
         ),
     )?;
     fs::set_permissions(curl, fs::Permissions::from_mode(0o755))?;
+    fake_supported_uname(&fake_bin)?;
     for (key, value) in &mut rig.env {
         if key == "PATH" {
             *value = format!("{}:/usr/bin:/bin", fake_bin.display()).into();
