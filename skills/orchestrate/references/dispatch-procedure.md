@@ -88,25 +88,16 @@ push|reconcile`. A terminal without MCP cancels with `provenant cancel ATTEMPT`.
    `fabric_run` `status` with `detail: true`. If its `state` is not `terminal`, wait and retry. If
    you are retrying your own resume, repeat it with the same `operation_id`,
    prompt and target; the replay returns the existing continuation, including on
-<<<<<<< HEAD
    a peer. Otherwise page through `fabric_run` `list` (local host only), then
    inspect candidates with `status` and `detail: true` to find the attempt
    whose `retry_of` is the target. Use a fresh `operation_id` only when
-   the ID was reused with a different prompt.
+   the ID was reused with a different prompt. Continuations keep the prior
+   attempt's applied provider, model and account; they do not draw the named
+   route pool again.
 8. Use `fabric_run`'s `cancel` operation with an explicit target to stop a run;
    use `fabric_output`'s `read` operation for a bounded slice. Output reads
    default to the result part and offset zero. Run operation IDs can be generated
    when omitted; retain the returned ID and supply it again for a planned retry.
-=======
-   a peer. Otherwise use `fabric_run` `list` (local host only) and target the
-   attempt whose `retry_of` is the target. Use a fresh `operation_id` only when
-   the ID was reused with a different prompt. Continuations keep the prior
-   attempt's applied provider, model and account; they do not draw the named
-   route pool again. A refusal returns no unrecorded attempt ID.
-8. Use `fabric_run`'s `cancel` operation with an explicit target and operation
-   ID to stop a run; use `fabric_output`'s `read` operation with a target, part,
-   offset and byte limit for a bounded slice.
->>>>>>> 6b64f7e29 (docs(cli): teach the core path and regenerate reference)
 
 ## Dispatch details
 
