@@ -15,6 +15,7 @@ use std::{
 };
 
 pub const PROTOCOL: u64 = 6;
+pub const CONSOLE_PROTOCOL: u64 = 7;
 pub const MAX_FRAME: usize = 1_048_576;
 
 pub fn discover_ssh_executable(
@@ -204,6 +205,17 @@ impl From<MutationResult> for CoordinationResult {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PeerAction {
     Health,
+    ConsoleBoard {
+        all: bool,
+        limit: u64,
+        selected: bool,
+    },
+    ConsoleTree {
+        max_depth: u64,
+        max_nodes: u64,
+        detail: bool,
+        selected: bool,
+    },
     RunStatuses {
         targets: Vec<crate::coordination::facade::AttemptTarget>,
     },
@@ -277,7 +289,14 @@ impl PeerRequest {
     ) -> Self {
         let mut request = Self {
             version: 1,
-            protocol: PROTOCOL,
+            protocol: if matches!(
+                action,
+                PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. }
+            ) {
+                CONSOLE_PROTOCOL
+            } else {
+                PROTOCOL
+            },
             target_host,
             source_host,
             agent,
@@ -380,6 +399,7 @@ pub enum PeerResult {
     RunEvents(crate::runs::RunEventsPage),
     Push(provenant_fabric_store::PushOperation),
     Health(PeerHealth),
+    Console(serde_json::Value),
     Coordination(CoordinationResult),
     SessionHandoff(crate::handoff::HandoffReceipt),
     Error {
@@ -404,9 +424,14 @@ fn baseline_protocol() -> u64 {
 pub fn protocol_refusal(bytes: &[u8]) -> Result<Option<PeerResponse>, PeerError> {
     let request: PeerRequest<serde_json::Value> =
         provenant_records::decode(bytes, Limits::CONFIG).map_err(|_| PeerError::Frame)?;
-    Ok((request.protocol != PROTOCOL).then_some(PeerResponse {
+    let console = matches!(
+        request.action["action"].as_str(),
+        Some("console_board" | "console_tree")
+    );
+    let expected = if console { CONSOLE_PROTOCOL } else { PROTOCOL };
+    Ok((request.protocol != expected).then_some(PeerResponse {
         version: 1,
-        protocol: PROTOCOL,
+        protocol: expected,
         host: request.target_host,
         project: request.project.key,
         result: PeerResult::Error {
@@ -615,6 +640,18 @@ impl SshTransport<'_> {
         if let Termination::Exit(code) = outcome.termination {
             if code != 0 {
                 let line = stderr_line(&outcome.stderr.bytes);
+                if matches!(
+                    request.action,
+                    PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. }
+                ) && stderr_has_line(
+                    &outcome.stderr.bytes,
+                    "provenant: fabric peer: invalid peer frame",
+                ) {
+                    return Err(PeerError::ProtocolMismatch {
+                        peer: peer.destination.clone(),
+                        remote: 1,
+                    });
+                }
                 if code == 3
                     && stderr_has_line(
                         &outcome.stderr.bytes,
@@ -627,6 +664,10 @@ impl SshTransport<'_> {
                     });
                 }
                 if code == 3
+                    && !matches!(
+                        request.action,
+                        PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. }
+                    )
                     && String::from_utf8_lossy(&outcome.stderr.bytes)
                         .lines()
                         .any(|line| {
@@ -639,15 +680,16 @@ impl SshTransport<'_> {
                     // a lost mutation reply. Probe health, never repeat the
                     // operation, and reclassify only a proven version mismatch.
                     // Omit protocol and trace so v1 can decode the probe.
-                    let mut probe = serde_json::to_vec(&serde_json::json!({
+                    let probe_value = serde_json::json!({
                         "version": 1,
                         "target_host": request.target_host,
                         "source_host": request.source_host,
                         "agent": request.agent,
                         "project": request.project,
                         "action": {"action": "health"},
-                    }))
-                    .map_err(|_| PeerError::Frame)?;
+                    });
+                    let mut probe =
+                        serde_json::to_vec(&probe_value).map_err(|_| PeerError::Frame)?;
                     probe.push(b'\n');
                     let remaining = timeout
                         .saturating_sub(Duration::from_micros(outcome.elapsed_micros))
@@ -711,7 +753,7 @@ impl SshTransport<'_> {
         {
             return Err(PeerError::Version);
         }
-        if response.protocol != PROTOCOL {
+        if response.protocol != request.protocol {
             return Err(PeerError::ProtocolMismatch {
                 peer: peer.destination.clone(),
                 remote: response.protocol,
@@ -1174,7 +1216,17 @@ mod tests {
                 return Err(ExecError::Busy);
             }
             let request = decode_request(options.stdin.unwrap()).unwrap();
-            assert_eq!(request.protocol, PROTOCOL);
+            assert_eq!(
+                request.protocol,
+                if matches!(
+                    request.action,
+                    PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. }
+                ) {
+                    CONSOLE_PROTOCOL
+                } else {
+                    PROTOCOL
+                }
+            );
             self.0.lock().unwrap().take().unwrap()
         }
     }
@@ -1201,12 +1253,33 @@ mod tests {
         exchange_error(&executor, mutation)
     }
     fn exchange_error(executor: &dyn Executor, mutation: bool) -> PeerError {
+        let action = if mutation {
+            PeerAction::Coordination {
+                input: CoordinationInput::Events(EventsInput::Note {
+                    note: "must not run".into(),
+                    dedup_key: None,
+                }),
+                operation_id: Some(OperationId::parse("wrong-version").unwrap()),
+            }
+        } else {
+            PeerAction::RunStatuses { targets: vec![] }
+        };
+        exchange_action_error(executor, action)
+    }
+    fn exchange_action_error(executor: &dyn Executor, action: PeerAction) -> PeerError {
         let clock = TestClock::new(WallTime::from_micros(1).unwrap(), MonoTime::from_micros(1));
         let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
         let host = HostId::from_bytes([2; 16]);
         let request = PeerRequest {
             version: 1,
-            protocol: PROTOCOL,
+            protocol: if matches!(
+                action,
+                PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. }
+            ) {
+                CONSOLE_PROTOCOL
+            } else {
+                PROTOCOL
+            },
             target_host: host,
             source_host: HostId::from_bytes([1; 16]),
             trace: Default::default(),
@@ -1219,17 +1292,7 @@ mod tests {
                 .unwrap(),
                 common_dir: "repo/.git".into(),
             },
-            action: if mutation {
-                PeerAction::Coordination {
-                    input: CoordinationInput::Events(EventsInput::Note {
-                        note: "must not run".into(),
-                        dedup_key: None,
-                    }),
-                    operation_id: Some(OperationId::parse("wrong-version").unwrap()),
-                }
-            } else {
-                PeerAction::RunStatuses { targets: vec![] }
-            },
+            action,
         };
         let peer = Peer {
             host,
@@ -1248,6 +1311,76 @@ mod tests {
         transport
             .exchange(&peer, &request, budget, &CancelToken::new())
             .unwrap_err()
+    }
+    #[test]
+    fn console_peer_unsupported_and_unreachable() {
+        for action in [
+            PeerAction::ConsoleBoard {
+                all: false,
+                limit: 50,
+                selected: false,
+            },
+            PeerAction::ConsoleTree {
+                max_depth: 8,
+                max_nodes: 100,
+                detail: false,
+                selected: false,
+            },
+        ] {
+            let old = Canned(Mutex::new(Some(Ok(outcome(
+                3,
+                "provenant: fabric peer: invalid peer frame\n",
+                false,
+            )))));
+            assert!(matches!(
+                exchange_action_error(&old, action.clone()),
+                PeerError::ProtocolMismatch { .. }
+            ));
+            let offline = Canned(Mutex::new(Some(Ok(outcome(
+                255,
+                "connection refused",
+                false,
+            )))));
+            assert!(matches!(
+                exchange_action_error(&offline, action),
+                PeerError::Failed(_)
+            ));
+        }
+    }
+    #[test]
+    fn console_protocol_refused_before_action_decode() {
+        let host = HostId::from_bytes([2; 16]);
+        let project = ProjectLocator {
+            key: CrossHostProjectKey::from_home(
+                Path::new("/home/a"),
+                Path::new("/home/a/repo/.git"),
+            )
+            .unwrap(),
+            common_dir: "repo/.git".into(),
+        };
+        let request = PeerRequest::new(
+            host,
+            HostId::from_bytes([1; 16]),
+            "chair".into(),
+            project,
+            PeerAction::ConsoleBoard {
+                all: false,
+                limit: 50,
+                selected: false,
+            },
+        );
+        assert_eq!(request.protocol, CONSOLE_PROTOCOL);
+        assert!(
+            protocol_refusal(&serde_json::to_vec(&request).unwrap())
+                .unwrap()
+                .is_none()
+        );
+        let mut old = serde_json::to_value(&request).unwrap();
+        old["protocol"] = PROTOCOL.into();
+        let refusal = protocol_refusal(&serde_json::to_vec(&old).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(refusal.protocol, CONSOLE_PROTOCOL);
     }
     #[test]
     fn read_only_failures_name_their_cause_on_the_same_wire_code() {

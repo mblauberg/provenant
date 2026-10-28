@@ -34,11 +34,93 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
         } else {
             None
         };
-        Ok(provenant_cli::console::read(
-            &resolved.roots,
-            selected,
-            &command,
-        )?)
+        let local = provenant_cli::console::read(&resolved.roots, selected, &command)?;
+        let (hosts, action) = match &command {
+            Console::Board {
+                hosts: Some(hosts),
+                all,
+                limit,
+                ..
+            } => (
+                hosts,
+                provenant_fabric_runtime::hosts::PeerAction::ConsoleBoard {
+                    all: *all,
+                    limit: *limit,
+                    selected: selected.is_some(),
+                },
+            ),
+            Console::Tree {
+                hosts: Some(hosts),
+                max_depth,
+                max_nodes,
+                detail,
+            } => (
+                hosts,
+                provenant_fabric_runtime::hosts::PeerAction::ConsoleTree {
+                    max_depth: *max_depth,
+                    max_nodes: *max_nodes,
+                    detail: *detail,
+                    selected: selected.is_some(),
+                },
+            ),
+            _ => return Ok(local),
+        };
+        let context = provenant_cli::fabric::Context::open_read_only(
+            resolved.roots,
+            &resolved.home,
+            &resolved.project,
+        )?;
+        let mut chosen = std::collections::BTreeSet::new();
+        if hosts == "all" {
+            chosen.extend(context.config.peers.values().map(|peer| peer.host));
+        } else {
+            for name in hosts.split(',') {
+                if name == "local" {
+                    continue;
+                }
+                chosen.insert(context.peer_host(name).ok_or("unknown peer host")?);
+            }
+        }
+        use provenant_core::Clock;
+        use provenant_fabric_runtime::{coordination::facade::FacadeError, hosts::PeerResult};
+        let clock = provenant_os::clock::SystemClock::new();
+        let mut boards = Vec::new();
+        let mut trees = Vec::new();
+        for host in chosen {
+            let budget = provenant_core::WaitBudget::cli(
+                clock.mono_now(),
+                context.config.limits.peer_seconds,
+            )?;
+            let result = context.peer(&clock, host, action.clone(), budget, &CancelToken::new());
+            let unsupported = matches!(&result, Err(failure) if matches!(failure.error, FacadeError::PeerVersion | FacadeError::PeerProtocolMismatch { .. } | FacadeError::ContinuationUnsupported));
+            let unavailable = matches!(&result, Err(failure) if matches!(failure.error, FacadeError::HomeUnavailable | FacadeError::Timeout));
+            if matches!(command, Console::Board { .. }) {
+                use provenant_cli::console::peer::{BoardObservation as O, PeerBoard};
+                let observation = match result {
+                    Ok(PeerResult::Console(page)) => O::Page(page),
+                    _ if unsupported => O::Unsupported,
+                    _ if unavailable => O::Unreachable,
+                    _ => O::Page(serde_json::Value::Null),
+                };
+                boards.push(PeerBoard { host, observation });
+            } else {
+                use provenant_cli::console::tree_peer::{PeerTree, TreeObservation as O};
+                let observation = match result {
+                    Ok(PeerResult::Console(tree)) => O::Tree(tree),
+                    _ if unsupported => O::Unsupported,
+                    _ if unavailable => O::Unreachable,
+                    _ => O::Tree(serde_json::Value::Null),
+                };
+                trees.push(PeerTree { host, observation });
+            }
+        }
+        if matches!(command, Console::Board { .. }) {
+            Ok(provenant_cli::console::peer::compose_board(local, boards)?)
+        } else {
+            Ok(provenant_cli::console::tree_peer::compose_tree(
+                local, trees,
+            )?)
+        }
     })();
     let result = match result {
         Ok(value) => CommandResult::new(leaf, Outcome::Ok, Some(value)),

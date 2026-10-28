@@ -584,7 +584,7 @@ pub fn peer(
                         let request = decode_request(&bytes)?;
                         let mut busy = serde_json::to_vec(&PeerResponse {
                             version: 1,
-                            protocol: PROTOCOL,
+                            protocol: request.protocol,
                             host: request.target_host,
                             project: request.project.key,
                             result: PeerResult::Error {
@@ -620,7 +620,15 @@ pub fn peer(
             crate::roots::Product::Required,
         )?;
         let assets = resolved.assets;
-        let mut context = Context::open(resolved.roots, &home, &cwd)?;
+        let read_only = matches!(
+            request.action,
+            PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. }
+        );
+        let mut context = if read_only {
+            Context::open_read_only(resolved.roots, &home, &cwd)?
+        } else {
+            Context::open(resolved.roots, &home, &cwd)?
+        };
         request.validate(context.identity.host, &context.config, &home)?;
         if context.identity.federation.as_ref().map(|p| &p.key) != Some(&request.project.key) {
             return Err(PeerError::Project.into());
@@ -659,6 +667,63 @@ pub fn peer(
             chair: None,
         };
         let result = match &request.action {
+            PeerAction::ConsoleBoard {
+                all,
+                limit,
+                selected,
+            } => {
+                let command = provenant_cli::console::Console::Board {
+                    all: *all,
+                    limit: *limit,
+                    cursor: None,
+                    hosts: None,
+                };
+                if *limit > context.config.limits.page_rows {
+                    PeerResult::Error {
+                        error: FacadeError::InvalidInput,
+                    }
+                } else {
+                    match provenant_cli::console::read(
+                        &context.roots,
+                        selected.then_some(context.identity.project),
+                        &command,
+                    ) {
+                        Ok(value) => PeerResult::Console(value),
+                        Err(_) => PeerResult::Error {
+                            error: FacadeError::StateCorrupt,
+                        },
+                    }
+                }
+            }
+            PeerAction::ConsoleTree {
+                max_depth,
+                max_nodes,
+                detail,
+                selected,
+            } => {
+                let command = provenant_cli::console::Console::Tree {
+                    max_depth: *max_depth,
+                    max_nodes: *max_nodes,
+                    detail: *detail,
+                    hosts: None,
+                };
+                if *max_nodes > context.config.limits.page_rows {
+                    PeerResult::Error {
+                        error: FacadeError::InvalidInput,
+                    }
+                } else {
+                    match provenant_cli::console::read(
+                        &context.roots,
+                        selected.then_some(context.identity.project),
+                        &command,
+                    ) {
+                        Ok(value) => PeerResult::Console(value),
+                        Err(_) => PeerResult::Error {
+                            error: FacadeError::StateCorrupt,
+                        },
+                    }
+                }
+            }
             PeerAction::RunStatuses { targets } => {
                 if !(1..=100).contains(&targets.len()) {
                     PeerResult::Error {
@@ -838,7 +903,7 @@ pub fn peer(
         };
         let response = PeerResponse {
             version: 1,
-            protocol: PROTOCOL,
+            protocol: request.protocol,
             host: context.identity.host,
             project: request.project.key,
             result,

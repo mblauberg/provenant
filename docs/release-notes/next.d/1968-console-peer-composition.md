@@ -1,3 +1,3 @@
 ## Additions
 
-- Add a board composition helper for bounded peer observations and explicit coverage; console commands remain local until the peer adapter is connected.
+- Add opt-in peer observations to `console board` and `console tree` with `--hosts`, preserving local results and reporting peer coverage when a host is incomplete, unreachable or does not support the read.
