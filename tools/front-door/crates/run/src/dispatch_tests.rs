@@ -3629,6 +3629,79 @@ fn mode_zero_stored_prompt_ends_the_attempt_rejected_with_the_cause() -> TestRes
 }
 
 #[test]
+fn holder_release_reclaims_temporary_after_verified_settlement() -> TestResult {
+    holder_release_temporary_fixture(true)
+}
+
+#[test]
+fn holder_release_retains_temporary_when_verification_fails() -> TestResult {
+    holder_release_temporary_fixture(false)
+}
+
+fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let custody_dir = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    store.finish(id, &attempt, &observed, &Fake::default(), &call)?;
+    let temporary = store.temporary_path(id, &call)?;
+    std::fs::create_dir_all(&temporary)?;
+    std::fs::write(temporary.join("payload.lock"), "discard")?;
+    drop(provenant_supervisor::fixture::acquire_writer(
+        Directory::open_anchor(custody_dir.path())?,
+        observed.scope,
+        call.budget,
+        &cancel,
+        &clock,
+    )?);
+    let reservation = custody_dir.path().join("reservation.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
+    let meta = attempt.metadata()?;
+    value["launch_state"] = "never_spawned".into();
+    value["unresolved_cleanup"] = false.into();
+    value["census_incomplete"] = false.into();
+    value["attempt_device"] = meta.device.into();
+    value["attempt_inode"] = if valid_binding {
+        meta.inode
+    } else {
+        meta.inode + 1
+    }
+    .into();
+    std::fs::write(reservation, serde_json::to_vec(&value)?)?;
+    let recovery = provenant_supervisor::custody::acquire_recovery(
+        Directory::open_anchor(custody_dir.path())?,
+        call.budget,
+        &cancel,
+        &clock,
+    )?;
+    crate::holder::release_and_reclaim(&attempt, observed.scope, &recovery)?;
+    assert_eq!(temporary.exists(), !valid_binding);
+    assert!(
+        attempt
+            .metadata_at(std::ffi::OsStr::new("release.json"), false)
+            .is_ok()
+    );
+    Ok(())
+}
+
+#[test]
 fn holder_commits_decoded_success_only_with_exit_zero_and_observed_identity() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -4826,6 +4899,11 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
     value["attempt_inode"] = meta.inode.into();
     std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
     artifacts::subdir(&attempt, std::ffi::OsStr::new("scratch"), true)?;
+    // Recreate the private tmp root with production permissions, independent of umask.
+    artifacts::subdir(&attempt, std::ffi::OsStr::new("tmp"), true)?;
+    let temporary = path.join("tmp/candidate-0");
+    std::fs::create_dir_all(&temporary)?;
+    std::fs::write(temporary.join("payload.lock"), b"build output")?;
     store.set_temporary_retained(id, true, &call)?;
     let manifest_path = path.join("quarantine/manifest.json");
     let manifest = std::fs::read(&manifest_path)?;
@@ -4838,12 +4916,15 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
         reservation.exists(),
         "failed verification retains the reservation"
     );
+    assert!(temporary.exists(), "uncertain custody retains tmp");
     assert_eq!(store.record(id, &call)?, record);
     std::fs::write(manifest_path, manifest)?;
     assert_eq!(
         store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?,
         vec![(id, Reconciled::Finished)]
     );
+    let cleanup = controls::REBOOT_TEMPORARY_CLEANUP.with(|result| result.borrow_mut().take());
+    assert_eq!(cleanup, Some(Ok(Some(Reconciled::TemporaryRemoved))));
     assert!(
         !path.join("scratch").exists(),
         "normal settlement removes empty launch staging"
@@ -4853,6 +4934,7 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
         "normal settlement verifies release evidence"
     );
     assert!(!reservation.exists());
+    assert!(!path.join("tmp").exists(), "released tmp is removed");
     assert_eq!(store.record(id, &call)?, record);
     Ok(())
 }

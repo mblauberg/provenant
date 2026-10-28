@@ -10,6 +10,11 @@ use provenant_supervisor::{
 use rusqlite::params;
 use serde::Serialize;
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static REBOOT_TEMPORARY_CLEANUP: std::cell::RefCell<Option<std::result::Result<Option<Reconciled>, String>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// What a cancel request achieved. Requested does not prove exit.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -714,6 +719,13 @@ impl RunStore {
             ) && record.exit_evidence.is_none())
         {
             self.settle_recovered(&attempt, proof.into_recovery())?;
+            // Recheck custody after release before removing lock-named payloads.
+            let cleanup = self.reconcile_terminal_temporary(record, call, _observer);
+            #[cfg(test)]
+            REBOOT_TEMPORARY_CLEANUP.with(|result| {
+                *result.borrow_mut() = Some(cleanup.as_ref().cloned().map_err(ToString::to_string));
+            });
+            let _ = cleanup;
         } else {
             // Lost without exit evidence deliberately preserves scratch.
             self.commit_reboot_lost(&proof, call)?;
@@ -721,7 +733,17 @@ impl RunStore {
                 .release()
                 .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
         }
-        self.set_temporary_retained(record.attempt_id, false, call)?;
+        if matches!(
+            record.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Lost,
+                exit_code: None,
+                ..
+            }
+        ) && record.exit_evidence.is_none()
+        {
+            self.set_temporary_retained(record.attempt_id, false, call)?;
+        }
         Ok(Some(Reconciled::Finished))
     }
     /// Writer exclusion for an attempt, taken without waiting: failure means a

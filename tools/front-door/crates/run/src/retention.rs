@@ -257,7 +257,15 @@ impl RunStore {
                     Err(error) => return Err(error.into()),
                 }
                 let age = now.as_micros().saturating_sub(finished_at.as_micros());
-                if age >= DAY_MICROS {
+                let uncertain_loss = matches!(
+                    record.state,
+                    AttemptState::Terminal {
+                        outcome: Outcome::Lost,
+                        exit_code: None,
+                        ..
+                    }
+                ) && record.exit_evidence.is_none();
+                if age >= DAY_MICROS && !uncertain_loss {
                     let temporary = path.with_file_name("tmp");
                     let collection = (|| -> Result<()> {
                         collect_temporary(&attempt, &temporary, dry_run, &mut report)?;
@@ -1471,6 +1479,29 @@ mod tests {
             );
             assert_eq!(fs::read(outside)?, vec![3; 200_000]);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn gc_preserves_tmp_for_lost_attempt_without_exit_evidence() -> TestResult {
+        use provenant_core::Clock;
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let record = store.record(input.attempts[0].attempt_id, &call)?;
+        store.commit_lost(RunStore::scope(&record), "fixture", &call)?;
+        let temporary = attempt.join("tmp");
+        fs::DirBuilder::new().mode(0o700).create(&temporary)?;
+        fs::write(temporary.join("payload"), b"scratch")?;
+        let report = store.gc_provider_state(
+            &Directory::open_anchor(context.state_root.as_path())?,
+            7,
+            WallTime::from_micros(clock.wall_now()?.as_micros() + DAY_MICROS)?,
+            false,
+            &call,
+        )?;
+        assert!(report.attempt_tmp.is_empty());
+        assert!(temporary.exists());
         Ok(())
     }
 
