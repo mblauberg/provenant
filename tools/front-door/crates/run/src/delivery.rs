@@ -713,7 +713,9 @@ impl HostDeliveryContext {
                 continue;
             };
             if name == "HEAD" {
-                default = value.strip_prefix("ref: refs/heads/").map(str::to_owned);
+                if let Some(branch) = value.strip_prefix("ref: refs/heads/") {
+                    default = Some(branch.to_owned());
+                }
             } else if let Some(branch) = name.strip_prefix("refs/heads/")
                 && GitOid::parse(value).is_ok()
             {
