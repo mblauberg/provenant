@@ -156,12 +156,21 @@ and the final line is the usual envelope. `--watch` excludes `--wait`,
   `::watch_times_out_with_pending_lanes_and_names_the_host`
 - Owner: `crates/cli/src/run/watch.rs`, `src/lib.rs`
 
+### Status selection
+
+`status` lists every active lane and the twenty newest settled lanes, newest
+first. `status --json` returns the same selection as full records. `--all`
+selects all history, paged by `--limit` and `--cursor`.
+
 ## Guards
 
 ### Merge guard
 
 `land NUMBER` merges only the head it verified: the pull request head read
 before the checks, or the full object ID given with the hidden `--head SHA`.
+Landing a reviewed head passes `--head SHA`; `land NUMBER` alone lands the
+current verified head. Human output prints `merged #NUMBER FULL_SHA`; JSON
+retains the full SHA in `data.head`.
 `pr watch` and `land` need at least one passing check (the rest passing or
 skipped), refuse a head change during verification and fail closed on
 incomplete evidence.

@@ -53,7 +53,9 @@ one.
    for explicit user acceptance only for `terminal` work or when the approved
    scope asks for it. A project may name its landing gate as acceptance. If
    the nearest repository merge policy authorises agent merges, merge once
-   its review and CI gates pass on the exact head. Where no such policy exists,
+   its review and CI gates pass on the exact head. Landing a reviewed head
+   passes `provenant land N --head SHA`; `provenant land N` alone lands the
+   current verified head. Where no such policy exists,
    do not merge. Never promote, and do not carry
    that issue's receipt past the state `implement` leaves it in. **Never
    fork a new receipt** — the delivery receipt

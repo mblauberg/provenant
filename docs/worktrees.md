@@ -142,8 +142,8 @@ Agents use `fabric_run` (`op: submit`); this is the terminal path for a shell
 without MCP.
 
 ```sh
-provenant dispatch --operation-id OP --model ADAPTER/MODEL \
-  --prompt-file BRIEF --mode worktree-write --worktree .worktrees/BRANCH
+provenant run --operation-id OP --model ADAPTER/MODEL \
+  --prompt-file BRIEF --branch BRANCH --base main
 ```
 
 Fabric uses `access: "worktree_write"` and `worktree`. Both entry points accept

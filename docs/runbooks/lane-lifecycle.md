@@ -13,14 +13,16 @@ provenant run --prompt-file brief.md --route senior \
 `run` waits up to 240 seconds, then prints the state and a result tail. Use
 `--wait 30m` or `--wait 3600s` for a longer background wait. Timeout prints the
 attempt ID and exact command to keep waiting; follow it rather than submitting
-again. `provenant status` shows active and recent lanes newest first; `--all`
-or `--json` returns full records. Use `--limit N` and the returned
-`--cursor N` to read further full-record pages.
+again. `provenant status` shows active lanes and the twenty newest settled
+lanes, newest first. `--json` returns full records for the same selection.
+Use `--all` with `--limit N` and the returned `--cursor N` to page all history.
 
-The receipt names the worktree. `--worktree PATH` can create a new registered
-checkout or use an existing one without taking over its lifecycle. To register a native
-linked checkout, use `provenant worktree adopt PATH --owner manual`; another
-project's checkout and a live or reserved writer are refused.
+The receipt names the worktree. `--worktree PATH` uses an existing checkout
+without taking over its lifecycle. A missing branch name creates an owned
+checkout; for an absolute path or a path below `.worktrees/`, use
+`--branch BRANCH` to create it. To register a native linked checkout, use
+`provenant worktree adopt PATH --owner manual`; another project's checkout and
+a live or reserved writer are refused.
 
 Choose `--deliver none`, `push`, `integrate:integration` or `pr`. Push and PR
 use origin and the lane branch. Integration targets must already exist;
@@ -62,10 +64,9 @@ worktrees retain their existing GC policy.
 `provenant resume ATTEMPT --prompt-file followup.md` generates and prints an
 operation ID; supply `--operation-id ID` for a planned retry. It pins the prior
 attempt's applied provider, model and account, including when dispatch selected
-a named route pool. Refused continuations do not print an unrecorded attempt
-ID. Targets accept unique hex prefixes of at least eight characters and
-`RUN/ATTEMPT`; an ambiguous prefix lists candidates. Resume starts fresh by
-default when continuation state is unavailable, preserving authority with
+a named route pool. Targets accept unique hex prefixes of at least eight
+characters and `RUN/ATTEMPT`; an ambiguous prefix lists candidates. Resume
+starts fresh by default when continuation state is unavailable, preserving authority with
 original context and the previous result attached. Ownership must match the
 lane lineage for a previously lane-owned tree. Explicit unowned and adopted
 checkouts resume in place unless a lane owner now names another lineage.

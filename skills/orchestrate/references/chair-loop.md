@@ -97,7 +97,8 @@ use `--limit N` to bound the report. Read extra bytes with
 wait per lane. `provenant status` is the source of truth after compaction or
 restart; `--all` or `--json` provides full records. Read retained events with
 `provenant output RUN/ATTEMPT --part events` and its byte offset. For CI and
-landing, use `provenant land N`; add `--head SHA` to pin a reviewed head.
+landing of a reviewed head, pass `provenant land N --head SHA`.
+`provenant land N` alone lands the current verified head.
 
 A dispatching sub-agent still blocks in the foreground on its own worker; see
 [worker-liveness.md](worker-liveness.md). Registered worktrees share the

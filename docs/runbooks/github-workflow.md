@@ -256,7 +256,8 @@ provenant land 148
 
 It captures the PR's current head, waits for green CI at that exact head,
 merges with a matching-head check and prunes the eligible local worktree and
-merged refs. Add `--head <reviewed-sha>` to pin a reviewed head. Pending, failed,
+merged refs. Landing a reviewed head passes `provenant land 148 --head SHA`;
+`provenant land 148` alone lands the current verified head. Pending, failed,
 cancelled or absent checks and a changed head refuse the merge. GitHub still
 enforces branch protection and any merge queue. `provenant pr watch 148` is
 available when only observing CI; `gh pr merge --auto` can queue a merge after
