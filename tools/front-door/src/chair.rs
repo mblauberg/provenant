@@ -26,6 +26,9 @@ use std::{
 };
 
 type Error = Box<dyn std::error::Error>;
+#[derive(Debug, thiserror::Error)]
+#[error("viewer state cannot be changed inside a lane")]
+struct ViewerLane;
 #[derive(Deserialize)]
 struct Input {
     hook_event_name: String,
@@ -508,7 +511,7 @@ fn viewer_run(command: ChairViewer, globals: &Globals) -> u8 {
     );
     let result = (|| -> Result<Value, Error> {
         if !read_only && provenant_cli::fabric::in_lane() {
-            return Err(provenant_fabric_store::Error::ViewerLane.into());
+            return Err(ViewerLane.into());
         }
         let resolved = crate::roots::resolve(
             globals,
@@ -600,34 +603,38 @@ fn viewer_run(command: ChairViewer, globals: &Globals) -> u8 {
                 }
                 let current = workflow
                     .read()?
-                    .map(|c| provenant_workflow::session::parse_summary(&c.markdown))
-                    .transpose();
-                let summary = match current {
-                    Ok(value) => value.flatten(),
-                    Err(_) => None,
-                };
+                    .map(|c| {
+                        provenant_workflow::session::parse_summary(&c.markdown)
+                            .map_err(provenant_workflow::session::SessionError::Summary)
+                    })
+                    .transpose()?;
+                let summary = current.flatten();
                 let Some(summary) = summary else {
                     return Ok(
-                        json!({"baseline":baseline,"to":null,"summary":null,"coverage":"unavailable","diff":baseline.map(|n| json!({"from":n,"unavailable":[n]}))}),
+                        json!({"baseline":baseline,"to":to,"summary":null,"coverage":"unavailable","diff":baseline.map(|n| json!({"from":n,"to":to,"unavailable":[n],"now":null,"next":null,"needs_you":null,"risk":null}))}),
                     );
                 };
                 let to = to.unwrap_or(summary.revision);
                 if baseline.is_some_and(|from| to < from) {
-                    return Err(provenant_fabric_store::Error::Conflict.into());
+                    return Ok(
+                        json!({"baseline":baseline,"to":to,"summary":summary,"coverage":"baseline_ahead","diff":null}),
+                    );
                 }
                 if to > summary.revision {
                     return Err(provenant_fabric_store::Error::Invalid("summary revision").into());
                 }
-                let diff = match workflow.viewer_summary_diff(baseline, Some(to)) {
-                    Ok(diff) => serde_json::to_value(diff)?,
+                let (diff, coverage) = match workflow.viewer_summary_diff(baseline, Some(to)) {
+                    Ok(diff) => (serde_json::to_value(diff)?, "available"),
                     Err(
                         provenant_workflow::session::SessionError::MissingCheckpoint { .. }
                         | provenant_workflow::session::SessionError::Summary(_),
-                    ) => json!(baseline.map(|n| json!({"from":n,"unavailable":[n]}))),
+                    ) => (json!(baseline.map(|n| json!({"from":n,"to":to,"unavailable":[n],"now":null,"next":null,"needs_you":null,"risk":null}))), "unavailable"),
                     Err(error) => return Err(error.into()),
                 };
                 let rendered = (to == summary.revision).then_some(&summary);
-                Ok(json!({"baseline": baseline, "to":to, "summary":rendered, "diff":diff}))
+                Ok(
+                    json!({"baseline": baseline, "to":to, "summary":rendered, "coverage":coverage, "diff":diff}),
+                )
             }
             ChairViewer::Rendered {
                 viewer,
@@ -680,22 +687,33 @@ fn viewer_run(command: ChairViewer, globals: &Globals) -> u8 {
                 ),
                 Some(E::ViewerLimit) => (
                     "VIEWER_LIMIT",
-                    "Resolve or close open requests, then retry.",
+                    "Forget an unused baseline with chair viewer forget VIEWER SESSION, or close requests and reclaim their viewer state, then retry.",
                 ),
-                Some(E::ViewerLane) => ("VIEWER_LANE", "Change viewer state outside the lane."),
+                Some(E::ViewerNotOpen) => {
+                    ("VIEWER_NOT_OPEN", "Refresh the request before retrying.")
+                }
                 Some(E::NotFound) => (
                     "VIEWER_NOT_FOUND",
                     "Inspect the request or session and retry.",
                 ),
                 Some(E::Conflict) => (
                     "VIEWER_CONFLICT",
-                    "Refresh the viewer summary before retrying.",
+                    "Use chair viewer forget VIEWER SESSION to reset the baseline, then retry.",
                 ),
                 Some(E::Busy | E::Cancelled) => ("VIEWER_RETRY", "Retry the operation."),
                 Some(E::Invalid(_)) => (
                     "VIEWER_INVALID",
                     "Correct the viewer name or revision and retry.",
                 ),
+                _ if error.is::<ViewerLane>() => {
+                    ("VIEWER_LANE", "Change viewer state outside the lane.")
+                }
+                _ if error.is::<provenant_workflow::session::HostSessionIdError>() => {
+                    ("VIEWER_INVALID", "Correct the session ID and retry.")
+                }
+                _ if error.is::<provenant_workflow::session::SessionError>() => {
+                    ("VIEWER_SESSION", "Inspect the session and retry.")
+                }
                 _ => ("VIEWER_UNAVAILABLE", "Inspect the session and retry."),
             };
             crate::fail_with_repair(

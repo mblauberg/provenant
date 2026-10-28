@@ -63,10 +63,10 @@ pub enum Error {
     Invalid(&'static str),
     #[error("record not found")]
     NotFound,
-    #[error("viewer request state limit reached")]
+    #[error("viewer state limit reached")]
     ViewerLimit,
-    #[error("viewer state cannot be changed from a lane")]
-    ViewerLane,
+    #[error("viewer request is not open")]
+    ViewerNotOpen,
     #[error("record conflicts with existing state")]
     Conflict,
     #[error("push operation {operation} requires reconciliation")]

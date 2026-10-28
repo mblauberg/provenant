@@ -920,15 +920,16 @@ const IMPORTS_TABLE: &str = "CREATE TABLE imports(source TEXT PRIMARY KEY, \
      project TEXT NOT NULL, legacy_project TEXT NOT NULL, imported_at INTEGER NOT NULL, \
      tasks INTEGER NOT NULL, messages INTEGER NOT NULL, \
      skipped_rows BLOB NOT NULL DEFAULT X'7B7D') STRICT;";
-// Fixtures rewinding a current database must remove migration 8's tables in
+// Fixtures rewinding a current database must remove later tables in
 // foreign-key order before the older schema can be upgraded again.
+const REMOVE_VIEWER_TABLES: &str = "DROP TABLE viewer_requests; DROP TABLE viewer_summaries;";
 const REMOVE_HUMAN_TABLES: &str = "DROP TABLE run_chairs; DROP TABLE human_answer_outbox; \
     DROP TABLE human_answers; DROP TABLE human_request_history; DROP TABLE human_requests;";
 fn downgrade_to_six(store: &Store, rows: &str) {
     store
         .db
         .execute_batch(&format!(
-            "{REMOVE_HUMAN_TABLES} {IMPORTS_TABLE} {rows} PRAGMA user_version=6;"
+            "{REMOVE_VIEWER_TABLES} {REMOVE_HUMAN_TABLES} {IMPORTS_TABLE} {rows} PRAGMA user_version=6;"
         ))
         .unwrap();
 }
@@ -1357,9 +1358,9 @@ fn run_chair_migration_preserves_mail_and_rejects_older_readers() {
     store.send(&message(&f, 9), &f.request()).unwrap();
     store
         .db
-        .execute_batch(
-            "DROP INDEX human_hook_queued; DROP INDEX human_hook_pending; DROP INDEX human_queued_delivery; DROP INDEX human_local_delivery; DROP TABLE run_chairs; PRAGMA user_version=8;",
-        )
+        .execute_batch(&format!(
+            "{REMOVE_VIEWER_TABLES} DROP INDEX human_hook_queued; DROP INDEX human_hook_pending; DROP INDEX human_queued_delivery; DROP INDEX human_local_delivery; DROP TABLE run_chairs; PRAGMA user_version=8;"
+        ))
         .unwrap();
     drop(store);
     let store = f.open();

@@ -150,7 +150,8 @@ revision it rendered, and missing retained history remains unavailable.
 - Why: concurrent saves and incomplete or differently scoped observations must
   not overwrite chair work or represent a live request as resolved.
 - Test: `crates/workflow/src/session.rs::retained_summary_diff_compares_fields_and_reports_missing`;
-  `crates/cli/src/console/overview.rs::compares_only_matching_host_project_and_chair_and_respects_partial_coverage`
+  `crates/cli/src/console/overview.rs::compares_only_matching_host_project_and_chair_and_respects_partial_coverage`;
+  `tests/inbox.rs::viewer_cli_isolation_and_render_race`
 - Owner: `crates/workflow/src/session/summary.rs`, `crates/cli/src/console/overview.rs`
 
 ### Explicit chairs are discoverable

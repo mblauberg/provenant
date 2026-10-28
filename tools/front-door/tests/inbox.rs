@@ -112,6 +112,7 @@ fn viewer_cli_isolation_and_render_race() -> Result {
         0,
     )?;
     assert_eq!(first["data"]["to"], 1);
+    assert_eq!(first["data"]["coverage"], "available");
     assert_eq!(first["data"]["summary"]["now"], "First");
     assert!(first["data"]["baseline"].is_null());
     save(2, "Second")?;
@@ -136,6 +137,7 @@ fn viewer_cli_isolation_and_render_race() -> Result {
         0,
     )?;
     assert_eq!(diff["data"]["to"], 2);
+    assert_eq!(diff["data"]["diff"]["to"], 2);
     assert_eq!(
         diff["data"]["diff"]["now"],
         json!({"from":"First","to":"Second"})
@@ -197,6 +199,16 @@ fn viewer_cli_isolation_and_render_race() -> Result {
     )?;
     assert_eq!(missing["data"]["coverage"], "unavailable");
     assert_eq!(missing["data"]["diff"]["unavailable"], json!([2]));
+    let missing_to = call(
+        &rig,
+        &[
+            "chair", "viewer", "summary", "console", "chair-a", "--to", "5",
+        ],
+        None,
+        0,
+    )?;
+    assert_eq!(missing_to["data"]["to"], 5);
+    assert_eq!(missing_to["data"]["diff"]["to"], 5);
     let projects = rig.state.join("workflow/projects");
     for entry in std::fs::read_dir(projects)? {
         let session = entry?.path().join("sessions/chair-a");
@@ -211,6 +223,24 @@ fn viewer_cli_isolation_and_render_race() -> Result {
         0,
     )?;
     assert_eq!(missing["data"]["diff"]["unavailable"], json!([2]));
+    save(1, "Restarted")?;
+    let restarted = call(
+        &rig,
+        &["chair", "viewer", "summary", "console", "chair-a"],
+        None,
+        0,
+    )?;
+    assert_eq!(restarted["data"]["coverage"], "baseline_ahead");
+    assert_eq!(restarted["data"]["summary"]["now"], "Restarted");
+    assert_eq!(
+        call(
+            &rig,
+            &["chair", "viewer", "summary", "console", "bad id!"],
+            None,
+            1
+        )?["error"]["code"],
+        "VIEWER_INVALID"
+    );
     let database = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
     database.pragma_update(None, "user_version", 12)?;
     let incompatible = call(

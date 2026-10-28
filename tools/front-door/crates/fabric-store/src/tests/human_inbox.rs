@@ -125,15 +125,20 @@ fn viewer_isolation() {
         None
     );
     store.db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) INSERT INTO viewer_summaries(project,viewer,session,revision) SELECT ?1,'full',printf('s-%d',x),1 FROM n", [project().to_string()]).unwrap();
-    store
-        .set_summary_baseline(project(), "full", "new", 2, &request)
-        .unwrap();
+    assert!(matches!(
+        store.set_summary_baseline(project(), "full", "new", 2, &request),
+        Err(Error::ViewerLimit)
+    ));
     assert_eq!(
         store
             .summary_baseline(project(), "full", "s-1", &request)
             .unwrap(),
-        None
+        Some(1)
     );
+    assert!(matches!(
+        store.forget_summary_baseline(project(), "phone", "", &request),
+        Err(Error::Invalid("session"))
+    ));
     store
         .forget_summary_baseline(project(), "phone", "chair", &request)
         .unwrap();
@@ -150,6 +155,33 @@ fn viewer_isolation() {
             .unwrap(),
         view
     );
+    let store = f.open();
+    store
+        .db
+        .execute(
+            "UPDATE human_requests SET state='answered' WHERE id=?1",
+            [id.to_string()],
+        )
+        .unwrap();
+    assert!(matches!(
+        store.set_request_view(project(), "console", id, &view, &request),
+        Err(Error::ViewerNotOpen)
+    ));
+}
+
+#[test]
+fn viewer_project_limit_applies_across_labels_and_tables() {
+    let f = Fixture::new();
+    let store = f.open();
+    let request = f.request();
+    store.db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000) INSERT INTO viewer_summaries(project,viewer,session,revision) SELECT ?1,printf('v-%d',x), 'chair',1 FROM n", [project().to_string()]).unwrap();
+    assert!(matches!(
+        store.set_summary_baseline(project(), "new", "chair", 1, &request),
+        Err(Error::ViewerLimit)
+    ));
+    store
+        .set_summary_baseline(project(), "v-1", "chair", 2, &request)
+        .unwrap();
 }
 
 #[test]

@@ -40,7 +40,17 @@ or not accounted for by an incomplete scan are unknown.
 `chair viewer` stores local presentation state under an explicit viewer name.
 Request state is separate from resolution and blocking. A rendered summary
 acknowledgement names the revision displayed; comparison uses retained summary
-history and reports a pruned baseline as unavailable.
+history and reports a pruned baseline as unavailable. Acknowledged revisions are
+monotonic; `chair viewer forget VIEWER SESSION` clears a baseline when a session
+has restarted at an earlier revision. Summary responses include `to`, `summary`
+and `coverage`: an unavailable session has no summary, and a baseline ahead of
+the current revision reports `baseline_ahead` while returning the current summary.
+An explicit `--to` remains visible even when the summary is unavailable.
+Closed or expired requests refuse presentation-state writes. Closed and expired
+request state is reclaimed on successful writes for that viewer. Each viewer is limited to 10,000 request
+rows and 10,000 summary baselines per project; the project also has a combined
+limit of 100,000 viewer rows. New rows are refused at capacity, preserving
+existing baselines; forget an unneeded baseline to free space.
 
 `console overview` combines local pending request titles and recent lane
 attention in one bounded read. Project labels use the registered Git common
