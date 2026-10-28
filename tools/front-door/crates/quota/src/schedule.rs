@@ -442,7 +442,21 @@ pub fn report(
                         .unwrap_or(0)
                 })
         });
+        let free_refused = provenant_records::AdapterSpec::get(&record.account.adapter)
+            .and_then(|spec| spec.free_account.map(|(key, _)| (key, spec.free_pool)))
+            .is_some_and(|(key, pool)| {
+                record.account.account_key == key
+                    && record.refusals.iter().any(|refusal| {
+                        refusal.pool.as_deref() == pool
+                            && refusal.observed_unix_seconds <= now
+                            && refusal
+                                .resets_unix_seconds
+                                .unwrap_or(refusal.observed_unix_seconds.saturating_add(3600))
+                                > now
+                    })
+            });
         let status = match &record.snapshot {
+            _ if free_refused => QuotaStatus::Exhausted,
             _ if auth_required => QuotaStatus::AuthRequired,
             Some(snapshot) if fresh => snapshot.status,
             Some(_) => QuotaStatus::Stale,
@@ -1394,5 +1408,49 @@ mod transition_tests {
         assert_eq!(rep.accounts[1].status, QuotaStatus::Available);
         assert_eq!(rep.coverage.known, 1);
         assert_eq!(rep.coverage.total, 2);
+    }
+}
+
+#[cfg(test)]
+mod zen_tests {
+    use super::*;
+
+    #[test]
+    fn zen_quota_row_reflects_observed_refusals_separately_from_go() {
+        let accounts: Vec<_> = ["go", "zen"]
+            .into_iter()
+            .map(|key| AccountScope {
+                adapter: "opencode".into(),
+                account_key: key.into(),
+                label: key.into(),
+            })
+            .collect();
+        let mut records: Vec<_> = accounts.iter().cloned().map(AccountRecord::empty).collect();
+        records[1].refusals.push(crate::Refusal {
+            account: accounts[1].clone(),
+            model: "opencode/beam-free".into(),
+            pool: Some("opencode-free".into()),
+            observed_unix_seconds: 100,
+            resets_unix_seconds: None,
+        });
+        let detections = [Detection {
+            adapter: "opencode".into(),
+            accounts: Some(accounts),
+            status: QuotaStatus::Available,
+        }];
+        for (now, expected) in [(101, QuotaStatus::Exhausted), (3700, QuotaStatus::Unknown)] {
+            let report = report(
+                crate::source::TEST_POLICIES,
+                &records,
+                &detections,
+                &QuotaQuery { adapter: None },
+                now,
+                "report.json".into(),
+            )
+            .unwrap();
+            assert_eq!(report.accounts.len(), 2);
+            assert_eq!(report.accounts[0].status, QuotaStatus::Unknown);
+            assert_eq!(report.accounts[1].status, expected);
+        }
     }
 }

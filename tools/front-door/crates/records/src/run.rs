@@ -68,6 +68,9 @@ impl HarnessProfile {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskRequest {
+    /// Human-supplied task title, when provided at submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(default, skip_serializing_if = "HarnessProfile::is_empty")]
     pub profile: HarnessProfile,
     pub task_id: TaskId,
@@ -514,6 +517,9 @@ pub enum WriteSource {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptRecord {
+    /// Human-supplied task title, when provided at submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// `fresh` when a resume could not use provider continuation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<String>,
@@ -674,6 +680,7 @@ mod tests {
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                title: None,
                 profile: HarnessProfile {
                     name: "rigorous".into(),
                     ..HarnessProfile::default()
@@ -701,6 +708,10 @@ mod tests {
             parent_attempt: None,
         };
         let mut sealed = serde_json::to_value(&request)?;
+        assert!(sealed["tasks"][0].get("title").is_none());
+        let legacy: CanonicalRequest = serde_json::from_value(sealed.clone())?;
+        assert_eq!(serde_json::to_value(&legacy)?, sealed);
+        assert_eq!(legacy.digest()?, request.digest()?);
         for task_class in [serde_json::Value::Null, serde_json::json!("mechanical")] {
             sealed["tasks"][0]["profile"]["task_class"] = task_class;
             let digest = CanonicalV1::record_digest("run-request", 1, &sealed)?;

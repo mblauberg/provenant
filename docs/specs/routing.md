@@ -42,6 +42,21 @@ process and mutate nothing.
   `tests/route.rs::help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates`
 - Owner: `crates/routing/src/`
 
+### Go pool quota coverage
+
+OpenCode Go local ledger usage is labelled `source: local-ledger` and
+`coverage: partial`; it is a lower bound because other devices are absent.
+An active per-account calibration supplies dashboard percentage floors,
+applied as the maximum of ledger and floor at each read. Expiry restores raw
+ledger usage. Missing or expired floors do not exclude pool members; route list
+and resolve identify uncalibrated windows so users can tighten pacing.
+Exhaustion, authentication and quota limits still exclude members.
+Configuration and the operational limits are
+in the [calibration runbook](../runbooks/configuration.md#opencode-go-quota-calibration).
+- Why: Go models remain available while partial coverage is visible.
+- Test: `crates/quota/src/calibration.rs::tests::calibration_takes_maximum_and_expires_even_with_cached_ledger`
+- Owner: `crates/quota/src/calibration.rs`, `crates/routing/src/resolve.rs`
+
 ### Confidentiality
 
 A confidential request admits only models whose catalogue row says they do

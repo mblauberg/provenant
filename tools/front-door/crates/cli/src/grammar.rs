@@ -49,6 +49,12 @@ pub enum Command {
     },
     /// Print the resolved release root
     Root,
+    /// Post a human decision, assumption or question
+    Ask(crate::inbox::Ask),
+    /// List, inspect, close and acknowledge human requests
+    Inbox(crate::inbox::Inbox),
+    /// Answer a request using the revision you saw
+    Answer(crate::inbox::Answer),
     /// Register and list provider accounts
     #[command(subcommand)]
     Accounts(crate::accounts::Accounts),
@@ -296,6 +302,9 @@ pub struct Dispatch {
     /// Caller-chosen ID that makes retries idempotent
     #[arg(long, default_value = "", value_parser = operation_id, hide = true, hide_default_value = true)]
     pub operation_id: OperationId,
+    /// Short human title for this task
+    #[arg(long, conflicts_with = "manifest")]
+    pub title: Option<String>,
     /// Fabric task this lane serves
     #[arg(long)]
     pub task_id: Option<TaskId>,

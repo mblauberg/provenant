@@ -8,6 +8,7 @@ fn submission(prompt: &str) -> DispatchRequest {
     DispatchRequest {
         operation_id: OperationId::parse("service-dispatch").unwrap(),
         tasks: vec![DispatchTask {
+            title: None,
             task_id: TaskId::from_bytes([3; 16]),
             prompt: prompt.into(),
             base: None,
@@ -28,6 +29,60 @@ fn submission(prompt: &str) -> DispatchRequest {
         lane_depth: 1,
         parent_attempt: None,
     }
+}
+
+#[test]
+fn task_title_roundtrip() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let mut input = submission("review this code");
+    input.tasks[0].title = Some("Review changes".into());
+    let run = Service::new(&store).dispatch(input, temp.path(), &call)?;
+    let attempt = store.request(run.run_id, &call)?.tasks[0].task_id;
+    drop(store);
+    let store = RunStore::open(&context, &call)?;
+    let request = store.request(run.run_id, &call)?;
+    assert_eq!(request.tasks[0].title.as_deref(), Some("Review changes"));
+    let page = Service::new(&store).lanes(
+        &LaneQuery {
+            targets: vec![],
+            all: true,
+            limit: 10,
+            after: 0,
+            newest_first: false,
+            owner: None,
+            unseen_after: None,
+        },
+        &call,
+    )?;
+    assert_eq!(page.lanes[0].task_id, attempt);
+    assert_eq!(page.lanes[0].title.as_deref(), Some("Review changes"));
+    for title in [
+        "x".repeat(257),
+        "line\nbreak".into(),
+        "tab\there".into(),
+        "escape\u{1b}".into(),
+        "unicode\u{85}".into(),
+    ] {
+        let mut invalid = submission("review this code");
+        invalid.operation_id = OperationId::parse("invalid-title")?;
+        invalid.tasks[0].title = Some(title);
+        let error = Service::new(&store)
+            .dispatch(invalid, temp.path(), &call)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RunError::Input {
+                kind: ErrorKind::Invalid,
+                ..
+            }
+        ));
+        assert!(error.to_string().contains("control characters"));
+    }
+    Ok(())
 }
 
 #[test]

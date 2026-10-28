@@ -1017,6 +1017,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                 tasks: tasks
                     .iter()
                     .map(|task_id| TaskRequest {
+                        title: None,
                         base: None,
                         base_ref: None,
                         writer: None,
@@ -2163,7 +2164,8 @@ fn submitted_policy(
     knobs: &[&str],
     route: Value,
 ) -> Result<(provenant_records::run::CanonicalRequest, Value)> {
-    let task = json!({"prompt":"fixture", "route":route,"timeout_seconds":60});
+    let task =
+        json!({"prompt":"fixture", "title":"Review fixture", "route":route,"timeout_seconds":60});
     let mut arguments = json!({"op":"submit","operation_id":operation,"wait_seconds":1,"tasks":[task.clone(),task.clone(),task.clone(),task],"knobs":knobs});
     if let Some(n) = concurrency {
         arguments["concurrency"] = n.into();
@@ -2195,13 +2197,15 @@ fn submitted_policy(
 fn submission_preserves_explicit_named_route_tier() -> Result {
     let rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
-    let (request, _) = submitted_policy(
+    let (request, attempt) = submitted_policy(
         &rig,
         "named-tier",
         None,
         &[],
         json!({"kind":"named","name":"senior"}),
     )?;
+    assert_eq!(request.tasks[0].title.as_deref(), Some("Review fixture"));
+    assert_eq!(attempt["title"], "Review fixture");
     assert_eq!(
         request.tasks[0].route,
         provenant_records::run::RequestedRoute::Named {
@@ -3732,6 +3736,7 @@ fn seed_attempt(
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![TaskRequest {
+                    title: None,
                     base: None,
                     base_ref: None,
                     writer: None,

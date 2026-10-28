@@ -1353,6 +1353,7 @@ impl RunStore {
                 fresh_continuation: fresh.map(str::to_owned),
                 schema_version: 1,
                 tasks: vec![TaskRequest {
+                    title: None,
                     base: task.base.clone(),
                     base_ref: task.base_ref.clone(),
                     profile: task.profile.clone(),

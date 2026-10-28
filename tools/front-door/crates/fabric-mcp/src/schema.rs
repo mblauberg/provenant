@@ -20,9 +20,10 @@ pub(crate) enum ToolKind {
     Output,
     Graph,
     Discover,
+    Inbox,
 }
 
-pub(crate) const TOOL_NAMES: [(ToolKind, &str); 9] = [
+pub(crate) const TOOL_NAMES: [(ToolKind, &str); 10] = [
     (ToolKind::Identity, "fabric_context"),
     (ToolKind::Mail, "fabric_mail"),
     (ToolKind::Task, "fabric_task"),
@@ -32,6 +33,7 @@ pub(crate) const TOOL_NAMES: [(ToolKind, &str); 9] = [
     (ToolKind::Graph, "fabric_graph"),
     (ToolKind::Output, "fabric_output"),
     (ToolKind::Discover, "fabric_discover"),
+    (ToolKind::Inbox, "fabric_inbox"),
 ];
 
 pub(crate) fn tool_name(kind: ToolKind) -> &'static str {
@@ -157,7 +159,15 @@ fn build_strict() -> Vec<Value> {
     let artifacts = array(reference("Artifact"), 0, 100);
     let mut recipients = array(reference("Id"), 1, 100);
     recipients["uniqueItems"] = json!(true);
-    let tools: [(&str, Value); 9] = [
+    let mut inbox_session = pattern(r"^[a-z0-9]([a-z0-9_-]|\.[a-z0-9_-])*\.?$");
+    inbox_session["maxLength"] = json!(128);
+    let inbox_request = object(json!({
+        "kind":choices(&["decision","assumption","question"]),"title":text(256),
+        "body":text(provenant_records::inbox::REQUEST_BODY_BYTES),"blocking?":{"type":"boolean"},
+        "options?":array(object(json!({"id":reference("OperationId"),"label":text(256),"description":text(1024)})),0,16),
+        "recommended_option_id?":nullable(reference("OperationId")),"proceeding_with?":nullable(text(1024))
+    }));
+    let tools: [(&str, Value); 10] = [
         (
             "Inspect the authenticated Fabric identity or list peer hosts.",
             json!({"inspect":{},"hosts":{"after?":nullable(reference("Id")),"limit":page.clone()}}),
@@ -199,7 +209,7 @@ fn build_strict() -> Vec<Value> {
         (
             "Submit and wait for results, list, inspect, wait for, cancel or resume runs. List returns compact attempts newest first; pass next_after as after to continue. Set detail for full records.",
             json!({
-                "submit":{"operation_id?":reference("OperationId"),"wait_seconds?":wait.clone(),"detail?":{"type":"boolean"},"tasks":array(object(json!({"prompt":text(MAX_TEXT_BYTES),"base?":nullable(text(1024)),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_seconds":integer(1,14_400),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,64),"concurrency?":nullable(integer(1,16)),"knobs?":array(text(256),0,64),"host?":nullable(reference("Id"))},
+                "submit":{"operation_id?":reference("OperationId"),"wait_seconds?":wait.clone(),"detail?":{"type":"boolean"},"tasks":array(object(json!({"prompt":text(MAX_TEXT_BYTES),"title?":nullable(text(256)),"base?":nullable(text(1024)),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_seconds":integer(1,14_400),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,64),"concurrency?":nullable(integer(1,16)),"knobs?":array(text(256),0,64),"host?":nullable(reference("Id"))},
                 "list":{"after?":nullable(reference("AttemptTarget")),"limit?":page},"status":{"target":reference("AttemptTarget"),"detail?":{"type":"boolean"}},
                 "wait":{"targets":array(reference("AttemptTarget"),1,100),"condition":choices(&["any","all"]),"wait_seconds":wait,"detail?":{"type":"boolean"}},
                 "cancel":{"target":reference("AttemptTarget"),"operation_id?":reference("OperationId"),"detail?":{"type":"boolean"}},
@@ -221,8 +231,18 @@ fn build_strict() -> Vec<Value> {
             }),
         ),
         (
-            "Discover advanced Fabric tools and their input schemas. Call a discovered tool by its name.",
+            "Discover inbox, graph, task, lease and event tools. Call discovered tools by name.",
             json!({"discover":{}}),
+        ),
+        (
+            "Post human requests, list the local inbox, answer, close or acknowledge. Fabric mail is queued, not live injection; peers are unsupported.",
+            json!({
+                "ask":{"session":inbox_session.clone(),"request":inbox_request,"operation_id?":nullable(reference("OperationId"))},
+                "list":{"id?":nullable(reference("Id")),"session?":nullable(inbox_session.clone()),"state?":choices(&["open","all"]),"limit?":integer(1,100),"cursor?":nullable(pattern(r"^[0-9a-f]{32}\.sha256:[0-9a-f]{64}\.[0-9]{1,20}$"))},
+                "answer":{"id":reference("Id"),"action":choices(&["choose","reply","confirm","override"]),"option_id?":nullable(reference("OperationId")),"text?":nullable(text(provenant_records::inbox::ANSWER_TEXT_BYTES)),"expect_revision":integer(1,u64::MAX),"channel":choices(&["chat","console","phone_remote","cli","unknown"]),"operation_id?":nullable(reference("OperationId"))},
+                "close":{"id":reference("Id"),"state":choices(&["withdrawn","superseded","expired"]),"reason":text(1024),"expect_revision":integer(1,u64::MAX),"operation_id?":nullable(reference("OperationId"))},
+                "acknowledge":{"id":reference("Id"),"answer_id":reference("Id"),"session":inbox_session,"operation_id?":nullable(reference("OperationId"))}
+            }),
         ),
     ];
     TOOL_NAMES
@@ -428,7 +448,7 @@ pub fn catalogue() -> &'static [Value] {
 fn is_advanced(name: &Value) -> bool {
     matches!(
         name.as_str(),
-        Some("fabric_task" | "fabric_events" | "fabric_lease" | "fabric_graph")
+        Some("fabric_task" | "fabric_events" | "fabric_lease" | "fabric_graph" | "fabric_inbox")
     )
 }
 

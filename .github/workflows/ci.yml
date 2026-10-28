@@ -293,6 +293,7 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/release-target
           CARGO_PROFILE_RELEASE_LTO: "false"
+          RUSTC_WRAPPER: .cargo/rustc-wrapper.sh
         run: |
           cargo build --release --locked -p provenant --bin provenant
 
@@ -301,6 +302,7 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/release-target
           CARGO_PROFILE_RELEASE_LTO: "false"
+          RUSTC_WRAPPER: .cargo/rustc-wrapper.sh
         run: |
           cargo run --release --locked --example package-release -- --out "$RUNNER_TEMP/release"
           mkdir -p "$RUNNER_TEMP/home"

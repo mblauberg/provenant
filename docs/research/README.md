@@ -14,6 +14,8 @@ links and verify volatile provider or model claims at the live runtime.
 
 ## Dated evidence and decisions
 
+- [OpenCode Go model admission, 28 October 2026](opencode-go-models.md)
+  : provisional MiMo Flash pool membership and catalogue-only MiMo Pro and GLM trials
 - [Agentic delivery harness: 2026 research synthesis](agentic-sdlc-harness-2026.md)
   : pre-implementation baseline, evidence cut-off 10 July 2026
 - [Agent skill portfolio: 2026 research and refactor](skill-portfolio-practices-2026.md)

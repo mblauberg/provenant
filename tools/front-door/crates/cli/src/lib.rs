@@ -15,6 +15,7 @@ pub use quota::Quota;
 pub use route::Route;
 pub use workflow::Workflow;
 mod grammar;
+pub mod inbox;
 pub mod install;
 pub mod pr_body;
 pub mod provider_updates;
@@ -287,6 +288,12 @@ const CORE_HELP: &str = "Provenant: run work, inspect progress and land changes.
             provenant land 1947
   quota     Show provider quota
             provenant quota
+  ask       Record a decision, assumption or question
+            provenant ask --file request.json --session SESSION --json
+  inbox     List requests or inspect an item
+            provenant inbox --json
+  answer    Resolve a request at the revision you saw
+            provenant help answer
   install   Install harness integrations
             provenant install
   help --all  All commands and advanced options
@@ -389,7 +396,15 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
             && parent == "provenant"
             && !matches!(
                 command.get_name(),
-                "run" | "status" | "land" | "quota" | "install" | "help"
+                "run"
+                    | "status"
+                    | "land"
+                    | "quota"
+                    | "ask"
+                    | "inbox"
+                    | "answer"
+                    | "install"
+                    | "help"
             )
         {
             command = command.hide(true);
@@ -1011,6 +1026,31 @@ mod tests {
         invalid(&["disk", "delete"]);
         invalid(&["disk", "report", "--force"]);
         invalid(&["disk", "report", "--dry-run"]);
+    }
+    #[test]
+    fn task_title_flags_are_optional_and_per_task() {
+        for verb in ["run", "dispatch"] {
+            let invocation = valid(&[
+                verb,
+                "--prompt-stdin",
+                "--model",
+                "codex/id",
+                "--title",
+                "Review changes",
+            ]);
+            let request = match invocation.command {
+                Command::Run(request) | Command::Dispatch(request) => request,
+                _ => panic!("submission"),
+            };
+            assert_eq!(request.title.as_deref(), Some("Review changes"));
+            invalid(&[
+                verb,
+                "--manifest",
+                "tasks.json",
+                "--title",
+                "Review changes",
+            ]);
+        }
     }
     #[test]
     fn dispatch_base_is_optional_without_a_peer_branch() {

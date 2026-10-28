@@ -100,6 +100,18 @@ impl stdio::Factory for Factory {
         );
     }
     type Facade<'a> = BoundFacade<'a>;
+    fn preflight(&self, call: &provenant_fabric_mcp::tools::ToolCall) -> Result<(), ServiceError> {
+        if let provenant_fabric_mcp::tools::ToolCall::Inbox(input) = call {
+            let ctx = &self.context;
+            provenant_fabric_runtime::inbox::validate_request(
+                &ctx.identity,
+                &ctx.config,
+                ctx.in_lane,
+                input,
+            )?;
+        }
+        Ok(())
+    }
     fn input_limits(&self) -> provenant_records::Limits {
         provenant_records::Limits {
             max_bytes: self.context.config.limits.input_frame_bytes,
@@ -127,6 +139,27 @@ struct BoundFacade<'a> {
     factory: &'a Factory,
 }
 impl F3Facade for BoundFacade<'_> {
+    fn inbox(
+        &mut self,
+        input: provenant_fabric_runtime::inbox::InboxInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<
+        provenant_fabric_runtime::inbox::InboxResult,
+        provenant_fabric_runtime::inbox::InboxError,
+    > {
+        let ctx = &self.factory.context;
+        provenant_fabric_runtime::inbox::execute(
+            &ctx.roots.state,
+            &ctx.identity,
+            &ctx.config,
+            ctx.in_lane,
+            &self.factory.clock,
+            input,
+            budget,
+            cancel,
+        )
+    }
     fn refresh_events(
         &mut self,
         budget: WaitBudget,
@@ -1585,6 +1618,7 @@ impl BinaryRunOwner<'_> {
                 base: task.base,
                 task_id: derived_task(&operation_id, index).map_err(fail_error)?,
                 prompt: task.prompt,
+                title: task.title,
                 account: task.account,
                 route: task.route,
                 fallback: Vec::new(),
@@ -2923,6 +2957,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     access,
                     worktree: worktree.map(str::to_owned),
                     prompt: prompt.into(),
+                    title: None,
                     route: match &route.model {
                         Some(model) => provenant_records::run::RequestedRoute::Model {
                             provider: route.adapter.clone(),
@@ -3926,6 +3961,7 @@ mod peer_tests {
                     lane_depth: 1,
                     parent_attempt: None,
                     tasks: vec![provenant_run::DispatchTask {
+                        title: None,
                         task_id: TaskId::from_bytes([3; 16]),
                         prompt: "reply OK".into(),
                         base: Some(info.head.to_string()),

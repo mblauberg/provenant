@@ -708,6 +708,7 @@ mod tests {
             for index in first..(first + 64).min(256) {
                 let task_id = TaskId::from_bytes(index.to_be_bytes());
                 child.request.tasks.push(run::TaskRequest {
+                    title: None,
                     task_id,
                     ..template.clone()
                 });
@@ -796,6 +797,7 @@ mod tests {
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    title: None,
                     base: None,
                     base_ref: None,
                     task_id,

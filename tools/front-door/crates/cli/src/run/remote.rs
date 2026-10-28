@@ -44,6 +44,7 @@ const PLACEMENT_LIMIT: u64 = 64 * 1024;
 const POLL: Duration = Duration::from_secs(2);
 
 pub(super) struct Task {
+    pub(super) title: Option<String>,
     pub(super) base: Option<String>,
     pub(super) prompt: String,
     pub(super) route: run::RequestedRoute,
@@ -728,6 +729,7 @@ fn submitted_task(
     timeout_seconds: u64,
 ) -> SubmittedTask {
     SubmittedTask {
+        title: task.title,
         // A writer's base belongs to its new worktree request.
         base: if new_worktree.is_none() {
             task.base
@@ -1562,6 +1564,7 @@ mod tests {
         };
         let task = submitted_task(
             Task {
+                title: Some("Make the change".into()),
                 base: Some("main".into()),
                 prompt: "write the change".into(),
                 route: route.clone(),
@@ -1593,6 +1596,7 @@ mod tests {
                 "delivery_id": null,
                 "new_worktree": {"base": "main", "branch": "writer/change"},
                 "prompt": "write the change",
+                "title": "Make the change",
                 "route": serde_json::to_value(route)?,
                 "timeout_seconds": 600,
                 "worktree": null
@@ -1605,6 +1609,7 @@ mod tests {
     fn read_only_peer_forwards_the_context_ref_and_original_prompt() {
         let task = submitted_task(
             Task {
+                title: None,
                 base: Some("main".into()),
                 prompt: "review".into(),
                 route: run::RequestedRoute::Named {

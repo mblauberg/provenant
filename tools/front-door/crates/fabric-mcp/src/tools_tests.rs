@@ -126,6 +126,35 @@ fn limits() -> Limits {
 }
 
 #[test]
+fn inbox_disclosure_strictness_and_mutation_limits() {
+    assert!(
+        !schema::catalogue()
+            .iter()
+            .any(|tool| tool["name"] == "fabric_inbox")
+    );
+    assert!(
+        schema::advanced_catalogue()
+            .iter()
+            .any(|tool| tool["name"] == "fabric_inbox")
+    );
+    let answer = json!({"op":"answer","id":"00000000000000000000000000000001",
+        "action":"reply","text":" yes ","expect_revision":1,"channel":"cli",
+        "operation_id":"answer-retry-1"});
+    let call = ToolCall::parse("fabric_inbox", answer.clone()).unwrap();
+    assert!(call.is_mutation());
+    assert_eq!(call.operation_id().unwrap().as_str(), "answer-retry-1");
+    let receipt = response("fabric_inbox", json!({"operation_id":"answer-retry-1"})).unwrap();
+    assert!(limit_response(receipt, &limits(), call.is_mutation(), false).is_ok());
+    let mut forged = answer;
+    forged["actor"] = json!("00000000000000000000000000000002");
+    assert!(ToolCall::parse("fabric_inbox", forged).is_err());
+    let list = ToolCall::parse("fabric_inbox", json!({"op":"list"})).unwrap();
+    assert!(!list.is_mutation());
+    assert_eq!(list.validate_limits(&limits()).unwrap_err().path, "limit");
+    assert!(ToolCall::parse("fabric_inbox", json!({"op":"list","operation_id":"bad"})).is_err());
+}
+
+#[test]
 fn configured_limits_reject_typed_body_page_lease_and_output_values() {
     let limits = limits();
     for (tool, args, path) in [

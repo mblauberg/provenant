@@ -184,7 +184,7 @@ fn prepare_with(
         cancel,
     )?;
     let eligible = |name: &str| provider_leases.contains_key(name);
-    let settings = config.domains.accounts;
+    let settings = config.domains.accounts.with_derived_accounts();
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
     if eligible("codex") && !entries.iter().any(|e| e.adapter == "codex") {
@@ -231,8 +231,13 @@ fn prepare_with(
         if !entries.iter().any(|entry| entry.adapter == adapter) && locate(adapter).is_ok() {
             entries.push(provenant_providers::accounts::Registration {
                 adapter: adapter.into(),
-                label: "default".into(),
-                key: "local".into(),
+                label: if adapter == "opencode" {
+                    "go"
+                } else {
+                    "default"
+                }
+                .into(),
+                key: if adapter == "opencode" { "go" } else { "local" }.into(),
                 org_fingerprint: None,
                 directory: home.clone(),
                 plan: None,
@@ -246,6 +251,16 @@ fn prepare_with(
             });
         }
     }
+    // Include a distinct Zen identity for an unregistered local OpenCode login.
+    let settings = provenant_providers::accounts::Settings {
+        entries: entries
+            .into_iter()
+            .enumerate()
+            .map(|(i, entry)| (i.to_string(), entry))
+            .collect(),
+    }
+    .with_derived_accounts();
+    let entries: Vec<_> = settings.entries.into_values().collect();
     let timestamp = jiff::Timestamp::now().as_second();
     let mut availability = Vec::new();
     let mut reasons: Vec<SkippedRoute> = Vec::new();
@@ -2285,6 +2300,7 @@ mod tests {
         for entry in REGISTRY {
             let adapter = entry.adapter.id();
             let requested = run::TaskRequest {
+                title: None,
                 base: None,
                 base_ref: None,
                 task_id: provenant_core::TaskId::from_bytes([3; 16]),
@@ -2643,6 +2659,7 @@ mod tests {
         }
         let prompt = "é".repeat(75_000);
         let task = run::TaskRequest {
+            title: None,
             base: Some("HEAD".into()),
             base_ref: None,
             task_id: TaskId::from_bytes([3; 16]),

@@ -40,6 +40,7 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target
           CARGO_BUILD_BUILD_DIR: ${{ runner.temp }}/cargo-target
+          RUSTC_WRAPPER: .cargo/rustc-wrapper.sh
         run: |
           cargo build --release --locked --bin provenant
           codesign --force --sign - "$CARGO_TARGET_DIR/release/provenant"

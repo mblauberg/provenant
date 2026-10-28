@@ -276,6 +276,7 @@ impl RunStore {
             for (index, task) in input.request.tasks.iter().enumerate() {
                 let new = input.attempts.iter().find(|a| a.task_id == task.task_id).ok_or(RunError::Validation("missing task prompt"))?;
                 let attempt = AttemptRecord {
+                    title: task.title.clone(),
                     continuation: input.request.fresh_continuation.as_ref().map(|_| "fresh".into()),
                     profile: task.profile.clone(),
                     schema_version: 1, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,

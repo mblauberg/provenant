@@ -668,6 +668,7 @@ struct Manifest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManifestTask {
+    title: Option<String>,
     base: Option<String>,
     task_id: Option<TaskId>,
     prompt: Option<String>,
@@ -886,6 +887,7 @@ fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAcc
 
 /// One task of a submission, from CLI flags, a manifest or Fabric.
 pub struct Submitted {
+    pub title: Option<String>,
     pub task_id: TaskId,
     pub prompt: String,
     pub base: Option<String>,
@@ -1090,6 +1092,7 @@ pub fn submit_with_host(
         .map(|task| {
             Ok(run::DispatchTask {
                 profile: profile.clone(),
+                title: task.title,
                 task_id: task.task_id,
                 prompt: task.prompt,
                 base: task.base,
@@ -1804,6 +1807,7 @@ fn dispatch_inner(
             };
             tasks.push((
                 task_id,
+                task.title,
                 prompt,
                 route,
                 fallback,
@@ -1824,6 +1828,7 @@ fn dispatch_inner(
         };
         tasks.push((
             task_id,
+            command.title.clone(),
             prompt,
             requested(
                 flag_route.0.as_deref(),
@@ -1844,8 +1849,10 @@ fn dispatch_inner(
     };
     if let Some(host) = &command.host {
         let mut placed = Vec::new();
-        for (index, (task_id, prompt, route, fallback, delivery_id, account, deliver, base)) in
-            tasks.into_iter().enumerate()
+        for (
+            index,
+            (task_id, title, prompt, route, fallback, delivery_id, account, deliver, base),
+        ) in tasks.into_iter().enumerate()
         {
             // The peer derives task IDs from the operation and has no fallback field.
             if task_id != derived_task(&command.operation_id, index)? {
@@ -1860,6 +1867,7 @@ fn dispatch_inner(
                 );
             }
             placed.push(remote::Task {
+                title,
                 base,
                 prompt,
                 route,
@@ -1890,7 +1898,7 @@ fn dispatch_inner(
         .operation(&command.operation_id, &call)?
         .is_none()
     {
-        for (_, _, _, _, _, _, delivery, _) in &tasks {
+        for (_, _, _, _, _, _, _, delivery, _) in &tasks {
             if let Some(delivery) = delivery {
                 check_delivery_branch(edge.cwd, &delivery.branch)?;
             }
@@ -1899,18 +1907,21 @@ fn dispatch_inner(
     let tasks = tasks
         .into_iter()
         .map(
-            |(task_id, prompt, route, fallback, delivery_id, account, deliver, base)| Submitted {
-                base,
-                task_id,
-                prompt,
-                route,
-                fallback,
-                account,
-                provider_timeout: command.provider_timeout,
-                delivery_id,
-                deliver,
-                worktree: access.worktree.clone(),
-                access: lane_access.clone(),
+            |(task_id, title, prompt, route, fallback, delivery_id, account, deliver, base)| {
+                Submitted {
+                    title,
+                    base,
+                    task_id,
+                    prompt,
+                    route,
+                    fallback,
+                    account,
+                    provider_timeout: command.provider_timeout,
+                    delivery_id,
+                    deliver,
+                    worktree: access.worktree.clone(),
+                    access: lane_access.clone(),
+                }
             },
         )
         .collect();
@@ -2035,7 +2046,8 @@ fn replay_owned_dispatch(
     let profile = config
         .dispatch_profile(&command.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
-    if task.prompt_digest != CanonicalV1::file_digest(prompt.as_bytes())
+    if task.title != command.title
+        || task.prompt_digest != CanonicalV1::file_digest(prompt.as_bytes())
         || task.route != route
         || task.account != command.account
         || task.base_ref != command.base
@@ -2592,9 +2604,14 @@ fn render_lanes(
                 .as_deref()
                 .map(|r| format!(" ({})", plain_text(r, usize::MAX)))
                 .unwrap_or_default();
+            let title_text = lane
+                .title
+                .as_deref()
+                .map(|title| format!(" {}", plain_text(title, usize::MAX)))
+                .unwrap_or_default();
             // Peer records remain intact in JSON; terminal text excludes controls.
             human.push_str(&format!(
-                "{}/{}/{} {state} {route_text}{account_field}{reason_text}\n",
+                "{}/{}/{}{title_text} {state} {route_text}{account_field}{reason_text}\n",
                 lane.run_id, lane.task_id, lane.attempt_id,
             ));
             for skipped in &lane.skipped_routes {
@@ -2651,7 +2668,7 @@ fn render_lanes(
                         .map(|path| attempt.join(path));
                     json!({ "adapter": adapter, "session": session, "path": path })
                 });
-            json!({
+            let mut row = json!({
                 "run_id": lane.run_id,
                 "task_id": lane.task_id,
                 "attempt_id": lane.attempt_id,
@@ -2680,7 +2697,11 @@ fn render_lanes(
                 "continuation": lane.continuation,
                 "result_path": result,
                 "transcript": transcript,
-            })
+            });
+            if let Some(title) = &lane.title {
+                row["title"] = json!(title);
+            }
+            row
         })
         .collect();
     if rows.is_empty() {
@@ -5341,13 +5362,15 @@ mod tests {
         let manifest: Manifest = serde_json::from_value(json!({
             "schema_version": 1,
             "tasks": [
-                {"prompt": "review", "base": "main", "route": {"kind": "named", "name": "senior"}},
+                {"prompt": "review", "title": "Review changes", "base": "main", "route": {"kind": "named", "name": "senior"}},
                 {"prompt": "review", "route": {"kind": "model", "provider": "codex", "model": "gpt-6-luna"}}
             ]
         }))
         .unwrap();
         assert_eq!(manifest.tasks[0].base.as_deref(), Some("main"));
         assert_eq!(manifest.tasks[1].base, None);
+        assert_eq!(manifest.tasks[0].title.as_deref(), Some("Review changes"));
+        assert_eq!(manifest.tasks[1].title, None);
         assert!(
             matches!(&manifest.tasks[0].route, run::RequestedRoute::Named { name, .. } if name == "senior")
         );
@@ -5485,6 +5508,7 @@ mod tests {
         let submission = |base: &str| Submission {
             operation_id: OperationId::parse("context-ref-replay").unwrap(),
             tasks: vec![Submitted {
+                title: None,
                 task_id: TaskId::from_bytes([3; 16]),
                 prompt: "review".into(),
                 base: Some(base.into()),
@@ -5542,6 +5566,7 @@ mod tests {
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    title: None,
                     base: None,
                     base_ref: None,
                     task_id,
@@ -5880,6 +5905,7 @@ mod tests {
             "task_id": TaskId::from_bytes([4; 16]),
             "operation_id": "peer-lane-render",
             "attempt_number": 1,
+            "title": "Review\nchanges",
             "revision": 1,
             "generation": 0,
             "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
@@ -5906,7 +5932,7 @@ mod tests {
         assert_eq!(
             human,
             format!(
-                "{}/{}/{} failed fixture/[32mmodel account=]0;account ([31mreason[0m)\n  skipped fixture/[33mfallback Unavailable: skipdetail\n  delivery origin:mainline NotAttempted head=unknown\n",
+                "{}/{}/{} Reviewchanges failed fixture/[32mmodel account=]0;account ([31mreason[0m)\n  skipped fixture/[33mfallback Unavailable: skipdetail\n  delivery origin:mainline NotAttempted head=unknown\n",
                 RunId::from_bytes([2; 16]),
                 TaskId::from_bytes([4; 16]),
                 AttemptId::from_bytes([1; 16])
@@ -5914,6 +5940,7 @@ mod tests {
         );
         assert!(!human.chars().any(|c| c.is_control() && c != '\n'));
         assert!(!human.contains('\u{202e}'));
+        assert_eq!(data["lanes"][0]["title"], "Review\nchanges");
         assert_eq!(data["lanes"][0]["reason"], json!(reason));
         assert_eq!(data["lanes"][0]["write_grants"][0]["source"], "write_root");
         assert_eq!(data["lanes"][0]["write_grants"][0]["scope"], "subtree");
@@ -6111,6 +6138,7 @@ mod tests {
             )
         );
         assert!(!human.contains("account="));
+        assert!(data["lanes"][0].get("title").is_none());
         assert_eq!(data["lanes"][0]["account"], json!("unknown"));
         assert_eq!(data["lanes"][0]["state"], "rejected");
         assert_eq!(data["lanes"][0]["reason"], json!(reason));

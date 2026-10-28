@@ -77,6 +77,23 @@ fn identity() -> Result<VersionInfo, Box<dyn std::error::Error>> {
         config_schema_version: provenant_config::CONFIG_SCHEMA_VERSION,
     })
 }
+fn human_inbox(
+    command: provenant_cli::inbox::HumanCommand,
+    path: &str,
+    globals: &provenant_cli::Globals,
+) -> u8 {
+    match roots::resolve(globals, Workspace::Project, Product::Required) {
+        Ok(resolved) => provenant_cli::inbox::run(
+            command,
+            path,
+            globals,
+            &resolved.roots,
+            &resolved.home,
+            &resolved.project,
+        ),
+        Err(error) => fail(path, Outcome::Error, "ROOT", &error.to_string(), globals),
+    }
+}
 fn emit<T: Serialize>(
     result: &CommandResult<T>,
     globals: &provenant_cli::Globals,
@@ -463,6 +480,21 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Config(provenant_cli::Config::Unset { name }) => config_command(
             "config unset",
             Some(provenant_config::KnobEdit::Unset(&name)),
+            globals,
+        ),
+        Command::Ask(args) => human_inbox(
+            provenant_cli::inbox::HumanCommand::Ask(args),
+            &inv.leaf,
+            globals,
+        ),
+        Command::Inbox(args) => human_inbox(
+            provenant_cli::inbox::HumanCommand::Inbox(args),
+            &inv.leaf,
+            globals,
+        ),
+        Command::Answer(args) => human_inbox(
+            provenant_cli::inbox::HumanCommand::Answer(args),
+            &inv.leaf,
             globals,
         ),
         Command::Fabric(provenant_cli::Fabric::Mcp { client }) => {

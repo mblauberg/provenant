@@ -616,6 +616,7 @@ dependencies = [
 name = "provenant-routing"
 version = "1.2.1"
 dependencies = [
+ "jiff",
  "provenant-config",
  "provenant-core",
  "provenant-providers",
