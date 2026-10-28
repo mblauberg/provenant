@@ -337,7 +337,7 @@ fn companions(
         &names,
         |check| request.wait(check),
         Into::into,
-        |name| Error::UnsafePath(path.join(name)),
+        |name, _| Error::UnsafePath(path.join(name)),
     )
 }
 #[cfg(test)]
@@ -350,7 +350,7 @@ fn companion(
         &mut metadata,
         |check| request.wait(check),
         Into::into,
-        || Error::UnsafePath(path.clone()),
+        |_| Error::UnsafePath(path.clone()),
     )
 }
 

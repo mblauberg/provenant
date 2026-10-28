@@ -434,14 +434,14 @@ fn opens_refuse_unsafe_database_companions() -> TestResult {
             assert!(
                 matches!(
                     RunStore::open(&context, &request),
-                    Err(RunError::UnsafePath)
+                    Err(RunError::UnsafePath { .. })
                 ),
                 "{suffix}/{kind}"
             );
             assert!(
                 matches!(
                     RunStore::open_read_only(&context, &request),
-                    Err(RunError::UnsafePath)
+                    Err(RunError::UnsafePath { .. })
                 ),
                 "read-only {suffix}/{kind}"
             );
