@@ -6242,6 +6242,83 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn local_wait_observes_settlement_and_renders_pending_details()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+        let store = trace_store(&temp, &call)?;
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+        inputs.state_dir = Some(root.join("state"));
+        let context = run::ExecutionContext {
+            state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
+            project_id: provenant_core::ProjectId::from_bytes([1; 16]),
+            actor_id: ActorId::from_bytes([2; 16]),
+            read_prompts: true,
+        };
+        let session = Session { store, context };
+        let prepared = trace_run(10, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
+        session.store.create(&prepared, &call)?;
+        let id = prepared.attempts[0].attempt_id;
+        let targets = [Target {
+            selection: None,
+            run: Some(prepared.run_id),
+            task: None,
+            attempt: Some(id),
+        }];
+        let picks = Picks {
+            targets: &targets,
+            owner: session.context.actor_id,
+            label: None,
+            since: None,
+        };
+        let mut fetch = candidates(&session, &picks, None);
+        let first = fetch(Duration::from_secs(1)).map_err(|fail| fail.message)?;
+        assert_eq!(first.len(), 1);
+        let (data, _) = render_settled(&session, &first).map_err(|fail| fail.message)?;
+        assert_eq!(
+            data["lanes"][0]["waiting_for"],
+            "launch: not yet handed to a guardian"
+        );
+        let mut reads = 0;
+        let finished_at = clock.wall_now()?;
+        let waited = watch::wait(
+            |remaining| {
+                reads += 1;
+                if reads == 2 {
+                    session.store.withdraw(
+                        id,
+                        run::AttemptState::Queued,
+                        run::Outcome::Cancelled,
+                        "fixture settlement",
+                        finished_at,
+                        &call,
+                    )?;
+                }
+                fetch(remaining)
+            },
+            picks.scope().map_err(|fail| fail.message)?,
+            Condition::All,
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+        )
+        .map_err(|fail| fail.message)?;
+        assert!(waited.met);
+        assert_eq!(waited.lanes.len(), 1);
+        assert!(matches!(
+            waited.lanes[0].state,
+            run::AttemptState::Terminal {
+                outcome: run::Outcome::Cancelled,
+                ..
+            }
+        ));
+        assert_eq!(reads, 2);
+        Ok(())
+    }
+
+    #[test]
     fn timeout_render_reads_wait_details_without_a_retry_budget() {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();

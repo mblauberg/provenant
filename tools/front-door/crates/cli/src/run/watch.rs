@@ -338,7 +338,15 @@ pub(super) fn watch(
     emit: &mut dyn FnMut(&run::AttemptRecord) -> Result<(), Fail>,
 ) -> Result<Watched, Fail> {
     let deadline = Instant::now() + budget;
-    let (armed, mut lanes) = arm(&mut fetch, scope, deadline, poll)?;
+    let (armed, mut lanes) = match arm(&mut fetch, scope, deadline, poll) {
+        Err(fail) if fail.kind == ErrorKind::Contention => {
+            return Ok(Watched {
+                lanes: Vec::new(),
+                settled: false,
+            });
+        }
+        result => result?,
+    };
     let mut seen: BTreeMap<AttemptId, String> = BTreeMap::new();
     let mut stale = None;
     loop {
@@ -351,7 +359,7 @@ pub(super) fn watch(
         }
         let all_settled = lanes.iter().all(|lane| settled(&lane.state).0);
         if all_settled || Instant::now() >= deadline {
-            if let Some(fail) = stale {
+            if let Some(fail) = stale.filter(|fail: &Fail| fail.kind != ErrorKind::Contention) {
                 return Err(fail);
             }
             return Ok(Watched {
@@ -679,6 +687,30 @@ mod tests {
         })
         .unwrap();
         assert!(!done);
+    }
+
+    #[test]
+    fn persistent_store_contention_expires_a_watch_without_failure() {
+        for armed in [false, true] {
+            let mut calls = 0;
+            let watched = watch(
+                |_| {
+                    calls += 1;
+                    if armed && calls == 1 {
+                        Ok(vec![running(1)])
+                    } else {
+                        Err(run::RunError::Contention.into())
+                    }
+                },
+                scope(&[1], None, true),
+                Duration::from_millis(20),
+                POLL,
+                &mut |_| Ok(()),
+            )
+            .expect("contention expires as a watch timeout");
+            assert!(!watched.settled);
+            assert_eq!(watched.lanes.len(), usize::from(armed));
+        }
     }
 
     #[test]

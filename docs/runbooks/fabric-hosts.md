@@ -300,7 +300,10 @@ left, as well as by `limits.peer_seconds`, and no read after the first starts
 at or after the deadline; the poll then fails as a transient peer error, which
 the wait retries until its own budget ends.
 Local run-store contention is also retried between polls until the wait's
-deadline; persistent contention ends the wait as a timeout. If peer reads
+deadline. Each local store operation makes an immediate attempt without
+waiting on contention, so a successful poll still observes settlement;
+persistent contention ends the wait or watch as a timeout. Optional wait
+details in the final reply use the same nonblocking reads. If peer reads
 remain unavailable at the deadline, the last failure is reported.
 The time a peer read has left covers
 the whole SSH child, including its termination and reap, so a hung `ssh` that
