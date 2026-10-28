@@ -117,7 +117,7 @@ impl<'a> Service<'a> {
                         )?
                         .branch,
                     ),
-                    None => crate::pr_contribution::review_branch(
+                    None => crate::pr_contribution::read_only_branch(
                         self.store.writer_registry(),
                         self.store.context.project_id,
                         cwd,
@@ -128,7 +128,11 @@ impl<'a> Service<'a> {
                         task.task_id,
                         (
                             branch.as_str().trim_start_matches("refs/heads/").to_owned(),
-                            if writer.is_some() { "worker" } else { "review" },
+                            if writer.is_some() {
+                                "worker"
+                            } else {
+                                "read_only"
+                            },
                         ),
                     );
                 }
@@ -294,14 +298,18 @@ impl<'a> Service<'a> {
         }
         let record = self.store.create(&prepared, call)?;
         if !contribution_branches.is_empty() {
-            let db = Contributions::open(self.store.writer_registry(), call)?;
-            // Read the accepted run, including on operation replay. Newly
-            // generated candidate IDs are not authoritative after create.
-            for attempt in self.store.contribution_attempts(record.run_id, call)? {
-                if let Some((branch, role)) = contribution_branches.get(&attempt.task_id) {
-                    db.capture(&attempt, branch, role, call)?;
+            let captured = (|| {
+                let db = Contributions::open(self.store.writer_registry(), call)?;
+                // Read the accepted run, including on operation replay. Newly
+                // generated candidate IDs are not authoritative after create.
+                for attempt in self.store.contribution_attempts(record.run_id, call)? {
+                    if let Some((branch, role)) = contribution_branches.get(&attempt.task_id) {
+                        db.capture(&attempt, branch, role, call)?;
+                    }
                 }
-            }
+                Ok(())
+            })();
+            self.store.contribution_diagnostic(record.run_id, captured);
         }
         Ok(record)
     }

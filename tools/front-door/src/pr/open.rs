@@ -250,13 +250,7 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
                     super::contributions::bind(&resolved, &plan.branch, number, plan.head)
                 });
             if let Err(error) = captured {
-                return fail(
-                    LEAF,
-                    Outcome::Error,
-                    "PR_CONTRIBUTIONS",
-                    &format!("PR opened, contribution binding failed: {error}"),
-                    globals,
-                );
+                super::contributions::warn(number, &error);
             }
             data["url"] = json!(url.map(str::trim));
             data["number"] = json!(number);

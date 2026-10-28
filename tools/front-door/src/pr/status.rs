@@ -161,6 +161,21 @@ pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
     })();
     match result {
         Ok(lines) => {
+            for line in &lines {
+                if matches!(line.state.as_str(), "CLOSED" | "MERGED") {
+                    let closed = (|| -> Result<()> {
+                        let resolved = roots::resolve(
+                            globals,
+                            roots::Workspace::Checkout,
+                            roots::Product::Optional,
+                        )?;
+                        super::contributions::close(&resolved, line.number)
+                    })();
+                    if let Err(error) = closed {
+                        super::contributions::warn(Some(line.number), &error);
+                    }
+                }
+            }
             let text: String = lines.iter().map(|line| line.text() + "\n").collect();
             emit(
                 &CommandResult::new(LEAF, Outcome::Ok, lines),

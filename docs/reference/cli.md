@@ -3394,9 +3394,12 @@ bounds are null. Positional arguments have no long flag.
 
 ## `provenant pr contributions`
 
+Response fields, nullability, coverage values and capture roles: [PR contributions JSON reference](../specs/run.md#pr-contributions-json-reference).
+
 | Argument | Contract |
 |---|---|
 | `number` | `{"name": "number", "positional": true, "required": true}` |
+| `--bind` | `{"defaults": ["false"], "name": "bind", "values": ["true", "false"]}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -3408,7 +3411,8 @@ bounds are null. Positional arguments have no long flag.
   "groups": [
     {
       "arguments": [
-        "number"
+        "number",
+        "bind"
       ],
       "multiple": true,
       "name": "Contributions",

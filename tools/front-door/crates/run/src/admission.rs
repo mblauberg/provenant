@@ -330,10 +330,7 @@ impl RunStore {
         if !crate::reader::write_grants_fit(&write_grants.grants) {
             return Err(RunError::Validation("invalid write grants"));
         }
-        let mut contribution = expected.clone();
-        contribution.resolved_route = Some(route.clone());
-        self.retain_contribution_route(&contribution, call)?;
-        self.write(call, |tx| {
+        let next = self.write(call, |tx| {
             let old = self.record(id, call)?;
             if old.state != AttemptState::Queued
                 || old.run_id != expected.run_id
@@ -378,7 +375,9 @@ impl RunStore {
                 params![bytes(&ticket)?, id.to_string()],
             )?;
             Ok(next)
-        })
+        })?;
+        self.contribution_diagnostic(next.run_id, self.retain_contribution_route(&next, call));
+        Ok(next)
     }
     /// Wait until host capacity, startup spacing and resource floors admit
     /// this attempt, then mark it running. Expiry or a state change refuses.

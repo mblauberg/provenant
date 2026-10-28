@@ -87,7 +87,7 @@ of host state and must be retained in backups.
 
 Capture uses facts owned by the attempt's local host. Writer dispatch into a
 registered worktree snapshots project, branch and attempt before launch.
-Read-only dispatch from that worktree records the `review` role; writers use
+Read-only dispatch from that worktree records the `read_only` role; writers use
 `worker`, and their continuations use `repair`. Capture includes queued,
 failed and cancelled attempts. An attempt appears once per PR, including on
 dispatch, continuation or binding replay. Resolved model and account labels
@@ -97,27 +97,89 @@ not substituted for unknown execution facts.
 `pr open` binds the branch to its canonical GitHub repository, PR number and
 head after creation; `--dry-run` captures nothing. `land` binds before merging
 or removing worktrees. Landing skips new bindings for fork PRs, protecting
-local namesake branches. Binding resolves every captured local attempt on the
-branch, and later dispatches
-resolve against retained bindings. Links describe branch participation, not
-commit authorship. Branch names are scoped by the local project identity;
-historical links remain when the branch is removed. Automatic capture leaves
-weights unknown and never seals an allocation. An explicit sealed allocation
-continues to refuse a newly discovered link transactionally.
+local namesake branches. PR creation and landing warn on attribution failure
+and name `provenant pr contributions N --bind` as the retry; an attribution
+failure cannot fail an otherwise successful operation. Capture errors after
+run creation likewise leave dispatch successful and seal the first diagnostic
+in `runs/<run>/pr-contribution-diagnostic.txt`, with a warning on stderr.
 
-`provenant pr contributions N [--json]` reads retained local links with role,
-model, account, branch, head and `weight_millionths`. JSON null and text
-`unknown` preserve missing facts. The reader opens an existing store without
-creating or migrating it; GitHub's repository lookup supplies the canonical
-repository namespace. Version 1 stores migrate at the next host capture or
-binding. The database is outside attempts and worktrees, so `gc --apply`,
-landing cleanup and worktree removal retain links and metadata.
+Bindings belong to a project/branch generation. Landing and observed
+`CLOSED`/`MERGED` PRs (`pr status`, `land`, or `pr contributions N --bind`)
+close existing bindings. Closing the last open binding advances the generation;
+replays cannot reopen it. Capture and binding resolve only attempts and open
+PRs in the same generation. Continuations and validated children inherit their
+parent's generation unless an authorised replacement changes branches.
+After external closure, observe the old PR with `pr status N` or
+`pr contributions N --bind` before reusing its branch. Historical links remain
+when the branch is removed. Links describe branch participation, not commit
+authorship. Automatic capture leaves weights unknown and never seals an
+allocation. An explicit sealed allocation continues to refuse a newly
+discovered link transactionally.
 
-Coverage is explicitly local and prospective. Peer-owned attempts are out of
-scope: `coverage.peer_attempts` is always `unknown`, accompanied by known
-configured peer host labels. The reader never opens peer records or forwards
-peer queries. Older attempts without captured membership are not inferred
-from transcripts or centrally backfilled.
+Multiple open PRs on one branch retain their links. An attempt linked to more
+than one PR without a sealed allocation is `ambiguous`; consumers must exclude
+it or use an explicit complete allocation rather than double-count its full
+cost. The link cap is 256 per attempt. Additional links are skipped and
+coverage becomes `truncated`, including for a PR whose link was skipped. This
+does not block further dispatch, binding or landing. A study must count an
+attempt once per merged PR, keyed by host, repository, PR number and attempt,
+and exclude unbound, ambiguous, truncated or missing coverage until resolved.
+
+`provenant pr contributions N [--json]` reads retained local links without
+creating or migrating a store; GitHub's repository lookup supplies the
+canonical repository namespace. `--bind` explicitly retries binding using the
+observed branch, head and state, and refuses fork PRs. Version 1 rows remain
+readable with null metadata. Versions 1 and 2 migrate to version 3 at the next
+host write; old `review` roles become `read_only` because no explicit review
+request field established that intent. Existing historical links are retained,
+without reconstructing their original lifecycle. The database is outside
+attempts and worktrees, so `gc --apply`, landing cleanup and worktree removal
+retain links and metadata. Rollback must retain the database; older binaries
+cannot write version 3.
+
+### PR contributions JSON reference
+
+The normal command-result envelope contains `data` with these fields:
+
+| Field | Type and meaning |
+|---|---|
+| `pull_request` | Object with non-null canonical lower-case `repository` (`owner/repo`) and positive integer `number`. |
+| `attempts` | Array, once per local attempt linked to this PR, ordered by `queued_at` then `attempt`. Null queue times sort first. |
+| `coverage` | Object described below; prospective local capture never proves complete historical or peer coverage. |
+
+Each `attempts` row always includes all of these fields. Missing facts are
+JSON null (text output uses `unknown`).
+
+| Field | Type and nullability |
+|---|---|
+| `attempt` | Non-null attempt UUID string. |
+| `pull_request` | Non-null repository/number object, as above. |
+| `run` | Run UUID string, or null for legacy/explicit links without host metadata. |
+| `outcome` | Terminal outcome string, or null before terminal publication or when unavailable. Values: `succeeded`, `review_required`, `failed`, `rejected`, `cancelled`, `timed_out`, `rate_limited`, `quota_limited`, `auth_required`, `model_unavailable`, `permission_denied`, `quarantined`, `lost`, `uncommitted`, `input_required`. |
+| `queued_at` | Canonical RFC3339 UTC string with six fractional digits, or null when unavailable. |
+| `finished_at` | Same timestamp format, or null before terminal publication or when unavailable. |
+| `branch` | Captured local branch string, or null when unavailable. |
+| `head` | Observed full PR Git SHA string, or null when unavailable. |
+| `role` | `worker` for writer dispatch, `read_only` for cwd-linked read-only dispatch/validated children, `repair` for writer continuations; null for legacy/explicit links. No review intent is inferred. |
+| `model`, `account` | Resolved placement strings, or null when unknown; requested or lane-written placement is not substituted. |
+| `weight_millionths` | Integer from 0 to 1,000,000, or null until explicit complete allocation is sealed. |
+| `pr_count` | Non-null integer count of retained PR links for this attempt, across repositories and including closed PRs. A truncated count is a lower bound. |
+| `ambiguous` | Non-null boolean: more than one retained PR link and no sealed allocation. |
+| `truncated` | Non-null boolean: additional links for the attempt have been skipped at the cap. |
+
+Coverage fields are always present and non-null:
+
+| Field | Values |
+|---|---|
+| `local_attempts` | `unbound` when the project is unregistered, the store is absent, or this PR has neither binding nor legacy links; otherwise `truncated` when any associated attempt lost a link, `ambiguous` when any row is ambiguous, or `captured`. The precedence is unbound, truncated, ambiguous, captured. An empty captured list is possible for a successfully bound PR with no captured attempts. |
+| `ambiguous` | Boolean indicating any returned row has ambiguous allocation, independently of the coverage precedence. |
+| `truncated` | Boolean indicating omitted links, including attempts absent from the returned rows. |
+| `peer_attempts` | Always `unknown`. |
+| `known_peer_hosts` | Array of configured peer host labels, sorted and deduplicated; empty when none are configured. |
+
+The reader never opens peer records or forwards peer queries. Older attempts
+without captured membership are not inferred from transcripts or centrally
+backfilled.
 
 - Tests: `src/pr_land_tests.rs::pr_contribution_roundtrip` drives dispatch,
   continuation, PR creation, landing, worktree removal and GC;

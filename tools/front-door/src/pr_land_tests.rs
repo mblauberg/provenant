@@ -17,6 +17,45 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     let landing = landing()?;
     let (_, context) = super::worktree_tests::writer_context(&landing.rig)?;
     let store = super::worktree_tests::open_writer_store(&context)?;
+    let unbound = landing.rig.root.join("unbound");
+    fs::create_dir(&unbound)?;
+    git_in(&landing.rig, &unbound, &["init", "-q"])?;
+    let output = command(
+        &landing.rig,
+        &[
+            "--project",
+            unbound.to_str().ok_or("path")?,
+            "pr",
+            "contributions",
+            NUMBER,
+            "--json",
+        ],
+    )?;
+    assert_eq!(code(&output), 0);
+    assert_eq!(
+        json(&output)?["data"]["coverage"]["local_attempts"],
+        "unbound"
+    );
+    let retry_unbound = command(
+        &landing.rig,
+        &[
+            "--project",
+            unbound.to_str().ok_or("path")?,
+            "pr",
+            "contributions",
+            NUMBER,
+            "--bind",
+            "--json",
+        ],
+    )?;
+    assert_ne!(code(&retry_unbound), 0);
+    let failure = json(&retry_unbound)?;
+    assert!(
+        failure["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("project is unbound")),
+        "{failure}"
+    );
     fs::write(
         landing.rig.state.join("config.toml"),
         format!(
@@ -69,6 +108,28 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         let run = Service::new(&store).dispatch(submit()?, &landing.worktree, &call)?;
         let attempt = store.pending_attempts(run.run_id, &call)?[0].attempt_id;
         ids.push(attempt.to_string());
+        if index == 0 {
+            // An attribution conflict after create cannot turn accepted work
+            // into a failed dispatch. The host retains a diagnostic.
+            let db = rusqlite::Connection::open(
+                store.writer_registry().join("pr-contributions.sqlite3"),
+            )?;
+            db.execute(
+                "UPDATE branch_attempts SET role='read_only' WHERE attempt=?1",
+                [attempt.to_string()],
+            )?;
+            let replay = Service::new(&store).dispatch(submit()?, &landing.worktree, &call)?;
+            assert_eq!(replay.run_id, run.run_id);
+            let diagnostic = fs::read_to_string(context.state_root.as_path().join(format!(
+                "runs/{}/pr-contribution-diagnostic.txt",
+                run.run_id
+            )))?;
+            assert!(diagnostic.contains("PR contribution capture failed"));
+            db.execute(
+                "UPDATE branch_attempts SET role='worker' WHERE attempt=?1",
+                [attempt.to_string()],
+            )?;
+        }
         assert_eq!(
             Service::new(&store)
                 .dispatch(submit()?, &landing.worktree, &call)?
@@ -129,6 +190,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         Ok(json(&output)?["data"].clone())
     };
     assert!(read()?["attempts"].as_array().ok_or("attempts")?.is_empty());
+    assert_eq!(read()?["coverage"]["local_attempts"], "unbound");
     git(&landing.rig, &["push", "-q", "origin", "feat"])?;
     let template = landing.rig.project.join(".github/pull_request_template.md");
     fs::write(
@@ -163,6 +225,10 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         String::from_utf8_lossy(&preview.stdout.bytes)
     );
     assert!(read()?["attempts"].as_array().ok_or("attempts")?.is_empty());
+    // PR creation succeeds even when its optional binding cannot be stored.
+    let contributions = store.writer_registry().join("pr-contributions.sqlite3");
+    let db = rusqlite::Connection::open(&contributions)?;
+    db.execute_batch("CREATE TRIGGER reject_binding BEFORE INSERT ON branch_prs BEGIN SELECT RAISE(ABORT, 'fixture binding failure'); END;")?;
     let opened = command(&landing.rig, &open_args)?;
     assert_eq!(
         code(&opened),
@@ -170,10 +236,50 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         "{}",
         String::from_utf8_lossy(&opened.stdout.bytes)
     );
+    let warning = String::from_utf8(opened.stderr.bytes)?;
+    assert!(warning.contains("warning:"));
+    assert!(warning.contains("provenant pr contributions 1668 --bind"));
+    db.execute_batch("DROP TRIGGER reject_binding;")?;
+    let retry = || -> Result {
+        let output = command(
+            &landing.rig,
+            &["pr", "contributions", NUMBER, "--bind", "--json"],
+        )?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        Ok(())
+    };
+    let merged_view = fs::read(landing.rig.project.join("view.json"))?;
+    let mut open_view: serde_json::Value = serde_json::from_slice(&merged_view)?;
+    open_view["state"] = serde_json::json!("OPEN");
+    fs::write(
+        landing.rig.project.join("view.json"),
+        serde_json::to_vec(&open_view)?,
+    )?;
+    retry()?;
+    retry()?;
     let bound = read()?;
     assert_eq!(bound["attempts"].as_array().ok_or("attempts")?.len(), 5);
     fs::remove_file(template)?;
-    let landed = land(&landing)?;
+    fs::write(landing.rig.project.join("view.json"), merged_view)?;
+    db.execute_batch("CREATE TRIGGER reject_binding BEFORE INSERT ON branch_prs BEGIN SELECT RAISE(ABORT, 'fixture binding failure'); END;")?;
+    let output = command(&landing.rig, &["land", NUMBER, "--json"])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stdout.bytes)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr.bytes)
+            .contains("provenant pr contributions 1668 --bind")
+    );
+    let landed = json(&output)?;
+    db.execute_batch("DROP TRIGGER reject_binding;")?;
     assert_eq!(status(&landed, "worktree")?, "done", "{landed}");
     assert!(!landing.worktree.exists());
     let before = read()?;
@@ -186,6 +292,12 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
             .find(|row| row["attempt"] == id.as_str())
             .ok_or("missing attempt")?;
         assert!(row["weight_millionths"].is_null());
+        assert!(row["run"].is_string());
+        assert!(row["queued_at"].is_string());
+        assert!(row["finished_at"].is_string());
+        assert!(row["outcome"].is_string());
+        assert_eq!(row["pr_count"], 1);
+        assert_eq!(row["ambiguous"], false);
         if row["attempt"] == ids[0] || row["attempt"] == ids[1] {
             assert_eq!(row["model"], "codex/fixture");
             assert_eq!(row["account"], "fixture");
@@ -195,7 +307,10 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         }
         assert_eq!(row["head"], landing.head);
     }
-    assert_eq!(rows.iter().filter(|row| row["role"] == "review").count(), 1);
+    assert_eq!(
+        rows.iter().filter(|row| row["role"] == "read_only").count(),
+        1
+    );
     assert_eq!(rows.iter().filter(|row| row["role"] == "repair").count(), 1);
     assert_eq!(before["coverage"]["peer_attempts"], "unknown");
     assert_eq!(
@@ -228,6 +343,78 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     assert_eq!(read()?, before);
     land(&landing)?;
     assert_eq!(read()?, before);
+    // Recreate the branch after land. A new dispatch and new PR must share
+    // no attempts with the retained, merged PR, even after bind replay.
+    let recreated = command(&landing.rig, &["worktree", "create", "feat", "--json"])?;
+    assert_eq!(code(&recreated), 0);
+    let new_run = Service::new(&store).dispatch(
+        DispatchRequest {
+            chair: None,
+            operation_id: OperationId::parse("reused-branch")?,
+            tasks: vec![DispatchTask {
+                build_heavy: false,
+                title: None,
+                profile: Default::default(),
+                task_id: TaskId::from_bytes([98; 16]),
+                prompt: "new work".into(),
+                base: None,
+                head: None,
+                route: provenant_run::RequestedRoute::Named {
+                    name: "senior".into(),
+                    effort: None,
+                },
+                account: None,
+                fallback: vec![],
+                timeout_seconds: 60,
+                delivery_id: None,
+                deliver: None,
+                worktree: Some(landing.worktree.clone()),
+                access: Default::default(),
+            }],
+            concurrency: 1,
+            lane_depth: 1,
+            parent_attempt: None,
+        },
+        &landing.worktree,
+        &call,
+    )?;
+    let new_attempt = store.pending_attempts(new_run.run_id, &call)?[0].attempt_id;
+    store.cancel(new_attempt, "fixture ended", &call)?;
+    assert_eq!(read()?, before);
+    let links = provenant_run::Contributions::open(store.writer_registry(), &call)?;
+    let new_pr = provenant_run::PullRequest {
+        repository: "owner/repo".into(),
+        number: 1669,
+    };
+    links.bind(
+        context.project_id,
+        "feat",
+        &new_pr,
+        provenant_core::GitOid::parse(&landing.head)?,
+        &call,
+    )?;
+    let new_rows = links.for_pr(&new_pr, &call)?;
+    assert_eq!(new_rows.len(), 1);
+    assert_eq!(new_rows[0].attempt, new_attempt);
+    retry()?;
+    assert_eq!(read()?, before);
+    let second_new_pr = provenant_run::PullRequest {
+        number: 1670,
+        ..new_pr.clone()
+    };
+    links.bind(
+        context.project_id,
+        "feat",
+        &second_new_pr,
+        provenant_core::GitOid::parse(&landing.head)?,
+        &call,
+    )?;
+    let output = command(&landing.rig, &["pr", "contributions", "1669", "--json"])?;
+    assert_eq!(code(&output), 0);
+    let data = json(&output)?["data"].clone();
+    assert_eq!(data["coverage"]["local_attempts"], "ambiguous");
+    assert_eq!(data["coverage"]["ambiguous"], true);
+    assert_eq!(data["attempts"][0]["pr_count"], 2);
     Ok(())
 }
 

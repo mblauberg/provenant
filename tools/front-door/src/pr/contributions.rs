@@ -49,7 +49,7 @@ pub(super) fn bind(
     head: GitOid,
 ) -> Result<()> {
     let Some(project) = project_id(resolved)? else {
-        return Ok(());
+        return Err("project is unbound; register the project before binding contributions".into());
     };
     let pr = PullRequest {
         repository: repository(&resolved.project)?,
@@ -67,7 +67,39 @@ pub(super) fn bind(
     Ok(())
 }
 
-pub(super) fn run(number: u64, globals: &Globals) -> u8 {
+/// Workflow success must not depend on optional attribution storage.
+pub(super) fn warn(number: Option<u64>, error: &dyn std::fmt::Display) {
+    use std::io::Write;
+    let number = number.map_or_else(|| "N".into(), |number| number.to_string());
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "warning: PR contribution binding failed: {error}; retry `provenant pr contributions {number} --bind`"
+    );
+}
+
+pub(super) fn close(resolved: &roots::Resolved, number: u64) -> Result<()> {
+    let Some(project) = project_id(resolved)? else {
+        return Err("project is unbound; register the project before binding contributions".into());
+    };
+    let pr = PullRequest {
+        repository: repository(&resolved.project)?,
+        number,
+    };
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = Request {
+        clock: &clock,
+        cancel: &cancel,
+        budget: WaitBudget::cli(clock.mono_now(), 30)?,
+    };
+    // A status observation must never create a store.
+    if Contributions::open_read_only(resolved.roots.state.as_path(), &call)?.is_some() {
+        Contributions::open(resolved.roots.state.as_path(), &call)?.close(project, &pr, &call)?;
+    }
+    Ok(())
+}
+
+pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
     const LEAF: &str = "pr contributions";
     let result = (|| -> Result<_> {
         let resolved = roots::resolve(
@@ -86,10 +118,54 @@ pub(super) fn run(number: u64, globals: &Globals) -> u8 {
             cancel: &cancel,
             budget: WaitBudget::cli(clock.mono_now(), 30)?,
         };
-        let attempts = Contributions::open_read_only(resolved.roots.state.as_path(), &call)?
+        let project_bound = project_id(&resolved)?.is_some();
+        if bind_requested {
+            if !project_bound {
+                return Err(
+                    "project is unbound; register the project before binding contributions".into(),
+                );
+            }
+            let view = super::land::pull(&resolved.project, &number.to_string())?;
+            if view.cross_repository {
+                return Err("cannot bind a fork PR to a local namesake branch".into());
+            }
+            bind(
+                &resolved,
+                &view.branch,
+                number,
+                super::head(&resolved.project, &number.to_string())?,
+            )?;
+            if matches!(view.state.as_str(), "CLOSED" | "MERGED") {
+                close(&resolved, number)?;
+            }
+        }
+        let db = Contributions::open_read_only(resolved.roots.state.as_path(), &call)?;
+        let attempts = db
+            .as_ref()
             .map(|db| db.for_pr(&pr, &call))
             .transpose()?
             .unwrap_or_default();
+        let truncated = db
+            .as_ref()
+            .map(|db| db.truncated_for_pr(&pr, &call))
+            .transpose()?
+            .unwrap_or(false);
+        let ambiguous = attempts.iter().any(|row| row.ambiguous);
+        let bound = project_bound
+            && db
+                .as_ref()
+                .map(|db| db.is_bound(&pr, &call))
+                .transpose()?
+                .unwrap_or(false);
+        let coverage = if !bound {
+            "unbound"
+        } else if truncated {
+            "truncated"
+        } else if ambiguous {
+            "ambiguous"
+        } else {
+            "captured"
+        };
         let config = provenant_config::read_with_domains(
             &resolved.roots,
             &provenant_cli::domains::SECTIONS,
@@ -124,14 +200,20 @@ pub(super) fn run(number: u64, globals: &Globals) -> u8 {
                 .weight_millionths
                 .map_or_else(|| "unknown".into(), |value| format!("{value}/1000000"));
             text.push_str(&format!(
-                "{} role={} model={} account={} weight={}\n",
+                "{} role={} model={} account={} weight={} run={} outcome={} queued_at={} finished_at={} pr_count={} ambiguous={} truncated={}\n",
                 attempt.attempt,
                 attempt.role.as_deref().unwrap_or("unknown"),
                 attempt.model.as_deref().unwrap_or("unknown"),
                 attempt.account.as_deref().unwrap_or("unknown"),
-                weight
+                weight,
+                attempt.run.map_or_else(|| "unknown".into(), |id| id.to_string()),
+                attempt.outcome.map_or_else(|| "unknown".into(), |outcome| serde_json::to_value(outcome).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_else(|| "unknown".into())),
+                attempt.queued_at.map_or_else(|| "unknown".into(), |time| time.to_string()),
+                attempt.finished_at.map_or_else(|| "unknown".into(), |time| time.to_string()),
+                attempt.pr_count, attempt.ambiguous, attempt.truncated
             ));
         }
+        text.push_str(&format!("local_attempts: {coverage}\n"));
         text.push_str(&format!(
             "peer_attempts: unknown (known hosts: {})\n",
             if peers.is_empty() {
@@ -142,7 +224,7 @@ pub(super) fn run(number: u64, globals: &Globals) -> u8 {
         ));
         Ok((
             json!({"pull_request":pr,"attempts":attempts,
-            "coverage":{"local_attempts":"captured", "peer_attempts":"unknown","known_peer_hosts":peers}}),
+            "coverage":{"local_attempts":coverage, "ambiguous":ambiguous,"truncated":truncated, "peer_attempts":"unknown","known_peer_hosts":peers}}),
             text,
         ))
     })();

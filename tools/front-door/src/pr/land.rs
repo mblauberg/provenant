@@ -48,17 +48,17 @@ impl Step {
 }
 
 #[derive(Deserialize)]
-struct Pull {
-    state: String,
+pub(super) struct Pull {
+    pub(super) state: String,
     #[serde(rename = "baseRefName")]
     base: String,
     #[serde(rename = "headRefName")]
-    branch: String,
+    pub(super) branch: String,
     /// The head branch lives in another repository, such as a fork.
     #[serde(rename = "isCrossRepository")]
-    cross_repository: bool,
+    pub(super) cross_repository: bool,
 }
-fn pull(project: &Path, number: &str) -> Result<Pull> {
+pub(super) fn pull(project: &Path, number: &str) -> Result<Pull> {
     let bytes = successful(super::execute(
         project,
         &[
@@ -695,18 +695,40 @@ pub(crate) fn run(
         }
         let view = pull(&project, &text)?;
         if !view.cross_repository {
-            let resolved = roots::resolve(
-                globals,
-                roots::Workspace::Checkout,
-                roots::Product::Optional,
-            )?;
-            super::contributions::bind(&resolved, &view.branch, number, current)?;
+            let binding = (|| -> Result<()> {
+                let resolved = roots::resolve(
+                    globals,
+                    roots::Workspace::Checkout,
+                    roots::Product::Optional,
+                )?;
+                super::contributions::bind(&resolved, &view.branch, number, current)?;
+                if matches!(view.state.as_str(), "CLOSED" | "MERGED") {
+                    super::contributions::close(&resolved, number)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = binding {
+                super::contributions::warn(Some(number), &error);
+            }
         }
         checks(&project, &text, current, true)?;
         merge(&project, &text, current)?;
         let view = pull(&project, &text)?;
         state = view.state.clone();
         merged = view.state == "MERGED";
+        if matches!(view.state.as_str(), "CLOSED" | "MERGED") && !view.cross_repository {
+            let closed = (|| -> Result<()> {
+                let resolved = roots::resolve(
+                    globals,
+                    roots::Workspace::Checkout,
+                    roots::Product::Optional,
+                )?;
+                super::contributions::close(&resolved, number)
+            })();
+            if let Err(error) = closed {
+                super::contributions::warn(Some(number), &error);
+            }
+        }
         if merged {
             steps = follow_up(&project, &view, current, &mut output_globals, workers)?;
         }

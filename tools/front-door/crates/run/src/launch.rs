@@ -897,7 +897,10 @@ impl RunStore {
             if child.is_some()
                 && let Some(parent) = request.parent_attempt
             {
-                self.capture_child_contribution(parent, &record, call)?;
+                self.contribution_diagnostic(
+                    record.run_id,
+                    self.capture_child_contribution(parent, &record, call),
+                );
             }
             // At the cap the attempt stays Queued: a terminal refusal would spend
             // the task's only child attempt. Later attempts meet the same cap.
