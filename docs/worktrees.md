@@ -36,6 +36,10 @@ to the exact advertised commit, rather than trusting the tracking ref. Remote
 revision expressions are not accepted as bases; use a local commit ID instead.
 Host origin refresh refuses advertised branch names that collide under these
 comparisons and fails if the remote default branch is among them.
+Origin refresh skips branch names outside the supported ASCII branch-name
+grammar, including non-ASCII names. Refused tracking refs may remain stale.
+Remote bases require a reachable remote; an offline or missing remote base
+fails instead of trusting a stale tracking ref.
 
 `remove NAME` deletes the clean worktree and then its branch when every commit
 on the branch is contained in the fetched upstream default branch. Without
