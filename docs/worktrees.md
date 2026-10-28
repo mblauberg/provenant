@@ -54,6 +54,9 @@ path and reason. A writer that succeeded but left edits uncommitted with no
 new commit ends `uncommitted`, and its reason names the dirty paths.
 No force removal is offered.
 
+`worktree list` prints one terse line per tree. The path is a plain path,
+quoted only when it needs it; `--json` keeps the structured path object.
+
 ## Ownership and cleanup
 
 One writer owns each worktree. Removing an authorised merged worktree uses
