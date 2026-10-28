@@ -22,6 +22,16 @@ fn host_git(
     args: &[&str],
     timeout: Duration,
 ) -> Result<ExecOutcome, Error> {
+    host_git_with_stderr(repo, executor, args, timeout, false)
+}
+
+fn host_git_with_stderr(
+    repo: &Path,
+    executor: &dyn Executor,
+    args: &[&str],
+    timeout: Duration,
+    capture_stderr: bool,
+) -> Result<ExecOutcome, Error> {
     let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
     let environment: Vec<(OsString, OsString)> = [
         "HOME",
@@ -82,17 +92,22 @@ fn host_git(
     options.env = Some(&environment);
     options.stdin = Some(b"");
     options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
-    options.stderr = StreamPolicy::Discard;
+    options.stderr = if capture_stderr {
+        StreamPolicy::Capture { limit: 64 * 1024 }
+    } else {
+        StreamPolicy::Discard
+    };
     options.stop_on_output_limit = true;
     let output = executor.execute(options)?;
     if output.timed_out
         || output.cancelled
         || output.stdout.truncated
+        || output.stderr.truncated
         || output.drain_truncated
         || output.overflow_stopped
         || output.stdout.sink_lost_bytes > 0
     {
-        return Err(Error::GcObservation("upstream fetch incomplete"));
+        return Err(Error::GcObservation("host git operation incomplete"));
     }
     Ok(output)
 }
@@ -103,26 +118,30 @@ pub(crate) fn refresh_writer_tracking_ref(
     branch: &str,
 ) -> Result<(), Error> {
     refresh_branch(context.repo.root_path(), context.executor, branch)
+        .map_err(|_| Error::GcObservation("cannot refresh writer tracking ref"))
 }
 
 fn refresh_branch(repo: &Path, executor: &dyn Executor, branch: &str) -> Result<(), Error> {
     provenant_confinement::repo::GitRefName::branch(branch)
         .map_err(|_| Error::GcObservation("invalid writer branch"))?;
-    let source = format!("refs/heads/{branch}");
-    let advertised = host_git(
+    if branch == "HEAD" {
+        return Err(Error::GcObservation("invalid writer branch"));
+    }
+    let remote = host_git(
         repo,
         executor,
-        &["ls-remote", "--refs", "origin", &source],
-        Duration::from_secs(60),
+        &["config", "--get", "remote.origin.url"],
+        Duration::from_secs(5),
     )?;
-    if advertised.termination != Termination::Exit(0) {
-        return Err(Error::GcObservation("cannot observe writer branch"));
-    }
-    if advertised.stdout.bytes.is_empty() {
+    if remote.termination == Termination::Exit(1) {
         return Ok(());
     }
+    if remote.termination != Termination::Exit(0) {
+        return Err(Error::GcObservation("cannot read origin"));
+    }
+    let source = format!("refs/heads/{branch}");
     let refspec = format!("+{source}:refs/remotes/origin/{branch}");
-    let fetched = host_git(
+    let fetched = host_git_with_stderr(
         repo,
         executor,
         &[
@@ -134,9 +153,14 @@ fn refresh_branch(repo: &Path, executor: &dyn Executor, branch: &str) -> Result<
             "origin",
             &refspec,
         ],
-        Duration::from_secs(60),
+        Duration::from_secs(15),
+        true,
     )?;
     if fetched.termination != Termination::Exit(0) {
+        let missing = format!("fatal: couldn't find remote ref {source}\n");
+        if fetched.stderr.bytes == missing.as_bytes() {
+            return Ok(());
+        }
         return Err(Error::GcObservation("cannot fetch writer branch"));
     }
     Ok(())
@@ -653,6 +677,21 @@ mod tests {
         )?;
         git(
             &repo,
+            &[
+                "push",
+                bare.to_str().ok_or("bare path")?,
+                "HEAD:refs/heads/other/secret",
+            ],
+        )?;
+        refresh_branch(&repo, &executor, "lane/test")?;
+        for invalid in ["a*b", "../x", "-x", "HEAD"] {
+            assert!(
+                refresh_branch(&repo, &executor, invalid).is_err(),
+                "{invalid}"
+            );
+        }
+        git(
+            &repo,
             &["remote", "add", "origin", bare.to_str().ok_or("bare path")?],
         )?;
         git(&repo, &["push", "origin", "HEAD:refs/heads/lane/test"])?;
@@ -666,6 +705,18 @@ mod tests {
             git(&repo, &["rev-parse", "refs/remotes/origin/lane/test"])?,
             expected
         );
+        let other = host_git(
+            &repo,
+            &executor,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/other/secret",
+            ],
+            Duration::from_secs(10),
+        )?;
+        assert_ne!(other.termination, Termination::Exit(0));
         refresh_branch(&repo, &executor, "missing")?;
         git(
             &repo,

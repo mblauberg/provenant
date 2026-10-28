@@ -1,4 +1,5 @@
 ## Fixes
 
-- The host best-effort refreshes a settled writer lane's `origin` tracking ref,
-  so a successful writer push can be reflected in the shared repository.
+- At settlement, the host best-effort refreshes the `origin` tracking ref for
+  each writer with a branch, including explicit and adopted worktrees, so a
+  successful writer push can be reflected in the shared repository.

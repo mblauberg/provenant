@@ -109,10 +109,11 @@ Remote-tracking refs and shared config are read-only in writer lanes, so
 or dispatch with `--deliver-remote` and `--deliver-branch`: run fetches before
 launch and pushes the verified final commit after.
 
-Networked writers may push with the existing gh login. After a successful push,
+Network-open profiles can read the existing `~/.config/gh` login and may use
+it to push; profiles deny access to `~/.ssh`. After a successful push,
 Git may report that it could not update the local remote-tracking ref or set an
 upstream with `-u`. These denials are expected and need no report. The host
-best-effort refreshes the lane branch's `origin` tracking ref after settlement;
+best-effort refreshes the lane branch's `origin` tracking ref at settlement;
 shared upstream configuration remains read-only.
 
 ## General guidance
