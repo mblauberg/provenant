@@ -155,22 +155,6 @@ pub struct QuotaSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<QuotaDetails>,
 }
-impl QuotaSnapshot {
-    /// Go pools require all allowance windows and either complete coverage or
-    /// an active dashboard floor for each window. Freshness is checked by the caller.
-    pub fn trustworthy_go_windows(&self, now: i64) -> bool {
-        self.validate().is_ok()
-            && matches!(self.status, QuotaStatus::Available | QuotaStatus::Exhausted)
-            && ["five_hour", "seven_day", "thirty_day"].iter().all(|pool| {
-                self.windows.iter().any(|w| w.pool == *pool)
-                    && self.details.as_ref().is_some_and(|d| {
-                        // Complete coverage is reserved for a future authoritative source.
-                        d.coverage.as_deref() == Some("complete") || d.calibration_active(pool, now)
-                    })
-            })
-    }
-}
-
 pub trait QuotaSource: Sync {
     fn adapter_id(&self) -> &'static str;
     fn probe(

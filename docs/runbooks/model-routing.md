@@ -31,8 +31,8 @@ affect pacing unless an
 active dashboard calibration still binds that window. Calibrated windows with
 no current reset use a full remaining window for conservative pacing; see
 [Go calibration](configuration.md#opencode-go-quota-calibration). Go pool
-members require fresh quota with all three allowance windows and complete
-coverage or an active floor for each window. Other missing quota data uses
+members remain eligible without floors, using the local ledger as a lower
+bound. Route diagnostics identify uncalibrated windows. Missing quota data uses
 1.0. `spend` and `max` use 1.0; admission handles
 short rate-limit cooldowns, and a paid route remains eligible while credits
 remain. If no weighted member is ready, the first ready zero-weight member is

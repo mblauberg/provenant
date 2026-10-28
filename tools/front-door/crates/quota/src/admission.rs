@@ -63,12 +63,6 @@ impl Admission<'_> {
                     )
                     .unwrap_or(0) as i64
         });
-        if route.pool_selection.is_some()
-            && go_model
-            && !(fresh && snapshot.is_some_and(|s| s.trustworthy_go_windows(self.now_unix_seconds)))
-        {
-            return Err(QuotaError::Refused("Go pool requires trustworthy quota"));
-        }
         if fresh && let Some(snapshot) = snapshot {
             if snapshot.status == QuotaStatus::AuthRequired {
                 return Err(QuotaError::Refused("authentication required"));
@@ -318,10 +312,7 @@ mod admission_tests {
             }
             .check(&route)
         };
-        assert!(matches!(
-            check(&raw, 1000),
-            Err(QuotaError::Refused("Go pool requires trustworthy quota"))
-        ));
+        assert!(check(&raw, 1000).is_ok());
         let mut settings = Settings::default();
         settings.calibration.insert(
             "go".into(),
@@ -335,10 +326,7 @@ mod admission_tests {
         let mut active = raw.clone();
         settings.apply_calibration(&mut active, 1000);
         assert!(check(&active, 1000).is_ok());
-        assert!(matches!(
-            check(&active, 1100),
-            Err(QuotaError::Refused("Go pool requires trustworthy quota"))
-        ));
+        assert!(check(&active, 1100).is_ok());
         settings.calibration.get_mut("go").unwrap().five_hour = Some(100);
         let mut exhausted = raw.clone();
         settings.apply_calibration(&mut exhausted, 1000);

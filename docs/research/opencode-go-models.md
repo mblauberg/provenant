@@ -40,5 +40,5 @@ hosted models and describes Go's privacy settings. The catalogue records
 `trains_on_prompts = false` for these paid endpoints as required by the admission
 scope. No effort controls or underlying model-family identity are inferred from
 the research. Paid OpenCode pacing remains `pace`; free-model pacing remains
-`max`. Pool dispatch additionally requires trustworthy Go quota, as specified by
-the [routing owner](../specs/routing.md).
+`max`. Go pacing uses the local ledger and any active calibration floors, as
+described by the [routing owner](../specs/routing.md).

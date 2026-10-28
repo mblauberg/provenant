@@ -100,12 +100,11 @@ five-hour floor entered at 09:00 with a window ending at 13:00 should expire at
 floors are never written over the raw ledger cache. Zen does not use Go floors.
 
 DeepSeek V4.1 Flash (junior weight 2, senior 1) and GLM-5.3 Flash (junior 1,
-senior 1) are provisional Go pool members. Go pool
-selection requires a fresh reading with all three windows and an active floor
-for each, or a future source with complete coverage. Missing or expired floors
-exclude Go members from pools. Exact model selection remains available with
-the partial-coverage diagnostic. MiMo V2.6 Flash is catalogued for exact selection
-only. Paid OpenCode pacing remains `pace`.
+senior 1) are provisional Go pool members. They remain eligible without
+calibration and use the local ledger for pacing. Route diagnostics identify the
+partial coverage and any uncalibrated windows; adding floors can tighten pacing.
+MiMo V2.6 Flash is catalogued for exact selection only. Paid OpenCode pacing
+remains `pace`.
 
 Without an observable reset, a calibrated window uses a full remaining window
 for conservative pacing. Floors stay binding until expiry even if a recorded

@@ -578,6 +578,14 @@ fn pace_snapshot_factor(
             let reset_known = window.resets_unix_seconds.is_some_and(|reset| reset > now);
             let reset = match window.resets_unix_seconds {
                 Some(reset) if reset > now => reset,
+                None if adapter == "opencode"
+                    && snapshot
+                        .details
+                        .as_ref()
+                        .is_some_and(|d| d.source.as_deref() == Some("local-ledger")) =>
+                {
+                    now.checked_add(i64::try_from(duration).ok()?)?
+                }
                 _ if calibrated => now.checked_add(i64::try_from(duration).ok()?)?,
                 _ => return None,
             };
@@ -615,8 +623,10 @@ fn pace_snapshot_factor(
                     deadline.unwrap_or(reset),
                     if reset_known {
                         ""
-                    } else {
+                    } else if calibrated {
                         " calibration; reset unknown; full window remaining"
+                    } else {
+                        " ledger; reset unknown; full window remaining"
                     },
                     if standby { " standby" } else { "" },
                     match (fallback, configured) {
@@ -646,6 +656,31 @@ fn pacing_factor_basis_points(
         "source={source} policy={policy:?}{}",
         expiry.map(|e| format!(" until={e}")).unwrap_or_default()
     );
+    let detail = if model.adapter() == "opencode" && model.model().starts_with("opencode-go/") {
+        let observation = go_quota_observation(model, account, context);
+        let details = observation.and_then(|o| o.snapshot.details.as_ref());
+        if details.is_some_and(|d| d.coverage.as_deref() == Some("complete")) {
+            detail
+        } else {
+            let missing: Vec<_> = ["five_hour", "seven_day", "thirty_day"]
+                .into_iter()
+                .filter(|pool| {
+                    !details.is_some_and(|d| d.calibration_active(pool, context.now_seconds()))
+                })
+                .collect();
+            if missing.is_empty() {
+                format!("{detail}; Go quota source: local-ledger, coverage: partial")
+            } else {
+                format!(
+                    "{detail}; Go quota source: local-ledger, coverage: partial; Go calibration missing or stale: {} (calibration key must match account key {:?}); calibration would tighten pacing",
+                    missing.join(", "),
+                    account.unwrap_or("unknown")
+                )
+            }
+        }
+    } else {
+        detail
+    };
     if policy != PacingPolicy::Pace {
         return (NEUTRAL_FACTOR_BASIS_POINTS, detail, false);
     }
@@ -817,6 +852,12 @@ fn pacing_reserve_window(
                 });
             percent > 0
                 && (window.resets_unix_seconds.is_some_and(|reset| reset > now)
+                    || (window.resets_unix_seconds.is_none()
+                        && adapter == "opencode"
+                        && snapshot
+                            .details
+                            .as_ref()
+                            .is_some_and(|d| d.source.as_deref() == Some("local-ledger")))
                     || snapshot
                         .details
                         .as_ref()
@@ -955,15 +996,6 @@ fn candidate(
     effort: Option<&str>,
     context: &ValidatedContext<'_>,
 ) -> Result<RouteAlternative, RoutingError> {
-    candidate_with_quota(model, effort, context, false)
-}
-
-fn candidate_with_quota(
-    model: &ModelId,
-    effort: Option<&str>,
-    context: &ValidatedContext<'_>,
-    require_trustworthy_go: bool,
-) -> Result<RouteAlternative, RoutingError> {
     let entry = admissible(model, effort, context)?;
     let access = context.access.iter().find(|a| a.adapter == model.adapter());
     // Several registered accounts may serve one adapter: take a ready one with
@@ -974,8 +1006,6 @@ fn candidate_with_quota(
         .iter()
         .filter(|a| {
             a.adapter == model.adapter()
-                && (!require_trustworthy_go
-                    || trustworthy_go_quota(model, a.account_key.as_deref(), context))
                 && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
                     a.account_key
                         .as_deref()
@@ -1271,18 +1301,6 @@ fn go_quota_observation<'a>(
         .max_by_key(|q| (q.snapshot.observed_unix_seconds, q.snapshot.revision))
 }
 
-fn trustworthy_go_quota(
-    model: &ModelId,
-    account: Option<&str>,
-    context: &RoutingContext<'_>,
-) -> bool {
-    if model.adapter() != "opencode" || !model.model().starts_with("opencode-go/") {
-        return true;
-    }
-    go_quota_observation(model, account, context)
-        .is_some_and(|q| q.snapshot.trustworthy_go_windows(context.now_seconds()))
-}
-
 fn classify_pool(
     members: &[RoutePoolMember],
     request: &RouteRequest,
@@ -1338,76 +1356,8 @@ fn classify_pool(
             classified.exclusions.push(detail.to_owned());
             Some(kind.to_owned())
         } else {
-            match candidate_with_quota(&member.model, effort.as_deref(), context, true) {
+            match candidate(&member.model, effort.as_deref(), context) {
                 Ok(resolved) => {
-                    if !trustworthy_go_quota(
-                        &member.model,
-                        resolved.account_key.as_deref(),
-                        context,
-                    ) {
-                        let mut reason = "Go quota source: local-ledger, coverage: partial; requires fresh quota and unexpired calibration for all three windows".to_owned();
-                        let diagnostic = context
-                            .availability
-                            .iter()
-                            .filter(|a| {
-                                a.adapter == member.model.adapter()
-                                    && a.account_key.as_deref().is_some_and(|key| {
-                                        provenant_records::AdapterSpec::get(member.model.adapter())
-                                            .is_none_or(|spec| {
-                                                spec.account_serves_model(key, member.model.model())
-                                            })
-                                    })
-                            })
-                            .find_map(|a| {
-                                let account = a.account_key.as_deref()?;
-                                Some((
-                                    account,
-                                    go_quota_observation(&member.model, Some(account), context)?,
-                                ))
-                            });
-                        if let Some((account, observation)) = diagnostic {
-                            let missing: Vec<_> = ["five_hour", "seven_day", "thirty_day"]
-                                .into_iter()
-                                .filter(|pool| {
-                                    !observation
-                                        .snapshot
-                                        .details
-                                        .as_ref()
-                                        .is_some_and(|details| {
-                                            details.calibration_active(pool, context.now_seconds())
-                                        })
-                                })
-                                .collect();
-                            if !missing.is_empty()
-                                && !observation
-                                    .snapshot
-                                    .details
-                                    .as_ref()
-                                    .is_some_and(|details| {
-                                        details.coverage.as_deref() == Some("complete")
-                                    })
-                            {
-                                reason = format!(
-                                    "Go calibration missing or stale: {} (calibration key must match account key {account:?})",
-                                    missing.join(", ")
-                                );
-                            }
-                        }
-                        classified
-                            .exclusions
-                            .push(format!("{}: {reason}", member.model.as_str()));
-                        classified.candidates.push(RouteSelectionCandidate {
-                            model: member.model.as_str().into(),
-                            weight: member.weight,
-                            factor_basis_points,
-                            pacing_detail: None,
-                            effort,
-                            readiness: None,
-                            exclusion: Some(reason),
-                        });
-                        classified.routes.push(None);
-                        continue;
-                    }
                     let (policy, _, _, _) =
                         effective_profile(context, &member.model, resolved.account_key.as_deref());
                     let (factor, detail, is_standby) = pacing_factor_basis_points(

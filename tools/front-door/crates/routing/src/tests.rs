@@ -2585,8 +2585,8 @@ fn opencode_zen_and_go_use_separate_account_identities() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn go_pool_requires_current_full_calibration_and_paces_the_maximum()
--> Result<(), Box<dyn std::error::Error>> {
+fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn std::error::Error>>
+{
     use provenant_quota::{AccountRecord, Calibration, QuotaDetails, QuotaStatus, QuotaWindow};
     let catalogue = Catalogue::bundled()?;
     let model = "opencode/opencode-go/deepseek-v4.1-flash";
@@ -2612,11 +2612,7 @@ fn go_pool_requires_current_full_calibration_and_paces_the_maximum()
     let mut available = availability();
     available.adapter = "opencode".into();
     available.account_key = Some("go".into());
-    // A ready account with no trusted quota must not outrank the calibrated
-    // account just because unknown headroom defaults to a neutral factor.
-    let mut uncalibrated = available.clone();
-    uncalibrated.account_key = Some("other-go".into());
-    let availability = [available, uncalibrated];
+    let availability = [available];
     let access = [AccessContext {
         adapter: "opencode",
         disclosure_ref: "policy",
@@ -2701,15 +2697,20 @@ fn go_pool_requires_current_full_calibration_and_paces_the_maximum()
         ctx.availability = &availability;
         ctx.access = &access;
         ctx.quota = &observations;
-        match resolve(&query, &ctx) {
-            Err(RoutingError::NoEligiblePoolMember { exclusions }) => assert!(
-                exclusions.iter().any(|reason| reason.contains(&format!(
-                    "Go calibration missing or stale: {expected} (calibration key must match account key \"go\")"
-                ))),
-                "{key}: {exclusions:?}"
-            ),
-            other => panic!("{key}: expected quota rejection, got {other:?}"),
-        }
+        let route = resolve(&query, &ctx)?;
+        let detail = route.pool_selection.unwrap().candidates[0]
+            .pacing_detail
+            .clone()
+            .unwrap();
+        assert!(
+            detail.contains(&format!("Go calibration missing or stale: {expected}")),
+            "{key}: {detail}"
+        );
+        assert!(
+            pacing_preview(&ModelId::parse(model)?, &ctx)[0]
+                .detail
+                .contains(expected)
+        );
     }
     let mut expired = duplicate(&calibrated);
     expired
@@ -2745,18 +2746,19 @@ fn go_pool_requires_current_full_calibration_and_paces_the_maximum()
         ctx.availability = &availability;
         ctx.access = &access;
         ctx.quota = &observations;
-        match resolve(&query, &ctx) {
-            Err(RoutingError::NoEligiblePoolMember { exclusions }) => {
-                assert!(
-                    exclusions
-                        .iter()
-                        .any(|reason| reason.contains("Go quota")
-                            || reason.contains("Go calibration")),
-                    "{name}: {exclusions:?}"
-                );
-            }
-            other => panic!("{name}: expected quota rejection, got {other:?}"),
-        }
+        let route = resolve(&query, &ctx)?;
+        assert!(
+            matches!(route.readiness, RouteReadiness::Ready { .. }),
+            "{name}"
+        );
+        let detail = route.pool_selection.unwrap().candidates[0]
+            .pacing_detail
+            .clone()
+            .unwrap();
+        assert!(
+            detail.contains("Go quota source: local-ledger, coverage: partial"),
+            "{name}: {detail}"
+        );
         // The same local ledger remains visible for explicitly selected models.
         let explicit = resolve(&request(model)?, &ctx)?;
         assert!(
@@ -2771,6 +2773,7 @@ fn go_pool_requires_current_full_calibration_and_paces_the_maximum()
         window.resets_unix_seconds = Some(99);
     }
     for (observation, expected_factor) in [
+        (duplicate(&raw), 7516),
         (calibrated, 4100),
         (apply(&higher_ledger), 3000),
         (passed_reset, 4100),
