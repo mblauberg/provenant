@@ -87,6 +87,10 @@ pub enum StreamPolicy<'a> {
     Capture {
         limit: usize,
     },
+    /// Retain the most recent bytes while continuing to drain the stream.
+    Tail {
+        limit: usize,
+    },
     Discard,
     Tee {
         limit: usize,
@@ -103,7 +107,7 @@ impl Default for StreamPolicy<'_> {
 impl StreamPolicy<'_> {
     pub(crate) fn limit(&self) -> usize {
         match self {
-            Self::Capture { limit } | Self::Tee { limit, .. } => *limit,
+            Self::Capture { limit } | Self::Tail { limit } | Self::Tee { limit, .. } => *limit,
             Self::Discard => 0,
         }
     }
