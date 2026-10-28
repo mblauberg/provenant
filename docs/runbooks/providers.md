@@ -32,11 +32,16 @@ worktrees keep per-lane targets (`provenant worktree remove` and
 `provenant gc` prune the lane caches), because a target shared across
 worktrees can run another checkout's stale test binaries.
 
-On macOS, launch refuses existing hard-linked files in writable trees, except
-inside directories Git ignores wholesale (an in-tree `target/`), and names the
-first offending path. Inspect the file before removing it. If it is
-disposable build output, remove or rebuild that output, then retry the lane.
-Keep important files and links whose ownership is unclear.
+On macOS, launch inspects the whole writable worktree, including ignored
+`target/` and `node_modules/` directories. Existing hard-linked regular files
+stay readable, but each in-tree alias is write-denied and its ancestor
+directories cannot be renamed. Other files remain writable. The census allows
+500,000 entries and at most 4,096 denied paths; the profile with those denials
+is bounded to 512 KiB. If the denials exceed either limit, launch refuses with
+recovery advice: move disposable build/dependency output out of the worktree
+(for Rust, set `CARGO_TARGET_DIR` outside it), then retry. Important files and
+links whose ownership is unclear should be preserved. Other censused writable
+roots, such as private scratch and Git objects, still refuse hard-linked files.
 
 A writer's `TMPDIR` lives in the attempt's `tmp/candidate-N`, which terminal
 commit and unreserved reconciliation collect. Account probes still use `scratch/`.

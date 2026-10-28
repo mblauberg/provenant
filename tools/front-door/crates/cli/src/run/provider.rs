@@ -1383,12 +1383,18 @@ struct ConfinementRoots<'a> {
 
 /// Read access to the primary checkout's project scratch (`.provenant/scratch`, or
 /// `.agent-run`), where briefs and graph documents live. Git excludes it, so a
-/// writer's linked worktree does not hold it. A link is never followed.
+/// writer's linked worktree does not hold it. Final-component links are refused;
+/// parent links may only resolve within the canonical primary checkout.
 fn project_scratch_reads(project: &Path) -> Vec<PathGrant> {
+    let Ok(project) = std::fs::canonicalize(project) else {
+        return Vec::new();
+    };
     [".provenant/scratch", ".agent-run"]
         .map(|name| project.join(name))
         .into_iter()
         .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()))
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .filter(|path| path.starts_with(&project))
         .map(|path| PathGrant {
             path,
             scope: PathScope::Subtree,
@@ -3379,7 +3385,8 @@ mod tests {
     fn writers_read_the_primary_checkouts_untracked_scratch()
     -> Result<(), Box<dyn std::error::Error>> {
         let project = tempfile::tempdir()?;
-        let root = project.path();
+        let canonical = std::fs::canonicalize(project.path())?;
+        let root = canonical.as_path();
         assert!(project_scratch_reads(root).is_empty());
         std::fs::create_dir_all(root.join(".provenant/scratch"))?;
         std::fs::create_dir(root.join(".agent-run"))?;
@@ -3398,6 +3405,29 @@ mod tests {
         assert_eq!(
             paths(project_scratch_reads(root)),
             [root.join(".provenant/scratch")]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn project_scratch_reads_rejects_a_symlinked_parent_outside_the_checkout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let project = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        std::fs::create_dir(outside.path().join("scratch"))?;
+        std::os::unix::fs::symlink(outside.path(), project.path().join(".provenant"))?;
+        assert!(project_scratch_reads(project.path()).is_empty());
+        // An in-checkout parent link is safe, and grants its canonical target.
+        std::fs::remove_file(project.path().join(".provenant"))?;
+        std::fs::create_dir_all(project.path().join("owned/scratch"))?;
+        std::os::unix::fs::symlink("owned", project.path().join(".provenant"))?;
+        let canonical = std::fs::canonicalize(project.path())?;
+        assert_eq!(
+            project_scratch_reads(project.path()),
+            vec![PathGrant {
+                path: canonical.join("owned/scratch"),
+                scope: PathScope::Subtree,
+            }]
         );
         Ok(())
     }

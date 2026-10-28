@@ -59,16 +59,17 @@ that root already exists. Graph setup creates `graphs/` and excludes the
 scratch root through `.git/info/exclude`. Every lane can read it:
 read-only lanes through their working directory, writers through a read grant on
 the primary checkout's scratch, since their linked worktree lacks untracked
-files. `--read-root DIR` grants any other directory; `--prompt-file` grants its
-file. A bare `--document plan.json` resolves
+files. Scratch read grants use canonical paths and must remain under the
+canonical primary checkout. `--read-root DIR` grants any other directory;
+`--prompt-file` grants its file. A bare `--document plan.json` resolves
 there when no current-directory file exists. Explicit project-local paths
 also work. A graph can use node `delivery: "integrate:integration"` with
 top-level `integration_branch: "integration"` and `delivery: "pr"` for one
 final PR. Delivery failures block dependants or retain the graph advance error;
 `fabric graph resume --document PATH` retries final delivery.
 
-Hard-linked writable files outside Git-ignored directories still block macOS
-launch. The diagnostic names the file. Inspect it before removing disposable
-build output, then retry. The
-hard-link fixture remains enabled in macOS CI because lane sandboxes can deny
-the fixture's `hard_link` call before the launch check runs.
+On macOS, existing hard-linked files in the writable worktree stay readable
+but are write-denied, including inside ignored directories. Excessive denials
+still refuse launch; see the [writer limits and recovery advice](providers.md#writer-lanes).
+The hard-link fixtures remain enabled in macOS CI because lane sandboxes can
+deny their `hard_link` calls before the launch check runs.

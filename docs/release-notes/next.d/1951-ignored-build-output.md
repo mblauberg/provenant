@@ -1,3 +1,3 @@
 ## Fixes
 
-- Ignored build output no longer blocks a writer dispatch. The macOS hard-link census skips directories Git ignores wholesale, such as an in-tree Cargo `target/` or `node_modules/`, and does not count their entries against the tree bound (#1951).
+- Existing hard-linked files in a writable worktree stay readable but are write-denied, including in ignored `target/` and `node_modules/` directories. The macOS census includes all directories, with bounded path counts and profile bytes; overflow names the affected directory and gives recovery advice (#1951, #1957).
