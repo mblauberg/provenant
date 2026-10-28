@@ -2,6 +2,8 @@
 #![forbid(unsafe_code)]
 mod admission;
 mod artifacts;
+mod board;
+pub use board::{BoardLane, BoardPage};
 mod controls;
 mod correlation;
 pub use correlation::{WORK_INDEX_FILE, WorkCoverage, WorkIndex, WorkSelector, validate_work};

@@ -250,6 +250,60 @@ their `operation_id`.
 
 ## Bounded graphs and route fallback
 
+### Pipeline presets
+
+`provenant run --preset NAME --prompt-file FILE` expands a structural preset
+into an ordinary graph and submits it through the graph owner. `--explain`
+prints the graph and effective value origins without writing a graph, opening
+graph state or publishing an overflow artifact. Its output is bounded by the
+8 MiB graph document limit rather than the ordinary 1 MiB result limit.
+Identical expanded graphs use the same graph ID and a
+private, content-addressed document in project scratch, so retrying the same
+submission observes the existing graph. Use a changed prompt or parameters for
+a separate graph.
+
+The bundled structures are `single`, `chain`, `fan-out` and
+`fan-out-synthesise`. Each uses read-only tasks, a `parameters.route` pool
+(default `senior`), and the supplied prompt; fan-out structures also accept
+`parameters.width` (1 to 32, default 2). A chain passes the first result to
+the second; synthesis receives each branch result. Graph limits still apply.
+
+Preset TOML files are named `NAME.toml` under
+`$XDG_CONFIG_HOME/provenant/presets/` (or `~/.config/provenant/presets/`)
+and `.provenant/presets/` in the selected project. Values merge in bundled,
+user, repository and `--set PATH=TOML_VALUE` order. `preset list` lists names;
+`preset show NAME` displays merged values and their origins. New names inherit
+a structure using `extends = "single"` (or another preset name). For example:
+
+```toml
+extends = "chain"
+[parameters]
+route = "senior"
+[slots.first]
+preset = "fan-out"
+[slots.first.parameters]
+width = 3
+```
+
+Slots may name another preset and override its parameters. A named preset uses
+its own route; it does not inherit the parent's `parameters.route`. A file
+overriding an existing preset by the same name should omit `extends` and supply
+only its changes. Expansion is static,
+limited to eight levels and 512 nodes, and refuses cycles, unknown slots and
+unknown parameters. Parameter values passed on the command line use TOML
+syntax, for example `--set 'parameters.route="utility"'`; unquoted bare words
+are rejected with a quoting hint. Invalid files appear in `preset list` and do
+not prevent use of unrelated presets. Planner fragments
+are not preset expansion points. Review shape parameters and the remaining
+structural presets are future work.
+
+- Why: structural configuration composes into the existing graph runtime
+  without changing its admission, settlement or delivery rules.
+- Test: `src/preset_tests.rs::bundled_expansions_match_golden_graphs`,
+  `::layering_composition_and_refusals`, `::named_presets_inherit_and_cycles_are_refused`,
+  `crates/cli/src/lib.rs::tests::preset_arguments_require_run_and_prompt_and_reject_dispatch_options`.
+- Owner: `src/preset.rs`, `src/fabric.rs`
+
 A graph must obey the configured structural limits and budgets. Each attempt
 is also bounded by `limits.graph_timeout_seconds`. The [host runbook](../runbooks/fabric-hosts.md#configure-hosts)
 describes defaults, ceilings, budget telemetry and resuming a paused graph.

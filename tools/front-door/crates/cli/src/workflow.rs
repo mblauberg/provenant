@@ -483,6 +483,28 @@ fn execute(
                 .with_rebind(rebind)
                 .with_revisions(keep)
                 .save_revision(&text, edge.budget()?, &edge.cancel, &edge.clock)?;
+            let mut warnings = saved.warnings;
+            let soft_bytes =
+                provenant_config::read_with_domains(&edge.roots, &crate::domains::SECTIONS)
+                    .ok()
+                    .and_then(|config| config.retention.projects.get(&project.to_string()).cloned())
+                    .unwrap_or_default()
+                    .checkpoint_soft_bytes;
+            let references = checkpoint_references(std::str::from_utf8(&text).unwrap_or_default());
+            let closed = std::thread::scope(|scope| {
+                let tasks: Vec<_> = references
+                    .iter()
+                    .map(|&number| scope.spawn(move || (number, closed_reference(cwd, number))))
+                    .collect();
+                tasks
+                    .into_iter()
+                    .filter_map(|task| task.join().ok())
+                    .filter_map(|(number, closed)| closed.then_some(number))
+                    .collect::<Vec<_>>()
+            });
+            warnings.extend(checkpoint_warnings(&text, soft_bytes, |number| {
+                closed.contains(&number)
+            }));
             Ok(serde_json::json!({
                 "saved_bytes": text.len(),
                 "limit_bytes": provenant_workflow::session::CHECKPOINT_LIMIT,
@@ -491,7 +513,7 @@ fn execute(
                 "unchanged": saved.unchanged,
                 "retained": saved.retained,
                 "keep": keep,
-                "warnings": saved.warnings,
+                "warnings": warnings,
             }))
         }
         Workflow::Session(Session::Show { .. } | Session::Diff { .. }) => unreachable_read(),
@@ -499,6 +521,109 @@ fn execute(
             "workflow session handoff is composed by the provenant binary",
         )),
     }
+}
+
+/// Advisory only: failed or unavailable GitHub lookups leave the save intact.
+fn checkpoint_warnings(
+    text: &[u8],
+    soft_bytes: u64,
+    mut closed: impl FnMut(u64) -> bool,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if text.len() as u64 > soft_bytes {
+        warnings.push(format!("checkpoint is {} bytes (soft budget {soft_bytes}); rewrite current state rather than appending history", text.len()));
+    }
+    let refs = checkpoint_references(std::str::from_utf8(text).unwrap_or_default());
+    let stale: Vec<_> = refs.into_iter().filter(|number| closed(*number)).collect();
+    if !stale.is_empty() {
+        let names = stale
+            .iter()
+            .map(|number| format!("#{number}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        warnings.push(format!("checkpoint names closed references {names}; rewrite current state rather than appending history"));
+    }
+    warnings
+}
+
+/// Recognise explicit PR and issue references, avoiding incidental numbers.
+fn checkpoint_references(text: &str) -> Vec<u64> {
+    let lower = text.to_ascii_lowercase();
+    let mut found = Vec::new();
+    for (i, _) in lower.char_indices() {
+        if lower[..i]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '#')
+        {
+            continue;
+        }
+        let rest = &lower[i..];
+        let Some(prefix) = [
+            "pull request",
+            "pull/",
+            "issues/",
+            "issue",
+            "pr/",
+            "pr",
+            "#",
+        ]
+        .iter()
+        .find(|prefix| rest.starts_with(**prefix)) else {
+            continue;
+        };
+        let tail = if *prefix == "#" {
+            &rest[1..]
+        } else {
+            let remainder = &rest[prefix.len()..];
+            if remainder.starts_with('#') && prefix.ends_with(|c: char| c.is_alphanumeric()) {
+                continue;
+            }
+            let tail = remainder.trim_start_matches([' ', ':']);
+            tail.strip_prefix('#').unwrap_or(tail)
+        };
+        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+        let suffix = tail.get(digits..).unwrap_or_default();
+        if (1..=6).contains(&digits)
+            && !suffix
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '-'))
+            && !suffix
+                .strip_prefix(['/', '.'])
+                .is_some_and(|s| s.starts_with(|c: char| c.is_ascii_digit()))
+            && let Ok(number) = tail[..digits].parse::<u64>()
+            && number > 0
+            && !found.contains(&number)
+        {
+            found.push(number);
+            if found.len() == 8 {
+                break;
+            }
+        }
+    }
+    found
+}
+
+fn closed_reference(cwd: &Path, number: u64) -> bool {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    use std::{ffi::OsString, time::Duration};
+    let endpoint = format!("repos/{{owner}}/{{repo}}/issues/{number}");
+    let argv: Vec<OsString> = ["gh", "api", endpoint.as_str(), "--jq", ".state"]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(2));
+    options.stdout = StreamPolicy::Capture { limit: 128 };
+    options.stderr = StreamPolicy::Discard;
+    SystemExecutor::new(1)
+        .ok()
+        .and_then(|executor| executor.execute(options).ok())
+        .is_some_and(|out| {
+            !out.timed_out
+                && out.termination == Termination::Exit(0)
+                && out.stdout.bytes == b"closed\n"
+        })
 }
 
 fn unreachable_read() -> Result<Value, Error> {
@@ -834,6 +959,36 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checkpoint_advisories_are_soft_and_ignore_unavailable_references() {
+        let large = vec![b'x'; 2049];
+        assert!(super::checkpoint_warnings(&large, 2048, |_| false)[0].contains("soft budget"));
+        assert!(
+            super::checkpoint_warnings(b"Current PR #12 and issue #13", 2048, |n| n == 13)[0]
+                .contains("#13")
+        );
+        assert!(
+            super::checkpoint_warnings(b"Current PR #12 and issue #13", 2048, |_| false).is_empty()
+        );
+        assert!(super::checkpoint_warnings(&large, 4096, |_| false).is_empty());
+        assert_eq!(
+            super::checkpoint_references("é PR #12, issue #13, pull/14, issues/15; PR #12"),
+            vec![12, 13, 14, 15]
+        );
+        assert!(!super::closed_reference(
+            std::path::Path::new("/nonexistent-provenant-checkpoint-project"),
+            12
+        ));
+    }
+    #[test]
+    fn checkpoint_references_reject_headings_dates_and_partial_numbers() {
+        let text = "# 2026-10-29\n## 42 succeeded\n# 20 lanes\n#2026-10-29 #2026/10/29 #2026.10.29\nword#19 x_#20 pr#25 issue#26 #21suffix #22_foo #1234567\nPR # 23 issue #24-10\nOpen #31, PR #32; issue #33 and pull/34.";
+        assert_eq!(super::checkpoint_references(text), vec![31, 32, 33, 34]);
+        assert_eq!(
+            super::checkpoint_references("#1 (#2) issue #3 PR #4"),
+            vec![1, 2, 3, 4]
+        );
+    }
     use super::catalogue_family;
     use provenant_routing::Catalogue;
 

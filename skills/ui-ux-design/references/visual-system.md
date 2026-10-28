@@ -1,5 +1,3 @@
-<!-- Modified for Provenant. -->
-
 # Visual system
 
 Derive roles from canonical project tokens and rendered use before proposing

@@ -300,5 +300,5 @@ Report vulnerabilities privately through
 
 ## Licence
 
-Released under the [MIT licence](LICENSE). Third-party components are listed in
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+Released under the [MIT licence](LICENSE). See [acknowledgements](ACKNOWLEDGEMENTS.md)
+for influences on the skills and workflows.

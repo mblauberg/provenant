@@ -24,6 +24,21 @@ pub fn after_reboot_with(
     recovery.after_reboot_with(attempt, scope, observer)
 }
 
+/// Inject boot observation when acquiring a previous-boot reservation.
+pub fn acquire_reboot_recovery_with(
+    directory: provenant_os::fs::Directory,
+    attempt: &provenant_os::fs::Directory,
+    scope: crate::custody::Scope,
+    budget: provenant_core::WaitBudget,
+    cancel: &provenant_core::CancelToken,
+    clock: &dyn provenant_core::Clock,
+    observer: &dyn ProcessObserver,
+) -> crate::custody::Result<crate::custody::Recovery> {
+    crate::custody::acquire_reboot_recovery_with(
+        directory, attempt, scope, budget, cancel, clock, observer,
+    )
+}
+
 /// A process recorded by the guardian is terminated if its owning test fails.
 /// Successful tests disarm the guard after proving normal settlement.
 pub struct ProcessCleanupGuard {

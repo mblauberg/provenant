@@ -1,7 +1,7 @@
 # Command surface
 
 Owner: `crates/cli` (grammar, rendering), `src/` (composition, hooks)
-Anchor: `tests/parser.rs`, `crates/cli/src/render.rs`, `tests/hooks.rs`
+Anchor: `tests/parser.rs`, `crates/cli/src/render.rs`, `tests/hooks.rs`, `tests/catalogue_read_only.rs`, `crates/cli/src/console/board.rs`, `crates/run/src/board.rs`
 
 One executable, `provenant`, serves people, skills, hooks and CI. The `cli`
 crate parses arguments, calls typed library operations and renders typed
@@ -11,6 +11,148 @@ catalogue owns command syntax; the generated [CLI reference](../reference/cli.md
 lists every leaf, flag and bound. Paths are relative to `tools/front-door/`.
 
 ## Local console catalogue
+
+### Nested tree
+
+`console tree` reads host-local attempts, including retained terminal attempts,
+and follows each attempt's isolated `children/<attempt_id>` store. It uses the
+board's validated indexed reader and creates no store, identity or index.
+`--project` restricts records to the selected local project. Depth includes the
+host store; depth and examined-row limits bound the walk, and duplicates consume
+the examined-row limit. Each store read has its own five-second budget.
+`children_absent` counts ordinary absent child stores. An absent store with
+recorded child evidence is an `unfetched_children` gap, as are failed reads and
+depth or node limits. At the depth frontier an absent store is counted without
+truncating. Corrupt host state fails the read; child failures preserve the
+remaining observations. A missing store is not proof that no child ever existed.
+
+Nodes contain host/project-qualified lane identities, status, parents, usage and
+lists of observed child attempt IDs with edge kinds. `--detail` adds complete
+owner records. Edges and gaps carry project IDs, nullable only for an unfiltered
+host-store gap. Reconstructing a forest must account for missing parents and
+multiple edge kinds.
+Dispatch (`parent_attempt`), continuation (`parent`) and retry (`retry_of`)
+edges remain distinct; each reports whether its project-qualified parent was
+observed. Missing may mean outside the bounds, not necessarily nonexistent.
+Attempts are counted once per project and attempt ID, with duplicate observations
+and conflicting run/task identities or parent fields reported separately.
+If a duplicate observation has its own child store, it is reported as
+unavailable rather than silently omitted.
+Nested coverage is partial for gaps, truncation, conflicts or missing parents.
+Usage totals contain a
+known sum and a missing count per token category; they describe observed nodes,
+not an estimate of unseen work. Provider-internal children are not inferred.
+
+- Why: nested work must remain visible without inventing edges or complete totals.
+- Test: `crates/cli/src/console/tree.rs::tests::nested_tree_once`
+- Owner: `crates/cli/src/console/tree.rs`, `crates/run/src/board.rs`
+
+### Board snapshot and cursor contract
+
+`console board` must return current host-local facts in descending immutable
+attempt-sequence order, with retries as separate rows. The default selection
+must exclude terminal attempts; `--all` must include them. `--project` must
+restrict the existing binding; otherwise the board must span local projects.
+The generated reference owns syntax and the default 50 / maximum 100 row bound.
+
+The version 2 payload must identify UTC `observed_at`, effective `filters`,
+`high_water`, `snapshot`, current `generation`, `lanes`, `next_cursor`,
+`truncated` and `coverage`. The first page must fix `high_water` to the store's
+maximum attempt sequence (zero when empty). A continuation must retain this
+inclusive ceiling and use an exclusive descending position. New attempts above
+the ceiling must not enter that walk. Each attempt below the ceiling matching
+the filter when its sequence range is read must appear exactly once in a walk
+that follows each returned cursor once. Later state changes must not invalidate
+the cursor. A row becoming terminal before its range is read may disappear from
+an active-only walk. A valid continuation with no remaining matches must return
+an empty final page. `truncated` must mean more matching rows existed at the page
+read; `next_cursor: null` must end the walk.
+
+`snapshot` must be the CanonicalV1 record digest for domain `console-board`,
+version 2, of `(high_water,filters)`. It identifies a selection, **not frozen
+facts**. Filters must bind the resolved state-root native-path file digest,
+host identity (nullable), selected project (nullable), active/all flag and limit.
+A cursor must have shape `2.<high_water>.<before>.<checksum>`, using canonical
+decimal positions and a CanonicalV1 `console-board-position` version 2 digest
+of `(snapshot,before)`. Positions must satisfy `0 < before <= high_water <=
+i64::MAX`. Clients must treat cursors as opaque. Edited positions, checksums,
+filters, root bindings, unsupported versions and ceilings exceeding the current
+store maximum must fail with exit 2, `CATALOGUE_INPUT` and instructions to restart
+without `--cursor`. A missing store must also invalidate a continuation.
+The checksum detects accidental edits; it is public and supplies no authority
+or security boundary. Replaying a valid cursor re-reads its range.
+
+Each page must obtain indexed records, ceiling validation and generation in one
+SQLite read transaction. `generation` must be `events:<N>`, where N is the
+store-wide maximum committed event sequence (`events:0` for an initialised
+store with no events). Every board-visible run/attempt write must append an event in
+the same transaction, and pruning must preserve the latest event per attempt.
+Generation discovery must use primary-key end lookups, never history blob
+hashing. Unrelated project writes may advance the generation. Clients may use
+it to detect change but must not require it to stay fixed across pages.
+Missing or uninitialised run state must return `generation: "empty"`,
+`high_water: 0`, empty lanes and no cursor; `empty` is a literal, not a digest.
+Unsafe, corrupt or incompatible indexed state must fail through the error
+envelope. Reads must create no product state, identity, cache or migrations;
+SQLite WAL/shared-memory bookkeeping remains permitted.
+
+Rows must preserve complete owner metadata and unknown facts:
+
+- `lane_id: {host,run_id,task_id,attempt_id}`; unknown host identity is null.
+- `metadata: {attempt,run}` containing the complete owner records: title,
+  state and terminal reason, all four routes (including effort and account),
+  timings, usage, trace, delivery and write-grant facts, and artifact
+  descriptors. Run metadata distinguishes continuation `parent`, nested
+  `parent_attempt` and `children`; attempt metadata retains `retry_of`.
+- `chair`, from the immutable host-owned index, checked against the run request
+  digest. A missing binding is null; provider sessions never imply a chair.
+- `wait`, a best-effort admission observation, and `attention`, true for
+  terminal outcomes other than success or cancellation.
+- `usage_coverage: {known,missing}` listing the five token categories. Null
+  remains unknown, including reasoning; a reported zero is known. Source and
+  context coverage remain in the attempt usage record.
+- `observation_coverage`, `complete` when the owner observation read succeeded
+  for this generation, otherwise `unavailable`. Failed observations must leave
+  last-output time and priority null and must not discard indexed row facts.
+- `estimated_cost` and `verified_links`, null with unavailable coverage until
+  their owners expose these facts. Worktree delivery metadata stays in the
+  attempt delivery receipt; no Git probing or inferred issue/PR links.
+
+Chair bindings must remain immutable, digest-checked host facts. Wait reasons,
+process-checkpoint last-output time/priority and observation time are ancillary
+observations outside the SQLite transaction; they must not replace indexed
+execution facts. Checkpoints must match the indexed attempt generation.
+
+Successful page coverage must use these exact values:
+
+| Field | Values and meaning |
+|---|---|
+| `scope`, `host` | `local`; nullable host ID, never allocated by a read |
+| `runs` | `complete` for an opened owner store, including zero matches; `empty` for missing/uninitialised state |
+| `chairs` | `complete` when the index opened and every requested association read was valid or unbound; `partial` for lookup errors/digest mismatches; `unavailable` when the index cannot open, including missing/incompatible state |
+| `observations` | `complete` when all rows' owner reads succeeded (including an empty page); `partial` when some succeeded; `unavailable` when none succeeded on a nonempty page |
+| `nested_runs`, `estimated_cost`, `verified_links` | `unavailable`; no isolated child-store/peer traversal or inferred facts |
+
+Artifact descriptors must be bounded locators, never assertions of present file
+bodies. Board reads must never read or return prompt, result or transcript
+bodies. The existing 1 MiB envelope must refuse oversized pages without writing
+overflow artefacts and advise reducing the limit. If one row still exceeds the
+cap at limit 1, clients must use bounded `provenant output ATTEMPT` reads; this
+surface cannot render that row. A 100-row page must meet p95 ≤1 second, including
+with at least 100,000 retained attempts. Tests measure the indexed reader at
+100,000 attempts and the full console page on a small fixture. The full board
+at 100,000 attempts, including per-row observation lookups, still needs a
+measurement on a real host before this bound counts as verified.
+
+- Why: an active board must remain pageable while work changes, without blob
+  scans, invented usage or one damaged ancillary checkpoint hiding other lanes.
+- Test: `crates/cli/src/console/board.rs::tests::board_paging_end_to_end_and_100_row_p95`;
+  `crates/run/src/board.rs::tests::board_paging_snapshot_and_metadata`;
+  `tests/catalogue_read_only.rs::board_read_only`;
+  `src/console.rs::tests::oversized_single_board_row_explains_recovery`
+- Owner: `crates/cli/src/console/board.rs`, `crates/run/src/board.rs`, `src/console.rs`, `src/lib.rs`
+
+### Project and session catalogue
 
 `console projects` lists registered project IDs and their canonical Git common
 directories. Linked worktrees share a binding. `console sessions [SESSION]`

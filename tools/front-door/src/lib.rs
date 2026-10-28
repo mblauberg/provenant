@@ -26,6 +26,14 @@ mod overflow;
 mod pr;
 #[cfg(test)]
 mod pr_land_tests;
+mod preset;
+#[cfg(test)]
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the custom worktree test driver includes this library without the test harness"
+)]
+mod preset_tests;
 mod provider_retention;
 mod release_smoke;
 mod roots;
@@ -574,6 +582,8 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 ),
             }
         }
+        Command::Preset(cmd) => preset::command(cmd, globals),
+        Command::Run(cmd) if cmd.preset.is_some() => preset::run(*cmd, globals, process.workers()),
         Command::Run(cmd) => run_edge(&inv.leaf, globals, |edge| {
             let mut reply = provenant_cli::run::run(*cmd, edge);
             if let Err(error) =
@@ -800,6 +810,8 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
             | "console projects"
             | "console sessions"
             | "console overview"
+            | "console board"
+            | "console tree"
     ) {
         None
     } else {

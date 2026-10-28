@@ -5270,6 +5270,16 @@ fn reconcile_recovers_a_writer_from_a_previous_boot() -> TestResult {
 }
 
 #[test]
+fn reconcile_recovers_writer_when_device_numbers_change_after_reboot() -> TestResult {
+    recover_rebooted_writer_inner(false, false, true, NEW_BOOT, false, true)
+}
+
+#[test]
+fn changed_device_numbers_on_same_boot_keep_writer_custody() -> TestResult {
+    recover_rebooted_writer_inner(false, false, true, OLD_BOOT, false, true)
+}
+
+#[test]
 fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
     let observer = RebootObserver(NEW_BOOT);
     let temp = tempfile::tempdir()?;
@@ -5699,11 +5709,11 @@ fn recover_rebooted_writer(
     writer: bool,
     boot: &'static str,
 ) -> TestResult {
-    recover_rebooted_writer_inner(cancel_run, interrupted, writer, boot, false)
+    recover_rebooted_writer_inner(cancel_run, interrupted, writer, boot, false, false)
 }
 
 fn recover_rebooted_writer_removed_worktree() -> TestResult {
-    recover_rebooted_writer_inner(false, false, true, NEW_BOOT, true)
+    recover_rebooted_writer_inner(false, false, true, NEW_BOOT, true, false)
 }
 
 fn recover_rebooted_writer_inner(
@@ -5712,6 +5722,7 @@ fn recover_rebooted_writer_inner(
     writer: bool,
     boot: &'static str,
     removed: bool,
+    changed_device: bool,
 ) -> TestResult {
     let observer = RebootObserver(boot);
     let temp = tempfile::tempdir()?;
@@ -5778,6 +5789,11 @@ fn recover_rebooted_writer_inner(
     value["launch_state"] = "spawned".into();
     value["attempt_device"] = meta.device.into();
     value["attempt_inode"] = meta.inode.into();
+    if changed_device {
+        value["reservation_device"] =
+            (value["reservation_device"].as_u64().ok_or("device")? + 1).into();
+        value["attempt_device"] = (meta.device + 1).into();
+    }
     std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
     let summary =
         serde_json::json!({"schema_version":1, "scope":scope, "requester":context.actor_id});

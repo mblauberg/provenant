@@ -1,5 +1,3 @@
-<!-- Modified for Provenant. -->
-
 # Interaction and states
 
 Model the user's goal as a compact state matrix: state, trigger/event, guard,

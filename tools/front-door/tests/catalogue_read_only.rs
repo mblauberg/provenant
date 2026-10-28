@@ -36,6 +36,151 @@ fn snapshot(path: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> {
 }
 
 #[test]
+fn board_read_only() -> Result {
+    use provenant_core::{
+        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
+        TaskId, WaitBudget,
+    };
+    use provenant_os::clock::SystemClock;
+    use provenant_run::{
+        CanonicalRequest, ExecutionContext, NewAttempt, PreparedRun, Request, RunStore,
+    };
+    use serde_json::json;
+    let empty = TestRig::new()?.without_state()?;
+    let board = call(&empty, &["console", "board"], 0)?;
+    assert_eq!(board["data"]["lanes"], json!([]));
+    assert_eq!(board["data"]["generation"], "empty");
+    assert_eq!(board["data"]["coverage"]["runs"], "empty");
+    let tree = call(&empty, &["console", "tree"], 0)?;
+    assert_eq!(tree["data"]["nodes"], json!([]));
+    assert!(!empty.state.exists());
+    let rig = TestRig::new()?;
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let project = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
+    )?
+    .project_id();
+    let context = ExecutionContext {
+        state_root: roots.state,
+        project_id: project,
+        actor_id: ActorId::from_bytes([2; 16]),
+        read_prompts: false,
+    };
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let request = Request {
+        clock: &clock,
+        budget: WaitBudget::cli(clock.mono_now(), 10)?,
+        cancel: &cancel,
+    };
+    let task = TaskId::from_bytes([3; 16]);
+    let proposal: CanonicalRequest = serde_json::from_value(json!({"schema_version":1,"tasks":[{
+        "task_id":task,"prompt_digest":provenant_records::CanonicalV1::file_digest(b"private"),
+        "route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":null},
+        "fallback":[],"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],"concurrency":1,"parent":null}))?;
+    let store = RunStore::open(&context, &request)?;
+    for n in 1..=2 {
+        store.create(
+            &PreparedRun {
+                run_id: RunId::from_bytes([n; 16]),
+                operation_id: OperationId::parse(&format!("board-{n}"))?,
+                created_at: clock.wall_now()?,
+                request: proposal.clone(),
+                attempts: vec![NewAttempt {
+                    task_id: task,
+                    attempt_id: AttemptId::from_bytes([n; 16]),
+                    prompt: "private".into(),
+                }],
+            },
+            &request,
+        )?;
+    }
+    let other = RunStore::open(
+        &ExecutionContext {
+            project_id: ProjectId::from_bytes([8; 16]),
+            ..context.clone()
+        },
+        &request,
+    )?;
+    other.create(
+        &PreparedRun {
+            run_id: RunId::from_bytes([8; 16]),
+            operation_id: OperationId::parse("tree-other")?,
+            created_at: clock.wall_now()?,
+            request: proposal,
+            attempts: vec![NewAttempt {
+                task_id: task,
+                attempt_id: AttemptId::from_bytes([8; 16]),
+                prompt: "private".into(),
+            }],
+        },
+        &request,
+    )?;
+    drop(other);
+    drop(store);
+    let before = snapshot(&rig.state)?;
+    let tree = call(&rig, &["console", "tree"], 0)?;
+    assert_eq!(tree["data"]["totals"]["attempts"], 3);
+    assert!(!serde_json::to_string(&tree)?.contains("private"));
+    let filtered = call(
+        &rig,
+        &[
+            "--project",
+            rig.project.to_str().ok_or("project")?,
+            "console",
+            "tree",
+            "--detail",
+        ],
+        0,
+    )?;
+    assert_eq!(filtered["data"]["totals"]["attempts"], 2);
+    assert!(filtered["data"]["nodes"][0]["metadata"]["attempt"].is_object());
+    let first = call(&rig, &["console", "board", "--limit", "1"], 0)?;
+    assert_eq!(first["data"]["lanes"].as_array().ok_or("lanes")?.len(), 1);
+    let cursor = first["data"]["next_cursor"].as_str().ok_or("cursor")?;
+    let second = call(
+        &rig,
+        &["console", "board", "--limit", "1", "--cursor", cursor],
+        0,
+    )?;
+    assert_ne!(
+        first["data"]["lanes"][0]["lane_id"],
+        second["data"]["lanes"][0]["lane_id"]
+    );
+    let stale = call(
+        &rig,
+        &["console", "board", "--limit", "2", "--cursor", cursor],
+        2,
+    )?;
+    assert_eq!(stale["error"]["code"], "CATALOGUE_INPUT");
+    assert!(
+        stale["error"]["message"]
+            .as_str()
+            .ok_or("repair")?
+            .contains("without --cursor")
+    );
+    let after = snapshot(&rig.state)?;
+    let changes: std::collections::BTreeSet<_> = before
+        .iter()
+        .chain(after.iter())
+        .filter(|item| before.contains(item) != after.contains(item))
+        .map(|(path, _)| path)
+        .collect();
+    // The existing run reader permits SQLite WAL/SHM bookkeeping, never product writes.
+    assert!(
+        changes
+            .iter()
+            .all(|path| **path == rig.state.join("run.sqlite3-wal")
+                || **path == rig.state.join("run.sqlite3-shm")),
+        "state changed beyond SQLite companions: {changes:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn catalogue_read_only() -> Result {
     let empty = TestRig::new()?.without_state()?;
     assert_eq!(

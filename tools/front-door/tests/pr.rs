@@ -213,14 +213,21 @@ fn pr_status_prints_one_compact_line_per_pull_request() -> Result {
              #1669 OPEN {OTHER} checks=2/4 fail=1 pending=1 merge=blocked review=none draft\n"
         )
     );
-    // No checks reported is a count of zero, not an error, and JSON carries the fields.
+    // An explicit empty JSON array is a genuine zero-check result.
+    fs::write(rig.project.join("checks.json"), "[]")?;
+    let output = rig.command(&["pr", "status", "1668", "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(report["data"][0]["checks_total"], 0);
+    // A failed lookup is distinct and still returns the PR's other facts.
     fs::write(rig.project.join("checks-fail"), "")?;
     let output = rig.command(&["pr", "status", "1668", "--json"])?;
     assert_eq!(code(&output), 0, "{output:?}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(report["data"][0]["head"], HEAD);
-    assert_eq!(report["data"][0]["checks_total"], 0);
+    assert!(report["data"][0]["checks_total"].is_null());
     assert_eq!(report["data"][0]["merge"], "clean");
+    let output = rig.command(&["pr", "status", "1668"])?;
+    assert!(String::from_utf8(output.stdout.bytes)?.contains("checks=unavailable"));
     no_merge(&rig)
 }
 

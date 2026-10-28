@@ -275,6 +275,14 @@ also reports reservations left behind after a terminal commit. Keep the worktree
 reserved while custody is uncertain; do not remove the lock or reservation by
 hand, or rerun the same writer alongside it.
 
+After a reboot, reconcile can settle an attempt as lost and release its
+reservation when the recorded boot and directory bindings prove the previous
+process tree is gone. If device numbers changed, recovery requires the recorded
+attempt and reservation to have shared a filesystem and their current directories
+to share one too, with both recorded inodes still matching. If this evidence is
+missing, retain custody and inspect the reservation and boot identity before
+chair recovery. An unchanged boot does not establish absence.
+
 The chair clears a fence through supervisor's existing recovery API, under
 authority for that exact reservation:
 
@@ -302,8 +310,7 @@ binding and keeps malformed, live, nonterminal or unproved reservations.
 Dirty and ignored-output prechecks run under recovered writer exclusion before
 any lease clearance; a refused precheck leaves the reservation intact.
 Ordinary `worktree remove` still refuses any reservation.
-When custody is lost without a durable exit, this revision cannot create the
-required terminal receipt, so the fence cannot yet be cleared. Retain it and
-use a fresh registered worktree. A failed provider or an unfinished Git
+When custody is lost without a durable exit or reboot proof, the fence cannot
+yet be cleared. Retain it and use a fresh registered worktree. A failed provider or an unfinished Git
 operation with normally settled custody needs Git repair by the chair,
 rather than fence clearance.

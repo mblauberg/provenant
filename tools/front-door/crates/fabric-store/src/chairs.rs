@@ -14,6 +14,14 @@ pub struct RunChair {
 /// Store handles deliberately expose no association methods.
 pub struct HostStore(Store);
 impl HostStore {
+    /// Read existing host associations without creating or migrating state.
+    pub fn open_read_only(
+        root: &provenant_core::StateRoot,
+        deadline: std::time::Instant,
+    ) -> Result<Option<Self>> {
+        Store::open_read_only_host(root, deadline).map(|store| store.map(Self))
+    }
+
     pub fn open(root: &provenant_core::StateRoot, request: &Request<'_>) -> Result<Self> {
         Store::open_host(root, request).map(Self)
     }

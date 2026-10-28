@@ -2,7 +2,6 @@
 use super::{Result, execute, successful};
 use crate::{emit, fail, roots};
 use provenant_cli::Globals;
-use provenant_os::exec::Termination;
 use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -29,24 +28,31 @@ struct Line {
     state: String,
     head: String,
     draft: bool,
-    checks_passed: usize,
-    checks_total: usize,
-    checks_failed: usize,
-    checks_pending: usize,
+    checks_passed: Option<usize>,
+    checks_total: Option<usize>,
+    checks_failed: Option<usize>,
+    checks_pending: Option<usize>,
     merge: String,
     review: String,
 }
 impl Line {
     fn text(&self) -> String {
-        let mut line = format!(
-            "#{} {} {} checks={}/{}",
-            self.number, self.state, self.head, self.checks_passed, self.checks_total
-        );
-        if self.checks_failed > 0 {
-            line.push_str(&format!(" fail={}", self.checks_failed));
-        }
-        if self.checks_pending > 0 {
-            line.push_str(&format!(" pending={}", self.checks_pending));
+        let mut line = format!("#{} {} {}", self.number, self.state, self.head);
+        if let (Some(passed), Some(total), Some(failed), Some(pending)) = (
+            self.checks_passed,
+            self.checks_total,
+            self.checks_failed,
+            self.checks_pending,
+        ) {
+            line.push_str(&format!(" checks={passed}/{total}"));
+            if failed > 0 {
+                line.push_str(&format!(" fail={failed}"));
+            }
+            if pending > 0 {
+                line.push_str(&format!(" pending={pending}"));
+            }
+        } else {
+            line.push_str(" checks=unavailable");
         }
         line.push_str(&format!(" merge={} review={}", self.merge, self.review));
         if self.draft {
@@ -56,18 +62,16 @@ impl Line {
     }
 }
 
-/// `gh pr checks` exits non-zero for pending or failing checks and for none at
-/// all, so its output counts rather than its status.
-fn counts(project: &Path, number: &str) -> Result<Vec<Check>> {
+/// Valid JSON is meaningful even when gh exits non-zero for pending or failed
+/// checks. Missing, malformed or interrupted output is unavailable, not zero.
+fn counts(project: &Path, number: &str) -> Option<Vec<Check>> {
     let output = execute(
         project,
         &["gh", "pr", "checks", number, "--json", "bucket"],
         false,
-    )?;
-    if output.termination == Termination::Exit(0) || !output.stdout.bytes.is_empty() {
-        return Ok(serde_json::from_slice(&output.stdout.bytes).unwrap_or_default());
-    }
-    Ok(Vec::new())
+    )
+    .ok()?;
+    serde_json::from_slice(&output.stdout.bytes).ok()
 }
 fn open_numbers(project: &Path) -> Result<Vec<u64>> {
     #[derive(Deserialize)]
@@ -101,19 +105,25 @@ fn line(project: &Path, number: u64) -> Result<Line> {
         false,
     )?)?;
     let view: View = serde_json::from_slice(&bytes)?;
-    let checks = counts(project, &text)?;
-    let passed = checks
-        .iter()
-        .filter(|check| matches!(check.bucket.as_str(), "pass" | "skipping"))
-        .count();
-    let failed = checks
-        .iter()
-        .filter(|check| matches!(check.bucket.as_str(), "fail" | "cancel"))
-        .count();
-    let pending = checks
-        .iter()
-        .filter(|check| check.bucket == "pending")
-        .count();
+    let checks = counts(project, &text);
+    let passed = checks.as_ref().map(|checks| {
+        checks
+            .iter()
+            .filter(|check| matches!(check.bucket.as_str(), "pass" | "skipping"))
+            .count()
+    });
+    let failed = checks.as_ref().map(|checks| {
+        checks
+            .iter()
+            .filter(|check| matches!(check.bucket.as_str(), "fail" | "cancel"))
+            .count()
+    });
+    let pending = checks.as_ref().map(|checks| {
+        checks
+            .iter()
+            .filter(|check| check.bucket == "pending")
+            .count()
+    });
     let word = |text: &str| {
         if text.is_empty() {
             "none".to_owned()
@@ -127,7 +137,7 @@ fn line(project: &Path, number: u64) -> Result<Line> {
         head: view.head,
         draft: view.draft,
         checks_passed: passed,
-        checks_total: checks.len(),
+        checks_total: checks.as_ref().map(Vec::len),
         checks_failed: failed,
         checks_pending: pending,
         merge: word(&view.merge),
