@@ -66,6 +66,17 @@ pub struct HolderContext {
 pub struct SealedTask {
     pub request_digest: provenant_core::Digest,
     pub task_id: provenant_core::TaskId,
+    #[serde(default = "legacy_network")]
+    pub effective_network: NetworkAccess,
+}
+fn legacy_network() -> NetworkAccess {
+    NetworkAccess::Provider
+}
+impl SealedTask {
+    /// Restore host-sealed launch policy before validating the next generation.
+    pub fn apply_network(&self, task: &mut TaskRequest) {
+        task.access.network = Some(self.effective_network);
+    }
 }
 
 enum Completion<'a> {

@@ -92,10 +92,15 @@ launch before membership capture, so rewriting a queued child ID cannot claim
 a sibling's membership or poison its launch. A lane cannot claim a historical
 run namespace by choosing its run ID and recomputing the public attempt hash.
 
-Nested continuations created by the host also use version 1, retaining the
-original parent-attempt namespace and including their continuation parent in
-the canonical digest. Replays retain the original scheme, including legacy
-prepared operations whose request was not yet published.
+Nested continuation requests use version 1, retaining the original
+parent-attempt namespace and including their continuation parent in the
+canonical digest. Replays retain the original scheme, including legacy
+prepared operations whose request was not yet published. A child-store
+continuation uses its requesting parent's sealed network bound, or the same
+provider-only profile as other provider-only lanes when that context is
+unavailable. On macOS that profile currently permits outbound TCP 443 beyond
+provider endpoints ([#2118](https://github.com/mblauberg/provenant/issues/2118));
+see [child launch policy](routing.md#the-host-validates-and-launches-children).
 
 This scheme avoids rekeying lane-published records and IDs already returned to
 callers. There is no migration of existing child records: an absent version

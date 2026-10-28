@@ -2578,6 +2578,17 @@ fn check_chair_run_id(
     Ok(())
 }
 
+fn seal_launch_task(
+    request_digest: provenant_core::Digest,
+    task: &run::TaskRequest,
+) -> run::SealedTask {
+    run::SealedTask {
+        request_digest,
+        task_id: task.task_id,
+        effective_network: task.access.network(task.writer.is_some()),
+    }
+}
+
 /// A child carries the request `validate_child` returned, which is the only
 /// copy launched from. The store carries its parent's sealed requester.
 fn launch_on_host(
@@ -2586,7 +2597,7 @@ fn launch_on_host(
     edge: &Edge<'_>,
     call: &run::Request<'_>,
     host: Option<&run::HostLaunchContext>,
-    validated: Option<&run::CanonicalRequest>,
+    validated: Option<&run::ValidatedChild>,
     ready: Option<&run::PreparedStart>,
 ) -> Result<Vec<run::Started>, Fail> {
     let inherited_host = host.is_some();
@@ -2613,7 +2624,7 @@ fn launch_on_host(
     };
     let read;
     let request = match validated {
-        Some(request) => request,
+        Some(request) => &**request,
         None => {
             read = session.store.request(run, call)?;
             &read
@@ -2689,6 +2700,13 @@ fn launch_on_host(
         state_root: session.context.state_root.as_path().into(),
     };
     let holder = |attempt: &run::AttemptRecord, requester| {
+        let task = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == attempt.task_id)
+            .ok_or(run::RunError::Validation(
+                "attempt task missing from request",
+            ))?;
         let mut host = host.clone();
         if !inherited_host {
             // Called after preparation, while its selected provider lease is held.
@@ -2744,10 +2762,12 @@ fn launch_on_host(
                 .and_then(|task| task.deliver.as_ref())
                 .map(|_| run::HostDeliveryContext::capture()),
             launch: Some(host),
-            sealed: Some(run::SealedTask {
+            sealed: Some(seal_launch_task(
                 request_digest,
-                task_id: attempt.task_id,
-            }),
+                &session
+                    .store
+                    .effective_launch_task(request, task, validated),
+            )),
         }
         .encode()
     };
@@ -2786,6 +2806,7 @@ fn launch_on_host(
                 )
             },
             validated,
+            Some(request),
             call,
         )?;
         check_launch_policy(&started)?;
@@ -2793,7 +2814,7 @@ fn launch_on_host(
     }
     let started = session
         .service()
-        .start(run, &providers, &holder, validated, call)?;
+        .start(run, &providers, &holder, validated, request, call)?;
     check_launch_policy(&started)?;
     Ok(started)
 }

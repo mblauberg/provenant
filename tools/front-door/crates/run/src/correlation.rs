@@ -695,7 +695,7 @@ mod tests {
         assert!(matches!(
             store.start_child(
                 forged.run_id,
-                &forged.request,
+                &ValidatedChild::fixture(forged.request.clone()),
                 &crate::dispatch_tests::Ready,
                 &|_, _| unreachable!("forged run reached handoff"),
                 &call
@@ -849,7 +849,7 @@ mod tests {
         assert!(matches!(
             store.start_child(
                 proposal.run_id,
-                &proposal.request,
+                &ValidatedChild::fixture(proposal.request.clone()),
                 &crate::dispatch_tests::Ready,
                 &|_, _| unreachable!("unsupported scheme reached handoff"),
                 &call

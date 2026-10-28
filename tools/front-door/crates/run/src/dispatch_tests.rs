@@ -441,7 +441,10 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
         if valid && case == "read-only default child of a quiet writer" {
             let validated = result.as_ref().unwrap();
             assert_eq!(
-                validated.tasks[0].access.network(false),
+                validated
+                    .effective_task(&validated.tasks[0])
+                    .access
+                    .network(false),
                 NetworkAccess::Provider,
                 "{case}: expected Provider network"
             );
@@ -996,7 +999,7 @@ fn host_refuses_writer_child_after_request_rewrite() -> TestResult {
 
     // Rewrite both lane-writable copies so the host's validated digest is
     // the remaining boundary against adding writer authority before launch.
-    let mut swapped = validated.clone();
+    let mut swapped = (*validated).clone();
     swapped.tasks[0].writer = Some(WriterRequest {
         project: "/project".into(),
         worktree: "/project/.worktrees/child".into(),
@@ -1048,6 +1051,70 @@ fn rewrite_child_request(
 }
 
 #[test]
+fn lane_continuation_respects_sealed_parent_or_provider_fallback() -> TestResult {
+    for (bound, expected) in [
+        (None, NetworkAccess::Provider),
+        (Some(NetworkAccess::Local), NetworkAccess::Local),
+        (Some(NetworkAccess::Provider), NetworkAccess::Provider),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?
+            .with_writer_registry(&temp.path().join("host"));
+        let store = if let Some(network) = bound {
+            store.with_sealed_parent_network(network)
+        } else {
+            store
+        };
+        let prior = input();
+        store.create(&prior, &call)?;
+        let mut proposal = input();
+        proposal.run_id = RunId::from_bytes([35; 16]);
+        proposal.operation_id = "lane-continuation".parse()?;
+        proposal.attempts[0].attempt_id = AttemptId::from_bytes([36; 16]);
+        proposal.request.parent = Some(prior.attempts[0].attempt_id);
+        proposal.request.tasks[0].access.network = Some(NetworkAccess::Provider);
+        let mut narrower = proposal.request.tasks[0].clone();
+        narrower.access.network = Some(NetworkAccess::Provider);
+        assert_eq!(
+            store
+                .effective_launch_task(&proposal.request, &narrower, None)
+                .access
+                .network(false),
+            NetworkAccess::Provider
+        );
+        // A lane-writable request cannot bypass the check by omitting its parent lane.
+        proposal.request.parent_attempt = None;
+        let run = store.create(&proposal, &call)?;
+        let expected_request = proposal.request.clone();
+        proposal.request.tasks[0].access.network = Some(NetworkAccess::Open);
+        proposal.request.parent = None;
+        rewrite_child_request(&store, run.run_id, &proposal.request, &call)?;
+        let fake = Fake {
+            refuse: true,
+            ..Default::default()
+        };
+        assert!(matches!(
+            store.start_checked(
+                run.run_id,
+                &expected_request,
+                &fake,
+                &|_, _| unreachable!(),
+                &call
+            ),
+            Err(RunError::Validation(
+                "request changed after launch validation"
+            ))
+        ));
+        assert_eq!(fake.prepared.get(), 0);
+        store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
+        assert_eq!(fake.network.get(), Some(expected));
+    }
+    Ok(())
+}
+
+#[test]
 fn host_launches_only_the_validated_child_request() -> TestResult {
     let parent = AttemptId::from_bytes([9; 16]);
     let temp = tempfile::tempdir()?;
@@ -1055,7 +1122,8 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?
         .with_sealed_requester(provenant_core::ActorId::from_bytes([7; 16]));
-    let parent_task = input().request.tasks[0].clone();
+    let mut parent_task = input().request.tasks[0].clone();
+    parent_task.access.network = Some(NetworkAccess::Provider);
     let mut nested = input();
     nested.request.lane_depth = Some(2);
     nested.request.parent_attempt = Some(parent);
@@ -1063,7 +1131,7 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     let validated = store.validate_child(record.run_id, parent, &parent_task, 1, 2, &call)?;
 
     // The lane swaps its sealed request and the recorded digest together.
-    let mut swapped = validated.clone();
+    let mut swapped = (*validated).clone();
     swapped.tasks[0].access.network = Some(NetworkAccess::Open);
     store.run_dir(record.run_id, false)?.atomic_write(
         std::ffi::OsStr::new("request.json"),
@@ -1079,6 +1147,18 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     )?;
     assert_eq!(store.request(record.run_id, &call)?, swapped);
     let fake = Fake::default();
+    assert!(matches!(
+        store.start_checked(
+            record.run_id,
+            &validated,
+            &fake,
+            &|_, _| unreachable!(),
+            &call
+        ),
+        Err(RunError::Validation(
+            "request changed after launch validation"
+        ))
+    ));
     assert!(matches!(
         store.start_child(
             record.run_id,
@@ -1100,7 +1180,7 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     };
     store.start_child(
         record.run_id,
-        &swapped,
+        &ValidatedChild::fixture(swapped),
         &refuse,
         &|_, _| unreachable!(),
         &call,
@@ -1124,6 +1204,12 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
             "a child run cannot continue an attempt"
         ))
     ));
+    let fake = Fake {
+        refuse: true,
+        ..Default::default()
+    };
+    store.start(continued.run_id, &fake, &|_, _| unreachable!(), &call)?;
+    assert_eq!(fake.network.get(), Some(NetworkAccess::Provider));
     Ok(())
 }
 
@@ -1726,7 +1812,7 @@ fn host_view_holds_the_scope_it_hands_to_a_guardian() -> TestResult {
     assert!(store.held_attempts().is_empty());
     store.start_child(
         run.run_id,
-        &run.request,
+        &ValidatedChild::fixture(run.request.clone()),
         &Ready,
         &|_, _| Ok(Vec::new()),
         &call,
@@ -1780,7 +1866,7 @@ fn held_children_reclaim_exited_custody_across_sequential_launches() -> TestResu
         store.create(&run, &call)?;
         store.start_child(
             run.run_id,
-            &run.request,
+            &ValidatedChild::fixture(run.request.clone()),
             &Ready,
             &|_, _| {
                 handoffs.set(handoffs.get() + 1);
@@ -1977,7 +2063,7 @@ fn held_children_are_bounded_and_superseded_handles_are_dropped() -> TestResult 
 
     let started = store.start_child(
         run.run_id,
-        &run.request,
+        &ValidatedChild::fixture(run.request.clone()),
         &Ready,
         &|_, _| {
             Err(RunError::Validation(
@@ -2122,7 +2208,7 @@ fn deferral_stops_the_scan_after_the_first_attempt() -> TestResult {
     let fake = Fake::default();
     let started = store.start_child(
         run.run_id,
-        &run.request,
+        &ValidatedChild::fixture(run.request.clone()),
         &fake,
         &|_, _| unreachable!(),
         &call,
@@ -2589,6 +2675,7 @@ impl Resources for Host {
 }
 #[derive(Default)]
 struct Fake {
+    network: Cell<Option<NetworkAccess>>,
     refuse: bool,
     policy_task: Option<TaskId>,
     observed: Option<RouteRecord>,
@@ -2637,11 +2724,13 @@ impl Providers for Fake {
 
     fn prepare(
         &self,
-        _: &TaskRequest,
+        task: &TaskRequest,
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String> {
+        self.network
+            .set(Some(task.access.network(task.writer.is_some())));
         self.prepared.set(self.prepared.get() + 1);
         assert!(paths.temporary.ends_with("tmp"));
         assert!(paths.temporary.is_dir());
