@@ -185,6 +185,17 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         None,
     )?;
     assert_eq!(code(&commit), 0);
+    // Review derives its base from origin's default branch.
+    for args in [
+        &["update-ref", "refs/remotes/origin/main", "HEAD"][..],
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ][..],
+    ] {
+        assert_eq!(code(&rig.execute(&git, args, None)?), 0);
+    }
     let brief = rig.root.join("review-brief.txt");
     fs::write(&brief, "Check this change; fixture slow result")?;
     let timed = rig.command(&[
