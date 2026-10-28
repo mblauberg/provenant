@@ -23,6 +23,7 @@ struct Fixture {
     identity: Identity,
     clock: TestClock,
     cancel: CancelToken,
+    registrations: std::sync::Mutex<std::collections::HashMap<String, AnswerTarget>>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -49,6 +50,7 @@ impl Fixture {
                 MonoTime::from_micros(0),
             ),
             cancel: CancelToken::new(),
+            registrations: Default::default(),
         }
     }
     fn budget(&self) -> WaitBudget {
@@ -68,20 +70,23 @@ impl Fixture {
         self.service().execute(input, self.budget(), &self.cancel)
     }
 }
+fn config() -> crate::config::FabricConfig {
+    serde_json::from_value(serde_json::json!({"agent_label":"chair","client_label":"test","home_hosts":{},"peers":{},"limits":{"body_bytes":65536,"input_frame_bytes":1048576,"json_depth":64,"page_rows":100,"output_lines":500,"output_bytes":65536,"result_bytes":1048576,"lease_seconds":3600,"peer_seconds":30,"graph_timeout_seconds":14400,"bundle_bytes":67108864}})).unwrap()
+}
 fn op(text: &str) -> Option<OperationId> {
     Some(OperationId::parse(text).unwrap())
 }
 
 fn register(f: &Fixture, session: &str) {
-    std::fs::create_dir_all(f.root.as_path()).unwrap();
-    provenant_workflow::session::SessionStore::new(
-        f.root.clone(),
-        f.identity.project,
-        provenant_workflow::session::HostSessionId::parse(session).unwrap(),
-    )
-    .with_chair(f.identity.host, f.identity.inbox.actor)
-    .save(b"# Chair", f.budget(), &f.cancel, &f.clock)
-    .unwrap();
+    f.registrations.lock().unwrap().insert(
+        session.into(),
+        AnswerTarget {
+            host: f.identity.host,
+            project: f.identity.project,
+            session: session.into(),
+            actor: f.identity.inbox.actor,
+        },
+    );
 }
 
 fn offer(
@@ -90,8 +95,26 @@ fn offer(
     limit: u64,
     bytes: usize,
 ) -> Result<provenant_fabric_store::Page<AnswerOffer>, InboxError> {
-    f.service()
-        .offer_until_ack(session, limit, bytes, f.budget(), &f.cancel)
+    offer_until_ack(
+        &f.root,
+        &f.identity,
+        &config(),
+        false,
+        &f.clock,
+        session,
+        limit,
+        bytes,
+        f.budget(),
+        &f.cancel,
+        || {
+            f.registrations
+                .lock()
+                .unwrap()
+                .get(session)
+                .cloned()
+                .ok_or(InboxError::Conflict)
+        },
+    )
 }
 
 #[test]
@@ -253,6 +276,72 @@ fn offer_until_ack_byte_budget_counts_serialised_envelope_and_leaves_answer_queu
 }
 
 #[test]
+fn oversized_answer_is_refused_and_small_budget_skips_large_answers() {
+    let f = Fixture::new();
+    register(&f, "session-a");
+    let large = receipt(f.call(ask(RequestKind::Question, "large")).unwrap());
+    let make_answer = |text: String, operation: &str| InboxInput::Answer {
+        id: large.request_id,
+        action: AnswerAction::Reply,
+        option_id: None,
+        text: Some(text),
+        expect_revision: 1,
+        channel: InteractionChannel::Chat,
+        operation_id: op(operation),
+    };
+    assert_eq!(
+        f.call(make_answer("\u{1}".repeat(4000), "too-large"))
+            .unwrap_err()
+            .code(),
+        "invalid_input"
+    );
+    f.call(make_answer("x".repeat(3000), "large-answer"))
+        .unwrap();
+    let small = receipt(f.call(ask(RequestKind::Decision, "small")).unwrap());
+    let saved = receipt(f.call(answer(small.request_id, "small-answer")).unwrap());
+    let batch = offer(&f, "session-a", 50, 2048).unwrap();
+    assert!(batch.truncated);
+    assert_eq!(batch.items.len(), 1);
+    assert_eq!(batch.items[0].answer.id, saved.answer_id.unwrap());
+    assert!(serde_json::to_vec(&batch).unwrap().len() <= 2048);
+    let full = offer(&f, "session-a", 50, MAX_OFFER_BYTES).unwrap();
+    assert_eq!(full.items.len(), 2);
+}
+
+#[test]
+fn concurrent_offer_and_ack_never_resurrects_delivery() {
+    let f = Fixture::new();
+    register(&f, "session-a");
+    let created = receipt(f.call(ask(RequestKind::Decision, "race-ask")).unwrap());
+    let saved = receipt(f.call(answer(created.request_id, "race-answer")).unwrap());
+    let barrier = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            barrier.wait();
+            offer(&f, "session-a", 50, MAX_OFFER_BYTES).unwrap()
+        });
+        let second = scope.spawn(|| {
+            barrier.wait();
+            f.call(InboxInput::Acknowledge {
+                id: created.request_id,
+                answer_id: saved.answer_id.unwrap(),
+                session: "session-a".into(),
+                operation_id: op("race-ack"),
+            })
+            .unwrap()
+        });
+        assert!(first.join().unwrap().items.len() <= 1);
+        second.join().unwrap();
+    });
+    assert!(
+        offer(&f, "session-a", 50, MAX_OFFER_BYTES)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+}
+
+#[test]
 fn offer_until_ack_rebind_never_transfers_old_answers() {
     let mut f = Fixture::new();
     register(&f, "session-a");
@@ -260,15 +349,7 @@ fn offer_until_ack_rebind_never_transfers_old_answers() {
     f.call(answer(created.request_id, "answer")).unwrap();
     let original = f.identity.inbox.clone();
     f.identity.inbox = crate::identity::Address::new(f.identity.host, "new-chair").unwrap();
-    provenant_workflow::session::SessionStore::new(
-        f.root.clone(),
-        f.identity.project,
-        provenant_workflow::session::HostSessionId::parse("session-a").unwrap(),
-    )
-    .with_chair(f.identity.host, f.identity.inbox.actor)
-    .with_rebind(true)
-    .save(b"# New chair", f.budget(), &f.cancel, &f.clock)
-    .unwrap();
+    register(&f, "session-a");
     assert!(
         offer(&f, "session-a", 50, MAX_OFFER_BYTES)
             .unwrap()
@@ -291,7 +372,16 @@ fn offer_until_ack_rebind_never_transfers_old_answers() {
 #[test]
 fn delivery_capabilities_publish_only_tested_fabric_fallback_for_each_provider() {
     let capabilities = delivery_capabilities();
-    assert_eq!(capabilities.len(), provenant_records::ADAPTER_SPECS.len());
+    assert_eq!(
+        capabilities.iter().map(|c| c.provider).collect::<Vec<_>>(),
+        vec![
+            provenant_records::Harness::Claude,
+            provenant_records::Harness::Codex,
+            provenant_records::Harness::Cursor,
+            provenant_records::Harness::Agy,
+            provenant_records::Harness::Opencode
+        ]
+    );
     for capability in capabilities {
         assert_eq!(capability.transport, AnswerTransport::FabricMail);
         assert!(!capability.live_injection);
@@ -711,7 +801,7 @@ fn inbox_paging_binds_filters_snapshot_and_limits() {
 #[test]
 fn inbox_remote_owner_and_worker_mutations_are_refused_without_opening_store() {
     let mut f = Fixture::new();
-    let mut config:crate::config::FabricConfig=serde_json::from_value(serde_json::json!({"agent_label":"chair","client_label":"test","home_hosts":{},"peers":{},"limits":{"body_bytes":65536,"input_frame_bytes":1048576,"json_depth":64,"page_rows":100,"output_lines":500,"output_bytes":65536,"result_bytes":1048576,"lease_seconds":3600,"peer_seconds":30,"graph_timeout_seconds":14400,"bundle_bytes":67108864}})).unwrap();
+    let mut config = config();
     let key = crate::identity::CrossHostProjectKey::from_home(
         Path::new("/home/test"),
         Path::new("/home/test/repo/.git"),
@@ -736,6 +826,26 @@ fn inbox_remote_owner_and_worker_mutations_are_refused_without_opening_store() {
     );
     assert_eq!(result.unwrap_err().code(), "unsupported_owner");
     assert!(!f.root.as_path().join("fabric").exists());
+    for (lane, code) in [
+        (false, "unsupported_owner"),
+        (true, "lane_coordination_refused"),
+    ] {
+        let result = offer_until_ack(
+            &f.root,
+            &f.identity,
+            &config,
+            lane,
+            &f.clock,
+            "session-a",
+            1,
+            MAX_OFFER_BYTES,
+            f.budget(),
+            &f.cancel,
+            || panic!("resolver must not run"),
+        );
+        assert_eq!(result.unwrap_err().code(), code);
+        assert!(!f.root.as_path().join("fabric").exists());
+    }
     let result = execute(
         &f.root,
         &f.identity,

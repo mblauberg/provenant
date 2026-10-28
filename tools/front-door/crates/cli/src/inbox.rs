@@ -9,6 +9,30 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Resolve a delivery target from the workflow owner's registered chair.
+pub fn resolve_delivery_target(
+    root: &provenant_core::StateRoot,
+    identity: &provenant_fabric_runtime::identity::Identity,
+    session: &str,
+) -> Result<AnswerTarget, InboxError> {
+    use provenant_workflow::session::{HostSessionId, SessionError, SessionStore};
+    let id = HostSessionId::parse(session).map_err(|_| InboxError::Invalid("session"))?;
+    let registered = SessionStore::new(root.clone(), identity.project, id)
+        .with_chair(identity.host, identity.inbox.actor)
+        .discovery()
+        .map_err(|error| match error {
+            SessionError::DiscoveryIdentity => InboxError::Conflict,
+            _ => InboxError::OwnerUnavailable,
+        })?
+        .ok_or(InboxError::Conflict)?;
+    Ok(AnswerTarget {
+        host: registered.record.host,
+        project: registered.record.project_id,
+        session: registered.record.host_session_id.as_str().into(),
+        actor: registered.record.chair_actor,
+    })
+}
+
 #[derive(Debug, Args)]
 pub struct Ask {
     /// JSON request content; ownership comes from the current Fabric identity

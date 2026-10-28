@@ -191,17 +191,7 @@ pub fn validate_request(
     input: &InboxInput,
 ) -> Result<(), InboxError> {
     input.validate()?;
-    if in_lane && input.is_mutation() {
-        return Err(InboxError::LaneMutation);
-    }
-    if identity
-        .federation
-        .as_ref()
-        .and_then(|project| config.home_hosts.get(project.key.as_str()))
-        .is_some_and(|host| *host != identity.host)
-    {
-        return Err(InboxError::UnsupportedOwner);
-    }
+    validate_edge(identity, config, in_lane, input.is_mutation())?;
     if let InboxInput::List { limit, .. } = input
         && *limit > config.limits.page_rows
     {
@@ -222,6 +212,27 @@ pub fn validate_request(
     }
     Ok(())
 }
+
+fn validate_edge(
+    identity: &Identity,
+    config: &crate::config::FabricConfig,
+    in_lane: bool,
+    mutation: bool,
+) -> Result<(), InboxError> {
+    if in_lane && mutation {
+        return Err(InboxError::LaneMutation);
+    }
+    if identity
+        .federation
+        .as_ref()
+        .and_then(|project| config.home_hosts.get(project.key.as_str()))
+        .is_some_and(|host| *host != identity.host)
+    {
+        return Err(InboxError::UnsupportedOwner);
+    }
+    Ok(())
+}
+
 impl From<provenant_fabric_store::Error> for InboxError {
     fn from(error: provenant_fabric_store::Error) -> Self {
         match error {
@@ -439,9 +450,50 @@ fn session_id(id: &str) -> Result<(), InboxError> {
     Ok(())
 }
 
+/// Resolve the registered chair at the adapter edge before opening the store.
+/// The resolver must consult authoritative session discovery and fail closed.
+#[allow(clippy::too_many_arguments)]
+pub fn offer_until_ack(
+    root: &StateRoot,
+    identity: &Identity,
+    config: &crate::config::FabricConfig,
+    in_lane: bool,
+    clock: &dyn Clock,
+    session: &str,
+    limit: u64,
+    max_bytes: usize,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    resolve: impl FnOnce() -> Result<AnswerTarget, InboxError>,
+) -> Result<provenant_fabric_store::Page<AnswerOffer>, InboxError> {
+    session_id(session)?;
+    validate_edge(identity, config, in_lane, true)?;
+    let target = resolve()?;
+    if target.host != identity.host
+        || target.project != identity.project
+        || target.actor != identity.inbox.actor
+        || target.session != session
+    {
+        return Err(InboxError::Conflict);
+    }
+    let service = InboxService::open(root, identity, clock, budget, cancel)?;
+    let request = Request {
+        clock,
+        budget,
+        cancel,
+        backoff: &ThreadWait,
+    };
+    Ok(service.store.offer_human_answers(
+        &target,
+        limit,
+        max_bytes,
+        clock.wall_now().map_err(CoordinationError::from)?,
+        &request,
+    )?)
+}
+
 pub struct InboxService<'a> {
     store: Store,
-    root: StateRoot,
     identity: &'a Identity,
     clock: &'a dyn Clock,
 }
@@ -461,54 +513,9 @@ impl<'a> InboxService<'a> {
         };
         Ok(Self {
             store: Store::open(root, &request)?,
-            root: root.clone(),
             identity,
             clock,
         })
-    }
-
-    /// Offer only the exact registered chair's unacknowledged answers. Adapters
-    /// must deduplicate by answer ID and acknowledge consumption separately.
-    pub fn offer_until_ack(
-        &self,
-        session: &str,
-        limit: u64,
-        max_bytes: usize,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<provenant_fabric_store::Page<AnswerOffer>, InboxError> {
-        session_id(session)?;
-        let request = Request {
-            clock: self.clock,
-            budget,
-            cancel,
-            backoff: &ThreadWait,
-        };
-        request.check()?;
-        let session_id = provenant_workflow::session::HostSessionId::parse(session)
-            .map_err(|_| InboxError::Invalid("session"))?;
-        let registered = provenant_workflow::session::SessionStore::new(
-            self.root.clone(),
-            self.identity.project,
-            session_id,
-        )
-        .with_chair(self.identity.host, self.identity.inbox.actor)
-        .discovery()
-        .map_err(|_| InboxError::Conflict)?
-        .ok_or(InboxError::Conflict)?;
-        let target = AnswerTarget {
-            host: registered.record.host,
-            project: registered.record.project_id,
-            session: registered.record.host_session_id.as_str().into(),
-            actor: registered.record.chair_actor,
-        };
-        Ok(self.store.offer_human_answers(
-            &target,
-            limit,
-            max_bytes,
-            self.clock.wall_now().map_err(CoordinationError::from)?,
-            &request,
-        )?)
     }
 
     pub fn execute(
@@ -716,6 +723,26 @@ impl<'a> InboxService<'a> {
                     acknowledged_at: None,
                     error: None,
                 };
+                // Reserve the largest possible attempt count in the wire envelope.
+                let mut offered = delivery.clone();
+                offered.state = AnswerDeliveryState::Offered;
+                offered.attempts = u64::MAX;
+                offered.last_attempt_at = Some(timestamp);
+                let page = provenant_fabric_store::Page {
+                    items: vec![AnswerOffer {
+                        answer: answer.clone(),
+                        delivery: offered,
+                    }],
+                    truncated: false,
+                };
+                if CanonicalV1::bytes(&page)
+                    .map_err(provenant_fabric_store::Error::from)?
+                    .as_bytes()
+                    .len()
+                    > MAX_OFFER_BYTES
+                {
+                    return Err(InboxError::Invalid("answer exceeds delivery byte limit"));
+                }
                 let body=serde_json::to_string(&serde_json::json!({"schema_version":1,"kind":"human_answer","request_id":id,"target_host":value.owner_host,"target_session":value.chair_session_id,"target_actor":value.chair_actor,"answer":answer,"authority":"This answer is scoped to its request; it is not a review receipt or new authority. Acknowledge this answer ID after consuming it once."})).map_err(CoordinationError::ResponseEncoding)?;
                 let message = provenant_fabric_store::Message {
                     header: RecordHeader::V1,

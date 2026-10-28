@@ -34,7 +34,7 @@ pub struct DeliveryCapability {
     pub live_injection: bool,
 }
 
-/// Tested local fallback only. Provider hook/input adapters are separate work.
+/// Implemented local fallback only. Provider hook/input adapters are separate work.
 pub fn delivery_capabilities() -> Vec<DeliveryCapability> {
     crate::ADAPTER_SPECS
         .iter()

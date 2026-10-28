@@ -96,7 +96,7 @@ impl Store {
                 if encode(&batch)?.len() > max_bytes {
                     batch.items.pop();
                     batch.truncated = true;
-                    break;
+                    continue;
                 }
             }
             for offer in &batch.items {
