@@ -441,6 +441,7 @@ fn session_id(id: &str) -> Result<(), InboxError> {
 
 pub struct InboxService<'a> {
     store: Store,
+    root: StateRoot,
     identity: &'a Identity,
     clock: &'a dyn Clock,
 }
@@ -460,9 +461,54 @@ impl<'a> InboxService<'a> {
         };
         Ok(Self {
             store: Store::open(root, &request)?,
+            root: root.clone(),
             identity,
             clock,
         })
+    }
+
+    /// Offer only the exact registered chair's unacknowledged answers. Adapters
+    /// must deduplicate by answer ID and acknowledge consumption separately.
+    pub fn offer_until_ack(
+        &self,
+        session: &str,
+        limit: u64,
+        max_bytes: usize,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<provenant_fabric_store::Page<AnswerOffer>, InboxError> {
+        session_id(session)?;
+        let request = Request {
+            clock: self.clock,
+            budget,
+            cancel,
+            backoff: &ThreadWait,
+        };
+        request.check()?;
+        let session_id = provenant_workflow::session::HostSessionId::parse(session)
+            .map_err(|_| InboxError::Invalid("session"))?;
+        let registered = provenant_workflow::session::SessionStore::new(
+            self.root.clone(),
+            self.identity.project,
+            session_id,
+        )
+        .with_chair(self.identity.host, self.identity.inbox.actor)
+        .discovery()
+        .map_err(|_| InboxError::Conflict)?
+        .ok_or(InboxError::Conflict)?;
+        let target = AnswerTarget {
+            host: registered.record.host,
+            project: registered.record.project_id,
+            session: registered.record.host_session_id.as_str().into(),
+            actor: registered.record.chair_actor,
+        };
+        Ok(self.store.offer_human_answers(
+            &target,
+            limit,
+            max_bytes,
+            self.clock.wall_now().map_err(CoordinationError::from)?,
+            &request,
+        )?)
     }
 
     pub fn execute(
@@ -665,8 +711,8 @@ impl<'a> InboxService<'a> {
                     transport: AnswerTransport::FabricMail,
                     message_id: MessageId::from_bytes(entropy()?),
                     state: AnswerDeliveryState::Queued,
-                    attempts: 1,
-                    last_attempt_at: Some(timestamp),
+                    attempts: 0,
+                    last_attempt_at: None,
                     acknowledged_at: None,
                     error: None,
                 };
