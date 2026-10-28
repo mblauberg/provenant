@@ -43,12 +43,8 @@ fn seed_with(
     cache: &Path,
     clone: impl FnOnce(&Path, &provenant_os::fs::Directory) -> Result<(), &'static str>,
 ) -> Outcome {
-    use provenant_os::fs::Directory;
-    use std::{
-        ffi::OsStr,
-        sync::atomic::{AtomicU64, Ordering},
-    };
-    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    use provenant_os::fs::{Directory, LockMode, temporary_name};
+    use std::ffi::{OsStr, OsString};
     let Ok(cache_dir) = Directory::open_anchor(cache) else {
         return Outcome::fallback("cache_unavailable");
     };
@@ -61,44 +57,99 @@ fn seed_with(
     let Ok(cargo_dir) = cache_dir.open_verified_directory(cargo_name) else {
         return Outcome::fallback("cargo_home_unavailable");
     };
+    if cargo_dir.make_private().is_err() {
+        return Outcome::fallback("cargo_home_not_private");
+    }
+    // Serialise staging and recovery, including across interrupted attempts.
+    let Ok(_lock) = cargo_dir.try_lock(OsStr::new("registry-seed.lock"), LockMode::Exclusive)
+    else {
+        return Outcome::fallback("seed_lock_unavailable");
+    };
+    let Ok(entries) = cargo_dir.entries() else {
+        return Outcome::fallback("staging_cleanup_failed");
+    };
+    for entry in entries {
+        let Ok(name) = entry else {
+            return Outcome::fallback("staging_cleanup_failed");
+        };
+        if name.to_string_lossy().starts_with(".registry-seed-")
+            && crate::artifacts::remove_entry_tree(&cargo_dir, &name).is_err()
+        {
+            return Outcome::fallback("staging_cleanup_failed");
+        }
+    }
     let registry = OsStr::new("registry");
     match cargo_dir.metadata_at(registry, false) {
         Ok(_) => return Outcome::skipped("existing_registry"),
         Err(error) if error.is_not_found() => {}
         Err(_) => return Outcome::fallback("registry_unavailable"),
     }
-    let stage = format!(
-        ".registry-seed-{}-{}",
-        std::process::id(),
-        SERIAL.fetch_add(1, Ordering::Relaxed)
-    );
-    let stage_name = OsStr::new(&stage);
-    if cargo_dir.mkdir(stage_name, 0o700).is_err() {
-        return Outcome::fallback("staging_unavailable");
+    let mut stage = None;
+    for _ in 0..16 {
+        let Ok(random) = temporary_name() else {
+            return Outcome::fallback("staging_unavailable");
+        };
+        let mut name = OsString::from(".registry-seed-");
+        name.push(random);
+        match cargo_dir.mkdir(&name, 0o700) {
+            Ok(()) => {
+                stage = Some(name);
+                break;
+            }
+            Err(error) if error.is_exists() => continue,
+            Err(_) => return Outcome::fallback("staging_unavailable"),
+        }
     }
+    let Some(stage_name) = stage else {
+        return Outcome::fallback("staging_unavailable");
+    };
     let result = (|| {
         let staging = cargo_dir
-            .open_verified_directory(stage_name)
+            .open_verified_directory(&stage_name)
             .map_err(|_| "staging_unavailable")?;
         clone(&home.join(".cargo/registry"), &staging)?;
-        cargo_dir
-            .rename_noreplace(stage_name, &cargo_dir, registry)
-            .map_err(|_| "publish_failed")?;
+        sync_tree(&staging).map_err(|_| "staging_sync_failed")?;
+        match cargo_dir.rename_noreplace(&stage_name, &cargo_dir, registry) {
+            Ok(()) => {}
+            Err(error) if error.is_exists() => return Err("publish_raced"),
+            Err(_) => return Err("publish_failed"),
+        }
         Ok(())
     })();
     match result {
         Ok(()) => Outcome {
             status: "seeded",
-            reason: "cloned",
+            reason: if cargo_dir.sync().is_ok() {
+                "cloned"
+            } else {
+                "durability_unconfirmed"
+            },
         },
         Err(reason) => {
-            // This directory is private to the host and created exclusively above.
-            if std::fs::remove_dir_all(cache.join("cargo-home").join(stage)).is_err() {
+            if crate::artifacts::remove_entry_tree(&cargo_dir, &stage_name).is_err() {
                 return Outcome::fallback("staging_cleanup_failed");
             }
-            Outcome::fallback(reason)
+            if reason == "publish_raced" {
+                Outcome::skipped(reason)
+            } else {
+                Outcome::fallback(reason)
+            }
         }
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn sync_tree(directory: &provenant_os::fs::Directory) -> provenant_os::fs::Result<()> {
+    use provenant_os::fs::FileKind;
+    for name in directory.entries()? {
+        let name = name?;
+        match directory.metadata_at(&name, false)?.kind {
+            FileKind::Directory => sync_tree(&directory.open_verified_directory(&name)?)?,
+            FileKind::Regular => directory.open_read(&name)?.sync()?,
+            _ => return Err(provenant_os::fs::FsError::NotRegular { name }),
+        }
+    }
+    directory.sync()
 }
 
 #[cfg(target_os = "macos")]
@@ -184,8 +235,50 @@ mod tests {
             std::fs::read_dir(tmp.path().join("cargo-home"))
                 .unwrap()
                 .count(),
-            0
+            1 // The stable seed lock remains for the next attempt.
         );
+    }
+
+    #[test]
+    fn stale_stages_are_removed_and_cargo_home_is_private() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let tmp = tempfile::tempdir().unwrap();
+        let cargo = tmp.path().join("cargo-home");
+        std::fs::create_dir(&cargo).unwrap();
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir(cargo.join(".registry-seed-stale")).unwrap();
+        let outcome = seed_with(tmp.path(), tmp.path(), |_, _| Err("clone_failed"));
+        assert_eq!(outcome, Outcome::fallback("clone_failed"));
+        assert!(!cargo.join(".registry-seed-stale").exists());
+        assert_eq!(std::fs::metadata(cargo).unwrap().mode() & 0o777, 0o700);
+    }
+
+    #[test]
+    fn failed_cleanup_does_not_follow_replaced_cargo_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cargo = tmp.path().join("cargo-home");
+        let held = tmp.path().join("held");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let outcome = seed_with(tmp.path(), tmp.path(), |_, _| {
+            std::fs::rename(&cargo, &held).unwrap();
+            std::os::unix::fs::symlink(&outside, &cargo).unwrap();
+            Err("clone_failed")
+        });
+        assert_eq!(outcome, Outcome::fallback("clone_failed"));
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(&held).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn publish_race_keeps_existing_registry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outcome = seed_with(tmp.path(), tmp.path(), |_, _| {
+            std::fs::create_dir(tmp.path().join("cargo-home/registry")).unwrap();
+            Ok(())
+        });
+        assert_eq!(outcome, Outcome::skipped("publish_raced"));
+        assert!(tmp.path().join("cargo-home/registry").is_dir());
     }
 
     #[test]
@@ -216,5 +309,21 @@ mod tests {
             std::fs::read(home.join(".cargo/registry/index/item")).unwrap(),
             b"host"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn registry_symlink_refuses_entire_seed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir_all(home.join(".cargo/registry/src")).unwrap();
+        std::fs::create_dir(&cache).unwrap();
+        std::os::unix::fs::symlink("/outside", home.join(".cargo/registry/src/link")).unwrap();
+        assert_eq!(
+            seed_registry(true, &home, &cache),
+            Outcome::fallback("registry_contains_unsupported_entry")
+        );
+        assert!(!cache.join("cargo-home/registry").exists());
     }
 }

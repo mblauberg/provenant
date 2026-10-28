@@ -239,6 +239,9 @@ jobs:
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
         run: cargo nextest run --profile ci --locked -p provenant-supervisor -p provenant-confinement -p provenant-os
+      - name: Run macOS Cargo seed tests
+        working-directory: tools/front-door
+        run: cargo nextest run --profile ci --locked -p provenant-run -E 'test(cargo_seed)'
       - name: Run dispatch confinement integration tests
         working-directory: tools/front-door
         env:

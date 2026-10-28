@@ -259,13 +259,12 @@ impl LaunchConfinement {
             ),
             AccessMode::ReadOnly => crate::cargo_seed::Outcome::skipped("read_only_lane"),
         };
-        // Diagnostic only: seed failure must never prevent lane launch.
-        if let Ok(bytes) = serde_json::to_vec(&outcome) {
-            let _ = attempt_dir.atomic_write(
-                OsStr::new("cargo-setup.json"),
-                ".cargo-setup-",
-                &bytes,
-                provenant_os::fs::PublishMode::Replace,
+        // Diagnostic publication must never prevent lane launch.
+        if let Err(error) = record_cargo_setup(attempt_dir, &outcome) {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: could not record Cargo setup: {error}"
             );
         }
         let directories = required_anchors(self.plan.permissions(), &self.profile, writer)
@@ -283,6 +282,49 @@ impl LaunchConfinement {
             .map_err(RunError::Confinement)?
             .command(argv, attempt)
             .map_err(RunError::Confinement)
+    }
+}
+
+fn record_cargo_setup(
+    directory: &Directory,
+    outcome: &crate::cargo_seed::Outcome,
+) -> std::result::Result<(), String> {
+    let bytes = serde_json::to_vec(outcome).map_err(|error| error.to_string())?;
+    directory
+        .atomic_write(
+            OsStr::new("cargo-setup.json"),
+            ".cargo-setup-",
+            &bytes,
+            provenant_os::fs::PublishMode::Replace,
+        )
+        .and_then(|publication| publication.require_durable())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod cargo_setup_tests {
+    use super::*;
+
+    #[test]
+    fn cargo_setup_record_reports_writer_and_read_only_outcomes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let directory = Directory::open_anchor(tmp.path()).unwrap();
+        for reason in ["disabled", "read_only_lane"] {
+            let outcome = crate::cargo_seed::Outcome::skipped(reason);
+            record_cargo_setup(&directory, &outcome).unwrap();
+            let record: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(tmp.path().join("cargo-setup.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(record["status"], "skipped");
+            assert_eq!(record["reason"], reason);
+        }
+        std::fs::remove_file(tmp.path().join("cargo-setup.json")).unwrap();
+        std::fs::create_dir(tmp.path().join("cargo-setup.json")).unwrap();
+        assert!(
+            record_cargo_setup(&directory, &crate::cargo_seed::Outcome::skipped("disabled"))
+                .is_err()
+        );
     }
 }
 
