@@ -1314,6 +1314,11 @@ pub fn acquire_reboot_recovery(
     )
 }
 
+/// Whether two directories remain on the same filesystem across a device renumbering.
+pub fn same_device_rebinding(old_a: u64, old_b: u64, new_a: u64, new_b: u64) -> bool {
+    old_a == old_b && new_a == new_b
+}
+
 pub(crate) fn acquire_reboot_recovery_with(
     directory: Directory,
     attempt: &Directory,
@@ -1342,8 +1347,14 @@ pub(crate) fn acquire_reboot_recovery_with(
         || reservation.scope != scope
         || reservation.reservation_inode != slot.inode
         || reservation.attempt_inode != Some(target.inode)
-        || reservation.attempt_device != Some(reservation.reservation_device)
-        || slot.device != target.device
+        || !reservation.attempt_device.is_some_and(|device| {
+            same_device_rebinding(
+                reservation.reservation_device,
+                device,
+                slot.device,
+                target.device,
+            )
+        })
     {
         return Err(CustodyError::InvalidRecord);
     }
@@ -1492,8 +1503,14 @@ impl Recovery {
         if self.reservation.attempt_device != Some(metadata.device) {
             let slot = self.directory.metadata()?;
             if self.reservation.reservation_inode != slot.inode
-                || self.reservation.attempt_device != Some(self.reservation.reservation_device)
-                || slot.device != metadata.device
+                || !self.reservation.attempt_device.is_some_and(|device| {
+                    same_device_rebinding(
+                        self.reservation.reservation_device,
+                        device,
+                        slot.device,
+                        metadata.device,
+                    )
+                })
             {
                 return Ok(None);
             }

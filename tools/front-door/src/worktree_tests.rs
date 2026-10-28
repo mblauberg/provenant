@@ -2524,7 +2524,7 @@ fn re_added_worktree_is_adopted_then_dispatchable() -> Result {
     let message = refused["error"]["message"].as_str().ok_or("message")?;
     assert!(message.contains("registration is stale"), "{message}");
     assert!(
-        message.contains("provenant worktree adopt <path>"),
+        message.contains("provenant worktree adopt PATH --owner NAME"),
         "{message}"
     );
 

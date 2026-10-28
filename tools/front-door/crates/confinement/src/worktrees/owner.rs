@@ -285,7 +285,7 @@ pub fn adopt(
     save_owner(&worktree, owner)?;
     write_identity(
         &state,
-        &identity_for(context, &path, branch, worktree.identity()),
+        &identity_for(context, &path, branch, &worktree),
         PublishMode::Replace,
     )?;
     Ok(WorktreeInfo {
