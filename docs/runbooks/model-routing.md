@@ -44,7 +44,7 @@ Explicit fallbacks use `--fallback ADAPTER/ID,ADAPTER/ID`.
 
 Dispatch uses the same route flags. Copy the resolved `adapter/model@effort`
 from the attempt record; never infer a model from a tier or a provider name.
-Quota observations use `provenant quota show` and `provenant quota tick`.
+Quota observations use `provenant quota` and `provenant quota tick`.
 
 Agy read-only lanes can run system commands, including Git, within the outer
 read-only confinement profile. Headless tool permissions are auto-approved;

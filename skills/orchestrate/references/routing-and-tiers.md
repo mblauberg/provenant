@@ -76,7 +76,7 @@ actual model behind a provider name.
 
 ## Cooldowns
 
-`provenant quota show` reads cached observations and `provenant quota tick`
+`provenant quota` reads cached observations and `provenant quota tick`
 refreshes due accounts. Rust owners decide eligibility.
 
 ## Choosing among admissible routes

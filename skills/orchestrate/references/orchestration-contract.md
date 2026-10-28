@@ -136,9 +136,12 @@ response continues it through a new provider invocation and new attempt; it
 never mutates or resumes the blocked attempt in place.
 
 Cross-terminal cancellation uses `fabric_run`'s `cancel` (one attempt); a
-terminal without MCP uses `provenant cancel RUN[/TASK[/ATTEMPT]] --operation-id
-ID`. RUN/TASK/ATTEMPT cancels one attempt like `fabric_run`; RUN/TASK cancels
-every attempt of the task. Run records own the target; supervisor keeps custody through publication and
+terminal without MCP uses `provenant cancel ATTEMPT`. It generates and prints
+an operation ID unless `--operation-id ID` is supplied for a planned retry.
+Targets accept unique hex prefixes of at least eight characters and
+`RUN/ATTEMPT`; the run record supplies project scope. The full
+`RUN/TASK/ATTEMPT` form selects one attempt, while `RUN/TASK` selects every
+attempt of that task. Supervisor keeps custody through publication and
 settlement. A transport disconnect does not authorise a PID signal.
 
 ### Producer separation default

@@ -83,7 +83,7 @@ Manual `gc --pressure` prints a notice when scheduling is disabled, the project
 is transient or no eligible data is in scope. JSON exposes the reason as `notice`.
 Lane settlement collects that lane's declared ignored output and Cargo cache,
 including when its worktree is retained for delivery pickup. Successful
-settlement, delivery integration and `pr land` also prune eligible worktrees
+settlement, delivery integration and `land` also prune eligible worktrees
 and their caches through the existing custody checks. These event passes share
 the collection lock, apply no idle delay and leave foreign worktrees alone.
 Kept files, live writers and reservations still prevent removal. A busy

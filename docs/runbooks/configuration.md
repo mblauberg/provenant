@@ -9,7 +9,7 @@ profile or a knob with `provenant config set profile economy` or
 `provenant config set lanes.max_concurrency 4`; `config unset KNOB` reverts it.
 
 Profiles are `balanced`, `economy` and `rigorous`. Override a knob for one run
-with `provenant dispatch --knob NAME=VALUE` (the terminal path; agents use
+with `provenant run --knob NAME=VALUE` (the terminal path; agents use
 `fabric_run` (`op: submit`)'s `knobs`).
 
 ## Precedence and stamps
@@ -284,7 +284,7 @@ readiness apply at dispatch. Remove a member with
 
 ## Quota menu display
 
-The menu bar reads display choices from `quota show --json`. Per account, set
+The menu bar reads display choices from `quota --json`. Per account, set
 them with `provenant accounts set <account> [--display-name NAME] [--hidden
 true|false] [--order N] [--headline auto|5h|weekly|default]`. `<account>` is an
 entry id such as `claude-work` or a label unique across adapters. An empty
@@ -297,7 +297,7 @@ most_constrained|<account>]` writes `[domains.quota.display]` and returns the
 quota report. Reports carry a top-level `display` block and a per-row `display`
 block (`id`, `name`, `hidden`, `order`, `headline`). Hidden accounts and order
 are not applied by the CLI; the app does that.
-If `display.icon` names an unregistered account, `quota show` reports a
+If `display.icon` names an unregistered account, `quota` reports a
 `display_icon_warning` field in JSON and one warning line in human output.
 The report uses `most_constrained` for the icon without changing config.
 

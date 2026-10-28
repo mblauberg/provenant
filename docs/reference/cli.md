@@ -2,7 +2,7 @@
 
 # CLI reference
 
-Source: `provenant help --json`.
+Source: `provenant help --all --json`.
 
 Only commands and arguments exposed by the help catalogue appear here.
 In argument contracts, omitted booleans are false, lists are empty and
@@ -46,6 +46,7 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `command` | `{"name": "command", "positional": true, "repeatable": true}` |
+| `--all` | `{"defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -57,7 +58,8 @@ bounds are null. Positional arguments have no long flag.
   "groups": [
     {
       "arguments": [
-        "command"
+        "command",
+        "all"
       ],
       "multiple": true,
       "name": "Help",
@@ -1745,13 +1747,180 @@ bounds are null. Positional arguments have no long flag.
 }
 ```
 
+## `provenant run`
+
+| Argument | Contract |
+|---|---|
+| `--prompt-file` | `{"name": "prompt_file"}` |
+| `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
+| `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
+| `--task-id` | `{"name": "task_id"}` |
+| `--delivery-id` | `{"name": "delivery_id"}` |
+| `--deliver` | `{"conflicts": ["deliver_remote", "deliver_branch", "open_pr"], "name": "deliver"}` |
+| `--deliver-remote` | `{"name": "deliver_remote"}` |
+| `--deliver-branch` | `{"name": "deliver_branch"}` |
+| `--open-pr` | `{"defaults": ["false"], "name": "open_pr", "values": ["true", "false"]}` |
+| `--route` | `{"name": "route"}` |
+| `--effort` | `{"name": "effort"}` |
+| `--confidential` | `{"defaults": ["false"], "name": "confidential", "values": ["true", "false"]}` |
+| `--allow-free` | `{"defaults": ["false"], "name": "allow_free", "values": ["true", "false"]}` |
+| `--fallback` | `{"bounds": [0, 2], "name": "fallback"}` |
+| `--account` | `{"name": "account"}` |
+| `--mode` | `{"defaults": ["read-only"], "name": "mode", "values": ["read-only", "worktree-write"]}` |
+| `--worktree` | `{"name": "worktree"}` |
+| `--read-root` | `{"bounds": [0, 32], "name": "read_root", "repeatable": true}` |
+| `--write-root` | `{"bounds": [0, 32], "name": "write_root", "repeatable": true}` |
+| `--network` | `{"name": "network", "values": ["on", "off"]}` |
+| `--capability` | `{"bounds": [0, 16], "name": "capability", "repeatable": true}` |
+| `--provider-timeout` | `{"bounds": [1, 14400], "conditional_defaults": [["read-only", "3600"], ["worktree-write", "10800"]], "defaults": ["3600"], "name": "provider_timeout"}` |
+| `--concurrency` | `{"bounds": [1, 16], "conflicts": ["prompt_file", "prompt_stdin"], "name": "concurrency", "requires": ["manifest"]}` |
+| `--knob` | `{"name": "knobs", "repeatable": true}` |
+| `--host` | `{"name": "host"}` |
+| `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "name": "worktree_branch"}` |
+| `--base` | `{"name": "base"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--model` | `{"conflicts": ["route"], "name": "model"}` |
+| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "network", "capability", "provider_timeout"], "name": "manifest"}` |
+| `--wait` | `{"bounds": [1, 14400], "defaults": ["240"], "name": "wait"}` |
+| `--branch` | `{"name": "branch"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "constraints": [
+    "single prompt requires exactly one of model or route",
+    "operation-id is generated when omitted; supply it for planned retries",
+    "manifest conflicts with per-task route, access, metadata and provider-timeout",
+    "concurrency requires manifest",
+    "worktree, or a peer writer's branch, is required with, and only valid for, worktree-write",
+    "fallback conflicts with a writer and has at most two distinct models",
+    "prompt and manifest inputs are at most 1 MiB"
+  ],
+  "groups": [
+    {
+      "arguments": [],
+      "multiple": true,
+      "name": "Dispatch",
+      "required": false
+    },
+    {
+      "arguments": [
+        "prompt_file",
+        "prompt_stdin",
+        "manifest"
+      ],
+      "multiple": false,
+      "name": "dispatch_input",
+      "required": true
+    },
+    {
+      "arguments": [
+        "model",
+        "route",
+        "effort",
+        "confidential",
+        "allow_free",
+        "fallback"
+      ],
+      "multiple": true,
+      "name": "RouteRequest",
+      "required": false
+    },
+    {
+      "arguments": [
+        "mode",
+        "worktree",
+        "read_root",
+        "write_root",
+        "network",
+        "capability"
+      ],
+      "multiple": true,
+      "name": "Access",
+      "required": false
+    },
+    {
+      "arguments": [
+        "worktree",
+        "branch",
+        "worktree_branch"
+      ],
+      "multiple": false,
+      "name": "writer_target",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant status`
+
+| Argument | Contract |
+|---|---|
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
+| `--cursor` | `{"name": "cursor"}` |
+| `--all` | `{"defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "limit",
+        "cursor",
+        "all"
+      ],
+      "multiple": true,
+      "name": "Status",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant land`
+
+| Argument | Contract |
+|---|---|
+| `number` | `{"name": "number", "positional": true, "required": true}` |
+| `--head` | `{"name": "head"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "number",
+        "head"
+      ],
+      "multiple": true,
+      "name": "Land",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant dispatch`
 
 | Argument | Contract |
 |---|---|
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
+| `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
 | `--task-id` | `{"name": "task_id"}` |
 | `--delivery-id` | `{"name": "delivery_id"}` |
 | `--deliver` | `{"conflicts": ["deliver_remote", "deliver_branch", "open_pr"], "name": "deliver"}` |
@@ -1790,6 +1959,7 @@ bounds are null. Positional arguments have no long flag.
 {
   "constraints": [
     "single prompt requires exactly one of model or route",
+    "operation-id is generated when omitted; supply it for planned retries",
     "manifest conflicts with per-task route, access, metadata and provider-timeout",
     "concurrency requires manifest",
     "worktree, or a peer writer's branch, is required with, and only valid for, worktree-write",
@@ -1946,7 +2116,7 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `target` | `{"name": "target", "positional": true, "required": true}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
+| `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
 | `--reason` | `{"bounds": [0, 256], "name": "reason"}` |
 | `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
@@ -1978,7 +2148,7 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `attempt` | `{"name": "attempt", "positional": true, "required": true}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
+| `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
 | `--no-fallback` | `{"defaults": ["false"], "name": "no_fallback", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
@@ -1993,7 +2163,8 @@ bounds are null. Positional arguments have no long flag.
 {
   "constraints": [
     "target is an ATTEMPT ID, RUN/ATTEMPT or RUN/TASK/ATTEMPT",
-    "prompt is at most 1 MiB; expected generation is 0"
+    "prompt is at most 1 MiB; expected generation is 0",
+    "operation-id is generated when omitted; supply it for planned retries"
   ],
   "groups": [
     {
@@ -2168,6 +2339,19 @@ bounds are null. Positional arguments have no long flag.
 | `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [],
+      "multiple": true,
+      "name": "Quota",
+      "required": false
+    }
+  ]
+}
+```
 
 ## `provenant quota show`
 
@@ -2487,62 +2671,6 @@ bounds are null. Positional arguments have no long flag.
 }
 ```
 
-## `provenant pr merge`
-
-| Argument | Contract |
-|---|---|
-| `number` | `{"name": "number", "positional": true, "required": true}` |
-| `--head` | `{"name": "head", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
-
-```json
-{
-  "groups": [
-    {
-      "arguments": [
-        "number",
-        "head"
-      ],
-      "multiple": true,
-      "name": "Merge",
-      "required": false
-    }
-  ]
-}
-```
-
-## `provenant pr land`
-
-| Argument | Contract |
-|---|---|
-| `number` | `{"name": "number", "positional": true, "required": true}` |
-| `--head` | `{"name": "head", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
-
-```json
-{
-  "groups": [
-    {
-      "arguments": [
-        "number",
-        "head"
-      ],
-      "multiple": true,
-      "name": "Land",
-      "required": false
-    }
-  ]
-}
-```
-
 ## `provenant pr open`
 
 | Argument | Contract |
@@ -2613,6 +2741,8 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `--scheduled` | `{"defaults": ["false"], "name": "scheduled", "values": ["true", "false"]}` |
+| `--pressure` | `{"defaults": ["false"], "name": "pressure", "values": ["true", "false"]}` |
 | `--free-floor` | `{"name": "free_floor"}` |
 | `--dry-run` | `{"conflicts": ["apply"], "defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
 | `--apply` | `{"defaults": ["false"], "name": "apply", "values": ["true", "false"]}` |

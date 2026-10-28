@@ -36,12 +36,12 @@ def catalogue(root, binary=None):
         binary = Path(metadata["target_directory"]) / "debug/provenant"
     try:
         result = subprocess.run(
-            [str(binary), "help", "--json"], cwd=root, check=True,
+            [str(binary), "help", "--all", "--json"], cwd=root, check=True,
             env=dict(os.environ, PROVENANT_ROOT=str(root)),
             stdout=subprocess.PIPE, text=True,
         )
     except subprocess.CalledProcessError as error:
-        raise ValueError("CLI help --json is unavailable") from error
+        raise ValueError("CLI help --all --json is unavailable") from error
     return json.loads(result.stdout)["data"]
 
 
@@ -62,7 +62,7 @@ def header(title, source):
 
 
 def cli_reference(data):
-    text = header("CLI reference", "provenant help --json")
+    text = header("CLI reference", "provenant help --all --json")
     text += (
         "Only commands and arguments exposed by the help catalogue appear here.\n"
         "In argument contracts, omitted booleans are false, lists are empty and\n"
@@ -122,7 +122,7 @@ def generate(root, binary=None):
         try:
             files["cli.md"] = cli_reference(catalogue(root, binary))
         except (ValueError, KeyError, TypeError, AttributeError):
-            gap("cli.md", "provenant help --json has no machine-readable catalogue")
+            gap("cli.md", "provenant help --all --json has no machine-readable catalogue")
     else:
         gap("cli.md", f"{WORKSPACE}/Cargo.toml is missing; CLI catalogue unavailable")
     for source, name, render in [

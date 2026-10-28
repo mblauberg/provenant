@@ -123,7 +123,7 @@ configured keep paths, symlinks and output written within 24 hours are kept.
 See the [configuration runbook](runbooks/configuration.md#lane-cache-collection).
 Settlement collects the lane's declared ignored output and Cargo cache without
 an idle delay, even when the worktree stays for delivery pickup. Successful
-settlement, delivery integration and `pr land` prune eligible worktrees and
+settlement, delivery integration and `land` prune eligible worktrees and
 caches. Event collection uses the same GC lock as the daily sweep and keeps
 foreign worktrees out of scope.
 Output pruning holds the worktree's writer lock; the repository lock is held

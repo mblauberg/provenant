@@ -140,7 +140,7 @@ must print the new worktree's absolute path and nothing else on stdout.
 
 ```sh
 provenant hook claude --help
-provenant lanes --json
+provenant status --json
 provenant worktree list --json
 ```
 

@@ -121,8 +121,11 @@ submitting separate tasks for distinct exact models, then synthesise in the
 chair. Bind the applied route and effort from each attempt to the receipt.
 Unsupported effort is refused; never invent role or effort values.
 The runtime governs routing, the bundled catalogue supplies default pool
-membership and pacing, and the mechanics live in `orchestrate`. Prefer per-dispatch
-controls: editing a global provider configuration, such as
+membership and pacing, and the mechanics live in `orchestrate`. The CLI core
+path is `provenant run` for bounded submission, waiting and a result tail,
+`status` for active and recent lanes, `land N` for exact-head CI and landing,
+and `quota` for usage. Use `help --all` or `help COMMAND` for advanced controls.
+Prefer per-run controls: editing a global provider configuration, such as
 `~/.codex/config.toml`, needs explicit authority for that path and action. Run attempts live under
 `<state>/runs/<run>/attempts/<attempt>/`; the default state root is
 `~/.local/share/provenant/v1`. `.agent-run/` is a protected legacy root, not

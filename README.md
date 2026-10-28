@@ -96,7 +96,7 @@ fit.
 | --- | --- |
 | **Subscription quota and API** | Drives each provider's own CLI with your existing sign-in, so lanes draw on the subscriptions you already have. Pay-per-token API models are available through OpenCode routes such as OpenRouter; OpenCode's own configuration holds the key, never Provenant. |
 | **Many accounts** | Register several accounts per provider. Dispatch resolves an account with headroom unless you pin one, and a quota refusal cools only the account that hit it. |
-| **Usage meter** | `provenant quota show` and an optional macOS menu bar app show every account's windows, reset times, credits and staleness in one place. |
+| **Usage meter** | `provenant quota` and an optional macOS menu bar app show every account's windows, reset times, credits and staleness in one place. |
 | **Your harnesses** | One install wires Fabric MCP, skills and instructions into Claude Code, Codex, Cursor, Agy and OpenCode. Claude Code also gets managed hooks and automatic account switching. |
 | **Routing** | Named pools (`utility`, `junior`, `senior`, `principal`, `writing`, `design`) choose among models by weight, scaled by each provider's pacing. |
 | **Confined lanes** | Each lane runs `read-only` or `worktree-write` under a macOS sandbox profile. Writers get one registered worktree and no Git credentials. |
@@ -148,7 +148,7 @@ packages and upgrades.
 Check what Provenant can see. These commands read state only:
 
 ```sh
-provenant quota show                    # every account's quota windows
+provenant quota                    # every account's quota windows
 provenant route list                    # pools, weights and pacing
 provenant route resolve --route junior  # which model a junior lane would get
 ```
@@ -160,19 +160,16 @@ Start a read-only lane:
 
 ```sh
 printf '%s\n' 'Summarise this repository structure in three bullets.' | \
-  provenant dispatch --operation-id "readme-smoke-$(date +%s)" \
-    --prompt-stdin --route junior --mode read-only
-provenant lanes --all                   # find the attempt
-provenant output <attempt>              # read what it wrote
+  provenant run \
+    --prompt-stdin --route junior
+provenant status                        # active and recent lanes
 ```
 
 A writer lane gets its own worktree, and the host pushes the verified result:
 
 ```sh
-provenant worktree create fix/example --base origin/main
-provenant dispatch --operation-id "fix-$(date +%s)" --prompt-file BRIEF.md \
-  --route senior --mode worktree-write --worktree .worktrees/fix-example \
-  --deliver-remote origin --deliver-branch fix/example --open-pr
+provenant run --prompt-file BRIEF.md \
+  --route senior --branch fix/example --base origin/main --deliver pr
 ```
 
 Inside a harness, agents do the same through Fabric MCP tools, so in practice
@@ -255,7 +252,7 @@ involved. Usage counters never log arguments, prompts or results.
 | `provenant telemetry stats` | Tokens and cost by run and attempt, priced from [`config/telemetry-prices.toml`](config/telemetry-prices.toml) |
 | `provenant telemetry stats --usage` | How often each CLI verb and MCP tool is used, including installed ones never called |
 | `provenant telemetry trace` | A timeline of attempts across hosts, for [Perfetto](https://ui.perfetto.dev) |
-| `provenant lanes --all` | Every lane and its state; `--id` shows one attempt's route, account and grants |
+| `provenant status` | Active and recent lanes; `--all` and `--json` show full records |
 | `provenant output <attempt>` | A lane's recorded output |
 | `provenant resume <attempt>` | Continue an attempt with a new prompt |
 | `provenant workflow session` | Save, show or hand off a session checkpoint |

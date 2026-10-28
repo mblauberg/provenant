@@ -21,9 +21,11 @@ description: "Use to coordinate bounded work across agents, research lanes or in
 
 ## Always
 
-Wait once, in the background; never sleep or poll. Bound tool output, and run
-no foreground wait over about four minutes. Full worker output stays in run
-files; return a digest and path. Record `adapter/model@effort` from the
+For a CLI submission, use `provenant run --prompt-file BRIEF --route senior`: it
+waits up to 240 seconds and returns the state and result tail. On timeout,
+follow its printed wait command; do not submit again. Run longer waits in the
+background; never sleep or poll. Use `provenant status` after a restart. Full
+worker output stays in run files; return a digest and path. Record `adapter/model@effort` from the
 receipt.
 
 ## Rules

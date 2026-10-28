@@ -30,8 +30,11 @@ without Herdr, record `HERDR-NOT-USED: <reason>`.
 ## Without Herdr
 
 When Herdr is absent or not in use, record `HERDR-NOT-USED: <reason>` (existing
-rule). Dispatch through Fabric, observe with
-`provenant lanes --all --wait N --condition all`, read retained events with
+rule). Submit through Fabric, or use `provenant run --prompt-file BRIEF
+--route senior` for a terminal submission and its bounded wait and result
+tail. Inspect lanes with `provenant status`. For an existing multi-lane wait,
+use the advanced `provenant lanes --all --wait N --condition all`; read
+retained events with
 `provenant output RUN/TASK/ATTEMPT --part events`, read
 bounded slices with `fabric_output`'s `read` operation, and steer with
 `fabric_mail`'s `send` operation or `fabric_run`'s `resume` operation using

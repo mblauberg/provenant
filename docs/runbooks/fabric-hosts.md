@@ -14,7 +14,7 @@ provenant hosts
 provenant hosts doctor
 provenant fabric peer
 provenant fabric peer-agent
-provenant dispatch --host workshop --mode read-only --help
+provenant help run
 provenant lanes --host workshop
 provenant workflow session handoff --help
 ```
@@ -223,13 +223,16 @@ servers and running workers after upgrading. `not_terminal` and
 
 ## Dispatch and recovery
 
-The CLI grammar uses `provenant dispatch` for one prompt or a batch
-manifest; `--host` names explicit placement on a configured peer, by label or
+Use `provenant run` to submit one prompt, wait and read its result tail;
+advanced `provenant dispatch` also accepts a batch manifest; `--host` names explicit placement on a configured peer, by label or
 host ID. The peer resolves the route, confines the lane and runs it in its own
 checkout of the same project, at the same path under its home directory, with
 its own provider sign-ins; a `--account` pin is checked against the peer's registrations. The calling host keeps only a placement record under
-`fabric/remote-runs/` in its state directory. `lanes --id`, `output` and `cancel` find that record and forward to
-the peer by ID, and `dispatch --wait`, `lanes --wait` and `lanes --watch` poll the peer. Lanes
+`fabric/remote-runs/` in its state directory. `status`, `lanes --id`, `output`
+and `cancel` use that record to find the peer by ID. `run` combines submission
+with a bounded wait and result tail; its timeout prints the exact command to
+continue waiting. Advanced `lanes --wait` and `lanes --watch` observe existing
+peer runs. Lanes
 keep running after the SSH call returns. Fabric MCP `fabric_run`
 (`op: submit`) takes the same placement as an optional `host` field.
 To read a peer's own attempt without a local placement record, use
@@ -242,10 +245,9 @@ which is a path on the calling host. This is the terminal path; agents use
 `fabric_run` (`op: submit`):
 
 ```sh
-provenant dispatch --host workshop --mode worktree-write \
-  --branch feat/x --base origin/main --model ADAPTER/ID \
-  --operation-id OP --prompt-file prompt.md \
-  [--deliver-remote origin --deliver-branch feat/x [--open-pr]]
+provenant run --host workshop --mode worktree-write \
+  --branch feat/x --base origin/main --route senior \
+  --prompt-file prompt.md --deliver pr
 ```
 
 The peer fetches every remote with its own Git credentials, then refuses with
@@ -304,11 +306,13 @@ if `ssh` hangs. The watch prints `STATE RUN/TASK/ATTEMPT` (and
 `host=ID` for a peer's lane) once per state change, then `end settled lanes=N`,
 or `end timeout lanes=N pending=M` with exit 124.
 
-`provenant help dispatch`
-shows the operation ID, route and access controls. The reserved observation
+`provenant help run` shows all route, access, placement and retry controls.
+CLI run, dispatch, cancel and resume generate and print an operation ID when
+omitted; retain an explicit `--operation-id` for planned retries. The reserved observation
 and control names are top-level `lanes`, `output`, `cancel`, `resume` and
 `reconcile`. Targets follow the
-grammar `RUN[/TASK[/ATTEMPT]]`.
+grammar `RUN[/TASK[/ATTEMPT]]`, also accepting `RUN/ATTEMPT` and unique hex
+prefixes of at least eight characters. An ambiguous prefix lists candidates.
 
 The peer transport does not silently fall back to local placement. A mutation
 whose reply is lost can return `launch_unknown`; retain its operation ID and
