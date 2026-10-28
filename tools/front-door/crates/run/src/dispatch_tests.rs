@@ -1162,6 +1162,65 @@ impl Providers for Ready {
     }
 }
 
+struct FirstPriorityFailure(TaskId);
+impl Providers for FirstPriorityFailure {
+    fn priority(&self, task: &TaskRequest) -> std::result::Result<u8, String> {
+        if task.task_id == self.0 {
+            Err("priority configuration unavailable".into())
+        } else {
+            Ok(5)
+        }
+    }
+    fn prepare(
+        &self,
+        task: &TaskRequest,
+        prompt: &str,
+        paths: &LaunchPaths,
+        resume: Option<&AttemptRecord>,
+    ) -> std::result::Result<PreparedLaunch, String> {
+        Ready.prepare(task, prompt, paths, resume)
+    }
+    fn decode(
+        &self,
+        route: &RouteRecord,
+        output: &[u8],
+        exit: &ExitObservation,
+        path: &std::path::Path,
+    ) -> std::result::Result<Decoded, String> {
+        Ready.decode(route, output, exit, path)
+    }
+}
+
+#[test]
+fn priority_selection_failure_does_not_stall_siblings() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let prepared = two_tasks(2);
+    store.create(&prepared, &call)?;
+    let first = prepared.attempts[0].attempt_id;
+    let sibling = prepared.attempts[1].attempt_id;
+    let held = RefCell::new(Vec::new());
+    let holder = |record: &AttemptRecord, _| {
+        held.borrow_mut().push(record.attempt_id);
+        Err(RunError::Validation("fixture holder"))
+    };
+    let started = store.start(
+        prepared.run_id,
+        &FirstPriorityFailure(prepared.attempts[0].task_id),
+        &holder,
+        &call,
+    )?;
+    assert!(matches!(started.as_slice(), [
+        Started::Refused { attempt, kind: RefusalKind::Preparation, reason },
+        Started::Refused { attempt: second, .. },
+    ] if *attempt == first && reason.contains("priority configuration unavailable") && *second == sibling));
+    assert_eq!(*held.borrow(), [sibling]);
+    assert_eq!(terminal(&store, first, &call)?, Outcome::Rejected);
+    Ok(())
+}
+
 /// Carries a real permission plan through launch, stopping before compilation.
 struct Confined {
     writer: bool,

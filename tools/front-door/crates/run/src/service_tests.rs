@@ -79,6 +79,7 @@ fn submission(prompt: &str) -> DispatchRequest {
     DispatchRequest {
         operation_id: OperationId::parse("service-dispatch").unwrap(),
         tasks: vec![DispatchTask {
+            build_heavy: false,
             title: None,
             task_id: TaskId::from_bytes([3; 16]),
             prompt: prompt.into(),

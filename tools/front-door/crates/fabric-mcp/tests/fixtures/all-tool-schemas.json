@@ -1306,6 +1306,9 @@
                       }
                     ]
                   },
+                  "build_heavy": {
+                    "type": "boolean"
+                  },
                   "deliver": {
                     "anyOf": [
                       {

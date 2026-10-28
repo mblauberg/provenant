@@ -17,6 +17,28 @@ again. `provenant status` shows active lanes and the twenty newest settled
 lanes, newest first. `--json` returns full records for the same selection.
 Use `--all` with `--limit N` and the returned `--cursor N` to page all history.
 
+On macOS, the host selects a nice value for the lane, and the guardian applies
+it to the provider process before confinement. Its descendants inherit that
+value.
+Configure the lane classes in the selected state directory's `config.toml`:
+
+```toml
+[domains.fabric.lanes.priority]
+writer = 10
+read-only = 5
+build-heavy = 15
+```
+
+Values range from 0 to 19, with higher values yielding more CPU time to other
+work. These are the defaults. A worktree-write lane uses `writer`; other lanes
+use `read-only`. Set `--build-heavy` to use `build-heavy` for either mode.
+Fabric tasks and manifests accept `"build_heavy": true`. `lanes --json` reports
+the applied value as `priority`, and `requested_priority` when it differs. The
+value is null before it is known and for older records without this evidence.
+If the guardian already has a higher nice value, the provider inherits that
+lower scheduling priority. If changing priority fails, the provider still
+launches at its inherited priority and the reason is recorded as a warning.
+
 The receipt names the worktree. `--worktree PATH` uses an existing checkout
 without taking over its lifecycle. A missing branch name creates an owned
 checkout; for an absolute path or a path below `.worktrees/`, use

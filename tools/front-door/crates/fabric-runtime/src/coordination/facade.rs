@@ -20,6 +20,8 @@ pub struct AttemptTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubmittedTask {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub build_heavy: bool,
     #[serde(default)]
     pub account: Option<String>,
     #[serde(default)]

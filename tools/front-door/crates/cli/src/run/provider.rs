@@ -2318,6 +2318,7 @@ mod tests {
         for entry in REGISTRY {
             let adapter = entry.adapter.id();
             let requested = run::TaskRequest {
+                build_heavy: false,
                 title: None,
                 base: None,
                 head: None,
@@ -2679,6 +2680,7 @@ mod tests {
         let prompt = "é".repeat(75_000);
         let review_oid = run::resolve_git_base(&git, &project, "HEAD")?;
         let task = run::TaskRequest {
+            build_heavy: false,
             title: None,
             base: Some(review_oid.clone()),
             head: Some(review_oid.clone()),

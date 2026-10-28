@@ -192,6 +192,7 @@ impl<'a> Service<'a> {
             .map_err(|error| input_error(ErrorKind::Io, error.to_string()))?;
 
             requests.push(TaskRequest {
+                build_heavy: task.build_heavy,
                 title: task.title,
                 profile: task.profile,
                 task_id: task.task_id,
@@ -471,6 +472,7 @@ impl From<&RunError> for ErrorKind {
 
 /// Prepared transport-independent dispatch input.
 pub struct DispatchTask {
+    pub build_heavy: bool,
     pub title: Option<String>,
     pub task_id: provenant_core::TaskId,
     pub prompt: String,
