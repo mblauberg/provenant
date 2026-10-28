@@ -353,6 +353,36 @@ impl ToolCall {
         service: &mut Service<'_, F>,
         cancel: &CancelToken,
     ) -> Result<ToolResponse, ServiceError> {
+        let operation_id = self.operation_id();
+        self.execute_inner(service, cancel)
+            .map_err(|error| match operation_id {
+                Some(operation_id) => ServiceError::Mutation {
+                    operation_id,
+                    source: Box::new(error),
+                },
+                None => error,
+            })
+    }
+
+    pub(crate) fn operation_id(&self) -> Option<OperationId> {
+        match self {
+            Self::Submit(SubmitInput::Submit { operation_id, .. })
+            | Self::SubmitWait(SubmitInput::Submit { operation_id, .. }, ..)
+            | Self::Run(
+                RunInput::Cancel { operation_id, .. } | RunInput::Resume { operation_id, .. },
+            )
+            | Self::RunDetailed(
+                RunInput::Cancel { operation_id, .. } | RunInput::Resume { operation_id, .. },
+            ) => Some(operation_id.clone()),
+            _ => None,
+        }
+    }
+
+    fn execute_inner<F: F3Facade>(
+        self,
+        service: &mut Service<'_, F>,
+        cancel: &CancelToken,
+    ) -> Result<ToolResponse, ServiceError> {
         // ToolCall is public and can be constructed without parse. Apply the
         // same transport cap before any coordination or facade side effects.
         match &self {
@@ -398,7 +428,6 @@ impl ToolCall {
         let budget = service.budget(match &self {
             Self::Run(RunInput::Wait { wait_seconds, .. })
             | Self::RunDetailed(RunInput::Wait { wait_seconds, .. }) => *wait_seconds,
-            Self::SubmitWait(_, wait_seconds, _) => *wait_seconds,
             Self::Events(
                 EventsInput::Read {
                     wait_seconds: Some(wait_seconds),
@@ -599,13 +628,14 @@ impl ToolCall {
                         .cloned()
                         .ok_or(FacadeError::StateCorrupt)?,
                 )?;
+                let wait_budget = service.budget(wait_seconds)?;
                 let wait = service.facade.run(
                     RunInput::Wait {
                         targets: targets.clone(),
                         condition: WaitCondition::All,
                         wait_seconds,
                     },
-                    budget,
+                    wait_budget,
                     cancel,
                 );
                 let mut value = serde_json::json!({"receipt": receipt});
@@ -626,6 +656,7 @@ impl ToolCall {
                             );
                         } else {
                             let mut outputs = Vec::new();
+                            let output_budget = service.budget(crate::MAX_WAIT_SECONDS)?;
                             for target in targets {
                                 let remaining = service.limits.as_ref().map_or(16_384, |limits| {
                                     limits
@@ -650,20 +681,20 @@ impl ToolCall {
                                 }
                                 match service.facade.output(
                                     OutputInput::Read {
-                                        target,
+                                        target: target.clone(),
                                         part: OutputPart::Result,
                                         offset: 0,
                                         max_bytes: remaining,
                                     },
-                                    budget,
+                                    output_budget,
                                     cancel,
                                 ) {
                                     Ok(output) => outputs.push(serde_json::to_value(output)?),
-                                    Err(_) => {
+                                    Err(error) => {
+                                        outputs.push(serde_json::json!({"target": target, "error": {"code": error.code(), "message": error.to_string()}}));
                                         value["continuation"] = serde_json::json!(
                                             "Use fabric_output to read each result using the receipt targets."
                                         );
-                                        break;
                                     }
                                 }
                             }
@@ -744,6 +775,12 @@ impl ToolCall {
 /// sources while the protocol exposes a stable domain code.
 #[derive(Debug, Error)]
 pub enum ServiceError {
+    #[error("{source}")]
+    Mutation {
+        operation_id: OperationId,
+        #[source]
+        source: Box<ServiceError>,
+    },
     #[error(transparent)]
     Invalid(#[from] InputError),
     #[error(transparent)]
@@ -761,6 +798,7 @@ pub enum ServiceError {
 impl ServiceError {
     pub fn code(&self) -> &'static str {
         match self {
+            Self::Mutation { source, .. } => source.code(),
             Self::Invalid(_) => "invalid_input",
             Self::Coordination(error) => error.code(),
             Self::Facade(error) => error.code(),
@@ -773,6 +811,15 @@ impl ServiceError {
     /// Stable structured error data. Uncertain mutations carry their
     /// idempotency key; prompts, tokens and raw source errors are omitted.
     pub fn structured_error(&self) -> Value {
+        if let Self::Mutation {
+            operation_id,
+            source,
+        } = self
+        {
+            let mut detail = source.structured_error();
+            detail["operation_id"] = serde_json::json!(operation_id);
+            return detail;
+        }
         let mut detail = match self {
             Self::Invalid(error) => serde_json::json!({"code":self.code(),"path":error.path}),
             Self::Coordination(CoordinationError::LaneMutation) => {

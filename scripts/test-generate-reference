@@ -55,6 +55,7 @@ class ReferenceTests(unittest.TestCase):
     def test_non_machine_readable_source_is_a_named_gap(self):
         source = self.root / GEN['SCHEMAS']
         source.parent.mkdir(parents=True)
+        (self.root / GEN['ALL_SCHEMAS']).write_text('[]')
         for content in ('not JSON', '{"wrong": "shape"}'):
             source.write_text(content)
             files, gaps = GEN['generate'](self.root)
@@ -77,9 +78,11 @@ class ReferenceTests(unittest.TestCase):
     def test_mcp_and_configuration_preserve_all_schema_fields(self):
         tool = {'name': 'fixture_tool', 'inputSchema': {'type': 'object'},
                 'outputSchema': {'const': None}, '_meta': {'schemaVersion': 2}}
-        text = GEN['mcp_reference']([tool])
+        text = GEN['mcp_reference']([tool], [tool, {'name': 'hidden'}])
         for key in tool:
             self.assertIn('"' + key + '"', text)
+        self.assertIn('## Discoverable tools', text)
+        self.assertIn('### `hidden`', text)
         data = {'knobs': {'fixture': {'type': 'enum', 'default': 'a', 'values': ['a', 'b'],
                                     'effect': 'One | two `three`.'}},
                 'schema_version': 1, 'profiles': {'balanced': {'fixture': 'b'}}}

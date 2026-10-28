@@ -355,12 +355,23 @@ fn serve_with_timeouts(
                     job.started,
                 );
                 let response = if job.cancel.is_cancelled() {
-                    failure(Some(job.tool), "cancelled")
+                    let mut detail = json!({"code":"cancelled"});
+                    if let Some(operation_id) = job.call.operation_id() {
+                        detail["operation_id"] = json!(operation_id);
+                    }
+                    tools::tool_error(Some(job.tool), "cancelled", detail)
                 } else {
                     if service.is_none() {
                         match factory.open() {
                             Ok(opened) => service = Some(opened),
                             Err(error) => {
+                                let error = match job.call.operation_id() {
+                                    Some(operation_id) => ServiceError::Mutation {
+                                        operation_id,
+                                        source: Box::new(error),
+                                    },
+                                    None => error,
+                                };
                                 completion.response = Some(service_error(job.tool, &error));
                                 continue;
                             }

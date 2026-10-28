@@ -2,7 +2,7 @@
 
 # MCP tool reference
 
-Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json`.
+Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json and tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json`.
 
 ## `fabric_context`
 
@@ -999,5 +999,788 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json`.
     "type": "object"
   },
   "name": "fabric_discover"
+}
+```
+
+## Discoverable tools
+
+### `fabric_task`
+
+```json
+{
+  "_meta": {
+    "io.provenant/schemaVersion": 2
+  },
+  "description": "Create and manage fenced project tasks.",
+  "inputSchema": {
+    "$defs": {
+      "Id": {
+        "pattern": "^[0-9a-f]{32}$",
+        "type": "string"
+      },
+      "OperationId": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+        "type": "string"
+      },
+      "TaskProof": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "task": {
+            "$ref": "#/$defs/Id"
+          },
+          "token": {
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "generation",
+          "task",
+          "token"
+        ],
+        "type": "object"
+      }
+    },
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/Id"
+          },
+          "lease_seconds": {
+            "maximum": 3600,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "claim"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          }
+        },
+        "required": [
+          "id",
+          "lease_seconds",
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 65536,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "objective": {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          "op": {
+            "const": "create"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          }
+        },
+        "required": [
+          "objective",
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "op": {
+            "const": "finish"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "proof": {
+            "$ref": "#/$defs/TaskProof"
+          },
+          "state": {
+            "enum": [
+              "done",
+              "cancelled"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "proof",
+          "state"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Id"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "list"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "open",
+                  "done",
+                  "cancelled"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "limit",
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "op": {
+            "const": "release"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "proof": {
+            "$ref": "#/$defs/TaskProof"
+          }
+        },
+        "required": [
+          "op",
+          "proof"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 65536,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "objective": {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          "op": {
+            "const": "update"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "proof": {
+            "$ref": "#/$defs/TaskProof"
+          }
+        },
+        "required": [
+          "objective",
+          "op",
+          "proof"
+        ],
+        "type": "object"
+      }
+    ],
+    "type": "object"
+  },
+  "name": "fabric_task"
+}
+```
+
+### `fabric_events`
+
+```json
+{
+  "_meta": {
+    "io.provenant/schemaVersion": 2
+  },
+  "description": "Read the activity journal or append a note.",
+  "inputSchema": {
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "dedup_key": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "note": {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          "op": {
+            "const": "note"
+          },
+          "operation_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "note",
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "anyOf": [
+              {
+                "maximum": 9223372036854775807,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "read"
+          },
+          "wait_seconds": {
+            "anyOf": [
+              {
+                "maximum": 55,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "limit",
+          "op"
+        ],
+        "type": "object"
+      }
+    ],
+    "type": "object"
+  },
+  "name": "fabric_events"
+}
+```
+
+### `fabric_lease`
+
+```json
+{
+  "_meta": {
+    "io.provenant/schemaVersion": 2
+  },
+  "description": "Manage advisory work claims and landing leases.",
+  "inputSchema": {
+    "$defs": {
+      "ClaimProof": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "$ref": "#/$defs/Id"
+          },
+          "token": {
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "generation",
+          "id",
+          "token"
+        ],
+        "type": "object"
+      },
+      "GitOid": {
+        "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+        "type": "string"
+      },
+      "Id": {
+        "pattern": "^[0-9a-f]{32}$",
+        "type": "string"
+      },
+      "LandingProof": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "$ref": "#/$defs/Id"
+          },
+          "reference": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "token": {
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "generation",
+          "id",
+          "reference",
+          "token"
+        ],
+        "type": "object"
+      },
+      "OperationId": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+        "type": "string"
+      }
+    },
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "lease_seconds": {
+            "maximum": 3600,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "claim_acquire"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "scope": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "key": {
+                    "maxLength": 1024,
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "issue"
+                  }
+                },
+                "required": [
+                  "key",
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "paths"
+                  },
+                  "paths": {
+                    "items": {
+                      "maxLength": 4096,
+                      "type": "string"
+                    },
+                    "maxItems": 100,
+                    "minItems": 1,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "paths"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "worktree"
+                  },
+                  "path": {
+                    "maxLength": 4096,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "path"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "required": [
+          "lease_seconds",
+          "op",
+          "scope"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Id"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "claim_list"
+          }
+        },
+        "required": [
+          "limit",
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "op": {
+            "const": "claim_release"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "proof": {
+            "$ref": "#/$defs/ClaimProof"
+          }
+        },
+        "required": [
+          "op",
+          "proof"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "lease_seconds": {
+            "maximum": 3600,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "claim_renew"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "proof": {
+            "$ref": "#/$defs/ClaimProof"
+          }
+        },
+        "required": [
+          "lease_seconds",
+          "op",
+          "proof"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "op": {
+            "const": "claim_verify"
+          },
+          "proof": {
+            "$ref": "#/$defs/ClaimProof"
+          }
+        },
+        "required": [
+          "op",
+          "proof"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "candidate": {
+            "$ref": "#/$defs/GitOid"
+          },
+          "expected": {
+            "$ref": "#/$defs/GitOid"
+          },
+          "lease_seconds": {
+            "maximum": 3600,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "landing_acquire"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "reference": {
+            "maxLength": 1024,
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate",
+          "expected",
+          "lease_seconds",
+          "op",
+          "reference"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "op": {
+            "const": "landing_release"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "proof": {
+            "$ref": "#/$defs/LandingProof"
+          }
+        },
+        "required": [
+          "op",
+          "proof"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "lease_seconds": {
+            "maximum": 3600,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "landing_renew"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "proof": {
+            "$ref": "#/$defs/LandingProof"
+          }
+        },
+        "required": [
+          "lease_seconds",
+          "op",
+          "proof"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "op": {
+            "const": "landing_verify"
+          },
+          "proof": {
+            "$ref": "#/$defs/LandingProof"
+          }
+        },
+        "required": [
+          "op",
+          "proof"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "op": {
+            "const": "landing_wait"
+          },
+          "reference": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 55,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "generation",
+          "op",
+          "reference",
+          "wait_seconds"
+        ],
+        "type": "object"
+      }
+    ],
+    "type": "object"
+  },
+  "name": "fabric_lease"
+}
+```
+
+### `fabric_graph`
+
+```json
+{
+  "_meta": {
+    "io.provenant/schemaVersion": 2
+  },
+  "description": "Run, inspect, cancel or resume a checkpointed graph. Run and resume take a project-local document path.",
+  "inputSchema": {
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          },
+          "op": {
+            "const": "cancel"
+          }
+        },
+        "required": [
+          "id",
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "document": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "op": {
+            "const": "resume"
+          }
+        },
+        "required": [
+          "document",
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "document": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "op": {
+            "const": "run"
+          }
+        },
+        "required": [
+          "document",
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          },
+          "op": {
+            "const": "status"
+          }
+        },
+        "required": [
+          "id",
+          "op"
+        ],
+        "type": "object"
+      }
+    ],
+    "type": "object"
+  },
+  "name": "fabric_graph"
 }
 ```

@@ -12,6 +12,12 @@ fn generated_schema_snapshot_is_checked_in() {
         "/tests/fixtures/tool-schemas.json"
     ));
     assert_eq!(actual, expected);
+    let actual = serde_json::to_string_pretty(&all_catalogue()).expect("catalogue serialises");
+    let expected = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/all-tool-schemas.json"
+    ));
+    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -19,6 +25,9 @@ fn generated_schema_snapshot_is_checked_in() {
 fn update_schema_snapshot() {
     let actual = serde_json::to_string_pretty(catalogue()).expect("catalogue serialises");
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tool-schemas.json");
+    fs::write(path, actual).expect("write schema snapshot");
+    let actual = serde_json::to_string_pretty(&all_catalogue()).expect("catalogue serialises");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/all-tool-schemas.json");
     fs::write(path, actual).expect("write schema snapshot");
 }
 

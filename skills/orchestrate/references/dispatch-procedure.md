@@ -56,11 +56,12 @@ cancel ATTEMPT`. The full RUN/TASK/ATTEMPT form is also accepted.
    in `prompt`, targeting `target: { attempt: ATTEMPT }` and providing
    `expected_generation: 0` (it counts earlier continuations, not the attempt
    record's `generation`) and `operation_id`. On `Conflict`, read the target's
-   `fabric_run` `status`. If its `state` is not `terminal`, wait and retry. If
+   `fabric_run` `status` with `detail: true`. If its `state` is not `terminal`, wait and retry. If
    you are retrying your own resume, repeat it with the same `operation_id`,
    prompt and target; the replay returns the existing continuation, including on
-   a peer. Otherwise use `fabric_run` `list` (local host only) and target the
-   attempt whose `retry_of` is the target. Use a fresh `operation_id` only when
+   a peer. Otherwise page through `fabric_run` `list` (local host only), then
+   inspect candidates with `status` and `detail: true` to find the attempt
+   whose `retry_of` is the target. Use a fresh `operation_id` only when
    the ID was reused with a different prompt.
 8. Use `fabric_run`'s `cancel` operation with an explicit target to stop a run;
    use `fabric_output`'s `read` operation for a bounded slice. Output reads
