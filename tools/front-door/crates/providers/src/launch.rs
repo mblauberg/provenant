@@ -49,6 +49,7 @@ pub struct LaunchSpec {
     pub secret_input: Option<provenant_os::exec::SecretInput>,
     pub cwd: PathBuf,
     pub setup: Vec<SetupStep>,
+    pub(crate) git_wrapper: crate::lane::GitWrapper,
     pub profile: ProviderProfile,
     /// Decoder state bound to any continuation identity.
     pub stream: StreamState,
@@ -219,47 +220,20 @@ pub(crate) fn private_git_objects(
     ]);
     let bin = input.confined.permissions().scratch.path.join("bin");
     let wrapper = bin.join("git");
-    // Preserve Claude's configuration scrub and identity exports before probing
-    // repository discovery. Other adapters previously used the real Git directly.
-    let scrubbed = spec.setup.iter().any(|step| {
+    // Keep routing independent of setup steps so publishing cannot drop it.
+    spec.git_wrapper.scrub |= spec.setup.iter().any(|step| {
         matches!(step,
             SetupStep::WriteExecutable { path, .. } if path == &wrapper
         )
     });
-    spec.setup.retain(|step| {
-        !matches!(step,
-            SetupStep::WriteExecutable { path, .. } | SetupStep::Symlink { link: path, .. }
-            if path == &wrapper
-        )
-    });
-    let routing = scoped_git_routing(input.provenant.git, common, &objects, input.cwd, writer);
-    let bytes = if scrubbed {
-        input.provenant.git_wrapper(&spec.env, &routing)?
-    } else {
-        [
-            b"#!/bin/sh\n".as_slice(),
-            &routing,
-            b"exec \"$lane_git\" \"$@\"\n",
-        ]
-        .concat()
-    };
-    if !spec.setup.contains(&SetupStep::CreateDir(bin.clone())) {
-        spec.setup.push(SetupStep::CreateDir(bin.clone()));
-    }
-    spec.setup.push(SetupStep::WriteExecutable {
-        path: wrapper.clone(),
-        bytes,
-    });
-    let (_, path) = spec
-        .env
-        .iter_mut()
-        .find(|(key, _)| key == "PATH")
-        .ok_or(ProviderError::InvalidPath)?;
-    if std::env::split_paths(path).next().as_ref() != Some(&bin) {
-        *path =
-            std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(path)))
-                .map_err(|_| ProviderError::InvalidPath)?;
-    }
+    spec.git_wrapper.routing = Some(scoped_git_routing(
+        input.provenant.git,
+        common,
+        &objects,
+        input.cwd,
+        writer,
+    ));
+    spec.write_git_wrapper(&bin, input.provenant.git)?;
     // Like Claude's existing scrub wrapper, this is attempt-owned shell code.
     spec.profile.spec.tool_exec_roots.push(subtree(bin));
     spec.profile

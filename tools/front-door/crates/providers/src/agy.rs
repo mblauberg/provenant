@@ -153,6 +153,7 @@ fn prepare(
         secret_input: None,
         cwd: input.cwd.to_owned(),
         setup,
+        git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 // The keyring library reads its token through Apple's `security`.
