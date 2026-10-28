@@ -2643,6 +2643,7 @@ mod tests {
         plan.read_only = None;
         plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
             git_grants_digest: [7; 32],
+            publishing_disabled: false,
             cargo_cache: PathGrant {
                 path: "/fixture/cache".into(),
                 scope: PathScope::Subtree,
@@ -2701,6 +2702,7 @@ mod tests {
                 plan.read_only = None;
                 plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
                     git_grants_digest: [7; 32],
+                    publishing_disabled: false,
                     cargo_cache: PathGrant {
                         path: "/fixture/cache".into(),
                         scope: PathScope::Subtree,
@@ -2770,6 +2772,7 @@ mod tests {
                 plan.read_only = None;
                 plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
                     git_grants_digest: [7; 32],
+                    publishing_disabled: false,
                     cargo_cache: subtree("/fixture/cache"),
                 }));
             }
@@ -3547,6 +3550,7 @@ mod tests {
     fn serialised_digest_cannot_authorise_without_a_verified_worktree() {
         let authority = WorktreeWriteAuthority {
             git_grants_digest: [0; 32],
+            publishing_disabled: false,
             cargo_cache: PathGrant {
                 path: "/fixture/home/Library/Caches/provenant-lane-cargo/fixture".into(),
                 scope: PathScope::Subtree,

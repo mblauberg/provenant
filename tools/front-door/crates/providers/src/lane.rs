@@ -15,6 +15,7 @@ impl crate::LaunchSpec {
         scratch: &Path,
         git: &Path,
         gh: &Path,
+        home: &Path,
         branch: &str,
     ) -> Result<(), ProviderError> {
         provenant_confinement::repo::GitRefName::branch(branch)
@@ -29,9 +30,11 @@ impl crate::LaunchSpec {
             }
             Ok(value.to_owned())
         };
-        let git = shell_quote(&text(git)?);
+        let git_path = text(git)?;
+        let git = shell_quote(&git_path);
         let gh_path = text(gh)?;
-        let gh = shell_quote(&gh_path);
+        let gh_config = shell_quote(&text(&home.join(".config/gh"))?);
+        let gh = format!("GH_CONFIG_DIR={gh_config} {}", shell_quote(&gh_path));
         let config = scratch.join("publishing.gitconfig");
         let hooks = scratch.join("publishing-hooks");
         let config_text = format!(
@@ -46,19 +49,31 @@ impl crate::LaunchSpec {
              export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM\nexec {git} -c {include} \"$@\"\n"
         );
         let wrapper_path = scratch.join("bin/git");
-        let step = self
-            .setup
-            .iter_mut()
-            .find(|step| match step {
-                SetupStep::Symlink { link, .. } => link == &wrapper_path,
-                SetupStep::WriteExecutable { path, .. } => path == &wrapper_path,
-                _ => false,
-            })
-            .ok_or(ProviderError::UnsupportedPolicy)?;
-        *step = SetupStep::WriteExecutable {
+        let step = self.setup.iter_mut().find(|step| match step {
+            SetupStep::Symlink { link, .. } => link == &wrapper_path,
+            SetupStep::WriteExecutable { path, .. } => path == &wrapper_path,
+            _ => false,
+        });
+        let wrapper = SetupStep::WriteExecutable {
             path: wrapper_path,
             bytes: wrapper.into_bytes(),
         };
+        if let Some(step) = step {
+            *step = wrapper;
+        } else {
+            self.setup.push(SetupStep::CreateDir(scratch.join("bin")));
+            self.setup.push(wrapper);
+        }
+        let (_, path) = self
+            .env
+            .iter_mut()
+            .find(|(key, _)| key == "PATH")
+            .ok_or(ProviderError::InvalidPath)?;
+        *path = std::env::join_paths(
+            std::iter::once(scratch.join("bin"))
+                .chain(std::env::split_paths(path).filter(|path| path != &scratch.join("bin"))),
+        )
+        .map_err(|_| ProviderError::InvalidPath)?;
         self.setup.extend([
             SetupStep::CreateDir(hooks.clone()),
             SetupStep::WriteFile {
@@ -69,11 +84,33 @@ impl crate::LaunchSpec {
                 path: hooks.join("pre-push"),
                 bytes: publishing_hook(&git, &gh, branch).into_bytes(),
             },
-            SetupStep::Symlink {
-                link: scratch.join("bin/gh"),
-                target: gh_path.clone().into(),
+            SetupStep::WriteExecutable {
+                path: scratch.join("bin/gh"),
+                bytes: format!(
+                    "#!/bin/sh\nGH_CONFIG_DIR={gh_config}\nexport GH_CONFIG_DIR\nexec {} \"$@\"\n",
+                    shell_quote(&gh_path)
+                )
+                .into_bytes(),
             },
         ]);
+        self.profile
+            .spec
+            .process_executables
+            .push(exact(git_path.as_str()));
+        self.profile.spec.runtime_reads.extend(
+            std::iter::once(exact(git_path.as_str())).chain(
+                crate::dylib::linked_libraries(Path::new(&git_path))
+                    .into_iter()
+                    .map(exact),
+            ),
+        );
+        if let Some(prefix) = Path::new(&git_path).parent().and_then(Path::parent) {
+            let core = prefix.join("libexec/git-core");
+            if core.is_dir() {
+                self.profile.spec.runtime_reads.push(subtree(&core));
+                self.profile.spec.tool_exec_roots.push(subtree(core));
+            }
+        }
         self.profile
             .spec
             .process_executables
@@ -107,6 +144,8 @@ fn publishing_hook(git: &str, gh: &str, branch: &str) -> String {
 set -eu
 refuse() {{ echo 'lane push refused: only an unprotected lane branch on origin may advance' >&2; exit 1; }}
 [ "$1" = origin ] || refuse
+# Read the immutable repository config, without push command-line overrides.
+unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
 branch={branch}
 case "$branch" in main|master) refuse ;; esac
 [ "$({git} symbolic-ref --quiet HEAD)" = "refs/heads/$branch" ] || refuse
@@ -368,12 +407,23 @@ mod tests {
             route.account_key = None;
             let plan = crate::tests::fixture_access_plan(
                 crate::Access::WorktreeWrite,
-                provenant_records::AdapterSpec::get(id).and_then(|spec| spec.authentication), false,
+                provenant_records::AdapterSpec::get(id).and_then(|spec| spec.authentication),
+                false,
             );
             let mut spec = entry.adapter.prepare(crate::tests::fixture_input(
-                &route, &plan, &prompt, Path::new("/fixture/repo"), (id == "claude").then_some(&token),
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                (id == "claude").then_some(&token),
             ))?;
-            let result = spec.configure_publishing(&plan.permissions().scratch.path, Path::new("/fixture/git"), Path::new("/fixture/gh"), "feat/lane");
+            let result = spec.configure_publishing(
+                &plan.permissions().scratch.path,
+                Path::new("/fixture/git"),
+                Path::new("/fixture/gh"),
+                Path::new("/fixture/home"),
+                "feat/lane",
+            );
             assert!(result.is_ok(), "publishing setup for {id}: {result:?}");
         }
         Ok(())
@@ -393,6 +443,7 @@ mod tests {
         let home = root.join("home");
         let repo = root.join("repo");
         let origin = root.join("origin.git");
+        let other_origin = root.join("other.git");
         let worktree = root.join("lane");
         let attempt = root.join("attempt");
         let scratch = attempt.join("tmp");
@@ -415,7 +466,7 @@ mod tests {
             br#"#!/bin/sh
 [ ! -f "$HOME/offline" ] || exit 1
 case "$1" in
-    auth) cat "$HOME/.config/gh/hosts.yml" ;;
+    auth) cat "$GH_CONFIG_DIR/hosts.yml" ;;
     repo) cat "$HOME/default" ;;
     api) case "$3" in
         */rules/branches/*) cat "$HOME/rules" ;;
@@ -477,6 +528,12 @@ esac
                 origin.to_str().ok_or("origin path")?,
             ],
             vec![
+                "init",
+                "-q",
+                "--bare",
+                other_origin.to_str().ok_or("other origin path")?,
+            ],
+            vec![
                 "remote",
                 "add",
                 "origin",
@@ -517,7 +574,7 @@ esac
         let mut spec = Codex.prepare(crate::tests::fixture_input(
             &route, &plan, &prompt, &worktree, None,
         ))?;
-        spec.configure_publishing(&scratch, &git, &gh, "feat/lane")?;
+        spec.configure_publishing(&scratch, &git, &gh, &home, "feat/lane")?;
         // Apply only the generated publishing setup; adapter-specific auth
         // setup belongs to the existing provider tests.
         fs::create_dir_all(scratch.join("bin"))?;
@@ -542,11 +599,13 @@ esac
         env[1].1 = format!("{}:/usr/bin:/bin", scratch.join("bin").display()).into();
         let lane_git = scratch.join("bin/git");
         // The wrapper must carry the config even when the shell scrubs env.
+        let mut private_env = env.clone();
+        private_env[0].1 = root.join("private-home").into();
         let credential = run(
             &lane_git,
             &["credential", "fill"],
             &worktree,
-            &env,
+            &private_env,
             Some(b"protocol=https\nhost=github.com\n\n"),
         )?;
         assert_eq!(credential.termination, Termination::Exit(0));
@@ -569,12 +628,14 @@ esac
             push(&["push", "origin", "HEAD"])?.termination,
             Termination::Exit(0)
         );
+        let remote_override = format!("remote.origin.pushurl={}", other_origin.display());
         for args in [
             vec!["push", "origin", "HEAD:main"],
             vec!["push", "origin", "HEAD:other"],
             vec!["push", "origin", "HEAD:refs/tags/v1"],
             vec!["push", "origin", ":refs/heads/feat/lane"],
             vec!["push", origin.to_str().ok_or("origin path")?, "HEAD"],
+            vec!["-c", &remote_override, "push", "origin", "HEAD"],
         ] {
             assert_ne!(
                 push(&args)?.termination,

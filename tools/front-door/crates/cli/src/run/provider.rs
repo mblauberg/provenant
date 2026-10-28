@@ -85,6 +85,17 @@ fn prepare_with(
         Some(writer) => writer.worktree.path().to_owned(),
         None => canonical(registry.cwd.ok_or("working directory is unavailable")?)?,
     };
+    // gh is optional on the host. A missing executable must not prevent a
+    // writer from doing local work or grant it unused publishing credentials.
+    let publishing_gh = (writer.is_some()
+        && task
+            .profile
+            .knobs
+            .get("lanes.publish")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true))
+    .then(|| resolve_executable("gh").ok())
+    .flatten();
     let git_context = task
         .base
         .as_deref()
@@ -217,11 +228,7 @@ fn prepare_with(
             &task.access,
             &host_writes,
             adapter,
-            task.profile
-                .knobs
-                .get("lanes.publish")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(true),
+            publishing_gh.is_some(),
         )
         .and_then(|request| ConfinedPlan::new(request).map_err(|error| error.to_string()))
         {
@@ -424,11 +431,7 @@ fn prepare_with(
             &task.access,
             &host_writes,
             adapter.id(),
-            task.profile
-                .knobs
-                .get("lanes.publish")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(true),
+            publishing_gh.is_some(),
         )
         .and_then(|request| match writer.as_ref() {
             Some(_) => ConfinedPlan::new(request)
@@ -522,12 +525,16 @@ fn prepare_with(
                 continue;
             }
         };
-        if plan.permissions().writer_publishing() {
-            let publishing = resolve_executable("gh").and_then(|gh| {
+        if let Some(gh) = publishing_gh
+            .as_ref()
+            .filter(|_| plan.permissions().writer_publishing())
+        {
+            let publishing = (|| {
                 spec.configure_publishing(
                     scratch,
                     &git,
-                    &gh,
+                    gh,
+                    &home,
                     writer
                         .as_ref()
                         .ok_or("writer authority missing")?
@@ -535,7 +542,7 @@ fn prepare_with(
                         .short_name(),
                 )
                 .map_err(|error| error.to_string())
-            });
+            })();
             if let Err(error) = publishing {
                 reasons.push(skip(&label, SkipKind::Setup, error));
                 continue;

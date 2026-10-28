@@ -35,6 +35,10 @@ would discard remote history, including forced rewinds. GitHub protection
 lookups must succeed before a push proceeds. The hook checks active rules even
 when the branch has not been created on GitHub yet.
 
+This hook governs ordinary lane Git pushes. A lane with the full gh login can
+bypass it with `--no-verify`, change its scratch files or use the GitHub API.
+Repository rulesets remain the server-side boundary for those actions.
+
 Use `gh pr create`, `gh pr comment`, `gh pr view` and `gh pr checks` to manage
 the pull request. Merge through `provenant pr merge --head SHA N` or `pr land`,
 which require green CI for the exact head. The Provenant executable is not on
@@ -47,6 +51,7 @@ Publishing defaults on. Disable it for a dispatch with
 Set `[knobs] "lanes.publish" = false` in the host configuration for a persistent
 opt-out. Disabling it removes the writer's gh read allowance and publishing
 setup. Read-only lanes keep their existing open-network gh read access.
+Hosts without gh continue local writer work without publishing setup or grants.
 
 After a settled writer without delivery, run:
 
