@@ -414,8 +414,7 @@ pub fn worktree_cargo_cache(
 }
 
 /// Prepare only derived writer directories outside the child sandbox. This
-/// also creates missing nested branch/ref-log parents without granting the
-/// child authority to create sibling refs. Call while holding writer custody,
+/// creates the lane cache and other derived directories. Call while holding writer custody,
 /// before collecting `required_anchors`. Shared config and packed refs remain
 /// immutable; tracking refs remain host-owned.
 pub fn prepare_writer_directories(
@@ -520,7 +519,7 @@ pub(crate) struct WorktreeWriteGrants {
     packed_refs_lock: PathGrant,
     head: [PathGrant; 14],
     objects: PathGrant,
-    selected_ref: [PathGrant; 4],
+    branch: String,
 }
 
 impl WorktreeWriteGrants {
@@ -573,13 +572,7 @@ impl WorktreeWriteGrants {
             ]
             .map(|name| exact(private.join(name))),
             objects: subtree(common.join("objects")),
-            selected_ref: [
-                format!("refs/heads/{branch}"),
-                format!("refs/heads/{branch}.lock"),
-                format!("logs/refs/heads/{branch}"),
-                format!("logs/refs/heads/{branch}.lock"),
-            ]
-            .map(|relative| exact(common.join(relative))),
+            branch: branch.to_owned(),
         }
     }
 
@@ -592,12 +585,13 @@ impl WorktreeWriteGrants {
             .chain(self.fetch_heads.iter())
             .chain(self.head.iter())
             .chain(std::iter::once(&self.objects))
-            .chain(self.selected_ref.iter())
     }
 
     fn digest(&self, cache: &PathGrant) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"provenant-worktree-git-grants-v11\0");
+        digest.update(b"provenant-worktree-git-grants-v12\0");
+        digest.update((self.branch.len() as u64).to_be_bytes());
+        digest.update(self.branch.as_bytes());
         for grant in self.iter().chain([cache]) {
             let bytes = grant.path.as_os_str().as_encoded_bytes();
             digest.update((bytes.len() as u64).to_be_bytes());
@@ -2942,6 +2936,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn writer_grants_do_not_include_shared_branch_paths() {
+        let common = Path::new("/fixture/git");
+        let grants = WorktreeWriteGrants::from_paths(
+            Path::new("/fixture/lane"),
+            Path::new("/fixture/git/worktrees/lane"),
+            common,
+            "lane/test",
+        );
+        for relative in [
+            "refs/heads/lane/test",
+            "refs/heads/lane/test.lock",
+            "logs/refs/heads/lane/test",
+            "logs/refs/heads/lane/test.lock",
+        ] {
+            assert!(
+                !grants
+                    .iter()
+                    .any(|grant| grant.path == common.join(relative))
+            );
+        }
+        let other = WorktreeWriteGrants::from_paths(
+            Path::new("/fixture/lane"),
+            Path::new("/fixture/git/worktrees/lane"),
+            common,
+            "lane/other",
+        );
+        let cache = PathGrant {
+            path: "/fixture/cache".into(),
+            scope: PathScope::Subtree,
+        };
+        assert_ne!(grants.digest(&cache), other.digest(&cache));
+    }
+
     #[cfg(target_os = "macos")]
     fn worktree_grants_fixture() -> WorktreeWriteGrants {
         let exact = |name: &str| PathGrant {
@@ -2963,7 +2991,7 @@ mod tests {
             packed_refs_lock: exact("packed-refs.lock"),
             head: std::array::from_fn(|i| exact(&format!("head-{i}"))),
             objects: subtree("/fixture/git/objects"),
-            selected_ref: std::array::from_fn(|i| exact(&format!("ref-{i}"))),
+            branch: "fixture".to_owned(),
         }
     }
 
@@ -4000,12 +4028,7 @@ mod tests {
         );
         assert_eq!(grants.objects.path, common.join("objects"));
         assert_eq!(grants.common_exclude.path, common.join("info/exclude"));
-        assert!(
-            grants
-                .selected_ref
-                .iter()
-                .all(|grant| grant.path.starts_with(&common))
-        );
+        assert!(!missing_parent.exists());
 
         let common_heads = common.join("refs/heads/s3");
         let common_logs = common.join("logs/refs/heads/s3");

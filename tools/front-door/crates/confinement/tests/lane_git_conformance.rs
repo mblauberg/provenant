@@ -740,6 +740,45 @@ fn linked_lane_uses_private_objects_and_cannot_mutate_shared_objects() -> Result
         "link probe could not execute: {}",
         String::from_utf8_lossy(&control.stderr)
     );
+    // Probe vacant names so an existing ref or reflog cannot cause a false
+    // positive from ln's EEXIST failure. Restore the host files afterwards.
+    for relative in [
+        "refs/heads/lane/test",
+        "refs/heads/lane/test.lock",
+        "logs/refs/heads/lane/test",
+        "logs/refs/heads/lane/test.lock",
+    ] {
+        let path = repo_git.join(relative);
+        let original = match fs::read(&path) {
+            Ok(bytes) => {
+                let unlink = Command::new("/usr/bin/sandbox-exec")
+                    .args(["-p", sbpl, "/bin/rm"])
+                    .arg(&path)
+                    .output()?;
+                assert!(!unlink.status.success(), "sandbox removed {relative}");
+                fs::remove_file(&path)?;
+                Some(bytes)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let output = Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", sbpl, "/bin/ln", "-s"])
+            .arg(repo_git.join("config"))
+            .arg(&path)
+            .output()?;
+        assert!(
+            !output.status.success(),
+            "sandbox permitted a link at {relative}"
+        );
+        assert!(
+            path.symlink_metadata().is_err(),
+            "link appeared at {relative}"
+        );
+        if let Some(bytes) = original {
+            fs::write(path, bytes)?;
+        }
+    }
     for relative in [
         "refs/remotes/origin/lane/test.lock",
         "logs/refs/remotes/origin/lane/test",

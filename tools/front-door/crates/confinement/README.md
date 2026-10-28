@@ -21,8 +21,8 @@ same-named and recreated worktrees do not share a lane cache. Host builds use
 separate target directories outside this namespace.
 Before collecting `required_anchors`, call `prepare_writer_directories` under
 writer custody; pass the same independently resolved home in `Anchors.home`.
-This prepares missing nested ref/reflog parents and the exact cache without
-allowing sibling refs or caches. Existing cache and lane-parent directories
+This prepares the exact cache and other derived directories. Shared branch refs
+and reflogs are host-owned; lane Git uses private refs. Existing cache and lane-parent directories
 must belong to the effective user with mode 0700; setup refuses mismatches
 without changing their metadata. Compilation rechecks the held cache.
 Common config, remote tracking and packed
