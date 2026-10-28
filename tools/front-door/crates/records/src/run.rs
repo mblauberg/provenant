@@ -24,6 +24,9 @@ pub struct ChairBinding {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalRequest {
+    /// Host-verifiable child run and attempt IDs. Absent on legacy, unindexed runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_attempt_id_version: Option<u64>,
     /// Submission proposal only. Readers trust the host-owned Fabric index.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chair: Option<ChairBinding>,
@@ -710,6 +713,7 @@ mod tests {
     fn request_with_a_removed_task_class_retains_its_sealed_digest()
     -> Result<(), Box<dyn std::error::Error>> {
         let request = CanonicalRequest {
+            child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,

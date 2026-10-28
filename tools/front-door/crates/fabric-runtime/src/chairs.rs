@@ -79,6 +79,7 @@ mod tests {
 
     fn proposal() -> CanonicalRequest {
         CanonicalRequest {
+            child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,

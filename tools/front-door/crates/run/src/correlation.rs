@@ -11,6 +11,66 @@ use std::path::Path;
 pub const WORK_INDEX_FILE: &str = "work-index.sqlite3";
 const ROW_LIMIT: usize = 64;
 const MEMBER_BYTES: usize = 64 * 1024;
+/// Run selectors also need a host-verifiable namespace, including for runs
+/// predating the host's chair or membership indexes.
+pub(crate) fn child_run_id(
+    project: ProjectId,
+    request: &CanonicalRequest,
+    operation: &provenant_core::OperationId,
+) -> Result<Option<RunId>> {
+    match request.child_attempt_id_version {
+        None => Ok(None),
+        Some(1) => {
+            let parent = request.parent_attempt.ok_or(RunError::Validation(
+                "derived child IDs require a parent attempt",
+            ))?;
+            use sha2::{Digest as _, Sha256};
+            let mut hash = Sha256::new();
+            hash.update(b"provenant-child-run-v1\0");
+            hash.update(project.as_bytes());
+            hash.update(parent.as_bytes());
+            hash.update(
+                provenant_records::CanonicalV1::file_digest(operation.as_str().as_bytes()).bytes(),
+            );
+            hash.update(request.digest()?.as_bytes());
+            let digest = hash.finalize();
+            let mut id = [0; 16];
+            id.copy_from_slice(&digest[..16]);
+            Ok(Some(RunId::from_bytes(id)))
+        }
+        Some(_) => Err(RunError::Validation("unsupported child attempt ID version")),
+    }
+}
+/// Version 1 binds the ID to the entire proposal and the host's namespace.
+/// No lane-proposed ID is adopted as authority, even at first validation.
+pub(crate) fn child_attempt_id(
+    project: ProjectId,
+    run: RunId,
+    request: &CanonicalRequest,
+    task: TaskId,
+) -> Result<Option<AttemptId>> {
+    match request.child_attempt_id_version {
+        None => Ok(None),
+        Some(1) => {
+            let parent = request.parent_attempt.ok_or(RunError::Validation(
+                "derived child IDs require a parent attempt",
+            ))?;
+            use sha2::{Digest as _, Sha256};
+            let mut hash = Sha256::new();
+            hash.update(b"provenant-child-attempt-v1\0");
+            hash.update(project.as_bytes());
+            hash.update(parent.as_bytes());
+            hash.update(run.as_bytes());
+            hash.update(task.as_bytes());
+            hash.update(request.digest()?.as_bytes());
+            let digest = hash.finalize();
+            let mut id = [0; 16];
+            id.copy_from_slice(&digest[..16]);
+            Ok(Some(AttemptId::from_bytes(id)))
+        }
+        Some(_) => Err(RunError::Validation("unsupported child attempt ID version")),
+    }
+}
 /// Repository is the verified canonical Git common directory. Head is the
 /// host-observed launch HEAD. No selector accepts a nested store locator.
 #[derive(Debug, Clone)]
@@ -197,13 +257,47 @@ impl WorkIndex {
     }
 }
 impl RunStore {
+    pub(crate) fn check_child_run_id(
+        &self,
+        run: RunId,
+        request: &CanonicalRequest,
+        operation: &provenant_core::OperationId,
+    ) -> Result<()> {
+        if child_run_id(self.context.project_id, request, operation)?
+            .is_some_and(|expected| expected != run)
+        {
+            return Err(RunError::Validation(
+                "child run ID does not match host derivation",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn seal_work(
         &self,
         record: &AttemptRecord,
         plan: &PreparedLaunch,
+        child: Option<&CanonicalRequest>,
         call: &Request<'_>,
     ) -> Result<()> {
-        if self.sealed_requester.is_some()
+        if let Some(request) = child {
+            self.child_requester()?;
+            self.check_child_run_id(record.run_id, request, &record.operation_id)?;
+            match child_attempt_id(
+                self.context.project_id,
+                record.run_id,
+                request,
+                record.task_id,
+            )? {
+                None => return Ok(()),
+                Some(id) if id == record.attempt_id => {}
+                Some(_) => {
+                    return Err(RunError::Validation(
+                        "child attempt ID does not match host derivation",
+                    ));
+                }
+            }
+        } else if self.sealed_requester.is_some()
             || self.context.state_root.as_path() != self.writer_registry()
         {
             return Ok(());
@@ -433,6 +527,11 @@ mod tests {
 
     #[test]
     fn request_correlation_rewritten_child_cannot_poison_sibling() -> TestResult {
+        rewritten_child(false)?;
+        rewritten_child(true)
+    }
+
+    fn rewritten_child(before_validation: bool) -> TestResult {
         let temp = tempfile::tempdir()?;
         let host = context(temp.path())?;
         let lane_dir = temp.path().join("lane");
@@ -447,14 +546,21 @@ mod tests {
         let store = RunStore::open(&lane, &call)?
             .with_writer_registry(host.state_root.as_path())
             .with_sealed_requester(host.actor_id);
-        let mut nested = input();
-        nested.run_id = RunId::from_bytes([8; 16]);
-        nested.attempts[0].attempt_id = AttemptId::from_bytes([7; 16]);
-        nested.request.lane_depth = Some(2);
         let parent = AttemptId::from_bytes([9; 16]);
-        nested.request.parent_attempt = Some(parent);
-        store.create(&nested, &call)?;
-        let old = nested.attempts[0].attempt_id.to_string();
+        let mut submission = crate::service_tests::submission("child");
+        submission.parent_attempt = Some(parent);
+        submission.lane_depth = 2;
+        let nested = Service::new(&store).dispatch(submission, &lane_dir, &call)?;
+        let nested_attempt = store.pending_attempts(nested.run_id, &call)?[0].clone();
+        let validated = store.validate_child(
+            nested.run_id,
+            parent,
+            &input().request.tasks[0],
+            1,
+            2,
+            &call,
+        )?;
+        let old = nested_attempt.attempt_id.to_string();
         let stolen = sibling.attempts[0].attempt_id.to_string();
         store.db.execute_batch(&format!("PRAGMA foreign_keys=OFF;
             UPDATE attempts SET id='{stolen}',record=CAST(replace(CAST(record AS TEXT),'{old}','{stolen}') AS BLOB);
@@ -467,21 +573,33 @@ mod tests {
             .join(nested.run_id.to_string())
             .join("attempts");
         std::fs::rename(attempts.join(&old), attempts.join(&stolen))?;
-        let validated = store.validate_child(
-            nested.run_id,
-            parent,
-            &input().request.tasks[0],
-            1,
-            2,
-            &call,
-        )?;
-        store.start_child(
+        if before_validation {
+            assert!(matches!(
+                store.validate_child(
+                    nested.run_id,
+                    parent,
+                    &input().request.tasks[0],
+                    1,
+                    2,
+                    &call,
+                ),
+                Err(RunError::Validation(
+                    "child attempt ID does not match host derivation"
+                ))
+            ));
+        }
+        let started = store.start_child(
             nested.run_id,
             &validated,
             &crate::dispatch_tests::Ready,
             &|_, _| Err(RunError::Validation("fixture child handoff")),
             &call,
         )?;
+        assert!(
+            matches!(started.as_slice(), [Started::Refused { reason, .. }]
+            if reason == "child attempt ID does not match host derivation"),
+            "{started:?}"
+        );
         let outcome = root.start(
             sibling.run_id,
             &crate::dispatch_tests::Ready,
@@ -492,7 +610,7 @@ mod tests {
         let forged = WorkSelector {
             project: host.project_id,
             run: nested.run_id,
-            task: Some(nested.attempts[0].task_id),
+            task: Some(nested_attempt.task_id),
             attempt: Some(sibling.attempts[0].attempt_id),
             repository: None,
             head: None,
@@ -504,6 +622,238 @@ mod tests {
             "forged lookup={coverage:?}, sibling={outcome:?}"
         );
         assert_eq!(coverage, WorkCoverage::Unindexed);
+        Ok(())
+    }
+
+    #[test]
+    fn request_correlation_child_run_namespace_cannot_claim_sibling() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let host = context(temp.path())?;
+        let lane_dir = temp.path().join("lane");
+        std::fs::create_dir(&lane_dir)?;
+        let lane = context(&lane_dir)?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let sibling = input();
+        let root = RunStore::open(&host, &call)?;
+        root.create(&sibling, &call)?;
+        let store = RunStore::open(&lane, &call)?
+            .with_writer_registry(host.state_root.as_path())
+            .with_sealed_requester(host.actor_id);
+        let parent = AttemptId::from_bytes([9; 16]);
+        // The lane claims a historical run/task namespace and recomputes the
+        // public attempt hash. No host membership or chair row exists yet.
+        let mut forged = input();
+        forged.request.parent_attempt = Some(parent);
+        forged.request.lane_depth = Some(2);
+        forged.request.child_attempt_id_version = Some(1);
+        forged.attempts[0].attempt_id = child_attempt_id(
+            host.project_id,
+            forged.run_id,
+            &forged.request,
+            forged.attempts[0].task_id,
+        )?
+        .ok_or("derived ID")?;
+        store.create(&forged, &call)?;
+        let validation = store.validate_child(
+            forged.run_id,
+            parent,
+            &input().request.tasks[0],
+            1,
+            2,
+            &call,
+        );
+        if let Ok(validated) = &validation {
+            store.start_child(
+                forged.run_id,
+                validated,
+                &crate::dispatch_tests::Ready,
+                &|_, _| Err(RunError::Validation("fixture child handoff")),
+                &call,
+            )?;
+        }
+        let index = WorkIndex::open(host.state_root.as_path(), &call)?;
+        let selection = WorkSelector {
+            project: host.project_id,
+            run: sibling.run_id,
+            task: Some(sibling.attempts[0].task_id),
+            attempt: None,
+            repository: None,
+            head: None,
+        };
+        assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Unindexed);
+        assert!(matches!(
+            validation,
+            Err(RunError::Validation(
+                "child run ID does not match host derivation"
+            ))
+        ));
+        // Bypassing validation must also fail at the launch boundary.
+        assert!(matches!(
+            store.start_child(
+                forged.run_id,
+                &forged.request,
+                &crate::dispatch_tests::Ready,
+                &|_, _| unreachable!("forged run reached handoff"),
+                &call
+            ),
+            Err(RunError::Validation(
+                "child run ID does not match host derivation"
+            ))
+        ));
+        let outcome = root.start(
+            sibling.run_id,
+            &crate::dispatch_tests::Ready,
+            &|_, _| Err(RunError::Validation("fixture sibling handoff")),
+            &call,
+        )?;
+        assert!(
+            matches!(outcome.as_slice(), [Started::Refused { reason, .. }] if reason.contains("fixture sibling handoff"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn request_correlation_derived_child_and_legacy_coverage() -> TestResult {
+        for (legacy, child_launch, host_view) in [
+            (false, true, true),
+            (true, true, true),
+            (false, false, true),
+            (false, false, false),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let host = context(temp.path())?;
+            let lane_dir = temp.path().join("lane");
+            std::fs::create_dir(&lane_dir)?;
+            let lane = context(&lane_dir)?;
+            let clock = clock();
+            let cancel = CancelToken::new();
+            let call = call(&clock, &cancel);
+            let lane_store =
+                RunStore::open(&lane, &call)?.with_writer_registry(host.state_root.as_path());
+            let parent = AttemptId::from_bytes([9; 16]);
+            let run = if legacy {
+                let mut proposal = input();
+                proposal.request.parent_attempt = Some(parent);
+                proposal.request.lane_depth = Some(2);
+                // An old canonical request still round-trips without a marker.
+                let raw = serde_json::to_value(&proposal.request)?;
+                assert!(raw.get("child_attempt_id_version").is_none());
+                lane_store.create(&proposal, &call)?
+            } else {
+                let mut proposal = crate::service_tests::submission("child");
+                proposal.parent_attempt = Some(parent);
+                proposal.lane_depth = 2;
+                Service::new(&lane_store).dispatch(proposal, &lane_dir, &call)?
+            };
+            let record = lane_store.pending_attempts(run.run_id, &call)?[0].clone();
+            let selector = WorkSelector {
+                project: host.project_id,
+                run: run.run_id,
+                task: Some(record.task_id),
+                attempt: Some(record.attempt_id),
+                repository: None,
+                head: None,
+            };
+            let index = WorkIndex::open(host.state_root.as_path(), &call)?;
+            assert_eq!(index.validate(&selector, &call)?, WorkCoverage::Unindexed);
+            let store = if host_view {
+                lane_store.with_sealed_requester(host.actor_id)
+            } else {
+                lane_store
+            };
+            let validated =
+                store.validate_child(run.run_id, parent, &input().request.tasks[0], 1, 2, &call)?;
+            assert_eq!(
+                validated.child_attempt_id_version,
+                if legacy { None } else { Some(1) }
+            );
+            let handed = std::cell::Cell::new(false);
+            let handoff = |child: &AttemptRecord, _| {
+                assert_eq!(child.attempt_id, record.attempt_id);
+                handed.set(true);
+                Err(RunError::Validation("fixture child handoff"))
+            };
+            if child_launch {
+                store.start_child(
+                    run.run_id,
+                    &validated,
+                    &crate::dispatch_tests::Ready,
+                    &handoff,
+                    &call,
+                )?;
+            } else {
+                store.start(run.run_id, &crate::dispatch_tests::Ready, &handoff, &call)?;
+            }
+            assert!(handed.get());
+            // Membership survives removal of the lane's records and host reopen.
+            drop(store);
+            std::fs::remove_dir_all(lane.state_root.as_path())?;
+            drop(index);
+            let index = WorkIndex::open(host.state_root.as_path(), &call)?;
+            assert_eq!(
+                index.validate(&selector, &call)?,
+                if !legacy && child_launch {
+                    WorkCoverage::Verified
+                } else {
+                    WorkCoverage::Unindexed
+                }
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn request_correlation_child_id_contract() -> TestResult {
+        let (_temp, host, clock, cancel) = fixture()?;
+        let call = call(&clock, &cancel);
+        let mut proposal = input();
+        proposal.request.parent_attempt = Some(AttemptId::from_bytes([9; 16]));
+        proposal.request.lane_depth = Some(2);
+        proposal.request.child_attempt_id_version = Some(1);
+        let task = proposal.attempts[0].task_id;
+        let id = child_attempt_id(host.project_id, proposal.run_id, &proposal.request, task)?
+            .ok_or("missing ID")?;
+        for field in 0..5 {
+            let mut request = proposal.request.clone();
+            let mut project = host.project_id;
+            let mut run = proposal.run_id;
+            let mut task = task;
+            match field {
+                0 => project = ProjectId::from_bytes([99; 16]),
+                1 => request.parent_attempt = Some(AttemptId::from_bytes([99; 16])),
+                2 => run = RunId::from_bytes([99; 16]),
+                3 => task = TaskId::from_bytes([99; 16]),
+                _ => request.concurrency += 1,
+            }
+            assert_ne!(child_attempt_id(project, run, &request, task)?, Some(id));
+        }
+        let store = RunStore::open(&host, &call)?.with_sealed_requester(host.actor_id);
+        proposal.attempts[0].attempt_id = id;
+        proposal.request.child_attempt_id_version = Some(2);
+        store.create(&proposal, &call)?;
+        assert!(matches!(
+            store.validate_child(
+                proposal.run_id,
+                proposal.request.parent_attempt.ok_or("parent")?,
+                &input().request.tasks[0],
+                1,
+                2,
+                &call
+            ),
+            Err(RunError::Validation("unsupported child attempt ID version"))
+        ));
+        assert!(matches!(
+            store.start_child(
+                proposal.run_id,
+                &proposal.request,
+                &crate::dispatch_tests::Ready,
+                &|_, _| unreachable!("unsupported scheme reached handoff"),
+                &call
+            ),
+            Err(RunError::Validation("unsupported child attempt ID version"))
+        ));
         Ok(())
     }
     #[test]

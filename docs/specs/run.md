@@ -72,10 +72,29 @@ prompts.
 ## Work correlation lookup
 
 `run::WorkIndex` owns immutable membership in `<host-state>/work-index.sqlite3`.
-Only the trusted host store seals its minted attempt IDs, from root dispatch,
-resume or continuation, before marking them Starting. Nested attempts are never
-sealed: their IDs originate in a lane-writable store. Trusted nested membership
-requires host-owned child enrolment, which is a separate contract.
+The trusted host seals root, resume and continuation attempts before marking
+them Starting. New nested dispatches use host-verifiable derived IDs. Their
+canonical request carries `child_attempt_id_version: 1`. The child run ID is
+the first 16 bytes of SHA-256 over `provenant-child-run-v1\0`, then the raw
+project and parent attempt IDs, the SHA-256 digest of the operation ID's UTF-8
+bytes, and the canonical request digest. Each attempt ID is the
+first 16 bytes of SHA-256 over `provenant-child-attempt-v1\0` followed by the raw,
+fixed-width project, parent attempt, run, task and canonical request digest
+bytes, in that order. The namespace comes from the host's project and sealed
+parent context. The host checks every proposed ID during child validation and
+checks both run and attempt identities again at launch and sealing. A mismatch refuses
+launch before membership capture, so rewriting a queued child ID cannot claim
+a sibling's membership or poison its launch. A lane cannot claim a historical
+run namespace by choosing its run ID and recomputing the public attempt hash.
+
+This scheme avoids rekeying lane-published records and IDs already returned to
+callers. There is no migration of existing child records: an absent version
+marker preserves legacy launch behaviour and explicit `Unindexed` coverage.
+An unknown version refuses launch. Removing the marker only loses indexing;
+it never adopts a lane-proposed ID as trusted membership. Replays preserve the
+original version, including repair of legacy prepared operations. Calling the
+ordinary start path on a child store cannot seal membership. Only host child
+launch from a validated versioned request can seal nested membership.
 
 Opening and sealing remain crate-private. The public `validate_work` reader
 accepts only the configured host `StateRoot`; CLI/MCP bind it to their trusted
@@ -91,8 +110,8 @@ successful launch nor workflow authority.
 and head constraints. Reads check at most 64 candidates and 64 KiB per record,
 using the same byte bound as writes. `Verified` requires a task or attempt;
 run-only matches are at best `Partial` because there is no trusted complete member list.
-Missing nested, historical and unprepared work, including an empty run-only
-selection, returns `Unindexed`. Contradictory
+Legacy or missing nested, historical and unprepared work, including an empty
+run-only selection, returns `Unindexed`. Contradictory
 facts return `Mismatch`, ahead of unavailable repository/head facts and unindexed
 coverage, including run-only selectors. A mismatch observed among the first 64
 candidates also wins over `Limit`; otherwise `Limit` never proves absence. Lookups traverse no child roots and accept
