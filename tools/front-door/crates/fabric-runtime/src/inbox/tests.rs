@@ -1110,6 +1110,11 @@ fn request_correlation_deadline_expires_on_read_without_rewriting_answers_or_his
     f.clock.advance(DurationMicros::from_micros(10)).unwrap();
     let expired = item(&f, open.request_id);
     assert_eq!(expired.request.state, RequestState::Expired);
+    assert_eq!(
+        expired.request.closure_reason.as_deref(),
+        Some("deadline elapsed")
+    );
+    assert_eq!(expired.history[0].closure_reason, None);
     assert_eq!(expired.request.revision, 1);
     assert_eq!(expired.history.len(), 1);
     assert_eq!(expired.history[0].state, RequestState::Open);

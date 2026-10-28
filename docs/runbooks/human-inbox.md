@@ -155,7 +155,8 @@ pending delivery. A request may also carry `"deadline":"2033-05-18T03:33:20.0000
 MCP request JSON. This is explicit UTC with six fractional digits and must be
 in the future when created. An elapsed deadline refuses the entire creation,
 including any supersession. At or after
-the deadline an unresolved item reads as `expired`, disappears from the open
+the deadline an unresolved item reads as `expired` with reason `deadline elapsed`,
+disappears from the open
 list and refuses new answers. Use `inbox REQUEST_ID` or `inbox --state all` to
 see it. Answered, confirmed, overridden and closed items retain their state,
 answer and delivery, even after the deadline. Expiry does not infer approval.

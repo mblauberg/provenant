@@ -466,6 +466,10 @@ fn revision(value: u64) -> Result<i64> {
 }
 
 fn view(mut value: HumanRequest, at: WallTime) -> HumanRequest {
-    value.state = value.state_at(at);
+    let state = value.state_at(at);
+    if state != value.state {
+        value.closure_reason = Some("deadline elapsed".into());
+    }
+    value.state = state;
     value
 }
