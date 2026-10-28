@@ -3571,22 +3571,25 @@ impl Factory {
 }
 
 fn graph_snapshot(
-    checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint,
+    mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint,
 ) -> provenant_fabric_runtime::graph::GraphRun {
     use provenant_fabric_runtime::graph::{GraphRun, GraphStatus, NodeState};
+    let unfinished =
+        (checkpoint.delivery_required && !checkpoint.delivered && checkpoint.successful())
+            || checkpoint
+                .nodes
+                .iter()
+                .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running));
     let status = if checkpoint.cancelled {
         GraphStatus::Cancelled
+    } else if !unfinished {
+        // A crash can leave a pause behind after the final node was saved.
+        checkpoint.pause_reason = None;
+        GraphStatus::Complete
     } else if checkpoint.pause_reason.is_some() {
         GraphStatus::Paused
-    } else if (checkpoint.delivery_required && !checkpoint.delivered && checkpoint.successful())
-        || checkpoint
-            .nodes
-            .iter()
-            .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running))
-    {
-        GraphStatus::Pending
     } else {
-        GraphStatus::Complete
+        GraphStatus::Pending
     };
     let advance_error = checkpoint
         .nodes
@@ -3947,6 +3950,42 @@ pub fn events(
 }
 #[cfg(test)]
 mod result_tests {
+    #[test]
+    fn graph_status_handles_pause_left_after_terminal_checkpoint() {
+        use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphStatus, NodeState};
+
+        // This is the durable state if the process stops immediately after saving
+        // the final terminal node, before advance clears the structural pause.
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "graph_id": "graph",
+            "plan_digest": "digest",
+            "pause_reason": "node limit exceeded",
+            "nodes": [{"id": "one", "state": "succeeded", "worktree": null, "attempts": []}]
+        }))
+        .unwrap();
+        let run = super::graph_snapshot(checkpoint.clone());
+        assert_eq!(run.status, GraphStatus::Complete);
+        assert!(run.checkpoint.pause_reason.is_none());
+
+        checkpoint.nodes[0].state = NodeState::Running;
+        assert_eq!(
+            super::graph_snapshot(checkpoint.clone()).status,
+            GraphStatus::Paused
+        );
+        checkpoint.nodes[0].state = NodeState::Succeeded;
+        checkpoint.delivery_required = true;
+        assert_eq!(
+            super::graph_snapshot(checkpoint.clone()).status,
+            GraphStatus::Paused
+        );
+        checkpoint.cancelled = true;
+        assert_eq!(
+            super::graph_snapshot(checkpoint).status,
+            GraphStatus::Cancelled
+        );
+    }
+
     #[test]
     fn graph_result_errors_produce_safe_specific_warnings() {
         use provenant_run::RunError;
