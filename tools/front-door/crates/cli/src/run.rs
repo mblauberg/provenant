@@ -248,7 +248,10 @@ impl run::Providers for Registry<'_> {
         let roots = match inputs.resolve(&provenant_os::fs::SystemPathResolver) {
             Ok(roots) => roots,
             Err(_) => {
-                let mut decoded = self.decode(route, stdout, exit, provider_state)?;
+                // A failed sealed-root binding must not fall back to this
+                // registry's unrelated roots when recording capacity evidence.
+                let mut decoded =
+                    Registry::default().decode(route, stdout, exit, provider_state)?;
                 if decoded
                     .reason
                     .as_deref()
@@ -1503,11 +1506,13 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             let waits = session.store.lane_waits(&rows, &call);
             let now = now(&clock)?;
             let human = if command.all {
-                render_lanes_with_cooldowns(
+                let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
+                render_lanes(
                     &rows,
                     &waits,
                     next,
                     session.context.state_root.as_path(),
+                    lane_cooldown_view(&cooldowns),
                 )
                 .1
             } else {
@@ -2758,11 +2763,13 @@ fn report(
                 .service()
                 .lanes(&lane_query(session, &[target], true, 100, 0, call)?, call)?;
             let waits = session.store.lane_waits(&page.lanes, call);
-            let (data, human) = render_lanes_with_cooldowns(
+            let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
+            let (data, human) = render_lanes(
                 &page.lanes,
                 &waits,
                 None,
                 session.context.state_root.as_path(),
+                lane_cooldown_view(&cooldowns),
             );
             (data, human, false)
         }
@@ -2830,6 +2837,7 @@ fn render_lanes(
     waits: &[run::LaneWait],
     next: Option<u64>,
     root: &Path,
+    cooldowns: Option<(&[provenant_quota::AccountRecord], i64)>,
 ) -> (Value, String) {
     let mut human = String::new();
     let rows: Vec<Value> = lanes
@@ -3005,31 +3013,30 @@ fn render_lanes(
     if rows.is_empty() {
         human.push_str("no matching lanes\n");
     }
+    let cooldowns = cooldowns.map_or_else(Vec::new, |(records, now)| {
+        render_cooldowns(records, now, &mut human)
+    });
     (
-        json!({ "lanes": rows, "next_cursor": next.map(|n| n.to_string()) }),
+        json!({ "lanes": rows, "next_cursor": next.map(|n| n.to_string()), "capacity_cooldowns": cooldowns }),
         human,
     )
 }
 
-/// Read optional host cooldowns at the composition edge, outside lane rendering.
-fn render_lanes_with_cooldowns(
-    lanes: &[run::AttemptRecord],
-    waits: &[run::LaneWait],
-    next: Option<u64>,
-    root: &Path,
-) -> (Value, String) {
-    let (mut data, mut human) = render_lanes(lanes, waits, next, root);
-    let cooldowns = match (
-        crate::quota::read_cache_at(root),
-        SystemClock::new().wall_now(),
-    ) {
-        (Ok(records), Ok(now)) => {
-            render_cooldowns(&records, now.as_timestamp().as_second(), &mut human)
-        }
-        _ => Vec::new(),
-    };
-    data["capacity_cooldowns"] = json!(cooldowns);
-    (data, human)
+/// Read optional host cooldowns before composing a lane reply.
+fn read_lane_cooldowns(root: &Path) -> Option<(Vec<provenant_quota::AccountRecord>, i64)> {
+    crate::quota::read_cache_at(root).ok().zip(
+        SystemClock::new()
+            .wall_now()
+            .ok()
+            .map(|now| now.as_timestamp().as_second()),
+    )
+}
+fn lane_cooldown_view(
+    cooldowns: &Option<(Vec<provenant_quota::AccountRecord>, i64)>,
+) -> Option<(&[provenant_quota::AccountRecord], i64)> {
+    cooldowns
+        .as_ref()
+        .map(|(records, now)| (records.as_slice(), *now))
 }
 fn render_cooldowns(
     records: &[provenant_quota::AccountRecord],
@@ -3207,17 +3214,19 @@ const LOCAL_POLL: Duration = Duration::from_millis(500);
 fn render_settled(
     session: &Session,
     lanes: &[run::AttemptRecord],
+    cooldowns: Option<(&[provenant_quota::AccountRecord], i64)>,
 ) -> Result<(Value, String), Fail> {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let waits = settled_waits(&clock, &cancel, |call| {
         session.store.lane_waits(lanes, call)
     });
-    Ok(render_lanes_with_cooldowns(
+    Ok(render_lanes(
         lanes,
         &waits,
         None,
         session.context.state_root.as_path(),
+        cooldowns,
     ))
 }
 /// Wait details are optional, and must not extend a completed wait or watch.
@@ -3234,7 +3243,8 @@ fn settled_waits<T>(
     read(&call)
 }
 fn waited_reply(session: &Session, waited: watch::Waited) -> Result<(Value, String, bool), Fail> {
-    let (mut data, human) = render_settled(session, &waited.lanes)?;
+    let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
+    let (mut data, human) = render_settled(session, &waited.lanes, lane_cooldown_view(&cooldowns))?;
     data["condition_met"] = json!(waited.met);
     if waited.ignored > 0 {
         data["ignored_settled"] = json!(waited.ignored);
@@ -3344,7 +3354,8 @@ fn watched_reply(
     watched: &watch::Watched,
     json: bool,
 ) -> Result<(Value, String, bool), Fail> {
-    let (mut data, _) = render_settled(session, &watched.lanes)?;
+    let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
+    let (mut data, _) = render_settled(session, &watched.lanes, lane_cooldown_view(&cooldowns))?;
     data["condition_met"] = json!(watched.settled);
     let human = if json {
         String::new()
@@ -3438,15 +3449,27 @@ fn lanes_wait_entry(
         match lanes_inner(command, edge, json, &mut *emit, Some((deadline, entered))) {
             Err(fail) if fail.kind == ErrorKind::Contention => {
                 if Instant::now() >= deadline {
-                    let (mut data, human) =
-                        render_lanes_with_cooldowns(&[], &[], None, edge.roots.state.as_path());
+                    let cooldowns = read_lane_cooldowns(edge.roots.state.as_path());
+                    let (mut data, human) = render_lanes(
+                        &[],
+                        &[],
+                        None,
+                        edge.roots.state.as_path(),
+                        lane_cooldown_view(&cooldowns),
+                    );
                     data["condition_met"] = json!(false);
                     return Ok((data, human, true));
                 }
                 watch::pause(LOCAL_POLL, deadline);
                 if Instant::now() >= deadline {
-                    let (mut data, human) =
-                        render_lanes_with_cooldowns(&[], &[], None, edge.roots.state.as_path());
+                    let cooldowns = read_lane_cooldowns(edge.roots.state.as_path());
+                    let (mut data, human) = render_lanes(
+                        &[],
+                        &[],
+                        None,
+                        edge.roots.state.as_path(),
+                        lane_cooldown_view(&cooldowns),
+                    );
                     data["condition_met"] = json!(false);
                     return Ok((data, human, true));
                 }
@@ -3510,7 +3533,14 @@ fn lanes_inner(
     };
     let Some(store) = store else {
         let root = execution_state(edge.roots, edge.home, edge.assets)?;
-        let (mut data, human) = render_lanes_with_cooldowns(&[], &[], None, root.as_path());
+        let cooldowns = read_lane_cooldowns(root.as_path());
+        let (mut data, human) = render_lanes(
+            &[],
+            &[],
+            None,
+            root.as_path(),
+            lane_cooldown_view(&cooldowns),
+        );
         if command.wait.is_some() || command.watch.is_some() {
             // No store means no lanes, so there is nothing left to wait for.
             data["condition_met"] = json!(true);
@@ -3605,8 +3635,14 @@ fn lanes_inner(
         (lanes, page.next)
     };
     let waits = session.store.lane_waits(&lanes, &call);
-    let (data, human) =
-        render_lanes_with_cooldowns(&lanes, &waits, next, session.context.state_root.as_path());
+    let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
+    let (data, human) = render_lanes(
+        &lanes,
+        &waits,
+        next,
+        session.context.state_root.as_path(),
+        lane_cooldown_view(&cooldowns),
+    );
     Ok((data, human, false))
 }
 
@@ -6605,6 +6641,43 @@ mod tests {
         assert!(!rendered.chars().any(char::is_control));
     }
 
+    fn render_lanes_without_cooldowns(
+        lanes: &[run::AttemptRecord],
+        waits: &[run::LaneWait],
+        next: Option<u64>,
+        root: &Path,
+    ) -> (Value, String) {
+        render_lanes(lanes, waits, next, root, None)
+    }
+
+    #[test]
+    fn local_lanes_read_and_show_capacity_cooldowns() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let route = run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/model".into()),
+            effort: None,
+            account_label: Some("work".into()),
+            account_key: Some("key".into()),
+            source: None,
+            pool_selection: None,
+        };
+        let now = SystemClock::new().wall_now()?.as_timestamp().as_second();
+        crate::quota::persist_capacity_cooldown(temp.path(), &route, now, 600)?;
+        let cooldowns = read_lane_cooldowns(temp.path());
+        let (data, human) =
+            render_lanes(&[], &[], None, temp.path(), lane_cooldown_view(&cooldowns));
+        assert_eq!(data["capacity_cooldowns"][0]["model"], "model");
+        assert_eq!(data["capacity_cooldowns"][0]["account"]["label"], "work");
+        assert!(
+            data["capacity_cooldowns"][0]["remaining_seconds"]
+                .as_i64()
+                .is_some_and(|seconds| seconds > 0 && seconds <= 600)
+        );
+        assert!(human.contains("capacity cooldown codex/model [work]:"));
+        Ok(())
+    }
+
     #[test]
     fn lanes_show_only_live_capacity_cooldowns() {
         let account = provenant_quota::AccountScope {
@@ -6666,8 +6739,12 @@ mod tests {
             "skipped_routes": [{"route":"fixture/\x1b[33mfallback","kind":"unavailable","detail":detail}],
             "delivery": {"schema_version":1,"remote":remote,"branch":branch,"state":{"state":"not_attempted"}}
         }))?;
-        let (data, human) =
-            render_lanes(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
+        let (data, human) = render_lanes_without_cooldowns(
+            std::slice::from_ref(&lane),
+            &[],
+            None,
+            Path::new("/state"),
+        );
         assert_eq!(
             human,
             format!(
@@ -6684,8 +6761,12 @@ mod tests {
         assert!(data["lanes"][0].get("requested_priority").is_none());
         lane.requested_priority = Some(10);
         lane.priority = Some(15);
-        let (different, _) =
-            render_lanes(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
+        let (different, _) = render_lanes_without_cooldowns(
+            std::slice::from_ref(&lane),
+            &[],
+            None,
+            Path::new("/state"),
+        );
         assert_eq!(different["lanes"][0]["priority"], 15);
         assert_eq!(different["lanes"][0]["requested_priority"], 10);
         assert_eq!(data["lanes"][0]["reason"], json!(reason));
@@ -6714,8 +6795,12 @@ mod tests {
             reason: Some("provider capacity: Selected model is at capacity".into()),
         };
         lane.session = Some("session".into());
-        let (data, human) =
-            render_lanes(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
+        let (data, human) = render_lanes_without_cooldowns(
+            std::slice::from_ref(&lane),
+            &[],
+            None,
+            Path::new("/state"),
+        );
         assert_eq!(data["lanes"][0]["state"], "model_unavailable");
         assert!(human.contains("(provider capacity: Selected model is at capacity)"));
         assert!(human.contains(&format!(
@@ -6723,14 +6808,24 @@ mod tests {
             lane.attempt_id
         )));
         lane.session = None;
-        let (_, human) = render_lanes(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
+        let (_, human) = render_lanes_without_cooldowns(
+            std::slice::from_ref(&lane),
+            &[],
+            None,
+            Path::new("/state"),
+        );
         assert!(!human.contains("provenant resume"));
         assert!(human.contains("redispatch with another model"));
         lane.session = Some("session".into());
         if let run::AttemptState::Terminal { reason, .. } = &mut lane.state {
             *reason = Some("provider model unavailable: no route".into());
         }
-        let (_, human) = render_lanes(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
+        let (_, human) = render_lanes_without_cooldowns(
+            std::slice::from_ref(&lane),
+            &[],
+            None,
+            Path::new("/state"),
+        );
         assert!(!human.contains("provenant resume"));
         assert!(human.contains("redispatch with a corrected model"));
         lane.state = run::AttemptState::Terminal {
@@ -6744,7 +6839,7 @@ mod tests {
             &provenant_core::RelativePath::parse(".github/unsafe\npath.yml")?,
         )?];
         lane.delivery = None;
-        let (data, human) = render_lanes(&[lane], &[], None, Path::new("/state"));
+        let (data, human) = render_lanes_without_cooldowns(&[lane], &[], None, Path::new("/state"));
         assert_eq!(data["lanes"][0]["state"], "review_required");
         assert_eq!(data["lanes"][0]["head"], "a".repeat(40));
         assert_eq!(
@@ -6793,7 +6888,7 @@ mod tests {
             reason: None,
         };
         lane.protected_paths = vec![];
-        let (_, human) = render_lanes(&[lane], &[], None, Path::new("/state"));
+        let (_, human) = render_lanes_without_cooldowns(&[lane], &[], None, Path::new("/state"));
         assert!(human.contains("  review head=unknown paths=\n"));
         Ok(())
     }
@@ -6832,7 +6927,7 @@ mod tests {
         let transcript = attempt.join("provider-state/candidate-0/claude-config/projects/k");
         std::fs::create_dir_all(&transcript)?;
         std::fs::write(transcript.join("sess-1848.jsonl"), "{}\n")?;
-        let (data, _) = render_lanes(&[lane.clone()], &[], None, &state);
+        let (data, _) = render_lanes_without_cooldowns(&[lane.clone()], &[], None, &state);
         let found = &data["lanes"][0]["transcript"];
         assert_eq!(found["adapter"], "claude");
         assert_eq!(found["session"], "sess-1848");
@@ -6859,7 +6954,7 @@ mod tests {
         }];
         let other = tempfile::tempdir()?;
         std::fs::create_dir_all(artifact(other.path(), &lane, ""))?;
-        let (data, _) = render_lanes(&[lane], &[], None, other.path());
+        let (data, _) = render_lanes_without_cooldowns(&[lane], &[], None, other.path());
         assert_eq!(
             data["lanes"][0]["transcript"]["path"],
             path.to_string_lossy().as_ref()
@@ -6900,7 +6995,7 @@ mod tests {
                 "redacted": false
             }
         }))?;
-        let (data, human) = render_lanes(&[lane], &[], None, Path::new("/state"));
+        let (data, human) = render_lanes_without_cooldowns(&[lane], &[], None, Path::new("/state"));
         assert_eq!(
             human,
             format!(
@@ -6954,7 +7049,7 @@ mod tests {
         let mut fetch = candidates(&session, &picks, None);
         let first = fetch(Duration::from_secs(1)).map_err(|fail| fail.message)?;
         assert_eq!(first.len(), 1);
-        let (data, _) = render_settled(&session, &first).map_err(|fail| fail.message)?;
+        let (data, _) = render_settled(&session, &first, None).map_err(|fail| fail.message)?;
         assert_eq!(
             data["lanes"][0]["waiting_for"],
             "launch: not yet handed to a guardian"
@@ -7038,7 +7133,8 @@ mod tests {
             lane_class: run::LaneClass::ReadOnly,
             waiting_for: "read-only startup spacing: 1.2 s left of 2.0 s".into(),
         };
-        let (data, human) = render_lanes(&[lane], &[wait], None, Path::new("/state"));
+        let (data, human) =
+            render_lanes_without_cooldowns(&[lane], &[wait], None, Path::new("/state"));
         assert!(
             human.contains("starting unresolved (read-only startup spacing: 1.2 s left of 2.0 s)"),
             "{human}"
@@ -7087,7 +7183,7 @@ mod tests {
             }
         }))?;
         assert_eq!(settled(&lane.state), (true, false));
-        let (data, human) = render_lanes(&[lane], &[], None, Path::new("/state"));
+        let (data, human) = render_lanes_without_cooldowns(&[lane], &[], None, Path::new("/state"));
         assert!(
             human.contains(&format!(" uncommitted unresolved ({reason})\n")),
             "{human}"
@@ -7514,6 +7610,87 @@ mod tests {
         assert_eq!(
             decoded.reason.as_deref(),
             Some("provider capacity: at capacity")
+        );
+        assert!(!roots.state.as_path().join("quota").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_sealed_root_never_writes_to_registry_root() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use provenant_os::exec::{
+            ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+        };
+        use std::ffi::OsString;
+        const MARKER: &str = "PROVENANT_TEST_INVALID_CAPACITY_ROOT";
+        if std::env::var_os(MARKER).is_none() {
+            let argv = vec![
+                std::env::current_exe()?.into_os_string(),
+                "--exact".into(),
+                "run::tests::invalid_sealed_root_never_writes_to_registry_root".into(),
+            ];
+            let mut env: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| key != MARKER && key != provenant_core::RUN_STATE_DIRECTORY_ENV)
+                .collect();
+            env.push((OsString::from(MARKER), OsString::from("1")));
+            let cwd = std::env::current_dir()?;
+            let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+            options.env = Some(&env);
+            options.stdout = StreamPolicy::Capture { limit: 65_536 };
+            options.stderr = StreamPolicy::Capture { limit: 65_536 };
+            let out = SystemExecutor::new(1)?.execute(options)?;
+            assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+            assert!(!out.timed_out, "{out:?}");
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("registry"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let registry = Registry {
+            roots: Some(&roots),
+            ..Default::default()
+        };
+        let protected = temp.path().join("protected");
+        let context = run::HolderContext {
+            schema_version: 1,
+            roots: run::RootSeed {
+                home: temp.path().join("home"),
+                checkout: protected.clone(),
+                state_root: protected,
+            },
+            project_id: provenant_core::ProjectId::from_bytes([1; 16]),
+            actor_id: ActorId::from_bytes([2; 16]),
+            run_id: RunId::from_bytes([3; 16]),
+            attempt_id: AttemptId::from_bytes([4; 16]),
+            host_delivery: None,
+            launch: None,
+            sealed: None,
+        };
+        let route = run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6.1-sol".into()),
+            account_key: Some("key".into()),
+            account_label: Some("label".into()),
+            ..Default::default()
+        };
+        let stream = br#"{"type":"turn.failed","error":{"message":"at capacity","codex_error_info":"server_overloaded"}}"#;
+        let mut exit = clean_exit();
+        exit.termination = Some(Termination::Exit(1));
+        let decoded = registry.decode_with_context(
+            &route,
+            stream,
+            &exit,
+            Path::new("/nonexistent"),
+            &context,
+        )?;
+        assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
+        assert!(
+            decoded
+                .reason
+                .unwrap_or_default()
+                .contains("capacity cooldown configuration unavailable")
         );
         assert!(!roots.state.as_path().join("quota").exists());
         Ok(())

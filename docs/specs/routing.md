@@ -32,7 +32,7 @@ and task index; the receipt records each weight, the random roll and the chosen 
 ### Capacity cooldown
 
 A host records a short-lived capacity cooldown for the affected model and account
-when a provider reports capacity. Pool, named-route and senior/junior draws skip
+when a provider reports capacity. Pool-backed routes and senior/junior draws skip
 live cooldowns; if all candidates are cooling, the normal choice remains available
 and the receipt explains the fallback. Explicit model dispatches and resumes ignore
 capacity cooldowns. Quota refusals remain separate and continue to apply. The host

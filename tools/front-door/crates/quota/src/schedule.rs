@@ -827,6 +827,7 @@ mod tests {
         renamed.label = "renamed".into();
         let r = record_capacity_cooldown(None, &a, "claude/model", 100, 600)
             .unwrap()
+            .unwrap()
             .replacement
             .unwrap();
         let intent = reserve(

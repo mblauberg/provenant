@@ -2986,7 +2986,8 @@ fn capacity_cooldowns_apply_only_to_draws_and_expire() -> Result<(), Box<dyn std
         "pools": {"trial": [
             {"model":"codex/gpt-6-luna", "weight":1, "efforts":["high"]},
             {"model":"codex/gpt-6.1-sol", "weight":1, "efforts":["high"]}
-        ]}
+        ]},
+        "pacing": {"accounts": {"opaque-account": {"policy":"pace"}}}
     }))?;
     let registry = [provenant_providers::Registration {
         quota_source: None,
@@ -3009,23 +3010,47 @@ fn capacity_cooldowns_apply_only_to_draws_and_expire() -> Result<(), Box<dyn std
         expires_unix_seconds: 110,
     };
     let cooldowns = [cooldown.clone()];
+    let mut observation = quota(
+        "codex/gpt-6-luna",
+        "opaque-account",
+        provenant_quota::QuotaStatus::Available,
+        1,
+        80,
+        120,
+    )?;
+    observation.snapshot.windows = vec![provenant_quota::QuotaWindow {
+        pool: "primary".into(),
+        window_seconds: Some(18_000),
+        used_basis_points: 5_000,
+        resets_unix_seconds: Some(10_000),
+    }];
+    let observations = [observation];
     let mut ctx = context(&catalogue, &config, now()?);
+    ctx.quota = &observations;
     ctx.registry = &registry;
     ctx.availability = &availability;
     ctx.access = &access;
-    ctx.capacity_cooldowns = &cooldowns;
     let mut query = request("codex/gpt-6-luna")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    let baseline = resolve(&query, &ctx)?
+        .pool_selection
+        .ok_or("receipt")?
+        .candidates[0]
+        .clone();
+    assert!(baseline.pacing_detail.is_some());
+    assert_ne!(baseline.factor_basis_points, 10_000);
+    ctx.capacity_cooldowns = &cooldowns;
+    query.choice = RouteChoice::Model(ModelId::parse("codex/gpt-6-luna")?);
     let explicit = resolve(&query, &ctx)?;
     assert_eq!(explicit.model, "gpt-6-luna");
     query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
     let selected = resolve(&query, &ctx)?;
     assert_eq!(selected.model, "gpt-6.1-sol");
-    assert_eq!(
-        selected.pool_selection.unwrap().candidates[0]
-            .exclusion
-            .as_deref(),
-        Some("capacity cooldown")
-    );
+    let receipt = selected.pool_selection.ok_or("receipt")?;
+    let skipped = &receipt.candidates[0];
+    assert_eq!(skipped.exclusion.as_deref(), Some("capacity cooldown"));
+    assert_eq!(skipped.factor_basis_points, baseline.factor_basis_points);
+    assert_eq!(skipped.pacing_detail, baseline.pacing_detail);
     let both = [
         cooldown,
         provenant_quota::CapacityCooldown {
@@ -3099,7 +3124,7 @@ fn cooling_ready_candidate_beats_unavailable_candidate() -> Result<(), Box<dyn s
     assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
     assert_eq!(
         selected.pool_selection.unwrap().reason.as_deref(),
-        Some("all eligible candidates cooling, normal selection")
+        Some("cooling ready candidate selected over unavailable candidate")
     );
     Ok(())
 }

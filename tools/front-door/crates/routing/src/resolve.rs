@@ -1426,21 +1426,6 @@ fn classify_pool(
         } else {
             match candidate(&member.model, effort.as_deref(), context, avoid_cooling) {
                 Ok(resolved) => {
-                    if avoid_cooling
-                        && cooling(&member.model, resolved.account_key.as_deref(), context)
-                    {
-                        classified.candidates.push(RouteSelectionCandidate {
-                            model: member.model.as_str().into(),
-                            weight: member.weight,
-                            factor_basis_points,
-                            pacing_detail: None,
-                            effort,
-                            readiness: Some(resolved.readiness.clone()),
-                            exclusion: Some("capacity cooldown".into()),
-                        });
-                        classified.routes.push(None);
-                        continue;
-                    }
                     let (policy, _, _, _) =
                         effective_profile(context, &member.model, resolved.account_key.as_deref());
                     let (factor, detail, is_standby) = pacing_factor_basis_points(
@@ -1450,6 +1435,21 @@ fn classify_pool(
                         context,
                     );
                     factor_basis_points = factor;
+                    if avoid_cooling
+                        && cooling(&member.model, resolved.account_key.as_deref(), context)
+                    {
+                        classified.candidates.push(RouteSelectionCandidate {
+                            model: member.model.as_str().into(),
+                            weight: member.weight,
+                            factor_basis_points,
+                            pacing_detail: Some(detail),
+                            effort,
+                            readiness: Some(resolved.readiness.clone()),
+                            exclusion: Some("capacity cooldown".into()),
+                        });
+                        classified.routes.push(None);
+                        continue;
+                    }
                     pacing_detail = Some(detail);
                     readiness = Some(resolved.readiness.clone());
                     if matches!(resolved.readiness, RouteReadiness::Ready { .. }) {
@@ -1582,7 +1582,7 @@ fn select_pool(
     excluded_members: &[ModelId],
 ) -> Result<PoolPick, RoutingError> {
     let mut classified = classify_pool(members, request, context, excluded_members, true)?;
-    let (draw, fallback) = match draw_pool(name, &classified, seed) {
+    let (draw, reason) = match draw_pool(name, &classified, seed) {
         Ok(draw)
             if !matches!(
                 classified.routes[draw.index]
@@ -1603,12 +1603,15 @@ fn select_pool(
                 Some(RouteReadiness::Ready { .. })
             ) {
                 classified = normal;
-                (normal_draw, true)
+                (
+                    normal_draw,
+                    Some("cooling ready candidate selected over unavailable candidate"),
+                )
             } else {
-                (draw, false)
+                (draw, None)
             }
         }
-        Ok(draw) => (draw, false),
+        Ok(draw) => (draw, None),
         Err(error)
             if classified
                 .candidates
@@ -1617,7 +1620,10 @@ fn select_pool(
         {
             classified = classify_pool(members, request, context, excluded_members, false)?;
             let draw = draw_pool(name, &classified, seed).map_err(|_| error)?;
-            (draw, true)
+            (
+                draw,
+                Some("all eligible candidates cooling, normal selection"),
+            )
         }
         Err(error) => return Err(error),
     };
@@ -1628,9 +1634,7 @@ fn select_pool(
         .cloned()
         .ok_or(RoutingError::Catalogue)?;
     let mut receipt = selection_receipt(name, &classified, &draw, &route);
-    if fallback {
-        receipt.reason = Some("all eligible candidates cooling, normal selection".into());
-    }
+    receipt.reason = reason.map(str::to_owned);
     Ok(PoolPick { route, receipt })
 }
 

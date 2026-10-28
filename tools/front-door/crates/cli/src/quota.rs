@@ -382,13 +382,16 @@ pub(crate) fn persist_capacity_cooldown(
         })
         .cloned();
     let account = current.as_ref().map_or(&account, |record| &record.account);
-    let intent = provenant_quota::record_capacity_cooldown(
+    let Some(intent) = provenant_quota::record_capacity_cooldown(
         current.as_ref(),
         account,
         model,
         now_unix_seconds,
         duration_seconds,
-    )?;
+    )?
+    else {
+        return Ok(());
+    };
     write_intent(&directory, &intent, &mut records)
 }
 

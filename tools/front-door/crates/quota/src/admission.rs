@@ -31,7 +31,10 @@ pub fn record_capacity_cooldown(
     model: &str,
     now: i64,
     duration_seconds: u64,
-) -> Result<UpdateIntent, QuotaError> {
+) -> Result<Option<UpdateIntent>, QuotaError> {
+    if duration_seconds == 0 {
+        return Ok(None);
+    }
     account.validate()?;
     let prefix = format!("{}/", account.adapter);
     let model = model
@@ -70,11 +73,11 @@ pub fn record_capacity_cooldown(
         expires_unix_seconds: expires,
     });
     record.validate()?;
-    Ok(UpdateIntent {
+    Ok(Some(UpdateIntent {
         account: account.clone(),
         expected: current.cloned(),
         replacement: Some(record),
-    })
+    }))
 }
 
 pub struct Admission<'a> {
@@ -290,17 +293,31 @@ mod tests {
             account_key: "key".into(),
             label: "label".into(),
         };
-        let intent = record_capacity_cooldown(None, &account, "codex/model", 100, 600).unwrap();
+        let intent = record_capacity_cooldown(None, &account, "codex/model", 100, 600)
+            .unwrap()
+            .unwrap();
         let first = intent.replacement.unwrap();
         assert_eq!(first.capacity_cooldowns[0].expires_unix_seconds, 700);
         assert_eq!(first.capacity_cooldowns[0].model, "model");
-        let intent =
-            record_capacity_cooldown(Some(&first), &account, "codex/other", 700, 600).unwrap();
+        let intent = record_capacity_cooldown(Some(&first), &account, "codex/other", 700, 600)
+            .unwrap()
+            .unwrap();
         let second = intent.replacement.unwrap();
         assert_eq!(second.capacity_cooldowns.len(), 1);
         assert_eq!(second.capacity_cooldowns[0].model, "other");
         assert!(record_capacity_cooldown(None, &account, "claude/model", 100, 600).is_err());
-        assert!(record_capacity_cooldown(None, &account, "codex/model", 100, 0).is_err());
+        assert!(
+            record_capacity_cooldown(None, &account, "codex/model", 100, 0)
+                .unwrap()
+                .is_none()
+        );
+        let before = first.clone();
+        assert!(
+            record_capacity_cooldown(Some(&first), &account, "codex/model", 100, 0)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(first, before);
     }
     #[test]
     fn dst_reset_rejects_gap_and_fold() {
@@ -558,6 +575,7 @@ mod admission_tests {
         };
         let model = format!("{}/{}", account.adapter, route.model);
         let capacity = record_capacity_cooldown(None, &account, &model, 1000, 600)
+            .unwrap()
             .unwrap()
             .replacement
             .unwrap();
