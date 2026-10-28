@@ -24,6 +24,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/006-federation.sql"),
     include_str!("migrations/007-remove-legacy-import.sql"),
     include_str!("migrations/008-human-inbox.sql"),
+    include_str!("migrations/009-run-chairs.sql"),
 ];
 // Index of 007, which may drop only the always-null legacy members and the
 // traces of an import that brought nothing over. Anything the removed import
@@ -144,6 +145,16 @@ pub struct Store {
 }
 impl Store {
     pub fn open(root: &StateRoot, request: &Request<'_>) -> Result<Self> {
+        Self::open_database(root, request, "fabric.sqlite3")
+    }
+
+    /// Host-only records live outside the exact coordination DB grants lanes
+    /// receive. Reuse all directory, companion and migration checks.
+    pub fn open_host(root: &StateRoot, request: &Request<'_>) -> Result<Self> {
+        Self::open_database(root, request, "host.sqlite3")
+    }
+
+    fn open_database(root: &StateRoot, request: &Request<'_>, database: &str) -> Result<Self> {
         request.check()?;
         let mut directory = Directory::root(true)?;
         for part in root.as_path().components() {
@@ -183,8 +194,8 @@ impl Store {
         )?;
         let path = root.as_path().join("fabric");
         private(&fabric, &path)?;
-        let db_path = path.join("fabric.sqlite3");
-        match fabric.create_new(OsStr::new("fabric.sqlite3")) {
+        let db_path = path.join(database);
+        match fabric.create_new(OsStr::new(database)) {
             Ok(file) => {
                 file.sync()?;
                 fabric.sync()?;
@@ -192,7 +203,7 @@ impl Store {
             Err(error) if error.is_exists() => {}
             Err(error) => return Err(error.into()),
         }
-        companions(&fabric, &path, request)?;
+        companions(&fabric, &path, database, request)?;
         let db = provenant_sqlite::open_connection(&db_path, false)?;
         // Refuse future versions before journal-mode changes or schema writes.
         request.retry(|| schema_version(&db))?;
@@ -230,7 +241,7 @@ impl Store {
                 break;
             }
         }
-        companions(&fabric, &path, request)?;
+        companions(&fabric, &path, database, request)?;
         Ok(store)
     }
     pub(crate) fn write<T>(
@@ -258,14 +269,14 @@ fn private(directory: &Directory, path: &std::path::Path) -> Result<()> {
     }
     Ok(())
 }
-fn companions(directory: &Directory, path: &std::path::Path, request: &Request<'_>) -> Result<()> {
-    let names = [
-        "fabric.sqlite3",
-        "fabric.sqlite3-wal",
-        "fabric.sqlite3-shm",
-        "fabric.sqlite3-journal",
-    ]
-    .map(OsString::from);
+fn companions(
+    directory: &Directory,
+    path: &std::path::Path,
+    database: &str,
+    request: &Request<'_>,
+) -> Result<()> {
+    let names = ["", "-wal", "-shm", "-journal"]
+        .map(|suffix| OsString::from(format!("{database}{suffix}")));
     provenant_sqlite::check_companions(
         directory,
         &names,
@@ -360,10 +371,10 @@ mod tests {
         // Entering WAL can leave a valid rollback journal for recovery.
         directory.create_new(OsStr::new("fabric.sqlite3-journal"))?;
         std::fs::write(&path, b"rollback journal data")?;
-        companions(&directory, temp.path(), &request)?;
+        companions(&directory, temp.path(), "fabric.sqlite3", &request)?;
         directory.unlink(OsStr::new("fabric.sqlite3-journal"))?;
         std::os::unix::fs::symlink(temp.path().join("missing"), &path)?;
-        let error = companions(&directory, temp.path(), &request).unwrap_err();
+        let error = companions(&directory, temp.path(), "fabric.sqlite3", &request).unwrap_err();
         assert!(matches!(&error, Error::UnsafePath(p) if p == &path));
         assert!(error.to_string().contains("fabric.sqlite3-journal"));
         Ok(())

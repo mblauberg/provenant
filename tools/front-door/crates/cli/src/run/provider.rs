@@ -628,6 +628,12 @@ fn prepare_with(
                 continue;
             }
         };
+        if !chair_index_protected(
+            roots.state.as_path(),
+            &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
+        ) {
+            return Err("write grants overlap the host chair index".into());
+        }
         if let Some(gh) = publishing_gh.as_ref() {
             let publishing = spec
                 .configure_publishing(scratch, &git, gh, &home)
@@ -1538,6 +1544,51 @@ struct ConfinementRoots<'a> {
     private_state: &'a Path,
     assets: &'a Path,
     prompt_file: Option<&'a Path>,
+}
+
+fn chair_index_protected(
+    state: &Path,
+    grants: &[provenant_confinement::permissions::WriteGrant],
+) -> bool {
+    let resolve = |path: &Path| {
+        provenant_core::PathResolver::resolve_existing_ancestor(
+            &provenant_os::fs::SystemPathResolver,
+            path,
+        )
+        .ok()
+    };
+    ["", "-wal", "-shm", "-journal"].iter().all(|suffix| {
+        let Some(path) = resolve(&state.join("fabric").join(format!("host.sqlite3{suffix}")))
+        else {
+            return false;
+        };
+        grants.iter().all(|grant| {
+            resolve(&grant.path).is_some_and(|root| match grant.scope {
+                PathScope::Exact => root != path,
+                PathScope::Subtree => !path.starts_with(root),
+            })
+        })
+    })
+}
+
+#[test]
+fn configured_grants_cannot_expose_the_chair_index() {
+    use provenant_confinement::permissions::WriteGrant;
+    for path in [
+        "/state/fabric",
+        "/state/fabric/host.sqlite3",
+        "/state/fabric/host.sqlite3-wal",
+        "/state/fabric/host.sqlite3-shm",
+        "/state/fabric/host.sqlite3-journal",
+    ] {
+        let grant = WriteGrant {
+            source: run::WriteSource::WriteRoot,
+            path: path.into(),
+            scope: PathScope::Subtree,
+        };
+        assert!(!chair_index_protected(Path::new("/state"), &[grant]));
+    }
+    assert!(chair_index_protected(Path::new("/state"), &[]));
 }
 
 /// Read access to the primary checkout's project scratch (`.provenant/scratch`, or
@@ -2727,6 +2778,7 @@ mod tests {
                 run_id,
                 operation_id: paths.operation_id.clone(),
                 request: run::CanonicalRequest {
+                    chair: None,
                     fresh_continuation: None,
                     schema_version: 1,
                     tasks: vec![task.clone()],

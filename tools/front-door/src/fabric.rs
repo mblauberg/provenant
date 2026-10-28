@@ -1630,6 +1630,14 @@ impl BinaryRunOwner<'_> {
                 &session,
                 edge,
                 Submission {
+                    // Peer ingress and graph replay identify a run owner, not
+                    // an originating chair. Origin propagation is separate.
+                    chair: (self.allow_remote && self.actor.is_none()).then_some(
+                        provenant_run::ChairBinding {
+                            host: self.factory.context.identity.inbox.host,
+                            actor: self.factory.context.identity.inbox.actor,
+                        },
+                    ),
                     operation_id: operation_id.clone(),
                     tasks: submitted,
                     concurrency: concurrency.map(u64::from),
@@ -3953,6 +3961,7 @@ mod peer_tests {
             )?;
             let run = provenant_run::Service::new(&store).dispatch(
                 provenant_run::DispatchRequest {
+                    chair: None,
                     operation_id: "settlement-original".parse()?,
                     concurrency: 1,
                     lane_depth: 1,

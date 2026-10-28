@@ -6,6 +6,7 @@ type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 fn submission(prompt: &str) -> DispatchRequest {
     DispatchRequest {
+        chair: None,
         operation_id: OperationId::parse("service-dispatch").unwrap(),
         tasks: vec![DispatchTask {
             title: None,
@@ -29,6 +30,27 @@ fn submission(prompt: &str) -> DispatchRequest {
         lane_depth: 1,
         parent_attempt: None,
     }
+}
+
+#[test]
+fn chair_binding_replays_the_original_submission() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut first = submission("review this code");
+    first.chair = Some(ChairBinding {
+        host: provenant_core::HostId::from_bytes([4; 16]),
+        actor: provenant_core::ActorId::from_bytes([5; 16]),
+    });
+    let chair = first.chair.clone();
+    let run = Service::new(&store).dispatch(first, temp.path(), &call)?;
+    // A later harness identity does not reassign an accepted operation.
+    let replay =
+        Service::new(&store).dispatch(submission("review this code"), temp.path(), &call)?;
+    assert_eq!(run.run_id, replay.run_id);
+    assert_eq!(store.request(run.run_id, &call)?.chair, chair);
+    Ok(())
 }
 
 #[test]

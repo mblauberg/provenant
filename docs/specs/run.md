@@ -9,7 +9,7 @@ Run turns a request into bounded provider attempts and keeps the exact
 prompt, route and result of each, so completion and cancellation survive a
 disconnected caller. Routing resolves models ([routing](routing.md));
 supervisor owns every process and signal ([supervisor](supervisor.md)); Fabric
-keeps no second registry ([fabric](fabric.md)). Run starts no process
+stores chair associations, with execution facts owned by Run ([fabric](fabric.md)). Run starts no process
 itself. Grammar and bounds are in the generated [CLI
 reference](../reference/cli.md). Paths are relative to `tools/front-door/`.
 
@@ -38,6 +38,37 @@ absent titles remain absent in older records. Titles are never inferred from
 prompts.
 - Test: `crates/run/src/service_tests.rs::task_title_roundtrip`
 - Owner: `crates/run/src/service.rs`, `crates/records/src/run.rs`
+
+## Chair associations
+
+Local CLI and MCP submissions seal a chair's host and Fabric inbox actor with
+the request. CLI selection matches session discovery; MCP uses its bound inbox.
+This actor-scoped association identifies no particular live chair session and
+does not change run ownership. Worker provider sessions never establish it.
+
+The Fabric `run_chairs` index in `<state>/fabric/host.sqlite3` is authoritative,
+keyed by project and run. This database and its companions are outside the exact
+coordination database write grants lanes receive. It seals the request digest
+and optional chair before launch. Each nested launch inherits from the host
+index using the parent's host-sealed request
+digest. A disagreeing child proposal is refused. Lane-local requests and even a
+lane-local Fabric database or the shared mail database cannot replace this
+association. A retry preserves the original proposal; continuations copy the
+original host index binding.
+Index failures or exposing write grants refuse launch. Replay a root submission with the
+same operation ID: launch repairs its index from the immutable host request,
+including owned-worktree replay. Lane stores cannot repair it.
+Transient index errors leave queued children available for a later scan.
+
+Readers use `fabric-runtime::chairs::ChairIndex`; missing records and older runs
+are unbound. Provider handles and child requests are never fallbacks. Graph and
+peer executions remain unbound until they retain an originating chair separately
+from the actor owning operation replay. Board and tree rendering are separate.
+
+- Test: `crates/fabric-runtime/src/chairs.rs::nested_chair_binding`;
+  `crates/run/src/service_tests.rs::chair_binding_replays_the_original_submission`
+- Owner: `crates/fabric-runtime/src/chairs.rs`, `crates/fabric-store/src/chairs.rs`,
+  `crates/cli/src/run.rs`, `crates/cli/src/run/children.rs`
 
 ## Atomic admission
 

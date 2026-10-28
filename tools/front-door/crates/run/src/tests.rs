@@ -45,6 +45,7 @@ pub(super) fn input() -> PreparedRun {
         operation_id: OperationId::parse("run-test").unwrap(),
         created_at: WallTime::from_micros(100).unwrap(),
         request: CanonicalRequest {
+            chair: None,
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {

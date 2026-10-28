@@ -1035,6 +1035,7 @@ fn writer_run(
         run_id: provenant_core::RunId::from_bytes([seed.wrapping_add(2); 16]),
         operation_id: provenant_core::OperationId::parse(operation)?,
         request: provenant_run::CanonicalRequest {
+            chair: None,
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![provenant_run::TaskRequest {

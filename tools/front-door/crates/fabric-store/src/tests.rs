@@ -910,7 +910,7 @@ const IMPORTS_TABLE: &str = "CREATE TABLE imports(source TEXT PRIMARY KEY, \
      skipped_rows BLOB NOT NULL DEFAULT X'7B7D') STRICT;";
 // Fixtures rewinding a current database must remove migration 8's tables in
 // foreign-key order before the older schema can be upgraded again.
-const REMOVE_HUMAN_TABLES: &str = "DROP TABLE human_answer_outbox; \
+const REMOVE_HUMAN_TABLES: &str = "DROP TABLE run_chairs; DROP TABLE human_answer_outbox; \
     DROP TABLE human_answers; DROP TABLE human_request_history; DROP TABLE human_requests;";
 fn downgrade_to_six(store: &Store, rows: &str) {
     store
@@ -1336,3 +1336,58 @@ mod f2;
 
 mod human_inbox;
 mod operations;
+
+#[test]
+fn run_chair_migration_preserves_mail_and_rejects_older_readers() {
+    let f = Fixture::new();
+    let store = f.open();
+    store.send(&message(&f, 9), &f.request()).unwrap();
+    store
+        .db
+        .execute_batch("DROP TABLE run_chairs; PRAGMA user_version=8;")
+        .unwrap();
+    drop(store);
+    let store = f.open();
+    assert_eq!(
+        store
+            .read_mail(project(), actor(3), Some(0), 100, &f.request())
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert!(matches!(
+        provenant_sqlite::read_version(&store.db, 8),
+        Err(provenant_sqlite::VersionError::Unsupported(9))
+    ));
+    assert!(
+        store
+            .run_chair(
+                project(),
+                provenant_core::RunId::from_bytes([1; 16]),
+                &f.request()
+            )
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn host_store_refuses_unsafe_database_companions() {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let f = Fixture::new();
+        let store = f.open();
+        let path = f
+            .root
+            .as_path()
+            .join("fabric")
+            .join(format!("host.sqlite3{suffix}"));
+        std::os::unix::fs::symlink(f.path(), &path).unwrap();
+        assert!(matches!(
+            Store::open_host(&f.root, &f.request()),
+            Err(Error::UnsafePath(_))
+        ));
+        // The host refusal must leave ordinary mail storage intact.
+        store.send(&message(&f, 9), &f.request()).unwrap();
+    }
+}
