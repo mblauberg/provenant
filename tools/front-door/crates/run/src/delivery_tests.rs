@@ -14,6 +14,100 @@ struct PrepareFixture {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)]
+fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let project = root.join("project");
+    let home = root.join("home");
+    let remote = root.join("remote.git");
+    std::fs::create_dir(&project)?;
+    std::fs::create_dir(&home)?;
+    let git_dir = project.join(".git");
+    let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
+    let run = |directory: &Path,
+               args: &[&str]|
+     -> std::result::Result<String, Box<dyn std::error::Error>> {
+        let output = std::process::Command::new(&git)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_DIR", directory)
+            .env("GIT_WORK_TREE", &project)
+            .current_dir(&project)
+            .args(args)
+            .output()?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+        }
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    };
+    run(&git_dir, &["init", "-q"])?;
+    run(
+        &git_dir,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+    )?;
+    run(&remote, &["init", "-q"])?;
+    run(&remote, &["config", "--local", "core.bare", "true"])?;
+    run(
+        &git_dir,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().ok_or("remote path")?,
+        ],
+    )?;
+    run(&git_dir, &["push", "-q", "origin", "HEAD:refs/heads/main"])?;
+    let expected = run(&git_dir, &["rev-parse", "HEAD"])?;
+    run(&git_dir, &["update-ref", "-d", "refs/remotes/origin/main"])?;
+    let writer = WriterRequest {
+        project: project.clone(),
+        worktree: project.clone(),
+    };
+    let host = || {
+        HostDeliveryContext::new(vec![
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("HOME".into(), home.as_os_str().to_owned()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ])
+    };
+    host().refresh_origin_with(&writer, &git_dir)?;
+    assert_eq!(
+        run(&git_dir, &["rev-parse", "refs/remotes/origin/main"])?,
+        expected
+    );
+    run(
+        &git_dir,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            root.join("missing.git").to_str().ok_or("missing path")?,
+        ],
+    )?;
+    assert!(host().refresh_origin_with(&writer, &git_dir).is_err());
+    assert_eq!(
+        run(&git_dir, &["rev-parse", "refs/remotes/origin/main"])?,
+        expected
+    );
+    Ok(())
+}
+
+#[test]
 fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;

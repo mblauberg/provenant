@@ -233,16 +233,14 @@ pub struct LaunchConfinement {
 impl LaunchConfinement {
     /// Prepare Git while custody is held, then replace every handle that was
     /// bound to the common config before Git changed it.
-    pub(crate) fn prepare_git(&mut self) -> Result<()> {
+    pub(crate) fn prepare_git(&mut self) -> Result<Option<provenant_os::fs::LockGuard>> {
         let Some(writer) = self.writer.as_mut() else {
-            return Ok(());
+            return Ok(None);
         };
         let AccessMode::WorktreeWrite(authority) = &self.plan.permissions().mode else {
-            return Ok(());
+            return Ok(None);
         };
-        prepare_writer_directories(&writer.worktree, &writer.branch, authority, &self.home)
-            .map_err(RunError::Confinement)?;
-        prepare_writer_git(writer, &self.state_root)
+        prepare_writer_git(writer, &self.state_root, &self.home, Some(authority)).map(Some)
     }
     pub(crate) fn command(
         &self,
@@ -362,7 +360,14 @@ impl LaunchConfinement {
     }
 }
 
-fn prepare_writer_git(writer: &mut WriterLaunch, state: &Path) -> Result<()> {
+fn prepare_writer_git(
+    writer: &mut WriterLaunch,
+    state: &Path,
+    home: &Path,
+    authority: Option<&provenant_confinement::permissions::WorktreeWriteAuthority>,
+) -> Result<provenant_os::fs::LockGuard> {
+    use provenant_core::{Clock, WaitBudget};
+    use provenant_os::{clock::SystemClock, fs::LockMode};
     let utility = runtime(state)?;
     let root_identity = writer.worktree.identity();
     let private_identity = writer.worktree.repo().private_identity();
@@ -370,7 +375,77 @@ fn prepare_writer_git(writer: &mut WriterLaunch, state: &Path) -> Result<()> {
     let executor =
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
     let cancel = CancelToken::new();
+    // Independent worktrees share config. Keep both writes and all subsequent
+    // verification under one project-wide lock; a later launch repairs either
+    // key if a process stopped between the two writes.
+    let clock = SystemClock::new();
+    let setup_dir = writer.worktree.repo().common_dir();
+    let setup_name = OsStr::new("provenant-lane-setup.lock");
+    match setup_dir.create_new(setup_name) {
+        Ok(file) => {
+            file.sync()?;
+            setup_dir.sync()?;
+        }
+        Err(failure) if failure.is_exists() => {}
+        Err(failure) => {
+            return Err(anchored_error(
+                failure,
+                writer.worktree.repo().common_git_dir(),
+            ));
+        }
+    }
+    let config_lock = writer
+        .worktree
+        .repo()
+        .common_dir()
+        .lock(
+            setup_name,
+            LockMode::Exclusive,
+            WaitBudget::cli(clock.mono_now(), 120)
+                .map_err(error("set writer setup lock budget", None))?,
+            &cancel,
+            &clock,
+        )
+        .map_err(|failure| anchored_error(failure, writer.worktree.repo().common_git_dir()))?;
+    let old_repo = writer.worktree.repo();
+    let project = old_repo
+        .common_git_dir()
+        .parent()
+        .ok_or(RunError::Validation(
+            "writer common Git directory has no project",
+        ))?
+        .to_path_buf();
+    let path = writer.worktree.path().to_path_buf();
+    let repo = utility
+        .open_repo(&executor, &project, budget()?, &cancel)
+        .map_err(error("reopen writer repository", Some(&project)))?;
+    let refreshed = provenant_confinement::verify_worktree(&repo, &path)
+        .map_err(worktrees::WorktreeError::from)?;
+    if !root_identity.same_identity(&refreshed.identity())
+        || !private_identity.same_identity(&refreshed.repo().private_identity())
+        || !common_identity.same_identity(&refreshed.repo().common_identity())
+    {
+        return Err(RunError::Validation(
+            "writer identity changed before launch",
+        ));
+    }
+    writer.worktree = refreshed;
+    if let Some(authority) = authority {
+        prepare_writer_directories(&writer.worktree, &writer.branch, authority, home)
+            .map_err(RunError::Confinement)?;
+    }
     let repo = writer.worktree.repo();
+    repo.revalidate()
+        .map_err(error("verify writer repository before fetch", Some(&path)))?;
+    crate::HostDeliveryContext::refresh_origin(
+        &WriterRequest {
+            project: project.clone(),
+            worktree: path.clone(),
+        },
+        repo.private_git_dir(),
+    )?;
+    repo.revalidate()
+        .map_err(error("verify writer repository after fetch", Some(&path)))?;
     let ref_path = Path::new(writer.branch.as_str());
     let parent = repo.common_git_dir().join(
         ref_path
@@ -383,7 +458,13 @@ fn prepare_writer_git(writer: &mut WriterLaunch, state: &Path) -> Result<()> {
         .ok_or(RunError::Validation("writer ref has no name"))?;
     let mut lock_name = name.to_os_string();
     lock_name.push(".lock");
-    let mut lock = directory.create_new(&lock_name)?;
+    let mut lock = directory.create_new(&lock_name).map_err(|failure| {
+        if failure.is_exists() {
+            RunError::WriterRefLocked(parent.join(&lock_name))
+        } else {
+            failure.into()
+        }
+    })?;
     let result = (|| -> Result<()> {
         let resolved = provenant_confinement::run_utility(
             &executor,
@@ -415,14 +496,6 @@ fn prepare_writer_git(writer: &mut WriterLaunch, state: &Path) -> Result<()> {
         let _ = directory.discard_git_ref_lock(name, &lock);
     }
     result?;
-    let project = repo
-        .common_git_dir()
-        .parent()
-        .ok_or(RunError::Validation(
-            "writer common Git directory has no project",
-        ))?
-        .to_path_buf();
-    let path = writer.worktree.path().to_path_buf();
     for merge in [false, true] {
         let repo = utility
             .open_repo(&executor, &project, budget()?, &cancel)
@@ -471,7 +544,7 @@ fn prepare_writer_git(writer: &mut WriterLaunch, state: &Path) -> Result<()> {
         return Err(RunError::Validation("writer branch changed before launch"));
     }
     writer.worktree = refreshed;
-    Ok(())
+    Ok(config_lock)
 }
 
 // Cargo configuration can override rustc independently of the rustup pin.
@@ -605,6 +678,7 @@ mod cargo_setup_tests {
         let root = std::fs::canonicalize(temp.path())?;
         let project = root.join("project");
         let lane = root.join("lane");
+        let second_lane = root.join("second-lane");
         let state = root.join("state");
         std::fs::create_dir(&project)?;
         std::fs::create_dir(&state)?;
@@ -645,6 +719,13 @@ mod cargo_setup_tests {
             "feature/nested",
             lane.to_str().ok_or("lane path")?,
         ])?;
+        run(&[
+            "worktree",
+            "add",
+            "-qb",
+            "feature/second",
+            second_lane.to_str().ok_or("second lane path")?,
+        ])?;
         run(&["pack-refs", "--all"])?;
         let reference = "refs/heads/feature/nested";
         let expected = run(&["rev-parse", reference])?;
@@ -661,8 +742,36 @@ mod cargo_setup_tests {
             base: GitOid::parse(&expected)?,
             custody: None,
         };
-        prepare_writer_git(&mut writer, &state)?;
-        writer.worktree.repo().revalidate()?;
+        let second_tree = provenant_confinement::verify_worktree(&repo, &second_lane)?;
+        let mut second = WriterLaunch {
+            worktree: second_tree,
+            branch: GitRefName::new("refs/heads/feature/second")?,
+            base: GitOid::parse(&expected)?,
+            custody: None,
+        };
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                prepare_writer_git(&mut writer, &state, &root, None)
+                    .map(drop)
+                    .map_err(|e| e.to_string())
+            });
+            let second = scope.spawn(|| {
+                prepare_writer_git(&mut second, &state, &root, None)
+                    .map(drop)
+                    .map_err(|e| e.to_string())
+            });
+            first
+                .join()
+                .map_err(|_| "first preparation panicked".to_owned())??;
+            second
+                .join()
+                .map_err(|_| "second preparation panicked".to_owned())??;
+            Ok::<(), String>(())
+        })?;
+        let repo = utility.open_repo(&executor, &project, budget()?, &cancel)?;
+        provenant_confinement::verify_worktree(&repo, &lane)?
+            .repo()
+            .revalidate()?;
         assert_eq!(
             std::fs::read_to_string(git_dir.join(reference))?.trim(),
             expected
@@ -687,6 +796,25 @@ mod cargo_setup_tests {
             run(&["config", "--local", "--get", "branch.feature/nested.merge"])?,
             reference
         );
+        assert_eq!(
+            run(&["config", "--local", "--get", "branch.feature/second.remote"])?,
+            "origin"
+        );
+        assert_eq!(
+            run(&["config", "--local", "--get", "branch.feature/second.merge"])?,
+            "refs/heads/feature/second"
+        );
+        let stale = git_dir.join("refs/heads/feature/nested.lock");
+        std::fs::write(&stale, b"held")?;
+        let failure = prepare_writer_git(&mut writer, &state, &root, None)
+            .err()
+            .ok_or("stale lock must refuse")?;
+        assert!(
+            failure
+                .to_string()
+                .contains("check for a running Git process")
+        );
+        assert_eq!(std::fs::read(&stale)?, b"held");
         Ok(())
     }
 

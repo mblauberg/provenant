@@ -57,9 +57,9 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
     fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
     fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700))?;
     let git_path = [
+        "/usr/bin/git",
         "/opt/homebrew/bin/git",
         "/usr/local/bin/git",
-        "/usr/bin/git",
     ]
     .iter()
     .map(PathBuf::from)
@@ -135,6 +135,28 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
         &home,
         &["-c", "protocol.file.allow=always", "fetch", "origin"],
     ));
+    ok(git(
+        &git_path,
+        &repo_git,
+        &repo,
+        &home,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    ));
+    let origin_main = repo_git.join("refs/remotes/origin/main");
+    fs::write(
+        &origin_main,
+        ok(git(
+            &git_path,
+            &source_git,
+            &source,
+            &home,
+            &["rev-parse", "HEAD"],
+        )),
+    )?;
     ok(git(
         &git_path,
         &repo_git,
@@ -222,6 +244,14 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
         &home,
         &["commit", "--allow-empty", "-m", "advance"],
     ));
+    // The host refreshes tracking refs before verifying and launching the lane.
+    ok(git(
+        &git_path,
+        &repo_git,
+        &repo,
+        &home,
+        &["-c", "protocol.file.allow=always", "fetch", "origin"],
+    ));
     fs::create_dir_all(repo_git.join("refs/remotes/upstream"))?;
     let executor = SystemExecutor::new(2)?;
     let cancel = CancelToken::new();
@@ -262,7 +292,7 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
     let plan = PlanPermissions {
         read_only: None,
         mode: AccessMode::WorktreeWrite(Box::new(authority)),
-        scratch: grant(scratch),
+        scratch: grant(scratch.clone()),
         private_state: None,
         read_roots: vec![grant(source.clone())],
         protected_roots: vec![],
@@ -319,11 +349,34 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
             .expect("run sandboxed Git")
     };
     let packed_before = fs::read(repo_git.join("packed-refs"))?;
+    let tracking_before = ok(git(
+        &git_path,
+        private,
+        &lane,
+        &home,
+        &["rev-parse", "refs/remotes/origin/main"],
+    ));
     ok(run(&[
         "-c",
         "protocol.file.allow=always",
         "fetch",
         "origin",
+        "main",
+    ]));
+    ok(git(
+        &git_path,
+        &source_git,
+        &source,
+        &home,
+        &["commit", "--allow-empty", "-m", "advance after launch"],
+    ));
+    ok(run(&[
+        "-c",
+        "protocol.file.allow=always",
+        "fetch",
+        "--refmap=",
+        "origin",
+        "main",
     ]));
     assert!(ok(run(&["status", "--short", "--branch"])).contains("behind 1"));
     ok(run(&["commit", "--allow-empty", "-m", "lane"]));
@@ -347,7 +400,54 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
             .status
             .success()
     );
+    for reference in ["refs/remotes/origin/HEAD", "refs/remotes/origin/main"] {
+        assert!(!run(&["update-ref", reference, "HEAD"]).status.success());
+        let output = Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", sbpl, "/usr/bin/touch"])
+            .arg(repo_git.join(reference))
+            .output()?;
+        assert!(
+            !output.status.success(),
+            "sandbox permitted writing {reference}"
+        );
+    }
+    ok(run(&[
+        "update-ref",
+        "refs/remotes/origin/lane/test",
+        "HEAD",
+    ]));
+    let link_path = repo_git.join("refs/remotes/origin/lane/test.lock");
+    let control_link = scratch.join("link-control");
+    let control = Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", sbpl, "/bin/ln", "-s"])
+        .arg(repo_git.join("config"))
+        .arg(&control_link)
+        .output()?;
+    assert!(
+        control.status.success(),
+        "link probe could not execute: {}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    let output = Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", sbpl, "/bin/ln"])
+        .arg(repo_git.join("config"))
+        .arg(&link_path)
+        .output()?;
+    assert!(
+        !output.status.success(),
+        "sandbox permitted a hard link to Git config"
+    );
     assert!(private.join("FETCH_HEAD").is_file());
+    assert_eq!(
+        tracking_before,
+        ok(git(
+            &git_path,
+            private,
+            &lane,
+            &home,
+            &["rev-parse", "refs/remotes/origin/main"]
+        ))
+    );
     assert_eq!(
         ok(git(
             &git_path,
@@ -361,7 +461,7 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
             private,
             &lane,
             &home,
-            &["rev-parse", "refs/remotes/origin/main"]
+            &["rev-parse", "FETCH_HEAD"]
         ))
     );
     Ok(())

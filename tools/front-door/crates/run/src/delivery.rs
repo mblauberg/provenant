@@ -560,6 +560,89 @@ impl HostDeliveryContext {
             host_cwd: writer.project.clone(),
             destination: request.clone(),
         });
+        self.validate_transport_helpers(writer)?;
+        self.command(
+            &writer.worktree,
+            "git",
+            &[
+                "fetch",
+                "--no-tags",
+                "--no-recurse-submodules",
+                &request.remote,
+            ],
+            stage,
+        )?;
+        Ok(self)
+    }
+    /// Refresh origin under writer custody with delivery's host credential and
+    /// executable checks, while constraining the refspec and transport helpers.
+    pub(crate) fn refresh_origin(writer: &WriterRequest, git_dir: &Path) -> Result<()> {
+        Self::capture().refresh_origin_with(writer, git_dir)
+    }
+    pub(super) fn refresh_origin_with(self, writer: &WriterRequest, git_dir: &Path) -> Result<()> {
+        let mut host = self;
+        host.host_environment(writer)?;
+        host.environment
+            .retain(|(key, _)| key != b"GIT_TERMINAL_PROMPT");
+        host.environment
+            .push((b"GIT_TERMINAL_PROMPT".to_vec(), b"0".to_vec()));
+        host.tools = Some(HostTools {
+            git: host.executable("git", writer)?,
+            gh: None,
+        });
+        let git_dir = git_dir
+            .to_str()
+            .ok_or_else(|| prepare_error("git dir", "path is not UTF-8"))?;
+        let worktree = writer
+            .worktree
+            .to_str()
+            .ok_or_else(|| prepare_error("worktree", "path is not UTF-8"))?;
+        let remotes = host.command(
+            &writer.worktree,
+            "git",
+            &["--git-dir", git_dir, "--work-tree", worktree, "remote"],
+            Stage::Prepare,
+        )?;
+        if !remotes.lines().any(|line| line == "origin") {
+            return Ok(());
+        }
+        host.validate_transport_helpers(writer)?;
+        host.command(
+            &writer.worktree,
+            "git",
+            &[
+                "--git-dir",
+                git_dir,
+                "--work-tree",
+                worktree,
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "protocol.ssh.allow=always",
+                "-c",
+                "protocol.https.allow=always",
+                "-c",
+                "protocol.http.allow=always",
+                "-c",
+                "protocol.file.allow=always",
+                "-c",
+                "remote.origin.uploadpack=git-upload-pack",
+                "fetch",
+                "--no-auto-maintenance",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--refmap=",
+                "--",
+                "origin",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ],
+            Stage::Prepare,
+        )?;
+        Ok(())
+    }
+
+    fn validate_transport_helpers(&self, writer: &WriterRequest) -> Result<()> {
+        let stage = Stage::Prepare;
         // Free-form shell helpers can select writer code. Support normal
         // executable helpers and gh's standard helper, otherwise refuse early.
         let helpers = self.command(
@@ -623,18 +706,7 @@ impl HostDeliveryContext {
                 }
             }
         }
-        self.command(
-            &writer.worktree,
-            "git",
-            &[
-                "fetch",
-                "--no-tags",
-                "--no-recurse-submodules",
-                &request.remote,
-            ],
-            stage,
-        )?;
-        Ok(self)
+        Ok(())
     }
     fn host_environment(&mut self, writer: &WriterRequest) -> Result<()> {
         for (key, value) in &mut self.environment {

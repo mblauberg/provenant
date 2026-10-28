@@ -509,7 +509,7 @@ pub(crate) struct WorktreeWriteGrants {
     packed_refs_lock: PathGrant,
     head: [PathGrant; 14],
     objects: PathGrant,
-    origin_tracking: [PathGrant; 2],
+    origin_tracking: [PathGrant; 4],
     selected_ref: [PathGrant; 4],
 }
 
@@ -563,8 +563,13 @@ impl WorktreeWriteGrants {
             ]
             .map(|name| exact(private.join(name))),
             objects: subtree(common.join("objects")),
-            origin_tracking: ["refs/remotes/origin", "logs/refs/remotes/origin"]
-                .map(|path| subtree(common.join(path))),
+            origin_tracking: [
+                format!("refs/remotes/origin/{branch}"),
+                format!("refs/remotes/origin/{branch}.lock"),
+                format!("logs/refs/remotes/origin/{branch}"),
+                format!("logs/refs/remotes/origin/{branch}.lock"),
+            ]
+            .map(|path| exact(common.join(path))),
             selected_ref: [
                 format!("refs/heads/{branch}"),
                 format!("refs/heads/{branch}.lock"),
@@ -608,6 +613,45 @@ impl WorktreeWriteGrants {
         for grant in self.iter().skip(1) {
             validate_noncredential_grant(grant)?;
         }
+        // The guard and base selection trust these host-owned tracking refs.
+        let origin = self.common_git_dir.path.join("refs/remotes/origin");
+        let tracking = &self.origin_tracking[0].path;
+        if tracking == &origin.join("HEAD") || tracking == &origin.join("main") {
+            return Err(PermissionError::GitWriteAuthorityMissing);
+        }
+        match std::fs::read_to_string(origin.join("HEAD")) {
+            Ok(head) => {
+                if let Some(branch) = head.trim().strip_prefix("ref: refs/remotes/origin/")
+                    && tracking == &origin.join(branch)
+                {
+                    return Err(PermissionError::GitWriteAuthorityMissing);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(PermissionError::GitWriteAuthorityMissing),
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod protected_tracking_tests {
+    use super::WorktreeWriteGrants;
+
+    #[test]
+    fn protected_origin_tracking_refs_cannot_be_granted() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let common = temp.path().join("git");
+        let origin = common.join("refs/remotes/origin");
+        std::fs::create_dir_all(&origin)?;
+        std::fs::write(origin.join("HEAD"), "ref: refs/remotes/origin/trunk\n")?;
+        for branch in ["HEAD", "main", "trunk"] {
+            let grants = WorktreeWriteGrants::from_paths(temp.path(), &common, &common, branch);
+            assert!(grants.validate().is_err(), "protected branch {branch}");
+        }
+        let grants = WorktreeWriteGrants::from_paths(temp.path(), &common, &common, "lane/test");
+        grants.validate()?;
         Ok(())
     }
 }
@@ -1286,9 +1330,6 @@ fn compile_sbpl(
     if let Some(grants) = &worktree_grants {
         hard_link_denies = verify_worktree_tree(&grants.worktree.path, anchors)?;
         verify_writable_tree(&grants.objects.path, anchors)?;
-        for grant in &grants.origin_tracking {
-            verify_writable_tree(&grant.path, anchors)?;
-        }
     }
     if let Some(read_only) = &plan.read_only {
         if !matches!(plan.mode, AccessMode::ReadOnly) {
@@ -2983,10 +3024,7 @@ mod tests {
             packed_refs_lock: exact("packed-refs.lock"),
             head: std::array::from_fn(|i| exact(&format!("head-{i}"))),
             objects: subtree("/fixture/git/objects"),
-            origin_tracking: [
-                subtree("/fixture/git/refs/remotes/origin"),
-                subtree("/fixture/git/logs/refs/remotes/origin"),
-            ],
+            origin_tracking: std::array::from_fn(|i| exact(&format!("origin-{i}"))),
             selected_ref: std::array::from_fn(|i| exact(&format!("ref-{i}"))),
         }
     }
@@ -4049,8 +4087,8 @@ mod tests {
             private_logs.clone(),
             common_heads,
             common_logs,
-            common.join("refs/remotes/origin"),
-            common.join("logs/refs/remotes/origin"),
+            common.join("refs/remotes/origin/s3"),
+            common.join("logs/refs/remotes/origin/s3"),
         ];
 
         let directories = anchor_paths
@@ -4063,11 +4101,11 @@ mod tests {
             worktree: Some((&linked, &selected_ref)),
         };
         // A pre-existing alias to config must not be writable through an origin grant.
-        let alias = common.join("refs/remotes/origin/config-alias");
+        let alias = grants.origin_tracking[0].path.clone();
         std::fs::hard_link(common.join("config"), &alias)?;
         assert!(matches!(
-            verify_writable_tree(&common.join("refs/remotes/origin"), &anchors),
-            Err(PermissionError::HardLinkedWritableFile(_))
+            anchors.verify_single_link_grant(&grants.origin_tracking[0]),
+            Err(PermissionError::AnchorMismatch)
         ));
         std::fs::remove_file(alias)?;
         assert!(missing_parent.is_dir());
@@ -4138,9 +4176,14 @@ mod tests {
                 "{relative}"
             );
         }
-        for relative in ["refs/remotes/origin", "logs/refs/remotes/origin"] {
+        for relative in [
+            "refs/remotes/origin/s3/authority",
+            "refs/remotes/origin/s3/authority.lock",
+            "logs/refs/remotes/origin/s3/authority",
+            "logs/refs/remotes/origin/s3/authority.lock",
+        ] {
             assert!(source.contains(&format!(
-                "(allow file-write* (subpath \"{}\"))",
+                "(allow file-write* (literal \"{}\"))",
                 common.join(relative).display()
             )));
         }
@@ -4344,6 +4387,7 @@ mod tests {
         // Probe existing files so a denial cannot be an absent parent.
         for relative in [
             "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
             "logs/refs/remotes/origin/HEAD",
             "refs/remotes/upstream/HEAD",
             "logs/refs/remotes/upstream/HEAD",
@@ -4472,8 +4516,8 @@ mod tests {
             private_logs,
             common_heads,
             common_logs,
-            common.join("refs/remotes/origin"),
-            common.join("logs/refs/remotes/origin"),
+            common.join("refs/remotes/origin/s3"),
+            common.join("logs/refs/remotes/origin/s3"),
         ];
         let executable_directories = executables
             .iter()
@@ -4711,8 +4755,12 @@ mod tests {
                 String::from_utf8_lossy(&fetch_head_outcome.stderr.bytes)
             );
         }
-        for relative in ["refs/remotes/origin/HEAD", "logs/refs/remotes/origin/HEAD"] {
-            assert!(successful_probe(&run(
+        for relative in [
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+            "logs/refs/remotes/origin/HEAD",
+        ] {
+            assert!(!successful_probe(&run(
                 &executables[0],
                 &[&common.join(relative)]
             )));

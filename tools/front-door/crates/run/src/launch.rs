@@ -1120,13 +1120,18 @@ impl RunStore {
                 }
             }
         }
+        // Keep the shared config lock until custody confirms the child launch.
+        let mut _git_setup_lock = None;
         if let Some(confinement) = &mut plan.confinement {
-            if let Err(error) = confinement.prepare_git() {
-                lease
-                    .withdraw_unlaunched()
-                    .map_err(|e| HandOff::Uncertain(e.to_string()))?;
-                return Err(local(&error));
-            }
+            _git_setup_lock = match confinement.prepare_git() {
+                Ok(lock) => lock,
+                Err(error) => {
+                    lease
+                        .withdraw_unlaunched()
+                        .map_err(|e| HandOff::Uncertain(e.to_string()))?;
+                    return Err(local(&error));
+                }
+            };
             if let Some(writer) = &confinement.writer
                 && let Err(error) =
                     writer.snapshot(self.context.state_root.as_path(), &directory()?, scope)

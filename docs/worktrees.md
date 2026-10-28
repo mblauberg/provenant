@@ -90,12 +90,15 @@ Claude creates a native agent's worktree with `provenant worktree create
 claude/NAME` and removes it with `provenant worktree remove`, so it has an owner
 from the start. See the [Claude hooks runbook](runbooks/claude-hooks.md).
 
-Confined writer lanes can update their selected branch, Git objects, origin
-tracking refs under `refs/remotes/origin/` and their reflogs. Fetch records
-`FETCH_HEAD` in the linked worktree's private Git directory. Shared Git config,
-other remotes and `packed-refs` remain read-only. The host prepares the lane
-branch and delivery upstream before launch. Existing files in writable origin
-ref and reflog trees are checked for hard links before granting access.
+Confined writer lanes can update their selected branch, Git objects and the
+exact `refs/remotes/origin/<lane-branch>` tracking ref and its reflog, including
+their lock files. Fetch records `FETCH_HEAD` in the linked worktree's private
+Git directory. Other tracking refs, including `origin/HEAD` and `origin/main`,
+shared Git config and `packed-refs` remain read-only. The host refreshes origin
+tracking refs and prepares the lane branch and upstream before launch. A lane
+can use `git fetch --refmap= origin main` to update `FETCH_HEAD` without trying
+to update `origin/main` if the remote advances during the run. A lane whose
+branch would alias a protected origin ref is refused.
 
 Fabric sets `CARGO_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR` and `CARGO_HOME` for
 each lane. Do not override them: confinement may deny other paths. Confined writers use

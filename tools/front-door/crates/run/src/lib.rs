@@ -171,6 +171,8 @@ pub enum RunError {
          `provenant worktree create --base <branch> <branch>`"
     )]
     WorktreeUnregistered(std::path::PathBuf),
+    #[error("writer Git ref lock {} already exists; check for a running Git process, then remove the stale lock before retrying", .0.display())]
+    WriterRefLocked(std::path::PathBuf),
     #[error(transparent)]
     Plan(#[from] provenant_confinement::PlanError),
     #[error("invalid run record: {0}")]

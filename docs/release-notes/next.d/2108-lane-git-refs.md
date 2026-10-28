@@ -1,3 +1,3 @@
 ## Fixes
 
-- Allow confined writer lanes to fetch origin tracking refs and maintain their reflogs while keeping shared Git configuration and packed refs read-only.
+- The host materialises a loose lane branch ref and configures its upstream before launch, so a writer can commit when its branch was packed-only. A lane may update only its own `refs/remotes/origin/<lane-branch>` tracking ref and reflog, with their locks.
