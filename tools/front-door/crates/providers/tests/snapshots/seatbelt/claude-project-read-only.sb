@@ -135,6 +135,7 @@
 (deny file-write-create (require-all (vnode-type SYMLINK) (subpath "/fixture/state/host-binding.lock")))
 (deny file-write-create (require-all (vnode-type SYMLINK) (subpath "/fixture/state/workflow")))
 (deny file-write-create (require-all (vnode-type SYMLINK) (subpath "/fixture/state")))
+(deny file-write-create (require-all (vnode-type SYMLINK) (subpath "/fixture/scratch/git-objects")))
 (allow file-read* (subpath "/fixture/project/.agent-run"))
 (allow file-write* (subpath "/fixture/project/.agent-run"))
 (deny file-write* (require-all (subpath "/fixture/project/.agent-run") (regex #"/([.][gG][iI][tT]|[.][aA][gG][eE][nN][tT][sS]|[.][cC][oO][dD][eE][xX]|[.][cC][lL][aA][uU][dD][eE]|[.][cC][uU][rR][sS][oO][rR]|[.][gG][eE][mM][iI][nN][iI]|[.][oO][pP][eE][nN][cC][oO][dD][eE]|[.][kK][iI][rR][oO]|[.][cC][oO][pP][iI][lL][oO][tT]|[.][gG][iI][tT][hH][uU][bB]|[.][cC][oO][nN][fF][iI][gG]|[.][aA][iI][dD][eE][rR]|[.][cC][oO][nN][tT][iI][nN][uU][eE]|[.][vV][sS][cC][oO][dD][eE]|[.][wW][iI][nN][dD][sS][uU][rR][fF]|[.][cC][lL][aA][uU][dD][eE][.][jJ][sS][oO][nN]|[.][mM][cC][pP][.][jJ][sS][oO][nN]|[oO][pP][eE][nN][cC][oO][dD][eE][.][jJ][sS][oO][nN]|[oO][pP][eE][nN][cC][oO][dD][eE][.][jJ][sS][oO][nN][cC]|[aA][gG][eE][nN][tT][sS][.][mM][dD]|[cC][lL][aA][uU][dD][eE][.][mM][dD]|[gG][eE][mM][iI][nN][iI][.][mM][dD])(/|$)")))

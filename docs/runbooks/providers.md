@@ -57,6 +57,18 @@ and build offline (`CARGO_NET_OFFLINE=true`) without Cargo's automatic cache
 clean-up. Pinning the build directory overrides inherited Cargo configuration.
 `provenant worktree remove` and `provenant gc` prune writer caches.
 
+Read-only lanes with a verified Git checkout use a private scratch object
+directory, with the host's common object store as a read-only alternate. The
+shell Git wrapper selects it only for the bound repository and its linked
+worktrees, for `show`, `log`, `diff`, `merge-tree` and `hash-object`; other
+repositories retain their own stores. Aliases and external subcommands receive
+no override; direct absolute-path Git calls bypass the wrapper. Git can create
+temporary objects for commands such as `show --remerge-diff` without writing
+the shared store. Scratch objects
+and alternates are lane-controlled, so lane Git output is not trusted host
+evidence. Scratch is removed at normal settlement; lost attempts retain it
+until later cleanup.
+
 On macOS, launch inspects the whole writable worktree, including ignored
 `target/` and `node_modules/` directories. Existing hard-linked regular files
 stay readable, but each in-tree alias is write-denied and its ancestor
