@@ -219,6 +219,7 @@ bounds are null. Positional arguments have no long flag.
 | `--action` | `{"name": "action", "required": true, "values": ["choose", "reply", "confirm", "override"]}` |
 | `--option` | `{"name": "option"}` |
 | `--text-stdin` | `{"defaults": ["false"], "name": "text_stdin", "values": ["true", "false"]}` |
+| `--text-file` | `{"conflicts": ["text_stdin"], "name": "text_file"}` |
 | `--expect-revision` | `{"name": "expect_revision", "required": true}` |
 | `--channel` | `{"name": "channel", "required": true, "values": ["chat", "console", "phone_remote", "cli", "unknown"]}` |
 | `--operation-id` | `{"name": "operation_id"}` |
@@ -237,6 +238,7 @@ bounds are null. Positional arguments have no long flag.
         "action",
         "option",
         "text_stdin",
+        "text_file",
         "expect_revision",
         "channel",
         "operation_id"

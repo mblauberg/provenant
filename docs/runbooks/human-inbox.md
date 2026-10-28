@@ -40,12 +40,20 @@ posting does not discover, register or authenticate a live provider session.
 Ownership comes from this host's current Fabric project and inbox actor.
 Change the agent label only deliberately: acknowledgement must use the request's
 original actor as well as its exact host/project/session.
+MCP and the terminal may use different labels by default. Inspect
+`fabric_context` (`op: inspect`) in the originating MCP session and retain
+`inbox.agent` with its checkpoint. For CLI acknowledgement, set
+`PROVENANT_AGENT_LABEL` to that same label for the command; a similar label or
+the same session ID alone is insufficient.
 
 Use `kind: question` for information, or `kind: assumption` with a non-empty
 `proceeding_with` string for a reversible working position. Only decisions can
 set `blocking: true`. Decisions/questions accept `choose` or `reply`; assumptions
 accept `confirm` or `override`. `reply` and `override` read exact UTF-8 text via
-`--text-stdin`. `confirm` records acceptance of the saved `proceeding_with` value
+`--text-file reply.md` or piped `--text-stdin`, capped at 4 KiB. Compose human
+replies in a file; piped input must finish, including EOF, within five seconds.
+The two text sources are mutually exclusive.
+`confirm` records acceptance of the saved `proceeding_with` value
 and takes no option or text. Record `chat`, `console`, `phone_remote`, `cli` or
 `unknown` explicitly; phone use is never inferred.
 

@@ -27,9 +27,12 @@ pub struct Answer {
     pub action: Action,
     #[arg(long)]
     pub option: Option<String>,
-    /// Read the exact answer text from standard input (at most 4 KiB)
+    /// Read piped answer text (at most 4 KiB; input must finish within 5 seconds)
     #[arg(long)]
     pub text_stdin: bool,
+    /// Read a UTF-8 reply composed in a file (at most 4 KiB)
+    #[arg(long, conflicts_with = "text_stdin")]
+    pub text_file: Option<PathBuf>,
     #[arg(long, value_parser=clap::value_parser!(u64).range(1..))]
     pub expect_revision: u64,
     #[arg(long, value_enum)]
@@ -138,10 +141,13 @@ impl HumanCommand {
                     Action::Override => AnswerAction::Override,
                 },
                 option_id: args.option,
-                text: if args.text_stdin {
-                    Some(read_text()?)
-                } else {
-                    None
+                text: match (args.text_stdin, args.text_file) {
+                    (true, None) => Some(read_text()?),
+                    (false, Some(path)) => Some(read_text_file(&path)?),
+                    (false, None) => None,
+                    (true, Some(_)) => {
+                        return Err(Error::Input("choose only one answer text source"));
+                    }
                 },
                 expect_revision: args.expect_revision,
                 channel: match args.channel {
@@ -254,9 +260,26 @@ fn read_text() -> Result<String, Error> {
     let bytes = provenant_os::sys::hook_io::read_stdin(
         ANSWER_TEXT_BYTES,
         std::time::Instant::now() + std::time::Duration::from_secs(5),
-    )?;
+    )
+    .map_err(|error| match error.kind() {
+        io::ErrorKind::TimedOut => Error::Input(
+            "piped answer input timed out after 5 seconds; compose a reply with --text-file",
+        ),
+        io::ErrorKind::FileTooLarge => Error::Input("piped answer exceeds 4 KiB"),
+        _ => Error::Io(error),
+    })?;
     String::from_utf8(bytes)
         .map_err(|_| Error::Input("answer text must be UTF-8 and at most 4 KiB"))
+}
+fn read_text_file(path: &Path) -> Result<String, Error> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take((ANSWER_TEXT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > ANSWER_TEXT_BYTES {
+        return Err(Error::Input("answer file exceeds 4 KiB"));
+    }
+    String::from_utf8(bytes).map_err(|_| Error::Input("answer file must be UTF-8"))
 }
 fn execute(
     command: HumanCommand,
@@ -309,9 +332,10 @@ pub fn run(
                 message: error.to_string(),
                 cause: None,
                 repair: match &error {
-                    Error::Inbox(InboxError::Mutation { operation_id, .. }) => Some(format!(
+                    Error::Inbox(InboxError::Mutation { operation_id, source }) if matches!(source.code(),"busy"|"cancelled"|"inbox_unavailable") => Some(format!(
                         "Retry the same request with --operation-id {operation_id}; preserve its original content and revision."
                     )),
+                    Error::Inbox(error) if matches!(error.code(),"conflict"|"operation_conflict")=>Some("Inspect `provenant inbox --state all --json` before submitting another operation; preserve the authoritative answer and its revision.".into()),
                     Error::Inbox(InboxError::CursorExpired) => {
                         Some("Restart the list without --cursor.".into())
                     }

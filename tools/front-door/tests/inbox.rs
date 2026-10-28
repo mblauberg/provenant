@@ -383,7 +383,64 @@ fn inbox_mcp_and_cli_share_the_same_authoritative_records() -> Result {
         stale["error"]["repair"]
             .as_str()
             .ok_or("repair")?
-            .contains("--operation-id")
+            .contains("inbox --state all")
     );
+    Ok(())
+}
+
+#[test]
+fn inbox_cli_accepts_composed_text_files_and_rejects_oversized_piped_answers() -> Result {
+    let rig = TestRig::new()?;
+    let file = draft(&rig, "question")?;
+    let created = call(
+        &rig,
+        &["ask", "--file", &file, "--session", "chair-a"],
+        None,
+        0,
+    )?;
+    let id = created["data"]["request_id"].as_str().ok_or("request ID")?;
+    let text = rig.root.join("answer.md");
+    std::fs::write(&text, "  composed without a deadline\n")?;
+    let answered = call(
+        &rig,
+        &[
+            "answer",
+            id,
+            "--action",
+            "reply",
+            "--text-file",
+            text.to_str().ok_or("text path")?,
+            "--expect-revision",
+            "1",
+            "--channel",
+            "cli",
+        ],
+        None,
+        0,
+    )?;
+    assert_eq!(answered["data"]["state"], "answered");
+    let shown = call(&rig, &["inbox", id], None, 0)?;
+    assert_eq!(
+        shown["data"]["item"]["answer"]["text"],
+        "  composed without a deadline\n"
+    );
+    let oversized = vec![b'x'; 4097];
+    let result = call(
+        &rig,
+        &[
+            "answer",
+            id,
+            "--action",
+            "reply",
+            "--text-stdin",
+            "--expect-revision",
+            "1",
+            "--channel",
+            "cli",
+        ],
+        Some(&oversized),
+        2,
+    )?;
+    assert_eq!(result["error"]["code"], "invalid_input");
     Ok(())
 }
