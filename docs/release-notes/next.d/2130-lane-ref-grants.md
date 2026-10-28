@@ -1,3 +1,3 @@
 ## Fixes
 
-- Harden lane confinement by removing obsolete shared branch ref and reflog grants.
+- Lane writers can no longer hold grants on the shared repository's branch refs and reflogs. Those paths were already read-only under the Seatbelt profile; this removes the leftover grant bookkeeping. The rendered profile is unchanged, but the lane Git grant digest changes, so stored authorities from earlier releases no longer match.

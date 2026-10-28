@@ -749,6 +749,11 @@ fn linked_lane_uses_private_objects_and_cannot_mutate_shared_objects() -> Result
         "logs/refs/heads/lane/test.lock",
     ] {
         let path = repo_git.join(relative);
+        // A missing parent would make ln fail with ENOENT, not a denial.
+        assert!(
+            path.parent().is_some_and(Path::is_dir),
+            "probe parent missing for {relative}"
+        );
         let original = match fs::read(&path) {
             Ok(bytes) => {
                 let unlink = Command::new("/usr/bin/sandbox-exec")
