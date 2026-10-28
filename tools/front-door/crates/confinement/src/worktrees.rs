@@ -57,6 +57,10 @@ pub enum WorktreeError {
     InvalidRequest,
     #[error("branch name collides with existing ref {existing}")]
     BranchCollision { existing: String },
+    #[error(
+        "remote-rooted revision {revision:?} is unsupported; use a remote branch name such as origin/main"
+    )]
+    RemoteRevisionExpression { revision: String },
     #[error("worktree or branch was not found")]
     NotFound,
     #[error("base {base} did not resolve to a commit")]
@@ -1866,7 +1870,37 @@ fn pin_revision(
     } else {
         ""
     };
-    let candidate = if revision.ends_with("/HEAD") {
+    // Compound revisions have no symbolic full name. Inspect their possible
+    // roots before allowing Git to resolve them against local tracking refs.
+    if symbolic_name.is_empty() {
+        for (index, ch) in revision.char_indices() {
+            if index == 0 || !matches!(ch, '^' | '~' | ':' | '@') {
+                continue;
+            }
+            let root =
+                GitRevision::new(&revision[..index]).map_err(|_| WorktreeError::InvalidRequest)?;
+            let result = run_git(
+                context,
+                context.repo,
+                GitRead::SymbolicRevision { revision: root },
+                cancel,
+            )?;
+            if exit_code(&result)? == 0
+                && trim_ascii(&result.stdout.bytes).starts_with(b"refs/remotes/")
+            {
+                return Err(WorktreeError::RemoteRevisionExpression {
+                    revision: revision.to_owned(),
+                });
+            }
+        }
+    }
+    let remote_head = (symbolic_name.starts_with("refs/remotes/")
+        && !revision.contains('/')
+        && GitRefName::branch(revision).is_ok())
+    .then(|| format!("{revision}/HEAD"));
+    let candidate = if let Some(head) = &remote_head {
+        head.as_str()
+    } else if revision.ends_with("/HEAD") {
         revision
     } else if symbolic_name.starts_with("refs/remotes/") {
         symbolic_name
@@ -4997,6 +5031,34 @@ mod lifecycle_tests {
             &cancel(),
         )?;
         let test_context = TestContext::new(&fixture)?;
+        for alias in [
+            "remotes/origin/main",
+            "origin",
+            "@{u}",
+            "main@{upstream}",
+            "@{push}",
+        ] {
+            assert_eq!(
+                pin_revision(&test_context.context(), alias, &cancel())?,
+                expected,
+                "{alias}"
+            );
+        }
+        for expression in [
+            "origin/main~0",
+            "remotes/origin/main^0",
+            "@{u}~0",
+            "main@{upstream}^0",
+            "@{push}~0",
+        ] {
+            let error = pin_revision(&test_context.context(), expression, &cancel())
+                .expect_err("remote-rooted expression must be refused");
+            assert!(
+                matches!(error, WorktreeError::RemoteRevisionExpression { .. }),
+                "{expression}: {error}"
+            );
+            assert!(error.to_string().contains("origin/main"));
+        }
         let (_, integration) = pin_integration(&test_context.context(), "origin/main", &cancel())?;
         assert_eq!(integration, expected);
         let (_, default_integration) =

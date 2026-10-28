@@ -33,13 +33,16 @@ a writer at the branch's tip with
 New branch names must not case-fold or Unicode-normalise to an existing local
 or remote-tracking branch name. A remote base such as `origin/main` is pinned
 to the exact advertised commit, rather than trusting the tracking ref. Remote
-revision expressions are not accepted as bases; use a local commit ID instead.
+revision expressions rooted in tracking refs are not accepted as bases; use the
+exact `origin/branch` or `refs/remotes/origin/branch` form, or a local commit ID.
 Host origin refresh refuses advertised branch names that collide under these
 comparisons and fails if the remote default branch is among them.
 Origin refresh skips branch names outside the supported ASCII branch-name
 grammar, including non-ASCII names. Refused tracking refs may remain stale.
 Remote bases require a reachable remote; an offline or missing remote base
 fails instead of trusting a stale tracking ref.
+The pre-push policy also reads the remote's advertised default branch instead
+of the local tracking HEAD. If the default cannot be advertised, push is refused.
 
 `remove NAME` deletes the clean worktree and then its branch when every commit
 on the branch is contained in the fetched upstream default branch. Without

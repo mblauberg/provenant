@@ -570,8 +570,8 @@ The guard is advisory: confinement and custody stay authoritative.
 
 `hook git pre-push` refuses default-branch deletion, non-fast-forward
 updates, pushes from linked worktrees to the default branch and conflict
-markers. It also refuses when any inspection fails, disables inherited redirects
-and never fetches.
+markers. It identifies the default branch from the remote's advertisement,
+refuses when any inspection fails and never fetches.
 - Why: the last local guard before shared history changes.
 - Test: `tests/hooks.rs::pre_push_uses_real_git_to_refuse_data_loss_and_conflict_markers`
 - Owner: `src/hooks.rs`

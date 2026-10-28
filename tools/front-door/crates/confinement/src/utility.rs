@@ -822,6 +822,66 @@ pub fn run_release_read_utility(
     )
 }
 
+/// Query the remote's advertised HEAD using host transport credentials.
+pub(crate) fn advertised_remote_head(
+    executor: &dyn Executor,
+    repo: &ReadOnlyRepo,
+    runtime: &UtilityRuntime,
+    remote: &str,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<ExecOutcome, UtilityError> {
+    if remote.is_empty()
+        || remote.len() > 128
+        || !remote
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_./".contains(&b))
+        || remote.starts_with('-')
+        || remote.contains("..")
+    {
+        return Err(UtilityError::InvalidOperationValue);
+    }
+    if cancel.is_cancelled() {
+        return Err(UtilityError::Cancelled);
+    }
+    runtime.revalidate()?;
+    repo.0.revalidate()?;
+    verify_repo_binding(&repo.0)?;
+    let argv: Vec<OsString> = vec![
+        runtime.git.path.as_os_str().to_owned(),
+        "--git-dir".into(),
+        repo.0.private_git_dir().as_os_str().to_owned(),
+        "--work-tree".into(),
+        repo.0.root_path().as_os_str().to_owned(),
+        "-c".into(),
+        "core.hooksPath=/dev/null".into(),
+        "ls-remote".into(),
+        "--symref".into(),
+        "--".into(),
+        remote.into(),
+        "HEAD".into(),
+    ];
+    let mut env: Vec<_> = std::env::vars_os()
+        .filter(|(key, _)| {
+            !matches!(
+                key.to_str(),
+                Some("GIT_TERMINAL_PROMPT" | "GIT_DIR" | "GIT_WORK_TREE" | "GIT_COMMON_DIR")
+            )
+        })
+        .collect();
+    env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
+    let options = exec_options(
+        &argv,
+        repo.0.root_path(),
+        budget,
+        &env,
+        Some(b""),
+        Some(cancel),
+    );
+    runtime.git.verify()?;
+    validate_outcome(executor.execute(options)?)
+}
+
 /// Same closed reads and execution boundary, with no mutation capability.
 pub fn run_read_utility(
     executor: &dyn Executor,

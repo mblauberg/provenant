@@ -167,26 +167,6 @@ fn resolve(
     if base.is_empty() || base.len() > 1024 || base.contains('\0') {
         return Err(invalid());
     }
-    let (out, timed_out) = read_git_with_env(
-        executor,
-        git,
-        cwd,
-        &[
-            "rev-parse",
-            "--verify",
-            "--end-of-options",
-            &format!("{base}^{{commit}}"),
-        ],
-        256,
-        env,
-    )
-    .map_err(|_| invalid())?;
-    let text = std::str::from_utf8(&out.bytes).map_err(|_| invalid())?;
-    provenant_core::GitOid::parse(text.trim()).map_err(|_| invalid())?;
-    if timed_out || out.truncated {
-        return Err(invalid());
-    }
-    let oid = text.trim().to_owned();
     // A tracking ref can alias a differently spelled ref on the host's
     // filesystem. Verify the exact advertised head before trusting its OID.
     let (symbolic, timed_out) = read_git_with_env(
@@ -210,48 +190,71 @@ fn resolve(
     let symbolic = std::str::from_utf8(&symbolic.bytes)
         .map_err(|_| invalid())?
         .trim();
-    let remote_name = symbolic
-        .strip_prefix("refs/remotes/")
-        .unwrap_or(base.strip_prefix("refs/remotes/").unwrap_or(base));
-    if let Some((remote, branch)) = remote_name.split_once('/') {
-        let (remotes, timed_out) = read_git_with_env(executor, git, cwd, &["remote"], 16384, env)
-            .map_err(|_| invalid())?;
-        if timed_out || remotes.truncated {
-            return Err(invalid());
-        }
-        if remotes
-            .bytes
-            .split(|byte| *byte == b'\n')
-            .any(|name| name == remote.as_bytes())
-        {
-            let reference = if branch == "HEAD" {
-                let (symbolic, timed_out) = read_git_with_env(
-                    executor,
-                    git,
-                    cwd,
-                    &[
-                        "symbolic-ref",
-                        "--quiet",
-                        &format!("refs/remotes/{remote}/HEAD"),
-                    ],
-                    4096,
-                    env,
-                )
-                .map_err(|_| invalid())?;
-                if timed_out || symbolic.truncated {
-                    return Err(invalid());
+    // Revision operators hide their root from --symbolic-full-name.
+    if !symbolic.starts_with("refs/remotes/") {
+        let mut end = base.find(['^', '~', ':']).unwrap_or(base.len());
+        if let Some(at) = base[..end].find("@{") {
+            let suffix = &base[at..end];
+            if let Some(close) = suffix.find('}') {
+                if matches!(&suffix[..=close], "@{u}" | "@{upstream}" | "@{push}") {
+                    end = at + close + 1;
+                } else {
+                    end = at;
                 }
-                let symbolic = std::str::from_utf8(&symbolic.bytes)
-                    .map_err(|_| invalid())?
-                    .trim();
-                let branch = symbolic
-                    .strip_prefix(&format!("refs/remotes/{remote}/"))
-                    .ok_or_else(invalid)?;
-                format!("refs/heads/{branch}")
             } else {
+                end = at;
+            }
+        }
+        if end < base.len() && end > 0 {
+            let (root, timed_out) = read_git_with_env(
+                executor,
+                git,
+                cwd,
+                &[
+                    "rev-parse",
+                    "--symbolic-full-name",
+                    "--verify",
+                    "--end-of-options",
+                    &base[..end],
+                ],
+                4096,
+                env,
+            )
+            .map_err(|_| invalid())?;
+            if timed_out || root.truncated {
+                return Err(invalid());
+            }
+            if root.bytes.starts_with(b"refs/remotes/") {
+                return Err(RunError::Validation(
+                    "remote revision expressions are not supported; use a remote branch ref such as refs/remotes/origin/main",
+                ));
+            }
+        }
+    }
+    if let Some(remote_name) = symbolic.strip_prefix("refs/remotes/") {
+        if let Some((resolved_remote, branch)) = remote_name.split_once('/') {
+            // Symbolic resolution dereferences HEAD. Identify an explicitly
+            // requested remote HEAD from the configured remote names, rather
+            // than trusting the local symref's target to name that remote.
+            let (remotes, timed_out) =
+                read_git_with_env(executor, git, cwd, &["remote"], 16384, env)
+                    .map_err(|_| invalid())?;
+            if timed_out || remotes.truncated {
+                return Err(invalid());
+            }
+            let remotes = std::str::from_utf8(&remotes.bytes).map_err(|_| invalid())?;
+            let requested_default = remotes.lines().find(|remote| {
+                base == *remote
+                    || base == format!("{remote}/HEAD")
+                    || base == format!("remotes/{remote}/HEAD")
+                    || base == format!("refs/remotes/{remote}/HEAD")
+            });
+            let remote = requested_default.unwrap_or(resolved_remote);
+            let default = requested_default.is_some() || branch == "HEAD";
+            if !default {
                 provenant_confinement::repo::GitRefName::branch(branch).map_err(|_| invalid())?;
-                format!("refs/heads/{branch}")
-            };
+            }
+            let reference = format!("refs/heads/{branch}");
             let mut transport_env: Vec<_> = std::env::vars_os()
                 .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
                 .collect();
@@ -266,36 +269,95 @@ fn resolve(
                     .cloned(),
             );
             transport_env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
-            let (advertised, timed_out) = read_git_with_env(
-                executor,
-                git,
-                cwd,
-                &[
+            let args = if default {
+                vec![
+                    "ls-remote",
+                    "--symref",
+                    "--exit-code",
+                    "--",
+                    remote,
+                    "HEAD",
+                    "refs/heads/*",
+                ]
+            } else {
+                vec![
                     "ls-remote",
                     "--exit-code",
                     "--heads",
                     "--",
                     remote,
-                    &reference,
-                ],
-                16384,
-                &transport_env,
-            )
-            .map_err(|_| invalid())?;
+                    reference.as_str(),
+                ]
+            };
+            let (advertised, timed_out) =
+                read_git_with_env(executor, git, cwd, &args, CONTEXT_LIMIT, &transport_env)
+                    .map_err(|_| invalid())?;
             if timed_out || advertised.truncated {
                 return Err(invalid());
             }
             let advertised = std::str::from_utf8(&advertised.bytes).map_err(|_| invalid())?;
-            let mut matches = advertised.lines().filter_map(|line| {
-                let (value, name) = line.split_once('\t')?;
-                (name == reference).then_some(value)
-            });
-            if matches.next() != Some(oid.as_str()) || matches.next().is_some() {
+            let mut default_branch = None;
+            let mut heads = Vec::new();
+            for line in advertised.lines() {
+                let (value, name) = line.split_once('\t').ok_or_else(invalid)?;
+                if name == "HEAD" && value.starts_with("ref: ") {
+                    let name = value.strip_prefix("ref: refs/heads/").ok_or_else(invalid)?;
+                    if default_branch.replace(name).is_some() {
+                        return Err(invalid());
+                    }
+                } else if let Some(name) = name.strip_prefix("refs/heads/") {
+                    if provenant_core::GitOid::parse(value).is_err() {
+                        return Err(invalid());
+                    }
+                    heads.push((name, value));
+                }
+            }
+            let branch = if default {
+                default_branch.ok_or_else(invalid)?
+            } else {
+                branch
+            };
+            provenant_confinement::repo::GitRefName::branch(branch).map_err(|_| invalid())?;
+            let mut matches = heads.iter().filter(|(name, _)| *name == branch);
+            let oid = matches
+                .next()
+                .map(|(_, value)| *value)
+                .ok_or_else(invalid)?;
+            if matches.next().is_some() {
                 return Err(invalid());
             }
+            if default
+                && heads
+                    .iter()
+                    .any(|(name, _)| provenant_core::refs_collide(branch, name))
+            {
+                return Err(invalid());
+            }
+            return Ok(oid.to_owned());
+        } else {
+            return Err(invalid());
         }
     }
-    Ok(oid)
+    let (out, timed_out) = read_git_with_env(
+        executor,
+        git,
+        cwd,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{base}^{{commit}}"),
+        ],
+        256,
+        env,
+    )
+    .map_err(|_| invalid())?;
+    let text = std::str::from_utf8(&out.bytes).map_err(|_| invalid())?;
+    provenant_core::GitOid::parse(text.trim()).map_err(|_| invalid())?;
+    if timed_out || out.truncated {
+        return Err(invalid());
+    }
+    Ok(text.trim().to_owned())
 }
 
 /// Validate the base before admission; persist the resolved commit in the
@@ -659,7 +721,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(scratch.path().join("git-context.json"))?)?;
         assert_eq!(metadata["log_truncated"], false);
         assert_eq!(metadata["diff_truncated"], false);
-        assert_eq!(executor.0.lock().map_err(|_| "calls poisoned")?.len(), 6);
+        assert_eq!(executor.0.lock().map_err(|_| "calls poisoned")?.len(), 8);
         Ok(())
     }
 
@@ -894,12 +956,43 @@ mod tests {
             "refs/remotes/origin/HEAD",
             "refs/remotes/origin/main",
         ])?;
-        assert!(resolve_base("origin/main").is_err());
-        assert!(resolve_base("refs/remotes/origin/HEAD").is_err());
+        run(&["config", "branch.main.remote", "origin"])?;
+        run(&["config", "branch.main.merge", "refs/heads/main"])?;
+        run(&["config", "push.default", "upstream"])?;
+        let aliases = [
+            "origin/main",
+            "remotes/origin/main",
+            "origin",
+            "@{u}",
+            "main@{upstream}",
+            "@{push}",
+            "refs/remotes/origin/HEAD",
+        ];
         let head = resolve_git_base(&fixture.binary, &fixture.root, "HEAD")?;
+        for base in aliases {
+            assert_eq!(resolve_base(base)?, head, "{base}");
+        }
         run(&["update-ref", "refs/remotes/origin/main", &head])?;
-        assert_eq!(resolve_base("origin/main")?, head);
-        assert_eq!(resolve_base("refs/remotes/origin/HEAD")?, head);
+        for base in aliases {
+            assert_eq!(resolve_base(base)?, head, "{base}");
+        }
+        for base in [
+            "origin/main^",
+            "remotes/origin/main~1",
+            "@{u}^",
+            "origin/main@{0}",
+            "origin/main:tracked.txt",
+        ] {
+            let error = resolve_base(base).expect_err(base);
+            assert!(
+                error.to_string().contains("refs/remotes/origin/main"),
+                "{base}: {error}"
+            );
+        }
+        run(&["pack-refs", "--all"])?;
+        run(&["branch", "Main"])?;
+        assert!(resolve_base("origin").is_err());
+        assert!(resolve_base("refs/remotes/origin/HEAD").is_err());
         Ok(())
     }
 
