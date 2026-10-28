@@ -1,5 +1,5 @@
 //! Writer identity and confinement composition. Supervisor owns the lease.
-use crate::{Result, RunError, WriterRequest};
+use crate::{PathCheck, Result, RunError, WriterRequest};
 use provenant_confinement::{
     ConfinedPlan, UtilityBudget, UtilityRuntime, VerifiedWorktree,
     permissions::{
@@ -95,7 +95,10 @@ fn resolve_writer_with(
     let repo = selected
         .repository
         .ok_or(RunError::Validation("writer needs a Git project"))?;
-    let project = repo.common_git_dir().parent().ok_or(RunError::UnsafePath)?;
+    let project = repo
+        .common_git_dir()
+        .parent()
+        .ok_or_else(|| RunError::unsafe_path(repo.common_git_dir(), PathCheck::Containment))?;
     let selected = project.join(path);
     let path = canonicalize(&selected).map_err(|error| {
         if error.is_not_found() {
@@ -106,7 +109,7 @@ fn resolve_writer_with(
     })?;
     if !verify {
         if !path.starts_with(project) {
-            return Err(RunError::UnsafePath);
+            return Err(RunError::unsafe_path(path, PathCheck::Containment));
         }
         return Ok(WriterRequest {
             project: project.to_path_buf(),
@@ -282,7 +285,11 @@ impl crate::RunStore {
         writer: &WriterRequest,
     ) -> Result<Directory> {
         match prepare_writer(writer, &self.writer_registry, record.project_id) {
-            Ok(mut launch) => Ok(launch.custody.take().ok_or(RunError::UnsafePath)?.0),
+            Ok(mut launch) => Ok(launch
+                .custody
+                .take()
+                .ok_or_else(|| RunError::unsafe_path(writer.worktree.clone(), PathCheck::Missing))?
+                .0),
             Err(failure) if worktree_removed(writer) => {
                 let scope = Self::scope(record);
                 let fence = self
@@ -290,7 +297,9 @@ impl crate::RunStore {
                     .into_iter()
                     .find(|fence| fence.scope == scope)
                     .ok_or(failure)?;
-                let parent = fence.reservation.parent().ok_or(RunError::UnsafePath)?;
+                let parent = fence.reservation.parent().ok_or_else(|| {
+                    RunError::unsafe_path(fence.reservation.clone(), PathCheck::Containment)
+                })?;
                 Ok(Directory::open_anchor(parent)?)
             }
             Err(failure) => Err(failure),
