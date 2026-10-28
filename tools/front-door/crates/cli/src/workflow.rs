@@ -153,6 +153,9 @@ pub struct Handoff {
     /// Source session ID; defaults to CLAUDE_CODE_SESSION_ID, then CLAUDE_SESSION_ID
     #[arg(long)]
     pub session_id: Option<String>,
+    /// Source chair harness, using the same actor binding as session save
+    #[arg(long, value_parser = crate::install::harness_parser())]
+    pub client: Option<provenant_records::Harness>,
 }
 impl Workflow {
     pub fn path(&self) -> &'static str {

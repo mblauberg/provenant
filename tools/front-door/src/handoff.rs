@@ -307,6 +307,15 @@ fn checkpoint_store(
         .with_revisions(provenant_cli::workflow::session_revisions(roots))
 }
 
+fn checkpoint_identity(store: &SessionStore) -> Result<(), Refusal> {
+    store.validate_chair().map_err(|error| match error {
+        provenant_workflow::session::SessionError::DiscoveryIdentity => {
+            Refusal::refused("IDENTITY", error.to_string())
+        }
+        error => error.into(),
+    })
+}
+
 fn session_id(explicit: Option<&str>) -> Result<Option<HostSessionId>, Refusal> {
     let text = match explicit {
         Some(text) => Some(text.to_owned()),
@@ -414,12 +423,14 @@ fn execute(
         .map(|(_, lanes)| lanes)
         .map_err(|fail| fail.message);
     let project = context.identity.project;
-    let actor =
-        provenant_cli::workflow::session_actor(context, Some(provenant_records::Harness::Claude))
-            .map_err(|e| Refusal::invalid(e.to_string()))?;
+    let actor = provenant_cli::workflow::session_actor(context, args.client)
+        .map_err(|e| Refusal::invalid(e.to_string()))?;
     let store = session.as_ref().filter(|_| !args.no_checkpoint).map(|id| {
         checkpoint_store(&src.roots, project, id.clone()).with_chair(context.identity.host, actor)
     });
+    if let Some(store) = &store {
+        checkpoint_identity(store)?;
+    }
     let checkpoint = store
         .as_ref()
         .map(SessionStore::read)
@@ -1188,6 +1199,10 @@ mod tests {
             &roots,
             ProjectId::from_bytes([3; 16]),
             HostSessionId::parse("handoff-session").unwrap(),
+        )
+        .with_chair(
+            provenant_core::HostId::from_bytes([4; 16]),
+            provenant_core::ActorId::from_bytes([5; 16]),
         );
         let (clock, cancel) = (SystemClock::new(), CancelToken::new());
         for text in ["one\n", "two\n", "three\n", "four\n"] {
@@ -1203,6 +1218,17 @@ mod tests {
             .map(|revision| revision.revision)
             .collect();
         assert_eq!(kept, [3, 4], "[retention] session_revisions applies");
+        assert!(checkpoint_identity(&store).is_ok());
+        let other = checkpoint_store(
+            &roots,
+            ProjectId::from_bytes([3; 16]),
+            HostSessionId::parse("handoff-session").unwrap(),
+        )
+        .with_chair(
+            provenant_core::HostId::from_bytes([4; 16]),
+            provenant_core::ActorId::from_bytes([6; 16]),
+        );
+        assert_eq!(checkpoint_identity(&other).err().unwrap().code, "IDENTITY");
     }
 
     #[test]

@@ -83,6 +83,15 @@ impl SessionStore {
         self
     }
 
+    /// Preflight an existing chair binding without requiring readable history.
+    pub fn validate_chair(&self) -> Result<(), SessionError> {
+        match self.directory(false) {
+            Ok(dir) => self.check_discovery_identity(self.load_discovery(&dir)?.as_ref()),
+            Err(error) if error.is_not_found() => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub(super) fn load_discovery(
         &self,
         dir: &Directory,

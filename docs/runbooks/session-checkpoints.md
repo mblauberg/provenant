@@ -10,7 +10,8 @@ excerpt.
 
 For an MCP chair without an explicit agent label, include `--client claude` or
 `--client codex` on each save to use the same actor as its MCP inbox. Saves keep
-that host/actor binding; a different actor is refused with `IDENTITY`.
+that host/actor binding; supply the same `--client` on handoff. A different actor
+is refused with `IDENTITY` before peer delivery.
 
 ## Earlier saves
 

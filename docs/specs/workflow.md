@@ -144,7 +144,8 @@ bound project, supplied host session ID and trusted actor as a chair.
 HARNESS`, while preserving explicit environment/configured agent labels.
 Without `--client`, the normal CLI Fabric identity applies; MCP chairs without
 an explicit agent label must supply their client on each save. Source
-checkpoint saves during `session handoff` use the same binding. The workflow
+checkpoint saves during `session handoff` use the same optional source
+`--client` binding and validate it before peer delivery. The workflow
 owner stores a per-session index entry in
 `workflow/projects/<project>/sessions/<session>/discovery.json` (at most 4 KiB):
 
