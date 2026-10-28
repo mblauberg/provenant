@@ -41,6 +41,18 @@ evidence_ref = "docs/research/opencode-go-models.md#mimo-v26; accessed 2026-10-2
 trains_on_prompts = false
 
 [[models]]
+model = "opencode/opencode-go/deepseek-v4.1-flash"
+efforts = []
+evidence_ref = "docs/research/opencode-go-models.md#flash-fallbacks; accessed 2026-10-28"
+trains_on_prompts = false
+
+[[models]]
+model = "opencode/opencode-go/glm-5.3-flash"
+efforts = []
+evidence_ref = "docs/research/opencode-go-models.md#flash-fallbacks; accessed 2026-10-28"
+trains_on_prompts = false
+
+[[models]]
 model = "opencode/opencode-go/mimo-v2.6-pro"
 efforts = []
 evidence_ref = "docs/research/opencode-go-models.md#mimo-v26; accessed 2026-10-28"
@@ -160,6 +172,8 @@ utility = [
 junior = [
     # Provisional pending local trial evidence.
     { model = "opencode/opencode-go/mimo-v2.6-flash", weight = 1, efforts = [] },
+    { model = "opencode/opencode-go/deepseek-v4.1-flash", weight = 1, efforts = [] },
+    { model = "opencode/opencode-go/glm-5.3-flash", weight = 1, efforts = [] },
     { model = "codex/gpt-6.1-terra", weight = 2, effort = "low", efforts = ["low", "medium"] },
     { model = "codex/gpt-6-luna", weight = 4, effort = "high", efforts = ["medium", "high", "xhigh"] },
     { model = "claude/claude-haiku-5-5", weight = 4, effort = "high", efforts = ["medium", "high", "xhigh"] },

@@ -25,9 +25,24 @@ asset was inspected where the plain HTML contained only the application shell.
 `opencode/opencode-go/glm-5.3` is catalogued for exact-model trials only. Senior
 pool admission awaits a trial.
 
+## Flash fallbacks
+
+The free Zen variants of DeepSeek V4.1 Flash and GLM-5.3 Flash already sit in
+the junior pool, but free allowances run out. Their paid Go endpoints are the
+cheapest fallbacks: the [Go documentation](https://opencode.ai/v2/docs/console/go/)
+gives DeepSeek V4.1 Flash an $80 monthly limit on the $10 plan (8x) and GLM-5.3
+Flash $60 (6x), the same as MiMo V2.6 Flash. Artificial Analysis rates
+[DeepSeek V4.1 Flash](https://artificialanalysis.ai/models/releases/deepseek-v4-1-flash)
+at 45 and [GLM-5.3 Flash](https://artificialanalysis.ai/models/glm-5-3-flash/) at
+42 on its intelligence index. DeepSeek's 1017 revision (17 October 2026) reports
+no Terminal-Bench 2.1 score, so the older Flash revision's figure is not
+attributed to it, and OpenCode does not publish which revision it serves. Both
+join the junior pool at weight 1 alongside MiMo V2.6 Flash, so a like-for-like
+local trial can compare the three.
+
 ## Provider controls
 
-The [OpenCode Go documentation](https://opencode.ai/docs/go/) lists all three
+The [OpenCode Go documentation](https://opencode.ai/docs/go/) lists all five
 hosted models and describes Go's privacy settings. The catalogue records
 `trains_on_prompts = false` for these paid endpoints as required by the admission
 scope. No effort controls or underlying model-family identity are inferred from

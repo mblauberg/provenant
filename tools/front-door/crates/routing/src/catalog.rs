@@ -706,11 +706,17 @@ mod tests {
     use provenant_records::{RouteEligibility, RouteReadiness};
 
     #[test]
-    fn bundled_go_models_resolve_and_only_flash_has_provisional_pool_weights()
+    fn bundled_go_models_resolve_and_only_flash_models_have_provisional_pool_weights()
     -> Result<(), Box<dyn std::error::Error>> {
         let catalogue = Catalogue::bundled()?;
         let config = RoutingConfig::default();
-        let model_names = ["mimo-v2.6-flash", "mimo-v2.6-pro", "glm-5.3"];
+        let model_names = [
+            "mimo-v2.6-flash",
+            "deepseek-v4.1-flash",
+            "glm-5.3-flash",
+            "mimo-v2.6-pro",
+            "glm-5.3",
+        ];
         let availability = [AvailabilityRecord {
             schema_version: 1,
             adapter: "opencode".into(),
@@ -770,13 +776,18 @@ mod tests {
                         .map(|member| (pool.as_str(), member))
                 })
                 .collect();
-            if name == "mimo-v2.6-flash" {
+            let pools: &[&str] = match name {
+                "mimo-v2.6-flash" => &["junior", "senior"],
+                "deepseek-v4.1-flash" | "glm-5.3-flash" => &["junior"],
+                _ => &[],
+            };
+            if !pools.is_empty() {
                 assert_eq!(
                     memberships
                         .iter()
                         .map(|(pool, _)| *pool)
                         .collect::<Vec<_>>(),
-                    ["junior", "senior"]
+                    pools
                 );
                 for (_, member) in memberships {
                     assert_eq!(member.weight, 1);
