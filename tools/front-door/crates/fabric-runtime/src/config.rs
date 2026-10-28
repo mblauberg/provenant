@@ -388,19 +388,13 @@ impl DomainConfig for FabricConfig {
                 reject(format!("lanes.priority.{name}"));
             }
         }
-        if self
-            .lanes
-            .max_concurrent_builds
-            .is_some_and(|n| !(1..=64).contains(&n))
+        for key in (provenant_config::LaneBuildSettings {
+            max_concurrent_builds: self.lanes.max_concurrent_builds,
+            cargo_build_jobs: self.lanes.cargo_build_jobs,
+        })
+        .invalid_keys()
         {
-            reject("lanes.max_concurrent_builds".into());
-        }
-        if self
-            .lanes
-            .cargo_build_jobs
-            .is_some_and(|n| !(1..=1024).contains(&n))
-        {
-            reject("lanes.cargo_build_jobs".into());
+            reject(format!("lanes.{key}"));
         }
         errors
     }

@@ -48,16 +48,27 @@ impl LaneBuildSettings {
             Err(error) if error.is_not_found() => Self::default(),
             Err(error) => return Err(std::io::Error::other(error)),
         };
-        if settings
-            .max_concurrent_builds
-            .is_some_and(|n| !(1..=64).contains(&n))
-            || settings
-                .cargo_build_jobs
-                .is_some_and(|n| !(1..=1024).contains(&n))
-        {
+        if !settings.invalid_keys().is_empty() {
             return Err(std::io::Error::other("invalid lane build settings"));
         }
         Ok(settings)
+    }
+    /// Invalid host build setting names, shared with the Fabric reader.
+    pub fn invalid_keys(&self) -> Vec<&'static str> {
+        let mut invalid = Vec::new();
+        if self
+            .max_concurrent_builds
+            .is_some_and(|n| !(1..=64).contains(&n))
+        {
+            invalid.push("max_concurrent_builds");
+        }
+        if self
+            .cargo_build_jobs
+            .is_some_and(|n| !(1..=1024).contains(&n))
+        {
+            invalid.push("cargo_build_jobs");
+        }
+        invalid
     }
     pub fn build_limit(&self, total_bytes: u64) -> u64 {
         self.max_concurrent_builds
