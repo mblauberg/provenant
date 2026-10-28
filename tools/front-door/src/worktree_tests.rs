@@ -1149,6 +1149,7 @@ impl provenant_run::Providers for WriterProvider {
                 home: self.home.clone(),
             }),
             observed_head: None,
+            repository: None,
         })
     }
 

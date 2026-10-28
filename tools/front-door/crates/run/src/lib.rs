@@ -3,6 +3,8 @@
 mod admission;
 mod artifacts;
 mod controls;
+mod correlation;
+pub use correlation::{WORK_INDEX_FILE, WorkCoverage, WorkIndex, WorkSelector};
 mod db;
 mod delivery;
 mod disk;

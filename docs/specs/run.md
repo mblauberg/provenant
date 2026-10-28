@@ -39,6 +39,33 @@ prompts.
 - Test: `crates/run/src/service_tests.rs::task_title_roundtrip`
 - Owner: `crates/run/src/service.rs`, `crates/records/src/run.rs`
 
+## Work correlation lookup
+
+`run::WorkIndex` owns immutable membership in `<host-state>/work-index.sqlite3`.
+Run seals project, run, task and attempt together before the guardian handoff,
+from the host-accepted launch snapshot. Nested launches use the trusted host
+registry root, never their lane-writable store as lookup authority. Continuations
+receive their own membership through the same path. Capture failures refuse
+handoff; identical captures replay and disagreeing captures conflict.
+
+Repository identity is the verified canonical Git common directory. Head is the
+host-observed launch HEAD for readers; writer heads and unavailable Git facts
+remain explicitly unproven. These facts identify accepted work, not a chair
+session, successful launch, answer or workflow authority.
+
+`WorkSelector` requires project and run, with optional task, attempt, repository
+and head constraints. `validate` checks at most 64 candidates, reads at most
+64 KiB per record and returns `Verified`, `Unindexed`, `RepositoryUnavailable`,
+`HeadUnavailable`, `Mismatch` or `Limit`. Unknown, historical and unprepared work
+is unindexed. Reaching the bound never establishes absence. No lookup traverses
+child roots, reads provider sessions or accepts a caller-supplied store locator.
+The composition edge must open the trusted host root; lanes cannot write the
+index, its companions or lock through configured grants. Keep membership for
+as long as run metadata, including when lane-local records disappear.
+
+- Test: `crates/run/src/correlation.rs::tests`; `crates/cli/src/run/provider.rs::configured_grants_cannot_expose_host_indexes`
+- Owner: `crates/run/src/correlation.rs`, `crates/run/src/launch.rs`
+
 ## Chair associations
 
 Local CLI and MCP submissions seal a chair's host and Fabric inbox actor with

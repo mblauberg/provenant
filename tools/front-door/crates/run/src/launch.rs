@@ -61,6 +61,8 @@ pub struct PreparedLaunch {
     /// HEAD of the checkout a read-only lane runs in, read by the host at
     /// preparation. Writers record theirs from delivery instead.
     pub observed_head: Option<provenant_core::GitOid>,
+    /// Canonical Git common directory verified by the host preparation edge.
+    pub repository: Option<provenant_records::AbsolutePath>,
     pub confinement: Option<crate::LaunchConfinement>,
 }
 
@@ -977,6 +979,7 @@ impl RunStore {
             self.attempt_dir(record.run_id, id, false)
                 .map_err(|e| local(&e))
         };
+        self.seal_work(record, &plan, call).map_err(|e| local(&e))?;
         let mut holder_context = context(record, requester).map_err(|e| local(&e))?;
         let reservation =
             PublicationReservation::prepare(directory()?, call.budget, call.cancel, call.clock)
