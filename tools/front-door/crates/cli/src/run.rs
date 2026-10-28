@@ -5130,6 +5130,78 @@ mod tests {
     }
 
     #[test]
+    fn refused_provider_continuation_keeps_a_durable_attempt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct Refusing {
+            prior: Option<AttemptId>,
+        }
+        impl run::Providers for Refusing {
+            fn prepare(
+                &self,
+                _: &run::TaskRequest,
+                _: &str,
+                _: &run::LaunchPaths,
+                resume: Option<&run::AttemptRecord>,
+            ) -> Result<run::PreparedLaunch, String> {
+                assert_eq!(resume.map(|prior| prior.attempt_id), self.prior);
+                Err("fixture continuation refused; run provenant run".into())
+            }
+            fn decode(
+                &self,
+                _: &run::RouteRecord,
+                _: &[u8],
+                _: &ExitObservation,
+                _: &Path,
+            ) -> Result<run::Decoded, String> {
+                unreachable!("a refused launch never reaches a provider")
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+        let store = trace_store(&temp, &call)?;
+        let prior = trace_run(10, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
+        store.create(&prior, &call)?;
+        store.start(
+            prior.run_id,
+            &Refusing { prior: None },
+            &|_, _| unreachable!(),
+            &call,
+        )?;
+        let prior_id = prior.attempts[0].attempt_id;
+        let mut resumed = trace_run(20, prior_id, clock.wall_now()?)?;
+        resumed.request.parent = Some(prior_id);
+        resumed.request.tasks[0].task_id = prior.attempts[0].task_id;
+        resumed.attempts[0].task_id = prior.attempts[0].task_id;
+        store.create(&resumed, &call)?;
+        let started = store.start(
+            resumed.run_id,
+            &Refusing {
+                prior: Some(prior_id),
+            },
+            &|_, _| unreachable!(),
+            &call,
+        )?;
+        let [run::Started::Refused { attempt, .. }] = started.as_slice() else {
+            return Err("continuation must be refused".into());
+        };
+        assert_eq!(*attempt, resumed.attempts[0].attempt_id);
+        // Reopen the store: every ID printed by the refusal must remain
+        // addressable after the command exits.
+        drop(store);
+        let reopened = trace_store(&temp, &call)?;
+        let record = run::Service::new(&reopened).status(*attempt, &call)?;
+        assert_eq!(record.run_id, resumed.run_id);
+        assert!(matches!(
+            record.state,
+            run::AttemptState::Terminal { outcome: run::Outcome::Rejected, reason: Some(ref reason), .. }
+                if reason.contains("fixture continuation refused")
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn grants_lines_list_each_applied_grant_and_stay_empty_for_older_attempts()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
