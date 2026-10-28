@@ -417,15 +417,21 @@ impl RunStore {
                 eprintln!("admission: memory pressure probe failed: {error}");
                 None
             });
-            let settings = provenant_config::LaneBuildSettings::read(&self.writer_registry)
-                .map_err(|_| RunError::BuildSettings)?;
+            let settings = provenant_config::LaneBuildSettings::read(&self.writer_registry);
+            if settings
+                .as_ref()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::InvalidInput)
+            {
+                return Err(RunError::BuildSettings);
+            }
             let fits = match (
                 resources.memory(),
                 pressure,
                 resources.disk(attempt),
                 disk_floor_bytes,
+                settings,
             ) {
-                (Ok(memory), pressure, Ok(disk), Ok(floor)) => {
+                (Ok(memory), pressure, Ok(disk), Ok(floor), Ok(settings)) => {
                     refusal = if disk < floor {
                         Some(RunError::DiskFloor { free: disk, floor })
                     } else if let Some(

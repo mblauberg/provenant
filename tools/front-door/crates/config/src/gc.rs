@@ -50,19 +50,25 @@ impl LaneBuildSettings {
         });
         let settings = match read {
             Ok(bytes) => {
-                toml_edit::de::from_str::<Root>(
-                    std::str::from_utf8(&bytes).map_err(std::io::Error::other)?,
-                )
-                .map_err(std::io::Error::other)?
-                .domains
-                .fabric
-                .lanes
+                let text = std::str::from_utf8(&bytes)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+                let document = text
+                    .parse::<toml_edit::DocumentMut>()
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+                toml_edit::de::from_document::<Root>(document)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+                    .domains
+                    .fabric
+                    .lanes
             }
             Err(error) if error.is_not_found() => Self::default(),
             Err(error) => return Err(std::io::Error::other(error)),
         };
         if !settings.invalid_keys().is_empty() {
-            return Err(std::io::Error::other("invalid lane build settings"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid lane build settings",
+            ));
         }
         Ok(settings)
     }

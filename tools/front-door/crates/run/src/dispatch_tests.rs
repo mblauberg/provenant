@@ -2397,19 +2397,28 @@ fn invalid_build_settings_refuse_without_waiting() -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    std::fs::write(
-        store.writer_registry.join("config.toml"),
-        "[domains.fabric.lanes]\nmax_concurrent_builds = 0\n",
-    )?;
     let run = lane(69, true);
     let id = starting(&store, &run, &call)?;
     let attempt = store.attempt_dir(run.run_id, id, false)?;
-    let now = clock.wall_now()?;
-    assert!(matches!(
-        store.admit(id, &attempt, &Host { available: 100 }, &clock, &cancel),
-        Err(RunError::BuildSettings)
-    ));
-    assert_eq!(clock.wall_now()?, now);
+    for assignment in [
+        "max_concurrent_builds = 0",
+        "cargo_build_jobs = -2",
+        "cargo_build_jobs = 'invalid'",
+    ] {
+        std::fs::write(
+            store.writer_registry.join("config.toml"),
+            format!("[domains.fabric.lanes]\n{assignment}\n"),
+        )?;
+        let now = clock.wall_now()?;
+        assert!(
+            matches!(
+                store.admit(id, &attempt, &Host { available: 100 }, &clock, &cancel),
+                Err(RunError::BuildSettings)
+            ),
+            "{assignment}"
+        );
+        assert_eq!(clock.wall_now()?, now);
+    }
     Ok(())
 }
 
@@ -3489,6 +3498,11 @@ fn a_delayed_admission_cannot_start_inside_a_newer_start_or_rewind_it() -> TestR
     let (clock, cancel) = (Stepped::up(0), CancelToken::new());
     let call = stepped_call(&clock, &cancel);
     let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    // Keep the writer slot limit from masking the startup-spacing behaviour.
+    std::fs::write(
+        store.writer_registry.join("config.toml"),
+        "[domains.fabric.lanes]\nmax_concurrent_builds = 2\n",
+    )?;
     store.set_admission_policy(AdmissionPolicy {
         admission_seconds: 1,
         ..AdmissionPolicy::default()
@@ -3506,10 +3520,11 @@ fn a_delayed_admission_cannot_start_inside_a_newer_start_or_rewind_it() -> TestR
         call: &call,
         started: Cell::new(false),
     };
-    assert!(matches!(
-        store.admit(delayed_id, &attempt, &probe, &clock, &cancel),
-        Err(RunError::Refused)
-    ));
+    let admission = store.admit(delayed_id, &attempt, &probe, &clock, &cancel);
+    assert!(
+        matches!(&admission, Err(RunError::Refused)),
+        "admission: {admission:?}"
+    );
     assert!(probe.started.get());
     assert_eq!(
         store.record(delayed_id, &call)?.state,

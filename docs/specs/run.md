@@ -223,7 +223,7 @@ releases a lease. A busy, missing, replaced or unreadable store retains the
 lease until the guardian is confirmed absent or the boot changes. The ledger
 records the owner file's device and inode to detect replacement. Malformed
 lease evidence is retained unless independent evidence proves release.
-Invalid host build settings fail immediately with a named configuration error.
+A parsed host configuration with invalid build settings fails immediately with a named configuration error. An unreadable or syntactically incomplete configuration is retried, so an unavailable current disk floor never admits unchecked.
 An unavailable guardian identity is retried until the admission deadline, then
 reported as a typed refusal.
 Both identity fields are required on every lease. Earlier lease schemas were
