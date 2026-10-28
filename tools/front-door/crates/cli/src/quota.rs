@@ -327,6 +327,149 @@ pub(crate) fn persist_provider_refusal(
     write_intent(&directory, &intent, &mut records)
 }
 
+/// Record successful account-scoped provider evidence, without inventing quota.
+pub(crate) fn persist_provider_success(
+    state_root: &Path,
+    route: &provenant_records::run::RouteRecord,
+    now: i64,
+) -> Result<(), EdgeError> {
+    let (Some(adapter), Some(key)) = (route.provider.as_deref(), route.account_key.as_deref())
+    else {
+        return Ok(());
+    };
+    let root = match Directory::open_anchor(state_root) {
+        Ok(root) => root,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let directory = match root.open_verified_directory(OsStr::new("quota")) {
+        Ok(dir) => dir,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    check_private(&root)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|_| EdgeError::Time)?;
+    let _lock = directory.lock(
+        OsStr::new("quota.lock"),
+        LockMode::Exclusive,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    let mut records = read_records(&directory)?;
+    let current = records
+        .iter()
+        .find(|r| r.account.adapter == adapter && r.account.account_key == key)
+        .cloned();
+    let mut next = match &current {
+        Some(record) => record.clone(),
+        None => {
+            let Some(label) = route.account_label.as_ref() else {
+                return Ok(());
+            };
+            let account = AccountScope {
+                adapter: adapter.into(),
+                account_key: key.into(),
+                label: label.clone(),
+            };
+            account.validate()?;
+            AccountRecord::empty(account)
+        }
+    };
+    next.auth_verified_unix_seconds = Some(now);
+    // A probe started before this lane may not overwrite newer evidence.
+    next.claim = None;
+    if next.last_error == Some(ProbeFailure::Auth) {
+        next.last_error = None;
+        next.failures = 0;
+        next.backoff_until_unix_seconds = None;
+        next.last_attempt_unix_seconds = None;
+    }
+    if next
+        .snapshot
+        .as_ref()
+        .is_some_and(|s| s.status == QuotaStatus::AuthRequired)
+    {
+        next.snapshot = None;
+    }
+    next.revision = next
+        .revision
+        .checked_add(1)
+        .ok_or(QuotaError::NumberOutOfRange)?;
+    let intent = UpdateIntent {
+        account: next.account.clone(),
+        expected: current,
+        replacement: Some(next),
+    };
+    write_intent(&directory, &intent, &mut records)?;
+
+    // Publish the changed row so an already-open menu receives the event.
+    let mut bytes = Vec::new();
+    let reader = match directory.open_read(OsStr::new("report.json")) {
+        Ok(reader) => reader,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    reader
+        .take(MAX_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| EdgeError::Read {
+            path: PathBuf::from("report.json"),
+            source,
+        })?;
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
+        return Err(EdgeError::TooLarge);
+    }
+    let mut report: QuotaReport = serde_json::from_slice(&bytes)?;
+    if report.generated_unix_seconds > now {
+        return Ok(());
+    }
+    if let Some(row) = report
+        .accounts
+        .iter_mut()
+        .find(|r| r.account.adapter == adapter && r.account.account_key == key)
+        && row.status == QuotaStatus::AuthRequired
+    {
+        row.status = if row.snapshot.is_some() {
+            QuotaStatus::Stale
+        } else {
+            QuotaStatus::Unknown
+        };
+        if row
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.status == QuotaStatus::AuthRequired)
+        {
+            row.snapshot = None;
+            row.status = QuotaStatus::Unknown;
+        }
+        row.error = None;
+        row.refreshing = false;
+        row.next_due_unix_seconds = Some(now);
+        report
+            .refreshing_ids
+            .retain(|id| id != &format!("{key}/{adapter}"));
+        report.next_due_unix_seconds = report
+            .accounts
+            .iter()
+            .filter_map(|r| r.next_due_unix_seconds)
+            .min();
+        report.generated_unix_seconds = now;
+        let bytes = serde_json::to_vec(&report)?;
+        durable(provenant_os::fs::Directory::atomic_write_with_permissions(
+            &directory,
+            OsStr::new("report.json"),
+            ".report",
+            &bytes,
+            0o600,
+            PublishMode::Replace,
+        )?)?;
+    }
+    Ok(())
+}
+
 fn write_intent(
     dir: &Directory,
     intent: &UpdateIntent,
@@ -923,6 +1066,107 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn successful_lane_clears_only_its_auth_and_supersedes_a_probe()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let root = private(temp.path())?;
+        let dir = child(&root, OsStr::new("quota"))?;
+        let mut records = Vec::new();
+        for key in ["first", "second"] {
+            let account = AccountScope {
+                adapter: "claude".into(),
+                account_key: key.into(),
+                label: key.into(),
+            };
+            let mut record = AccountRecord::empty(account.clone());
+            record.revision = 1;
+            record.last_attempt_unix_seconds = Some(100);
+            record.last_error = Some(ProbeFailure::Auth);
+            record.failures = 1;
+            record.claim = Some(RefreshClaim {
+                token: "old".into(),
+                deadline_unix_seconds: 155,
+            });
+            write_intent(
+                &dir,
+                &UpdateIntent {
+                    account,
+                    expected: None,
+                    replacement: Some(record),
+                },
+                &mut records,
+            )?;
+        }
+        let report = schedule::report(
+            &[],
+            &records,
+            &[],
+            &QuotaQuery { adapter: None },
+            110,
+            temp.path()
+                .join("quota/report.json")
+                .to_string_lossy()
+                .into_owned(),
+        )?;
+        let bytes = serde_json::to_vec(&report)?;
+        durable(provenant_os::fs::Directory::atomic_write_with_permissions(
+            &dir,
+            OsStr::new("report.json"),
+            ".report",
+            &bytes,
+            0o600,
+            PublishMode::Replace,
+        )?)?;
+        let route = provenant_records::run::RouteRecord {
+            provider: Some("claude".into()),
+            model: None,
+            effort: None,
+            account_label: Some("first".into()),
+            account_key: Some("first".into()),
+            source: None,
+            pool_selection: None,
+        };
+        persist_provider_success(temp.path(), &route, 120)?;
+        let found = read_records(&dir)?;
+        let first = found
+            .iter()
+            .find(|r| r.account.account_key == "first")
+            .unwrap();
+        let second = found
+            .iter()
+            .find(|r| r.account.account_key == "second")
+            .unwrap();
+        assert_eq!(first.auth_verified_unix_seconds, Some(120));
+        assert_eq!(first.last_error, None);
+        assert!(first.claim.is_none());
+        assert!(schedule::complete(first, "old", 121, Err(ProbeFailure::Auth), None).is_err());
+        assert_eq!(second.last_error, Some(ProbeFailure::Auth));
+        let report: QuotaReport =
+            serde_json::from_slice(&std::fs::read(temp.path().join("quota/report.json"))?)?;
+        assert_eq!(
+            report
+                .accounts
+                .iter()
+                .find(|r| r.account.account_key == "first")
+                .unwrap()
+                .status,
+            QuotaStatus::Unknown
+        );
+        assert_eq!(
+            report
+                .accounts
+                .iter()
+                .find(|r| r.account.account_key == "second")
+                .unwrap()
+                .status,
+            QuotaStatus::AuthRequired
+        );
+        Ok(())
+    }
 
     #[test]
     fn display_icon_resolves_against_registered_accounts() -> Result<(), Box<dyn std::error::Error>>

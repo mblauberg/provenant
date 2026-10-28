@@ -503,6 +503,17 @@ impl run::Providers for Registry<'_> {
                 None => note,
             });
         }
+        if decoded.outcome == run::Outcome::Succeeded
+            && std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_none()
+            && let Some(state_root) = provider_state.ancestors().nth(5)
+        {
+            // Housekeeping must not change a successful lane's outcome.
+            let _ = crate::quota::persist_provider_success(
+                state_root,
+                route,
+                jiff::Timestamp::now().as_second(),
+            );
+        }
         Ok(decoded)
     }
 }

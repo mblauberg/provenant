@@ -113,6 +113,9 @@ pub struct AccountRecord {
     pub backoff_until_unix_seconds: Option<i64>,
     pub failures: u64,
     pub last_error: Option<ProbeFailure>,
+    /// A successful lane is newer account-scoped evidence than ambient detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_verified_unix_seconds: Option<i64>,
     pub refusals: Vec<crate::Refusal>,
 }
 impl AccountRecord {
@@ -127,6 +130,7 @@ impl AccountRecord {
             backoff_until_unix_seconds: None,
             failures: 0,
             last_error: None,
+            auth_verified_unix_seconds: None,
             refusals: Vec::new(),
         }
     }
