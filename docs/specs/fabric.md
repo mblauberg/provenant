@@ -178,12 +178,15 @@ CLI list, show and answer may address a configured peer by host label or ID;
 a request ID may be qualified as `host:request`. The owner executes answers
 with the normal revision and operation-ID replay rules. It records the source
 host and peer actor with the answer; the answering host keeps no authoritative
-copy. Close and acknowledgement are owner-local chair operations, retaining
+copy. The MCP `fabric_inbox` tool has no host parameter and remains local-only.
+Close and acknowledgement are owner-local chair operations, retaining
 exact chair and delivery target checks. Remote attempts return
 `owner_local_only` before a write and direct the caller to the owner. An
 unavailable owner is reported rather than replaced with a local mirror.
 Paging binds project, host, session, state, page size and request snapshot;
-changed filters or snapshots require an explicit restart.
+changed filters or snapshots require an explicit restart. New observations
+invoke no model, provider probe, polling loop or background process.
+- Why: unknown peer/session coverage must remain unknown.
 - Test: `tests/fabric_transport.rs::remote_inbox_owner`;
   `crates/fabric-runtime/src/inbox/tests.rs::inbox_paging_binds_filters_snapshot_and_limits`
 - Owner: `crates/fabric-runtime/src/inbox.rs`, `crates/cli/src/inbox.rs`
@@ -712,6 +715,9 @@ remote command is the fixed `provenant fabric peer`, which takes one framed
 request, never a command string. Ingress refuses another `protocol` before
 decoding, and refuses an unknown source, its own host ID as source or a
 `trace.host` other than the sender. There is no version negotiation.
+The claimed `source_host` must name a configured peer, and the claimed agent
+must form a valid actor address with that host. Neither claim is bound to the
+SSH session; this is the existing configured-peer trust model.
 - Why: the peer key is restricted to one command; nothing else may run.
 - Test: `tests/fabric_transport.rs::peer_ingress_refuses_protocol_before_decoding_or_running_mutations`;
   `::peer_ingress_refuses_a_trace_naming_another_host_than_the_sender`

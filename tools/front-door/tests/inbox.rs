@@ -431,8 +431,100 @@ fn inbox_cli_refuses_forged_ownership_and_closes_without_approval() -> Result {
     assert_eq!(closed["data"]["state"], "withdrawn");
     assert!(closed["data"]["answer_id"].is_null());
     assert_eq!(closed, call(&rig, &args, None, 0)?);
-    let remote = call(&rig, &["inbox", "--host", "remote"], None, 1)?;
-    assert_eq!(remote["error"]["code"], "unsupported_owner");
+    Ok(())
+}
+
+#[test]
+fn inbox_explicit_local_and_unconfigured_owner() -> Result {
+    let mut rig = TestRig::new()?;
+    // The initial project is outside HOME and has no federation binding.
+    let explicit = call(&rig, &["inbox", "--host", "local"], None, 0)?;
+    let implicit = call(&rig, &["inbox"], None, 0)?;
+    assert_eq!(explicit["data"], implicit["data"]);
+
+    let moved = rig.home.join("repo");
+    std::fs::rename(&rig.project, &moved)?;
+    rig.project = moved;
+    for (key, value) in &mut rig.env {
+        if key == "PROVENANT_ROOT" {
+            *value = rig.project.clone().into();
+        }
+    }
+    call(&rig, &["inbox"], None, 0)?;
+    let remote = call(&rig, &["inbox", "--host", "remote"], None, 3)?;
+    assert_eq!(remote["error"]["code"], "owner_unavailable");
+    let request = "01".repeat(16);
+    let answer = call(
+        &rig,
+        &[
+            "answer",
+            &request,
+            "--host",
+            "remote",
+            "--action",
+            "choose",
+            "--option",
+            "repair",
+            "--expect-revision",
+            "1",
+            "--channel",
+            "cli",
+            "--operation-id",
+            "retry-answer",
+        ],
+        None,
+        3,
+    )?;
+    assert_eq!(answer["error"]["code"], "owner_unavailable");
+    assert!(
+        answer["error"]["message"]
+            .as_str()
+            .ok_or("message")?
+            .contains("retry-answer")
+    );
+    assert!(
+        answer["error"]["repair"]
+            .as_str()
+            .ok_or("repair")?
+            .contains("--operation-id retry-answer")
+    );
+    let generated = call(
+        &rig,
+        &[
+            "answer",
+            &request,
+            "--host",
+            "remote",
+            "--action",
+            "choose",
+            "--option",
+            "repair",
+            "--expect-revision",
+            "1",
+            "--channel",
+            "cli",
+        ],
+        None,
+        3,
+    )?;
+    let repair = generated["error"]["repair"].as_str().ok_or("repair")?;
+    let operation = repair
+        .split_once("--operation-id ")
+        .ok_or("operation ID in repair")?
+        .1
+        .split(';')
+        .next()
+        .ok_or("operation ID")?;
+    assert!(!operation.is_empty());
+    assert!(
+        generated["error"]["message"]
+            .as_str()
+            .ok_or("message")?
+            .contains(operation)
+    );
+    let id = format!("{}:{}", "09".repeat(16), "01".repeat(16));
+    let mismatch = call(&rig, &["inbox", &id, "--host", "local"], None, 2)?;
+    assert_eq!(mismatch["error"]["code"], "invalid_input");
     Ok(())
 }
 
@@ -481,7 +573,7 @@ fn mcp_call(rig: &TestRig, name: &str, arguments: Value) -> Result<Value> {
 }
 
 #[test]
-fn inbox_mcp_remote_owner_refuses_before_coordination_setup() -> Result {
+fn inbox_mcp_remote_home_lists_locally_when_configured() -> Result {
     for with_peer in [false, true] {
         let mut rig = TestRig::new()?;
         let moved = rig.home.join("repo");
@@ -509,11 +601,22 @@ fn inbox_mcp_remote_owner_refuses_before_coordination_setup() -> Result {
         std::fs::write(file, config.to_string())?;
         assert!(!rig.state.join("fabric").exists());
         let reply = mcp_call(&rig, "fabric_inbox", json!({"op":"list"}))?;
-        assert_eq!(
-            reply["structuredContent"]["code"], "unsupported_owner",
-            "with_peer={with_peer}: {reply}"
-        );
-        assert!(!rig.state.join("fabric").exists(), "with_peer={with_peer}");
+        if with_peer {
+            assert_eq!(reply["structuredContent"]["result"], "listed", "{reply}");
+            assert_eq!(reply["structuredContent"]["items"], json!([]));
+            assert!(
+                reply["structuredContent"]["coverage"]
+                    .as_str()
+                    .ok_or("coverage")?
+                    .contains("local_only")
+            );
+        } else {
+            assert_eq!(
+                reply["structuredContent"]["code"], "home_unavailable",
+                "{reply}"
+            );
+            assert!(!rig.state.join("fabric").exists());
+        }
     }
     Ok(())
 }

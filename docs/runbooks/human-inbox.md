@@ -39,6 +39,8 @@ For a peer owner, use `--host HOST` for list, show or answer, or qualify a
 request ID as `HOST_ID:REQUEST_ID`. Preserve the operation ID for retries.
 Close and acknowledgement must run on the owner host or in the owning chair
 session; remote attempts return `owner_local_only`.
+The MCP `fabric_inbox` tool has no host selector and operates on the local
+host only. Use the CLI to address a peer owner.
 
 Use the explicit originating session ID. It is a declared delivery target;
 posting does not discover, register or authenticate a live provider session.
@@ -281,9 +283,10 @@ deadline has elapsed. Requests without deadlines behave as before.
 
 Pages default to 50 and cap at 100. Pass `next_cursor` back as `--cursor` with
 the same filters/page size. A request change invalidates the cursor; restart
-without it. `--host` accepts the exact local host ID only. A remote configured
-Fabric home returns `unsupported_owner`, even if offline; no local mirror is
-created. To operate remotely, control a session on the owning host directly.
+without it. `--host` selects `local`, the local host ID, or a configured peer
+label or ID. An unconfigured or unavailable owner returns `owner_unavailable`;
+no local mirror is created. Close and acknowledgement on a remote owner return
+`owner_local_only` and must be run on the owner.
 
 Request/log retention and migration behaviour are documented by the
 [store owner](../../tools/front-door/crates/fabric-store/README.md). No request

@@ -2623,6 +2623,55 @@ fn remote_inbox_owner() -> Result {
     assert_eq!(conflict["error"]["code"], "conflict");
     let (_, before_answered) = json_command(&rig, &["inbox", &qualified, "--json"])?;
     let (_, before_open) = json_command(&rig, &["inbox", &format!("{peer}:{other}"), "--json"])?;
+    // Bypass CLI routing and send forged mutations directly to the owner.
+    let answer_id = answer["data"]["answer_id"].as_str().ok_or("answer id")?;
+    let key = local_identity["data"]["federation"]["key"]
+        .as_str()
+        .ok_or("project key")?;
+    for (input, expected) in [
+        (
+            json!({"op":"close","id":other,"state":"withdrawn","reason":"forged","expect_revision":1,"operation_id":"forged-close"}),
+            "owner_local_only",
+        ),
+        (
+            json!({"op":"acknowledge","id":id,"answer_id":answer_id,"session":"chair-a","operation_id":"forged-ack"}),
+            "owner_local_only",
+        ),
+        (
+            json!({"op":"ask","session":"chair-a","request":{"kind":"question","title":"Forged","body":"No","blocking":false,"options":[],"recommended_option_id":null,"proceeding_with":null},"operation_id":"forged-ask"}),
+            "invalid_input",
+        ),
+        (
+            json!({"op":"answer","id":other,"action":"reply","option_id":null,"text":"No ID","expect_revision":1,"channel":"console","operation_id":null}),
+            "invalid_input",
+        ),
+    ] {
+        let request = json!({
+            "version":1, "protocol":provenant_fabric_runtime::hosts::INBOX_PROTOCOL,
+            "target_host":peer.to_string(), "source_host":local_identity["data"]["host"],
+            "agent":"fixture", "project":{"key":key,"common_dir":"repo/.git"},
+            "action":{"action":"inbox","input":input}
+        });
+        let output = rig.execute_os(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &[
+                "--state-dir".into(),
+                peer_state.clone().into(),
+                "fabric".into(),
+                "peer".into(),
+                "--in-process".into(),
+            ],
+            Some(&serde_json::to_vec(&request)?),
+        )?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(response["result"]["data"]["code"], expected, "{response}");
+    }
     let (status, close) = json_command(
         &rig,
         &[
@@ -2644,7 +2693,6 @@ fn remote_inbox_owner() -> Result {
     )?;
     assert_ne!(status, 0);
     assert_eq!(close["error"]["code"], "owner_local_only");
-    let answer_id = answer["data"]["answer_id"].as_str().ok_or("answer id")?;
     let (status, ack) = json_command(
         &rig,
         &[

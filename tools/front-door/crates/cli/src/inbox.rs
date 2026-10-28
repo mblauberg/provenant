@@ -317,7 +317,11 @@ enum Error {
     #[error("{0}")]
     Input(&'static str),
     #[error("{message}")]
-    Remote { code: String, message: String },
+    Remote {
+        code: String,
+        message: String,
+        operation_id: Option<OperationId>,
+    },
 }
 impl Error {
     fn outcome_code(&self) -> (Outcome, &'static str) {
@@ -396,6 +400,24 @@ fn read_text_file(path: &Path) -> Result<String, Error> {
     }
     String::from_utf8(bytes).map_err(|_| Error::Input("answer file must be UTF-8"))
 }
+fn is_local_host(name: &str, own: Option<provenant_core::HostId>) -> bool {
+    name == "local" || own.is_some_and(|id| name == id.to_string())
+}
+
+fn remote_error(code: String, message: String, operation_id: Option<OperationId>) -> Error {
+    let operation_id =
+        operation_id.filter(|_| matches!(code.as_str(), "ambiguous_outcome" | "owner_unavailable"));
+    let message = match &operation_id {
+        Some(id) => format!("inbox operation {id}: {message}"),
+        None => message,
+    };
+    Error::Remote {
+        code,
+        message,
+        operation_id,
+    }
+}
+
 fn execute(
     command: HumanCommand,
     roots: provenant_core::Roots,
@@ -425,13 +447,18 @@ fn execute(
         return Err(InboxError::LaneMutation.into());
     }
     input.validate()?;
-    let context = if host.is_some() || qualified.is_some() {
+    let own = provenant_config::lookup_host(&roots).map_err(crate::fabric::EdgeError::from)?;
+    let selected = host.clone().or_else(|| qualified.map(|id| id.to_string()));
+    let context = if selected
+        .as_deref()
+        .is_some_and(|name| !is_local_host(name, own))
+    {
         Context::open_read_only(roots, home, cwd)?
     } else {
         Context::open(roots, home, cwd)?
     };
     if let (Some(name), Some(qualified)) = (&host, qualified) {
-        let selected = if name == "local" || name == &context.identity.host.to_string() {
+        let selected = if is_local_host(name, Some(context.identity.host)) {
             Some(context.identity.host)
         } else {
             context.peer_host(name)
@@ -443,9 +470,7 @@ fn execute(
     let host = host.or_else(|| qualified.map(|host| host.to_string()));
     let clock = provenant_os::clock::SystemClock;
     let budget = WaitBudget::cli(clock.mono_now(), 5)?;
-    if let Some(host) =
-        host.filter(|host| host != "local" && host != &context.identity.host.to_string())
-    {
+    if let Some(host) = host.filter(|host| !is_local_host(host, Some(context.identity.host))) {
         if matches!(
             input,
             InboxInput::Close { .. } | InboxInput::Acknowledge { .. }
@@ -455,13 +480,18 @@ fn execute(
                 message: format!(
                     "inbox owner {host}: run this operation on the owner host or from the owning chair session"
                 ),
+                operation_id: None,
             });
         }
-        let target = context.peer_host(&host).ok_or_else(|| Error::Remote {
-            code: "owner_unavailable".into(),
-            message: format!("inbox owner {host} is not configured"),
-        })?;
         input.freeze_operation()?;
+        let operation_id = input.operation_id().cloned();
+        let target = context.peer_host(&host).ok_or_else(|| {
+            remote_error(
+                "owner_unavailable".into(),
+                format!("inbox owner {host} is not configured"),
+                operation_id.clone(),
+            )
+        })?;
         let reply = context.peer(
             &clock,
             target,
@@ -475,10 +505,11 @@ fn execute(
             )) => Ok(*result),
             Ok(provenant_fabric_runtime::hosts::PeerResult::Inbox(
                 provenant_fabric_runtime::inbox::InboxReply::Error { code, message },
-            )) => Err(Error::Remote { code, message }),
+            )) => Err(remote_error(code, message, operation_id.clone())),
             Ok(_) => Err(Error::Remote {
                 code: "unsupported_owner".into(),
                 message: "peer does not support inbox operations".into(),
+                operation_id: None,
             }),
             Err(failure) => {
                 use provenant_fabric_runtime::coordination::facade::FacadeError;
@@ -489,10 +520,11 @@ fn execute(
                     }
                     _ => "owner_unavailable",
                 };
-                Err(Error::Remote {
-                    code: code.into(),
-                    message: failure.detail.unwrap_or_else(|| failure.error.to_string()),
-                })
+                Err(remote_error(
+                    code.into(),
+                    failure.detail.unwrap_or_else(|| failure.error.to_string()),
+                    operation_id,
+                ))
             }
         };
     }
@@ -535,6 +567,9 @@ pub fn run(
                 message: error.to_string(),
                 cause: None,
                 repair: match &error {
+                    Error::Remote { operation_id: Some(operation_id), .. } => Some(format!(
+                        "Retry the same request with --operation-id {operation_id}; preserve its original content and revision."
+                    )),
                     Error::Inbox(InboxError::Mutation { operation_id, source }) if matches!(source.code(),"busy"|"cancelled"|"inbox_unavailable") => Some(format!(
                         "Retry the same request with --operation-id {operation_id}; preserve its original content and revision."
                     )),
@@ -578,5 +613,22 @@ pub fn run(
     ) {
         Ok(status) => crate::exit_status(&status),
         Err(_) => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_uncertain_answer_retains_operation_id() {
+        let operation = OperationId::parse("retry-answer").expect("valid operation");
+        for code in ["ambiguous_outcome", "owner_unavailable"] {
+            let error = remote_error(code.into(), "peer failed".into(), Some(operation.clone()));
+            assert!(error.to_string().contains("retry-answer"));
+            assert!(
+                matches!(error, Error::Remote { operation_id: Some(id), .. } if id == operation)
+            );
+        }
     }
 }

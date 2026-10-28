@@ -542,6 +542,21 @@ pub fn hosts(globals: &provenant_cli::Globals, workers: &'static dyn WorkerObser
         ),
     }
 }
+fn peer_read_only(action: &PeerAction) -> bool {
+    use provenant_fabric_runtime::inbox::InboxInput;
+    match action {
+        PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. } => true,
+        PeerAction::Inbox { input } => !matches!(
+            input,
+            InboxInput::Answer {
+                operation_id: Some(_),
+                ..
+            }
+        ),
+        _ => false,
+    }
+}
+
 // Peer frames use bounded real-time stdin and stdout transport deadlines.
 #[allow(clippy::disallowed_methods)]
 pub fn peer(
@@ -620,11 +635,9 @@ pub fn peer(
             crate::roots::Product::Required,
         )?;
         let assets = resolved.assets;
-        let read_only = matches!(
-            request.action,
-            PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. }
-        ) || matches!(&request.action, PeerAction::Inbox { input } if !matches!(input, provenant_fabric_runtime::inbox::InboxInput::Answer { .. }));
-        let mut context = if read_only {
+        // An answer without an operation ID is refused below, after peer validation,
+        // and must not initialise writable project state on its way there.
+        let mut context = if peer_read_only(&request.action) {
             Context::open_read_only(resolved.roots, &home, &cwd)?
         } else {
             Context::open(resolved.roots, &home, &cwd)?
