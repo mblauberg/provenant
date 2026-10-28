@@ -1,5 +1,6 @@
 //! The real Rust command edge runs without Python, Node or ambient state.
 mod support;
+use provenant_fabric_runtime::hosts::PROTOCOL;
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
@@ -121,7 +122,7 @@ fn hosts_probe_only_the_requested_page() -> Result {
     std::fs::write(
         &response,
         serde_json::to_vec(&json!({
-            "version": 1, "protocol":5,
+            "version": 1, "protocol":PROTOCOL,
             "host": first.to_string(),
             "project": project_key,
             "result": {"result":"health","data":{
@@ -167,7 +168,7 @@ fn hosts_probe_only_the_requested_page() -> Result {
     assert_eq!(hosts.as_array().ok_or("host list")?.len(), 1);
     assert_eq!(hosts[0]["host"], first.to_string());
     assert_eq!(hosts[0]["available"], true, "{hosts}");
-    assert_eq!(hosts[0]["protocol"], 5);
+    assert_eq!(hosts[0]["protocol"], PROTOCOL);
     assert!(hosts[0].get("reason").is_none());
     assert_eq!(
         replies
@@ -244,7 +245,7 @@ fn home_events_read_reports_upgrade_refused_for_legacy_import_data() -> Result {
         .as_str()
         .ok_or("project key")?;
     let request = json!({
-        "version": 1, "protocol":5,
+        "version": 1, "protocol":PROTOCOL,
         "target_host": host,
         "source_host": source,
         "agent": "fixture",
@@ -290,7 +291,7 @@ fn remote_landing_push_preserves_definitive_store_refusal() -> Result {
         .as_str()
         .ok_or("project key")?;
     let request = json!({
-        "version": 1, "protocol":5,
+        "version": 1, "protocol":PROTOCOL,
         "target_host": host,
         "source_host": source,
         "agent": "fixture",
@@ -337,7 +338,7 @@ fn peer_run_statuses_refuses_more_than_one_page() -> Result {
         .map(|index| json!({"host":host,"attempt":format!("{index:032x}")}))
         .collect::<Vec<_>>();
     let request = json!({
-        "version": 1, "protocol":5,
+        "version": 1, "protocol":PROTOCOL,
         "target_host": host,
         "source_host": source,
         "agent": "fixture",
@@ -369,7 +370,7 @@ fn peer_wait_refuses_remote_fanout() -> Result {
     let remote = next_host(local)?;
     configure_fixture_peer(&rig, remote)?;
     let request = json!({
-        "version": 1, "protocol":5,
+        "version": 1, "protocol":PROTOCOL,
         "target_host": local.to_string(),
         "source_host": remote.to_string(),
         "agent": "fixture",
@@ -459,7 +460,7 @@ fn rust_mcp_negotiates_lists_tools_and_persists_mail_without_interpreters() -> R
 fn peer_ingress_refuses_protocol_before_decoding_or_running_mutations() -> Result {
     let mut rig = TestRig::new()?;
     let identity = federated_identity(&mut rig)?;
-    for protocol in [1, 4, 6] {
+    for protocol in [1, PROTOCOL - 1, PROTOCOL + 1] {
         for action in [
             json!({"action":"coordination","input":{
                 "domain":"events","input":{"op":"note","note":"must not run","dedup_key":null}
@@ -481,7 +482,7 @@ fn peer_ingress_refuses_protocol_before_decoding_or_running_mutations() -> Resul
             )?;
             assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
             let reply: Value = serde_json::from_slice(&output.stdout.bytes)?;
-            assert_eq!(reply["protocol"], 5);
+            assert_eq!(reply["protocol"], PROTOCOL);
             assert_eq!(reply["result"]["data"]["error"]["code"], "peer_version");
             assert!(!rig.state.join("fabric/fabric.sqlite3").exists());
         }
@@ -492,7 +493,7 @@ fn peer_ingress_refuses_protocol_before_decoding_or_running_mutations() -> Resul
 #[test]
 fn peer_ingress_rejects_wrong_host_before_coordination_mutation() -> Result {
     let rig = TestRig::new()?;
-    let input = json!({"version":1,"protocol":5,"target_host":"11111111111111111111111111111111","source_host":"22222222222222222222222222222222","agent":"fixture","project":{"key":"not-a-project","common_dir":"../escape"},"action":{"action":"health"}});
+    let input = json!({"version":1,"protocol":PROTOCOL,"target_host":"11111111111111111111111111111111","source_host":"22222222222222222222222222222222","agent":"fixture","project":{"key":"not-a-project","common_dir":"../escape"},"action":{"action":"health"}});
     let output = rig.execute_os(
         Path::new(env!("CARGO_BIN_EXE_provenant")),
         &["fabric".into(), "peer".into()],
@@ -511,7 +512,7 @@ fn peer_ingress_refuses_the_target_host_as_source() -> Result {
     let host = identity["data"]["host"].as_str().ok_or("host")?;
     configure_fixture_peer(&rig, host.parse()?)?;
     let request = json!({
-        "version": 1, "protocol":5,
+        "version": 1, "protocol":PROTOCOL,
         "target_host": host,
         "source_host": host,
         "agent": "fixture",
@@ -551,7 +552,7 @@ fn peer_ingress_refuses_a_trace_naming_another_host_than_the_sender() -> Result 
     configure_fixture_peer(&rig, source)?;
     let key = &identity["data"]["federation"]["key"];
     let mut request = json!({
-        "version": 1, "protocol":5, "target_host": host, "source_host": source, "agent": "worker",
+        "version": 1, "protocol":PROTOCOL, "target_host": host, "source_host": source, "agent": "worker",
         "project": {"key": key, "common_dir": "repo/.git"},
         "trace": {"host": host},
         "action": {"action": "health"},
@@ -594,7 +595,7 @@ fn peer_replays_a_home_mutation_once_with_the_original_actor() -> Result {
     assert!(key.is_string());
     let source = next_host(host.as_str().ok_or("host")?.parse()?)?;
     configure_fixture_peer(&rig, source)?;
-    let request = json!({"version":1,"protocol":5,"target_host":host,"source_host":source,"agent":"worker","project":{"key":key,"common_dir":"repo/.git"},"action":{"action":"coordination","input":{"domain":"events","input":{"op":"note","note":"remote note","dedup_key":null}},"operation_id":"note-once"}});
+    let request = json!({"version":1,"protocol":PROTOCOL,"target_host":host,"source_host":source,"agent":"worker","project":{"key":key,"common_dir":"repo/.git"},"action":{"action":"coordination","input":{"domain":"events","input":{"op":"note","note":"remote note","dedup_key":null}},"operation_id":"note-once"}});
     let input = serde_json::to_vec(&request)?;
     let args: Vec<OsString> = vec![
         "--state-dir".into(),
@@ -636,7 +637,7 @@ fn peer_frames_a_local_run_event_failure() -> Result {
         std::fs::Permissions::from_mode(0o600),
     )?;
     let request = json!({
-        "version": 1, "protocol":5, "target_host": host, "source_host": source, "agent": "worker",
+        "version": 1, "protocol":PROTOCOL, "target_host": host, "source_host": source, "agent": "worker",
         "project": {"key": key, "common_dir": "repo/.git"},
         "action": {"action": "coordination", "operation_id": null,
             "input": {"domain": "events", "input": {
@@ -1210,7 +1211,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     let project_key_value: provenant_fabric_runtime::identity::CrossHostProjectKey =
         serde_json::from_value(json!(identity["data"]["federation"]["key"]))?;
     let ingress_request = json!({
-        "version": 1, "protocol":5,
+        "version": 1, "protocol":PROTOCOL,
         "target_host": local_host.to_string(),
         "source_host": remote_host.to_string(),
         "agent": "fixture",
@@ -1629,7 +1630,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     };
     assert!((1..=64).contains(&event_limit));
     let run_events_request = json!({
-        "version": 1, "protocol":5,
+        "version": 1, "protocol":PROTOCOL,
         "target_host": local_host.to_string(),
         "source_host": remote_host.to_string(),
         "agent": "fixture",
@@ -2603,7 +2604,7 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
         std::fs::write(
             &refusal,
             serde_json::to_vec(&json!({
-                "version":1,"protocol":5, "host":host.to_string(), "project":project,
+                "version":1,"protocol":PROTOCOL, "host":host.to_string(), "project":project,
                 "result":{"result":"error","data":{"error":{"code":wire}}},
             }))?,
         )?;
@@ -2625,14 +2626,15 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
         }))?,
     )?;
     std::fs::write(&calls, "")?;
-    let expected = "peer workshop speaks protocol 1, this host speaks 5; upgrade both";
+    let expected =
+        format!("peer workshop speaks protocol 1, this host speaks {PROTOCOL}; upgrade both");
     let (status, output) = json_command(&rig, &["lanes", "--host", "workshop", "--json"])?;
     assert_eq!(status, 1, "{output}");
     assert_eq!(output["error"]["code"], "PEER_VERSION", "{output}");
     assert!(
         output["error"]["message"]
             .as_str()
-            .is_some_and(|m| m.contains(expected)),
+            .is_some_and(|m| m.contains(&expected)),
         "{output}"
     );
     let hosts = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
@@ -2647,7 +2649,7 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
     assert!(
         result["content"][0]["text"]
             .as_str()
-            .is_some_and(|m| m.contains(expected)),
+            .is_some_and(|m| m.contains(&expected)),
         "{result}"
     );
     let result = &replies
@@ -2670,7 +2672,7 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
         .find(|entry| entry["host"] == local.to_string())
         .ok_or("local")?;
     assert_eq!(local_health["available"], true);
-    assert_eq!(local_health["protocol"], 5);
+    assert_eq!(local_health["protocol"], PROTOCOL);
     let calls = std::fs::read_to_string(calls)?;
     assert_eq!(calls.lines().count(), 3);
     let actions = calls
@@ -2683,7 +2685,7 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
     concurrent.sort_by_key(|action| action.to_string());
     assert_eq!(concurrent, ["health", "run"]);
     for call in actions {
-        assert_eq!(call["protocol"], 5);
+        assert_eq!(call["protocol"], PROTOCOL);
     }
     let (status, output) = json_command(&rig, &["hosts", "--json"])?;
     assert_eq!(status, 0, "{output}");

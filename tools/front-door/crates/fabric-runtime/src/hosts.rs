@@ -807,7 +807,7 @@ mod tests {
     fn protocol_fence_precedes_action_decoding() {
         let request = PeerRequest {
             version: 1,
-            protocol: 5,
+            protocol: PROTOCOL - 1,
             target_host: HostId::from_bytes([3; 16]),
             source_host: HostId::from_bytes([4; 16]),
             agent: "fixture".into(),
