@@ -603,6 +603,7 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `--document` | `{"name": "document", "required": true}` |
+| `--extend` | `{"name": "extend", "repeatable": true}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -614,7 +615,8 @@ bounds are null. Positional arguments have no long flag.
   "groups": [
     {
       "arguments": [
-        "document"
+        "document",
+        "extend"
       ],
       "multiple": true,
       "name": "Resume",

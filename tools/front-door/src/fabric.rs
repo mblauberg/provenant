@@ -2271,7 +2271,7 @@ fn advance_graphs_after_settlement(
     settled: &provenant_run::HolderContext,
     workers: &'static dyn WorkerObserver,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_fabric_runtime::graph::{FileJournal, advance};
+    use provenant_fabric_runtime::graph::{FileJournal, advance_with_budget};
 
     let Some(host) = &settled.launch else {
         return Ok(());
@@ -2329,7 +2329,21 @@ fn advance_graphs_after_settlement(
                 budget,
                 cancel: &cancel,
             };
-            advance(&execution.document, &mut owner, &mut journal)?;
+            let graph_config = &factory.context.config.graph;
+            let limits = execution
+                .document
+                .limits
+                .as_ref()
+                .cloned()
+                .unwrap_or_default()
+                .resolve(graph_config)?;
+            advance_with_budget(
+                &execution.document,
+                &mut owner,
+                &mut journal,
+                &limits,
+                &graph_config.budget,
+            )?;
             Ok(())
         })();
         // If the attempt store itself refused the retention receipt, retain
@@ -2848,6 +2862,14 @@ fn settle_attempt(
 }
 
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
+    fn wall_time_seconds(&self) -> u64 {
+        self.factory
+            .clock
+            .wall_now()
+            .ok()
+            .and_then(|time| u64::try_from(time.as_micros() / 1_000_000).ok())
+            .unwrap_or(0)
+    }
     type Error = FacadeError;
     fn actor(&self) -> String {
         self.factory.context.identity.inbox.actor.to_string()
@@ -2896,6 +2918,62 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             )
             .map_err(run_error)?;
         Ok(Some(url))
+    }
+    fn usage(
+        &mut self,
+        attempt_ref: &str,
+    ) -> Result<provenant_fabric_runtime::graph::AttemptUsage, Self::Error> {
+        let (host, attempt) = attempt_ref
+            .split_once('/')
+            .ok_or(FacadeError::StateCorrupt)?;
+        let target = AttemptTarget {
+            host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+            attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+        };
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+        };
+        let record = owner.snapshot(target, self.budget, self.cancel)?;
+        let usage = &record.usage;
+        let categories = [
+            usage.uncached_input,
+            usage.cache_read,
+            usage.cache_write,
+            usage.output_excluding_reasoning,
+            usage.reasoning,
+        ];
+        let tokens = categories.iter().any(Option::is_some).then(|| {
+            categories
+                .into_iter()
+                .flatten()
+                .fold(0u64, u64::saturating_add)
+        });
+        let cost_micro_usd =
+            std::fs::read_to_string(self.factory.assets.join("config/telemetry-prices.toml"))
+                .ok()
+                .and_then(|text| {
+                    toml_edit::de::from_str::<provenant_telemetry::ConfiguredPrices>(&text).ok()
+                })
+                .and_then(|config| provenant_telemetry::validate_prices(&config).ok())
+                .and_then(|prices| {
+                    provenant_run::fact(record.clone()).ok().and_then(|fact| {
+                        provenant_telemetry::stats([fact], &prices, Default::default()).ok()
+                    })
+                })
+                .and_then(|report| {
+                    report
+                        .totals
+                        .cost
+                        .known_lower_bound
+                        .map(|money| money.microdollars)
+                });
+        Ok(provenant_fabric_runtime::graph::AttemptUsage {
+            tokens,
+            cost_micro_usd,
+            wall_time_seconds: record.provider_ms.map(|ms| ms.saturating_add(999) / 1000),
+        })
     }
     fn observe_or_start(
         &mut self,
@@ -3102,7 +3180,7 @@ impl Factory {
             .map_err(|_| FacadeError::InvalidInput)?;
         let resume = matches!(&input, GraphInput::Resume { .. });
         let document = match &input {
-            GraphInput::Run { document } | GraphInput::Resume { document } => {
+            GraphInput::Run { document } | GraphInput::Resume { document, .. } => {
                 let scratch = provenant_confinement::worktrees::with_context(
                     &self.context.roots,
                     &self.home,
@@ -3137,11 +3215,11 @@ impl Factory {
                     return Err(FacadeError::ConfinementRefused);
                 }
                 let bytes = provenant_os::fs::FileHandle::open_source(&path)
-                    .and_then(|mut file| file.read_bounded(1_048_576))
+                    .and_then(|mut file| file.read_bounded(8_388_608))
                     .map_err(|_| FacadeError::io("access graph journal"))?;
                 let document: GraphDocument = provenant_records::decode_v1(
                     bytes.as_slice(),
-                    provenant_records::Limits::CONFIG,
+                    provenant_records::Limits::default(),
                 )
                 .map_err(|_| FacadeError::InvalidInput)?;
                 if let Some(branch) = &document.integration_branch {
@@ -3187,9 +3265,6 @@ impl Factory {
                             writer.branch.as_str().trim_start_matches("refs/heads/"),
                         )
                         .map_err(|_| FacadeError::ConfinementRefused)?;
-                    }
-                    if node.prompt.len() as u64 > self.context.config.limits.body_bytes {
-                        return Err(FacadeError::InvalidInput);
                     }
                 }
                 Some(document)
@@ -3276,10 +3351,54 @@ impl Factory {
                 budget,
                 cancel,
             };
+            let graph_config = &self.context.config.graph;
+            let limits = document
+                .limits
+                .as_ref()
+                .cloned()
+                .unwrap_or_default()
+                .resolve(graph_config)
+                .map_err(|reason| FacadeError::DispatchRefused { reason })?;
             let run = if resume {
-                provenant_fabric_runtime::graph::resume(document, &mut owner, &mut journal)
+                let extensions = match &input {
+                    GraphInput::Resume { extend, .. } => extend.as_slice(),
+                    _ => &[],
+                };
+                for extension in extensions
+                    .iter()
+                    .filter(|extension| extension.starts_with("limits."))
+                {
+                    let (key, value) =
+                        extension.split_once('=').ok_or(FacadeError::InvalidInput)?;
+                    let value: usize = value.parse().map_err(|_| FacadeError::InvalidInput)?;
+                    let mut fields = serde_json::Map::new();
+                    fields.insert(
+                        key.trim_start_matches("limits.").to_owned(),
+                        serde_json::json!(value),
+                    );
+                    let overrides: provenant_fabric_runtime::graph::GraphLimitOverrides =
+                        serde_json::from_value(serde_json::Value::Object(fields))
+                            .map_err(|_| FacadeError::InvalidInput)?;
+                    overrides
+                        .resolve(graph_config)
+                        .map_err(|reason| FacadeError::DispatchRefused { reason })?;
+                }
+                provenant_fabric_runtime::graph::resume_with_budget(
+                    document,
+                    &mut owner,
+                    &mut journal,
+                    &limits,
+                    &graph_config.budget,
+                    extensions,
+                )
             } else {
-                provenant_fabric_runtime::graph::advance(document, &mut owner, &mut journal)
+                provenant_fabric_runtime::graph::advance_with_budget(
+                    document,
+                    &mut owner,
+                    &mut journal,
+                    &limits,
+                    &graph_config.budget,
+                )
             };
             let run = run.map_err(|error| match error {
                 provenant_fabric_runtime::graph::GraphError::Run(error) => error,
@@ -3342,6 +3461,8 @@ fn graph_snapshot(
     use provenant_fabric_runtime::graph::{GraphRun, GraphStatus, NodeState};
     let status = if checkpoint.cancelled {
         GraphStatus::Cancelled
+    } else if checkpoint.pause_reason.is_some() {
+        GraphStatus::Paused
     } else if (checkpoint.delivery_required
         && !checkpoint.delivered
         && checkpoint
@@ -3435,7 +3556,10 @@ pub fn graph(
         Graph::Run { document } => ("fabric graph run", GraphInput::Run { document }),
         Graph::Status { id } => ("fabric graph status", GraphInput::Status { id }),
         Graph::Cancel { id } => ("fabric graph cancel", GraphInput::Cancel { id }),
-        Graph::Resume { document } => ("fabric graph resume", GraphInput::Resume { document }),
+        Graph::Resume { document, extend } => (
+            "fabric graph resume",
+            GraphInput::Resume { document, extend },
+        ),
     };
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
         let factory = factory(globals, workers)?;
@@ -4483,7 +4607,10 @@ mod peer_tests {
             GraphInput::Run {
                 document: document.clone(),
             },
-            GraphInput::Resume { document },
+            GraphInput::Resume {
+                document,
+                extend: vec![],
+            },
         ] {
             let replay = factory.graph(input, budget, &cancel)?;
             assert_eq!(replay.checkpoint, run.checkpoint);
@@ -4583,7 +4710,14 @@ mod peer_tests {
             let output = fixture.rig.execute(&git, &args, None)?;
             assert_eq!(crate::worktree_tests::support::code(&output), 0);
         }
-        let replay = factory.graph(GraphInput::Resume { document }, budget, &cancel)?;
+        let replay = factory.graph(
+            GraphInput::Resume {
+                document,
+                extend: vec![],
+            },
+            budget,
+            &cancel,
+        )?;
         assert_eq!(replay.checkpoint, run.checkpoint);
         let journal = FileJournal::open(
             &fixture.roots.state,

@@ -15,3 +15,30 @@ lease_seconds = 3600
 peer_seconds = 30
 graph_timeout_seconds = 14400
 bundle_bytes = 67108864
+
+[graph.limits]
+nodes = 512
+edges = 4096
+routes_per_node = 16
+node_prompt_bytes = 262144
+graph_prompt_bytes = 4194304
+expansion_depth = 4
+fan_out_width = 32
+loop_rounds = 5
+continuations = 3
+concurrency = 0 # 0 uses host lane caps
+
+[graph.limit_ceiling]
+nodes = 512
+edges = 4096
+routes_per_node = 16
+node_prompt_bytes = 262144
+graph_prompt_bytes = 4194304
+expansion_depth = 4
+fan_out_width = 32
+loop_rounds = 5
+continuations = 3
+concurrency = 0 # 0 imposes no additional ceiling
+
+[graph.budget.per_node]
+[graph.budget.per_graph]

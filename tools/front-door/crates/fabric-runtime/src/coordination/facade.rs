@@ -78,7 +78,11 @@ bounded_input! {
         Run { document: std::path::PathBuf },
         Status { id: String },
         Cancel { id: String },
-        Resume { document: std::path::PathBuf },
+        Resume {
+            document: std::path::PathBuf,
+            #[serde(default)]
+            extend: Vec<String>,
+        },
     }
 }
 

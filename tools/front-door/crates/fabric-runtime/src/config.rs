@@ -4,7 +4,7 @@ use provenant_core::HostId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FabricConfig {
     pub agent_label: String,
@@ -14,6 +14,69 @@ pub struct FabricConfig {
     pub home_hosts: BTreeMap<String, HostId>,
     pub peers: BTreeMap<String, Peer>,
     pub limits: Limits,
+    #[serde(default)]
+    pub graph: GraphConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GraphConfig {
+    pub limits: GraphLimits,
+    pub limit_ceiling: GraphLimits,
+    pub budget: GraphBudget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GraphLimits {
+    pub nodes: usize,
+    pub edges: usize,
+    pub routes_per_node: usize,
+    pub node_prompt_bytes: usize,
+    pub graph_prompt_bytes: usize,
+    pub expansion_depth: usize,
+    pub fan_out_width: usize,
+    pub loop_rounds: usize,
+    pub continuations: usize,
+    #[serde(deserialize_with = "deserialize_concurrency")]
+    pub concurrency: Option<usize>,
+}
+fn deserialize_concurrency<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<usize>::deserialize(deserializer)?.filter(|value| *value != 0))
+}
+impl Default for GraphLimits {
+    fn default() -> Self {
+        Self {
+            nodes: 512,
+            edges: 4096,
+            routes_per_node: 16,
+            node_prompt_bytes: 256 * 1024,
+            graph_prompt_bytes: 4 * 1024 * 1024,
+            expansion_depth: 4,
+            fan_out_width: 32,
+            loop_rounds: 5,
+            continuations: 3,
+            concurrency: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GraphBudget {
+    pub per_node: BudgetLimit,
+    pub per_graph: BudgetLimit,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BudgetLimit {
+    pub tokens: Option<u64>,
+    pub cost_usd: Option<f64>,
+    pub wall_time_seconds: Option<u64>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -140,6 +203,67 @@ impl DomainConfig for FabricConfig {
         if l.graph_timeout_seconds == 0 || l.graph_timeout_seconds > 14_400 {
             reject("limits.graph_timeout_seconds".into());
         }
+        let limits = &self.graph.limits;
+        let ceiling = &self.graph.limit_ceiling;
+        for (name, value, maximum) in [
+            ("nodes", limits.nodes, ceiling.nodes),
+            ("edges", limits.edges, ceiling.edges),
+            (
+                "routes_per_node",
+                limits.routes_per_node,
+                ceiling.routes_per_node,
+            ),
+            (
+                "node_prompt_bytes",
+                limits.node_prompt_bytes,
+                ceiling.node_prompt_bytes,
+            ),
+            (
+                "graph_prompt_bytes",
+                limits.graph_prompt_bytes,
+                ceiling.graph_prompt_bytes,
+            ),
+            (
+                "expansion_depth",
+                limits.expansion_depth,
+                ceiling.expansion_depth,
+            ),
+            ("fan_out_width", limits.fan_out_width, ceiling.fan_out_width),
+            ("loop_rounds", limits.loop_rounds, ceiling.loop_rounds),
+            ("continuations", limits.continuations, ceiling.continuations),
+        ] {
+            if maximum == 0 {
+                reject(format!("graph.limit_ceiling.{name}"));
+            }
+            if value == 0 || value > maximum {
+                reject(format!("graph.limits.{name}"));
+            }
+        }
+        if ceiling.concurrency == Some(0) {
+            reject("graph.limit_ceiling.concurrency".into());
+        }
+        if limits.concurrency == Some(0)
+            || matches!((limits.concurrency, ceiling.concurrency), (Some(value), Some(maximum)) if value > maximum)
+        {
+            reject("graph.limits.concurrency".into());
+        }
+        for (name, budget) in [
+            ("per_node", &self.graph.budget.per_node),
+            ("per_graph", &self.graph.budget.per_graph),
+        ] {
+            if budget.tokens == Some(0) {
+                reject(format!("graph.budget.{name}.tokens"));
+            }
+            if budget.wall_time_seconds == Some(0) {
+                reject(format!("graph.budget.{name}.wall_time_seconds"));
+            }
+            if budget
+                .cost_usd
+                .is_some_and(|cost| !cost.is_finite() || cost <= 0.0)
+            {
+                reject(format!("graph.budget.{name}.cost_usd"));
+            }
+        }
         errors
     }
 }
@@ -178,6 +302,7 @@ mod tests {
                 },
             )]),
             ssh_executable: Some(PathBuf::from("/opt/homebrew/bin/ssh")),
+            graph: GraphConfig::default(),
             limits: Limits {
                 body_bytes: 65536,
                 input_frame_bytes: 1048576,
@@ -233,5 +358,29 @@ mod tests {
             peer.connect_timeout_seconds = 31;
         }
         assert!(!config.validate().is_empty());
+    }
+
+    #[test]
+    fn graph_policy_defaults_and_validation() {
+        let mut config = config();
+        assert_eq!(config.graph.limits.nodes, 512);
+        assert_eq!(config.graph.limits.graph_prompt_bytes, 4 * 1024 * 1024);
+        assert!(config.graph.budget.per_graph.tokens.is_none());
+        config.graph.limits.nodes = 513;
+        assert!(
+            config
+                .validate()
+                .iter()
+                .any(|e| e.field == "graph.limits.nodes")
+        );
+        config.graph.limit_ceiling.nodes = 1024;
+        assert!(config.validate().is_empty());
+        config.graph.budget.per_node.cost_usd = Some(-1.0);
+        assert!(
+            config
+                .validate()
+                .iter()
+                .any(|e| e.field == "graph.budget.per_node.cost_usd")
+        );
     }
 }

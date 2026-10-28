@@ -815,6 +815,7 @@ mod tests {
             ssh_executable: None,
             home_hosts: Default::default(),
             peers: Default::default(),
+            graph: Default::default(),
             limits: crate::config::Limits {
                 body_bytes: 65536,
                 input_frame_bytes: 1048576,
