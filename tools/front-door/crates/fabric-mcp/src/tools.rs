@@ -697,11 +697,30 @@ impl ToolCall {
                 response(tool_name, value)
             }
             Self::Run(input) => {
+                let operation_id = match &input {
+                    RunInput::Cancel { operation_id, .. }
+                    | RunInput::Resume { operation_id, .. } => Some(operation_id.clone()),
+                    _ => None,
+                };
                 let mut value = serde_json::to_value(service.facade.run(input, budget, cancel)?)?;
                 compact_run(&mut value)?;
+                if let Some(operation_id) = operation_id {
+                    value["operation_id"] = serde_json::to_value(operation_id)?;
+                }
                 response(tool_name, value)
             }
-            Self::RunDetailed(input) => call!(facade, run, input),
+            Self::RunDetailed(input) => {
+                let operation_id = match &input {
+                    RunInput::Cancel { operation_id, .. }
+                    | RunInput::Resume { operation_id, .. } => Some(operation_id.clone()),
+                    _ => None,
+                };
+                let mut value = serde_json::to_value(service.facade.run(input, budget, cancel)?)?;
+                if let Some(operation_id) = operation_id {
+                    value["operation_id"] = serde_json::to_value(operation_id)?;
+                }
+                response(tool_name, value)
+            }
             Self::Output(input) => call!(facade, output, input),
             Self::Hosts(input) => {
                 #[derive(Serialize)]
@@ -934,26 +953,37 @@ fn limit_response(
             let Some(page) = response.structured_content.get_mut("page") else {
                 return Err(ServiceError::ResultTooLarge);
             };
+            let host = page
+                .get("next_after")
+                .and_then(|cursor| cursor.get("host"))
+                .cloned()
+                .unwrap_or(Value::Null);
             let Some(items) = page.get_mut("items").and_then(Value::as_array_mut) else {
                 return Err(ServiceError::ResultTooLarge);
             };
-            if items.len() <= 1
-                || items
-                    .last()
-                    .and_then(|item| item.get("attempt_id"))
-                    .is_none()
-            {
+            if items.len() <= 1 {
                 return Err(ServiceError::ResultTooLarge);
             }
             items.pop();
-            let attempt = items
-                .last()
-                .and_then(|item| item.get("attempt_id"))
-                .cloned()
-                .ok_or(FacadeError::StateCorrupt)?;
-            page["next_after"] = serde_json::json!({"attempt": attempt, "host": null});
+            let last = items.last().ok_or(FacadeError::StateCorrupt)?;
+            let attempt = last.get("attempt_id").cloned();
+            let sequence = last.get("seq").cloned();
+            if attempt.is_none() && sequence.is_none() && last.get("id").is_none() {
+                return Err(ServiceError::ResultTooLarge);
+            }
+            if let Some(attempt) = attempt {
+                page["next_after"] = serde_json::json!({"attempt": attempt, "host": host});
+            }
             page["truncated"] = Value::Bool(true);
-            response.content[0].text = render::digest("fabric_run", &response.structured_content);
+            if let Some(sequence) = sequence {
+                response.structured_content["cursor"] = sequence;
+            }
+            let tool = response.content[0]
+                .text
+                .split_whitespace()
+                .next()
+                .unwrap_or("fabric");
+            response.content[0].text = render::digest(tool, &response.structured_content);
         }
     }
     Ok(response)

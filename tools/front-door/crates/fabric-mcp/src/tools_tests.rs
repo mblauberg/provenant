@@ -278,7 +278,7 @@ fn run_page_shrinks_before_cursor_is_issued() {
         .collect();
     let response = response(
         "fabric_run",
-        json!({"result":"list","page":{"items":rows,"next_after":null,"truncated":false}}),
+        json!({"result":"list","page":{"items":rows,"next_after":{"attempt":"0000000000000000000000000000000a","host":"00000000000000000000000000000002"},"truncated":true}}),
     )
     .unwrap();
     let result = limit_response(response, &limits, false, false).unwrap();
@@ -289,8 +289,58 @@ fn run_page_shrinks_before_cursor_is_issued() {
         page["next_after"]["attempt"],
         items.last().unwrap()["attempt_id"]
     );
+    assert_eq!(
+        page["next_after"]["host"],
+        "00000000000000000000000000000002"
+    );
     assert_eq!(page["truncated"], true);
     assert!(serde_json::to_vec(&result).unwrap().len() <= 400);
+}
+
+#[test]
+fn id_based_pages_preserve_last_id_for_continuation() {
+    let mut limits = limits();
+    limits.result_bytes = 300;
+    for tool in ["fabric_task", "fabric_lease"] {
+        let items: Vec<Value> = (1..=10)
+            .map(|id| json!({"id":format!("{id:032x}"),"description":"a long record"}))
+            .collect();
+        let reply = response(
+            tool,
+            json!({"result":"listed","page":{"items":items,"truncated":false}}),
+        )
+        .unwrap();
+        let result = limit_response(reply, &limits, false, false).unwrap();
+        let page = &result.structured_content["page"];
+        let items = page["items"].as_array().unwrap();
+        assert!(!items.is_empty() && items.len() < 10);
+        assert_eq!(items.last().unwrap()["id"], format!("{:032x}", items.len()));
+        assert_eq!(page["truncated"], true);
+        assert!(result.content[0].text.starts_with(tool));
+    }
+}
+
+#[test]
+fn event_page_shrinks_and_moves_cursor_to_last_retained_sequence() {
+    let mut limits = limits();
+    limits.result_bytes = 300;
+    let items: Vec<Value> = (1..=10)
+        .map(|seq| json!({"seq":seq,"detail":"a long event"}))
+        .collect();
+    let reply = response(
+        "fabric_events",
+        json!({"result":"read","page":{"items":items,"truncated":false},"cursor":10}),
+    )
+    .unwrap();
+    let result = limit_response(reply, &limits, false, false).unwrap();
+    let page = &result.structured_content["page"];
+    let items = page["items"].as_array().unwrap();
+    assert!(items.len() < 10 && !items.is_empty());
+    assert_eq!(
+        result.structured_content["cursor"],
+        items.last().unwrap()["seq"]
+    );
+    assert_eq!(page["truncated"], true);
 }
 
 #[test]
