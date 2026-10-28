@@ -9,10 +9,11 @@ type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 fn dispatch_validates_review_commits() -> TestResult {
     use std::process::Command;
     let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
     let git = |args: &[&str]| -> TestResult {
         assert!(
             Command::new("git")
-                .current_dir(temp.path())
+                .current_dir(&root)
                 .args(args)
                 .status()?
                 .success()
@@ -31,11 +32,18 @@ fn dispatch_validates_review_commits() -> TestResult {
         "test",
     ])?;
     let output = Command::new("git")
-        .current_dir(temp.path())
+        .current_dir(&root)
         .args(["rev-parse", "HEAD"])
         .output()?;
     assert!(output.status.success());
     let head = String::from_utf8(output.stdout)?.trim().to_owned();
+    git(&["branch", "-M", "main"])?;
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        root.to_str().ok_or("fixture path")?,
+    ])?;
     git(&["update-ref", "refs/remotes/origin/main", &head])?;
     git(&[
         "symbolic-ref",
@@ -44,19 +52,19 @@ fn dispatch_validates_review_commits() -> TestResult {
     ])?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let store = RunStore::open(&context(&root)?, &call)?;
     let service = Service::new(&store);
     let mut valid = submission("review");
     valid.tasks[0].head = Some(head.clone());
     valid.tasks[0].base = Some(head.clone());
-    let run = service.dispatch(valid, temp.path(), &call)?;
+    let run = service.dispatch(valid, &root, &call)?;
     let task = &store.request(run.run_id, &call)?.tasks[0];
     assert_eq!(task.head.as_deref(), Some(head.as_str()));
     assert_eq!(task.base.as_deref(), Some(head.as_str()));
     let mut head_only = submission("head only");
     head_only.operation_id = OperationId::parse("head-only")?;
     head_only.tasks[0].head = Some(head.clone());
-    let run = service.dispatch(head_only, temp.path(), &call)?;
+    let run = service.dispatch(head_only, &root, &call)?;
     assert_eq!(
         store.request(run.run_id, &call)?.tasks[0].base.as_deref(),
         Some(head.as_str())
@@ -70,7 +78,7 @@ fn dispatch_validates_review_commits() -> TestResult {
         invalid.operation_id = OperationId::parse("invalid-review")?;
         invalid.tasks[0].head = Some(head);
         invalid.tasks[0].base = base;
-        assert!(service.dispatch(invalid, temp.path(), &call).is_err());
+        assert!(service.dispatch(invalid, &root, &call).is_err());
     }
     Ok(())
 }
