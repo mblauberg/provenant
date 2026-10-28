@@ -10,6 +10,60 @@ use provenant_supervisor::custody::{
 };
 use std::{ffi::OsString, path::Path, time::Duration};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+#[test]
+fn unsafe_path_reports_each_check_and_relative_path() {
+    for (check, reason) in [
+        (PathCheck::Mode, "mode"),
+        (PathCheck::Owner, "owner"),
+        (PathCheck::Symlink, "symlink"),
+        (PathCheck::Kind, "kind"),
+        (PathCheck::Links, "link count"),
+        (PathCheck::Identity, "identity mismatch"),
+        (PathCheck::Containment, "outside the root"),
+        (PathCheck::Missing, "missing"),
+    ] {
+        let error = RunError::unsafe_path("runs/example/process.json", check);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "run-store path runs/example/process.json is not private or contained: {reason}"
+            )
+        );
+    }
+}
+
+#[test]
+fn unsafe_state_root_is_named_relative_to_itself() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    drop(RunStore::open(&context, &call)?);
+    std::fs::set_permissions(
+        context.state_root.as_path(),
+        std::fs::Permissions::from_mode(0o755),
+    )?;
+    let error = match RunStore::open_read_only(&context, &call) {
+        Err(error) => error,
+        Ok(_) => panic!("unsafe state root was accepted"),
+    };
+    assert_eq!(
+        error.to_string(),
+        "run-store path . is not private or contained: mode"
+    );
+    let error = match RunStore::open(&context, &call) {
+        Err(error) => error,
+        Ok(_) => panic!("unsafe state root was accepted for writing"),
+    };
+    assert_eq!(
+        error.to_string(),
+        "run-store path . is not private or contained: mode"
+    );
+    Ok(())
+}
 pub(super) fn context(
     base: &Path,
 ) -> std::result::Result<ExecutionContext, Box<dyn std::error::Error>> {
