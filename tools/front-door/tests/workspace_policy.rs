@@ -16,6 +16,7 @@ const DIRECT: &[&str] = &[
     "serde",
     "serde_json",
     "sha2",
+    "sha1collisiondetection",
     "thiserror",
     "toml_edit",
 ];

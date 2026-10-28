@@ -16,8 +16,6 @@ use std::path::PathBuf;
 // hour of contention at the normal lock budget.
 const VERIFICATION_RETRY_LIMIT: i64 = 3;
 const BUSY_RETRY_LIMIT: i64 = 30;
-const VERIFICATION_CAP_REASON: &str = "verification retry cap exceeded (3)";
-const BUSY_CAP_REASON: &str = "object store lock retry cap exceeded (30)";
 
 fn settlement_retries(
     host: &std::path::Path,
@@ -25,6 +23,10 @@ fn settlement_retries(
     call: &Request<'_>,
     increment: Option<bool>,
 ) -> Result<(i64, i64)> {
+    // Live holders retain Recovery's exclusive writer.lock. Reconcile obtains
+    // that same lease in recover_writer_exit before finish_in_custody, and
+    // retains it through terminal publication. Concurrent settlers therefore
+    // cannot observe/increment retries for this writer at the same time.
     use rusqlite::{OptionalExtension, params};
     let (_, db, _initialisation) =
         crate::db::open_database(host, "object-settlement.sqlite3", call)?;
@@ -52,11 +54,41 @@ fn settlement_retries(
     })
 }
 
+fn clear_settlement_retries(
+    host: &std::path::Path,
+    scope: custody::Scope,
+    call: &Request<'_>,
+) -> Result<()> {
+    let (_, db, _initialisation) =
+        crate::db::open_database(host, "object-settlement.sqlite3", call)?;
+    crate::db::immediate(&db, call, |tx| {
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS retries (run TEXT NOT NULL, attempt TEXT NOT NULL, generation TEXT NOT NULL, deadlines INTEGER NOT NULL, busy INTEGER NOT NULL, PRIMARY KEY(run,attempt,generation)) STRICT;")?;
+        tx.execute(
+            "DELETE FROM retries WHERE run=?1 AND attempt=?2",
+            rusqlite::params![scope.run.to_string(), scope.attempt.to_string()],
+        )?;
+        Ok(())
+    })
+}
+
+fn terminal_request<'a>(request: &Request<'a>) -> Result<Request<'a>> {
+    Ok(Request {
+        clock: request.clock,
+        cancel: request.cancel,
+        budget: WaitBudget::cli(request.clock.mono_now(), 30)
+            .map_err(|_| RunError::Validation("terminal call budget"))?,
+    })
+}
+
 fn retry_limit(counts: (i64, i64)) -> Option<RunError> {
     if counts.0 >= VERIFICATION_RETRY_LIMIT {
-        Some(RunError::ObjectImportLimit(VERIFICATION_CAP_REASON))
+        Some(RunError::ObjectImportLimit(
+            ObjectImportLimitReason::VerificationRetries,
+        ))
     } else if counts.1 >= BUSY_RETRY_LIMIT {
-        Some(RunError::ObjectImportLimit(BUSY_CAP_REASON))
+        Some(RunError::ObjectImportLimit(
+            ObjectImportLimitReason::StoreBusyRetries,
+        ))
     } else {
         None
     }
@@ -301,12 +333,25 @@ struct ObjectImportRefusal {
     kind: String,
     worktree: PathBuf,
     reason: String,
+    #[serde(default)]
+    release_custody: bool,
 }
 
 pub(crate) fn object_import_refused(
     attempt: &Directory,
     scope: custody::Scope,
 ) -> Result<Option<String>> {
+    Ok(import_refusal(attempt, scope)?.map(|refusal| refusal.reason))
+}
+
+fn import_retains_custody(attempt: &Directory, scope: custody::Scope) -> Result<bool> {
+    Ok(import_refusal(attempt, scope)?.is_some_and(|refusal| !refusal.release_custody))
+}
+
+fn import_refusal(
+    attempt: &Directory,
+    scope: custody::Scope,
+) -> Result<Option<ObjectImportRefusal>> {
     let Some(raw) = read_sealed(attempt, "object-import-refused.json", RECORD_LIMIT)? else {
         return Ok(None);
     };
@@ -320,7 +365,7 @@ pub(crate) fn object_import_refused(
             "object import refusal evidence mismatch",
         ));
     }
-    Ok(Some(refusal.reason))
+    Ok(Some(refusal))
 }
 
 impl provenant_supervisor::Holder for RunHolder<'_> {
@@ -391,10 +436,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
                 &call(&SystemClock, &cancel).map_err(custody_error)?,
             )
             .map_err(custody_error)?;
-        if object_import_refused(attempt, exit.scope)
-            .map_err(custody_error)?
-            .is_none()
-        {
+        if !import_retains_custody(attempt, exit.scope).map_err(custody_error)? {
             crate::writer::settle_launch_staging(attempt).map_err(custody_error)?;
         }
         release_and_reclaim(attempt, exit.scope, recovery)
@@ -406,10 +448,7 @@ pub(crate) fn release_and_reclaim(
     scope: custody::Scope,
     recovery: &custody::Recovery,
 ) -> custody::Result<()> {
-    if object_import_refused(attempt, scope)
-        .map_err(custody_error)?
-        .is_some()
-    {
+    if import_retains_custody(attempt, scope).map_err(custody_error)? {
         return Ok(());
     }
     custody::publish_release(attempt, scope)?;
@@ -454,7 +493,7 @@ impl RunStore {
         )?;
         if let Some(recovery) = recovery {
             self.settle_recovered(attempt, recovery)?;
-        } else if object_import_refused(attempt, exit.scope)?.is_none() {
+        } else if !import_retains_custody(attempt, exit.scope)? {
             crate::writer::settle_launch_staging(attempt)?;
         }
         Ok(record)
@@ -527,7 +566,7 @@ impl RunStore {
         attempt: &Directory,
         recovery: custody::Recovery,
     ) -> Result<()> {
-        if object_import_refused(attempt, recovery.scope())?.is_some() {
+        if import_retains_custody(attempt, recovery.scope())? {
             return Ok(());
         }
         crate::writer::settle_launch_staging(attempt)?;
@@ -542,6 +581,25 @@ impl RunStore {
             .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))
     }
     fn finish_in_custody(
+        &self,
+        id: AttemptId,
+        attempt: &Directory,
+        exit: &ExitObservation,
+        completion: Completion<'_>,
+        providers: &dyn Providers,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        let record =
+            self.finish_in_custody_inner(id, attempt, exit, completion, providers, call)?;
+        if matches!(record.state, AttemptState::Terminal { .. }) {
+            // Also runs on terminal replay, repairing a crash between publishing
+            // the terminal transaction and pruning the host-owned retry rows.
+            clear_settlement_retries(&self.writer_registry, exit.scope, &terminal_request(call)?)?;
+        }
+        Ok(record)
+    }
+
+    fn finish_in_custody_inner(
         &self,
         id: AttemptId,
         attempt: &Directory,
@@ -734,6 +792,11 @@ impl RunStore {
                     },
                 )
             };
+            // Object work has its own real-time deadlines. It must not consume
+            // the caller's database budget and prevent recording success or a
+            // retry once that work finishes.
+            let terminal_call = terminal_request(call)?;
+            let call = &terminal_call;
             let check = match check {
                 Err(error @ RunError::ObjectStoreBusy) => {
                     match retry_limit(settlement_retries(
@@ -760,22 +823,24 @@ impl RunStore {
                 other => other,
             };
             match check {
-                Err(error @ RunError::ObjectImportLimit(reason))
-                    if reason == VERIFICATION_CAP_REASON
-                        || reason == BUSY_CAP_REASON
-                        || reason == crate::objects::STAGED_BYTES_LIMIT_REASON =>
-                {
-                    seal_retry_refusal(attempt, exit.scope)?;
-                    decoded.outcome = Outcome::Failed;
-                    decoded.reason = Some(format!(
-                        "writer object import refused for {}: {error}",
-                        writer.worktree.display()
-                    ));
-                }
-                Err(error @ RunError::ObjectImportLimit(_)) => {
+                Err(error @ RunError::ObjectImportLimit(limit)) => {
+                    let release_custody = matches!(
+                        limit,
+                        ObjectImportLimitReason::VerificationRetries
+                            | ObjectImportLimitReason::StoreBusyRetries
+                            | ObjectImportLimitReason::StagedBytes
+                    );
+                    if release_custody {
+                        seal_retry_refusal(attempt, exit.scope)?;
+                    }
                     let reason = format!(
-                        "writer object import refused for {}: {error}; private objects and writer custody retained for recovery",
-                        writer.worktree.display()
+                        "writer object import refused for {}: {error}{}",
+                        writer.worktree.display(),
+                        if release_custody {
+                            ""
+                        } else {
+                            "; private objects and writer custody retained for recovery"
+                        }
                     );
                     crate::artifacts::seal(
                         attempt,
@@ -786,6 +851,7 @@ impl RunStore {
                             kind: "object_import_refusal".into(),
                             worktree: writer.worktree.clone(),
                             reason: reason.clone(),
+                            release_custody,
                         })?,
                         RECORD_LIMIT,
                     )?;
@@ -995,6 +1061,8 @@ impl RunStore {
             usage: decoded.usage,
             session: decoded.session,
         };
+        let terminal_call = terminal_request(call)?;
+        let call = &terminal_call;
         // A result sealed without intent predates a crash: keep its bytes.
         if result_orphan {
             return self.recover_result_only(id, &publication, exit, call);
@@ -1113,12 +1181,51 @@ mod writer_recovery_tests {
     use super::*;
     use crate::tests::{call, clock, context, input, route};
 
+    struct CertificateClock {
+        inner: provenant_core::TestClock,
+        certificate: std::cell::RefCell<Option<PathBuf>>,
+    }
+    impl Clock for CertificateClock {
+        fn wall_now(
+            &self,
+        ) -> std::result::Result<provenant_core::WallTime, provenant_core::TimeError> {
+            self.inner.wall_now()
+        }
+        fn mono_now(&self) -> provenant_core::MonoTime {
+            let elapsed = if self
+                .certificate
+                .borrow()
+                .as_ref()
+                .is_some_and(|path| path.exists())
+            {
+                31_000_000
+            } else {
+                0
+            };
+            provenant_core::MonoTime::from_micros(self.inner.mono_now().as_micros() + elapsed)
+        }
+        fn wait_until(
+            &self,
+            deadline: provenant_core::MonoTime,
+        ) -> std::result::Result<(), provenant_core::TimeError> {
+            self.inner.wait_until(deadline)
+        }
+        fn boot_identity(&self) -> std::result::Result<String, provenant_core::TimeError> {
+            self.inner.boot_identity()
+        }
+        fn host_monotonic_micros(&self) -> std::result::Result<u64, provenant_core::TimeError> {
+            self.inner.host_monotonic_micros()
+        }
+    }
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum ImportCase {
         PackLimit,
         LockWait,
         Deadline,
         BusyCap,
+        StagedBytes,
+        ExpiredCall,
         LegacyPolicy,
     }
 
@@ -1174,6 +1281,18 @@ mod writer_recovery_tests {
     }
 
     #[test]
+    fn staged_bytes_limit_through_holder_seals_and_releases_custody()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        object_import_refusal_fixture(ImportCase::StagedBytes)
+    }
+
+    #[test]
+    fn verification_can_outlive_reconcile_budget_and_still_publish_terminal()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        object_import_refusal_fixture(ImportCase::ExpiredCall)
+    }
+
+    #[test]
     fn legacy_git_policy_warning_names_run_and_attempt_in_the_terminal_event()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         object_import_refusal_fixture(ImportCase::LegacyPolicy)
@@ -1189,8 +1308,16 @@ mod writer_recovery_tests {
 
         let fixture = PrepareFixture::new()?;
         let execution = registered_landed_writer_fixture(&fixture)?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
+        let clock = CertificateClock {
+            inner: clock(),
+            certificate: std::cell::RefCell::new(None),
+        };
+        let cancel = CancelToken::new();
+        let call = Request {
+            clock: &clock,
+            budget: WaitBudget::cli(clock.mono_now(), 30)?,
+            cancel: &cancel,
+        };
         let store = RunStore::open(&execution, &call)?;
         let mut run = input();
         run.request.tasks[0].writer = Some(fixture.writer.clone());
@@ -1215,6 +1342,14 @@ mod writer_recovery_tests {
         launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
         let temporary = store.temporary_path(id, &call)?;
         let candidate = temporary.join("candidate-0");
+        if case == ImportCase::ExpiredCall {
+            clock.certificate.replace(Some(
+                temporary
+                    .parent()
+                    .ok_or("attempt path")?
+                    .join("writer-terminal.json"),
+            ));
+        }
         std::fs::create_dir_all(&candidate)?;
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         if case != ImportCase::LegacyPolicy {
@@ -1231,6 +1366,22 @@ mod writer_recovery_tests {
         }
         let packs = candidate.join("git-objects/pack");
         std::fs::create_dir(&packs)?;
+        if case == ImportCase::StagedBytes {
+            let name = launch.base.to_string();
+            let fanout = candidate.join("git-objects").join(&name[..2]);
+            std::fs::create_dir(&fanout)?;
+            std::fs::copy(
+                launch
+                    .worktree
+                    .repo()
+                    .common_git_dir()
+                    .join("objects")
+                    .join(&name[..2])
+                    .join(&name[2..]),
+                fanout.join(&name[2..]),
+            )?;
+            crate::objects::TEST_STAGED_HASH_BUDGET.set(Some(std::time::Duration::ZERO));
+        }
         for number in 0..if case == ImportCase::PackLimit { 65 } else { 0 } {
             std::fs::write(packs.join(format!("pack-{number:040x}.pack")), b"untrusted")?;
         }
@@ -1272,6 +1423,17 @@ mod writer_recovery_tests {
         );
         crate::objects::TEST_LOCK_BUDGET.set(None);
         crate::objects::TEST_VERIFICATION_BUDGET.set(None);
+        crate::objects::TEST_STAGED_HASH_BUDGET.set(None);
+        if case == ImportCase::ExpiredCall {
+            let terminal = first?;
+            assert!(matches!(terminal.state, AttemptState::Terminal { .. }));
+            assert_eq!(call.budget.remaining(clock.mono_now()).as_micros(), 0);
+            assert!(matches!(store.record(id, &call), Err(RunError::Contention)));
+            assert_eq!(store.record(id, &terminal_request(&call)?)?, terminal);
+            store.settle_recovered(&attempt, recovery)?;
+            assert!(store.writer_fence_listing()?.reservations.is_empty());
+            return Ok(());
+        }
         if matches!(case, ImportCase::Deadline | ImportCase::BusyCap) {
             let expected = if case == ImportCase::Deadline {
                 VERIFICATION_RETRY_LIMIT
@@ -1308,19 +1470,60 @@ mod writer_recovery_tests {
                 }
             }
             let counts = settlement_retries(&store.writer_registry, scope, &call, None)?;
+            assert_eq!(counts, (0, 0), "terminal publication prunes retry rows");
+            let reason =
+                object_import_refused(&attempt, scope)?.ok_or("sealed cap refusal missing")?;
+            assert!(reason.contains(if case == ImportCase::Deadline {
+                "verification retry cap"
+            } else {
+                "lock retry cap"
+            }));
+            let failed = store.record(id, &call)?;
+            settlement_retries(&store.writer_registry, scope, &call, Some(true))?;
             assert_eq!(
-                counts,
-                if case == ImportCase::Deadline {
-                    (3, 0)
-                } else {
-                    (0, 30)
-                }
+                store.finish_in_custody(
+                    id,
+                    &attempt,
+                    &observed,
+                    Completion::Recovered(Some(&recovery)),
+                    &crate::dispatch_tests::Fake::default(),
+                    &call
+                )?,
+                failed
             );
-            assert!(object_import_refused(&attempt, scope)?.is_none());
+            assert_eq!(
+                settlement_retries(&store.writer_registry, scope, &call, None)?,
+                (0, 0)
+            );
             drop(shared_lock);
             store.settle_recovered(&attempt, recovery)?;
             assert!(read_sealed(&attempt, "release.json", RECORD_LIMIT)?.is_some());
             assert!(store.writer_fence_listing()?.reservations.is_empty());
+            return Ok(());
+        }
+        if case == ImportCase::StagedBytes {
+            let failed = first?;
+            assert!(
+                matches!(&failed.state, AttemptState::Terminal { outcome: Outcome::Failed, reason: Some(reason), .. } if reason.contains("staged object hashing"))
+            );
+            assert!(object_import_refused(&attempt, scope)?.is_some());
+            assert!(!import_retains_custody(&attempt, scope)?);
+            assert!(
+                read_sealed(
+                    &attempt.open_verified_directory(OsStr::new("quarantine"))?,
+                    "manifest.json",
+                    RECORD_LIMIT
+                )?
+                .is_some()
+            );
+            release_and_reclaim(&attempt, scope, &recovery)?;
+            store.settle_recovered(&attempt, recovery)?;
+            assert!(read_sealed(&attempt, "release.json", RECORD_LIMIT)?.is_some());
+            assert!(store.writer_fence_listing()?.reservations.is_empty());
+            assert!(
+                !candidate.exists(),
+                "released staged-byte refusal reclaims scratch"
+            );
             return Ok(());
         }
         if lock_wait {
@@ -1330,6 +1533,10 @@ mod writer_recovery_tests {
                 AttemptState::Terminal { .. }
             ));
             assert!(object_import_refused(&attempt, scope)?.is_none());
+            assert_eq!(
+                settlement_retries(&store.writer_registry, scope, &call, None)?,
+                (0, 1)
+            );
             assert!(read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.is_none());
             assert!(read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?.is_none());
             assert!(read_sealed(&attempt, "release.json", RECORD_LIMIT)?.is_none());
@@ -1347,6 +1554,10 @@ mod writer_recovery_tests {
             assert!(matches!(retried.state, AttemptState::Terminal { .. }));
             assert!(read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?.is_some());
             assert!(object_import_refused(&attempt, scope)?.is_none());
+            assert_eq!(
+                settlement_retries(&store.writer_registry, scope, &call, None)?,
+                (0, 0)
+            );
             return Ok(());
         }
         let failed = first?;

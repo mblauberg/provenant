@@ -31,6 +31,10 @@ material transitive addition needs a recorded reason and an update to this rule.
 `rusqlite` also serves run's store, keeping admission atomic in one
 database. `toml_edit` enables `serde` for typed config. There is no
 async runtime and no daemon.
+`sha1collisiondetection` supplies the streamed SHA-1 Git object check (#2138).
+This MIT-licensed, maintained Sequoia implementation preserves Git's collision
+refusal; replacing cryptographic collision detection in-house is inappropriate.
+Its default features are disabled, without its digest-trait or CLI dependencies.
 - Why: a small, audited supply chain with bounded, synchronous code.
 - Test: `tests/workspace_policy.rs::every_member_obeys_the_direct_dependency_policy`;
   `::transitive_crates_and_renamed_dependencies_are_rejected`

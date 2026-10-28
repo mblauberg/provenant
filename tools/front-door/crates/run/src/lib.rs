@@ -66,6 +66,20 @@ use thiserror::Error;
 pub const LANE_DEPTH_ENV: &str = "PROVENANT_LANE_DEPTH";
 pub const PARENT_ATTEMPT_ENV: &str = "PROVENANT_PARENT_ATTEMPT_ID";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum ObjectImportLimitReason {
+    #[error("copy/index-pack 120 s wall-clock budget exceeded")]
+    ImportDeadline,
+    #[error("pack-count cap exceeded (maximum 64)")]
+    PackCount,
+    #[error("staged object hashing exceeded verification budget")]
+    StagedBytes,
+    #[error("verification retry cap exceeded (3)")]
+    VerificationRetries,
+    #[error("object store lock retry cap exceeded (30)")]
+    StoreBusyRetries,
+}
+
 /// Return the depth of the run being dispatched under this lane.
 pub fn next_lane_depth(parent_depth: u64, max_depth: u64) -> Result<u64> {
     let depth = parent_depth.checked_add(1).ok_or(RunError::DepthOverflow)?;
@@ -183,7 +197,7 @@ pub enum RunError {
     #[error("invalid run record: {0}")]
     Validation(&'static str),
     #[error("lane object import refused: {0}")]
-    ObjectImportLimit(&'static str),
+    ObjectImportLimit(ObjectImportLimitReason),
     #[error(
         "object-store lock wait timed out; retry settlement (custody and private objects retained)"
     )]

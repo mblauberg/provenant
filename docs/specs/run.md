@@ -601,14 +601,20 @@ without executing its mutable config, and copies canonical loose objects and
 packs into a fresh host-owned snapshot. Traversal
 refuses symlinks and non-regular object files; it copies neither lane alternates
 nor pack indices. The host rebuilds indices with `index-pack --strict` and pins
-the shared store as the only alternate. `fsck --full --strict --no-reflogs --no-dangling
-<head>` checks object contents and connectivity before any instruction recovery,
-diff or ancestry read of the branch. Shared-store verification uses a fresh bare
-view with an empty primary object directory and the shared store as its sole
-alternate. This avoids inspecting another live lane's refs, index or unfinished
-operation markers, and prevents private objects from shadowing corrupt shared
-objects. Ref and unfinished-operation validation remain separate settlement
-checks. A non-commit head or any verification failure
+the shared store as the only alternate. Verification enumerates the staged
+objects without alternates, then streams `cat-file --batch` to check each object's
+canonical Git hash. Commits, trees and tags are packed into a temporary validation
+pack and parsed by `index-pack --strict`; blob contents stay streamed. A separate
+`rev-list --objects --no-object-names <head>` walk checks the reachable graph,
+including shared objects, with the same hash and strict format checks. The
+object-name list is bounded at 64 MiB independently of streamed content size.
+No verification command enumerates unrelated objects in the shared store. In
+particular, `fsck --no-full` is insufficient: Git 2.53 still enumerates loose
+objects in alternates. Verification uses host-owned bare views without another
+lane's refs, index or unfinished operation markers. Before publication, the
+shared store precedes the staged snapshot in the alternate search order, so a
+private duplicate cannot hide corrupt shared content. Ref and unfinished-operation
+validation remain separate settlement checks. A non-commit head or any verification failure
 refuses settlement certification and delivery.
 
 Copying, indexing and snapshot verification run in host-owned staging before
@@ -624,14 +630,14 @@ inode, size, ctime and other read-relevant metadata against the snapshot taken
 before hashing. Each staged file also carries a SHA-256 digest, including files
 over 1 MiB, to detect changes across rename. A change refuses publication,
 including a swap by a still-live lane using a pre-v11 policy.
-The final shared-store check uses `fsck --connectivity-only --strict` and checks
+The final shared-store check uses a reachable-only `rev-list` walk and checks
 each newly published file again, avoiding a second full hash. Existing object
 files retain their contents, inode and permissions. SHA-1 and SHA-256 repositories
 use the same boundary. Only the host's trusted shallow boundary is preserved;
 lane-supplied boundaries cannot excuse missing history. Import is bounded by
 100,000 directory entries, 2 GiB of source objects, 64 packs and a 120-second
 wall-clock budget for copying and `index-pack`, including initialisation and
-preflight. Full verification has a separate deadline: 120 seconds plus 60
+preflight. Object verification has a separate deadline: 120 seconds plus 60
 seconds per started GiB of object files (shared plus staged for import), capped
 at one hour. Hashing staged files alone has the same size-scaled allowance;
 exhausting it immediately refuses the import. Delivery cache misses get a fresh
@@ -641,8 +647,16 @@ to allow for repeated staged-file hashing as well as connectivity checking.
 Exclusive or shared lock waiting has its own 120-second limit. Settlement retains
 custody and private evidence while retrying: three verification retries
 or 30 lock-wait timeouts terminally refuse the import and release
-custody. These counts are separate and persist in host-owned settlement state
-across restarts. Thirty ordinary lock waits can span up to an hour.
+custody. A staged-file hashing timeout also immediately refuses and releases
+custody. Each refusal seals `object-import-refused.json` in the attempt directory;
+release is distinguished from the resource refusals that retain custody.
+These counts are separate and persist in host-owned settlement state across
+restarts. Terminal publication and replay prune all counter generations for
+that attempt. The exclusive writer lease spans verification, counter updates
+and terminal publication, serialising live and recovered settlers. Thirty
+ordinary lock waits can span up to an hour. Object work uses its own deadlines;
+afterwards the terminal database transaction gets a fresh 30-second budget, so
+verification outliving the reconcile call cannot prevent terminal publication.
 Exceeding either the pack limit or the copy/index budget terminally refuses
 the import with the limit named in the reason. Import snapshots are
 removed after each attempt; a later import attempts to sweep at most 32 exact

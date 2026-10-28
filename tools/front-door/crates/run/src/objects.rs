@@ -1,5 +1,6 @@
 //! Hash-check untrusted lane objects in a host-owned snapshot before publication.
-use crate::{Result, RunError};
+mod hash;
+use crate::{ObjectImportLimitReason, Result, RunError};
 use provenant_confinement::repo::VerifiedRepo;
 use provenant_core::GitOid;
 use provenant_os::{
@@ -19,8 +20,6 @@ const IMPORT_BUDGET: Duration = Duration::from_secs(120);
 const LOCK_BUDGET: Duration = Duration::from_secs(120);
 const GIB: u64 = 1024 * 1024 * 1024;
 const SMALL_FILE_HASH_LIMIT: u64 = 1024 * 1024;
-pub(crate) const STAGED_BYTES_LIMIT_REASON: &str =
-    "staged object hashing exceeded verification budget";
 pub(crate) const VERIFICATION_DEADLINE_REASON: &str =
     "verification deadline exceeded; retry settlement";
 const STAGING_PREFIX: &str = ".provenant-object-import-";
@@ -67,7 +66,7 @@ struct Deadline {
 impl Deadline {
     fn expired(self) -> RunError {
         if self.import {
-            RunError::ObjectImportLimit("copy/index-pack 120 s wall-clock budget exceeded")
+            RunError::ObjectImportLimit(ObjectImportLimitReason::ImportDeadline)
         } else {
             RunError::ObjectVerificationRetry(VERIFICATION_DEADLINE_REASON)
         }
@@ -104,6 +103,7 @@ fn verification_deadline(generation: &[(PathBuf, Metadata)], extra: u64) -> Dead
 #[cfg(test)]
 thread_local! {
     pub(crate) static TEST_VERIFICATION_BUDGET: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+    pub(crate) static TEST_STAGED_HASH_BUDGET: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
 }
 
 /// Publication rehashes staged files and checks connectivity under the lock.
@@ -137,6 +137,30 @@ fn command_before(
     alternate: Option<&Path>,
     deadline: Option<Deadline>,
 ) -> Result<Vec<u8>> {
+    command_stream(
+        git,
+        git_dir,
+        cwd,
+        args,
+        &alternate.into_iter().collect::<Vec<_>>(),
+        deadline,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn command_stream(
+    git: &Path,
+    git_dir: &Path,
+    cwd: &Path,
+    args: &[OsString],
+    alternates: &[&Path],
+    deadline: Option<Deadline>,
+    input: Option<&[u8]>,
+    decoder: Option<&mut hash::Batch>,
+) -> Result<Vec<u8>> {
+    let streaming = decoder.is_some();
     let mut env: Vec<(OsString, OsString)> = [
         ("GIT_CONFIG_NOSYSTEM", "1"),
         ("GIT_CONFIG_SYSTEM", "/dev/null"),
@@ -158,10 +182,15 @@ fn command_before(
             git_dir.join("objects").into(),
         ));
     }
-    if let Some(alternate) = alternate {
+    if !alternates.is_empty() {
         env.push((
             "GIT_ALTERNATE_OBJECT_DIRECTORIES".into(),
-            quote_alternate(alternate).into(),
+            alternates
+                .iter()
+                .map(|path| quote_alternate(path))
+                .collect::<Vec<_>>()
+                .join(":")
+                .into(),
         ));
     }
     let argv: Vec<OsString> = std::iter::once(git.into())
@@ -188,15 +217,27 @@ fn command_before(
     let executor = SystemExecutor::new(1).map_err(|_| invalid())?;
     let mut options = ExecOptions::new(&argv, cwd, remaining(deadline)?);
     options.env = Some(&env);
-    options.stdout = StreamPolicy::Capture {
-        limit: if args.first().is_some_and(|arg| arg == "for-each-ref") {
-            1024 * 1024
-        } else {
-            4096
-        },
+    options.stdin = input;
+    options.stdout_filter =
+        decoder.map(|batch| batch as &mut dyn provenant_os::exec::CaptureFilter);
+    options.stdout = if streaming {
+        StreamPolicy::Tail { limit: 4096 }
+    } else {
+        StreamPolicy::Capture {
+            limit: if args.first().is_some_and(|arg| {
+                arg == "rev-list"
+                    || (arg == "cat-file" && args.iter().any(|arg| arg == "--batch-all-objects"))
+            }) {
+                hash::LIST_LIMIT
+            } else if args.first().is_some_and(|arg| arg == "for-each-ref") {
+                1024 * 1024
+            } else {
+                4096
+            },
+        }
     };
     options.stderr = StreamPolicy::Tail { limit: 4096 };
-    options.stop_on_output_limit = true;
+    options.stop_on_output_limit = !streaming;
     let output = executor.execute(options).map_err(|_| invalid())?;
     if output.timed_out
         && let Some(deadline) = deadline
@@ -209,6 +250,7 @@ fn command_before(
         || output.cancelled
         || output.drain_truncated
         || output.stdout.truncated
+        || output.stdout.filter_failed
         || output.stdout.read_failed
         || output.stderr.read_failed
     {
@@ -250,7 +292,14 @@ fn quote_alternate(path: &Path) -> String {
 #[derive(Clone, Copy)]
 struct Verification {
     deadline: Deadline,
-    mode: &'static str,
+    mode: VerificationMode,
+}
+
+#[derive(Clone, Copy)]
+enum VerificationMode {
+    Local,
+    Reachable,
+    Connectivity,
 }
 
 fn verify(
@@ -258,34 +307,20 @@ fn verify(
     git_dir: &Path,
     cwd: &Path,
     head: GitOid,
-    alternate: Option<&Path>,
+    alternates: &[&Path],
     check: Verification,
 ) -> Result<()> {
-    // Callers supply a fresh bare view without lane refs or a lane index.
-    // The full mode hashes loose contents and packed objects, including
-    // alternates. Publication only needs connectivity after the snapshot hash.
-    command_before(
-        git,
-        git_dir,
-        cwd,
-        &args(&[
-            "fsck",
-            check.mode,
-            "--strict",
-            "--no-reflogs",
-            "--no-dangling",
-            &head.to_string(),
-        ]),
-        alternate,
-        Some(check.deadline),
-    )?;
-    let kind = command_before(
+    // Callers supply a host-owned bare view without lane refs or a lane index.
+    hash::verify(git, git_dir, cwd, head, alternates, check)?;
+    let kind = command_stream(
         git,
         git_dir,
         cwd,
         &args(&["cat-file", "-t", &head.to_string()]),
-        alternate,
+        alternates,
         Some(check.deadline),
+        None,
+        None,
     )?;
     if kind != b"commit\n" {
         return Err(invalid());
@@ -333,8 +368,9 @@ impl VerificationCache {
                 head,
                 Verification {
                     deadline: verification_deadline(&generation.1, 0),
-                    mode: "--full",
+                    mode: VerificationMode::Reachable,
                 },
+                None,
             );
             if store_generation(&common)? != generation.1 {
                 self.heads.clear();
@@ -722,7 +758,7 @@ fn initialise_view(
     Ok(())
 }
 
-/// Hash the shared store through an empty bare view. Git's reference database
+/// Hash the reachable graph through an empty bare view. Git's reference database
 /// checks must not inspect another worktree's unfinished operation markers.
 /// The empty primary store also prevents private duplicates from shadowing
 /// corrupt shared objects. The caller holds the shared object-store lock.
@@ -733,6 +769,7 @@ fn verify_shared(
     cwd: &Path,
     head: GitOid,
     check: Verification,
+    fallback: Option<&Path>,
 ) -> Result<()> {
     let name = staging_name()?;
     common.mkdir(&name, 0o700)?;
@@ -745,7 +782,9 @@ fn verify_shared(
                 &path,
                 cwd,
                 head,
-                Some(&common_path.join("objects")),
+                &std::iter::once(common_path.join("objects").as_path())
+                    .chain(fallback)
+                    .collect::<Vec<_>>(),
                 check,
             )
         });
@@ -826,7 +865,7 @@ fn import_before(
                 packs += 1;
                 if packs > MAX_PACKS {
                     return Err(RunError::ObjectImportLimit(
-                        "pack-count cap exceeded (maximum 64)",
+                        ObjectImportLimitReason::PackCount,
                     ));
                 }
             }
@@ -893,16 +932,9 @@ fn import_before(
         let generation = store_generation(repo.common_dir())?;
         let check = Verification {
             deadline: verification_deadline(&generation, staged_bytes),
-            mode: "--full",
+            mode: VerificationMode::Local,
         };
-        let result = verify(
-            git,
-            staging_path,
-            repo.root_path(),
-            head,
-            Some(&shared),
-            check,
-        );
+        let result = verify(git, staging_path, repo.root_path(), head, &[&shared], check);
         // Only publication and the final shared check exclude other lanes.
         let lock = object_lock(repo.common_dir(), LockMode::Exclusive)?;
         let connectivity = connectivity_deadline(&generation, staged_bytes);
@@ -919,6 +951,21 @@ fn import_before(
             ));
         }
         result?;
+        // Shared objects take precedence after publication. Verify that exact
+        // graph before moving files, so a private duplicate cannot mask a
+        // corrupt object that would win in the shared store.
+        verify_shared(
+            git,
+            repo.common_dir(),
+            repo.common_git_dir(),
+            repo.root_path(),
+            head,
+            Verification {
+                deadline: connectivity,
+                mode: VerificationMode::Reachable,
+            },
+            Some(&staging_path.join("objects")),
+        )?;
         break (generation, lock, connectivity);
     };
     let shared_dir = repo
@@ -963,8 +1010,9 @@ fn import_before(
         head,
         Verification {
             deadline: connectivity,
-            mode: "--connectivity-only",
+            mode: VerificationMode::Connectivity,
         },
+        None,
     )?;
     for file in &published {
         file.check(&shared_dir, connectivity)?;
@@ -1018,7 +1066,7 @@ fn file_stamp(
         loop {
             if deadline.is_some_and(|end| Instant::now() >= end) {
                 return Err(if staged_budget {
-                    RunError::ObjectImportLimit(STAGED_BYTES_LIMIT_REASON)
+                    RunError::ObjectImportLimit(ObjectImportLimitReason::StagedBytes)
                 } else {
                     RunError::ObjectVerificationRetry(VERIFICATION_DEADLINE_REASON)
                 });
@@ -1075,7 +1123,13 @@ fn snapshot_files(objects: &Directory) -> Result<Vec<StagedFile>> {
         }
     }
     // The staged bytes alone must be hashable within their verification budget.
-    let deadline = Instant::now() + verification_budget(bytes);
+    #[cfg(test)]
+    let budget = TEST_STAGED_HASH_BUDGET
+        .get()
+        .unwrap_or_else(|| verification_budget(bytes));
+    #[cfg(not(test))]
+    let budget = verification_budget(bytes);
+    let deadline = Instant::now() + budget;
     let mut files = Vec::new();
     for (fanout, name) in names {
         let directory = objects.open_verified_directory(&fanout)?;
@@ -1187,7 +1241,7 @@ fn sweep_staging_with(
 #[allow(clippy::print_stderr)]
 pub(crate) fn legacy_policy_diagnostic(identity: &str) -> String {
     let note = format!(
-        "warning: {identity}: legacy pre-v11 Git grants policy retains shared-store write access; running full shared-store verification"
+        "warning: {identity}: legacy pre-v11 Git grants policy retains shared-store write access; running scoped shared-graph verification"
     );
     eprintln!("{note}");
     note

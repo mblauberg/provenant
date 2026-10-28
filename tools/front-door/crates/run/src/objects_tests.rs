@@ -20,13 +20,13 @@ type TestResult<T = ()> = std::result::Result<T, Box<dyn Error>>;
 fn verification_has_a_fresh_budget_after_import() -> TestResult {
     use std::time::Instant;
     let fixture = Fixture::new("sha1")?;
-    let wrapper = fixture.root.join("slow-fsck-git");
-    let log = fixture.root.join("fsck-args");
+    let wrapper = fixture.root.join("slow-verification-git");
+    let log = fixture.root.join("verification-args");
     let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nfor arg do\ncase \"$arg\" in fsck) printf '%s\\n' \"$*\" >> {}; /bin/sleep 1;; esac\ndone\nexec {} \"$@\"\n",
+            "#!/bin/sh\nfor arg do\ncase \"$arg\" in --batch-all-objects|rev-list) printf '%s\\n' \"$*\" >> {}; /bin/sleep 1;; esac\ndone\nexec {} \"$@\"\n",
             quote(&log),
             quote(&fixture.git),
         ),
@@ -43,15 +43,18 @@ fn verification_has_a_fresh_budget_after_import() -> TestResult {
     )?;
     let calls = fs::read_to_string(log)?;
     assert_eq!(
-        calls.lines().filter(|line| line.contains("--full")).count(),
+        calls
+            .lines()
+            .filter(|line| line.contains("--batch-all-objects"))
+            .count(),
         1
     );
     assert_eq!(
         calls
             .lines()
-            .filter(|line| line.contains("--connectivity-only"))
+            .filter(|line| line.contains("rev-list"))
             .count(),
-        1
+        2
     );
     Ok(())
 }
@@ -418,7 +421,7 @@ fn excessive_private_pack_count_refuses_before_indexing_or_publication() -> Test
     assert!(matches!(
         fixture.import(),
         Err(crate::RunError::ObjectImportLimit(reason))
-            if reason.contains("pack") && reason.contains("64")
+            if reason == crate::ObjectImportLimitReason::PackCount
     ));
     assert!(fs::read_dir(&fixture.staging)?.next().is_none());
     fixture.assert_not_published();
@@ -705,7 +708,8 @@ fn publication_checks_new_files_again_after_connectivity_verification() -> TestR
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nfor arg do\ncase \"$arg\" in --connectivity-only) /usr/bin/touch {};; esac\ndone\nexec {} \"$@\"\n",
+            "#!/bin/sh\nfor arg do\ncase \"$arg\" in rev-list) if [ -e {} ]; then /usr/bin/touch {}; fi;; esac\ndone\nexec {} \"$@\"\n",
+            quote(&object),
             quote(&object),
             quote(&fixture.git),
         ),
@@ -728,13 +732,13 @@ fn verification_retries_one_concurrent_host_change_and_does_not_cache_repeated_c
         let fixture = Fixture::new("sha1")?;
         fixture.import()?;
         let wrapper = fixture.root.join("host-changing-git");
-        let calls = fixture.root.join("fsck-calls");
+        let calls = fixture.root.join("verification-calls");
         let object = object_path(&fixture.common_objects(), fixture.base_blob);
         let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
         fs::write(
             &wrapper,
             format!(
-                "#!/bin/sh\nfor arg do\ncase \"$arg\" in fsck)\nif [ {} = yes ] || [ ! -e {} ]; then\n/usr/bin/touch {}\nprintf 'changed\\n' >> {}\nexit 1\nfi\nprintf 'stable\\n' >> {}\n;; esac\ndone\nexec {} \"$@\"\n",
+                "#!/bin/sh\nfor arg do\ncase \"$arg\" in rev-list)\nif [ {} = yes ] || [ ! -e {} ]; then\n/usr/bin/touch {}\nprintf 'changed\\n' >> {}\nexit 1\nfi\nprintf 'stable\\n' >> {}\n;; esac\ndone\nexec {} \"$@\"\n",
                 if keep_changing { "yes" } else { "no" },
                 quote(&calls),
                 quote(&object),
@@ -965,6 +969,159 @@ fn missing_reachable_private_object_refuses_before_publication() -> TestResult {
     fs::remove_file(object_path(&fixture.source, fixture.blob))?;
     assert!(fixture.import().is_err());
     fixture.assert_not_published();
+    Ok(())
+}
+
+#[test]
+fn verification_object_set_excludes_unrelated_shared_loose_and_packed_objects() -> TestResult {
+    for format in ["sha1", "sha256"] {
+        let mut fixture = Fixture::new(format)?;
+        let unrelated_file = fixture.root.join("unrelated");
+        fs::write(&unrelated_file, b"unrelated shared object\n")?;
+        let unrelated = oid(git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.project,
+            None,
+            &[
+                "hash-object",
+                "-w",
+                unrelated_file.to_str().ok_or("unrelated path")?,
+            ],
+        )?)?;
+        // A separate pack is also unrelated to the lane. A full-store check
+        // would read it; the explicit verification input must exclude its OID.
+        let mut pack = Command::new(&fixture.git)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &fixture.home)
+            .args(["pack-objects", "--threads=1"])
+            .arg(fixture.common_objects().join("pack/pack"))
+            .current_dir(&fixture.project)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        use std::io::Write as _;
+        writeln!(pack.stdin.take().ok_or("pack stdin")?, "{unrelated}")?;
+        assert!(pack.wait_with_output()?.status.success());
+        // Corrupt the loose copy too, to make accidental alternate enumeration
+        // fail even if command arguments still appear scoped.
+        let unrelated_path = object_path(&fixture.common_objects(), unrelated);
+        fs::set_permissions(&unrelated_path, fs::Permissions::from_mode(0o600))?;
+        fs::write(unrelated_path, b"corrupt unrelated loose object")?;
+        let log = fixture.root.join("checked-object-names");
+        let wrapper = fixture.root.join("logging-verifier");
+        let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+        fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nfor arg do\ncase \"$arg\" in fsck) exit 93;; --batch) /usr/bin/tee -a {} | {} \"$@\"; exit $?;; esac\ndone\nexec {} \"$@\"\n",
+                quote(&log),
+                quote(&fixture.git),
+                quote(&fixture.git)
+            ),
+        )?;
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+        fixture.git = wrapper;
+        fixture.import()?;
+        verify_graph(
+            &fixture.git,
+            fixture.worktree.repo().common_git_dir(),
+            &fixture.lane,
+            fixture.head,
+        )?;
+        let checked = fs::read_to_string(log)?;
+        assert!(checked.lines().any(|name| name == fixture.blob.to_string()));
+        assert!(
+            checked
+                .lines()
+                .any(|name| name == fixture.base_blob.to_string())
+        );
+        assert!(!checked.lines().any(|name| name == unrelated.to_string()));
+    }
+    Ok(())
+}
+
+#[test]
+fn hash_valid_but_malformed_unreachable_lane_commit_is_refused() -> TestResult {
+    for format in ["sha1", "sha256"] {
+        let fixture = Fixture::new(format)?;
+        let tree = oid(git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.lane,
+            Some(&fixture.source),
+            &["rev-parse", "HEAD^{tree}"],
+        )?)?;
+        let malformed = fixture.root.join("malformed-commit");
+        fs::write(
+            &malformed,
+            format!("tree {tree}\n\nmissing author and committer\n"),
+        )?;
+        git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.lane,
+            Some(&fixture.source),
+            &[
+                "hash-object",
+                "--literally",
+                "-t",
+                "commit",
+                "-w",
+                malformed.to_str().ok_or("malformed path")?,
+            ],
+        )?;
+        assert!(
+            fixture.import().is_err(),
+            "strict format validation accepted malformed {format} commit"
+        );
+        fixture.assert_not_published();
+    }
+    Ok(())
+}
+
+#[test]
+fn streamed_hash_verification_handles_large_binary_blobs() -> TestResult {
+    let mut fixture = Fixture::new("sha1")?;
+    // Longer than the executor's line frame limit, with embedded NULs and
+    // newlines. Content must be consumed as bytes without line framing.
+    let bytes: Vec<u8> = (0..200_000).map(|index| (index % 256) as u8).collect();
+    fs::write(fixture.lane.join("file"), &bytes)?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.lane,
+        Some(&fixture.source),
+        &["add", "file"],
+    )?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.lane,
+        Some(&fixture.source),
+        &["commit", "-qm", "binary blob"],
+    )?;
+    fixture.head = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.lane,
+        Some(&fixture.source),
+        &["rev-parse", "HEAD"],
+    )?)?;
+    fixture.import()?;
+    assert_eq!(
+        git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.lane,
+            None,
+            &["show", "HEAD:file"]
+        )?
+        .stdout,
+        bytes
+    );
     Ok(())
 }
 
@@ -1303,7 +1460,7 @@ fn import_total_wall_clock_budget_covers_initialisation_and_indexing() -> TestRe
     .err()
     .ok_or("indexing must consume the one total import budget")?;
     assert!(
-        matches!(error, crate::RunError::ObjectImportLimit(reason) if reason.contains("wall-clock budget"))
+        matches!(error, crate::RunError::ObjectImportLimit(reason) if reason == crate::ObjectImportLimitReason::ImportDeadline)
     );
     assert!(
         initialised.exists(),
@@ -1334,7 +1491,7 @@ fn staged_hash_deadline_is_terminal() -> TestResult {
             true
         ),
         Err(crate::RunError::ObjectImportLimit(
-            super::STAGED_BYTES_LIMIT_REASON
+            crate::ObjectImportLimitReason::StagedBytes
         ))
     ));
     Ok(())
