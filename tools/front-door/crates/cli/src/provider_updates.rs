@@ -19,7 +19,9 @@ pub fn schedule(roots: &Roots, cwd: &Path) -> Result<(), String> {
         .as_timestamp()
         .as_second();
     if !config.providers.iter().any(|(provider, settings)| {
-        provenant_providers::update::due(roots.state.as_path(), provider, settings, now)
+        schedulable(roots.state.as_path(), provider, settings, now, || {
+            crate::run::provider_executable(provider).is_ok()
+        })
     }) {
         return Ok(());
     }
@@ -35,6 +37,27 @@ pub fn schedule(roots: &Roots, cwd: &Path) -> Result<(), String> {
         "provider-updates".into(),
     ];
     provenant_os::exec::spawn_detached(&argv, cwd).map_err(|e| e.to_string())
+}
+
+fn schedulable(
+    state: &Path,
+    provider: &str,
+    settings: &provenant_config::ProviderSettings,
+    now: i64,
+    installed: impl FnOnce() -> bool,
+) -> bool {
+    if !provenant_providers::update::due(state, provider, settings, now) || !installed() {
+        return false;
+    }
+    // Other fence errors still reach the worker's normal failure reporting.
+    !matches!(
+        provenant_os::provider_fence::acquire(
+            state,
+            provider,
+            provenant_os::fs::LockMode::Exclusive
+        ),
+        Err(provenant_os::fs::FsError::LockTimeout { .. })
+    )
 }
 
 pub fn housekeep(roots: &Roots, home: &Path, cwd: &Path) -> Result<(), String> {
@@ -138,4 +161,27 @@ fn note_update(
         )
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scheduling_skips_missing_and_busy_providers() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let settings = provenant_config::ProviderSettings::default();
+        assert!(!schedulable(temp.path(), "claude", &settings, 100, || {
+            false
+        }));
+        let lane = provenant_os::provider_fence::acquire(
+            temp.path(),
+            "claude",
+            provenant_os::fs::LockMode::Shared,
+        )?;
+        assert!(!schedulable(temp.path(), "claude", &settings, 100, || true));
+        drop(lane);
+        assert!(schedulable(temp.path(), "claude", &settings, 100, || true));
+        Ok(())
+    }
 }

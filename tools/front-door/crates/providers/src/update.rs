@@ -27,9 +27,11 @@ pub fn latest(state: &Path, provider: &str) -> Option<UpdateRecord> {
     let result = read(&record_name(provider));
     let attempt = read(&attempt_name(provider));
     match (result, attempt) {
-        (Some(result), Some(attempt))
+        (Some(result), Some(mut attempt))
             if attempt.checked_unix_seconds > result.checked_unix_seconds =>
         {
+            attempt.old_version = attempt.old_version.or(result.old_version);
+            attempt.new_version = attempt.new_version.or(result.new_version);
             Some(attempt)
         }
         (Some(result), _) => Some(result),
@@ -146,14 +148,13 @@ pub fn check(
             {
                 return result;
             }
-            let mut record = latest
-                .filter(|record| record.checked_unix_seconds == now)
-                .unwrap_or(UpdateRecord {
-                    checked_unix_seconds: now,
-                    old_version: None,
-                    new_version: None,
-                    outcome: String::new(),
-                });
+            let mut record = latest.unwrap_or(UpdateRecord {
+                checked_unix_seconds: now,
+                old_version: None,
+                new_version: None,
+                outcome: String::new(),
+            });
+            record.checked_unix_seconds = now;
             record.outcome = format!("failed: {error}");
             let _ = save(&dir, &record_name(provider), &record);
         }
@@ -184,8 +185,12 @@ fn check_inner(
     // destination is broken, subsequent events still back off on the error.
     let mut record = UpdateRecord {
         checked_unix_seconds: now,
-        old_version: None,
-        new_version: None,
+        old_version: previous
+            .as_ref()
+            .and_then(|record| record.old_version.clone()),
+        new_version: previous
+            .as_ref()
+            .and_then(|record| record.new_version.clone()),
         outcome: "failed (interrupted)".into(),
     };
     save(&dir, &attempt_name(provider), &record)?;
@@ -199,9 +204,10 @@ fn check_inner(
         save(&dir, &record_name(provider), &record)?;
         return Ok(Some(record));
     };
-    let old_version = version(executor, executable, state);
-    record.old_version = old_version.clone();
-    record.new_version = old_version;
+    if let Some(old_version) = version(executor, executable, state) {
+        record.old_version = Some(old_version.clone());
+        record.new_version = Some(old_version);
+    }
     save(&dir, &attempt_name(provider), &record)?;
     let mut options = ExecOptions::new(
         &argv,
@@ -278,6 +284,47 @@ mod tests {
                 elapsed_micros: 1,
             })
         }
+    }
+
+    #[test]
+    fn early_failure_preserves_last_known_versions() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let settings = ProviderSettings::default();
+        let fake = Fake {
+            state: temp.path(),
+            updated: AtomicBool::new(false),
+            calls: AtomicUsize::new(0),
+            fail: false,
+        };
+        let previous = check(
+            temp.path(),
+            "claude",
+            Path::new("/fake/claude"),
+            &settings,
+            &fake,
+            100,
+        )?
+        .ok_or("missing update")?;
+        std::fs::remove_file(temp.path().join("provider-updates/claude.attempt.json"))?;
+        std::fs::create_dir(temp.path().join("provider-updates/claude.attempt.json"))?;
+        let now = 100 + settings.update_interval_seconds as i64;
+        assert!(
+            check(
+                temp.path(),
+                "claude",
+                Path::new("/fake/claude"),
+                &settings,
+                &fake,
+                now
+            )
+            .is_err()
+        );
+        let failure = latest(temp.path(), "claude").ok_or("missing failure")?;
+        assert_eq!(failure.checked_unix_seconds, now);
+        assert!(failure.outcome.starts_with("failed:"));
+        assert_eq!(failure.old_version, previous.old_version);
+        assert_eq!(failure.new_version, previous.new_version);
+        Ok(())
     }
 
     #[test]

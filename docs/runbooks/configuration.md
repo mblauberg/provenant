@@ -134,7 +134,9 @@ other failed attempts. Interruption can leave a partially replaced installation;
 the next attempt uses the same native updater to repair it. Update failures
 are recorded once per interval, with updater output discarded. An independent
 attempt record preserves backoff if publishing the result record fails.
-Activity records the old and new versions. Each lane's `availability.json`
+Worker failures surface through the activity note and update records only;
+the quota tick does not report them. Activity records the old and new versions.
+Each lane's `availability.json`
 also includes its observed version and the latest update result.
 
 ## Lane cache collection
