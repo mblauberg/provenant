@@ -52,7 +52,7 @@ rerun both against the new head.
 
 | gate | command or artifact | result | head SHA | N/A reason |
 | --- | --- | --- | --- | --- |
-| Harness style | `provenant check harness` | | | |
+| Harness style | `scripts/check-harness` | | | |
 | Contract and cutover | | | | |
 | Security and operations | | | | |
 | Operator documentation | | | | |

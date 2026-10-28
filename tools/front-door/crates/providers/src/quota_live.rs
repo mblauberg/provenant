@@ -255,6 +255,7 @@ impl LiveQuota {
 }
 fn clean(out: &ExecOutcome) -> bool {
     !out.timed_out
+        && !out.cancelled
         && !out.drain_truncated
         && !out.stdout.truncated
         && !out.stdout.read_failed

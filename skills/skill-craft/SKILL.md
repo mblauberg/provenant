@@ -31,7 +31,7 @@ Both branches follow this without restating it in two voices:
 - **Token model, three-tier:** always-loaded frontmatter, triggered branch
   body, and entrypoint references loaded at one hop. Reference documents may
   link to sibling references, but that depth is not recursively enforced by
-  `provenant check harness`.
+  `scripts/check-harness`.
 - **Tier placement:** keep hard rules in `SKILL.md`; references load late.
   For repeated misses, hoist the rule and concrete banned-pattern examples
   into the core instead of expanding the reference.

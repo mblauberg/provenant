@@ -1,5 +1,7 @@
-use provenant_records::{YamlValue, parse_frontmatter_integers};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map as JsonMap, Value as YamlValue};
+
+type Mapping = JsonMap<String, YamlValue>;
 use thiserror::Error;
 
 /// Chair-authored summary in checkpoint frontmatter.
@@ -234,6 +236,16 @@ fn empty_header(text: &str, end: usize) -> bool {
         .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#'))
 }
 
+fn parse_header(text: &str, end: usize) -> Result<Mapping, SummaryError> {
+    let header = text[..end]
+        .lines()
+        .skip(1)
+        .take_while(|line| line.trim_end_matches('\r') != "---")
+        .collect::<Vec<_>>()
+        .join("\n");
+    serde_saphyr::from_str(&header).map_err(|_| SummaryError)
+}
+
 fn replace_summary(text: &str, summary: &Summary) -> Result<String, super::SessionError> {
     let newline = if text.starts_with("---\r\n") {
         "\r\n"
@@ -255,13 +267,9 @@ fn replace_summary(text: &str, summary: &Summary) -> Result<String, super::Sessi
     } else {
         let header_end = header_end(text)?.ok_or(SummaryError)?;
         let root = if empty_header(text, header_end) {
-            std::collections::BTreeMap::new()
+            Mapping::new()
         } else {
-            let parsed = parse_frontmatter_integers(text).map_err(|_| SummaryError)?;
-            let YamlValue::Mapping(root) = parsed.value else {
-                return Err(SummaryError.into());
-            };
-            root
+            parse_header(text, header_end)?
         };
         let lines: Vec<&str> = text.split_inclusive('\n').collect();
         let end = lines
@@ -271,15 +279,16 @@ fn replace_summary(text: &str, summary: &Summary) -> Result<String, super::Sessi
             .find(|(_, line)| line.trim_end_matches('\n').trim_end_matches('\r') == "---")
             .map(|(i, _)| i)
             .ok_or(SummaryError)?;
-        let (start, stop) = if let Some(node) = root.get("provenant_summary") {
-            let child = node.span.line.checked_sub(1).ok_or(SummaryError)?;
-            let start = (1..=child)
-                .rev()
+        let (start, stop) = if root.contains_key("provenant_summary") {
+            let start = (1..end)
                 .find(|&i| {
                     let line = lines[i].trim_end_matches(['\r', '\n']);
-                    !line.is_empty()
-                        && !line.starts_with(char::is_whitespace)
-                        && !line.starts_with('#')
+                    if line.starts_with(char::is_whitespace) || line.starts_with('#') {
+                        return false;
+                    }
+                    serde_saphyr::from_str::<Mapping>(line)
+                        .ok()
+                        .is_some_and(|mapping| mapping.contains_key("provenant_summary"))
                 })
                 .ok_or(SummaryError)?;
             let mut stop = (start + 1..end)
@@ -339,22 +348,19 @@ pub fn parse_summary(markdown: &str) -> Result<Option<Summary>, SummaryError> {
     if empty_header(markdown, end) {
         return Ok(None);
     }
-    let parsed = parse_frontmatter_integers(markdown).map_err(|_| SummaryError)?;
-    let YamlValue::Mapping(mut root) = parsed.value else {
-        return Err(SummaryError);
-    };
+    let mut root = parse_header(markdown, end)?;
     let Some(node) = root.remove("provenant_summary") else {
         return Ok(None);
     };
-    let YamlValue::Mapping(mut fields) = node.value else {
+    let YamlValue::Object(mut fields) = node else {
         return Err(SummaryError);
     };
-    fn string(
-        fields: &mut std::collections::BTreeMap<String, provenant_records::SpannedYaml>,
-        key: &str,
-    ) -> Result<String, SummaryError> {
-        match fields.remove(key).map(|n| n.value) {
+    fn string(fields: &mut Mapping, key: &str) -> Result<String, SummaryError> {
+        match fields.remove(key) {
             Some(YamlValue::String(s)) => Ok(s),
+            Some(YamlValue::Number(n)) if key == "schema_version" || key == "revision" => {
+                Ok(n.to_string())
+            }
             _ => Err(SummaryError),
         }
     }
@@ -377,10 +383,10 @@ pub fn parse_summary(markdown: &str) -> Result<Option<Summary>, SummaryError> {
     let now = string(&mut fields, "now")?;
     let next = string(&mut fields, "next")?;
     let risk = string(&mut fields, "risk")?;
-    let needs_you = match fields.remove("needs_you").map(|n| n.value) {
-        Some(YamlValue::Sequence(items)) => items
+    let needs_you = match fields.remove("needs_you") {
+        Some(YamlValue::Array(items)) => items
             .into_iter()
-            .map(|item| match item.value {
+            .map(|item| match item {
                 YamlValue::String(s) => Ok(s),
                 _ => Err(SummaryError),
             })

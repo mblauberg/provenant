@@ -8,6 +8,7 @@ pub(super) struct Identity {
     fingerprint: Option<String>,
     token: Option<String>,
     expires: Option<i64>,
+    missing: bool,
 }
 fn freshest<'a>(
     fingerprint: &str,
@@ -35,7 +36,7 @@ fn expected_fingerprint<'a>(
         .ok_or(ProbeFailure::Network)?;
     let live = live.ok_or(ProbeFailure::Network)?;
     if live != expected {
-        return Err(ProbeFailure::Auth);
+        return Err(ProbeFailure::Network);
     }
     Ok(expected)
 }
@@ -108,7 +109,7 @@ fn status_fingerprint(result: Result<ExecOutcome, ProbeFailure>) -> Result<Strin
             .and_then(Value::as_str)
             .is_none_or(str::is_empty)
     {
-        return Err(ProbeFailure::Auth);
+        return Err(ProbeFailure::Network);
     }
     if out.termination != Termination::Exit(0) {
         return Err(ProbeFailure::Network);
@@ -118,7 +119,7 @@ fn status_fingerprint(result: Result<ExecOutcome, ProbeFailure>) -> Result<Strin
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(|s| fingerprint(s, 16))
-        .ok_or(ProbeFailure::Auth)
+        .ok_or(ProbeFailure::Network)
 }
 
 fn default_identity(result: Result<Identity, ProbeFailure>) -> Result<Identity, ProbeFailure> {
@@ -183,6 +184,8 @@ impl LiveQuota {
         (dir != self.home.join(".claude")).then_some(("CLAUDE_CONFIG_DIR", dir))
     }
     fn claude_identity(&self, dir: &Path, deadline: i64) -> Result<Identity, ProbeFailure> {
+        let credential = optional_probe(self.claude_token(dir, deadline))?;
+        let missing = credential.is_none();
         let fingerprint = status_fingerprint(self.command(
             "claude",
             &["auth", "status", "--json"],
@@ -190,9 +193,15 @@ impl LiveQuota {
             None,
             deadline,
             10,
-        ))?;
-        let (token, expires) = optional_probe(self.claude_token(dir, deadline))?
-            .map_or((None, None), |(t, e)| (Some(t), Some(e)));
+        ))
+        .map_err(|error| {
+            if missing && error != ProbeFailure::ProbeDirectory {
+                ProbeFailure::Auth
+            } else {
+                error
+            }
+        })?;
+        let (token, expires) = credential.map_or((None, None), |(t, e)| (Some(t), Some(e)));
         // The default session can rotate while a tick is in flight. Confirm
         // the identity after reading its credential before attributing it.
         if dir == self.home.join(".claude") {
@@ -212,6 +221,7 @@ impl LiveQuota {
             fingerprint: Some(fingerprint),
             token,
             expires,
+            missing,
         })
     }
     fn claude_credentials(&self, dir: &Path, deadline: i64) -> Result<Value, ProbeFailure> {
@@ -251,18 +261,18 @@ impl LiveQuota {
     }
     fn claude_token(&self, dir: &Path, deadline: i64) -> Result<(String, i64), ProbeFailure> {
         let value = self.claude_credentials(dir, deadline)?;
-        let oauth = value.get("claudeAiOauth").ok_or(ProbeFailure::Auth)?;
+        let oauth = value.get("claudeAiOauth").ok_or(ProbeFailure::Network)?;
         let token = oauth
             .get("accessToken")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
-            .ok_or(ProbeFailure::Auth)?
+            .ok_or(ProbeFailure::Network)?
             .to_owned();
         let expires = oauth
             .get("expiresAt")
             .and_then(Value::as_i64)
             .map(|e| e / 1000)
-            .ok_or(ProbeFailure::Auth)?;
+            .ok_or(ProbeFailure::Network)?;
         Ok((token, expires))
     }
     fn mark_refresh(&self, account: &Account, expires: i64) -> Result<bool, ProbeFailure> {
@@ -343,7 +353,7 @@ impl LiveQuota {
             && may_refresh(&account.identity_dir, &self.home.join(".claude"), |dir| {
                 self.claude_credentials(dir, deadline)
             })?
-            && self.mark_refresh(account, fixed.expires.ok_or(ProbeFailure::Auth)?)?
+            && self.mark_refresh(account, fixed.expires.ok_or(ProbeFailure::Network)?)?
         {
             // The shared refresh resolves the executable and applies the
             // hardening flags on every platform; only its keychain read is
@@ -371,8 +381,12 @@ impl LiveQuota {
             fixed = self.claude_identity(&account.identity_dir, deadline)?;
         }
         let borrowed = self.claude_default.borrow();
-        let default = borrowed.as_ref().ok_or(ProbeFailure::Auth)?;
-        let identity = freshest(&expected, &fixed, default, now()).ok_or(ProbeFailure::Auth)?;
+        let default = borrowed.as_ref().ok_or(ProbeFailure::Network)?;
+        let identity = freshest(&expected, &fixed, default, now()).ok_or(if fixed.missing {
+            ProbeFailure::Auth
+        } else {
+            ProbeFailure::Network
+        })?;
         details.fingerprint = Some(expected);
         self.http(
             "https://api.anthropic.com/api/oauth/usage",
@@ -381,7 +395,7 @@ impl LiveQuota {
                     "Authorization",
                     format!(
                         "Bearer {}",
-                        identity.token.as_ref().ok_or(ProbeFailure::Auth)?
+                        identity.token.as_ref().ok_or(ProbeFailure::Network)?
                     ),
                 ),
                 ("anthropic-beta", "oauth-2025-04-20".into()),
@@ -417,6 +431,17 @@ mod tests {
             elapsed_micros: 0,
         };
         assert_eq!(keychain_output(missing), Err(ProbeFailure::Auth));
+        let cancelled = ExecOutcome {
+            termination: Termination::Exit(44),
+            stdout: Default::default(),
+            stderr: Default::default(),
+            timed_out: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: true,
+            elapsed_micros: 0,
+        };
+        assert_eq!(keychain_output(cancelled), Err(ProbeFailure::Network));
     }
 
     #[test]
@@ -458,7 +483,7 @@ mod tests {
         for json in [br#"{"loggedIn":false}"#.as_slice(), br#"{}"#] {
             assert_eq!(
                 status_fingerprint(Ok(outcome(json, 1, false))),
-                Err(ProbeFailure::Auth)
+                Err(ProbeFailure::Network)
             );
         }
         assert_eq!(
@@ -473,6 +498,7 @@ mod tests {
             fingerprint: Some("fixed".into()),
             token: Some("fake".into()),
             expires: Some(5000),
+            missing: false,
         };
         for error in [ProbeFailure::Auth, ProbeFailure::Network] {
             let default = default_identity(Err(error)).unwrap();
@@ -626,7 +652,7 @@ mod tests {
         for (configured, previous) in [(Some("pinned"), None), (None, Some("recorded"))] {
             assert!(matches!(
                 expected_fingerprint(configured, previous, Some("other")),
-                Err(ProbeFailure::Auth)
+                Err(ProbeFailure::Network)
             ));
         }
         assert_eq!(
@@ -645,11 +671,13 @@ mod tests {
             fingerprint: Some("pro-hash".into()),
             token: Some("redacted-fixed".into()),
             expires: Some(900),
+            missing: false,
         };
         let default = Identity {
             fingerprint: Some("pro-hash".into()),
             token: Some("redacted-default".into()),
             expires: Some(5000),
+            missing: false,
         };
         assert_eq!(
             freshest("pro-hash", &fixed, &default, 1000).and_then(|i| i.token.as_deref()),
@@ -660,6 +688,7 @@ mod tests {
             fingerprint: Some("anese-hash".into()),
             token: Some("redacted-rotated".into()),
             expires: Some(6000),
+            missing: false,
         };
         assert!(freshest("pro-hash", &fixed, &rotated, 1000).is_none());
         assert!(freshest("pro-hash", &fixed, &default, 5000).is_none());

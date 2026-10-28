@@ -69,7 +69,9 @@ pub fn next_due(
     let event_auth_retry = record.auth_retry_pending
         || (trigger == Trigger::Manual && record.last_error == Some(ProbeFailure::Auth));
     let mut due = match record.last_attempt_unix_seconds {
-        Some(at) if !event_auth_retry => add(at, ttl)?,
+        Some(at) if !event_auth_retry && record.last_error != Some(ProbeFailure::Network) => {
+            add(at, ttl)?
+        }
         _ => i64::MIN,
     };
     if let Some(backoff) = record.backoff_until_unix_seconds
@@ -84,7 +86,10 @@ pub fn next_due(
 }
 pub fn backoff(failure: ProbeFailure, failures: u64, retry_after_seconds: Option<u64>) -> u64 {
     let base = match failure {
-        ProbeFailure::Network | ProbeFailure::RateLimited => 120_u64
+        ProbeFailure::Network => 15_u64
+            .saturating_mul(1_u64 << failures.saturating_sub(1).min(2))
+            .min(60),
+        ProbeFailure::RateLimited => 120_u64
             .saturating_mul(1_u64 << failures.saturating_sub(1).min(5))
             .min(3600),
         ProbeFailure::Auth => 900,
@@ -549,6 +554,23 @@ mod tests {
         }
     }
     #[test]
+    fn transient_failure_retries_at_backoff_without_waiting_for_normal_interval() {
+        let mut record = AccountRecord::empty(account());
+        record.last_attempt_unix_seconds = Some(100);
+        record.last_error = Some(ProbeFailure::Network);
+        record.backoff_until_unix_seconds = Some(115);
+        assert_eq!(
+            next_due(
+                crate::source::TEST_POLICIES,
+                &record,
+                Trigger::Timer,
+                Power::Ac
+            )
+            .unwrap(),
+            Some(115)
+        );
+    }
+    #[test]
     fn manual_respects_floor_backoff_and_expired_claims() {
         let mut r = AccountRecord::empty(account());
         r.last_attempt_unix_seconds = Some(100);
@@ -785,7 +807,8 @@ mod tests {
     }
     #[test]
     fn backoff_has_bounded_exponential_and_retry_after_floor() {
-        assert_eq!(backoff(ProbeFailure::Network, 1, None), 120);
+        assert_eq!(backoff(ProbeFailure::Network, 1, None), 15);
+        assert_eq!(backoff(ProbeFailure::Network, 50, None), 60);
         assert_eq!(backoff(ProbeFailure::RateLimited, 50, None), 3600);
         assert_eq!(backoff(ProbeFailure::Network, 1, Some(999999)), 86400);
         assert_eq!(backoff(ProbeFailure::Auth, 1, None), 900);

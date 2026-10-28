@@ -33,15 +33,18 @@ diagnostics rather than adding generic runtime and logging frameworks.
 
 ### 5. External YAML
 
-Externally owned YAML formats use the records crate's fail-closed subset
-reader. Unsupported constructs are errors with locations, not permissive
-coercions. No Python parser or legacy-language parity oracle remains.
+Session summary frontmatter uses the maintained serde-saphyr parser, with a
+bounded header and typed validation. Repository harness checks use PyYAML so
+that documentation metadata uses the same YAML format as its consumers.
 
 ### 6. Dependency admission
 
 New direct crates, feature expansion and material transitive additions require
 an explicit reason: widely used, maintained, MIT or Apache-2.0 licensed, and
-not cheaply replaceable in-house.
+not cheaply replaceable in-house. The YAML parser is an exception to the
+popularity preference: serde-saphyr is maintained and handles complete YAML,
+including duplicate-key detection and unsigned revisions, which avoids owning
+a bespoke parser. Its encoding dependency also requires BSD-3-Clause.
 
 ## Consequences
 

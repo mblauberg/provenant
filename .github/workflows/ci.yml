@@ -86,15 +86,14 @@ jobs:
           add-job-id-key: false
           save-if: false
       - name: Check harness assets
-        working-directory: tools/front-door
-        env:
-          PROVENANT_ROOT: ${{ github.workspace }}
-          PROVENANT_STATE_DIR: ${{ runner.temp }}/provenant-state
-          TMPDIR: ${{ runner.temp }}
-        run: cargo run --locked -q -p provenant --bin provenant -- check harness --project "$GITHUB_WORKSPACE"
+        run: |
+          python3 -m venv "$RUNNER_TEMP/harness-venv"
+          "$RUNNER_TEMP/harness-venv/bin/pip" install PyYAML==6.0.2
+          echo "$RUNNER_TEMP/harness-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/harness-venv/bin/python" scripts/check-harness
 
       - name: Check generated contract reference
-        run: scripts/generate-reference --check --binary "$CARGO_TARGET_DIR/debug/provenant"
+        run: scripts/generate-reference --check
       # Advisory: continue-on-error keeps this outside the ci-status gate.
       - name: Require Owner and Anchor headers on specs and runbooks
         run: scripts/check-doc-truth --inventory-only --strict-inventory

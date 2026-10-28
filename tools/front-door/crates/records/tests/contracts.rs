@@ -2,7 +2,7 @@ use std::io::Cursor;
 
 use provenant_records::{
     AttemptOutcome, CanonicalError, CanonicalV1, DecodeError, FileDigest, Limits, PathWire,
-    RecordHeader, YamlValue, decode, decode_v1, parse_frontmatter, parse_sidecar,
+    RecordHeader, decode, decode_v1,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -217,110 +217,6 @@ fn canonical_v1_rejects_float_values() {
     assert!(matches!(
         CanonicalV1::bytes(&u128::MAX),
         Err(CanonicalError::IntegerOutOfRange)
-    ));
-}
-
-#[test]
-fn yaml_subset_parses_frontmatter_and_sidecars_and_refuses_ambiguous_values() {
-    let frontmatter = "---\nname: example\ndescription: >-\n  A folded\n  description.\nallowed-tools: [\"Read\", 'Write']\n---\nbody\n";
-    let parsed = parse_frontmatter(frontmatter).expect("valid skill frontmatter");
-    assert!(matches!(parsed.value, YamlValue::Mapping(_)));
-    assert!(parse_sidecar("name: example\nmetadata:\n  auto: true\n").is_ok());
-
-    let plain_comment =
-        parse_sidecar("Don't: quote # this is a comment\n").expect("plain apostrophe");
-    let YamlValue::Mapping(plain_comment) = plain_comment.value else {
-        panic!("mapping expected");
-    };
-    assert_eq!(
-        plain_comment
-            .get("Don't")
-            .and_then(|entry| match &entry.value {
-                YamlValue::String(value) => Some(value.as_str()),
-                _ => None,
-            }),
-        Some("quote")
-    );
-
-    let quoted_hash =
-        parse_sidecar("description: \"keep # this\" # comment\n").expect("quoted hash is data");
-    let YamlValue::Mapping(quoted_hash) = quoted_hash.value else {
-        panic!("mapping expected");
-    };
-    assert_eq!(
-        quoted_hash
-            .get("description")
-            .and_then(|entry| match &entry.value {
-                YamlValue::String(value) => Some(value.as_str()),
-                _ => None,
-            }),
-        Some("keep # this")
-    );
-
-    let folded = parse_sidecar("description: >\n  first\n    code\n  last\n")
-        .expect("folded scalar with an indented line");
-    let YamlValue::Mapping(folded) = folded.value else {
-        panic!("mapping expected");
-    };
-    assert_eq!(
-        folded
-            .get("description")
-            .and_then(|entry| match &entry.value {
-                YamlValue::String(value) => Some(value.as_str()),
-                _ => None,
-            }),
-        Some("first\n  code\nlast\n")
-    );
-
-    for (source, expected) in [
-        ("x: >\n  first\n\n  last\n", "first\nlast\n"),
-        ("x: >\n\n  first\n  last\n", "\nfirst last\n"),
-        ("x: >\n  first\n\n\n  last\n", "first\n\nlast\n"),
-        (
-            "x: >\n  first\n    code\n\n  last\n",
-            "first\n  code\n\nlast\n",
-        ),
-        ("x: >-\n  first\n\n", "first"),
-    ] {
-        let parsed = parse_sidecar(source).expect("folded blank-line scalar");
-        let YamlValue::Mapping(mapping) = parsed.value else {
-            panic!("mapping expected");
-        };
-        assert_eq!(
-            mapping.get("x").and_then(|entry| match &entry.value {
-                YamlValue::String(value) => Some(value.as_str()),
-                _ => None,
-            }),
-            Some(expected)
-        );
-    }
-
-    for invalid in [
-        "name: example\nname: duplicate\n",
-        "name: yes\n",
-        "name: 12\n",
-        "name: null\n",
-        "name: &anchor value\n",
-        "name: *alias\n",
-        "name: !tag value\n",
-        "name: value\n---\nname: second\n",
-        "name: first\n  continued plain text\n",
-    ] {
-        assert!(
-            parse_sidecar(invalid).is_err(),
-            "accepted invalid YAML: {invalid:?}"
-        );
-    }
-
-    assert!(parse_frontmatter("body\n---\nname: missing opening\n").is_err());
-    assert!(parse_frontmatter("---\nname: unclosed\nbody\n").is_err());
-    let oversized_line = format!("---\n{}\n---\n", "x".repeat(256 * 1024));
-    assert!(matches!(
-        parse_frontmatter(&oversized_line),
-        Err(provenant_records::YamlError {
-            kind: provenant_records::YamlErrorKind::LimitExceeded,
-            ..
-        })
     ));
 }
 
