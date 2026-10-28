@@ -214,7 +214,10 @@ fn opencode_dispatch_observes_v2_wal_session() -> Result {
                     "{lane}"
                 );
             } else {
-                assert_eq!(lane["reason"], "Model unavailable: opencode/misspelt-free");
+                assert_eq!(
+                    lane["reason"],
+                    "provider model unavailable: Model unavailable: opencode/misspelt-free"
+                );
             }
         }
         rig.assert_legacy_unchanged()?;
@@ -894,6 +897,33 @@ fn graph_settlement_advances_writer_and_account_routed_review() -> Result {
         1
     );
     cleanup.disarm();
+    Ok(())
+}
+
+fn codex_capacity_settles_without_quota_refusal() -> Result {
+    let message = "Selected model is at capacity. Please try a different model.";
+    let stdout = format!(
+        "{{\"type\":\"thread.started\",\"thread_id\":\"01234567-89ab-cdef-0123-456789abcdef\"}}\n{{\"type\":\"turn.failed\",\"error\":{{\"message\":\"{message}\",\"codex_error_info\":\"server_overloaded\"}}}}\n"
+    );
+    let (rig, terminal) = persisted_attempt(
+        "codex",
+        "codex/gpt-6.1-sol",
+        ("work", "codex-fixture"),
+        stdout.as_bytes(),
+        b"",
+        1,
+    )?;
+    assert!(matches!(
+        terminal.state,
+        provenant_run::AttemptState::Terminal {
+            outcome: provenant_run::Outcome::ModelUnavailable,
+            ..
+        }
+    ));
+    assert!(
+        matches!(&terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason == &format!("provider capacity: {message}"))
+    );
+    assert!(!rig.state.join("quota/codex-fixture/codex.json").exists());
     Ok(())
 }
 
@@ -1714,6 +1744,7 @@ fn main() -> ExitCode {
                 "agy_individual_quota_cools_model_until_reset",
                 "agy_denied_command_reaches_result_and_terminal_reason",
                 "agy_denial_result_reaches_terminal_reason",
+                "codex_capacity_settles_without_quota_refusal",
             ],
             |name| {
                 let result = match name {
@@ -1753,6 +1784,9 @@ fn main() -> ExitCode {
                     }
                     "agy_denial_result_reaches_terminal_reason" => {
                         agy_denial_result_reaches_terminal_reason()
+                    }
+                    "codex_capacity_settles_without_quota_refusal" => {
+                        codex_capacity_settles_without_quota_refusal()
                     }
                     _ => opencode_free_pool_cools_second_model(),
                 };
