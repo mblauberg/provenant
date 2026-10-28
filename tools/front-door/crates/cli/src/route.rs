@@ -346,6 +346,8 @@ enum EdgeError {
     Pacing(&'static str),
     #[error("{0}")]
     GoAllowance(String),
+    #[error("{0}")]
+    AccountProfile(String),
 }
 impl From<provenant_config::ConfigError> for EdgeError {
     fn from(error: provenant_config::ConfigError) -> Self {
@@ -373,6 +375,8 @@ pub enum Data {
 pub struct RoutePreview {
     #[serde(flatten)]
     pub route: provenant_records::ResolvedRoute,
+    pub supported_efforts: Option<Vec<String>>,
+    pub nearest_models: Vec<String>,
     pub pacing: Vec<provenant_routing::PacingPreview>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota: Option<provenant_quota::QuotaSnapshot>,
@@ -452,6 +456,101 @@ fn quota_observations(
     }
     Ok(observations)
 }
+fn resolve_account_reference(
+    name: &str,
+    field: &str,
+    settings: &provenant_providers::accounts::Settings,
+) -> Result<String, EdgeError> {
+    let derived = settings.with_derived_accounts();
+    let valid = derived
+        .entries
+        .iter()
+        .map(|(id, entry)| {
+            format!(
+                "{} (adapter/key: {}/{}, entry: {})",
+                entry.label, entry.adapter, entry.key, id
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let matches_for = |settings: &provenant_providers::accounts::Settings| {
+        settings
+            .entries
+            .iter()
+            .filter(|(id, entry)| {
+                name == format!("{}/{}", entry.adapter, entry.key)
+                    || *id == name
+                    || entry.label == name
+                    || entry.key == name
+            })
+            .map(|(id, entry)| (id.clone(), entry.clone()))
+            .collect::<Vec<_>>()
+    };
+    let mut matches = matches_for(settings);
+    if matches.is_empty() {
+        matches = matches_for(&derived);
+    }
+    match matches.as_slice() {
+        [(_, entry)] => Ok(format!("{}/{}", entry.adapter, entry.key)),
+        [] => Err(EdgeError::AccountProfile(format!(
+            "{field}: unknown account `{name}`; valid accounts: {}",
+            if valid.is_empty() {
+                "(none registered)"
+            } else {
+                &valid
+            }
+        ))),
+        _ => Err(EdgeError::AccountProfile(format!(
+            "{field}: account `{name}` is ambiguous: {}; use adapter/key or a unique label",
+            matches
+                .iter()
+                .map(|(id, entry)| format!(
+                    "{}/{} (label: {}, entry: {})",
+                    entry.adapter, entry.key, entry.label, id
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+// Resolve configured labels once, so all routing paths use the same account keys.
+fn resolve_pacing_accounts(
+    config: &mut provenant_routing::RoutingConfig,
+    settings: &provenant_providers::accounts::Settings,
+) -> Result<(), EdgeError> {
+    let resolve = |name: &str, field: &str| resolve_account_reference(name, field, settings);
+    let mut accounts = std::collections::BTreeMap::new();
+    for (name, mut profile) in std::mem::take(&mut config.pacing.accounts) {
+        let key = resolve(&name, &format!("pacing.accounts.{name}"))?;
+        if let Some(provenant_routing::PacingDeadline::ResetOf(reference)) = &mut profile.deadline {
+            reference.reset_of = resolve(
+                &reference.reset_of,
+                &format!("pacing.accounts.{name}.deadline.reset_of"),
+            )?;
+        }
+        if accounts.insert(key.clone(), profile).is_some() {
+            return Err(EdgeError::AccountProfile(format!(
+                "multiple pacing profiles resolve to account key `{key}`"
+            )));
+        }
+    }
+    config.pacing.accounts = accounts;
+    for (provider, profile) in &mut config.pacing.free {
+        if let Some(provenant_routing::PacingDeadline::ResetOf(reference)) = &mut profile.deadline {
+            reference.reset_of = resolve(
+                &reference.reset_of,
+                &format!("pacing.free.{provider}.deadline.reset_of"),
+            )?;
+        }
+    }
+    for (index, override_) in config.pacing_overrides.iter_mut().enumerate() {
+        if let Some(account) = &mut override_.account {
+            *account = resolve(account, &format!("pacing_overrides[{index}].account"))?;
+        }
+    }
+    Ok(())
+}
 fn with_context<T>(
     roots: &Roots,
     availability: &[AvailabilityRecord],
@@ -461,7 +560,8 @@ fn with_context<T>(
     action: impl FnOnce(&RoutingContext<'_>, &[provenant_quota::AccountRecord]) -> Result<T, EdgeError>,
 ) -> Result<T, EdgeError> {
     let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?.domains;
-    let config = domains.routing;
+    let mut config = domains.routing;
+    resolve_pacing_accounts(&mut config, &domains.accounts)?;
     let catalogue = Catalogue::bundled()?;
     // A lane holds no grant on the shared quota store: route without a
     // snapshot there rather than refusing the nested dispatch.
@@ -988,6 +1088,14 @@ fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<(), EdgeE
         .ok_or(EdgeError::Pacing(
             "--until must be a future RFC 3339 timestamp or positive duration",
         ))?;
+    let settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+        .domains
+        .accounts;
+    let account = request
+        .account
+        .as_deref()
+        .map(|name| resolve_account_reference(name, "--account", &settings))
+        .transpose()?;
     edit_config(roots, |document| {
         let routing = routing_table(document)?;
         let mut values = match routing.remove("pacing_overrides") {
@@ -1008,12 +1116,19 @@ fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<(), EdgeE
             let Some(row) = value.as_inline_table() else {
                 return true;
             };
-            row.get("account").and_then(toml_edit::Value::as_str) != request.account.as_deref()
+            let existing = row
+                .get("account")
+                .and_then(toml_edit::Value::as_str)
+                .map(|name| {
+                    resolve_account_reference(name, "account", &settings)
+                        .unwrap_or_else(|_| name.to_owned())
+                });
+            existing.as_deref() != account.as_deref()
                 || row.get("provider").and_then(toml_edit::Value::as_str)
                     != request.provider.as_deref()
         });
         let mut row = toml_edit::InlineTable::new();
-        if let Some(account) = &request.account {
+        if let Some(account) = &account {
             row.insert("account", toml_edit::Value::from(account.as_str()));
         }
         if let Some(provider) = &request.provider {
@@ -1055,8 +1170,15 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
                     })
                     .and_then(|r| r.snapshot.clone());
                 let pacing = provenant_routing::pacing_preview(&model, context);
+                let entry = context.catalogue.model(&model);
                 Ok(Data::Resolved(Box::new(RoutePreview {
                     route,
+                    supported_efforts: entry.map(|entry| entry.efforts.clone()),
+                    nearest_models: if entry.is_none() {
+                        context.catalogue.nearest_models(&model)
+                    } else {
+                        Vec::new()
+                    },
                     pacing,
                     quota,
                 })))
@@ -1131,7 +1253,9 @@ pub fn run(
                 EdgeError::Routing(_) | EdgeError::Unresolved { .. } | EdgeError::Pacing(_) => {
                     (Outcome::Invalid, "INVALID")
                 }
-                EdgeError::Config(_) | EdgeError::PacingConfig(_) => (Outcome::Invalid, "CONFIG"),
+                EdgeError::Config(_)
+                | EdgeError::PacingConfig(_)
+                | EdgeError::AccountProfile(_) => (Outcome::Invalid, "CONFIG"),
                 _ => (Outcome::Error, "IO"),
             };
             let mut result = CommandResult::new(name, status, None);
@@ -1245,6 +1369,25 @@ pub fn run(
                         }),
                     diagnostics
                 );
+                match &preview.supported_efforts {
+                    Some(efforts) if efforts.is_empty() => {
+                        text.push_str("supported efforts: none\n")
+                    }
+                    Some(efforts) => {
+                        text.push_str(&format!("supported efforts: {}\n", efforts.join(", ")))
+                    }
+                    None => {
+                        text.push_str(
+                            "model is not in the catalogue; effort support is unrecorded\n",
+                        );
+                        if !preview.nearest_models.is_empty() {
+                            text.push_str(&format!(
+                                "nearest catalogued IDs: {}\n",
+                                preview.nearest_models.join(", ")
+                            ));
+                        }
+                    }
+                }
                 if let Some(details) = preview.quota.as_ref().and_then(|q| q.details.as_ref())
                     && let (Some(source), Some(coverage)) = (&details.source, &details.coverage)
                 {
@@ -1280,6 +1423,85 @@ mod route_tests {
         RouteSelectionCandidate, RouteSelectionReceipt,
     };
     use std::error::Error;
+
+    #[test]
+    fn pacing_account_references_reject_collisions_and_keep_adapter() {
+        use provenant_providers::accounts::Settings;
+        use provenant_routing::RoutingConfig;
+        let settings: Settings = serde_json::from_value(serde_json::json!({"entries": {
+            "first": {"adapter":"claude", "label":"work", "key":"shared", "directory":"/tmp/a"},
+            "shared": {"adapter":"codex", "label":"shared", "key":"other", "directory":"/tmp/b"},
+            "third": {"adapter":"agy", "label":"personal", "key":"shared", "directory":"/tmp/c"}
+        }}))
+        .unwrap();
+        for config in [
+            serde_json::json!({"pacing":{"accounts":{"shared":{"policy":"pace"}}}}),
+            serde_json::json!({"pacing":{"free":{"codex":{"deadline":{"reset_of":"shared"}}}}}),
+        ] {
+            let mut config: RoutingConfig = serde_json::from_value(config).unwrap();
+            let error = super::resolve_pacing_accounts(&mut config, &settings)
+                .unwrap_err()
+                .to_string();
+            for expected in [
+                "ambiguous",
+                "claude/shared",
+                "codex/other",
+                "agy/shared",
+                "adapter/key",
+            ] {
+                assert!(error.contains(expected), "{error}");
+            }
+        }
+        let mut config: RoutingConfig = serde_json::from_value(serde_json::json!({"pacing":{
+            "accounts":{"work":{"deadline":{"reset_of":"agy/shared"}}}
+        }}))
+        .unwrap();
+        super::resolve_pacing_accounts(&mut config, &settings).unwrap();
+        let profile = &config.pacing.accounts["claude/shared"];
+        assert!(
+            matches!(&profile.deadline, Some(provenant_routing::PacingDeadline::ResetOf(r)) if r.reset_of == "agy/shared")
+        );
+    }
+    #[test]
+    fn override_references_resolve_and_registered_labels_precede_derived_accounts() {
+        use provenant_providers::accounts::Settings;
+        use provenant_routing::RoutingConfig;
+        let settings: Settings = serde_json::from_value(serde_json::json!({"entries": {
+            "one": {"adapter":"claude", "label":"office", "key":"shared", "directory":"/tmp/a"},
+            "two": {"adapter":"codex", "label":"other", "key":"shared", "directory":"/tmp/b"},
+            "three": {"adapter":"opencode", "label":"zen", "key":"work", "directory":"/tmp/c"}
+        }}))
+        .unwrap();
+        assert_eq!(
+            super::resolve_account_reference("zen", "test", &settings).unwrap(),
+            "opencode/work"
+        );
+        assert_eq!(
+            super::resolve_account_reference("opencode/zen", "test", &settings).unwrap(),
+            "opencode/zen"
+        );
+        assert!(
+            super::resolve_account_reference("shared", "test", &settings)
+                .unwrap_err()
+                .to_string()
+                .contains("ambiguous")
+        );
+        for (input, expected) in [
+            ("office", "claude/shared"),
+            ("claude/shared", "claude/shared"),
+        ] {
+            let mut config: RoutingConfig =
+                serde_json::from_value(serde_json::json!({"pacing_overrides": [{
+                    "account": input, "policy": "pace", "expires_unix_seconds": 2000000000_i64
+                }]}))
+                .unwrap();
+            super::resolve_pacing_accounts(&mut config, &settings).unwrap();
+            assert_eq!(
+                config.pacing_overrides[0].account.as_deref(),
+                Some(expected)
+            );
+        }
+    }
 
     #[test]
     fn names_resolve_to_routes_then_exact_then_unique_models() {
