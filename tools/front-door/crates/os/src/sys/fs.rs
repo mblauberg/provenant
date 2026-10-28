@@ -234,6 +234,7 @@ pub fn metadata_at(dir: &File, name: &OsStr, follow: bool) -> io::Result<Metadat
         size: stat.st_size.max(0) as u64,
         allocated: (stat.st_blocks.max(0) as u64).saturating_mul(512),
         modified_ns: i128::from(stat.st_mtime) * 1_000_000_000 + i128::from(ns),
+        changed_ns: i128::from(stat.st_ctime) * 1_000_000_000 + i128::from(stat.st_ctime_nsec),
         uid: stat.st_uid,
         mode: stat.st_mode as u32,
     })

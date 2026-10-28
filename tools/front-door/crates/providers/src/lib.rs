@@ -80,7 +80,7 @@ macro_rules! adapter {
                     continuation.bind_stream($id, &mut stream)?;
                 }
                 let mut spec = $prepare(&input, access, session, stream)?;
-                crate::launch::read_only_git_objects(&input, &mut spec)?;
+                crate::launch::private_git_objects(&input, &mut spec)?;
                 Ok(spec)
             }
             fn stream(

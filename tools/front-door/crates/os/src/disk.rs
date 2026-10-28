@@ -819,6 +819,7 @@ mod tests {
             size: 1024,
             allocated: 4096,
             modified_ns: 99,
+            changed_ns: 99,
             uid: 0,
             mode: 0,
         };
@@ -873,6 +874,7 @@ mod tests {
                 size: 1024,
                 allocated: 4096,
                 modified_ns: 3,
+                changed_ns: 3,
                 uid: 0,
                 mode: 0,
             },

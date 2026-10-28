@@ -799,7 +799,19 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
         Duration::from_secs(8),
         "sequencer writer hold point",
     )?;
-    git(&rig, &["-C", path_text, "reset", "--mixed", "HEAD^"])?;
+    // A lane now rewinds its private ref. Rewinding the shared ref instead is
+    // a competing host update, which correctly blocks CAS publication.
+    let previous = git(&rig, &["-C", path_text, "rev-parse", "HEAD^"])?;
+    let private_ref = context
+        .state_root
+        .as_path()
+        .join("runs")
+        .join(record.run_id.to_string())
+        .join("attempts")
+        .join(attempt.to_string())
+        .join("tmp/candidate-0/git-common")
+        .join(writer.branch.as_str());
+    fs::write(private_ref, format!("{previous}\n"))?;
     fs::write(release, b"release")?;
     let terminal = await_terminal(&store, attempt, &call)?;
     assert_terminal_outcome(&terminal, provenant_run::Outcome::Failed)?;
@@ -1262,9 +1274,9 @@ fn writer_observations() -> BTreeMap<
         (Operation::ProcessFork, Outcome::Denied),
         (Operation::WorktreeWrite, Outcome::Allowed),
         (Operation::GitIndexWrite, Outcome::Allowed),
-        (Operation::GitHeadWrite, Outcome::Allowed),
-        (Operation::GitObjectsWrite, Outcome::Allowed),
-        (Operation::SelectedRefWrite, Outcome::Allowed),
+        (Operation::GitHeadWrite, Outcome::Denied),
+        (Operation::GitObjectsWrite, Outcome::Denied),
+        (Operation::SelectedRefWrite, Outcome::Denied),
         (Operation::GitConfigWrite, Outcome::Denied),
         (Operation::OtherRefWrite, Outcome::Denied),
     ]
@@ -2873,27 +2885,24 @@ fn lane_prepare_isolates_nested_state() -> Result {
         let selected_git =
             fs::canonicalize(provenant_os::git::git_executable().ok_or("host Git")?)?;
         let scratch_git = confinement.plan.permissions().scratch.path.join("bin/git");
-        let needs_wrapper = !writer || adapter == "claude" || publishing;
         let git_entry = fs::symlink_metadata(&scratch_git)?.file_type();
-        if needs_wrapper {
-            // Read-only lanes scope their object store through a regular
-            // wrapper too, including Codex without publishing.
-            assert!(
-                git_entry.is_file(),
-                "Git wrapper for {adapter} writer={writer} publishing={publishing}"
-            );
-        } else {
-            assert!(
-                git_entry.is_symlink(),
-                "Git symlink for {adapter} writer={writer} publishing={publishing}"
-            );
-            assert_eq!(fs::read_link(&scratch_git)?, selected_git);
-        }
+        assert!(
+            git_entry.is_file(),
+            "Git wrapper for {adapter} writer={writer} publishing={publishing}"
+        );
         if adapter == "claude" || publishing {
             // Claude's env scrub and publishing both need a Git wrapper.
             let wrapper = fs::read_to_string(&scratch_git)?;
             assert!(wrapper.contains("GIT_CONFIG_GLOBAL=/dev/null"));
-            assert!(wrapper.contains(&format!("exec '{}'", selected_git.display())));
+            // Routed wrappers exec the bound Git through `$lane_git`.
+            let git = format!("'{}'", selected_git.display());
+            assert!(
+                wrapper.contains(&format!("exec {git}"))
+                    || (wrapper.contains(&format!("lane_git={git}\n"))
+                        && wrapper.contains("exec \"$lane_git\"")),
+                "Git exec for {adapter} writer={writer} publishing={publishing}"
+            );
+            assert_eq!(wrapper.contains(" -c 'include.path="), publishing);
         }
         let scratch = &confinement.plan.permissions().scratch.path;
         assert_eq!(scratch.join("publishing.gitconfig").exists(), publishing);
@@ -3318,6 +3327,12 @@ fn verify_lane_profile(
         (writer, &confinement.plan.permissions().mode)
     {
         prepare_writer_directories(worktree, branch, authority, &confinement.home)?;
+    }
+    if let Some(writer) = confinement.writer.as_ref() {
+        writer.prepare_private_git_for_fixture(
+            &provenant_os::fs::Directory::open_anchor(attempt)?,
+            &confinement.plan.permissions().scratch.path,
+        )?;
     }
     let directories = required_anchors(confinement.plan.permissions(), profile, writer)
         .iter()

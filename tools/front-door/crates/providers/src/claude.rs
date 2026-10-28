@@ -705,6 +705,7 @@ fn prepare(
         }),
         cwd: input.cwd.to_owned(),
         setup,
+        git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],

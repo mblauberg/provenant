@@ -1265,9 +1265,20 @@ impl RunStore {
                     return Err(local(&error));
                 }
             };
+            let writer_attempt = directory()?;
             if let Some(writer) = &confinement.writer
-                && let Err(error) =
-                    writer.snapshot(self.context.state_root.as_path(), &directory()?, scope)
+                && let Err(error) = crate::objects::prepare_bound(
+                    &provenant_os::git::git_executable()
+                        .ok_or_else(|| local(&"Git executable unavailable"))?,
+                    writer.worktree.repo(),
+                    &writer_attempt,
+                    &confinement.plan.permissions().scratch.path,
+                    writer.branch.as_str(),
+                    writer.base,
+                )
+                .and_then(|()| {
+                    writer.snapshot(self.context.state_root.as_path(), &writer_attempt, scope)
+                })
             {
                 lease
                     .withdraw_unlaunched()

@@ -3056,6 +3056,48 @@ mod tests {
             },
             None,
         )?;
+        let worktree = &publishing_task
+            .writer
+            .as_ref()
+            .ok_or("writer missing")?
+            .worktree;
+        // The runtime populates this private Git directory after preparation.
+        let private_common = publishing_paths.temporary.join("candidate-0/git-common");
+        std::fs::create_dir_all(private_common.join("objects"))?;
+        std::fs::create_dir_all(private_common.join("refs"))?;
+        std::fs::write(private_common.join("HEAD"), b"ref: refs/heads/writer\n")?;
+        std::fs::copy(project.join(".git/config"), private_common.join("config"))?;
+        std::fs::write(
+            worktree.join("private-blob-fixture"),
+            b"publishing private object fixture\n",
+        )?;
+        let git_shim = publishing_paths.temporary.join("candidate-0/bin/git");
+        let env = [
+            ("HOME".into(), git_home.as_os_str().to_owned()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+        ];
+        let run_git = |args: &[&str]| {
+            let argv: Vec<_> = std::iter::once(git_shim.as_os_str().to_owned())
+                .chain(args.iter().map(Into::into))
+                .collect();
+            let mut options = ExecOptions::new(&argv, worktree, Duration::from_secs(5));
+            options.env = Some(&env);
+            executor.execute(options)
+        };
+        let oid = run_git(&["hash-object", "private-blob-fixture"])?;
+        assert_eq!(oid.termination, Termination::Exit(0), "{oid:?}");
+        let oid = std::str::from_utf8(&oid.stdout.bytes)?.trim();
+        let added = run_git(&["add", "private-blob-fixture"])?;
+        assert_eq!(added.termination, Termination::Exit(0), "{added:?}");
+        let object = format!("{}/{}", &oid[..2], &oid[2..]);
+        assert!(
+            publishing_paths
+                .temporary
+                .join("candidate-0/git-objects")
+                .join(&object)
+                .is_file()
+        );
+        assert!(!project.join(".git/objects").join(&object).exists());
         let shim = publishing_paths.temporary.join("candidate-0/bin/gh");
         let run_shim = |label: &str| {
             use provenant_os::exec::{ExecOptions, Executor};
