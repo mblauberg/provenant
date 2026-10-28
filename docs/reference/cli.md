@@ -2777,6 +2777,7 @@ bounds are null. Positional arguments have no long flag.
 | `--max-depth` | `{"defaults": ["8"], "name": "max_depth"}` |
 | `--max-nodes` | `{"defaults": ["100"], "name": "max_nodes"}` |
 | `--detail` | `{"defaults": ["false"], "name": "detail", "values": ["true", "false"]}` |
+| `--hosts` | `{"name": "hosts"}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -2790,7 +2791,8 @@ bounds are null. Positional arguments have no long flag.
       "arguments": [
         "max_depth",
         "max_nodes",
-        "detail"
+        "detail",
+        "hosts"
       ],
       "multiple": true,
       "name": "Tree",
@@ -2807,6 +2809,7 @@ bounds are null. Positional arguments have no long flag.
 | `--all` | `{"defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
 | `--cursor` | `{"name": "cursor"}` |
+| `--hosts` | `{"name": "hosts"}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -2820,7 +2823,8 @@ bounds are null. Positional arguments have no long flag.
       "arguments": [
         "all",
         "limit",
-        "cursor"
+        "cursor",
+        "hosts"
       ],
       "multiple": true,
       "name": "Board",

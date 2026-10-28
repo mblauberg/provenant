@@ -4,6 +4,7 @@ use provenant_core::CancelToken;
 use provenant_records::{CommandError, CommandResult, Outcome};
 use std::io;
 
+#[allow(clippy::disallowed_methods)] // The process edge establishes the real-time deadline.
 pub fn run(command: Console, globals: &Globals) -> u8 {
     let leaf = match &command {
         Console::Board { .. } => "console board",
@@ -34,11 +35,78 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
         } else {
             None
         };
-        Ok(provenant_cli::console::read(
-            &resolved.roots,
-            selected,
-            &command,
-        )?)
+        let local = provenant_cli::console::read(&resolved.roots, selected, &command)?;
+        let (hosts, action) = match &command {
+            Console::Board {
+                hosts: Some(hosts),
+                all,
+                limit,
+                ..
+            } => (
+                hosts,
+                provenant_fabric_runtime::hosts::PeerAction::ConsoleBoard {
+                    all: *all,
+                    limit: *limit,
+                    selected: selected.is_some(),
+                },
+            ),
+            Console::Tree {
+                hosts: Some(hosts),
+                max_depth,
+                max_nodes,
+                detail,
+            } => (
+                hosts,
+                provenant_fabric_runtime::hosts::PeerAction::ConsoleTree {
+                    max_depth: *max_depth,
+                    max_nodes: *max_nodes,
+                    detail: *detail,
+                    selected: selected.is_some(),
+                },
+            ),
+            _ => return Ok(local),
+        };
+        let context = provenant_cli::fabric::Context::open_read_only(
+            resolved.roots,
+            &resolved.home,
+            &resolved.project,
+        )?;
+        let mut chosen = std::collections::BTreeSet::new();
+        if hosts == "all" {
+            chosen.extend(context.config.peers.values().map(|peer| peer.host));
+        } else {
+            for name in hosts.split(',') {
+                if name == "local" {
+                    continue;
+                }
+                chosen.insert(context.peer_host(name).ok_or("unknown peer host")?);
+            }
+        }
+        use provenant_core::Clock;
+        let clock = provenant_os::clock::SystemClock::new();
+        let seconds = context.config.limits.peer_seconds;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        let budget = provenant_core::WaitBudget::cli(clock.mono_now(), seconds)?;
+        let executor = provenant_os::exec::SystemExecutor::new(8)?;
+        let mut hosts: Vec<_> = chosen.into_iter().collect();
+        hosts.sort_by_key(|host| {
+            context
+                .config
+                .peers
+                .iter()
+                .find_map(|(label, peer)| (peer.host == *host).then_some(label.clone()))
+        });
+        let results = read_peers(hosts, deadline, move |host| {
+            context.peer_with(
+                &executor,
+                &provenant_os::clock::SystemClock::new(),
+                host,
+                action.clone(),
+                budget,
+                &CancelToken::new(),
+            )
+        });
+        compose_peers(local, matches!(command, Console::Board { .. }), results).map_err(Into::into)
     })();
     let result = match result {
         Ok(value) => CommandResult::new(leaf, Outcome::Ok, Some(value)),
@@ -77,6 +145,115 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
         &mut io::stdout().lock(),
         &mut io::stderr().lock(),
     )
+}
+
+fn compose_peers(
+    local: serde_json::Value,
+    board: bool,
+    results: Vec<(
+        provenant_core::HostId,
+        Option<
+            Result<provenant_fabric_runtime::hosts::PeerResult, provenant_cli::fabric::PeerFailure>,
+        >,
+    )>,
+) -> Result<serde_json::Value, &'static str> {
+    use provenant_fabric_runtime::{coordination::facade::FacadeError, hosts::PeerResult};
+    let mut boards = Vec::new();
+    let mut trees = Vec::new();
+    for (host, result) in results {
+        let Some(result) = result else {
+            if board {
+                boards.push(provenant_cli::console::peer::PeerBoard {
+                    host,
+                    observation: provenant_cli::console::peer::BoardObservation::Unreachable,
+                });
+            } else {
+                trees.push(provenant_cli::console::tree_peer::PeerTree {
+                    host,
+                    observation: provenant_cli::console::tree_peer::TreeObservation::Unreachable,
+                });
+            }
+            continue;
+        };
+        let unsupported = matches!(&result, Err(failure) if matches!(failure.error, FacadeError::PeerVersion | FacadeError::PeerProtocolMismatch { .. } | FacadeError::ContinuationUnsupported));
+        let unavailable = matches!(&result, Err(failure) if matches!(failure.error, FacadeError::HomeUnavailable | FacadeError::Timeout));
+        if board {
+            use provenant_cli::console::peer::{BoardObservation as O, PeerBoard};
+            let observation = match result {
+                Ok(PeerResult::Console(page)) => O::Page(page),
+                _ if unsupported => O::Unsupported,
+                _ if unavailable => O::Unreachable,
+                _ => O::Page(serde_json::Value::Null),
+            };
+            boards.push(PeerBoard { host, observation });
+        } else {
+            use provenant_cli::console::tree_peer::{PeerTree, TreeObservation as O};
+            let observation = match result {
+                Ok(PeerResult::Console(tree)) => O::Tree(tree),
+                _ if unsupported => O::Unsupported,
+                _ if unavailable => O::Unreachable,
+                _ => O::Tree(serde_json::Value::Null),
+            };
+            trees.push(PeerTree { host, observation });
+        }
+    }
+    if board {
+        provenant_cli::console::peer::compose_board(local, boards)
+    } else {
+        provenant_cli::console::tree_peer::compose_tree(local, trees)
+    }
+}
+
+// Detached workers prevent transport cleanup or a late reply from extending the deadline.
+#[allow(clippy::disallowed_methods)] // This is the real-time wait boundary for peer reads.
+fn read_peers<K, V, F>(hosts: Vec<K>, deadline: std::time::Instant, read: F) -> Vec<(K, Option<V>)>
+where
+    K: Clone + Send + Sync + 'static,
+    V: Send + 'static,
+    F: Fn(K) -> V + Send + Sync + 'static,
+{
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+    use std::time::Instant;
+
+    let hosts = Arc::new(hosts);
+    let next = Arc::new(AtomicUsize::new(0));
+    let read = Arc::new(read);
+    let (sender, receiver) = mpsc::channel();
+    for _ in 0..hosts.len().min(8) {
+        let (hosts, next, read, sender) =
+            (hosts.clone(), next.clone(), read.clone(), sender.clone());
+        std::thread::spawn(move || {
+            loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(host) = hosts.get(index) else { break };
+                if Instant::now() >= deadline {
+                    break;
+                }
+                let value = read(host.clone());
+                let finished = Instant::now();
+                if sender.send((index, value, finished)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    drop(sender);
+    let mut results: Vec<Option<V>> = (0..hosts.len()).map(|_| None).collect();
+    while let Ok((index, value, finished)) =
+        receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+    {
+        if finished <= deadline {
+            results[index] = Some(value);
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    hosts.iter().cloned().zip(results).collect()
 }
 
 // Never publish an overflow artefact, including when rendering errors.
@@ -142,6 +319,49 @@ fn render(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Exercise real elapsed time and late replies.
+    fn slow_peers_share_deadline_and_preserve_local_board() {
+        use provenant_core::{AttemptId, HostId, ProjectId};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use std::time::{Duration, Instant};
+
+        let hosts = vec![HostId::from_bytes([2; 16]), HostId::from_bytes([3; 16])];
+        let local = serde_json::json!({"lanes":[{
+            "lane_id":{"host":HostId::from_bytes([1; 16]),"attempt_id":AttemptId::from_bytes([4; 16])},
+            "metadata":{"attempt":{"project_id":ProjectId::from_bytes([5; 16])}}
+        }],"next_cursor":"local-cursor","coverage":{"scope":"local"}});
+        let start = Instant::now();
+        let budget = Duration::from_millis(300);
+        let started = Arc::new(AtomicUsize::new(0));
+        let counter = started.clone();
+        let results = super::read_peers(hosts.clone(), start + budget, move |_| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(650));
+            Ok(provenant_fabric_runtime::hosts::PeerResult::Console(
+                serde_json::Value::Null,
+            ))
+        });
+        let elapsed = start.elapsed();
+        assert!(elapsed >= budget);
+        assert!(elapsed < Duration::from_millis(550), "elapsed: {elapsed:?}");
+        assert_eq!(started.load(Ordering::Relaxed), 2);
+        assert!(results.iter().all(|(_, result)| result.is_none()));
+        let composed = super::compose_peers(local.clone(), true, results).unwrap();
+        assert_eq!(composed["lanes"], local["lanes"]);
+        assert_eq!(composed["next_cursor"], local["next_cursor"]);
+        for (index, host) in hosts.iter().enumerate() {
+            assert_eq!(
+                composed["coverage"]["peers"][index]["host"],
+                serde_json::json!(host)
+            );
+            assert_eq!(composed["coverage"]["peers"][index]["state"], "unreachable");
+        }
+    }
+
     #[test]
     fn oversized_single_board_row_explains_recovery() {
         let value =

@@ -10,7 +10,30 @@ define the envelope, exit codes and wait budgets. The machine-readable help
 catalogue owns command syntax; the generated [CLI reference](../reference/cli.md)
 lists every leaf, flag and bound. Paths are relative to `tools/front-door/`.
 
-## Local console catalogue
+## Console catalogue and peer coverage
+
+`console board` and `console tree` default to local reads. `--hosts all` or a
+comma-separated list of peer labels opts into peer observations. Reads use the
+existing bounded peer request boundary and do not allocate state. The local
+observation is retained when a peer is unreachable, lacks the read, or returns
+partial data. Coverage reports these as `unreachable`, `unsupported` and
+`partial` respectively; a successful complete observation is `complete`.
+Peer reads run concurrently, with at most eight in flight and one shared
+`limits.peer_seconds` deadline. Hosts still waiting at that deadline, including
+those not yet started, are unreachable; later replies are ignored. Peer output
+follows configured host label order regardless of completion order.
+An older relay that closes without a protocol refusal is reported as
+`unreachable`, since that response cannot distinguish an unsupported action
+from a lost reply without another potentially state-creating request.
+
+Board composition retains the local page and cursor. It qualifies deduplication
+by host, project and attempt, validates the host on each peer row, and reports
+duplicate, invalid and truncated observations as partial coverage. A peer
+continuation indicates partial coverage; the local cursor continues the local
+walk and does not page the peer.
+
+- Test: `crates/cli/src/console/peer.rs::tests::peer_board_coverage`
+- Owner: `crates/cli/src/console/peer.rs`
 
 ### Nested tree
 

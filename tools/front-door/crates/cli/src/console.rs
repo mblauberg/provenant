@@ -9,7 +9,9 @@ use std::os::unix::ffi::OsStrExt;
 
 mod board;
 mod overview;
+pub mod peer;
 mod tree;
+pub mod tree_peer;
 
 pub use overview::summary_comparison;
 
@@ -26,6 +28,9 @@ pub enum Console {
         /// Include complete run and attempt records
         #[arg(long)]
         detail: bool,
+        /// Include configured peers: all or a comma-separated list of labels
+        #[arg(long, value_name = "all|LABEL,...")]
+        hosts: Option<String>,
     },
     /// Read a local board snapshot without artifact bodies
     Board {
@@ -38,6 +43,9 @@ pub enum Console {
         /// Continue the same filters and attempt high-water mark
         #[arg(long)]
         cursor: Option<String>,
+        /// Include configured peers: all or a comma-separated list of labels
+        #[arg(long, value_name = "all|LABEL,...")]
+        hosts: Option<String>,
     },
     /// Summarise local attention and running work
     Overview,
@@ -113,13 +121,17 @@ fn read_with_budget(
     command: &Console,
     budget: usize,
 ) -> Result<Value, Error> {
-    if let Console::Board { all, limit, cursor } = command {
+    if let Console::Board {
+        all, limit, cursor, ..
+    } = command
+    {
         return board::read(roots, selected, *all, *limit, cursor.as_deref());
     }
     if let Console::Tree {
         max_depth,
         max_nodes,
         detail,
+        ..
     } = command
     {
         return tree::read(roots, selected, *max_depth, *max_nodes, *detail);

@@ -143,6 +143,43 @@ impl Context {
             cwd: cwd.to_path_buf(),
         })
     }
+    /// Resolve existing identity and configuration without creating state.
+    pub fn open_read_only(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
+        let config = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?
+            .domains
+            .fabric;
+        let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
+        let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+        let executor = SystemExecutor::new(1)?;
+        let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+        let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
+        let binding = provenant_config::lookup_project(&roots, &discovered.location)?
+            .ok_or(EdgeError::Invalid)?;
+        let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;
+        let key = if discovered.repository.is_some() {
+            Some(CrossHostProjectKey::from_home(home, binding.common_dir())?)
+        } else {
+            None
+        };
+        let identity = Identity::bind(
+            &binding,
+            host,
+            cwd,
+            &config,
+            std::env::var_os("PROVENANT_AGENT_LABEL").as_deref(),
+            None,
+            key,
+        )?;
+        Ok(Self {
+            roots,
+            identity,
+            config,
+            in_lane: in_lane(),
+            executor,
+            home: home.to_path_buf(),
+            cwd: cwd.to_path_buf(),
+        })
+    }
     pub fn inbox_address(
         &self,
         client: Option<provenant_records::Harness>,
