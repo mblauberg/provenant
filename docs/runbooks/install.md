@@ -92,12 +92,13 @@ cd tools/front-door
 export PATH="$HOME/.cargo/bin:$PATH"
 CARGO_PARENT="$(mktemp -d)"
 export CARGO_TARGET_DIR="$CARGO_PARENT/cargo-target"
+export RUSTC_WRAPPER=".cargo/rustc-wrapper.sh"
 RELEASE_PARENT="$(mktemp -d)"
 RELEASE="$RELEASE_PARENT/release"
 cargo build --release --locked --bin provenant
 cargo run --locked --example package-release -- --out "$RELEASE"
 rm -rf -- "$CARGO_PARENT"
-unset CARGO_TARGET_DIR CARGO_PARENT
+unset CARGO_TARGET_DIR CARGO_PARENT RUSTC_WRAPPER
 ```
 
 Host builds use a fresh target directory. Confined writers use the separate

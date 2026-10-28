@@ -2,9 +2,7 @@
 # `serial-process` group in .config/nextest.toml orders the ones that share
 # cross-process state. Plain `cargo test` is multi-threaded; test support
 # serialises child spawns with executable copies to avoid Linux ETXTBSY.
-
-[build]
-# This repository setting overrides build.rustc-wrapper in global Cargo config.
-# To retain that wrapper, set RUSTC_WRAPPER to a chaining wrapper that also invokes
-# .cargo/rustc-wrapper.sh; Cargo gives RUSTC_WRAPPER precedence over this setting.
-rustc-wrapper = ".cargo/rustc-wrapper.sh"
+#
+# Release packaging and distribution builds configure RUSTC_WRAPPER explicitly
+# to invoke .cargo/rustc-wrapper.sh for reproducible path remapping. Everyday
+# development and test builds run without the wrapper.
