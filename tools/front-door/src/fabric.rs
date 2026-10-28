@@ -3002,6 +3002,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         };
         let mut body = format!("Graph {}\n\n", document.graph_id);
         for node in &checkpoint.nodes {
+            if let Some(summary) = node.deterministic_summary() {
+                body.push_str(&summary);
+                continue;
+            }
             let reference = node
                 .attempts
                 .last()
@@ -3574,12 +3578,7 @@ fn graph_snapshot(
         GraphStatus::Cancelled
     } else if checkpoint.pause_reason.is_some() {
         GraphStatus::Paused
-    } else if (checkpoint.delivery_required
-        && !checkpoint.delivered
-        && checkpoint
-            .nodes
-            .iter()
-            .all(|node| node.state == NodeState::Succeeded))
+    } else if (checkpoint.delivery_required && !checkpoint.delivered && checkpoint.successful())
         || checkpoint
             .nodes
             .iter()
