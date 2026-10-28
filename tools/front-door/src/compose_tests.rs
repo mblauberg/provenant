@@ -138,6 +138,12 @@ pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Resul
         }
         let mode = if configured { "reader" } else { "reader-empty" };
         let (_, attempt) = dispatch(&rig, mode, "compose-reader")?;
+        let cargo: serde_json::Value =
+            serde_json::from_slice(&fs::read(attempt.join("cargo-setup.json"))?)?;
+        assert_eq!(
+            cargo,
+            serde_json::json!({"status": "skipped", "reason": "read_only_lane"})
+        );
         let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
         let raw: Vec<u8> = db.query_row(
             "SELECT record FROM attempts WHERE id=?1",
@@ -177,6 +183,12 @@ pub(crate) fn writer_dispatch_uses_lane_cache_and_narrow_provider_state() -> Res
     let (_, context) = writer_context(&rig)?;
     let cleanup = super::worktree_tests::writer_process_cleanup(&context);
     let (_, attempt) = dispatch(&rig, "writer", "compose-writer")?;
+    let cargo: serde_json::Value =
+        serde_json::from_slice(&fs::read(attempt.join("cargo-setup.json"))?)?;
+    assert_eq!(
+        cargo,
+        serde_json::json!({"status": "skipped", "reason": "disabled"})
+    );
     let cache = PathBuf::from(fs::read_to_string(
         attempt.join("provider-state/candidate-0/compose-cache"),
     )?);

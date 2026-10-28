@@ -23,6 +23,7 @@ mod store;
 mod transcript;
 pub use service::{DispatchRequest, DispatchTask, ErrorKind, Service};
 pub use transcript::locate as locate_transcript;
+mod cargo_seed;
 mod writer;
 
 pub use admission::{
@@ -67,6 +68,86 @@ pub fn next_lane_depth(parent_depth: u64, max_depth: u64) -> Result<u64> {
     Ok(depth)
 }
 
+/// The privacy or containment check that refused a run-store path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathCheck {
+    /// The entry belongs to another user.
+    Owner,
+    /// The entry grants group or other access.
+    Mode,
+    /// The entry is a symlink.
+    Symlink,
+    /// The entry is not the regular file or directory the store requires.
+    Kind,
+    /// The entry has more than one hard link.
+    Links,
+    /// The entry resolves outside the directory it must stay within.
+    Containment,
+    /// The entry changed identity while it was being checked.
+    Identity,
+    /// The entry was expected and is absent.
+    Missing,
+}
+impl PathCheck {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Mode => "mode",
+            Self::Symlink => "symlink",
+            Self::Kind => "kind",
+            Self::Links => "links",
+            Self::Containment => "containment",
+            Self::Identity => "identity",
+            Self::Missing => "missing",
+        }
+    }
+    /// The first privacy check a regular file's metadata fails, if any.
+    pub(crate) fn file(metadata: provenant_os::fs::Metadata) -> Option<Self> {
+        use provenant_os::fs::FileKind;
+        match metadata.kind {
+            FileKind::Regular => {}
+            FileKind::Symlink => return Some(Self::Symlink),
+            _ => return Some(Self::Kind),
+        }
+        if metadata.links != 1 {
+            Some(Self::Links)
+        } else if metadata.uid != provenant_os::fs::effective_uid() {
+            Some(Self::Owner)
+        } else if metadata.mode & 0o077 != 0 {
+            Some(Self::Mode)
+        } else {
+            None
+        }
+    }
+    /// The first privacy check a directory's metadata fails, if any.
+    pub(crate) fn directory(metadata: provenant_os::fs::Metadata) -> Option<Self> {
+        if metadata.uid != provenant_os::fs::effective_uid() {
+            Some(Self::Owner)
+        } else if metadata.mode & 0o077 != 0 {
+            Some(Self::Mode)
+        } else {
+            None
+        }
+    }
+}
+impl From<provenant_sqlite::CompanionFault> for PathCheck {
+    fn from(fault: provenant_sqlite::CompanionFault) -> Self {
+        use provenant_sqlite::CompanionFault;
+        match fault {
+            CompanionFault::NotRegular => Self::Kind,
+            CompanionFault::Symlink => Self::Symlink,
+            CompanionFault::Owner => Self::Owner,
+            CompanionFault::Mode => Self::Mode,
+            CompanionFault::Links => Self::Links,
+        }
+    }
+}
+impl std::fmt::Display for PathCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RunError {
     #[error("{message}")]
@@ -96,8 +177,11 @@ pub enum RunError {
     InvalidBase(String),
     #[error("run-store schema version {0} is unsupported")]
     Version(i64),
-    #[error("run-store path is not private or contained")]
-    UnsafePath,
+    #[error("run-store path {} is not private or contained: {check}", path.display())]
+    UnsafePath {
+        path: std::path::PathBuf,
+        check: PathCheck,
+    },
     #[error("run-store operation conflicts with its immutable request")]
     OperationConflict,
     #[error("run record was not found in this scope")]
@@ -160,6 +244,27 @@ pub enum RunError {
 }
 pub type Result<T> = std::result::Result<T, RunError>;
 impl RunError {
+    /// Refuse `path`, which is relative to the state root where the store owns it
+    /// and as given for a project or worktree path outside the state root.
+    pub(crate) fn unsafe_path(path: impl Into<std::path::PathBuf>, check: PathCheck) -> Self {
+        let path = path.into();
+        Self::UnsafePath {
+            path: if path.as_os_str().is_empty() {
+                ".".into()
+            } else {
+                path
+            },
+            check,
+        }
+    }
+    /// Refuse the entry `name` of a held directory, named relative to the state root.
+    pub(crate) fn unsafe_entry(
+        directory: &provenant_os::fs::Directory,
+        name: &std::ffi::OsStr,
+        check: PathCheck,
+    ) -> Self {
+        Self::unsafe_path(directory.anchored_path().join(name), check)
+    }
     pub fn code(&self) -> &'static str {
         ErrorKind::from(self).code()
     }

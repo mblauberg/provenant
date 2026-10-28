@@ -47,6 +47,14 @@ fails after the checkpoint and revision manifest commit, the save succeeds with
 a warning. Repeat the save to repair discovery (repeat `--rebind` if used).
 Readers report stale discovery explicitly; reads never repair it.
 
+Explicit CLI saves also publish a direct lookup under
+`workflow/session-locations/<SHA-256 of canonical cwd, NUL, session ID>.json`,
+containing the discovery record. Hook readers validate it against the current
+checkpoint and discovery record. Missing, stale or rebound entries deliver no
+answers; repeat the explicit save from the hook's working directory to repair
+them. Publication is advisory and uses the existing save warning path. Reads
+take an explicit deadline and never enumerate projects or invoke Git.
+
 ## Structured summary metadata
 
 A checkpoint can include a `provenant_summary` YAML frontmatter header with

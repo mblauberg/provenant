@@ -739,6 +739,7 @@ fn prepare_with(
                 profile: spec.profile,
                 writer,
                 home: home.clone(),
+                cargo_registry_seed: config.domains.fabric.lanes.cargo_seed.enabled,
             }),
         });
     }

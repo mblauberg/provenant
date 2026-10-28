@@ -1,5 +1,23 @@
 use super::*;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn clone_file_refuses_existing_destination() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("source"), b"source").unwrap();
+    std::fs::write(temp.path().join("existing"), b"existing").unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    let source = dir.open_read(OsStr::new("source")).unwrap();
+    assert!(
+        dir.clone_file_from(&source, OsStr::new("existing"))
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read(temp.path().join("existing")).unwrap(),
+        b"existing"
+    );
+}
+
 #[test]
 fn stable_read_bounds_bytes_and_retains_the_held_anchor() {
     let temp = tempfile::tempdir().unwrap();

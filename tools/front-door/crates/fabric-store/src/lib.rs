@@ -8,6 +8,7 @@ mod events;
 mod federation;
 mod human_inbox;
 mod landing;
+mod local_delivery;
 mod messages;
 mod operations;
 mod tasks;

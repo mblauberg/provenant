@@ -370,7 +370,8 @@ entry overlaps the state directory's protected parts or Git metadata.
 Fabric supplies private Cargo paths to each lane; see
 [writer lanes](providers.md#writer-lanes). Native unconfined agents may share a
 per-host target outside worktrees, taking care to run the intended checkout's
-test binaries.
+test binaries. The optional host Cargo registry seed is configured by hand in
+`config.toml`, not through `config set`; see [worktrees](../worktrees.md).
 
 ## Routing pools
 

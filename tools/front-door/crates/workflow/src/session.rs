@@ -251,6 +251,7 @@ pub struct SessionStore {
     keep: u64,
     chair: Option<ChairIdentity>,
     rebind: bool,
+    workspace: Option<std::path::PathBuf>,
 }
 impl SessionStore {
     pub fn new(root: StateRoot, project: ProjectId, session: HostSessionId) -> Self {
@@ -261,6 +262,7 @@ impl SessionStore {
             keep: REVISIONS_DEFAULT,
             chair: None,
             rebind: false,
+            workspace: None,
         }
     }
     /// Keep this many revisions, current included, clamped to 1 through 64.

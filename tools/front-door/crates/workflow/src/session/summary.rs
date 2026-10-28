@@ -107,7 +107,7 @@ fn header_end(text: &str) -> Result<Option<usize>, SummaryError> {
     let mut offset = 0;
     for (index, line) in text.split_inclusive('\n').enumerate() {
         offset += line.len();
-        if index > 0 && line.trim_end_matches(['\r', '\n']) == "---" {
+        if index > 0 && line.trim_end_matches('\n').trim_end_matches('\r') == "---" {
             return Ok(Some(offset));
         }
     }
@@ -156,7 +156,7 @@ fn replace_summary(text: &str, summary: &Summary) -> Result<String, super::Sessi
             .iter()
             .enumerate()
             .skip(1)
-            .find(|(_, line)| line.trim_end_matches(['\r', '\n']) == "---")
+            .find(|(_, line)| line.trim_end_matches('\n').trim_end_matches('\r') == "---")
             .map(|(i, _)| i)
             .ok_or(SummaryError)?;
         let (start, stop) = if let Some(node) = root.get("provenant_summary") {
@@ -308,5 +308,20 @@ mod tests {
         assert!(parse_summary("---\n---\n").unwrap().is_none());
         let updated = replace_summary("---\n---\n", &summary).unwrap();
         assert_eq!(parse_summary(&updated).unwrap(), Some(summary));
+    }
+
+    #[test]
+    fn summary_header_counts_crlf_bytes_at_limit() {
+        let prefix = "---\r\nprovenant_summary:\r\n  schema_version: 1\r\n  revision: 1\r\n  updated_at: \"2026-10-28T03:00:00Z\"\r\n  now: \"";
+        let suffix = "\"\r\n  next: \"Next\"\r\n  needs_you: []\r\n  risk: \"None\"\r\n---\r\n";
+        let header = format!(
+            "{prefix}{}{suffix}",
+            "x".repeat(8192 - prefix.len() - suffix.len())
+        );
+        assert_eq!(header.len(), 8192);
+        assert!(parse_summary(&header).unwrap().is_some());
+        let oversized = header.replacen("  now: \"", "  now: \"x", 1);
+        assert_eq!(oversized.len(), 8193);
+        assert!(parse_summary(&oversized).is_err());
     }
 }
