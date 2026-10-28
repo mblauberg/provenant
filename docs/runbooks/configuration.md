@@ -216,6 +216,14 @@ default output shows aggregate counts and exceptions; `--json` retains each path
 `retention.logs_days = 30` (range 1 to 3650) expires stdout and stderr
 captures larger than 64 KiB, and intermediate event log rows, from runs whose
 attempts are all terminal.
+
+Checkpoint saves warn above 2048 bytes. Override the soft budget for a project
+with `[retention.projects."PROJECT_ID"] checkpoint_soft_bytes = 4096` in the
+state config; the range is 1 to 262144 bytes. This is advisory and does not
+change the hard checkpoint size limit. A save also checks up to the first eight
+distinct issue and PR references for closed state; unavailable GitHub lookups
+are ignored.
+
 Chair log retention is per session: `[retention] chair_log_days = 30` (1 to
 3650), `chair_log_entries = 10000` (1 to 100000), and `chair_log_bytes =
 16777216` (65536 to 1073741824). Appends apply all three limits; listing

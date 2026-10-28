@@ -173,7 +173,8 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
             match handle.join() {
                 Ok((number, Ok(data))) => state.prs.push(PrLine {
                     number,
-                    status: pr_status(&data),
+                    state: pr_status(&data).0,
+                    summary: pr_status(&data).1,
                 }),
                 Ok((number, Err(_))) => state.prs_unread.push(PrUnread {
                     number,
@@ -293,33 +294,30 @@ fn parse_worktrees(data: &Value) -> Vec<WorktreeLine> {
         })
         .collect()
 }
-/// A one-line summary of `pr status` data. It reads the scalar fields a PR
-/// summary is likely to carry and falls back to the data's own JSON, so a
-/// change to that command's fields degrades the line rather than the hook.
-fn pr_status(data: &Value) -> String {
-    let mut parts = Vec::new();
-    for key in [
-        "state",
-        "ci",
-        "checks",
-        "review",
-        "mergeable",
-        "draft",
-        "head",
-    ] {
-        let shown = match &data[key] {
-            Value::String(value) => Some(value.chars().take(40).collect::<String>()),
-            Value::Bool(value) => Some(value.to_string()),
-            _ => None,
-        };
-        if let Some(value) = shown {
-            parts.push(format!("{key}={value}"));
-        }
-    }
-    if parts.is_empty() {
-        return data.to_string().chars().take(120).collect();
-    }
-    parts.join(" ")
+/// Read the first line of the CLI's status array; unknown fields stay unknown.
+fn pr_status(data: &Value) -> (String, String) {
+    let data = data
+        .as_array()
+        .and_then(|lines| lines.first())
+        .unwrap_or(data);
+    let state = data["state"].as_str().unwrap_or("unknown").to_owned();
+    let head: String = data["head"]
+        .as_str()
+        .unwrap_or("unknown")
+        .chars()
+        .take(7)
+        .collect();
+    let count = |key: &str| data[key].as_u64().map_or("?".to_owned(), |n| n.to_string());
+    (
+        state,
+        format!(
+            "{head} checks={}/{} failed={} pending={}",
+            count("checks_passed"),
+            count("checks_total"),
+            count("checks_failed"),
+            count("checks_pending")
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -470,13 +468,13 @@ mod tests {
     }
 
     #[test]
-    fn pr_status_reads_known_fields_or_falls_back_to_bounded_json() {
+    fn pr_status_reads_cli_array() {
         use super::*;
         use serde_json::json;
-        assert_eq!(
-            pr_status(&json!({"state":"open","ci":"passing","draft":false,"head":"abc"})),
-            "state=open ci=passing draft=false head=abc"
+        let (state, summary) = pr_status(
+            &json!([{"state":"OPEN", "head":"abcdef123456", "checks_passed":2, "checks_total":3, "checks_failed":0, "checks_pending":1}]),
         );
-        assert!(pr_status(&json!({"other": "x".repeat(500)})).len() <= 120);
+        assert_eq!(state, "OPEN");
+        assert_eq!(summary, "abcdef1 checks=2/3 failed=0 pending=1");
     }
 }

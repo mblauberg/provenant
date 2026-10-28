@@ -2115,6 +2115,47 @@ mod tests {
         }
     }
     #[test]
+    fn hook_compacts_merged_prs_and_succeeded_lanes() {
+        let (_temp, root, project) = setup();
+        let state = SessionState {
+            settled: (0..20)
+                .map(|n| LaneLine {
+                    id: format!("lane-{n}"),
+                    state: "succeeded".into(),
+                    ..Default::default()
+                })
+                .collect(),
+            prs: (1..=10)
+                .map(|number| PrLine {
+                    number,
+                    state: "MERGED".into(),
+                    summary: String::new(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let digest = state.digest(DIGEST_LIMIT);
+        let response = hook_context_with(
+            &root,
+            project,
+            HookEvent::SessionStart,
+            FIXTURES[0].0.as_bytes(),
+            &clock(0),
+            DurationMicros::ZERO,
+            Advice {
+                digest: &digest,
+                commands: &CommandPrefix::default(),
+                client: None,
+            },
+        );
+        let text = String::from_utf8(response.stdout).unwrap();
+        println!("compact hook fixture: {} bytes", text.len());
+        assert!(text.len() < 2048, "{} bytes", text.len());
+        assert!(text.contains("10 merged, 0 closed"));
+        assert!(text.contains("succeeded: 20"));
+        assert!(!text.contains("#1 "));
+    }
+    #[test]
     fn hook_output_cap_counts_json_escaping_and_keeps_utf8_and_save_command() {
         let (_temp, root, project) = setup();
         let (fixture, event) = FIXTURES[0];
