@@ -764,6 +764,44 @@ impl Directory {
             &self.path.join(name),
         )
     }
+    /// Publish a Git ref lock created by this caller as its corresponding ref.
+    /// General rename deliberately refuses lock names; this narrow operation
+    /// requires the held lock inode and derives its name from the ref leaf.
+    pub fn publish_git_ref_lock(&self, name: &OsStr, lock: &FileHandle) -> Result<()> {
+        let name = mutable_component(name)?;
+        let mut lock_name = name.to_os_string();
+        lock_name.push(".lock");
+        self.check_git_ref_lock(&lock_name, lock)?;
+        os::rename(
+            &self.file,
+            &lock_name,
+            &self.file,
+            name,
+            os::Rename::Replace,
+        )
+        .map_err(|source| FsError::Rename {
+            from_path: self.path.join(&lock_name),
+            to_path: self.path.join(name),
+            source,
+        })
+    }
+    /// Discard only the Git ref lock held by this caller.
+    pub fn discard_git_ref_lock(&self, name: &OsStr, lock: &FileHandle) -> Result<()> {
+        let name = mutable_component(name)?;
+        let mut lock_name = name.to_os_string();
+        lock_name.push(".lock");
+        self.check_git_ref_lock(&lock_name, lock)?;
+        os::unlink(&self.file, &lock_name, false)
+            .map_err(error("unlinkat", &self.path.join(&lock_name)))
+    }
+    fn check_git_ref_lock(&self, name: &OsStr, lock: &FileHandle) -> Result<()> {
+        let held = lock.metadata()?;
+        let named = self.metadata_at(name, false)?;
+        if held.kind != FileKind::Regular || held.links != 1 || !held.same_identity(&named) {
+            return Err(FsError::RaceRefused { name: name.into() });
+        }
+        Ok(())
+    }
     /// Best-effort logs append without truncation or following a final link.
     pub fn open_append(&self, name: &OsStr) -> Result<FileHandle> {
         let name = component(name)?;

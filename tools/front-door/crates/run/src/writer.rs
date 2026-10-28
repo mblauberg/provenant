@@ -15,7 +15,7 @@ use provenant_os::{
     fs::{Directory, FsError, canonicalize},
 };
 use provenant_supervisor::custody::WriterBinding;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
@@ -231,6 +231,19 @@ pub struct LaunchConfinement {
     pub state_root: PathBuf,
 }
 impl LaunchConfinement {
+    /// Prepare Git while custody is held, then replace every handle that was
+    /// bound to the common config before Git changed it.
+    pub(crate) fn prepare_git(&mut self) -> Result<()> {
+        let Some(writer) = self.writer.as_mut() else {
+            return Ok(());
+        };
+        let AccessMode::WorktreeWrite(authority) = &self.plan.permissions().mode else {
+            return Ok(());
+        };
+        prepare_writer_directories(&writer.worktree, &writer.branch, authority, &self.home)
+            .map_err(RunError::Confinement)?;
+        prepare_writer_git(writer, &self.state_root)
+    }
     pub(crate) fn command(
         &self,
         argv: &[OsString],
@@ -347,6 +360,118 @@ impl LaunchConfinement {
             .command(argv, attempt)
             .map_err(RunError::Confinement)
     }
+}
+
+fn prepare_writer_git(writer: &mut WriterLaunch, state: &Path) -> Result<()> {
+    let utility = runtime(state)?;
+    let root_identity = writer.worktree.identity();
+    let private_identity = writer.worktree.repo().private_identity();
+    let common_identity = writer.worktree.repo().common_identity();
+    let executor =
+        SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
+    let cancel = CancelToken::new();
+    let repo = writer.worktree.repo();
+    let ref_path = Path::new(writer.branch.as_str());
+    let parent = repo.common_git_dir().join(
+        ref_path
+            .parent()
+            .ok_or(RunError::Validation("writer ref has no parent"))?,
+    );
+    let directory = Directory::open_anchor(&parent)?;
+    let name = ref_path
+        .file_name()
+        .ok_or(RunError::Validation("writer ref has no name"))?;
+    let mut lock_name = name.to_os_string();
+    lock_name.push(".lock");
+    let mut lock = directory.create_new(&lock_name)?;
+    let result = (|| -> Result<()> {
+        let resolved = provenant_confinement::run_utility(
+            &executor,
+            provenant_confinement::GitRead::ResolveRef {
+                name: writer.branch.clone(),
+            },
+            repo,
+            &utility,
+            budget()?,
+            &cancel,
+        )
+        .map_err(error("resolve writer branch under lock", Some(&parent)))?;
+        if resolved.termination != provenant_os::exec::Termination::Exit(0)
+            || resolved.stdout.truncated
+            || std::str::from_utf8(&resolved.stdout.bytes)
+                .ok()
+                .map(str::trim)
+                != Some(writer.base.to_string().as_str())
+        {
+            return Err(RunError::Validation("writer branch changed before launch"));
+        }
+        writeln!(lock, "{}", writer.base).map_err(error("write writer ref lock", Some(&parent)))?;
+        lock.sync()?;
+        directory.publish_git_ref_lock(name, &lock)?;
+        directory.sync()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = directory.discard_git_ref_lock(name, &lock);
+    }
+    result?;
+    let project = repo
+        .common_git_dir()
+        .parent()
+        .ok_or(RunError::Validation(
+            "writer common Git directory has no project",
+        ))?
+        .to_path_buf();
+    let path = writer.worktree.path().to_path_buf();
+    for merge in [false, true] {
+        let repo = utility
+            .open_repo(&executor, &project, budget()?, &cancel)
+            .map_err(error("reopen writer repository", Some(&project)))?;
+        let worktree = provenant_confinement::verify_worktree(&repo, &path)
+            .map_err(worktrees::WorktreeError::from)?;
+        if !root_identity.same_identity(&worktree.identity())
+            || !private_identity.same_identity(&worktree.repo().private_identity())
+            || !common_identity.same_identity(&worktree.repo().common_identity())
+        {
+            return Err(RunError::Validation(
+                "writer identity changed before launch",
+            ));
+        }
+        provenant_confinement::utility::set_lane_upstream_key(
+            &executor,
+            worktree.repo(),
+            &utility,
+            &writer.branch,
+            merge,
+            budget()?,
+            &cancel,
+        )
+        .map_err(error("set writer upstream", Some(&path)))?;
+    }
+    let repo = utility
+        .open_repo(&executor, &project, budget()?, &cancel)
+        .map_err(error("reopen writer repository", Some(&project)))?;
+    let refreshed = provenant_confinement::verify_worktree(&repo, &path)
+        .map_err(worktrees::WorktreeError::from)?;
+    if !root_identity.same_identity(&refreshed.identity())
+        || !private_identity.same_identity(&refreshed.repo().private_identity())
+        || !common_identity.same_identity(&refreshed.repo().common_identity())
+    {
+        return Err(RunError::Validation(
+            "writer identity changed before launch",
+        ));
+    }
+    let head = refreshed
+        .repo()
+        .private_dir()
+        .read_bounded(OsStr::new("HEAD"), 4096)?;
+    if std::str::from_utf8(&head).ok().map(str::trim)
+        != Some(format!("ref: {}", writer.branch.as_str()).as_str())
+    {
+        return Err(RunError::Validation("writer branch changed before launch"));
+    }
+    writer.worktree = refreshed;
+    Ok(())
 }
 
 // Cargo configuration can override rustc independently of the rustup pin.
@@ -471,6 +596,99 @@ fn record_cargo_setup_file(
 #[cfg(test)]
 mod cargo_setup_tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn packed_writer_ref_and_upstream_are_prepared_with_fresh_handles()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let project = root.join("project");
+        let lane = root.join("lane");
+        let state = root.join("state");
+        std::fs::create_dir(&project)?;
+        std::fs::create_dir(&state)?;
+        let git_dir = project.join(".git");
+        let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
+        let run = |args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
+            let output = std::process::Command::new(&git)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &root)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_DIR", &git_dir)
+                .env("GIT_WORK_TREE", &project)
+                .current_dir(&project)
+                .args(args)
+                .output()?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+            }
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        run(&["init", "-q"])?;
+        run(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ])?;
+        run(&[
+            "worktree",
+            "add",
+            "-qb",
+            "feature/nested",
+            lane.to_str().ok_or("lane path")?,
+        ])?;
+        run(&["pack-refs", "--all"])?;
+        let reference = "refs/heads/feature/nested";
+        let expected = run(&["rev-parse", reference])?;
+        assert!(!git_dir.join(reference).exists());
+        std::fs::create_dir_all(git_dir.join("refs/heads/feature"))?;
+        let utility = runtime(&state)?;
+        let executor = SystemExecutor::new(1)?;
+        let cancel = CancelToken::new();
+        let repo = utility.open_repo(&executor, &project, budget()?, &cancel)?;
+        let worktree = provenant_confinement::verify_worktree(&repo, &lane)?;
+        let mut writer = WriterLaunch {
+            worktree,
+            branch: GitRefName::new(reference)?,
+            base: GitOid::parse(&expected)?,
+            custody: None,
+        };
+        prepare_writer_git(&mut writer, &state)?;
+        writer.worktree.repo().revalidate()?;
+        assert_eq!(
+            std::fs::read_to_string(git_dir.join(reference))?.trim(),
+            expected
+        );
+        assert_eq!(
+            run(&["show-ref", "--verify", reference])?,
+            format!("{expected} {reference}")
+        );
+        assert_eq!(
+            run(&[
+                "for-each-ref",
+                "--format=%(objectname) %(refname)",
+                reference
+            ])?,
+            format!("{expected} {reference}")
+        );
+        assert_eq!(
+            run(&["config", "--local", "--get", "branch.feature/nested.remote"])?,
+            "origin"
+        );
+        assert_eq!(
+            run(&["config", "--local", "--get", "branch.feature/nested.merge"])?,
+            reference
+        );
+        Ok(())
+    }
 
     #[test]
     fn toolchain_probe_requires_immutable_host_paths_and_trusted_path_order() {

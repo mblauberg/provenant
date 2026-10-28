@@ -1120,7 +1120,13 @@ impl RunStore {
                 }
             }
         }
-        if let Some(confinement) = &plan.confinement {
+        if let Some(confinement) = &mut plan.confinement {
+            if let Err(error) = confinement.prepare_git() {
+                lease
+                    .withdraw_unlaunched()
+                    .map_err(|e| HandOff::Uncertain(e.to_string()))?;
+                return Err(local(&error));
+            }
             if let Some(writer) = &confinement.writer
                 && let Err(error) =
                     writer.snapshot(self.context.state_root.as_path(), &directory()?, scope)
