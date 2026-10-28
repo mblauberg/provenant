@@ -24,24 +24,15 @@ refs intact. Inspect the failure and resolve it through the owning lane.
 Legacy `--deliver-remote`, `--deliver-branch` and `--open-pr` remain available
 as an alternative to `--deliver`.
 
-Writer lanes with open network can also publish during the attempt. They get
-read-only access to the existing gh configuration, with Git credentials supplied
-by the pinned `gh auth git-credential` helper. Setup never reads or copies the
-token. Provider-only and local network lanes retain the gh credential deny.
-The helper selects the host's `~/.config/gh`; custom gh configuration paths and
-keychain-only logins are not mirrored into the lane.
-
-Writers can push branches and open pull requests. Merge through
-`provenant pr merge --head SHA N` or `pr land`. Main is protected by the
-repository ruleset. The Provenant executable is not on the lane's shell PATH;
-hand the merge to the chair when the host's gated path is unavailable.
-
-Publishing defaults on. Disable it for a dispatch with
-`--knob lanes.publish=false` or Fabric `knobs: ["lanes.publish=false"]`.
-Set `[knobs] "lanes.publish" = false` in the host configuration for a persistent
-opt-out. Disabling it removes the writer's gh read allowance and publishing
-setup. Read-only lanes keep their existing open-network gh read access.
-Hosts without gh continue local writer work without publishing setup or grants.
+Writer lanes with open network can push and open pull requests using the host's
+read-only gh configuration and the pinned `gh auth git-credential` helper for
+HTTPS remotes; SSH remotes keep their own authentication. Custom gh configuration
+paths and keychain-only logins are not mirrored. Hosts without gh continue local
+work without publishing setup. Merge through `provenant pr merge --head SHA N` or
+`pr land`, or hand the merge to the chair. Publishing defaults on; disable it with
+`--knob lanes.publish=false`, Fabric `knobs: ["lanes.publish=false"]`, or host
+configuration `[knobs] "lanes.publish" = false`. Read-only lanes retain their
+existing open-network gh read access.
 
 After a settled writer without delivery, run:
 

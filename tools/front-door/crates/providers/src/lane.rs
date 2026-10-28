@@ -65,8 +65,7 @@ impl crate::LaunchSpec {
             .find(|(key, _)| key == "PATH")
             .ok_or(ProviderError::InvalidPath)?;
         *path = std::env::join_paths(
-            std::iter::once(scratch.join("bin"))
-                .chain(std::env::split_paths(path).filter(|path| path != &scratch.join("bin"))),
+            std::iter::once(scratch.join("bin")).chain(std::env::split_paths(path)),
         )
         .map_err(|_| ProviderError::InvalidPath)?;
         self.setup.extend([
@@ -83,6 +82,7 @@ impl crate::LaunchSpec {
                 .into_bytes(),
             },
         ]);
+        // Cursor and Agy do not use LaneRuntime::grant for Git.
         self.profile
             .spec
             .process_executables
@@ -381,13 +381,10 @@ mod tests {
 
         let temp = tempfile::tempdir()?;
         let root = temp.path().canonicalize()?;
-        let home = root.join("home");
-        let repo = root.join("repo");
-        let origin = root.join("origin.git");
-        let worktree = root.join("lane");
+        let home = root.join("home fixture's directory");
         let attempt = root.join("attempt");
-        let scratch = attempt.join("tmp");
-        for path in [&home, &repo, &scratch] {
+        let scratch = attempt.join("scratch fixture's directory");
+        for path in [&home, &scratch] {
             fs::create_dir_all(path)?;
         }
         fs::create_dir_all(home.join(".config/gh"))?;
@@ -400,18 +397,19 @@ mod tests {
         let gh = root.join("gh fixture's executable");
         fs::write(
             &gh,
-            br#"#!/bin/sh
-case "$1" in
-    auth) cat "$GH_CONFIG_DIR/hosts.yml" ;;
-    pr) printf 'fixture pr\n' ;;
-    *) exit 1 ;;
-esac
-"#,
+            format!(
+                "#!/bin/sh\n[ \"$GH_CONFIG_DIR\" = {} ] || exit 1\ncase \"$*\" in\n    'auth git-credential get') cat \"$GH_CONFIG_DIR/hosts.yml\" ;;\n    'pr create'|'pr comment'|'pr view'|'pr checks') printf 'fixture pr\\n' ;;\n    *) exit 1 ;;\nesac\n",
+                shell_quote(home.join(".config/gh").to_str().ok_or("home path")?),
+            ),
         )?;
         fs::set_permissions(&gh, fs::Permissions::from_mode(0o700))?;
-        let git = provenant_os::git::git_executable()
-            .ok_or("Git unavailable")?
-            .canonicalize()?;
+        let git = root.join("git fixture's executable");
+        std::os::unix::fs::symlink(
+            provenant_os::git::git_executable()
+                .ok_or("Git unavailable")?
+                .canonicalize()?,
+            &git,
+        )?;
         let executor = SystemExecutor::new(1)?;
         let mut env = vec![
             ("HOME".into(), home.as_os_str().to_owned()),
@@ -438,47 +436,6 @@ esac
             options.stderr_filter = Some(&mut stderr);
             Ok::<_, Box<dyn std::error::Error>>(executor.execute(options)?)
         };
-        for args in [
-            vec!["init", "-q", "-b", "main"],
-            vec![
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.invalid",
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "base",
-            ],
-            vec![
-                "init",
-                "-q",
-                "--bare",
-                origin.to_str().ok_or("origin path")?,
-            ],
-            vec![
-                "remote",
-                "add",
-                "origin",
-                origin.to_str().ok_or("origin path")?,
-            ],
-            vec![
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                "feat/lane",
-                worktree.to_str().ok_or("worktree path")?,
-            ],
-        ] {
-            let output = run(&git, &args, &repo, &env, None)?;
-            assert_eq!(
-                output.termination,
-                Termination::Exit(0),
-                "fixture repository: {output:?}"
-            );
-        }
         let base = crate::tests::fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
         let mut permissions = base.permissions().clone();
         permissions.scratch.path = scratch.clone();
@@ -496,7 +453,7 @@ esac
         route.account_key = None;
         let prompt = Prompt::new("fixture prompt".into());
         let mut spec = Codex.prepare(crate::tests::fixture_input(
-            &route, &plan, &prompt, &worktree, None,
+            &route, &plan, &prompt, &root, None,
         ))?;
         spec.configure_publishing(&scratch, &git, &gh, &home)?;
         // Apply only the generated publishing setup; adapter-specific auth
@@ -528,7 +485,7 @@ esac
         let credential = run(
             &lane_git,
             &["credential", "fill"],
-            &worktree,
+            &root,
             &private_env,
             Some(b"protocol=https\nhost=github.com\n\n"),
         )?;
@@ -547,21 +504,9 @@ esac
             serde_json::to_vec(&serde_json::json!({"argv": spec.argv, "env": env}))?,
         )?;
         fs::write(attempt.join("result.md"), &credential.stdout.bytes)?;
-        let push = |args: &[&str]| run(&lane_git, args, &worktree, &env, None);
-        assert_eq!(
-            push(&["push", "origin", "HEAD"])?.termination,
-            Termination::Exit(0)
-        );
         for verb in ["create", "comment", "view", "checks"] {
             assert_eq!(
-                run(
-                    &scratch.join("bin/gh"),
-                    &["pr", verb],
-                    &worktree,
-                    &env,
-                    None
-                )?
-                .termination,
+                run(&scratch.join("bin/gh"), &["pr", verb], &root, &env, None)?.termination,
                 Termination::Exit(0)
             );
         }

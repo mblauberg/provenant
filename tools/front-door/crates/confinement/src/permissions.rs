@@ -323,13 +323,12 @@ pub enum AccessMode {
 pub struct WorktreeWriteAuthority {
     pub git_grants_digest: [u8; 32],
     cargo_cache: PathGrant,
-    #[serde(default)]
-    publishing_disabled: bool,
+    publishing: bool,
 }
 
 impl WorktreeWriteAuthority {
     pub fn set_publishing(&mut self, enabled: bool) {
-        self.publishing_disabled = !enabled;
+        self.publishing = enabled;
     }
 
     /// Exact lane-only cache already bound into this writer authority.
@@ -349,7 +348,7 @@ impl WorktreeWriteAuthority {
         Ok(Self {
             git_grants_digest: grants.digest(&cargo_cache),
             cargo_cache,
-            publishing_disabled: false,
+            publishing: true,
         })
     }
 }
@@ -617,7 +616,7 @@ pub struct PlanPermissions {
 impl PlanPermissions {
     /// Publishing credentials require both writer authority and open network.
     pub fn writer_publishing(&self) -> bool {
-        matches!(&self.mode, AccessMode::WorktreeWrite(authority) if !authority.publishing_disabled)
+        matches!(&self.mode, AccessMode::WorktreeWrite(authority) if authority.publishing)
             && self.network == NetworkAccess::Open
     }
 }
@@ -2643,7 +2642,7 @@ mod tests {
         plan.read_only = None;
         plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
             git_grants_digest: [7; 32],
-            publishing_disabled: false,
+            publishing: true,
             cargo_cache: PathGrant {
                 path: "/fixture/cache".into(),
                 scope: PathScope::Subtree,
@@ -2702,7 +2701,7 @@ mod tests {
                 plan.read_only = None;
                 plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
                     git_grants_digest: [7; 32],
-                    publishing_disabled: false,
+                    publishing: true,
                     cargo_cache: PathGrant {
                         path: "/fixture/cache".into(),
                         scope: PathScope::Subtree,
@@ -2772,7 +2771,7 @@ mod tests {
                 plan.read_only = None;
                 plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
                     git_grants_digest: [7; 32],
-                    publishing_disabled: false,
+                    publishing: true,
                     cargo_cache: subtree("/fixture/cache"),
                 }));
             }
@@ -3550,7 +3549,7 @@ mod tests {
     fn serialised_digest_cannot_authorise_without_a_verified_worktree() {
         let authority = WorktreeWriteAuthority {
             git_grants_digest: [0; 32],
-            publishing_disabled: false,
+            publishing: true,
             cargo_cache: PathGrant {
                 path: "/fixture/home/Library/Caches/provenant-lane-cargo/fixture".into(),
                 scope: PathScope::Subtree,

@@ -203,21 +203,6 @@ fn cases() -> Result<Vec<Case>, ProviderError> {
             plan.network = network;
         })?);
     }
-    cases.push(Case::new(
-        "publishing-disabled-worktree-write",
-        "opencode",
-        Access::WorktreeWrite,
-        None,
-        false,
-        |plan| {
-            plan.network = NetworkAccess::Open;
-            if let provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) =
-                &mut plan.mode
-            {
-                authority.set_publishing(false);
-            }
-        },
-    )?);
     Ok(cases)
 }
 

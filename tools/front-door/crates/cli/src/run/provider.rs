@@ -1,7 +1,7 @@
 //! Provider preparation at the CLI composition edge.
 use super::{Registry, route_request};
 use provenant_confinement::permissions::{
-    AccessMode, PathGrant, PathScope, PlanPermissions, WorktreeWriteAuthority,
+    AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions, WorktreeWriteAuthority,
 };
 use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
 use provenant_core::{ProjectId, WorkScope};
@@ -88,6 +88,7 @@ fn prepare_with(
     // gh is optional on the host. A missing executable must not prevent a
     // writer from doing local work or grant it unused publishing credentials.
     let publishing_gh = (writer.is_some()
+        && task.access.network(true) == NetworkAccess::Open
         && task
             .profile
             .knobs
@@ -525,10 +526,7 @@ fn prepare_with(
                 continue;
             }
         };
-        if let Some(gh) = publishing_gh
-            .as_ref()
-            .filter(|_| plan.permissions().writer_publishing())
-        {
+        if let Some(gh) = publishing_gh.as_ref() {
             let publishing = spec
                 .configure_publishing(scratch, &git, gh, &home)
                 .map_err(|error| error.to_string());

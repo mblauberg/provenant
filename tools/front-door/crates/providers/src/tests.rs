@@ -890,6 +890,7 @@ pub(super) fn fixture_access_plan(
     if access == Access::WorktreeWrite {
         let authority: WorktreeWriteAuthority = serde_json::from_value(serde_json::json!({
             "git_grants_digest": vec![0; 32],
+            "publishing": true,
             "cargo_cache": {"path": "/fixture/home/Library/Caches/provenant-lane-cargo/fixture", "scope": "subtree"}
         })).expect("fixture authority; no compilation is attempted");
         permissions.mode = AccessMode::WorktreeWrite(Box::new(authority));
