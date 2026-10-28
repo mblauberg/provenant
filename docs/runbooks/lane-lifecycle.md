@@ -17,6 +17,25 @@ again. `provenant status` shows active lanes and the twenty newest settled
 lanes, newest first. `--json` returns full records for the same selection.
 Use `--all` with `--limit N` and the returned `--cursor N` to page all history.
 
+The host sets a minimum nice value on the provider process before confinement,
+and its descendants inherit it. Configure the lane classes in the selected
+state directory's `config.toml`:
+
+```toml
+[domains.fabric.lanes.priority]
+writer = 10
+read-only = 5
+build-heavy = 15
+```
+
+Values range from 0 to 19, with higher values yielding more CPU time to other
+work. These are the defaults. A worktree-write lane uses `writer`; other lanes
+use `read-only`. Set `--build-heavy` to use `build-heavy` for either mode.
+Fabric tasks and manifests accept `"build_heavy": true`. `lanes --json` reports
+the selected value as `priority`. If the host process already has a higher
+nice value, the lane inherits that lower priority instead; it cannot increase
+its scheduling priority without additional privileges.
+
 The receipt names the worktree. `--worktree PATH` uses an existing checkout
 without taking over its lifecycle. A missing branch name creates an owned
 checkout; for an absolute path or a path below `.worktrees/`, use

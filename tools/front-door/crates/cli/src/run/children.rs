@@ -797,6 +797,7 @@ mod tests {
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    build_heavy: false,
                     title: None,
                     base: None,
                     base_ref: None,

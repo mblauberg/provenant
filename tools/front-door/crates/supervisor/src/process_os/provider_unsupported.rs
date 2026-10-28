@@ -59,6 +59,7 @@ impl ProviderGroup {
         _spec: provenant_os::sys::raw_exec::SpawnSpec<'_>,
         _lease: &provenant_os::fs::LockGuard,
         _boot: &str,
+        _priority: u8,
     ) -> io::Result<Self> {
         Err(unsupported())
     }
@@ -178,6 +179,7 @@ mod tests {
             },
             &lease,
             "boot",
+            0,
         )
         .err()
         .ok_or_else(|| io::Error::other("provider spawned"))?;

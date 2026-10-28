@@ -390,11 +390,40 @@ pub(crate) struct ProviderGroup {
     pub(crate) stdout: Option<ChildStdout>,
     pub(crate) stderr: Option<ChildStderr>,
 }
+// Set priority before the confined executable starts; descendants inherit it.
+fn configure_priority(command: &mut Command, priority: u8) -> io::Result<()> {
+    if priority > 19 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid lane priority",
+        ));
+    }
+    // SAFETY: the hook only invokes async-signal-safe syscalls in the child.
+    unsafe {
+        command.pre_exec(move || apply_priority(priority));
+    }
+    Ok(())
+}
+
+fn apply_priority(priority: u8) -> io::Result<()> {
+    // SAFETY: queries only the calling process.
+    let inherited = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+    if inherited >= i32::from(priority) {
+        return Ok(());
+    }
+    // SAFETY: changes only the calling process.
+    if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, i32::from(priority)) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
 impl ProviderGroup {
     pub(crate) fn spawn(
         spec: provenant_os::sys::raw_exec::SpawnSpec<'_>,
         lease: &provenant_os::fs::LockGuard,
         boot: &str,
+        priority: u8,
     ) -> io::Result<Self> {
         let (program, args) = spec
             .argv
@@ -413,6 +442,7 @@ impl ProviderGroup {
             env = pipe.environment(input, &env);
         }
         let mut command = Command::new(program);
+        configure_priority(&mut command, priority)?;
         command
             .args(args)
             .env_clear()
@@ -1081,6 +1111,7 @@ mod tests {
             },
             &lease,
             &boot,
+            0,
         )
         .unwrap();
         assert!(group.child.as_mut().unwrap().wait().unwrap().success());
@@ -1101,5 +1132,59 @@ mod tests {
         };
         assert_eq!(mode("made"), 0o700);
         assert_eq!(mode("made.txt"), 0o600);
+    }
+
+    #[test]
+    fn provider_and_descendant_inherit_priority() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = provenant_os::fs::Directory::open_anchor(root.path()).unwrap();
+        let lease = directory
+            .try_lock(
+                std::ffi::OsStr::new("writer.lock"),
+                provenant_os::fs::LockMode::Exclusive,
+            )
+            .unwrap();
+        let argv: Vec<OsString> = [
+            "/bin/sh",
+            "-c",
+            "ps -o nice= -p $$; /bin/sh -c 'ps -o nice= -p $$'",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        let env = [(OsString::from("PATH"), OsString::from("/bin:/usr/bin"))];
+        let boot = super::super::census::SystemProcessObserver::boot_identity().unwrap();
+        let mut group = ProviderGroup::spawn(
+            provenant_os::sys::raw_exec::SpawnSpec {
+                argv: &argv,
+                env: Some(&env),
+                cwd: root.path(),
+                input: false,
+                secret_input: None,
+                inherited_lease: None,
+                process_group: false,
+                capture_stdout: true,
+                capture_stderr: false,
+            },
+            &lease,
+            &boot,
+            10,
+        )
+        .unwrap();
+        assert!(group.child.as_mut().unwrap().wait().unwrap().success());
+        let mut stdout = String::new();
+        group
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .unwrap();
+        let values: Vec<i32> = stdout
+            .split_whitespace()
+            .map(|value| value.parse().unwrap())
+            .collect();
+        assert_eq!(values.len(), 2);
+        assert!(values[0] >= 10);
+        assert_eq!(values[0], values[1]);
     }
 }

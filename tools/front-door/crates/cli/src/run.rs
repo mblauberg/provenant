@@ -193,6 +193,16 @@ impl Registry<'_> {
     }
 }
 impl run::Providers for Registry<'_> {
+    fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
+        let roots = self.roots.ok_or("routing context is unavailable")?;
+        let priority = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+            .map_err(|error| error.to_string())?
+            .domains
+            .fabric
+            .lanes
+            .priority;
+        Ok(priority.for_lane(task.writer.is_some(), task.build_heavy))
+    }
     fn check_policy(&self, task: &run::TaskRequest) -> Result<(), String> {
         let Some(writer) = &task.writer else {
             return Ok(());
@@ -668,6 +678,8 @@ struct Manifest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManifestTask {
+    #[serde(default)]
+    build_heavy: bool,
     title: Option<String>,
     base: Option<String>,
     task_id: Option<TaskId>,
@@ -887,6 +899,7 @@ fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAcc
 
 /// One task of a submission, from CLI flags, a manifest or Fabric.
 pub struct Submitted {
+    pub build_heavy: bool,
     pub title: Option<String>,
     pub task_id: TaskId,
     pub prompt: String,
@@ -1091,6 +1104,7 @@ pub fn submit_with_host(
         .into_iter()
         .map(|task| {
             Ok(run::DispatchTask {
+                build_heavy: task.build_heavy,
                 profile: profile.clone(),
                 title: task.title,
                 task_id: task.task_id,
@@ -1815,6 +1829,7 @@ fn dispatch_inner(
                 task.account,
                 task.deliver.or_else(|| flag_delivery.clone()),
                 task.base.or_else(|| command.base.clone()),
+                task.build_heavy || command.build_heavy,
             ));
         }
     } else {
@@ -1840,6 +1855,7 @@ fn dispatch_inner(
             command.account.clone(),
             flag_delivery,
             command.base.clone(),
+            command.build_heavy,
         ));
     }
     let concurrency = if command.input.manifest.is_some() {
@@ -1851,7 +1867,18 @@ fn dispatch_inner(
         let mut placed = Vec::new();
         for (
             index,
-            (task_id, title, prompt, route, fallback, delivery_id, account, deliver, base),
+            (
+                task_id,
+                title,
+                prompt,
+                route,
+                fallback,
+                delivery_id,
+                account,
+                deliver,
+                base,
+                build_heavy,
+            ),
         ) in tasks.into_iter().enumerate()
         {
             // The peer derives task IDs from the operation and has no fallback field.
@@ -1867,6 +1894,7 @@ fn dispatch_inner(
                 );
             }
             placed.push(remote::Task {
+                build_heavy,
                 title,
                 base,
                 prompt,
@@ -1898,7 +1926,7 @@ fn dispatch_inner(
         .operation(&command.operation_id, &call)?
         .is_none()
     {
-        for (_, _, _, _, _, _, _, delivery, _) in &tasks {
+        for (_, _, _, _, _, _, _, delivery, _, _) in &tasks {
             if let Some(delivery) = delivery {
                 check_delivery_branch(edge.cwd, &delivery.branch)?;
             }
@@ -1907,8 +1935,20 @@ fn dispatch_inner(
     let tasks = tasks
         .into_iter()
         .map(
-            |(task_id, title, prompt, route, fallback, delivery_id, account, deliver, base)| {
+            |(
+                task_id,
+                title,
+                prompt,
+                route,
+                fallback,
+                delivery_id,
+                account,
+                deliver,
+                base,
+                build_heavy,
+            )| {
                 Submitted {
+                    build_heavy,
                     title,
                     base,
                     task_id,
@@ -2047,6 +2087,7 @@ fn replay_owned_dispatch(
         .dispatch_profile(&command.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
     if task.title != command.title
+        || task.build_heavy != command.build_heavy
         || task.prompt_digest != CanonicalV1::file_digest(prompt.as_bytes())
         || task.route != route
         || task.account != command.account
@@ -2239,6 +2280,9 @@ struct PreparedProvider<'a> {
     ready: Option<&'a run::PreparedStart>,
 }
 impl run::Providers for PreparedProvider<'_> {
+    fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
+        self.fallback.priority(task)
+    }
     fn check_policy(&self, task: &run::TaskRequest) -> Result<(), String> {
         if let Some(ready) = self.ready {
             if ready.task != *task {
@@ -2685,6 +2729,7 @@ fn render_lanes(
                 "observed_route": lane.observed_route,
                 "queued_at": lane.queued_at,
                 "started_at": lane.started_at,
+                "priority": lane.priority,
                 "finished_at": finished_at,
                 "last_output_at": lane.last_output_at,
                 "delivery_id": lane.delivery_id,
@@ -5508,6 +5553,7 @@ mod tests {
         let submission = |base: &str| Submission {
             operation_id: OperationId::parse("context-ref-replay").unwrap(),
             tasks: vec![Submitted {
+                build_heavy: false,
                 title: None,
                 task_id: TaskId::from_bytes([3; 16]),
                 prompt: "review".into(),
@@ -5566,6 +5612,7 @@ mod tests {
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    build_heavy: false,
                     title: None,
                     base: None,
                     base_ref: None,
@@ -5915,6 +5962,7 @@ mod tests {
             "read_only_writable": ["locks"],
             "git_grants_digest": provenant_core::Digest::from_bytes([6; 32]),
             "queued_at": now,
+            "priority": 10,
             "state": {"state":"terminal","outcome":"failed","exit_code":1,"finished_at":now,"reason":reason},
             "usage": {},
             "prompt": {
@@ -5941,6 +5989,7 @@ mod tests {
         assert!(!human.chars().any(|c| c.is_control() && c != '\n'));
         assert!(!human.contains('\u{202e}'));
         assert_eq!(data["lanes"][0]["title"], "Review\nchanges");
+        assert_eq!(data["lanes"][0]["priority"], 10);
         assert_eq!(data["lanes"][0]["reason"], json!(reason));
         assert_eq!(data["lanes"][0]["write_grants"][0]["source"], "write_root");
         assert_eq!(data["lanes"][0]["write_grants"][0]["scope"], "subtree");

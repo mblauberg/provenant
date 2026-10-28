@@ -947,6 +947,7 @@ fn persisted_attempt(
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                build_heavy: false,
                 title: None,
                 base: None,
                 base_ref: None,

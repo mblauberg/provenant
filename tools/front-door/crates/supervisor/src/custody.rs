@@ -538,6 +538,8 @@ impl PublicationReservation {
 /// Ephemeral launch input. Environment and prompt bytes travel only on a pipe.
 #[derive(Debug)]
 pub struct ProviderCommand {
+    /// Nice value inherited by the provider and its descendants.
+    pub priority: u8,
     /// Lease held continuously from provider preparation through completion.
     pub provider_lease: Option<LockGuard>,
     pub resolved_route: String,

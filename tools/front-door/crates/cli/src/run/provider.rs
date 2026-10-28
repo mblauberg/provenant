@@ -2309,6 +2309,7 @@ mod tests {
         for entry in REGISTRY {
             let adapter = entry.adapter.id();
             let requested = run::TaskRequest {
+                build_heavy: false,
                 title: None,
                 base: None,
                 base_ref: None,
@@ -2668,6 +2669,7 @@ mod tests {
         }
         let prompt = "é".repeat(75_000);
         let task = run::TaskRequest {
+            build_heavy: false,
             title: None,
             base: Some("HEAD".into()),
             base_ref: None,

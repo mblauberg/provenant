@@ -1933,6 +1933,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
 | `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
@@ -2103,6 +2104,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
 | `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |

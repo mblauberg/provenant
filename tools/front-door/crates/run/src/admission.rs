@@ -257,6 +257,7 @@ impl RunStore {
     /// Move a queued attempt to `starting` with a fresh custody generation
     /// and its applied route, just before supervisor handoff. `head` is the
     /// checkout HEAD the host observed for a read-only lane; never lane output.
+    #[cfg(test)]
     pub(crate) fn mark_starting(
         &self,
         expected: &AttemptRecord,
@@ -264,6 +265,20 @@ impl RunStore {
         writable: &[String],
         write_grants: &AppliedWriteGrants,
         head: Option<GitOid>,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        self.mark_starting_with_priority(expected, route, writable, write_grants, head, None, call)
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "priority is launch evidence")]
+    pub(crate) fn mark_starting_with_priority(
+        &self,
+        expected: &AttemptRecord,
+        route: &RouteRecord,
+        writable: &[String],
+        write_grants: &AppliedWriteGrants,
+        head: Option<GitOid>,
+        priority: Option<u8>,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         let id = expected.attempt_id;
@@ -290,6 +305,7 @@ impl RunStore {
             next.write_grants = write_grants.grants.clone();
             next.git_grants_digest = write_grants.git_grants_digest;
             next.head = head;
+            next.priority = priority;
             next.resolved_route = Some(route.clone());
             next.applied_route = Some(route.clone());
             next.admission_deadline = Some(ticket.admission_deadline);

@@ -223,6 +223,10 @@ impl RunStore {
     }
 }
 pub trait Providers {
+    /// Host-selected minimum nice value for this lane.
+    fn priority(&self, task: &TaskRequest) -> std::result::Result<u8, String> {
+        Ok(if task.writer.is_some() { 10 } else { 5 })
+    }
     /// Host policy checks before provider preparation. A refusal is task-local;
     /// no provider is prepared and siblings remain eligible to launch.
     fn check_policy(&self, _task: &TaskRequest) -> std::result::Result<(), String> {
@@ -873,12 +877,16 @@ impl RunStore {
             if !plan.skipped_routes.is_empty() {
                 self.record_skipped_routes(id, &plan.skipped_routes, call)?;
             }
-            let record = match self.mark_starting(
+            let priority = providers
+                .priority(task)
+                .map_err(RunError::ProviderEvidence)?;
+            let record = match self.mark_starting_with_priority(
                 &record,
                 &plan.route,
                 writable,
                 &write_grants,
                 plan.observed_head,
+                Some(priority),
                 call,
             ) {
                 Ok(record) => record,
@@ -1111,6 +1119,7 @@ impl RunStore {
             stdin: plan.stdin,
             secret_input: plan.secret_input,
             holder_context,
+            priority: record.priority.unwrap_or(0),
         };
         let capture = capture_plan(task);
         // Held before launch: an unconfirmed handoff may still have a guardian.

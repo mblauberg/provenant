@@ -68,6 +68,9 @@ impl HarnessProfile {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskRequest {
+    /// Select the build-heavy scheduling priority for this task.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub build_heavy: bool,
     /// Human-supplied task title, when provided at submission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -560,6 +563,9 @@ pub struct AttemptRecord {
     pub session: Option<String>,
     pub queued_at: WallTime,
     pub started_at: Option<WallTime>,
+    /// Scheduling priority selected for the provider process at launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
     /// Most recent supervisor-observed stdout/stderr activity while running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_at: Option<WallTime>,
@@ -680,6 +686,7 @@ mod tests {
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                build_heavy: false,
                 title: None,
                 profile: HarnessProfile {
                     name: "rigorous".into(),

@@ -45,6 +45,7 @@ struct ExecutableSnapshot {
 #[serde(deny_unknown_fields)]
 struct LaunchMessage {
     schema_version: u64,
+    priority: u8,
     scope: Scope,
     resolved_route: String,
     permission_plan_digest: provenant_core::Digest,
@@ -95,6 +96,7 @@ pub(crate) fn handoff(
     )?;
     let message = LaunchMessage {
         schema_version: 1,
+        priority: owned.command.priority,
         scope: owned.lease.scope(),
         resolved_route: owned.command.resolved_route,
         permission_plan_digest: owned.command.permission_plan_digest,
@@ -295,7 +297,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         RECORD_LIMIT,
     )?;
     reservation.validate()?;
-    if !valid_resolved_route(&message.resolved_route) {
+    if message.priority > 19 || !valid_resolved_route(&message.resolved_route) {
         return Err(CustodyError::InvalidRecord);
     }
     let message_binding =
@@ -433,6 +435,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         provider_lease: inherited.provider_lease,
         resolved_route: message.resolved_route,
         secret_input: message.secret_input,
+        priority: message.priority,
     };
     driver.run(&argv, &env, &cwd, &message.stdin, message.capture, hooks)
 }
@@ -456,6 +459,7 @@ struct Driver<'a> {
     provider_lease: Option<provenant_os::fs::LockGuard>,
     resolved_route: String,
     secret_input: Option<provenant_os::exec::SecretInput>,
+    priority: u8,
     spared: crate::census::SparingTracker,
     tracked: std::collections::BTreeSet<ProcessIdentity>,
     history: std::collections::BTreeSet<ProcessIdentity>,
@@ -1232,6 +1236,7 @@ impl Driver<'_> {
                             .as_ref()
                             .ok_or_else(|| io::Error::other("writer custody missing"))?,
                         &self.reservation.boot,
+                        self.priority,
                     )
                 }
                 Ok(_) => Err(io::Error::new(
