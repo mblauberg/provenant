@@ -104,7 +104,8 @@ if [ -n "$source_dir" ]; then
         cd "$workspace"
         CARGO_TARGET_DIR=$scratch/target
         CARGO_BUILD_BUILD_DIR=$scratch/target
-        export CARGO_TARGET_DIR CARGO_BUILD_BUILD_DIR
+        RUSTC_WRAPPER=.cargo/rustc-wrapper.sh
+        export CARGO_TARGET_DIR CARGO_BUILD_BUILD_DIR RUSTC_WRAPPER
         cargo build --release --locked --bin provenant </dev/null &&
         cargo run --release --locked --example package-release -- --out "$release" </dev/null
     ) || die 5 'Build or packaging failed'
