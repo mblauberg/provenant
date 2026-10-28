@@ -35,7 +35,10 @@ Host builds use a fresh target directory. Confined writers use the separate
 `$HOME/Library/Caches/provenant-lane-cargo/<sha256>` namespace, derived from
 verified worktree and repository identities. It also holds the lane's private
 Cargo home, npm and pnpm caches and Corepack home; the host's `~/.cargo/registry`,
-`~/.npm`, `~/Library/pnpm` and similar stores are read-only to lanes. Never use
+`~/.npm`, `~/Library/pnpm` and similar stores are read-only to lanes. Lanes run the
+installed pnpm whatever version a project pins (`manage-package-manager-versions`
+and `package-manager-strict` are off), because a downloaded `@pnpm/exe` launcher
+needs a hard link that lanes cannot create. Never use
 a lane cache for a host build. `provenant worktree remove` deletes only the
 removed worktree's own cache while holding its writer lock. Other orphaned
 caches remain until `provenant gc [--dry-run | --apply] [--idle-days N]

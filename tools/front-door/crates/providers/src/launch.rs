@@ -347,6 +347,15 @@ pub(crate) fn node_tools(
                 ("pnpm_config_cache_dir".into(), pnpm_cache.into()),
                 ("COREPACK_HOME".into(), corepack.into()),
             ]);
+            // Run the installed pnpm whatever version a project pins. Switching
+            // downloads `@pnpm/exe`, whose launcher stays a non-executable
+            // placeholder when hard links are denied, so running it fails
+            // with ENOEXEC.
+            for name in ["manage_package_manager_versions", "package_manager_strict"] {
+                for prefix in ["npm", "pnpm"] {
+                    env.push((format!("{prefix}_config_{name}").into(), "false".into()));
+                }
+            }
             return;
         }
     }

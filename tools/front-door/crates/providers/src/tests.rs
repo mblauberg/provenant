@@ -1237,6 +1237,10 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                     "npm_config_cache_dir",
                     "pnpm_config_cache_dir",
                     "COREPACK_HOME",
+                    "npm_config_manage_package_manager_versions",
+                    "pnpm_config_manage_package_manager_versions",
+                    "npm_config_package_manager_strict",
+                    "pnpm_config_package_manager_strict",
                 ],
             );
         }
@@ -3070,6 +3074,45 @@ fn no_lane_can_write_shared_toolchain_stores() -> Result<(), ProviderError> {
                     assert_eq!(value, cache.join(leaf), "{id} {access:?} {key}");
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// pnpm switches to the version a project pins by downloading `@pnpm/exe`, whose
+/// launcher is a placeholder until its install step hard-links the native
+/// binary over it. Lanes cannot create hard links, so the placeholder stays and
+/// running it fails with ENOEXEC. Lanes run the host's pnpm as it is.
+#[test]
+fn lanes_run_the_installed_pnpm_instead_of_downloading_a_pinned_one() -> Result<(), ProviderError> {
+    if !["/opt/homebrew", "/usr/local"]
+        .iter()
+        .any(|prefix| Path::new(prefix).join("bin/node").exists())
+    {
+        return Ok(());
+    }
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture prompt".into());
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let plan = fixture_access_plan(access, Some("login"), false);
+        let launch = crate::codex::Codex.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            None,
+        ))?;
+        for key in [
+            "npm_config_manage_package_manager_versions",
+            "pnpm_config_manage_package_manager_versions",
+            "npm_config_package_manager_strict",
+            "pnpm_config_package_manager_strict",
+        ] {
+            assert!(
+                launch.env.iter().any(|(k, v)| k == key && v == "false"),
+                "{access:?} {key}"
+            );
         }
     }
     Ok(())
