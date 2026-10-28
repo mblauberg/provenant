@@ -2,6 +2,41 @@
 use provenant_supervisor::DiskPressure;
 use std::io;
 
+/// Cheap, best-effort session advisory. Never walks the cache or state trees.
+pub(crate) fn session_warning(
+    state: &std::path::Path,
+    home: &std::path::Path,
+    _cwd: &std::path::Path,
+) -> Option<String> {
+    fn observe(state: &std::path::Path, home: &std::path::Path) -> io::Result<Option<String>> {
+        use provenant_os::fs::Directory;
+        fn existing(path: &std::path::Path) -> io::Result<Directory> {
+            let mut path = path;
+            loop {
+                match Directory::open_anchor(path) {
+                    Ok(directory) => return Ok(directory),
+                    Err(error) if error.is_not_found() => {
+                        path = path.parent().ok_or_else(|| io::Error::other(error))?
+                    }
+                    Err(error) => return Err(io::Error::other(error)),
+                }
+            }
+        }
+        let settings = provenant_config::GcSettings::read(state)?;
+        let state_dir = existing(state)?;
+        let cache_dir = existing(&home.join("Library/Caches/provenant-lane-cargo"))?;
+        let (mut free, total) = state_dir.filesystem_bytes()?;
+        if state_dir.metadata().map_err(io::Error::other)?.device
+            != cache_dir.metadata().map_err(io::Error::other)?.device
+        {
+            free = free.min(cache_dir.filesystem_bytes()?.0);
+        }
+        let threshold = settings.free_floor_for_total(total)?.saturating_mul(2);
+        Ok((free < threshold).then(|| format!("Disk pressure: {free} bytes free, warning below {threshold} bytes; run `provenant disk report` or `provenant gc`.")))
+    }
+    observe(state, home).ok().flatten()
+}
+
 #[derive(Default)]
 pub(crate) struct LaneDisk {}
 impl DiskPressure for LaneDisk {

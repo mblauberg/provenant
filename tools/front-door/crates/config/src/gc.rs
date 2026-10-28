@@ -74,6 +74,16 @@ impl GcSettings {
         }
     }
 
+    /// Resolve the floor using an already observed state volume capacity.
+    pub fn free_floor_for_total(&self, total: u64) -> std::io::Result<u64> {
+        self.free_floor
+            .as_deref()
+            .map(parse_cache_size)
+            .transpose()
+            .map(|floor| floor.unwrap_or_else(|| default_free_floor(total)))
+            .map_err(std::io::Error::other)
+    }
+
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         if !(1..=3650).contains(&self.idle_days) {
             return Err("idle_days_range");

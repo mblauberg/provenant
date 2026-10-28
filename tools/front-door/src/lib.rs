@@ -693,13 +693,32 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         )) => handoff::run(*args, globals, process.workers()),
         Command::Workflow(cmd) => {
             match roots::resolve(globals, Workspace::Project, Product::Required) {
-                Ok(resolved) => provenant_cli::workflow::run(
-                    cmd,
-                    globals,
-                    &resolved.roots,
-                    &resolved.home,
-                    &resolved.project,
-                ),
+                Ok(resolved) => {
+                    let session_save = matches!(
+                        cmd,
+                        provenant_cli::Workflow::Session(
+                            provenant_cli::workflow::Session::Save { .. }
+                        )
+                    );
+                    let status = provenant_cli::workflow::run(
+                        cmd,
+                        globals,
+                        &resolved.roots,
+                        &resolved.home,
+                        &resolved.project,
+                    );
+                    if session_save
+                        && status == 0
+                        && let Some(warning) = disk_guard::session_warning(
+                            resolved.roots.state.as_path(),
+                            &resolved.home,
+                            &resolved.project,
+                        )
+                    {
+                        let _ = writeln!(io::stderr().lock(), "{warning}");
+                    }
+                    status
+                }
                 Err(error) => fail(
                     &inv.leaf,
                     Outcome::Error,

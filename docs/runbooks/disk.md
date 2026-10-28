@@ -8,6 +8,11 @@ host state and lane-cache directories. The report does not change durable
 state. SQLite may create or update `run.sqlite3-shm` and `run.sqlite3-wal`
 companions of an existing store while reading its live index.
 
+Session start and checkpoint saves warn when the state or lane Cargo cache
+volume has less than twice `gc.free_floor` available. The warning samples
+volume free space without walking files and does not estimate reclaimable
+space. Use the report and GC preview below to investigate it.
+
 1. Select the checkout and request the report:
 
    ```sh

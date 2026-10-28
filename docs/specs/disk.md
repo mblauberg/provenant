@@ -178,6 +178,14 @@ retained tail as truncated. Offsets and digest describe the retained bytes.
 
 ## Pressure collection and daily backstop
 
+Session start and successful checkpoint saves warn when free space on the
+state or lane Cargo cache volume is below twice `gc.free_floor`. The warning
+reports free space and the threshold and names `provenant disk report` and
+`provenant gc`. Volume sampling does not walk filesystem trees; failures are
+silent and do not affect the hook or save. Reclaimable space is not estimated.
+- Why: chairs need headroom to investigate disk use before admission refuses.
+- Owner: `src/disk_guard.rs`, `src/hooks.rs`
+
 Admission, running guardians and settlement sample the minimum free space
 across the host state, lane working directory and lane Cargo cache volumes.
 Missing cache directories use their nearest existing ancestor. Each observation

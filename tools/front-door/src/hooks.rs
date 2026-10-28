@@ -272,7 +272,7 @@ const NO_CHECKPOINT_WINDOW: i64 = 24 * 60 * 60;
 fn project_id(
     globals: &Globals,
     cwd: &Path,
-) -> Result<(provenant_core::Roots, provenant_core::ProjectId), Error> {
+) -> Result<(provenant_core::Roots, PathBuf, provenant_core::ProjectId), Error> {
     let project = std::fs::canonicalize(cwd)?;
     if let Some(selected) = &globals.project
         && std::fs::canonicalize(selected)? != project
@@ -282,12 +282,12 @@ fn project_id(
     if !project.is_dir() {
         return Err("hook cwd unavailable".into());
     }
-    let roots = crate::roots::resolve(
+    let resolved = crate::roots::resolve(
         globals,
         crate::roots::Workspace::At(&project),
         crate::roots::Product::Required,
-    )?
-    .roots;
+    )?;
+    let roots = resolved.roots;
     let id = with_git(|runtime, executor, budget, cancel| {
         let location = runtime
             .project_location(executor, &project, budget, cancel)?
@@ -296,7 +296,7 @@ fn project_id(
             provenant_config::lookup_project(&roots, &location)?.ok_or("project not bound")?;
         Ok(binding.project_id())
     })?;
-    Ok((roots, id))
+    Ok((roots, resolved.home, id))
 }
 fn checkpoint(
     moment: Moment,
@@ -307,7 +307,7 @@ fn checkpoint(
     client: Option<provenant_records::Harness>,
 ) -> Result<provenant_workflow::session::HookContext, Error> {
     use provenant_workflow::session;
-    let (roots, project) = project_id(globals, cwd)?;
+    let (roots, home, project) = project_id(globals, cwd)?;
     let host: AdvisoryInput = serde_json::from_slice(input)?;
     let store = session::SessionStore::new(
         roots.state.clone(),
@@ -369,6 +369,14 @@ fn checkpoint(
             }
         }
         _ => {}
+    }
+    if matches!(moment, Moment::Compact | Moment::Restart)
+        && let Some(warning) = crate::disk_guard::session_warning(roots.state.as_path(), &home, cwd)
+    {
+        if !digest.is_empty() {
+            digest.push('\n');
+        }
+        digest.push_str(&warning);
     }
     if moment == Moment::Stop {
         return Ok(session::HookContext {

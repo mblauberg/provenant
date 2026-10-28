@@ -142,6 +142,45 @@ fn create_lane(rig: &TestRig) -> Result<String> {
 }
 
 #[test]
+fn session_start_warns_once_only_when_disk_is_below_headroom() -> Result {
+    let rig = TestRig::new()?;
+    binding(&rig)?;
+    for source in ["startup", "compact"] {
+        let hook = if source == "compact" {
+            "compact"
+        } else {
+            "session-start"
+        };
+        let output = run_hook(&rig, hook, &start(&rig, "disk-session", source))?;
+        assert_eq!(code(&output), 0);
+        assert!(!context(&output)?.contains("Disk pressure:"));
+    }
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
+    )?;
+    for source in ["startup", "compact"] {
+        let hook = if source == "compact" {
+            "compact"
+        } else {
+            "session-start"
+        };
+        let output = run_hook(&rig, hook, &start(&rig, "disk-session", source))?;
+        assert_eq!(code(&output), 0);
+        let text = context(&output)?;
+        let lines: Vec<_> = text
+            .lines()
+            .filter(|line| line.starts_with("Disk pressure:"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(lines[0].contains("provenant disk report"));
+        assert!(lines[0].contains("provenant gc"));
+        assert!(lines[0].len() <= 160);
+    }
+    Ok(())
+}
+
+#[test]
 fn restart_hook_reports_in_flight_lanes_and_prs_named_by_the_chair() -> Result {
     let rig = TestRig::new()?;
     let lane = create_lane(&rig)?;

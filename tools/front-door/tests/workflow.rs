@@ -721,6 +721,43 @@ fn long_checkpoints_save_up_to_the_documented_bound() -> Result {
 }
 
 #[test]
+fn session_save_warns_once_only_when_disk_is_low() -> Result {
+    let rig = TestRig::new()?;
+    let file = rig.root.join("checkpoint.md");
+    std::fs::write(&file, "# Goal\nship it\n")?;
+    let file = file.to_string_lossy().into_owned();
+    for (floor, warning) in [("1B", false), ("9223372036854775807B", true)] {
+        std::fs::write(
+            rig.state.join("config.toml"),
+            format!("schema_version=1\n[gc]\nfree_floor='{floor}'\n"),
+        )?;
+        for json in [false, true] {
+            let mut args = vec!["workflow", "session", "save", "disk-test", "--file", &file];
+            if json {
+                args.push("--json");
+            }
+            let output = rig.command(&args)?;
+            assert_eq!(code(&output), 0);
+            if json {
+                let _: Value = serde_json::from_slice(&output.stdout.bytes)?;
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+            let lines: Vec<_> = stderr
+                .lines()
+                .filter(|line| line.starts_with("Disk pressure:"))
+                .collect();
+            assert_eq!(lines.len(), usize::from(warning), "{stderr}");
+            if warning {
+                assert!(lines[0].contains("provenant disk report"));
+                assert!(lines[0].contains("provenant gc"));
+                assert!(lines[0].len() < 160);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn session_checkpoints_round_trip_and_reject_unsafe_keys() -> Result {
     let rig = TestRig::new()?;
     let file = rig.root.join("checkpoint.md");
