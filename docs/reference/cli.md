@@ -150,6 +150,7 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `id` | `{"name": "id", "positional": true, "required": true}` |
+| `--host` | `{"name": "host"}` |
 | `--state` | `{"name": "state", "required": true, "values": ["withdrawn", "superseded", "expired"]}` |
 | `--reason` | `{"bounds": [0, 256], "name": "reason", "required": true}` |
 | `--expect-revision` | `{"name": "expect_revision", "required": true}` |
@@ -166,6 +167,7 @@ bounds are null. Positional arguments have no long flag.
     {
       "arguments": [
         "id",
+        "host",
         "state",
         "reason",
         "expect_revision",
@@ -184,6 +186,7 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `id` | `{"name": "id", "positional": true, "required": true}` |
+| `--host` | `{"name": "host"}` |
 | `--answer` | `{"name": "answer", "required": true}` |
 | `--session` | `{"name": "session", "required": true}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
@@ -199,6 +202,7 @@ bounds are null. Positional arguments have no long flag.
     {
       "arguments": [
         "id",
+        "host",
         "answer",
         "session",
         "operation_id"
@@ -216,6 +220,7 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `id` | `{"name": "id", "positional": true, "required": true}` |
+| `--host` | `{"name": "host"}` |
 | `--action` | `{"name": "action", "required": true, "values": ["choose", "reply", "confirm", "override"]}` |
 | `--option` | `{"name": "option"}` |
 | `--text-stdin` | `{"defaults": ["false"], "name": "text_stdin", "values": ["true", "false"]}` |
@@ -235,6 +240,7 @@ bounds are null. Positional arguments have no long flag.
     {
       "arguments": [
         "id",
+        "host",
         "action",
         "option",
         "text_stdin",
