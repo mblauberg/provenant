@@ -9,12 +9,11 @@ fn io_error_payload_preserves_native_path_diagnostics_without_source_text() {
         path: PathBuf::from(OsString::from_vec(b"/state-\xff/worktrees".to_vec())),
         source: std::io::Error::other("private source text"),
     });
-    assert_eq!(
-        ServiceError::Facade(error).structured_error(),
-        json!({
-            "code":"io", "operation":"access Fabric store", "path":"/state-\u{fffd}/worktrees"
-        })
-    );
+    let detail = ServiceError::Facade(error).structured_error();
+    assert_eq!(detail["code"], "io");
+    assert_eq!(detail["operation"], "access Fabric store");
+    assert_eq!(detail["path"], "/state-\u{fffd}/worktrees");
+    assert!(detail["message"].is_string() && detail["hint"].is_string());
 }
 
 #[test]
@@ -57,7 +56,7 @@ fn output_bytes_are_utf8_or_an_explicit_lossless_byte_encoding() {
 }
 
 #[test]
-fn uncertain_mutation_errors_include_only_the_operation_id() {
+fn uncertain_mutation_errors_include_operation_id_and_recovery() {
     let operation_id_result = OperationId::parse("dispatch-17");
     assert!(operation_id_result.is_ok());
     let Some(operation_id) = operation_id_result.ok() else {
@@ -65,10 +64,10 @@ fn uncertain_mutation_errors_include_only_the_operation_id() {
     };
     let error = ServiceError::Facade(FacadeError::LaunchUnknown { operation_id });
     assert_eq!(error.code(), "launch_unknown");
-    assert_eq!(
-        error.structured_error(),
-        json!({"code":"launch_unknown","operation_id":"dispatch-17"})
-    );
+    let detail = error.structured_error();
+    assert_eq!(detail["code"], "launch_unknown");
+    assert_eq!(detail["operation_id"], "dispatch-17");
+    assert!(detail["message"].is_string() && detail["hint"].is_string());
 }
 
 #[test]
@@ -227,7 +226,7 @@ fn run_submission_requires_its_explicit_operation() {
     tagged["op"] = json!("submit");
     assert!(matches!(
         ToolCall::parse("fabric_run", tagged.clone()),
-        Ok(ToolCall::Submit(_))
+        Ok(ToolCall::SubmitWait(_, 30, false))
     ));
     tagged["tasks"][0]["timeout_seconds"] = json!("soon");
     assert!(
@@ -235,6 +234,63 @@ fn run_submission_requires_its_explicit_operation() {
     );
     tagged["op"] = json!("submission");
     assert!(ToolCall::parse("fabric_run", tagged).is_err());
+}
+
+#[test]
+fn run_defaults_preserve_explicit_ids_and_generate_distinct_ids() {
+    let task = json!({"prompt":"review","route":{"kind":"model","provider":"codex","model":"model"},"timeout_seconds":1800,"access":"read_only","worktree":"/tmp/work"});
+    let args = json!({"op":"submit","tasks":[task]});
+    let id = |args| match ToolCall::parse("fabric_run", args).unwrap() {
+        ToolCall::SubmitWait(SubmitInput::Submit { operation_id, .. }, _, _) => operation_id,
+        _ => panic!("expected submit"),
+    };
+    assert_ne!(id(args.clone()), id(args.clone()));
+    let mut explicit = args;
+    explicit["operation_id"] = json!("retry-1");
+    assert_eq!(id(explicit).to_string(), "retry-1");
+    assert!(matches!(
+        ToolCall::parse(
+            "fabric_run",
+            json!({"op":"status","target":{"attempt":"00000000000000000000000000000001"},"detail":true})
+        ),
+        Ok(ToolCall::RunDetailed(_))
+    ));
+    assert!(matches!(
+        ToolCall::parse(
+            "fabric_output",
+            json!({"op":"read","target":{"attempt":"00000000000000000000000000000001"}})
+        ),
+        Ok(ToolCall::Output(OutputInput::Read {
+            part: OutputPart::Result,
+            offset: 0,
+            max_bytes: 16_384,
+            ..
+        }))
+    ));
+}
+
+#[test]
+fn run_page_shrinks_before_cursor_is_issued() {
+    let mut limits = limits();
+    limits.result_bytes = 400;
+    let rows: Vec<Value> = (1..=10)
+        .map(|i| json!({"attempt_id": format!("{i:032x}"), "state":"running"}))
+        .collect();
+    let response = response(
+        "fabric_run",
+        json!({"result":"list","page":{"items":rows,"next_after":null,"truncated":false}}),
+    )
+    .unwrap();
+    let result = limit_response(response, &limits, false, false).unwrap();
+    let page = &result.structured_content["page"];
+    let items = page["items"].as_array().unwrap();
+    assert!(items.len() < 10 && !items.is_empty());
+    assert_eq!(
+        page["next_after"]["attempt"],
+        items.last().unwrap()["attempt_id"]
+    );
+    assert_eq!(page["truncated"], true);
+    assert!(serde_json::to_vec(&result).unwrap().len() <= 400);
 }
 
 #[test]

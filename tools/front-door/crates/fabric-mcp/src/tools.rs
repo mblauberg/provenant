@@ -15,6 +15,7 @@ use thiserror::Error;
 /// Parsed tool request. Coordination inputs are the runtime's exact serde
 /// contracts; the execution facade contracts also live in runtime for F3.
 pub enum ToolCall {
+    Discover,
     Identity(IdentityInput),
     Mail(MailInput, Option<OperationId>),
     Task(TaskInput, Option<OperationId>),
@@ -22,6 +23,8 @@ pub enum ToolCall {
     Claim(ClaimInput, Option<OperationId>),
     Landing(LandingInput, Option<OperationId>),
     Submit(SubmitInput),
+    SubmitWait(SubmitInput, u64, bool),
+    RunDetailed(RunInput),
     Run(RunInput),
     Output(OutputInput),
     Hosts(HostsInput),
@@ -43,13 +46,14 @@ impl ToolCall {
 
     fn kind(&self) -> schema::ToolKind {
         match self {
+            Self::Discover => schema::ToolKind::Discover,
             Self::Identity(_) => schema::ToolKind::Identity,
             Self::Mail(..) => schema::ToolKind::Mail,
             Self::Task(..) => schema::ToolKind::Task,
             Self::Events(..) => schema::ToolKind::Events,
             Self::Claim(..) => schema::ToolKind::Claim,
             Self::Landing(..) => schema::ToolKind::Claim,
-            Self::Submit(_) => schema::ToolKind::Run,
+            Self::Submit(_) | Self::SubmitWait(..) | Self::RunDetailed(_) => schema::ToolKind::Run,
             Self::Run(_) => schema::ToolKind::Run,
             Self::Output(_) => schema::ToolKind::Output,
             Self::Hosts(_) => schema::ToolKind::Identity,
@@ -126,14 +130,17 @@ impl ToolCall {
             | Self::Claim(ClaimInput::Renew { lease_seconds, .. }, _) => lease(*lease_seconds),
             Self::Landing(LandingInput::Acquire { lease_seconds, .. }, _)
             | Self::Landing(LandingInput::Renew { lease_seconds, .. }, _) => lease(*lease_seconds),
-            Self::Submit(SubmitInput::Submit { tasks, .. }) => {
+            Self::Submit(SubmitInput::Submit { tasks, .. })
+            | Self::SubmitWait(SubmitInput::Submit { tasks, .. }, ..) => {
                 for (index, task) in tasks.iter().enumerate() {
                     body(&task.prompt, &format!("tasks[{index}].prompt"))?;
                 }
                 Ok(())
             }
-            Self::Run(RunInput::List { limit, .. }) => page(u64::from(*limit)),
-            Self::Run(RunInput::Resume { prompt, .. }) => body(prompt, "prompt"),
+            Self::Run(RunInput::List { limit, .. })
+            | Self::RunDetailed(RunInput::List { limit, .. }) => page(u64::from(*limit)),
+            Self::Run(RunInput::Resume { prompt, .. })
+            | Self::RunDetailed(RunInput::Resume { prompt, .. }) => body(prompt, "prompt"),
             Self::Output(OutputInput::Read { max_bytes, .. })
             | Self::Output(OutputInput::Fetch { max_bytes, .. }) => output(*max_bytes),
             Self::Hosts(HostsInput::Hosts { limit, .. }) => page(u64::from(*limit)),
@@ -170,7 +177,9 @@ impl ToolCall {
                     GraphInput::Run { .. } | GraphInput::Cancel { .. } | GraphInput::Resume { .. }
                 )
                 | Self::Submit(_)
+                | Self::SubmitWait(..)
                 | Self::Run(RunInput::Cancel { .. } | RunInput::Resume { .. })
+                | Self::RunDetailed(RunInput::Cancel { .. } | RunInput::Resume { .. })
         )
     }
 
@@ -203,6 +212,53 @@ impl ToolCall {
                 .entry("op")
                 .or_insert_with(|| Value::String(operation.to_owned()));
         }
+        let operation = arguments["op"].as_str().unwrap_or("").to_owned();
+        let mut detail = false;
+        let mut submit_wait = 30;
+        if let Some(object) = arguments.as_object_mut() {
+            if schema::tool_kind(name) == Some(schema::ToolKind::Run) {
+                if let Some(value) = object.remove("detail") {
+                    if !matches!(operation.as_str(), "submit" | "status" | "wait" | "cancel") {
+                        return Err(InvalidInput::Arguments {
+                            path: "arguments.detail".into(),
+                        });
+                    }
+                    detail = value.as_bool().ok_or_else(|| InvalidInput::Arguments {
+                        path: "arguments.detail".into(),
+                    })?;
+                }
+                if operation == "submit"
+                    && let Some(value) = object.remove("wait_seconds")
+                {
+                    submit_wait = value
+                        .as_u64()
+                        .filter(|v| (1..=crate::MAX_WAIT_SECONDS).contains(v))
+                        .ok_or_else(|| InvalidInput::Arguments {
+                            path: "arguments.wait_seconds".into(),
+                        })?;
+                }
+                if matches!(operation.as_str(), "submit" | "cancel" | "resume")
+                    && !object.contains_key("operation_id")
+                {
+                    object.insert(
+                        "operation_id".into(),
+                        Value::String(new_operation_id().map_err(|_| InvalidInput::Arguments {
+                            path: "arguments.operation_id".into(),
+                        })?),
+                    );
+                }
+                if operation == "list" {
+                    object.entry("limit").or_insert(serde_json::json!(20));
+                }
+            }
+            if schema::tool_kind(name) == Some(schema::ToolKind::Output) && operation == "read" {
+                object.entry("part").or_insert(serde_json::json!("result"));
+                object.entry("offset").or_insert(serde_json::json!(0));
+                object
+                    .entry("max_bytes")
+                    .or_insert(serde_json::json!(16_384));
+            }
+        }
         let operation_id =
             match schema::tool_kind(name) {
                 Some(
@@ -229,13 +285,13 @@ impl ToolCall {
                 _ => None,
             };
         macro_rules! parse {
-            ($ty:ty, $variant:ident $(, $metadata:expr)?) => {
+            ($ty:ty, $variant:ident $(, $metadata:expr)*) => {
                 serde_json::from_value::<$ty>(arguments.clone())
                     .and_then(|input| {
                         input
                             .validate_input(WaitTransport::Mcp)
                             .map_err(serde::de::Error::custom)?;
-                        Ok(Self::$variant(input $(, $metadata)?))
+                        Ok(Self::$variant(input $(, $metadata)*))
                     })
                     .map_err(|error| InvalidInput::Arguments {
                         path: schema::invalid_path(name, &arguments).unwrap_or_else(|| {
@@ -252,6 +308,18 @@ impl ToolCall {
         // Merged tools route each op to the input type that owns it.
         let operation = arguments["op"].as_str().unwrap_or("");
         let call = match schema::tool_kind(name) {
+            Some(schema::ToolKind::Discover) => {
+                if arguments.as_object().is_some_and(|o| {
+                    o.is_empty()
+                        || (o.len() == 1 && o.get("op") == Some(&serde_json::json!("discover")))
+                }) {
+                    Ok(Self::Discover)
+                } else {
+                    Err(InvalidInput::Arguments {
+                        path: "arguments".into(),
+                    })
+                }
+            }
             Some(schema::ToolKind::Identity) if operation == "hosts" => parse!(HostsInput, Hosts),
             Some(schema::ToolKind::Identity) => parse!(IdentityInput, Identity),
             Some(schema::ToolKind::Mail) => parse!(MailInput, Mail, operation_id.clone()),
@@ -261,7 +329,10 @@ impl ToolCall {
                 parse!(LandingInput, Landing, operation_id.clone())
             }
             Some(schema::ToolKind::Claim) => parse!(ClaimInput, Claim, operation_id.clone()),
-            Some(schema::ToolKind::Run) if operation == "submit" => parse!(SubmitInput, Submit),
+            Some(schema::ToolKind::Run) if operation == "submit" => {
+                parse!(SubmitInput, SubmitWait, submit_wait, detail)
+            }
+            Some(schema::ToolKind::Run) if detail => parse!(RunInput, RunDetailed),
             Some(schema::ToolKind::Run) => parse!(RunInput, Run),
             Some(schema::ToolKind::Output) => parse!(OutputInput, Output),
             Some(schema::ToolKind::Graph) => parse!(GraphInput, Graph),
@@ -285,14 +356,17 @@ impl ToolCall {
         // ToolCall is public and can be constructed without parse. Apply the
         // same transport cap before any coordination or facade side effects.
         match &self {
+            Self::Discover => Ok(()),
             Self::Identity(input) => input.validate_input(WaitTransport::Mcp),
             Self::Mail(input, _) => input.validate_input(WaitTransport::Mcp),
             Self::Task(input, _) => input.validate_input(WaitTransport::Mcp),
             Self::Events(input, _) => input.validate_input(WaitTransport::Mcp),
             Self::Claim(input, _) => input.validate_input(WaitTransport::Mcp),
             Self::Landing(input, _) => input.validate_input(WaitTransport::Mcp),
-            Self::Submit(input) => input.validate_input(WaitTransport::Mcp),
-            Self::Run(input) => input.validate_input(WaitTransport::Mcp),
+            Self::Submit(input) | Self::SubmitWait(input, ..) => {
+                input.validate_input(WaitTransport::Mcp)
+            }
+            Self::Run(input) | Self::RunDetailed(input) => input.validate_input(WaitTransport::Mcp),
             Self::Output(input) => input.validate_input(WaitTransport::Mcp),
             Self::Hosts(input) => input.validate_input(WaitTransport::Mcp),
             Self::Graph(input) => input.validate_input(WaitTransport::Mcp),
@@ -313,6 +387,7 @@ impl ToolCall {
                     | Self::Landing(..)
                     | Self::Graph(..)
                     | Self::Submit(SubmitInput::Submit { host: Some(_), .. })
+                    | Self::SubmitWait(SubmitInput::Submit { host: Some(_), .. }, ..)
             )
         {
             return Err(CoordinationError::LaneMutation.into());
@@ -321,7 +396,9 @@ impl ToolCall {
         let output = matches!(&self, Self::Output(_));
         let tool_name = self.name();
         let budget = service.budget(match &self {
-            Self::Run(RunInput::Wait { wait_seconds, .. }) => *wait_seconds,
+            Self::Run(RunInput::Wait { wait_seconds, .. })
+            | Self::RunDetailed(RunInput::Wait { wait_seconds, .. }) => *wait_seconds,
+            Self::SubmitWait(_, wait_seconds, _) => *wait_seconds,
             Self::Events(
                 EventsInput::Read {
                     wait_seconds: Some(wait_seconds),
@@ -335,6 +412,10 @@ impl ToolCall {
             ($owner:ident, $method:ident, $input:ident) => {{ response(tool_name, service.$owner.$method($input, budget, cancel)?) }};
         }
         let result = match self {
+            Self::Discover => response(
+                tool_name,
+                serde_json::json!({"tools": schema::advanced_catalogue()}),
+            ),
             Self::Identity(input) => response(
                 tool_name,
                 IdentityReply {
@@ -510,7 +591,117 @@ impl ToolCall {
                 }
             }
             Self::Submit(input) => call!(facade, submit, input),
-            Self::Run(input) => call!(facade, run, input),
+            Self::SubmitWait(input, wait_seconds, detail) => {
+                let receipt = serde_json::to_value(service.facade.submit(input, budget, cancel)?)?;
+                let targets: Vec<AttemptTarget> = serde_json::from_value(
+                    receipt
+                        .get("targets")
+                        .cloned()
+                        .ok_or(FacadeError::StateCorrupt)?,
+                )?;
+                let wait = service.facade.run(
+                    RunInput::Wait {
+                        targets: targets.clone(),
+                        condition: WaitCondition::All,
+                        wait_seconds,
+                    },
+                    budget,
+                    cancel,
+                );
+                let mut value = serde_json::json!({"receipt": receipt});
+                match wait {
+                    Ok(run) => {
+                        let mut run = serde_json::to_value(run)?;
+                        if !detail {
+                            compact_run(&mut run)?;
+                        }
+                        let timed_out = run
+                            .get("timed_out")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        value["wait"] = run;
+                        if timed_out {
+                            value["continuation"] = serde_json::json!(
+                                "Use fabric_run wait with the receipt targets, then fabric_output to read the result."
+                            );
+                        } else {
+                            let mut outputs = Vec::new();
+                            for target in targets {
+                                let remaining = service.limits.as_ref().map_or(16_384, |limits| {
+                                    limits
+                                        .result_bytes
+                                        .saturating_sub(
+                                            serde_json::to_vec(&value)
+                                                .map_or(u64::MAX, |v| v.len() as u64),
+                                        )
+                                        .saturating_sub(
+                                            serde_json::to_vec(&outputs)
+                                                .map_or(u64::MAX, |v| v.len() as u64),
+                                        )
+                                        .saturating_sub(1024)
+                                        .min(16_384)
+                                        / 2
+                                });
+                                if remaining == 0 {
+                                    value["continuation"] = serde_json::json!(
+                                        "Use fabric_output to read the remaining results using the receipt targets."
+                                    );
+                                    break;
+                                }
+                                match service.facade.output(
+                                    OutputInput::Read {
+                                        target,
+                                        part: OutputPart::Result,
+                                        offset: 0,
+                                        max_bytes: remaining,
+                                    },
+                                    budget,
+                                    cancel,
+                                ) {
+                                    Ok(output) => outputs.push(serde_json::to_value(output)?),
+                                    Err(_) => {
+                                        value["continuation"] = serde_json::json!(
+                                            "Use fabric_output to read each result using the receipt targets."
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                            value["outputs"] = Value::Array(outputs);
+                        }
+                    }
+                    Err(error) => {
+                        value["continuation"] = serde_json::json!(
+                            "Use fabric_run wait with the receipt targets, then fabric_output to read the result."
+                        );
+                        value["timed_out"] = Value::Bool(matches!(error, FacadeError::Timeout));
+                        value["observation_error"] = serde_json::json!({"code": error.code(), "message": error.to_string(), "hint":"Use the receipt targets to continue observing the submitted runs."});
+                    }
+                }
+                if let Some(limits) = &service.limits {
+                    let size = serde_json::to_vec(&value)?.len() as u64;
+                    if size > limits.result_bytes {
+                        value
+                            .as_object_mut()
+                            .ok_or(FacadeError::StateCorrupt)?
+                            .remove("outputs");
+                        value
+                            .as_object_mut()
+                            .ok_or(FacadeError::StateCorrupt)?
+                            .remove("wait");
+                        value["continuation"] = serde_json::json!(
+                            "Use fabric_run wait with the receipt targets, then fabric_output to read the result."
+                        );
+                    }
+                }
+                response(tool_name, value)
+            }
+            Self::Run(input) => {
+                let mut value = serde_json::to_value(service.facade.run(input, budget, cancel)?)?;
+                compact_run(&mut value)?;
+                response(tool_name, value)
+            }
+            Self::RunDetailed(input) => call!(facade, run, input),
             Self::Output(input) => call!(facade, output, input),
             Self::Hosts(input) => {
                 #[derive(Serialize)]
@@ -563,7 +754,7 @@ impl ServiceError {
     /// Stable structured error data. Uncertain mutations carry their
     /// idempotency key; prompts, tokens and raw source errors are omitted.
     pub fn structured_error(&self) -> Value {
-        match self {
+        let mut detail = match self {
             Self::Invalid(error) => serde_json::json!({"code":self.code(),"path":error.path}),
             Self::Coordination(CoordinationError::LaneMutation) => {
                 serde_json::json!({"code":self.code(),"message":self.to_string()})
@@ -589,8 +780,63 @@ impl ServiceError {
                 serde_json::json!({"code":self.code(),"operation_id":operation_id})
             }
             _ => serde_json::json!({"code":self.code()}),
+        };
+        detail["message"] = Value::String(self.to_string());
+        detail["hint"] = Value::String(
+            match self {
+                Self::Invalid(_) | Self::Time(_) => {
+                    "Check the argument path and tool schema, then retry."
+                }
+                Self::Facade(FacadeError::LaunchUnknown { .. }) => {
+                    "Check status before retrying with the same operation ID."
+                }
+                Self::ResultTooLarge => "Request a smaller page or output chunk.",
+                _ => "Inspect the current state and retry when the cause is resolved.",
+            }
+            .into(),
+        );
+        detail
+    }
+}
+
+fn new_operation_id() -> Result<String, provenant_os::fs::FsError> {
+    Ok(format!(
+        "mcp-{}",
+        provenant_core::hex(&provenant_os::fs::entropy_128()?)
+    ))
+}
+
+fn compact_run(value: &mut Value) -> Result<(), ServiceError> {
+    fn compact(value: &mut Value) -> Result<(), ServiceError> {
+        let mut record = value.clone();
+        let object = record.as_object_mut().ok_or(FacadeError::StateCorrupt)?;
+        if let Some(seconds) = object.remove("provider_seconds") {
+            object.insert(
+                "provider_ms".into(),
+                if seconds.is_null() {
+                    Value::Null
+                } else {
+                    serde_json::json!(
+                        (seconds.as_f64().ok_or(FacadeError::StateCorrupt)? * 1000.0).round()
+                            as u64
+                    )
+                },
+            );
+        }
+        let record: provenant_records::run::AttemptRecord = serde_json::from_value(record)?;
+        *value =
+            serde_json::to_value(provenant_fabric_runtime::runs::AttemptSummary::from(record))?;
+        Ok(())
+    }
+    if let Some(attempt) = value.get_mut("attempt") {
+        compact(attempt)?;
+    }
+    if let Some(attempts) = value.get_mut("attempts").and_then(Value::as_array_mut) {
+        for attempt in attempts {
+            compact(attempt)?;
         }
     }
+    Ok(())
 }
 
 fn coverage_after_timeout(
@@ -661,7 +907,7 @@ impl<'a, F> Service<'a, F> {
 }
 
 fn limit_response(
-    response: ToolResponse,
+    mut response: ToolResponse,
     limits: &Limits,
     mutation: bool,
     output: bool,
@@ -680,10 +926,34 @@ fn limit_response(
         {
             return Err(ServiceError::ResultTooLarge);
         }
-        let response_bytes = serde_json::to_vec(&response)?.len();
-        if u64::try_from(response_bytes).unwrap_or(u64::MAX) > limits.result_bytes {
-            // MCP cannot shorten a page safely after its owner has calculated the cursor.
-            return Err(ServiceError::ResultTooLarge);
+        loop {
+            let response_bytes = serde_json::to_vec(&response)?.len();
+            if u64::try_from(response_bytes).unwrap_or(u64::MAX) <= limits.result_bytes {
+                break;
+            }
+            let Some(page) = response.structured_content.get_mut("page") else {
+                return Err(ServiceError::ResultTooLarge);
+            };
+            let Some(items) = page.get_mut("items").and_then(Value::as_array_mut) else {
+                return Err(ServiceError::ResultTooLarge);
+            };
+            if items.len() <= 1
+                || items
+                    .last()
+                    .and_then(|item| item.get("attempt_id"))
+                    .is_none()
+            {
+                return Err(ServiceError::ResultTooLarge);
+            }
+            items.pop();
+            let attempt = items
+                .last()
+                .and_then(|item| item.get("attempt_id"))
+                .cloned()
+                .ok_or(FacadeError::StateCorrupt)?;
+            page["next_after"] = serde_json::json!({"attempt": attempt, "host": null});
+            page["truncated"] = Value::Bool(true);
+            response.content[0].text = render::digest("fabric_run", &response.structured_content);
         }
     }
     Ok(response)
