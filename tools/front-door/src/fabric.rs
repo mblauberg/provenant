@@ -4101,29 +4101,25 @@ mod peer_tests {
             budget,
             &cancel,
         )?;
-        let status = serde_json::to_value(status)?;
+        let RunResult::Status { mut attempt } = status else {
+            return Err("status result".into());
+        };
+        let status = serde_json::to_value(RunResult::Status {
+            attempt: attempt.clone(),
+        })?;
         assert!(status["attempt"].get("usage").is_some());
         assert!(status["attempt"].get("prompt").is_some());
         // Pool routing carries an audit receipt in full records. It must not
         // enlarge the compact route returned by list.
-        let mut record = status["attempt"].clone();
-        record
-            .as_object_mut()
-            .ok_or("record")?
-            .remove("provider_seconds");
-        record["provider_ms"] = serde_json::Value::Null;
-        record["applied_route"] = serde_json::json!({
+        attempt.applied_route = Some(serde_json::from_value(serde_json::json!({
             "provider":"fixture", "model":"fixture/model", "effort":"high",
             "account_label":"fixture", "account_key":"private-key", "source":"pool",
             "pool_selection": {
                 "pool":"senior", "candidates":[], "roll":0, "total_weight":1,
                 "pick":"fixture/model"
             }
-        });
-        let summary =
-            provenant_fabric_runtime::runs::AttemptSummary::from(serde_json::from_value::<
-                provenant_records::run::AttemptRecord,
-            >(record)?);
+        }))?);
+        let summary = provenant_fabric_runtime::runs::AttemptSummary::from(attempt);
         let summary = serde_json::to_value(summary)?;
         assert_eq!(
             summary["applied_route"],

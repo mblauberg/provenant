@@ -63,8 +63,8 @@ impl From<AttemptRecord> for AttemptSummary {
     }
 }
 
-/// A bounded page of summaries, newest queued first. `next_after` is supplied only when a
-/// caller can continue the same ordered selection.
+/// A bounded page of summaries, newest queued first. `next_after` is supplied
+/// only when a caller can continue the same ordered selection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptPage {
