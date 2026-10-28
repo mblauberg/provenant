@@ -64,6 +64,32 @@ An item cannot be edited into a new choice; close it as superseded, then post a
 new request. Historical answers remain visible. See generated
 [CLI](../reference/cli.md) and [MCP](../reference/mcp-tools.md) references for syntax.
 
+## Work links
+
+The request JSON for CLI `ask --file` and MCP `fabric_inbox` `ask` accepts
+optional `work`, containing required `run_id` and optional `task_id`,
+`attempt_id`, `repository` and `head`. Repository uses the existing absolute-path
+wire format, for example
+`{"relative_to_root":{"encoding":"utf8","path":"repo/.git"}}` for `/repo/.git`.
+Supply the canonical Git common directory, shared by linked worktrees. Head is
+an exact 40- or 64-character Git object ID observed at launch.
+
+Creation validates these claims through Run's host-sealed membership lookup for
+the current project. A lookup result of `mismatch` is refused. The saved
+`work_coverage` reports the lookup result: `verified`, `partial`, `unindexed`,
+`repository_unavailable`, `head_unavailable` or `limit`. It is omitted when no work
+was supplied. Run-only selection is at best partial. Observed contradictions are refused,
+including run-only and capped lookups. A limit without an observed contradiction
+leaves remaining candidates unknown. Nested, historical and unprepared
+work may be unindexed. Neither case establishes membership or grants authority.
+No Git probes, child-store traversal or later promotion of coverage occurs.
+Item, history and list JSON preserve the links and creation-time coverage;
+callers cannot supply coverage. `request.work` always contains claims; only
+`verified` coverage permits a work link or task-label join. Other results must be
+labelled unverified and must not become navigable work. Use the records owner's
+`verified_work()` accessor and the binding [Fabric contract](../specs/fabric.md#human-requests).
+Task labels remain a future overview concern.
+
 ## Consume once
 
 An answer atomically queues a `human_answer` Fabric response to the original

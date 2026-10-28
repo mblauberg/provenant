@@ -22,19 +22,15 @@ pub struct WorkSelector {
     pub repository: Option<AbsolutePath>,
     pub head: Option<GitOid>,
 }
-// Order encodes the aggregation precedence; contradictions outrank missing facts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum WorkCoverage {
-    /// Includes unknown, historical and not yet prepared work.
-    Unindexed,
-    Verified,
-    /// The index cannot prove a complete run roster.
-    Partial,
-    HeadUnavailable,
-    RepositoryUnavailable,
-    Mismatch,
-    /// More candidates remain. Absence has not been established.
-    Limit,
+pub use provenant_records::inbox::WorkCoverage;
+
+/// Validate only against the configured host state root. No caller store locator.
+pub fn validate_work(
+    host: &provenant_core::StateRoot,
+    selection: &WorkSelector,
+    call: &Request<'_>,
+) -> Result<WorkCoverage> {
+    WorkIndex::open(host.as_path(), call)?.validate(selection, call)
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Membership {
@@ -114,13 +110,17 @@ impl WorkIndex {
             let qualified = selection.task.is_some() || selection.attempt.is_some();
             for n in 0..=ROW_LIMIT {
                 let Some(row) = rows.next()? else {
-                    if !qualified {
-                        return Ok(WorkCoverage::Partial);
+                    if !qualified && coverage != WorkCoverage::Unindexed {
+                        return Ok(coverage.max(WorkCoverage::Partial));
                     }
                     return Ok(coverage);
                 };
                 if n == ROW_LIMIT {
-                    return Ok(WorkCoverage::Limit);
+                    return Ok(if coverage == WorkCoverage::Mismatch {
+                        coverage
+                    } else {
+                        WorkCoverage::Limit
+                    });
                 }
                 let raw: Vec<u8> = row.get(0)?;
                 if raw.len() > MEMBER_BYTES {
@@ -268,7 +268,7 @@ mod tests {
         let mut run_only = selection.clone();
         run_only.task = None;
         run_only.attempt = None;
-        assert_eq!(index.validate(&run_only, &call)?, WorkCoverage::Partial);
+        assert_eq!(index.validate(&run_only, &call)?, WorkCoverage::Unindexed);
         index.seal(&value, &call)?;
         index.seal(&value, &call)?;
         assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Verified);
@@ -277,6 +277,13 @@ mod tests {
         selection.head = value.head;
         selection.repository = Some(AbsolutePath::new(Path::new("/other/.git"))?);
         assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Mismatch);
+        let mut unqualified = selection.clone();
+        unqualified.task = None;
+        unqualified.attempt = None;
+        assert_eq!(index.validate(&unqualified, &call)?, WorkCoverage::Mismatch);
+        unqualified.repository = value.repository.clone();
+        unqualified.head = Some(GitOid::parse(&"b".repeat(40))?);
+        assert_eq!(index.validate(&unqualified, &call)?, WorkCoverage::Mismatch);
         selection.repository = value.repository.clone();
         for field in 0..4 {
             let mut foreign = selection.clone();
@@ -298,6 +305,49 @@ mod tests {
         let index = WorkIndex::open(context.state_root.as_path(), &call)?;
         assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Verified);
         assert_eq!(index.validate(&run_only, &call)?, WorkCoverage::Partial);
+        Ok(())
+    }
+
+    #[test]
+    fn request_correlation_survives_attempt_record_removal() -> TestResult {
+        let (_temp, context, clock, cancel) = fixture()?;
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let prepared = input();
+        store.create(&prepared, &call)?;
+        store.start(
+            prepared.run_id,
+            &crate::dispatch_tests::Ready,
+            &|_, _| Err(RunError::Validation("fixture handoff")),
+            &call,
+        )?;
+        let selector = WorkSelector {
+            project: context.project_id,
+            run: prepared.run_id,
+            task: Some(prepared.attempts[0].task_id),
+            attempt: Some(prepared.attempts[0].attempt_id),
+            repository: None,
+            head: None,
+        };
+        assert_eq!(
+            validate_work(&context.state_root, &selector, &call)?,
+            WorkCoverage::Verified
+        );
+        // Model lane-local cleanup without touching the host membership index.
+        store
+            .db
+            .execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER immutable_terminal_delete;")?;
+        assert_eq!(
+            store.db.execute(
+                "DELETE FROM attempts WHERE id=?1",
+                [prepared.attempts[0].attempt_id.to_string()]
+            )?,
+            1
+        );
+        assert_eq!(
+            validate_work(&context.state_root, &selector, &call)?,
+            WorkCoverage::Verified
+        );
         Ok(())
     }
 
@@ -346,6 +396,7 @@ mod tests {
             index.validate(&selection, &call)?,
             WorkCoverage::HeadUnavailable
         );
+        value.repository = Some(AbsolutePath::new(Path::new("/repo/.git"))?);
         for n in 1..=64_u8 {
             value.attempt = AttemptId::from_bytes([n; 16]);
             if value.attempt == input.attempts[0].attempt_id {
@@ -357,6 +408,10 @@ mod tests {
         index.seal(&value, &call)?;
         selection.task = None;
         assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Limit);
+        selection.head = None;
+        selection.repository = Some(AbsolutePath::new(Path::new("/other/.git"))?);
+        assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Mismatch);
+        selection.repository = None;
         selection.attempt = Some(value.attempt);
         selection.head = None;
         assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Verified);

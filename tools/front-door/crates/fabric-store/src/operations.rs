@@ -30,15 +30,8 @@ impl Store {
                 rusqlite::TransactionBehavior::Immediate,
             )?)
         })?;
-        let prior: Option<(String, Vec<u8>, Vec<u8>)> = tx.query_row(
-            "SELECT actor,request,result FROM coordination_operations WHERE project=?1 AND id=?2",
-            params![project.to_string(), id.to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).optional().map_err(Error::from)?;
-        if let Some((owner, prior, result)) = prior {
-            if owner != actor.to_string() || prior != frozen {
-                return Err(Error::Invalid("operation ID reused with a different request").into());
-            }
-            return Ok(decode(&result)?);
+        if let Some(result) = replay(&tx, project, actor, id, &frozen)? {
+            return Ok(result);
         }
         let result = action()?;
         tx.execute(
@@ -58,6 +51,20 @@ impl Store {
 }
 
 impl Store {
+    /// Validate replay before external preparation. The write path rechecks this
+    /// exact actor/input under its transaction, including concurrent receipts.
+    pub fn coordination_replay<T: DeserializeOwned>(
+        &self,
+        project: ProjectId,
+        actor: ActorId,
+        id: &OperationId,
+        input: &impl Serialize,
+        request: &Request<'_>,
+    ) -> Result<Option<T>> {
+        let frozen = encode(input)?;
+        request.retry(|| replay(&self.db, project, actor, id, &frozen))
+    }
+
     /// Read the home owner's atomic receipt without repeating a mutation.
     pub fn coordination_receipt<T: DeserializeOwned>(
         &self,
@@ -81,5 +88,30 @@ impl Store {
                 None => Ok(None),
             }
         })
+    }
+}
+
+fn replay<T: DeserializeOwned>(
+    db: &rusqlite::Connection,
+    project: ProjectId,
+    actor: ActorId,
+    id: &OperationId,
+    frozen: &[u8],
+) -> Result<Option<T>> {
+    let prior: Option<(String, Vec<u8>, Vec<u8>)> = db
+        .query_row(
+            "SELECT actor,request,result FROM coordination_operations WHERE project=?1 AND id=?2",
+            params![project.to_string(), id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    match prior {
+        Some((owner, input, result)) if owner == actor.to_string() && input == frozen => {
+            Ok(Some(decode(&result)?))
+        }
+        Some(_) => Err(Error::Invalid(
+            "operation ID reused with a different request",
+        )),
+        None => Ok(None),
     }
 }

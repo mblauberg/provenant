@@ -77,7 +77,9 @@ resume or continuation, before marking them Starting. Nested attempts are never
 sealed: their IDs originate in a lane-writable store. Trusted nested membership
 requires host-owned child enrolment, which is a separate contract.
 
-The constructor is crate-private until a trusted reader path is implemented.
+Opening and sealing remain crate-private. The public `validate_work` reader
+accepts only the configured host `StateRoot`; CLI/MCP bind it to their trusted
+project identity and pass its coverage to Fabric before a Fabric transaction.
 Identical captures replay; disagreements and permanent capture errors refuse
 handoff. Contention or cancellation leaves the attempt queued for retry.
 Repository identity is the verified canonical Git common directory. Head is the
@@ -88,14 +90,18 @@ successful launch nor workflow authority.
 `WorkSelector` requires project and run, with optional task, attempt, repository
 and head constraints. Reads check at most 64 candidates and 64 KiB per record,
 using the same byte bound as writes. `Verified` requires a task or attempt;
-run-only reads return `Partial` because there is no trusted complete member list.
-Missing nested, historical and unprepared work returns `Unindexed`. Contradictory
+run-only matches are at best `Partial` because there is no trusted complete member list.
+Missing nested, historical and unprepared work, including an empty run-only
+selection, returns `Unindexed`. Contradictory
 facts return `Mismatch`, ahead of unavailable repository/head facts and unindexed
-coverage. `Limit` never proves absence. Lookups traverse no child roots and accept
+coverage, including run-only selectors. A mismatch observed among the first 64
+candidates also wins over `Limit`; otherwise `Limit` never proves absence. Lookups traverse no child roots and accept
 no caller-supplied store locator. Configured grants cannot expose the host index,
 its companions or lock. Membership survives lane-local record removal. Index
 growth is unbounded and is not counted towards the disk floor.
 
+- Why: caller claims cannot establish membership or hide a known contradiction,
+  and a waiting index reader must not block unrelated Fabric writers.
 - Test: `crates/run/src/correlation.rs::tests`; `crates/cli/src/run/provider.rs::configured_grants_cannot_expose_host_indexes`
 - Owner: `crates/run/src/correlation.rs`, `crates/run/src/launch.rs`
 

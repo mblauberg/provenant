@@ -420,6 +420,7 @@ fn ask(kind: RequestKind, id: &str) -> InboxInput {
     InboxInput::Ask {
         session: "session-a".into(),
         request: RequestDraft {
+            work: None,
             kind,
             title: "Select repair".into(),
             body: "Which repair should proceed?".into(),
@@ -821,6 +822,7 @@ fn inbox_remote_owner_and_worker_mutations_are_refused_without_opening_store() {
         ask(RequestKind::Decision, "create"),
         f.budget(),
         &f.cancel,
+        &|_, _| panic!("lookup must not run"),
     );
     assert_eq!(result.unwrap_err().code(), "unsupported_owner");
     assert!(!f.root.as_path().join("fabric").exists());
@@ -853,9 +855,278 @@ fn inbox_remote_owner_and_worker_mutations_are_refused_without_opening_store() {
         ask(RequestKind::Decision, "create"),
         f.budget(),
         &f.cancel,
+        &|_, _| panic!("lookup must not run"),
     );
     assert_eq!(result.unwrap_err().code(), "lane_coordination_refused");
     assert!(!f.root.as_path().join("fabric").exists());
+}
+
+#[test]
+fn request_correlation_saves_exact_coverage_once_and_requires_host_lookup() {
+    let f = Fixture::new();
+    let mut input = ask(RequestKind::Question, "linked");
+    let work = RequestWork {
+        run_id: provenant_core::RunId::from_bytes([3; 16]),
+        task_id: Some(provenant_core::TaskId::from_bytes([4; 16])),
+        attempt_id: None,
+        repository: None,
+        head: None,
+    };
+    if let InboxInput::Ask { request, .. } = &mut input {
+        request.work = Some(work.clone());
+    }
+    assert_eq!(
+        f.call(input.clone()).unwrap_err().code(),
+        "inbox_unavailable"
+    );
+    let calls = std::cell::Cell::new(0);
+    for (n, coverage) in [
+        WorkCoverage::Unindexed,
+        WorkCoverage::Verified,
+        WorkCoverage::Partial,
+        WorkCoverage::RepositoryUnavailable,
+        WorkCoverage::HeadUnavailable,
+        WorkCoverage::Limit,
+        WorkCoverage::Mismatch,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let lookup = |selected: &RequestWork, _: &Request<'_>| {
+            assert_eq!(selected, &work);
+            calls.set(calls.get() + 1);
+            Ok(coverage)
+        };
+        let service = f.service().with_work_lookup(&lookup);
+        if let InboxInput::Ask { operation_id, .. } = &mut input {
+            *operation_id = op(&format!("linked-{n}"));
+        }
+        let result = service.execute(input.clone(), f.budget(), &f.cancel);
+        if coverage == WorkCoverage::Mismatch {
+            assert_eq!(result.unwrap_err().code(), "work_mismatch");
+            continue;
+        }
+        let saved = receipt(result.unwrap());
+        let InboxResult::Item { item } = f.call(show(saved.request_id)).unwrap() else {
+            panic!("item")
+        };
+        assert_eq!(saved.work_coverage, Some(coverage));
+        assert_eq!(item.request.schema_version, 2);
+        assert_eq!(
+            item.request.verified_work().is_some(),
+            coverage == WorkCoverage::Verified
+        );
+        assert_eq!(item.request.request.work, Some(work.clone()));
+        assert_eq!(item.request.work_coverage, Some(coverage));
+        assert_eq!(item.history[0].work_coverage, Some(coverage));
+        // Replay with no resolver available must retain the creation-time result.
+        assert_eq!(receipt(f.call(input.clone()).unwrap()), saved);
+    }
+    assert_eq!(calls.get(), 7);
+    assert_eq!(
+        f.service()
+            .store
+            .pending_human_requests(
+                100,
+                1_048_576,
+                &Request {
+                    clock: &f.clock,
+                    budget: f.budget(),
+                    cancel: &f.cancel,
+                    backoff: &ThreadWait,
+                }
+            )
+            .unwrap()
+            .items
+            .len(),
+        6
+    );
+}
+
+#[test]
+fn request_correlation_v2_survives_answer_close_and_acknowledgement() {
+    let f = Fixture::new();
+    let work = RequestWork {
+        run_id: provenant_core::RunId::from_bytes([3; 16]),
+        task_id: Some(provenant_core::TaskId::from_bytes([4; 16])),
+        attempt_id: None,
+        repository: None,
+        head: None,
+    };
+    let mut input = ask(RequestKind::Decision, "linked-roundtrip");
+    if let InboxInput::Ask { request, .. } = &mut input {
+        request.work = Some(work.clone());
+    }
+    let created = receipt(
+        f.service()
+            .with_work_lookup(&|_, _| Ok(WorkCoverage::Verified))
+            .execute(input, f.budget(), &f.cancel)
+            .unwrap(),
+    );
+    let check = |history_len| {
+        let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+            panic!("item")
+        };
+        assert_eq!(item.history.len(), history_len);
+        for record in std::iter::once(&item.request).chain(&item.history) {
+            assert_eq!(record.schema_version, 2);
+            assert_eq!(record.request.work.as_ref(), Some(&work));
+            assert_eq!(record.work_coverage, Some(WorkCoverage::Verified));
+            assert_eq!(record.verified_work(), Some(&work));
+        }
+        item
+    };
+    check(1);
+    let answered = receipt(f.call(answer(created.request_id, "linked-answer")).unwrap());
+    check(2);
+    f.call(InboxInput::Close {
+        id: created.request_id,
+        state: RequestState::Superseded,
+        reason: "Replaced by a new scoped request".into(),
+        expect_revision: 2,
+        operation_id: op("linked-close"),
+    })
+    .unwrap();
+    check(3);
+    f.call(InboxInput::Acknowledge {
+        id: created.request_id,
+        answer_id: answered.answer_id.unwrap(),
+        session: "session-a".into(),
+        operation_id: op("linked-ack"),
+    })
+    .unwrap();
+    let item = check(3);
+    assert_eq!(item.request.state, RequestState::Superseded);
+    assert_eq!(item.answer.unwrap().id, answered.answer_id.unwrap());
+    assert_eq!(
+        item.delivery.unwrap().state,
+        AnswerDeliveryState::Acknowledged
+    );
+}
+
+#[test]
+fn request_correlation_absent_links_preserve_old_operation_digest() {
+    let input = ask(RequestKind::Question, "old-ask");
+    let mut old = serde_json::to_value(&input).unwrap();
+    old["request"].as_object_mut().unwrap().remove("work");
+    let f = Fixture::new();
+    let request = Request {
+        clock: &f.clock,
+        budget: f.budget(),
+        cancel: &f.cancel,
+        backoff: &ThreadWait,
+    };
+    let saved = f.call(input.clone()).unwrap();
+    let replay: InboxResult = f
+        .service()
+        .store
+        .coordination_operation(
+            f.identity.project,
+            f.identity.inbox.actor,
+            &OperationId::parse("old-ask").unwrap(),
+            &("human_inbox_v1", old),
+            &request,
+            || -> Result<InboxResult, InboxError> { panic!("replay mutated") },
+        )
+        .unwrap();
+    assert_eq!(saved, replay);
+}
+
+#[test]
+fn request_correlation_lookup_never_holds_fabric_write_lock() {
+    let f = Fixture::new();
+    let mut input = ask(RequestKind::Question, "outside-transaction");
+    if let InboxInput::Ask { request, .. } = &mut input {
+        request.work = Some(RequestWork {
+            run_id: provenant_core::RunId::from_bytes([3; 16]),
+            task_id: None,
+            attempt_id: None,
+            repository: None,
+            head: None,
+        });
+    }
+    let lookup = |_: &RequestWork, _: &Request<'_>| {
+        let db =
+            rusqlite::Connection::open(f.root.as_path().join("fabric/fabric.sqlite3")).unwrap();
+        db.busy_timeout(std::time::Duration::ZERO).unwrap();
+        db.execute_batch("BEGIN IMMEDIATE; ROLLBACK")
+            .expect("lookup blocked unrelated Fabric writer");
+        // A competing preparation wins after our preflight. The transaction
+        // must return that receipt, rather than our later observation.
+        f.service()
+            .with_work_lookup(&|_, _| Ok(WorkCoverage::Unindexed))
+            .execute(input.clone(), f.budget(), &f.cancel)
+            .unwrap();
+        Ok(WorkCoverage::Verified)
+    };
+    let saved = receipt(
+        f.service()
+            .with_work_lookup(&lookup)
+            .execute(input.clone(), f.budget(), &f.cancel)
+            .unwrap(),
+    );
+    assert_eq!(saved.work_coverage, Some(WorkCoverage::Unindexed));
+}
+
+#[test]
+fn request_correlation_legacy_records_keep_v1_wire_shape_and_answer() {
+    let f = Fixture::new();
+    let saved = receipt(f.call(ask(RequestKind::Decision, "legacy")).unwrap());
+    let InboxResult::Item { item } = f.call(show(saved.request_id)).unwrap() else {
+        panic!("item")
+    };
+    let mut old = serde_json::to_value(&item.request).unwrap();
+    old.as_object_mut().unwrap().remove("work_coverage");
+    old["request"].as_object_mut().unwrap().remove("work");
+    let bytes = serde_json::to_vec(&old).unwrap();
+    let db = rusqlite::Connection::open(f.root.as_path().join("fabric/fabric.sqlite3")).unwrap();
+    for table in ["human_requests", "human_request_history"] {
+        db.execute(&format!("UPDATE {table} SET record=?1"), [&bytes])
+            .unwrap();
+    }
+    let InboxResult::Item { item } = f.call(show(saved.request_id)).unwrap() else {
+        panic!("item")
+    };
+    assert_eq!(serde_json::to_value(&item.request).unwrap(), old);
+    let listed = f
+        .call(serde_json::from_value(serde_json::json!({"op":"list"})).unwrap())
+        .unwrap();
+    let InboxResult::Listed { items, .. } = listed else {
+        panic!("list")
+    };
+    assert_eq!(items, vec![item.request]);
+    f.call(answer(saved.request_id, "legacy-answer")).unwrap();
+    let InboxResult::Item { item } = f.call(show(saved.request_id)).unwrap() else {
+        panic!("item")
+    };
+    assert_eq!(item.request.schema_version, 1);
+    assert!(
+        serde_json::to_value(&item.request)
+            .unwrap()
+            .get("work_coverage")
+            .is_none()
+    );
+}
+
+#[test]
+fn request_correlation_repository_bound_counts_encoded_wire_bytes() {
+    use std::os::unix::ffi::OsStringExt;
+    for (size, valid) in [(2048, true), (2049, false)] {
+        let mut bytes = vec![b'x'; size];
+        bytes[0] = 0xff;
+        let path = PathBuf::from(std::ffi::OsString::from_vec([vec![b'/'], bytes].concat()));
+        let mut input = ask(RequestKind::Question, "native-path");
+        if let InboxInput::Ask { request, .. } = &mut input {
+            request.work = Some(RequestWork {
+                run_id: provenant_core::RunId::from_bytes([3; 16]),
+                task_id: None,
+                attempt_id: None,
+                repository: Some(provenant_records::AbsolutePath::new(&path).unwrap()),
+                head: None,
+            });
+        }
+        assert_eq!(input.validate().is_ok(), valid);
+    }
 }
 
 #[test]
