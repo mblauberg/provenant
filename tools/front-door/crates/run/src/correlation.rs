@@ -11,6 +11,36 @@ use std::path::Path;
 pub const WORK_INDEX_FILE: &str = "work-index.sqlite3";
 const ROW_LIMIT: usize = 64;
 const MEMBER_BYTES: usize = 64 * 1024;
+/// Run selectors also need a host-verifiable namespace, including for runs
+/// predating the host's chair or membership indexes.
+pub(crate) fn child_run_id(
+    project: ProjectId,
+    request: &CanonicalRequest,
+    operation: &provenant_core::OperationId,
+) -> Result<Option<RunId>> {
+    match request.child_attempt_id_version {
+        None => Ok(None),
+        Some(1) => {
+            let parent = request.parent_attempt.ok_or(RunError::Validation(
+                "derived child IDs require a parent attempt",
+            ))?;
+            use sha2::{Digest as _, Sha256};
+            let mut hash = Sha256::new();
+            hash.update(b"provenant-child-run-v1\0");
+            hash.update(project.as_bytes());
+            hash.update(parent.as_bytes());
+            hash.update(
+                provenant_records::CanonicalV1::file_digest(operation.as_str().as_bytes()).bytes(),
+            );
+            hash.update(request.digest()?.as_bytes());
+            let digest = hash.finalize();
+            let mut id = [0; 16];
+            id.copy_from_slice(&digest[..16]);
+            Ok(Some(RunId::from_bytes(id)))
+        }
+        Some(_) => Err(RunError::Validation("unsupported child attempt ID version")),
+    }
+}
 /// Version 1 binds the ID to the entire proposal and the host's namespace.
 /// No lane-proposed ID is adopted as authority, even at first validation.
 pub(crate) fn child_attempt_id(
@@ -227,6 +257,22 @@ impl WorkIndex {
     }
 }
 impl RunStore {
+    pub(crate) fn check_child_run_id(
+        &self,
+        run: RunId,
+        request: &CanonicalRequest,
+        operation: &provenant_core::OperationId,
+    ) -> Result<()> {
+        if child_run_id(self.context.project_id, request, operation)?
+            .is_some_and(|expected| expected != run)
+        {
+            return Err(RunError::Validation(
+                "child run ID does not match host derivation",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn seal_work(
         &self,
         record: &AttemptRecord,
@@ -236,6 +282,7 @@ impl RunStore {
     ) -> Result<()> {
         if let Some(request) = child {
             self.child_requester()?;
+            self.check_child_run_id(record.run_id, request, &record.operation_id)?;
             match child_attempt_id(
                 self.context.project_id,
                 record.run_id,
@@ -520,6 +567,95 @@ mod tests {
             "forged lookup={coverage:?}, sibling={outcome:?}"
         );
         assert_eq!(coverage, WorkCoverage::Unindexed);
+        Ok(())
+    }
+
+    #[test]
+    fn request_correlation_child_run_namespace_cannot_claim_sibling() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let host = context(temp.path())?;
+        let lane_dir = temp.path().join("lane");
+        std::fs::create_dir(&lane_dir)?;
+        let lane = context(&lane_dir)?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let sibling = input();
+        let root = RunStore::open(&host, &call)?;
+        root.create(&sibling, &call)?;
+        let store = RunStore::open(&lane, &call)?
+            .with_writer_registry(host.state_root.as_path())
+            .with_sealed_requester(host.actor_id);
+        let parent = AttemptId::from_bytes([9; 16]);
+        // The lane claims a historical run/task namespace and recomputes the
+        // public attempt hash. No host membership or chair row exists yet.
+        let mut forged = input();
+        forged.request.parent_attempt = Some(parent);
+        forged.request.lane_depth = Some(2);
+        forged.request.child_attempt_id_version = Some(1);
+        forged.attempts[0].attempt_id = child_attempt_id(
+            host.project_id,
+            forged.run_id,
+            &forged.request,
+            forged.attempts[0].task_id,
+        )?
+        .ok_or("derived ID")?;
+        store.create(&forged, &call)?;
+        let validation = store.validate_child(
+            forged.run_id,
+            parent,
+            &input().request.tasks[0],
+            1,
+            2,
+            &call,
+        );
+        if let Ok(validated) = &validation {
+            store.start_child(
+                forged.run_id,
+                validated,
+                &crate::dispatch_tests::Ready,
+                &|_, _| Err(RunError::Validation("fixture child handoff")),
+                &call,
+            )?;
+        }
+        let index = WorkIndex::open(host.state_root.as_path(), &call)?;
+        let selection = WorkSelector {
+            project: host.project_id,
+            run: sibling.run_id,
+            task: Some(sibling.attempts[0].task_id),
+            attempt: None,
+            repository: None,
+            head: None,
+        };
+        assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Unindexed);
+        assert!(matches!(
+            validation,
+            Err(RunError::Validation(
+                "child run ID does not match host derivation"
+            ))
+        ));
+        // Bypassing validation must also fail at the launch boundary.
+        assert!(matches!(
+            store.start_child(
+                forged.run_id,
+                &forged.request,
+                &crate::dispatch_tests::Ready,
+                &|_, _| unreachable!("forged run reached handoff"),
+                &call
+            ),
+            Err(RunError::Validation(
+                "child run ID does not match host derivation"
+            ))
+        ));
+        let outcome = root.start(
+            sibling.run_id,
+            &crate::dispatch_tests::Ready,
+            &|_, _| Err(RunError::Validation("fixture sibling handoff")),
+            &call,
+        )?;
+        assert!(
+            matches!(outcome.as_slice(), [Started::Refused { reason, .. }] if reason.contains("fixture sibling handoff"))
+        );
         Ok(())
     }
 

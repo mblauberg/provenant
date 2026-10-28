@@ -24,7 +24,7 @@ pub struct ChairBinding {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalRequest {
-    /// Host-verifiable child ID derivation. Absent on legacy, unindexed runs.
+    /// Host-verifiable child run and attempt IDs. Absent on legacy, unindexed runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_attempt_id_version: Option<u64>,
     /// Submission proposal only. Readers trust the host-owned Fabric index.

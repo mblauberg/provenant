@@ -60,14 +60,18 @@ prompts.
 `run::WorkIndex` owns immutable membership in `<host-state>/work-index.sqlite3`.
 The trusted host seals root, resume and continuation attempts before marking
 them Starting. New nested dispatches use host-verifiable derived IDs. Their
-canonical request carries `child_attempt_id_version: 1`; each attempt ID is the
+canonical request carries `child_attempt_id_version: 1`. The child run ID is
+the first 16 bytes of SHA-256 over `provenant-child-run-v1\0`, then the raw
+project and parent attempt IDs, the SHA-256 digest of the operation ID's UTF-8
+bytes, and the canonical request digest. Each attempt ID is the
 first 16 bytes of SHA-256 over `provenant-child-attempt-v1\0` followed by the raw,
 fixed-width project, parent attempt, run, task and canonical request digest
 bytes, in that order. The namespace comes from the host's project and sealed
 parent context. The host checks every proposed ID during child validation and
-checks the retained attempt again at launch and sealing. A mismatch refuses
+checks both run and attempt identities again at launch and sealing. A mismatch refuses
 launch before membership capture, so rewriting a queued child ID cannot claim
-a sibling's membership or poison its launch.
+a sibling's membership or poison its launch. A lane cannot claim a historical
+run namespace by choosing its run ID and recomputing the public attempt hash.
 
 This scheme avoids rekeying lane-published records and IDs already returned to
 callers. There is no migration of existing child records: an absent version

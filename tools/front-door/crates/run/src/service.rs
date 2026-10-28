@@ -255,6 +255,13 @@ impl<'a> Service<'a> {
                 prepared.request = legacy;
             }
         }
+        if let Some(id) = crate::correlation::child_run_id(
+            self.store.context.project_id,
+            &prepared.request,
+            &prepared.operation_id,
+        )? {
+            prepared.run_id = id;
+        }
         for attempt in &mut prepared.attempts {
             if let Some(id) = crate::correlation::child_attempt_id(
                 self.store.context.project_id,

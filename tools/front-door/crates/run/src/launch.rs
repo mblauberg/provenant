@@ -357,6 +357,7 @@ impl RunStore {
         request: &CanonicalRequest,
         record: &AttemptRecord,
     ) -> Result<Option<&'static str>> {
+        self.check_child_run_id(run, request, &record.operation_id)?;
         Ok(if record.run_id != run {
             Some("child attempt run does not match")
         } else if crate::correlation::child_attempt_id(
@@ -446,6 +447,7 @@ impl RunStore {
                 "a child run cannot continue an attempt",
             ));
         }
+        self.check_child_run_id(run, &request, &self.run(run, call)?.operation_id)?;
         let attempts = self.child_attempts(run, &request, call)?;
         if let Some(reason) = attempts.refusals.values().next() {
             return Err(RunError::Validation(reason));
@@ -655,7 +657,10 @@ impl RunStore {
                     "child request changed after validation",
                 ));
             }
-            Some((_, requester)) => requester,
+            Some((_, requester)) => {
+                self.check_child_run_id(run, &request, &self.run(run, call)?.operation_id)?;
+                requester
+            }
             None => self.run(run, call)?.actor_id,
         };
         let resume = request
