@@ -6,12 +6,27 @@ use std::{fs, path::Path};
 
 #[test]
 fn generated_schema_snapshot_is_checked_in() {
-    let actual = serde_json::to_string_pretty(catalogue()).expect("catalogue serialises");
-    let expected = include_str!(concat!(
+    let snapshot: Vec<Value> = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/tool-schemas.json"
-    ));
-    assert_eq!(actual, expected);
+        "/tests/fixtures/all-tool-schemas.json"
+    )))
+    .expect("snapshot parses");
+    let names = [
+        "fabric_context",
+        "fabric_mail",
+        "fabric_run",
+        "fabric_output",
+        "fabric_discover",
+    ];
+    let subset: Vec<_> = snapshot
+        .into_iter()
+        .filter(|tool| {
+            tool["name"]
+                .as_str()
+                .is_some_and(|name| names.contains(&name))
+        })
+        .collect();
+    assert_eq!(catalogue(), subset);
     let actual = serde_json::to_string_pretty(&all_catalogue()).expect("catalogue serialises");
     let expected = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -23,9 +38,6 @@ fn generated_schema_snapshot_is_checked_in() {
 #[test]
 #[ignore = "run explicitly to refresh the checked schema snapshot"]
 fn update_schema_snapshot() {
-    let actual = serde_json::to_string_pretty(catalogue()).expect("catalogue serialises");
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tool-schemas.json");
-    fs::write(path, actual).expect("write schema snapshot");
     let actual = serde_json::to_string_pretty(&all_catalogue()).expect("catalogue serialises");
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/all-tool-schemas.json");
     fs::write(path, actual).expect("write schema snapshot");

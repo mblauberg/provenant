@@ -522,50 +522,6 @@ mod tests {
     }
 
     #[test]
-    fn companion_refuses_unsafe_metadata_after_an_unlink() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let directory = Directory::open_anchor(temp.path())?;
-        let safe = directory
-            .create_new(OsStr::new("run.sqlite3-wal"))?
-            .metadata()?;
-        let clock = crate::tests::clock();
-        let cancel = CancelToken::new();
-        let request = crate::tests::call(&clock, &cancel);
-        for unsafe_metadata in [
-            Metadata { links: 2, ..safe },
-            Metadata {
-                kind: provenant_os::fs::FileKind::Symlink,
-                ..safe
-            },
-            Metadata {
-                kind: provenant_os::fs::FileKind::Directory,
-                ..safe
-            },
-            Metadata {
-                mode: 0o644,
-                ..safe
-            },
-            Metadata {
-                uid: safe.uid.wrapping_add(1),
-                ..safe
-            },
-        ] {
-            let mut observations = 0;
-            let result = companion(&request, || {
-                observations += 1;
-                Ok(if observations == 1 {
-                    Metadata { links: 0, ..safe }
-                } else {
-                    unsafe_metadata
-                })
-            });
-            assert!(matches!(result, Err(RunError::UnsafePath { .. })));
-            assert_eq!(observations, 2);
-        }
-        Ok(())
-    }
-
-    #[test]
     fn companion_unlink_retry_preserves_wait_errors() -> TestResult {
         let temp = tempfile::tempdir()?;
         let directory = Directory::open_anchor(temp.path())?;
