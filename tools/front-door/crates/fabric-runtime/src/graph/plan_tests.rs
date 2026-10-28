@@ -86,17 +86,21 @@ fn plan_overlapping_writers_share_one_worktree_integrate_and_deliver_once() {
         node
     }).collect();
     let output = result(nodes);
-    let mut owner = fixture_owner(&[&output, "a done", "b done", "both done", "checked"]);
+    let mut owner = fixture_owner(&[&output]);
+    owner.observations.push_back(AttemptObservation::Pending { attempt_ref: Some("a".into()) });
     let mut journal = MemoryJournal::default();
+    let partial = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(partial.checkpoint.nodes.iter().filter(|n| n.state == NodeState::Running).count(), 1);
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.deliveries, 0);
+    journal.0 = Some(serde_json::from_slice(&serde_json::to_vec(&partial.checkpoint).unwrap()).unwrap());
+    owner.observations.extend(["a done", "b done", "both done", "checked"].map(|text| terminal_with_result(AttemptOutcome::Succeeded, text)));
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
     assert!(run.checkpoint.successful());
     assert_eq!(owner.deliveries, 1);
-    assert!(owner.permissions[1..4].iter().all(|p| *p == (AccessMode::WorktreeWrite, Some(".worktrees/a".into()))));
-    assert!(owner.delivery_modes[1..4].iter().all(|mode| *mode == Some(provenant_records::run::DeliveryMode::Integrate("integration".into()))));
-    let expanded = &run.checkpoint.expansions[0].nodes;
-    assert!(expanded[1].depends_on.contains(&expanded[0].id));
-    assert!(expanded[2].depends_on.contains(&expanded[1].id));
+    assert!(owner.permissions[1..5].iter().all(|p| *p == (AccessMode::WorktreeWrite, Some(".worktrees/a".into()))));
+    assert!(owner.delivery_modes[1..5].iter().all(|mode| *mode == Some(provenant_records::run::DeliveryMode::Integrate("integration".into()))));
     let encoded = serde_json::to_vec(&run.checkpoint).unwrap();
     journal.0 = Some(serde_json::from_slice(&encoded).unwrap());
     let replay = advance(&doc, &mut owner, &mut journal).unwrap();
@@ -315,5 +319,28 @@ fn fragment_gate_recovery_is_a_completion_dependency_for_consumers() {
         assert_eq!(run.status, GraphStatus::Complete);
         assert!(run.checkpoint.successful());
         assert_eq!(owner.calls.last().unwrap().0.node_id, "after");
+    }
+}
+
+#[test]
+fn an_inactive_recovery_writer_does_not_skip_an_overlapping_required_writer() {
+    for (sibling, explicit_dependency) in [(true, false), (false, false), (false, true)] {
+        let mut first = planner(4).nodes.remove(0); first.id = "first".into();
+        let mut second = first.clone(); second.id = "second".into();
+        let mut doc = graph(if sibling { vec![first, second] } else { vec![first] }); doc.integration_branch = Some("integration".into());
+        let mut repair = slice("repair", &["src"]); repair["access"] = json!("worktree_write"); repair["worktree"] = json!(".worktrees/a"); repair["depends_on"] = json!(["gate"]);
+        let mut nodes = vec![slice("review", &["src"]), json!({"id":"gate","kind":"gate","access":"read_only","depends_on":["review"],"inputs":[{"node":"review","outputs":["verdict"]}],"condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"},"on_fail":"repair"}), repair];
+        let mut required = slice("required", &["src"]); required["access"] = json!("worktree_write"); required["worktree"] = json!(".worktrees/b");
+        if explicit_dependency { required["depends_on"] = json!(["repair"]); }
+        if !sibling { nodes.push(required.clone()); }
+        let first = result(nodes);
+        let second = result(vec![required]);
+        let texts = if sibling { vec![first.as_str(), second.as_str(), "VERDICT: PASS", "done"] } else { vec![first.as_str(), "VERDICT: PASS", "done"] };
+        let mut owner = fixture_owner(&texts);
+        let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert!(run.checkpoint.successful());
+        let id = if sibling { "second--required" } else { "first--required" };
+        assert_eq!(run.checkpoint.nodes.iter().find(|n| n.id == id).unwrap().state, if explicit_dependency { NodeState::Skipped } else { NodeState::Succeeded });
+        assert_eq!(owner.calls.len(), if sibling { 4 } else if explicit_dependency { 2 } else { 3 });
     }
 }

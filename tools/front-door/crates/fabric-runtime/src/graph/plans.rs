@@ -290,7 +290,7 @@ fn fragment(
         .filter_map(|n| local.nodes.iter().find(|child| child.id == n.id).cloned())
         .collect();
     // Union overlapping writer scopes, including transitive overlaps. Every
-    // component uses one checkout; the ordinary dependency scheduler serialises it.
+    // component uses one checkout; admission fences serialise its writers.
     let mut components: Vec<usize> = (0..nodes.len()).collect();
     for i in 0..nodes.len() {
         for j in 0..i {
@@ -316,12 +316,6 @@ fn fragment(
                 return Err("overlapping writers require an integration_branch".into());
             }
             nodes[i].worktree = first.worktree;
-            if let Some(previous) = (0..i).rev().find(|j| components[*j] == components[i]) {
-                let previous = nodes[previous].id.clone();
-                if !nodes[i].depends_on.contains(&previous) {
-                    nodes[i].depends_on.push(previous);
-                }
-            }
         }
     }
     let id = |name: &str| format!("{}--{name}", node.id);
@@ -337,7 +331,7 @@ fn fragment(
         child.on_fail = child.on_fail.as_deref().map(id);
         child.round = None;
     }
-    coordinate(&mut nodes, document, &node.id)?;
+    coordinate(&mut nodes, document)?;
     Ok(Expansion {
         source: node.id.clone(),
         continuation: false,
@@ -345,27 +339,7 @@ fn fragment(
     })
 }
 
-fn descends(document: &GraphDocument, node: &str, ancestor: &str) -> bool {
-    let mut pending = vec![node.to_owned()];
-    let mut seen = std::collections::BTreeSet::new();
-    while let Some(id) = pending.pop() {
-        if id == ancestor {
-            return true;
-        }
-        if seen.insert(id.clone())
-            && let Some(node) = document.nodes.iter().find(|n| n.id == id)
-        {
-            pending.extend(node.dependencies().cloned());
-        }
-    }
-    false
-}
-
-fn coordinate(
-    nodes: &mut [GraphNode],
-    document: &GraphDocument,
-    source: &str,
-) -> Result<(), String> {
+fn coordinate(nodes: &mut [GraphNode], document: &GraphDocument) -> Result<(), String> {
     let paths: std::collections::BTreeSet<_> = nodes
         .iter()
         .filter(|n| n.access == AccessMode::WorktreeWrite)
@@ -397,21 +371,11 @@ fn coordinate(
             if document.integration_branch.is_none() {
                 return Err("overlapping writers require an integration_branch".into());
             }
-            let dependencies: Vec<_> = existing
-                .iter()
-                .filter(|n| !descends(document, &n.id, source))
-                .map(|n| n.id.clone())
-                .collect();
             for child in nodes
                 .iter_mut()
                 .filter(|n| n.worktree.as_ref() == Some(&path))
             {
                 child.worktree = Some((*checkout).clone());
-                for id in &dependencies {
-                    if !child.depends_on.contains(id) {
-                        child.depends_on.push(id.clone());
-                    }
-                }
             }
         }
     }

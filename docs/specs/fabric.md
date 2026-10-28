@@ -407,7 +407,7 @@ their round membership after persistence.
 
 Disjoint scoped writers in separate registered checkouts may run concurrently.
 Overlapping scopes, including transitive overlaps and identical checkouts,
-must share one checkout and dependency order. Such components require a graph
+must share one checkout and serial admission. Such components require a graph
 integration branch; their writers use existing integrate delivery and the
 graph owns at most one final PR. Write scope is a scheduling declaration and
 part of the brief; existing worktree confinement remains the write boundary.
