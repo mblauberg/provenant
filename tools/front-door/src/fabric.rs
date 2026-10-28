@@ -2274,6 +2274,46 @@ fn load_graph_prices(assets: &std::path::Path) -> Result<provenant_telemetry::Pr
         .map_err(|error| format!("{}: invalid price table: {error}", path.display()))
 }
 
+fn graph_attempt_usage(
+    record: provenant_records::run::AttemptRecord,
+    prices: Option<&provenant_telemetry::PriceTable>,
+    cost_unknown_reason: Option<String>,
+) -> provenant_fabric_runtime::graph::AttemptUsage {
+    let usage = &record.usage;
+    let categories = [
+        usage.uncached_input,
+        usage.cache_read,
+        usage.cache_write,
+        usage.output_excluding_reasoning,
+        usage.reasoning,
+    ];
+    let tokens_partial = categories.iter().any(Option::is_none);
+    let tokens = categories.iter().any(Option::is_some).then(|| {
+        categories
+            .into_iter()
+            .flatten()
+            .fold(0u64, u64::saturating_add)
+    });
+    let cost = prices
+        .and_then(|prices| {
+            provenant_run::fact(record.clone()).ok().and_then(|fact| {
+                provenant_telemetry::stats([fact], prices, Default::default()).ok()
+            })
+        })
+        .map(|report| report.totals.cost);
+    let cost_partial = cost.as_ref().is_none_or(|cost| cost.complete.is_none());
+    let cost_micro_usd =
+        cost.and_then(|cost| cost.known_lower_bound.map(|money| money.microdollars));
+    provenant_fabric_runtime::graph::AttemptUsage {
+        tokens,
+        cost_micro_usd,
+        wall_time_seconds: record.provider_ms.map(|ms| ms.saturating_add(999) / 1000),
+        tokens_partial,
+        cost_partial,
+        cost_unknown_reason,
+    }
+}
+
 fn graph_journal_error(error: provenant_fabric_runtime::graph::JournalError) -> FacadeError {
     use provenant_fabric_runtime::graph::JournalError;
     match error {
@@ -3047,46 +3087,17 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             chair: None,
         };
         let record = owner.snapshot(target, self.budget, self.cancel)?;
-        let usage = &record.usage;
-        let categories = [
-            usage.uncached_input,
-            usage.cache_read,
-            usage.cache_write,
-            usage.output_excluding_reasoning,
-            usage.reasoning,
-        ];
-        let tokens_partial = categories.iter().any(Option::is_none);
-        let tokens = categories.iter().any(Option::is_some).then(|| {
-            categories
-                .into_iter()
-                .flatten()
-                .fold(0u64, u64::saturating_add)
-        });
         let cost_unknown_reason = self.cost_unknown_reason();
         let prices = self
             .prices
             .get_or_insert_with(|| load_graph_prices(&self.factory.assets));
-        let cost = prices
-            .as_ref()
-            .ok()
-            .and_then(|prices| {
-                provenant_run::fact(record.clone()).ok().and_then(|fact| {
-                    provenant_telemetry::stats([fact], prices, Default::default()).ok()
-                })
-            })
-            .map(|report| report.totals.cost);
-        let cost_partial = cost.as_ref().is_none_or(|cost| cost.complete.is_none());
-        let cost_micro_usd =
-            cost.and_then(|cost| cost.known_lower_bound.map(|money| money.microdollars));
-        Ok(provenant_fabric_runtime::graph::AttemptUsage {
-            tokens,
-            cost_micro_usd,
-            wall_time_seconds: record.provider_ms.map(|ms| ms.saturating_add(999) / 1000),
-            tokens_partial,
-            cost_partial,
+        Ok(graph_attempt_usage(
+            record,
+            prices.as_ref().ok(),
             cost_unknown_reason,
-        })
+        ))
     }
+
     fn observe_or_start(
         &mut self,
         key: &provenant_fabric_runtime::graph::AttemptKey,
@@ -3950,6 +3961,119 @@ pub fn events(
 }
 #[cfg(test)]
 mod result_tests {
+    #[test]
+    fn graph_usage_maps_attempt_telemetry_and_prices() {
+        fn usage_record(
+            model: &str,
+            usage: serde_json::Value,
+            provider_ms: Option<u64>,
+        ) -> provenant_records::run::AttemptRecord {
+            use provenant_core::{AttemptId, Digest, ProjectId, RunId, TaskId, WallTime};
+            use serde_json::json;
+            let now = WallTime::from_micros(1).unwrap();
+            serde_json::from_value(json!({
+                "schema_version": 1,
+                "attempt_id": AttemptId::from_bytes([1; 16]),
+                "run_id": RunId::from_bytes([2; 16]),
+                "project_id": ProjectId::from_bytes([3; 16]),
+                "task_id": TaskId::from_bytes([4; 16]),
+                "operation_id": "graph-usage-test",
+                "attempt_number": 1, "revision": 1, "generation": 0,
+                "requested_route": {"kind":"model", "provider":"p", "model":model},
+                "resolved_route": {"provider":"p", "model":model, "effort":null, "account_label":null},
+                "authority_digest": Digest::from_bytes([5; 32]), "queued_at": now,
+                "state": {"state":"terminal", "outcome":"lost", "exit_code":null, "finished_at":now, "reason":null},
+                "provider_ms": provider_ms, "usage": usage,
+                "prompt": {"path":{"encoding":"utf8", "path":"prompt.txt"},
+                    "digest": provenant_records::CanonicalV1::file_digest(b""), "bytes":0, "complete":true, "redacted":false}
+            })).unwrap()
+        }
+
+        fn usage_prices() -> provenant_telemetry::PriceTable {
+            let config = provenant_telemetry::ConfiguredPrices {
+                schema_version: 1,
+                id: "test".into(),
+                reviewed_at: "2026-10-22".into(),
+                units: "usd_microdollars_per_million_tokens".into(),
+                models: vec![provenant_telemetry::ConfiguredModel {
+                    provider: "p".into(),
+                    model: "priced".into(),
+                    sources: vec!["test".into()],
+                    billing: provenant_telemetry::BillingKind::Api,
+                    zero_rate_verified: false,
+                    rates: provenant_telemetry::Rates {
+                        uncached_input: Some(1_000_000),
+                        cache_read: Some(2_000_000),
+                        cache_write: Some(3_000_000),
+                        output_excluding_reasoning: Some(4_000_000),
+                    },
+                }],
+            };
+            provenant_telemetry::validate_prices(&config).unwrap()
+        }
+
+        use serde_json::json;
+        let prices = usage_prices();
+        let full = json!({"uncached_input":1_000_000, "cache_read":1_000_000,
+            "cache_write":1_000_000, "output_excluding_reasoning":1_000_000, "reasoning":1_000_000});
+        let result = super::graph_attempt_usage(
+            usage_record("priced", full.clone(), Some(1001)),
+            Some(&prices),
+            None,
+        );
+        assert_eq!(result.tokens, Some(5_000_000));
+        assert!(!result.tokens_partial);
+        assert_eq!(result.cost_micro_usd, Some(14_000_000));
+        assert!(!result.cost_partial);
+        assert_eq!(result.wall_time_seconds, Some(2));
+        assert_eq!(result.cost_unknown_reason, None);
+
+        let partial = super::graph_attempt_usage(
+            usage_record("priced", json!({"uncached_input":1_000_000}), Some(1000)),
+            Some(&prices),
+            None,
+        );
+        assert_eq!(partial.tokens, Some(1_000_000));
+        assert!(partial.tokens_partial);
+        assert_eq!(partial.cost_micro_usd, Some(1_000_000));
+        assert!(partial.cost_partial);
+        assert_eq!(partial.wall_time_seconds, Some(1));
+
+        let absent = super::graph_attempt_usage(
+            usage_record("priced", json!({}), None),
+            Some(&prices),
+            None,
+        );
+        assert_eq!(absent.tokens, None);
+        assert!(absent.tokens_partial);
+        assert_eq!(absent.cost_micro_usd, None);
+        assert!(absent.cost_partial);
+        assert_eq!(absent.wall_time_seconds, None);
+
+        let unpriced = super::graph_attempt_usage(
+            usage_record("unpriced", full.clone(), Some(0)),
+            Some(&prices),
+            None,
+        );
+        assert_eq!(unpriced.tokens, Some(5_000_000));
+        assert!(!unpriced.tokens_partial);
+        assert_eq!(unpriced.cost_micro_usd, None);
+        assert!(unpriced.cost_partial);
+        assert_eq!(unpriced.wall_time_seconds, Some(0));
+
+        let unavailable = super::graph_attempt_usage(
+            usage_record("priced", full, None),
+            None,
+            Some("price table unavailable".into()),
+        );
+        assert_eq!(unavailable.cost_micro_usd, None);
+        assert!(unavailable.cost_partial);
+        assert_eq!(
+            unavailable.cost_unknown_reason.as_deref(),
+            Some("price table unavailable")
+        );
+    }
+
     #[test]
     fn graph_status_handles_pause_left_after_terminal_checkpoint() {
         use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphStatus, NodeState};
