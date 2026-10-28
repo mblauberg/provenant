@@ -715,7 +715,7 @@ impl RunStore {
         {
             self.settle_recovered(&attempt, proof.into_recovery())?;
             // Recheck custody after release before removing lock-named payloads.
-            let _ = self.reconcile_terminal_temporary(record, call, _observer)?;
+            let _ = self.reconcile_terminal_temporary(record, call, _observer);
         } else {
             // Lost without exit evidence deliberately preserves scratch.
             self.commit_reboot_lost(&proof, call)?;

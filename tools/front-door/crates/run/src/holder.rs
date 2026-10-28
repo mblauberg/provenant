@@ -192,12 +192,21 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
             )
             .map_err(custody_error)?;
         crate::writer::settle_launch_staging(attempt).map_err(custody_error)?;
-        custody::publish_release(attempt, exit.scope)?;
-        let _commit = recovery.verify_settlement(attempt)?;
-        // Custody still excludes a writer and the exit and release are sealed.
-        let _ = crate::artifacts::remove_unreserved_terminal_temporary(attempt);
-        Ok(())
+        release_and_reclaim(attempt, exit.scope, recovery)
     }
+}
+
+pub(crate) fn release_and_reclaim(
+    attempt: &Directory,
+    scope: custody::Scope,
+    recovery: &custody::Recovery,
+) -> custody::Result<()> {
+    custody::publish_release(attempt, scope)?;
+    if let Ok(_commit) = recovery.verify_settlement(attempt) {
+        // Hold the verified custody lock until temporary cleanup finishes.
+        let _ = crate::artifacts::remove_unreserved_terminal_temporary(attempt);
+    }
+    Ok(())
 }
 
 impl RunStore {
