@@ -606,6 +606,45 @@ fn streamed_result_is_verified_and_redacted_across_chunks() -> TestResult {
 }
 
 #[test]
+fn streamed_verdict_evidence_validates_complete_large_artifacts() -> TestResult {
+    for duplicate in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let input = input();
+        let id = input.attempts[0].attempt_id;
+        store.create(&input, &call)?;
+        seal_exit_fixture(&store, &input)?;
+        let text = format!(
+            "{}\n{}{}\nVERDICT: PASS",
+            "x".repeat(5000),
+            if duplicate { "VERDICT: FAIL\n" } else { "" },
+            "y".repeat(20000)
+        );
+        let mut done = publication();
+        done.result = &text;
+        store.publish_terminal(id, 1, &done, &exit(), &call)?;
+        let captured = store.stream_result(id, &call, None)?;
+        assert!(captured.source_truncated);
+        assert!(!captured.excerpt.contains("VERDICT: FAIL"));
+        assert!(!captured.tail.contains("VERDICT: FAIL"));
+        assert_eq!(
+            captured.verdict.as_deref(),
+            if duplicate {
+                None
+            } else {
+                Some("VERDICT: PASS")
+            }
+        );
+        assert_eq!(captured.verdict_invalid, duplicate);
+    }
+    Ok(())
+}
+
+#[test]
 fn transcript_part_reads_the_redacted_tail_of_the_provider_transcript() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;

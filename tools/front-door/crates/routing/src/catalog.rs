@@ -176,7 +176,7 @@ impl From<FixedDeadline> for String {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(default)]
 /// Routing settings. Library callers should resolve account selectors to
@@ -186,12 +186,28 @@ impl From<FixedDeadline> for String {
 pub struct RoutingConfig {
     /// Silence the advisory for Opus implementation lanes.
     pub suppress_opus_writer_warning: bool,
+    pub capacity_cooldown_seconds: u64,
     pub routes: BTreeMap<String, NamedRoute>,
     pub pools: BTreeMap<String, Vec<RoutePoolMember>>,
     pub pacing: PacingSettings,
     pub pacing_reserve: BTreeMap<String, PacingReserve>,
     pub pacing_overrides: Vec<PacingOverride>,
     pub opencode_go: OpenCodeGoSettings,
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            suppress_opus_writer_warning: false,
+            capacity_cooldown_seconds: 600,
+            routes: BTreeMap::new(),
+            pools: BTreeMap::new(),
+            pacing: PacingSettings::default(),
+            pacing_reserve: BTreeMap::new(),
+            pacing_overrides: Vec::new(),
+            opencode_go: OpenCodeGoSettings::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -641,7 +657,7 @@ mod pacing_profile_tests {
     }
 }
 fn defaults(_: Profile) -> &'static str {
-    "suppress_opus_writer_warning = false\npacing_overrides = []\n[opencode_go]\nmin_monthly_allowance_usd = 60\n[routes]\n[pools]\n[pacing]\n[pacing_reserve]\n"
+    "suppress_opus_writer_warning = false\ncapacity_cooldown_seconds = 600\npacing_overrides = []\n[opencode_go]\nmin_monthly_allowance_usd = 60\n[routes]\n[pools]\n[pacing]\n[pacing_reserve]\n"
 }
 pub const SECTION: DomainSection = DomainSection::new::<RoutingConfig>("routing", defaults);
 
@@ -901,6 +917,7 @@ mod tests {
             registry: REGISTRY,
             availability: &availability,
             quota: &[],
+            capacity_cooldowns: &[],
             access: &access,
             now: provenant_core::WallTime::from_micros(100_000_000)?,
             host: "test-host",

@@ -109,27 +109,83 @@ build runs. Worktree removal and `provenant gc` remove this directory with the
 cache. Read-only lanes have no lane cache and get no variable.
 
 On macOS, a host may opt writer lanes into cloning the host Cargo registry
-into a fresh private Cargo home by hand-editing its state `config.toml` (this
+and Git store into a fresh private Cargo home by hand-editing its state `config.toml` (this
 setting is not supported by `provenant config set`):
 
 ```toml
 [domains.fabric.lanes.cargo_seed]
 enabled = true
+max_generations = 3
+max_bytes = 21474836480
 ```
 
-The default is false. Only `~/.cargo/registry` is seeded; Cargo Git stores and
-build targets are unchanged. Existing lane registries are retained. Cloning
+The default is false. `~/.cargo/registry` and `~/.cargo/git` are seeded independently;
+existing lane stores are retained. Cloning
 requires filesystem support for copy-on-write clones and falls back to an
 empty registry when unavailable or a source entry cannot be cloned. A symlink
-or other unsupported entry anywhere in the host registry causes the whole seed
-to fall back on every fresh lane until the entry is removed or the registry is
-recreated. Inspect the host registry and the `registry_contains_unsupported_entry`
-reason in the attempt record to diagnose this. Other platforms skip this
-setting. Each attempt's `cargo-setup.json` records a `status` (`seeded`,
+or other unsupported entry anywhere in a host store causes that whole store
+to fall back on every fresh lane until the entry is removed or the store is
+recreated. Inspect the host store and the `registry_contains_unsupported_entry`
+or `git_contains_unsupported_entry` reason in the attempt record to diagnose this.
+Other platforms skip this setting. Each attempt's `cargo-setup.json` (registry)
+and `cargo-git-setup.json` (Git) record a `status` (`seeded`,
 `skipped`, or `fallback`) and a `reason`. If the record cannot be written, the
 host emits a warning and the lane still runs. A `durability_unconfirmed` reason
-means the registry was published but its directory sync failed. Read-only lanes
+means the store was published but its directory sync failed. Read-only lanes
 retain their existing read-only registry access.
+
+To prepare a target seed, run `provenant worktree seed-build` on the host from
+the project. It builds `tools/front-door` from the pinned local `origin/main`
+commit in a scratch checkout, using `cargo build --locked --all-targets` and
+`cargo test --locked --no-run`. A successful build is published as a generation
+under the state directory's `cargo-target-seeds/generations/`. The manifest
+records the commit, full `rustc -vV`, host triple, profile, features and flags.
+Refresh `origin/main` before building when a newer seed is wanted. This is a
+host operation: only build seeds from a trusted `origin/main`.
+
+Fresh writer targets are cloned from the newest generation whose full rustc
+version and host triple match the lane's toolchain. Cargo fingerprints decide
+which units can be reused when source, profile, features or flags differ. The
+host probes an installed release compiler directly, without executing a toolchain
+or binary from the writer checkout. Verification requires an explicit fixed
+release pin in `tools/front-door/rust-toolchain.toml` or the legacy
+`rust-toolchain`, an unambiguous host installation, and no rustup overrides or
+lane environment overrides. The lane's PATH must resolve to the protected host
+rustup shim, the lane must not be able to write its toolchain, and Cargo config
+files that could select another compiler cause a fallback. If verification
+fails, the target falls back with `toolchain_unverified`. The lane writes only
+its own target; it cannot promote output into the seed. An existing lane target
+is retained. `cargo-target-setup.json` records whether
+preparation seeded, skipped or fell back, including mismatch reasons. The lane
+starts with an empty target if no matching generation can be cloned. The
+configuration above limits retained generations to three and 20 GiB of apparent
+file size; `provenant gc` removes the oldest generations over either limit.
+It also reclaims abandoned build staging trees once no seed build is active,
+and removes incomplete generations. Only one host seed build runs at a time.
+Generations created before the completion marker was introduced are treated
+as incomplete; build a fresh generation after upgrading.
+GC skips the store while a lane is cloning. Zero for either limit removes all
+generations at the next GC.
+
+To compare on each host, build a generation, then run the following from the
+same checkout on an unconfined host. Substitute the generation directory shown
+by `seed-build` and a new output directory on the same APFS volume:
+
+```sh
+scripts/measure-cargo-target-seed \
+  "$HOME/.local/share/provenant/v1/cargo-target-seeds/generations/GENERATION" \
+  "$HOME/seed-measurement" > seed-measurement.txt
+```
+
+The script clones each file with `clonefile`, failing if cloning is unavailable,
+then times `cargo check --locked` and `cargo test --no-run --locked` in separate
+cold and seeded targets. It reports each target's apparent and allocated bytes
+using `du`, plus the volume free-space change during cloning. `du` counts shared
+blocks for each clone, so it cannot determine shared bytes; the free-space
+change is only an estimate and can include concurrent volume activity. Record
+the manifest, checkout and toolchain printed with the timings. The output targets
+are retained for inspection. These measurements are still pending on both hosts;
+there is no evidence yet to enable seeding by default.
 
 `provenant worktree remove` deletes only the removed worktree's own lane cache,
 derived from its verified identity before Git removes it. Cache cleanup holds

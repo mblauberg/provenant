@@ -3,6 +3,7 @@ use sha2::{Digest as _, Sha256};
 
 const HEAD_BYTES: usize = 4096;
 const TAIL_BYTES: usize = 16384;
+const VERDICT_BYTES: usize = 1024;
 
 /// A streaming accumulator. Storage is bounded by the window sizes and the
 /// already validated required verdict, irrespective of artifact length.
@@ -17,10 +18,15 @@ pub struct ResultCapture {
     line_started: bool,
     line_invalid: bool,
     utf8: Vec<u8>,
+    verdict: VerdictCapture,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapturedResult {
+    /// Exactly one well-formed verdict, on the final non-empty line of the
+    /// complete stream. Independent of the legacy required-line contract.
+    pub verdict: Option<Box<str>>,
+    pub verdict_invalid: bool,
     pub digest: String,
     pub excerpt: String,
     pub tail: String,
@@ -45,10 +51,12 @@ impl ResultCapture {
             line_started: false,
             line_invalid: false,
             utf8: Vec::with_capacity(4),
+            verdict: VerdictCapture::default(),
         }
     }
 
     pub fn push(&mut self, chunk: &[u8]) {
+        self.verdict.push(chunk);
         self.hash.update(chunk);
         self.bytes = self.bytes.saturating_add(chunk.len() as u64);
         let take = HEAD_BYTES.saturating_sub(self.head.len()).min(chunk.len());
@@ -146,7 +154,10 @@ impl ResultCapture {
             || String::from_utf8_lossy(&self.tail).len() > TAIL_BYTES;
         let truncated = self.bytes > HEAD_BYTES as u64
             || String::from_utf8_lossy(&self.head).len() > HEAD_BYTES;
+        let (verdict, verdict_invalid) = self.verdict.finish();
         CapturedResult {
+            verdict,
+            verdict_invalid,
             digest,
             excerpt,
             tail,
@@ -155,6 +166,75 @@ impl ResultCapture {
             tail_truncated,
             matched_required: self.matched_required,
         }
+    }
+}
+
+/// Retain one bounded line and count verdict markers across every byte, even
+/// outside the excerpt windows. Quoted, repeated or malformed markers cannot
+/// be hidden by a later valid verdict.
+#[derive(Default)]
+struct VerdictCapture {
+    line: Vec<u8>,
+    overflow: bool,
+    marker_prefix: usize,
+    markers: u8,
+    final_verdict: Option<Box<str>>,
+}
+
+impl VerdictCapture {
+    fn push(&mut self, chunk: &[u8]) {
+        const MARKER: &[u8] = b"verdict:";
+        for &byte in chunk {
+            if byte == b'\n' {
+                self.end_line();
+                continue;
+            }
+            let lower = byte.to_ascii_lowercase();
+            self.marker_prefix = if lower == MARKER[self.marker_prefix] {
+                self.marker_prefix + 1
+            } else {
+                usize::from(lower == MARKER[0])
+            };
+            if self.marker_prefix == MARKER.len() {
+                self.markers = self.markers.saturating_add(1);
+                self.marker_prefix = 0;
+            }
+            if self.line.len() < VERDICT_BYTES {
+                self.line.push(byte);
+            } else {
+                self.overflow = true;
+            }
+        }
+    }
+
+    fn end_line(&mut self) {
+        let text = std::str::from_utf8(&self.line).ok().map(str::trim);
+        if self.overflow || text != Some("") {
+            self.final_verdict = text
+                .filter(|line| {
+                    !self.overflow
+                        && self.markers == 1
+                        && line.strip_prefix("VERDICT: ").is_some_and(|token| {
+                            !token.is_empty()
+                                && token.bytes().all(|byte| {
+                                    byte.is_ascii_uppercase()
+                                        || byte.is_ascii_digit()
+                                        || matches!(byte, b'_' | b'-')
+                                })
+                        })
+                })
+                .map(Box::<str>::from);
+        }
+        self.line.clear();
+        self.overflow = false;
+        self.marker_prefix = 0;
+    }
+
+    fn finish(mut self) -> (Option<Box<str>>, bool) {
+        self.end_line();
+        let verdict = self.final_verdict.filter(|_| self.markers == 1);
+        let invalid = self.markers > 0 && verdict.is_none();
+        (verdict, invalid)
     }
 }
 
@@ -184,6 +264,45 @@ fn window(bytes: &[u8], cap: usize, tail: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verdict_evidence_is_unique_final_and_independent_of_chunk_boundaries() {
+        for (text, expected, invalid) in [
+            (
+                "Findings first.\nVERDICT: PASS\n\n".to_owned(),
+                Some("VERDICT: PASS"),
+                false,
+            ),
+            ("VERDICT: FAIL".to_owned(), Some("VERDICT: FAIL"), false),
+            ("No verdict".to_owned(), None, false),
+            ("VERDICT: PASS\nmore text".to_owned(), None, true),
+            ("verdict: PASS\nVERDICT: PASS".to_owned(), None, true),
+            (
+                "Quoted: VERDICT: PASS\nVERDICT: PASS".to_owned(),
+                None,
+                true,
+            ),
+            (
+                format!(
+                    "{}\nVERDICT: FAIL\n{}\nVERDICT: PASS",
+                    "x".repeat(5000),
+                    "y".repeat(20000)
+                ),
+                None,
+                true,
+            ),
+        ] {
+            for size in [1, 7, 4096] {
+                let mut capture = ResultCapture::new(Some("VERDICT: PASS"));
+                for chunk in text.as_bytes().chunks(size) {
+                    capture.push(chunk);
+                }
+                let captured = capture.finish();
+                assert_eq!(captured.verdict.as_deref(), expected);
+                assert_eq!(captured.verdict_invalid, invalid);
+            }
+        }
+    }
 
     #[test]
     fn hashes_all_bytes_and_keeps_bounded_windows() {

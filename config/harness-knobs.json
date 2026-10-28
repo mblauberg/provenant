@@ -22,6 +22,12 @@
     }
   },
   "knobs": {
+    "domains.routing.capacity_cooldown_seconds": {
+      "type": "int", "min": 0, "default": 600, "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/run.rs",
+      "effect": "Avoid a model and account in automatic draws for this many seconds after a provider capacity error. Zero disables new cooldowns.",
+      "trade_off": "Longer cooldowns reduce repeated capacity errors but keep affected models out of automatic draws for longer."
+    },
     "usage.project_attribution": {
       "type": "bool", "default": false, "status": "wired",
       "reader": "tools/front-door/src/usage.rs",

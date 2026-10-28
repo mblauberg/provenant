@@ -5,6 +5,8 @@ home_hosts = {}
 peers = {}
 [lanes.cargo_seed]
 enabled = false
+max_generations = 3
+max_bytes = 21474836480
 [lanes.priority]
 writer = 10
 read-only = 5

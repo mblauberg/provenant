@@ -9,6 +9,11 @@ use std::{
 
 fn fixture() -> Result<TestRig> {
     let mut rig = repository()?;
+    let seed = rig
+        .state
+        .join("cargo-target-seeds/generations/fixture/target");
+    fs::create_dir_all(&seed)?;
+    fs::write(seed.join("artifact"), b"host seed")?;
     ok(
         &rig,
         &["worktree", "create", "compose", "--base", "HEAD", "--json"],
@@ -198,6 +203,13 @@ pub(crate) fn writer_dispatch_uses_lane_cache_and_narrow_provider_state() -> Res
             .starts_with(b"provenant-lane-cargo-owner-v2\n")
     );
     assert_eq!(fs::read(cache.join("target/compose-target"))?, b"target");
+    assert_eq!(
+        fs::read(
+            rig.state
+                .join("cargo-target-seeds/generations/fixture/target/artifact")
+        )?,
+        b"host seed"
+    );
     // Shared config remains immutable until the host delivery owner composes #1255.
     assert_eq!(git(&rig, &["config", "--get", "user.name"])?, "Fixture");
     let store = super::worktree_tests::open_writer_store(&context)?;
@@ -236,6 +248,15 @@ pub(crate) fn provider() -> Result {
         fs::write(target.join("compose-target"), b"target")?;
         fs::create_dir_all(cargo.join("registry"))?;
         fs::write(cargo.join("registry/compose-home"), b"cargo")?;
+        let child_state = PathBuf::from(
+            std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
+                .ok_or("child state missing")?,
+        );
+        let host_state = child_state
+            .parent()
+            .and_then(Path::parent)
+            .ok_or("host state")?;
+        denied(&host_state.join("cargo-target-seeds/generations/fixture/target/artifact"))?;
         for shared in [
             ".cargo/registry/compose",
             ".cargo/git/compose",
