@@ -29,7 +29,7 @@ fn draft(rig: &TestRig, kind: &str) -> Result<String> {
     std::fs::write(
         &path,
         serde_json::to_vec(
-            &json!({"kind":kind,"title":"Repair choice","body":"Choose how to repair the check.","blocking":kind=="decision","options":[{"id":"repair","label":"Repair","description":"Repair the failing check"}],"recommended_option_id":"repair","proceeding_with":if kind=="assumption" {json!("Repair the failing check")}else{Value::Null}}),
+            &json!({"work":{"run_id":"00000000000000000000000000000001","task_id":"00000000000000000000000000000002"},"kind":kind,"title":"Repair choice","body":"Choose how to repair the check.","blocking":kind=="decision","options":[{"id":"repair","label":"Repair","description":"Repair the failing check"}],"recommended_option_id":"repair","proceeding_with":if kind=="assumption" {json!("Repair the failing check")}else{Value::Null}}),
         )?,
     )?;
     Ok(path.to_str().ok_or("draft path")?.into())
@@ -80,6 +80,17 @@ fn inbox_cli_posts_lists_and_resolves_all_kinds_without_apps() -> Result {
                 .iter()
                 .any(|item| item["id"] == id)
         );
+        let item = listed["data"]["items"]
+            .as_array()
+            .ok_or("items")?
+            .iter()
+            .find(|item| item["id"] == id)
+            .ok_or("created request")?;
+        assert_eq!(
+            item["request"]["work"]["task_id"],
+            "00000000000000000000000000000002"
+        );
+        assert_eq!(item["work_coverage"], "unindexed");
         let action = match kind {
             "assumption" => "confirm",
             "question" => "reply",
@@ -442,5 +453,193 @@ fn inbox_cli_accepts_composed_text_files_and_rejects_oversized_piped_answers() -
         2,
     )?;
     assert_eq!(result["error"]["code"], "invalid_input");
+    Ok(())
+}
+
+/// Trusted preparation seam: Run seals the attempt, then handoff is refused.
+struct Indexed(provenant_records::AbsolutePath);
+impl provenant_run::Providers for Indexed {
+    fn prepare(
+        &self,
+        _: &provenant_run::TaskRequest,
+        _: &str,
+        _: &provenant_run::LaunchPaths,
+        _: Option<&provenant_run::AttemptRecord>,
+    ) -> std::result::Result<provenant_run::PreparedLaunch, String> {
+        Ok(provenant_run::PreparedLaunch {
+            provider_lease: None,
+            argv: vec!["fixture".into()],
+            environment: vec![],
+            stdin: vec![],
+            secret_input: None,
+            cwd: "/".into(),
+            skipped_routes: vec![],
+            confinement: None,
+            route: provenant_run::RouteRecord {
+                provider: Some("fixture".into()),
+                model: Some("fixture/model".into()),
+                ..Default::default()
+            },
+            repository: Some(self.0.clone()),
+            observed_head: Some(
+                provenant_core::GitOid::parse(&"a".repeat(40)).map_err(|e| e.to_string())?,
+            ),
+        })
+    }
+    fn decode(
+        &self,
+        _: &provenant_run::RouteRecord,
+        _: &[u8],
+        _: &provenant_supervisor::custody::ExitObservation,
+        _: &std::path::Path,
+    ) -> std::result::Result<provenant_run::Decoded, String> {
+        unreachable!("no provider runs")
+    }
+}
+
+#[test]
+fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result {
+    use provenant_core::{ActorId, CancelToken, Clock, OperationId, ProjectId, TaskId, WaitBudget};
+    use provenant_run::{
+        DispatchRequest, DispatchTask, ExecutionContext, Request, RequestedRoute, RunStore, Service,
+    };
+    let rig = TestRig::new()?;
+    let identity = call(&rig, &["fabric", "identity"], None, 0)?;
+    let project = ProjectId::parse(identity["data"]["project"].as_str().ok_or("project")?)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let request = Request {
+        clock: &clock,
+        budget: WaitBudget::cli(clock.mono_now(), 5)?,
+        cancel: &cancel,
+    };
+    let mut roots = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    roots.state_dir = Some(rig.state.clone());
+    let context = ExecutionContext {
+        state_root: roots.resolve(&provenant_os::fs::SystemPathResolver)?.state,
+        project_id: project,
+        actor_id: ActorId::from_bytes([2; 16]),
+        read_prompts: false,
+    };
+    let store = RunStore::open(&context, &request)?;
+    let task = TaskId::from_bytes([3; 16]);
+    let run = Service::new(&store).dispatch(
+        DispatchRequest {
+            chair: None,
+            operation_id: OperationId::parse("correlation-fixture")?,
+            concurrency: 1,
+            lane_depth: 1,
+            parent_attempt: None,
+            tasks: vec![DispatchTask {
+                build_heavy: false,
+                title: None,
+                task_id: task,
+                prompt: "fixture".into(),
+                base: None,
+                head: None,
+                route: RequestedRoute::Named {
+                    name: "senior".into(),
+                    effort: None,
+                },
+                account: None,
+                fallback: vec![],
+                profile: Default::default(),
+                timeout_seconds: 60,
+                delivery_id: None,
+                deliver: None,
+                worktree: None,
+                access: Default::default(),
+            }],
+        },
+        &rig.project,
+        &request,
+    )?;
+    let repository = identity["data"]["common_dir"].clone();
+    let outcomes = store.start(
+        run.run_id,
+        &Indexed(serde_json::from_value(repository.clone())?),
+        &|_, _| Err(provenant_run::RunError::Validation("fixture handoff")),
+        &request,
+    )?;
+    assert!(
+        matches!(outcomes.as_slice(), [provenant_run::Started::Refused { reason, .. }] if reason.contains("fixture handoff"))
+    );
+    let draft = json!({"kind":"question","title":"Correlation","body":"Which work?",
+        "work":{"run_id":run.run_id,"task_id":task,"repository":repository,"head":"a".repeat(40)}});
+    let path = rig.root.join("linked.json");
+    let path_str = path.to_str().ok_or("draft")?;
+    std::fs::write(&path, serde_json::to_vec(&draft)?)?;
+    let cli = call(
+        &rig,
+        &["ask", "--file", path_str, "--session", "chair-a"],
+        None,
+        0,
+    )?;
+    let mcp = mcp_call(
+        &rig,
+        "fabric_inbox",
+        json!({"op":"ask","session":"chair-a","request":draft}),
+    )?;
+    for receipt in [&cli["data"], &mcp["structuredContent"]] {
+        assert_eq!(receipt["work_coverage"], "verified");
+        let id = receipt["request_id"].as_str().ok_or("request ID")?;
+        let shown = call(&rig, &["inbox", id], None, 0)?;
+        assert_eq!(shown["data"]["item"]["request"]["schema_version"], 2);
+    }
+    for unqualified in [false, true] {
+        for field in ["repository", "head"] {
+            let mut bad = draft.clone();
+            if unqualified {
+                bad["work"].as_object_mut().ok_or("work")?.remove("task_id");
+            }
+            bad["work"][field] = if field == "head" {
+                json!("b".repeat(40))
+            } else {
+                serde_json::to_value(provenant_records::AbsolutePath::new(std::path::Path::new(
+                    "/foreign/.git",
+                ))?)?
+            };
+            std::fs::write(&path, serde_json::to_vec(&bad)?)?;
+            assert_eq!(
+                call(
+                    &rig,
+                    &["ask", "--file", path_str, "--session", "chair-a"],
+                    None,
+                    2
+                )?["error"]["code"],
+                "work_mismatch"
+            );
+            assert_eq!(
+                mcp_call(
+                    &rig,
+                    "fabric_inbox",
+                    json!({"op":"ask","session":"chair-a","request":bad})
+                )?["structuredContent"]["code"],
+                "work_mismatch"
+            );
+        }
+    }
+    let db = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM human_requests", [], |r| r
+            .get::<_, i64>(0))?,
+        2
+    );
+    let index = rusqlite::Connection::open(rig.state.join(provenant_run::WORK_INDEX_FILE))?;
+    index.pragma_update(None, "user_version", 2)?;
+    std::fs::write(&path, serde_json::to_vec(&draft)?)?;
+    let failed = call(
+        &rig,
+        &["ask", "--file", path_str, "--session", "chair-a"],
+        None,
+        3,
+    )?;
+    assert_eq!(failed["error"]["code"], "work_lookup_failed");
+    assert!(
+        failed["error"]["message"]
+            .as_str()
+            .ok_or("message")?
+            .contains("version")
+    );
     Ok(())
 }

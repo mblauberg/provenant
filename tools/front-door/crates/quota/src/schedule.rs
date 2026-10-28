@@ -125,6 +125,9 @@ pub fn reserve(
     for refusal in &mut record.refusals {
         refusal.account = account.clone();
     }
+    for cooldown in &mut record.capacity_cooldowns {
+        cooldown.account = account.clone();
+    }
     record.revision = record
         .revision
         .checked_add(1)
@@ -475,6 +478,18 @@ pub fn report(
                 .as_ref()
                 .is_some_and(|c| c.deadline_unix_seconds > now),
             error: record.last_error,
+            capacity_cooldowns: record
+                .capacity_cooldowns
+                .iter()
+                .filter(|c| c.observed_unix_seconds <= now && c.expires_unix_seconds > now)
+                .map(|c| crate::CapacityCooldownRow {
+                    model: c.model.clone(),
+                    observed_unix_seconds: c.observed_unix_seconds,
+                    expires_unix_seconds: c.expires_unix_seconds,
+                    remaining_seconds: u64::try_from(c.expires_unix_seconds.saturating_sub(now))
+                        .unwrap_or(u64::MAX),
+                })
+                .collect(),
             display: None,
         });
     }
@@ -778,11 +793,43 @@ mod tests {
         assert_eq!(backoff(ProbeFailure::ProbeDirectory, 1, None), 120);
     }
     #[test]
+    fn report_shows_only_live_capacity_cooldowns() {
+        let account = account();
+        let mut record = AccountRecord::empty(account.clone());
+        record.capacity_cooldowns.push(CapacityCooldown {
+            account,
+            model: "model".into(),
+            observed_unix_seconds: 100,
+            expires_unix_seconds: 700,
+        });
+        let row = |now| {
+            report(
+                crate::source::TEST_POLICIES,
+                &[record.clone()],
+                &[],
+                &QuotaQuery { adapter: None },
+                now,
+                "report.json".into(),
+            )
+            .unwrap()
+            .accounts
+            .remove(0)
+        };
+        assert_eq!(row(400).capacity_cooldowns[0].remaining_seconds, 300);
+        assert!(row(700).capacity_cooldowns.is_empty());
+        assert!(row(99).capacity_cooldowns.is_empty());
+    }
+
+    #[test]
     fn reserve_adopts_a_renamed_label_for_the_same_account_key() {
         let a = account();
         let mut renamed = a.clone();
         renamed.label = "renamed".into();
-        let r = AccountRecord::empty(a.clone());
+        let r = record_capacity_cooldown(None, &a, "claude/model", 100, 600)
+            .unwrap()
+            .unwrap()
+            .replacement
+            .unwrap();
         let intent = reserve(
             crate::source::TEST_POLICIES,
             Some(&r),
@@ -796,6 +843,9 @@ mod tests {
         intent.check(Some(&r)).unwrap();
         let reserved = intent.replacement.unwrap();
         assert_eq!(reserved.account, renamed);
+        assert_eq!(reserved.capacity_cooldowns.len(), 1);
+        assert_eq!(reserved.capacity_cooldowns[0].account, renamed);
+        assert_eq!(reserved.capacity_cooldowns[0].expires_unix_seconds, 700);
         let done = complete(&reserved, "claim", 420, Err(ProbeFailure::Auth), None).unwrap();
         assert_eq!(done.replacement.unwrap().account, renamed);
     }

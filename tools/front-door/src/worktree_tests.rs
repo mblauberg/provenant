@@ -386,6 +386,9 @@ pub(super) fn repository() -> Result<TestRig> {
     let rig = TestRig::new()?;
     git(&rig, &["config", "user.name", "Fixture"])?;
     git(&rig, &["config", "user.email", "fixture@example.invalid"])?;
+    // Detached auto-maintenance would write locks while tests snapshot the tree.
+    git(&rig, &["config", "maintenance.auto", "false"])?;
+    git(&rig, &["config", "gc.auto", "0"])?;
     git(&rig, &["checkout", "-q", "-b", "main"])?;
     fs::write(rig.project.join(".gitignore"), ".worktrees/\n")?;
     for name in [
@@ -1205,6 +1208,7 @@ impl provenant_run::Providers for WriterProvider {
                 writer: Some(writer),
                 home: self.home.clone(),
                 cargo_registry_seed: false,
+                state_root: std::path::PathBuf::from("/fixture/state"),
             }),
             observed_head: None,
             repository: None,

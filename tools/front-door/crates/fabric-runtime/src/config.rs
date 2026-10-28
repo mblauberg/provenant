@@ -116,11 +116,25 @@ pub struct Lanes {
     pub cargo_seed: CargoSeed,
 }
 
-/// Optional host Cargo registry seed for writer lanes.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Optional host Cargo seeds for writer lanes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CargoSeed {
     pub enabled: bool,
+    /// Maximum number of published target generations to retain.
+    pub max_generations: usize,
+    /// Maximum total apparent bytes in published target generations.
+    pub max_bytes: u64,
+}
+
+impl Default for CargoSeed {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_generations: 3,
+            max_bytes: 20 * 1024 * 1024 * 1024,
+        }
+    }
 }
 
 /// Nice values applied by the host before entering lane confinement.
@@ -455,12 +469,21 @@ mod tests {
     fn lane_priority_defaults_and_bounds() {
         let mut config = config();
         assert!(!config.lanes.cargo_seed.enabled);
+        assert_eq!(config.lanes.cargo_seed.max_generations, 3);
+        assert_eq!(config.lanes.cargo_seed.max_bytes, 20 * 1024 * 1024 * 1024);
         assert_eq!(config.lanes.priority.for_lane(true, false), 10);
         assert_eq!(config.lanes.priority.for_lane(false, false), 5);
         assert_eq!(config.lanes.priority.for_lane(true, true), 15);
         assert_eq!(config.lanes.priority.for_lane(false, true), 15);
         let mut value = serde_json::to_value(&config).unwrap();
         value["lanes"]["cargo_seed"]["enabled"] = true.into();
+        value["lanes"]["cargo_seed"]["max_generations"] = 0.into();
+        value["lanes"]["cargo_seed"]["max_bytes"] = 0.into();
+        let limits = serde_json::from_value::<FabricConfig>(value.clone())
+            .unwrap()
+            .lanes
+            .cargo_seed;
+        assert_eq!((limits.max_generations, limits.max_bytes), (0, 0));
         assert!(
             serde_json::from_value::<FabricConfig>(value.clone())
                 .unwrap()

@@ -166,6 +166,8 @@ impl TestRig {
                 ("PATH", "/usr/bin:/bin"),
                 ("GIT_CONFIG_NOSYSTEM", "1"),
                 ("PROVENANT_AGENT_LABEL", "fixture"),
+                // Debug hooks otherwise miss the 50 ms delivery budget under CI load.
+                ("PROVENANT_TEST_ANSWER_BUDGET_MS", "1000"),
             ]
             .map(|(k, v)| (k.into(), v.into())),
         )

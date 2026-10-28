@@ -66,6 +66,8 @@ pub(crate) enum Error {
     DiskSpace(std::io::Error),
     #[error("invalid worktree removal scope")]
     InvalidScope,
+    #[error("target seed build: {0}")]
+    SeedBuild(String),
 }
 
 #[allow(clippy::print_stderr)]
@@ -120,6 +122,7 @@ impl Error {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Data {
+    SeedBuilt(String),
     Created(worktrees::WorktreeInfo),
     Adopted(worktrees::WorktreeInfo),
     Listed(Vec<worktrees::WorktreeInfo>),
@@ -128,6 +131,7 @@ enum Data {
 
 pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
     let name = match &command {
+        Worktree::SeedBuild => "worktree seed-build",
         Worktree::Create { .. } => "worktree create",
         Worktree::Adopt { .. } => "worktree adopt",
         Worktree::List => "worktree list",
@@ -205,6 +209,11 @@ fn execute(
         roots::Product::Required,
     )?;
     let (roots, home, project) = (&resolved.roots, &resolved.home, &resolved.project);
+    if matches!(command, Worktree::SeedBuild) {
+        let generation = crate::target_seed_build::build(roots.state.as_path(), project)
+            .map_err(|error| Error::SeedBuild(error.to_string()))?;
+        return Ok(Data::SeedBuilt(generation));
+    }
     with_context(
         roots,
         home,
@@ -213,6 +222,7 @@ fn execute(
         workers,
         |context, cancel| {
             Ok(match command {
+                Worktree::SeedBuild => unreachable!(),
                 Worktree::Adopt { path, owner } => {
                     let path = if path.is_absolute() {
                         path
@@ -319,6 +329,7 @@ struct GcData {
     idle_days: u64,
     provider_state: provenant_run::ProviderStateGc,
     chair_logs: crate::chair_log_retention::Report,
+    target_seeds: provenant_run::target_seed_gc::Report,
     worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
     alerts: Vec<String>,
     unobserved_projects: Vec<PathBuf>,
@@ -373,6 +384,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 skipped_transient,
                 provider_state: *provider_state,
                 chair_logs: Default::default(),
+                target_seeds: Default::default(),
                 worktree_cleanup,
                 alerts,
                 notice: None,
@@ -411,6 +423,16 @@ fn gc_data_summary(data: &GcData) -> String {
         .sum();
     human.push_str(&format!("{trees} merged worktree(s), {outputs} output directory(s), {} attempt tmp directory(s), {} capture(s)\n",
         data.provider_state.attempt_tmp.len(), data.provider_state.attempt_logs.len()));
+    human.push_str(&format!(
+        "{} target seed generation(s), {} apparent bytes {}\n",
+        data.target_seeds.removed.len(),
+        data.target_seeds.bytes,
+        if data.report.dry_run {
+            "reclaimable"
+        } else {
+            "removed"
+        }
+    ));
     for temporary in &data.provider_state.attempt_tmp {
         human.push_str(&format!(
             "{} attempt tmp {} ({} bytes)\n",
@@ -1173,9 +1195,24 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .map_err(|_| Error::GcObservation("invalid alert threshold"))?
         .unwrap_or(0)
         .max(free_floor);
+    let seed_policy = &config.domains.fabric.lanes.cargo_seed;
+    let seed_collection = provenant_run::target_seed_gc::collect(
+        roots.state.as_path(),
+        seed_policy.max_generations,
+        seed_policy.max_bytes,
+        command.dry_run,
+    );
     // Observe after every collection class, including a partially failed sweep.
-    let alerts = crate::gc_support::disk_alert(&roots, &project_ids, alert_floor, command.dry_run)
-        .unwrap_or_else(|error| vec![format!("disk alert failed: {error}")]);
+    let mut alerts =
+        crate::gc_support::disk_alert(&roots, &project_ids, alert_floor, command.dry_run)
+            .unwrap_or_else(|error| vec![format!("disk alert failed: {error}")]);
+    let target_seeds = match seed_collection {
+        Ok(report) => report,
+        Err(error) => {
+            alerts.push(format!("target seed collection skipped: {error}"));
+            Default::default()
+        }
+    };
     let report = match report {
         Ok(report) => report,
         Err(error) => {
@@ -1222,6 +1259,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         idle_days: command.idle_days,
         provider_state,
         chair_logs,
+        target_seeds,
         unobserved_projects,
         skipped_transient,
         worktree_cleanup,

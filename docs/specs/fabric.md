@@ -92,6 +92,43 @@ session discovery or evidence of a live provider connection.
   `crates/fabric-runtime/src/inbox/tests.rs::inbox_acknowledgement_requires_the_exact_host_project_session_and_actor`
 - Owner: `crates/fabric-runtime/src/inbox.rs`, `crates/records/src/inbox.rs`
 
+`request.work` is caller-authored claimed work, never a verified binding by itself.
+Its optional repository names the canonical Git common directory; head names
+launch HEAD. `work_coverage` is a host-only preparation snapshot. Consumers MUST
+use both together: only `verified` permits navigation or task-label joins to work,
+repository or head. `HumanRequest::verified_work()` enforces that rule. Other
+coverage, missing coverage and legacy claims may be displayed only as unverified
+claims, never promoted by a UI, summary or receipt replay. Even verified work
+confers no execution, repository or approval authority.
+
+Both edges resolve through Run at the configured host root and current project.
+They reject `mismatch` with `work_mismatch`, including unqualified selectors;
+partial, unavailable, unindexed and capped results remain explicit claims. Replay
+validates the exact actor and input before lookup. New lookups finish before Fabric opens its write
+transaction, so index locks, creation and backoff cannot stall other coordination.
+Inside the transaction the exact actor/input receipt is checked again to handle
+concurrent preparations. Membership is an observation, not a cross-store atomic
+snapshot: a later host capture does not retroactively change saved coverage.
+Ask receipts report the saved coverage. Missing resolvers fail closed; lookup
+failures disclose their cause as `work_lookup_failed`, preserving busy/cancelled.
+Repository limits count at most 4096 UTF-8 bytes of `relative_to_root.path`,
+including hexadecimal expansion for `native_bytes`, excluding the root slash.
+
+Unlinked requests omit absent correlation fields and retain the version-1 wire
+shape. Newly correlated records declare version 2 and require a version-2 reader.
+An older reader that rejects a record fails the entire list page, so an inbox
+list or console overview can be unavailable even when other records are readable.
+Current readers accept both record versions, including retained history and the
+bounded overview projection; the database schema is unchanged. Existing version-1
+records and immutable receipts remain readable and retain their original shape.
+- Why: unknown work must not appear verified; index contention must not hold
+  Fabric's write lock; optional features must not rewrite unrelated version-1 data.
+- Test: `crates/fabric-runtime/src/inbox/tests.rs::request_correlation_lookup_never_holds_fabric_write_lock`;
+  `crates/fabric-runtime/src/inbox/tests.rs::request_correlation_legacy_records_keep_v1_wire_shape_and_answer`;
+  `tests/inbox.rs::request_correlation_edges_verify_host_seals_and_refuse_mismatches`
+- Owner: `crates/records/src/inbox.rs`, `crates/fabric-runtime/src/inbox.rs`,
+  `crates/fabric-store/src/operations.rs`, `crates/cli/src/inbox.rs`
+
 One operation must commit the revision comparison, answer, request state,
 history, delivery intent, local Fabric response and replay receipt together.
 Replays return the original receipt before checking the current revision.

@@ -29,6 +29,7 @@ mod pr_land_tests;
 mod provider_retention;
 mod release_smoke;
 mod roots;
+mod target_seed_build;
 mod usage;
 #[cfg(test)]
 pub mod worktree_tests;

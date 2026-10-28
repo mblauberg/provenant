@@ -600,6 +600,16 @@ fn poll_until(
     }
 }
 
+/// Peer views cannot attribute this hosts cooldowns to the peer.
+fn render_peer_lanes(
+    lanes: &[run::AttemptRecord],
+    waits: &[run::LaneWait],
+    next: Option<u64>,
+    state: &std::path::Path,
+) -> (Value, String) {
+    render_lanes(lanes, waits, next, state, None)
+}
+
 /// Local lane rendering plus each row's owning host. Result paths are the
 /// peer's; read them with `output`.
 fn render(
@@ -617,7 +627,7 @@ fn render_with_waits(
     selected: &[(HostId, AttemptId)],
     state: &std::path::Path,
 ) -> (Value, String) {
-    let (mut data, human) = render_lanes(lanes, waits, None, state);
+    let (mut data, human) = render_peer_lanes(lanes, waits, None, state);
     if let Some(rows) = data["lanes"].as_array_mut() {
         for (row, lane) in rows.iter_mut().zip(lanes) {
             let host = selected
@@ -1089,7 +1099,7 @@ pub(super) fn host_lanes(
         .collect();
     let selected: Vec<_> = lanes.iter().map(|lane| (id, lane.attempt_id)).collect();
     let (data, human) = if selected.is_empty() {
-        let (mut data, human) = render_lanes(&[], &[], None, edge.roots.state.as_path());
+        let (mut data, human) = render_peer_lanes(&[], &[], None, edge.roots.state.as_path());
         data["host"] = json!(id);
         (data, format!("host {id}\n{human}"))
     } else {
@@ -1485,6 +1495,27 @@ mod tests {
                 "redacted": false
             }
         }))?)
+    }
+
+    #[test]
+    fn peer_lanes_do_not_show_local_capacity_cooldowns() -> Result {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        let route = run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/model".into()),
+            effort: None,
+            account_label: Some("work".into()),
+            account_key: Some("key".into()),
+            source: None,
+            pool_selection: None,
+        };
+        let now = SystemClock::new().wall_now()?.as_timestamp().as_second();
+        crate::quota::persist_capacity_cooldown(&state, &route, now, 600)?;
+        let (data, human) = render_with_waits(&[], &[], &[], &state);
+        assert_eq!(data["capacity_cooldowns"], json!([]));
+        assert!(!human.contains("capacity cooldown"));
+        Ok(())
     }
 
     #[test]
