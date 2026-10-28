@@ -95,84 +95,6 @@ fn compare_summary(
     json!({"stale":stale,"missing":missing,"unknown":unknown,"coverage":if partial { "partial" } else { "complete" }})
 }
 
-#[cfg(test)]
-mod comparison_tests {
-    use super::*;
-    use provenant_fabric_runtime::inbox::{OverviewBatch, OverviewItem};
-
-    #[test]
-    fn compares_only_matching_host_project_and_chair_and_respects_partial_coverage() {
-        let project = ProjectId::from_bytes([1; 16]);
-        let host = provenant_core::HostId::from_bytes([2; 16]).to_string();
-        let foreign = provenant_core::HostId::from_bytes([3; 16]).to_string();
-        let item =
-            |id: &str, owner: Option<String>, session: &str, project_id: String| OverviewItem {
-                id: id.into(),
-                project_id,
-                title: String::new(),
-                chair_session_id: Some(session.into()),
-                owner_host: owner,
-            };
-        let page = |truncated| OverviewBatch {
-            items: vec![
-                item("open", Some(host.clone()), "chair", project.to_string()),
-                item(
-                    "foreign",
-                    Some(foreign.clone()),
-                    "chair",
-                    project.to_string(),
-                ),
-                item("other", Some(host.clone()), "other", project.to_string()),
-                item(
-                    "project",
-                    Some(host.clone()),
-                    "chair",
-                    ProjectId::from_bytes([4; 16]).to_string(),
-                ),
-            ],
-            truncated,
-            bytes_read: 0,
-        };
-        let refs = vec![
-            "closed".into(),
-            "foreign".into(),
-            "other".into(),
-            "project".into(),
-        ];
-        let complete = compare_summary(page(false), project, &host, "chair", &refs);
-        assert_eq!(complete["stale"], json!(["closed"]));
-        assert_eq!(complete["missing"], json!(["open"]));
-        assert_eq!(complete["unknown"], json!(["foreign", "other", "project"]));
-        assert_eq!(complete["coverage"], "partial");
-        let partial = compare_summary(page(true), project, &host, "chair", &refs);
-        assert_eq!(partial["stale"], json!([]));
-        assert_eq!(partial["missing"], json!(["open"]));
-        assert_eq!(
-            partial["unknown"],
-            json!(["closed", "foreign", "other", "project"])
-        );
-        assert_eq!(partial["coverage"], "partial");
-        let clean = compare_summary(
-            page(false),
-            project,
-            &host,
-            "chair",
-            &["open".into(), "closed".into()],
-        );
-        assert_eq!(clean["stale"], json!(["closed"]));
-        assert_eq!(clean["unknown"], json!([]));
-        assert_eq!(clean["coverage"], "complete");
-        let mut unknown = page(false);
-        unknown
-            .items
-            .push(item("unknown", None, "chair", project.to_string()));
-        let unknown = compare_summary(unknown, project, &host, "chair", &["unknown".into()]);
-        assert_eq!(unknown["coverage"], "partial");
-        assert_eq!(unknown["unknown"], json!(["unknown"]));
-        assert_eq!(unknown["stale"], json!([]));
-    }
-}
-
 pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> {
     const BYTE_BUDGET: usize = 1_048_576;
     let labels: BTreeMap<_, _> = projects
@@ -273,4 +195,82 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
                   "running":(run != "unavailable" && run != "incompatible").then_some(running),
                   "attention":(run != "unavailable" && run != "incompatible").then_some(attention)},
         "coverage":{"scope":"local","inbox":fabric,"runs":run,"nested_runs":"unavailable"}}))
+}
+
+#[cfg(test)]
+mod comparison_tests {
+    use super::*;
+    use provenant_fabric_runtime::inbox::{OverviewBatch, OverviewItem};
+
+    #[test]
+    fn compares_only_matching_host_project_and_chair_and_respects_partial_coverage() {
+        let project = ProjectId::from_bytes([1; 16]);
+        let host = provenant_core::HostId::from_bytes([2; 16]).to_string();
+        let foreign = provenant_core::HostId::from_bytes([3; 16]).to_string();
+        let item =
+            |id: &str, owner: Option<String>, session: &str, project_id: String| OverviewItem {
+                id: id.into(),
+                project_id,
+                title: String::new(),
+                chair_session_id: Some(session.into()),
+                owner_host: owner,
+            };
+        let page = |truncated| OverviewBatch {
+            items: vec![
+                item("open", Some(host.clone()), "chair", project.to_string()),
+                item(
+                    "foreign",
+                    Some(foreign.clone()),
+                    "chair",
+                    project.to_string(),
+                ),
+                item("other", Some(host.clone()), "other", project.to_string()),
+                item(
+                    "project",
+                    Some(host.clone()),
+                    "chair",
+                    ProjectId::from_bytes([4; 16]).to_string(),
+                ),
+            ],
+            truncated,
+            bytes_read: 0,
+        };
+        let refs = vec![
+            "closed".into(),
+            "foreign".into(),
+            "other".into(),
+            "project".into(),
+        ];
+        let complete = compare_summary(page(false), project, &host, "chair", &refs);
+        assert_eq!(complete["stale"], json!(["closed"]));
+        assert_eq!(complete["missing"], json!(["open"]));
+        assert_eq!(complete["unknown"], json!(["foreign", "other", "project"]));
+        assert_eq!(complete["coverage"], "partial");
+        let partial = compare_summary(page(true), project, &host, "chair", &refs);
+        assert_eq!(partial["stale"], json!([]));
+        assert_eq!(partial["missing"], json!(["open"]));
+        assert_eq!(
+            partial["unknown"],
+            json!(["closed", "foreign", "other", "project"])
+        );
+        assert_eq!(partial["coverage"], "partial");
+        let clean = compare_summary(
+            page(false),
+            project,
+            &host,
+            "chair",
+            &["open".into(), "closed".into()],
+        );
+        assert_eq!(clean["stale"], json!(["closed"]));
+        assert_eq!(clean["unknown"], json!([]));
+        assert_eq!(clean["coverage"], "complete");
+        let mut unknown = page(false);
+        unknown
+            .items
+            .push(item("unknown", None, "chair", project.to_string()));
+        let unknown = compare_summary(unknown, project, &host, "chair", &["unknown".into()]);
+        assert_eq!(unknown["coverage"], "partial");
+        assert_eq!(unknown["unknown"], json!(["unknown"]));
+        assert_eq!(unknown["stale"], json!([]));
+    }
 }
