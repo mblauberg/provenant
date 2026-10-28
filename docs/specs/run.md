@@ -30,6 +30,17 @@ blocking the lane. Each attempt must report the seed outcome and reason in
   `::read_only_dispatch_applies_bound_git_and_project_writes`
 - Owner: `crates/run/src/cargo_seed.rs`, `crates/run/src/writer.rs`
 
+## Cargo target seed
+
+An opted-in macOS writer with a fresh target may clone the newest host target
+generation matching the complete `rustc -vV` output and host triple. Mismatches
+and clone failures leave the target empty and are reported in
+`cargo-target-setup.json`. Existing targets are retained. A clone is private and
+writable; no lane may write the published generation. Preparation holds the
+store lock until cloning finishes, so GC cannot remove the source mid-clone.
+- Test: `crates/run/src/cargo_seed.rs::tests`; `crates/cli/src/run/provider.rs::configured_grants_cannot_expose_host_indexes`; `crates/run/src/target_seed_gc.rs::tests::active_clone_lock_prevents_collection`; `src/compose_tests.rs::writer_dispatch_uses_lane_cache_and_narrow_provider_state`
+- Owner: `crates/run/src/cargo_seed.rs`, `crates/run/src/target_seed.rs`
+
 ## Operation IDs
 
 An operation ID is 1 to 128 ASCII letters, digits, `.`, `_` or `-`, starting

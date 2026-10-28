@@ -61,6 +61,181 @@ pub(crate) fn seed_git(enabled: bool, home: &Path, cache: &Path) -> Outcome {
     }
 }
 
+pub(crate) fn seed_target(enabled: bool, state: &Path, cache: &Path, worktree: &Path) -> Outcome {
+    if !enabled {
+        return Outcome::skipped("disabled");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // The host seed is built in this workspace, which can pin its own
+        // toolchain below the repository root.
+        let front_door = worktree.join("tools/front-door");
+        let rustc_dir = if front_door.join("rust-toolchain.toml").is_file() {
+            front_door.as_path()
+        } else {
+            worktree
+        };
+        let Ok((version, triple)) = crate::target_seed::rustc_metadata(rustc_dir) else {
+            return Outcome::fallback("toolchain_unavailable");
+        };
+        seed_target_with(state, cache, &version, &triple, clone_target)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (state, cache, worktree);
+        Outcome::skipped("unsupported_platform")
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn seed_target_with(
+    state: &Path,
+    cache: &Path,
+    version: &str,
+    triple: &str,
+    clone: impl FnOnce(&Path, &provenant_os::fs::Directory) -> Result<(), &'static str>,
+) -> Outcome {
+    use provenant_os::fs::{Directory, temporary_name};
+    use std::ffi::{OsStr, OsString};
+    let Ok(cache_dir) = Directory::open_anchor(cache) else {
+        return Outcome::fallback("cache_unavailable");
+    };
+    match cache_dir.metadata_at(OsStr::new("target"), false) {
+        Ok(_) => return Outcome::skipped("existing_target"),
+        Err(error) if error.is_not_found() => {}
+        Err(_) => return Outcome::fallback("target_unavailable"),
+    }
+    // Held until the entire clone is published or removed: GC cannot unlink its source.
+    let Ok(_lock) = crate::target_seed::lock_store(state) else {
+        return Outcome::fallback("seed_lock_unavailable");
+    };
+    let generations = crate::target_seed::store_path(state).join("generations");
+    let Ok(entries) = std::fs::read_dir(generations) else {
+        return Outcome::fallback("store_unavailable");
+    };
+    let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.file_name()));
+    let mut saw_version = false;
+    let mut saw_manifest = false;
+    let mut saw_entry = false;
+    let mut selected = None;
+    for entry in entries {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir())
+            || entry.file_name().to_string_lossy().starts_with('.')
+        {
+            continue;
+        }
+        saw_entry = true;
+        let Ok(data) = std::fs::read(entry.path().join("manifest.json")) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_slice::<crate::target_seed::Manifest>(&data) else {
+            continue;
+        };
+        saw_manifest = true;
+        if manifest.rustc_vv != version {
+            continue;
+        }
+        saw_version = true;
+        if manifest.host_triple != triple {
+            continue;
+        }
+        selected = Some(entry.path().join("target"));
+        break;
+    }
+    let Some(source) = selected else {
+        return Outcome::fallback(if !saw_entry {
+            "no_generations"
+        } else if !saw_manifest {
+            "manifest_invalid"
+        } else if !saw_version {
+            "toolchain_mismatch"
+        } else {
+            "triple_mismatch"
+        });
+    };
+    let Ok(random) = temporary_name() else {
+        return Outcome::fallback("staging_unavailable");
+    };
+    let mut stage = OsString::from(".target-seed-");
+    stage.push(random);
+    if cache_dir.mkdir(&stage, 0o700).is_err() {
+        return Outcome::fallback("staging_unavailable");
+    }
+    let result = (|| {
+        let staging = cache_dir
+            .open_verified_directory(&stage)
+            .map_err(|_| "staging_unavailable")?;
+        clone(&source, &staging)?;
+        cache_dir
+            .rename_noreplace(&stage, &cache_dir, OsStr::new("target"))
+            .map_err(|_| "publish_failed")?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Outcome {
+            status: "seeded",
+            reason: "cloned",
+        },
+        Err(reason) => {
+            if crate::artifacts::remove_entry_tree(&cache_dir, &stage).is_err() {
+                return Outcome::fallback("staging_cleanup_failed");
+            }
+            Outcome::fallback(reason)
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn clone_target(
+    source: &Path,
+    destination: &provenant_os::fs::Directory,
+) -> Result<(), &'static str> {
+    // The seed can be read-only; make each clone writable without changing the seed.
+    fn walk(
+        source: &provenant_os::fs::Directory,
+        dest: &provenant_os::fs::Directory,
+        depth: usize,
+    ) -> Result<(), &'static str> {
+        use provenant_os::fs::FileKind;
+        if depth > 128 {
+            return Err("target_too_deep");
+        }
+        for entry in source.entries().map_err(|_| "target_read_failed")? {
+            let name = entry.map_err(|_| "target_read_failed")?;
+            match source
+                .metadata_at(&name, false)
+                .map_err(|_| "target_read_failed")?
+                .kind
+            {
+                FileKind::Directory => {
+                    let child = source
+                        .open_verified_directory(&name)
+                        .map_err(|_| "target_read_failed")?;
+                    dest.mkdir(&name, 0o700).map_err(|_| "clone_failed")?;
+                    let target = dest
+                        .open_verified_directory(&name)
+                        .map_err(|_| "clone_failed")?;
+                    walk(&child, &target, depth + 1)?;
+                }
+                FileKind::Regular => {
+                    let file = source.open_read(&name).map_err(|_| "target_read_failed")?;
+                    dest.clone_file_from(&file, &name)
+                        .map_err(|_| "clone_failed")?;
+                    dest.open_read(&name)
+                        .and_then(|file| file.make_owner_writable())
+                        .map_err(|_| "clone_failed")?;
+                }
+                _ => return Err("target_contains_unsupported_entry"),
+            }
+        }
+        Ok(())
+    }
+    let source =
+        provenant_os::fs::Directory::open_anchor(source).map_err(|_| "target_unavailable")?;
+    walk(&source, destination, 0)
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn seed_with(
     home: &Path,
@@ -248,6 +423,103 @@ fn clone_registry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn generation(state: &Path, name: &str, version: &str, triple: &str) {
+        let dir = crate::target_seed::store_path(state)
+            .join("generations")
+            .join(name);
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        let manifest = crate::target_seed::Manifest {
+            rustc_vv: version.into(),
+            host_triple: triple.into(),
+            commit: "abc".into(),
+            profile: "dev".into(),
+            features: vec![],
+            flags: vec![],
+        };
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn target_selection_and_fallbacks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        let run = |version, triple| {
+            seed_target_with(&state, &cache, version, triple, |source, _| {
+                assert!(source.ends_with("002/target"));
+                Ok(())
+            })
+        };
+        assert_eq!(run("v1", "host"), Outcome::fallback("no_generations"));
+        generation(&state, "001", "v1", "host");
+        generation(&state, "002", "v1", "host");
+        generation(&state, "003", "v2", "other");
+        assert_eq!(
+            run("unknown", "host"),
+            Outcome::fallback("toolchain_mismatch")
+        );
+        assert_eq!(run("v1", "other"), Outcome::fallback("triple_mismatch"));
+        assert_eq!(run("v1", "host").status, "seeded");
+        assert_eq!(run("v1", "host"), Outcome::skipped("existing_target"));
+    }
+
+    #[test]
+    fn target_failed_clone_is_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        generation(tmp.path(), "001", "v1", "host");
+        let outcome = seed_target_with(tmp.path(), &cache, "v1", "host", |_, stage| {
+            stage.mkdir(std::ffi::OsStr::new("partial"), 0o700).unwrap();
+            Err("clone_failed")
+        });
+        assert_eq!(outcome, Outcome::fallback("clone_failed"));
+        assert_eq!(std::fs::read_dir(cache).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn target_invalid_manifest_and_busy_store_fall_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        generation(tmp.path(), "001", "v1", "host");
+        let manifest =
+            crate::target_seed::store_path(tmp.path()).join("generations/001/manifest.json");
+        std::fs::write(manifest, b"invalid").unwrap();
+        let run = || {
+            seed_target_with(tmp.path(), &cache, "v1", "host", |_, _| {
+                panic!("must not clone")
+            })
+        };
+        assert_eq!(run(), Outcome::fallback("manifest_invalid"));
+        let _lock = crate::target_seed::lock_store(tmp.path()).unwrap();
+        assert_eq!(run(), Outcome::fallback("seed_lock_unavailable"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn target_clone_is_writable_and_cannot_change_seed() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        generation(tmp.path(), "001", "v1", "host");
+        let seed = crate::target_seed::store_path(tmp.path()).join("generations/001/target/file");
+        std::fs::write(&seed, b"seed").unwrap();
+        std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o444)).unwrap();
+        assert_eq!(
+            seed_target_with(tmp.path(), &cache, "v1", "host", clone_target).status,
+            "seeded"
+        );
+        std::fs::write(cache.join("target/file"), b"lane").unwrap();
+        assert_eq!(std::fs::read(&seed).unwrap(), b"seed");
+    }
 
     #[test]
     fn disabled_does_not_touch_cache() {

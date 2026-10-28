@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Measure cold and APFS-cloned targets on an unconfined macOS host."""
+
+import argparse
+import ctypes
+import fcntl
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+import sys
+import time
+
+
+def clone_tree(source, destination):
+    """Clone each regular file, failing instead of silently copying it."""
+    if not stat.S_ISDIR(source.lstat().st_mode):
+        raise RuntimeError(f"seed target is not a directory: {source}")
+    libc = ctypes.CDLL(None, use_errno=True)
+    clonefile = libc.clonefile
+    clonefile.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int)
+    clonefile.restype = ctypes.c_int
+    destination.mkdir(mode=0o700)
+    for root, directories, files in os.walk(source, followlinks=False):
+        root = Path(root)
+        target = destination / root.relative_to(source)
+        for name in directories:
+            entry = root / name
+            if not stat.S_ISDIR(entry.lstat().st_mode):
+                raise RuntimeError(f"unsupported seed entry: {entry}")
+            (target / name).mkdir(mode=0o700)
+        for name in files:
+            entry = root / name
+            mode = entry.lstat().st_mode
+            if not stat.S_ISREG(mode):
+                raise RuntimeError(f"unsupported seed entry: {entry}")
+            copy = target / name
+            if clonefile(os.fsencode(entry), os.fsencode(copy), 0) != 0:
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error), str(entry))
+            copy.chmod(stat.S_IMODE(mode) | stat.S_IWUSR)
+
+
+def free_bytes(path):
+    fs = os.statvfs(path)
+    return fs.f_bavail * fs.f_frsize
+
+
+def report_size(label, path):
+    for kind, args in (("allocated", ["-sk"]), ("apparent", ["-Ask"])):
+        result = subprocess.check_output(["du", *args, str(path)], text=True)
+        print(f"{label}_{kind}_bytes={int(result.split()[0]) * 1024}", flush=True)
+
+
+def timed_cargo(label, workspace, target, arguments):
+    env = os.environ.copy()
+    env["CARGO_TARGET_DIR"] = str(target)
+    env["CARGO_BUILD_BUILD_DIR"] = str(target)
+    start = time.monotonic()
+    subprocess.run(["cargo", *arguments, "--locked"], cwd=workspace, env=env, check=True)
+    print(f"{label}_seconds={time.monotonic() - start:.3f}", flush=True)
+    report_size(label, target)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("generation", type=Path, help="published generation directory")
+    parser.add_argument("output", type=Path, help="new directory on the seed volume")
+    parser.add_argument("--workspace", type=Path, default=Path("tools/front-door"))
+    args = parser.parse_args()
+    if sys.platform != "darwin" or os.environ.get("PROVENANT_LANE_DEPTH"):
+        parser.error("run on an unconfined macOS host, not in a lane")
+    generation = args.generation.resolve(strict=True)
+    workspace = args.workspace.resolve(strict=True)
+    output = args.output.absolute()
+    if output.exists():
+        parser.error("output must not exist")
+    if generation.parent.name != "generations":
+        parser.error("generation must be inside cargo-target-seeds/generations")
+    store = generation.parent.parent
+    if store.name != "cargo-target-seeds":
+        parser.error("generation must be inside cargo-target-seeds/generations")
+    output.mkdir(mode=0o700)
+    if os.stat(generation).st_dev != os.stat(output).st_dev:
+        parser.error("output must be on the same filesystem as the generation")
+    print("workspace=" + str(workspace), flush=True)
+    print("generation=" + str(generation), flush=True)
+    print("checkout=" + subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=workspace, text=True).strip(), flush=True)
+    print("rustc_vv=" + json.dumps(subprocess.check_output(
+        ["rustc", "-vV"], cwd=workspace, text=True)), flush=True)
+    print("rust_flags=" + json.dumps({key: os.environ.get(key) for key in
+          ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS")}), flush=True)
+    cold = output / "cold"
+    seeded = output / "seeded"
+    cold.mkdir(mode=0o700)
+    before = free_bytes(output)
+    start = time.monotonic()
+    # The same flock protects readers from generation GC during the clone.
+    with (store / "store.lock").open("rb") as lock:
+        fcntl.flock(lock, fcntl.LOCK_SH)
+        print("manifest=" + (generation / "manifest.json").read_text().strip(), flush=True)
+        clone_tree(generation / "target", seeded)
+    print(f"clone_seconds={time.monotonic() - start:.3f}", flush=True)
+    print(f"clone_volume_free_delta_bytes={before - free_bytes(output)}", flush=True)
+    report_size("seeded_initial", seeded)
+    print("shared_bytes=unavailable (du counts clone blocks per file; volume delta is an estimate)", flush=True)
+    for label, target in (("cold", cold), ("seeded", seeded)):
+        timed_cargo(label + "_check", workspace, target, ["check"])
+        timed_cargo(label + "_test_build", workspace, target, ["test", "--no-run"])
+    print("targets_retained=" + str(output), flush=True)
+
+
+if __name__ == "__main__":
+    main()

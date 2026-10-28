@@ -227,6 +227,8 @@ pub struct LaunchConfinement {
     pub home: PathBuf,
     /// Opt in to cloning the host Cargo registry into a fresh writer cache.
     pub cargo_registry_seed: bool,
+    /// Host state root containing target seed generations.
+    pub state_root: PathBuf,
 }
 impl LaunchConfinement {
     pub(crate) fn command(
@@ -285,6 +287,26 @@ impl LaunchConfinement {
             let _ = writeln!(
                 std::io::stderr().lock(),
                 "warning: could not record Cargo Git setup: {error}"
+            );
+        }
+        let target_outcome = match (&self.plan.permissions().mode, writer) {
+            (AccessMode::WorktreeWrite(authority), Some((worktree, _))) => {
+                crate::cargo_seed::seed_target(
+                    self.cargo_registry_seed,
+                    &self.state_root,
+                    &authority.cargo_cache().path,
+                    worktree.path(),
+                )
+            }
+            _ => crate::cargo_seed::Outcome::skipped("read_only_lane"),
+        };
+        if let Err(error) =
+            record_cargo_setup_file(attempt_dir, "cargo-target-setup.json", &target_outcome)
+        {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: could not record Cargo target setup: {error}"
             );
         }
         let directories = required_anchors(self.plan.permissions(), &self.profile, writer)

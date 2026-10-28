@@ -97,6 +97,15 @@ the [worktree guide](../worktrees.md).
   `::enabled_is_a_no_op_on_other_platforms`
 - Owner: `crates/fabric-runtime/src/config.rs`, `crates/run/src/cargo_seed.rs`
 
+### Cargo target seed generations
+
+The host may build a generation from the pinned `origin/main` commit in a
+scratch checkout. It publishes a read-only generation only after the build and
+manifest succeed. GC holds the store lock and removes oldest generations until
+both the count and apparent-byte caps hold; a busy store is skipped.
+- Test: `src/target_seed_build.rs::tests`; `crates/run/src/target_seed_gc.rs::tests`
+- Owner: `src/target_seed_build.rs`, `crates/run/src/target_seed_gc.rs`
+
 ### Strict typed config
 
 `config.toml` declares `schema_version = 1`; unknown keys, duplicates, bad

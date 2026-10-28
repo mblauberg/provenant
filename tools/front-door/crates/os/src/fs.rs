@@ -1145,6 +1145,19 @@ impl FileHandle {
             .sync_all()
             .map_err(error("fsync file", &self.path))
     }
+    /// Give the owner write permission through the open descriptor.
+    pub fn make_owner_writable(&self) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = self
+            .file
+            .metadata()
+            .map_err(error("fstat file", &self.path))?
+            .permissions()
+            .mode();
+        self.file
+            .set_permissions(std::fs::Permissions::from_mode(mode | 0o200))
+            .map_err(error("fchmod file", &self.path))
+    }
     /// Give the owner execute permission through the open descriptor.
     pub fn make_owner_executable(&self) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
