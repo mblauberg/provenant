@@ -77,11 +77,11 @@ pub struct GraphLimits {
     pub fan_out_width: usize,
     #[serde(
         deserialize_with = "deserialize_concurrency",
-        serialize_with = "serialize_concurrency"
+        serialize_with = "serialise_concurrency"
     )]
     pub concurrency: Option<usize>,
 }
-fn serialize_concurrency<S: serde::Serializer>(
+fn serialise_concurrency<S: serde::Serializer>(
     value: &Option<usize>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
