@@ -2674,6 +2674,81 @@ bounds are null. Positional arguments have no long flag.
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
+## `provenant chair log`
+
+| Argument | Contract |
+|---|---|
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant chair log append`
+
+| Argument | Contract |
+|---|---|
+| `--session` | `{"name": "session", "required": true}` |
+| `--file` | `{"name": "file", "required": true}` |
+| `--operation-id` | `{"name": "operation_id", "requires": ["issued_at"]}` |
+| `--issued-at` | `{"name": "issued_at", "requires": ["operation_id"]}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "constraints": [
+    "operation-id and issued-at are generated when omitted; supply both for planned retries"
+  ],
+  "groups": [
+    {
+      "arguments": [
+        "session",
+        "file",
+        "operation_id",
+        "issued_at"
+      ],
+      "multiple": true,
+      "name": "Append",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant chair log list`
+
+| Argument | Contract |
+|---|---|
+| `--session` | `{"name": "session", "required": true}` |
+| `--after` | `{"name": "after"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "session",
+        "after",
+        "limit"
+      ],
+      "multiple": true,
+      "name": "List",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant chair switch`
 
 | Argument | Contract |

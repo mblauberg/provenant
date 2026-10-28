@@ -4,6 +4,7 @@
 pub mod bind;
 pub mod chair;
 pub mod coverage;
+pub mod log;
 mod persistence;
 pub mod receipt;
 pub mod review;
