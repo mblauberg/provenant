@@ -399,8 +399,12 @@ ancestry proof. Remote delivery refreshes and verifies its tracking ref.
 `lane deliver ATTEMPT [--deliver MODE]` uses the recorded destination, or
 origin push when the settled lane recorded none. It requires a succeeded
 writer, released custody, no new reservation, a clean tree and the exact
-receipt head. It persists a keyed host pickup receipt separately from the
-immutable terminal record. Successful pickup replays without repeating
+receipt head. After reviewing a `review_required` writer, the chair can use
+`lane deliver --accept-review ATTEMPT` to accept its protected changes and
+deliver the same exact head. The delivery receipt records the acceptance and
+protected paths. Lanes and peers cannot accept review. Delivery persists a
+keyed host pickup receipt separately from the immutable terminal record.
+Successful pickup replays without repeating
 external effects, while failures remain explicitly retryable. A worktree
 already pruned by its own lifecycle may replay its successful receipt.
 PR bodies use commit subjects and bodies with run and attempt IDs, capped at

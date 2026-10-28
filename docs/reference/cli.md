@@ -2390,6 +2390,7 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `attempt` | `{"name": "attempt", "positional": true, "required": true}` |
 | `--deliver` | `{"name": "deliver"}` |
+| `--accept-review` | `{"defaults": ["false"], "name": "accept_review", "values": ["true", "false"]}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -2402,7 +2403,8 @@ bounds are null. Positional arguments have no long flag.
     {
       "arguments": [
         "attempt",
-        "deliver"
+        "deliver",
+        "accept_review"
       ],
       "multiple": true,
       "name": "Deliver",

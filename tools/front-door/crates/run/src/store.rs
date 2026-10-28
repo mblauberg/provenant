@@ -593,6 +593,7 @@ impl RunStore {
                     remote: deliver.remote,
                     branch: deliver.branch,
                     head: None,
+                    review_acceptance: None,
                     state: WriterDeliveryState::NotAttempted,
                 });
             }
