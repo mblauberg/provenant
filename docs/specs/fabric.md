@@ -283,18 +283,20 @@ complete redacted stream. Its syntax is `VERDICT: TOKEN`, with an uppercase
 ASCII token containing only letters, digits, underscores or hyphens. The line
 must fit within 1024 bytes, including surrounding whitespace. Repeated verdict
 markers anywhere in the stream, even in quotations or outside the retained
-windows, invalidate the evidence. Case differences, trailing text, an overlong
-line or an incomplete source also invalidate it. Invalid evidence is recorded
+windows, invalidate the evidence. Case differences, trailing text or an overlong
+line also invalidate it. Invalid evidence is recorded
 in `verdict_error` and must fail any consuming verdict gate. A missing verdict
 is a non-match; a matched `required_verdict` contract must not override invalid
 typed evidence.
+Run-store integrity verification rejects incomplete artifacts before their
+verdicts can be consumed; excerpt truncation alone does not invalidate a verdict.
 
 Findings use a fenced `findings` JSON block with `schema_version: 1`
 and a `findings` array; each item has string fields `id`, `severity`, `file`, `summary` and
 `status`, and an optional non-negative integer `line` (which may be null).
 Unknown fields or a different schema version make the block invalid. Parsing
-of findings only uses complete lines and blocks within a window, so content in the middle
-of a large result may not be captured. A block may contain at most 32 findings
+of findings only uses complete lines and blocks within a window, so content
+in the middle of a large result may not be captured. A block may contain at most 32 findings
 and 8 KiB of JSON, and text fields are
 limited to 1024 bytes each; a block with an overlong field is invalid. Missing
 or invalid findings produce an empty list and, when a result exists, a warning,

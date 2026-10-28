@@ -2395,7 +2395,6 @@ fn make_outputs(
         warnings.push(warning);
     }
     let verdict = result
-        .filter(|capture| !capture.source_truncated)
         .and_then(|capture| capture.verdict.as_deref())
         .map(str::to_owned);
     let parsed = windows
@@ -2436,8 +2435,8 @@ fn make_outputs(
     });
     NodeOutputs {
         verdict_error: result
-            .filter(|capture| capture.verdict_invalid || capture.source_truncated)
-            .map(|_| "verdict malformed, repeated, not final or incomplete".to_owned()),
+            .filter(|capture| capture.verdict_invalid)
+            .map(|_| "verdict malformed, repeated or not final".to_owned()),
         schema_version: 2,
         result: result.map(|capture| ResultOutput {
             digest: capture.digest.clone(),
@@ -4839,7 +4838,10 @@ mod tests {
             "{}\n```findings\n{{\"schema_version\":1,\"findings\":[{{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a\",\"line\":1,\"summary\":\"issue\",\"status\":\"open\"}}]}}\n```\nVERDICT: PASS\n",
             "x".repeat(25000)
         );
-        let captured = capture(&text);
+        let mut captured = capture(&text);
+        // RunStore marks the raw excerpt as truncated after verifying the
+        // entire stream. This does not mean verdict evidence is incomplete.
+        captured.source_truncated = true;
         let outputs = make_outputs(Some(&captured), None, None, None, None);
         assert_eq!(outputs.verdict.as_deref(), Some("VERDICT: PASS"));
         assert_eq!(outputs.findings[0].id, "F1");

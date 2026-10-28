@@ -84,8 +84,9 @@ Ask each reviewer to put its findings first and finish with exactly one
 standalone verdict, for example `VERDICT: PASS` or `VERDICT: FAIL`. The token
 must contain only uppercase ASCII letters, digits, underscores or hyphens;
 the entire line must fit within 1024 bytes. Do not quote or repeat verdict
-markers in prose. Multiple markers, malformed lines, a non-final verdict or an
-incomplete result fail the gate, even if other inputs satisfy its threshold.
+markers in prose. Multiple markers, malformed lines or a non-final verdict
+fail the gate, even if other inputs satisfy its threshold. An incomplete
+artifact fails the reviewer before the gate can consume it.
 
 For threshold decisions, let reviewers report either verdict without a
 `required_verdict` contract. A valid negative verdict then counts as a
