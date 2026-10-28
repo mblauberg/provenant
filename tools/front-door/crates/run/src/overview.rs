@@ -26,6 +26,7 @@ pub enum OverviewState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunOverview {
     pub attempts: Vec<OverviewAttempt>,
+    pub bytes_read: usize,
     /// More attempts exist beyond the bounded scan; counts may be incomplete.
     pub truncated: bool,
 }
@@ -34,29 +35,45 @@ impl RunStore {
     /// Read up to `limit` recent attempts across projects, newest first,
     /// keeping only the latest observed attempt for each task. Counts derived
     /// from these rows are partial when truncated.
-    pub fn overview_attempts(&self, limit: usize, call: &Request<'_>) -> Result<RunOverview> {
+    pub fn overview_attempts(
+        &self,
+        limit: usize,
+        max_bytes: usize,
+        call: &Request<'_>,
+    ) -> Result<RunOverview> {
         let limit = limit.min(128);
         call.retry(|| {
             let mut statement = self.db.prepare(
-                "SELECT project, run, task, id, substr(record, 1, 1048577) \
-                 FROM attempts ORDER BY sequence DESC LIMIT ?1",
+                "WITH recent AS (SELECT sequence, length(record) AS bytes FROM attempts ORDER BY sequence DESC LIMIT ?1), \
+                 sized AS (SELECT sequence, bytes, sum(bytes) OVER (ORDER BY sequence DESC) AS total FROM recent) \
+                 SELECT a.project, a.run, a.task, a.id, s.bytes, s.total, \
+                 CASE WHEN s.total <= ?2 AND s.bytes <= 1048576 THEN a.record END \
+                 FROM sized s JOIN attempts a ON a.sequence=s.sequence ORDER BY s.sequence DESC",
             )?;
-            let mut rows = statement.query([(limit + 1) as i64])?;
+            let mut rows = statement.query(rusqlite::params![(limit + 1) as i64, max_bytes.min(1_048_576) as i64])?;
             let mut attempts = Vec::new();
             let mut seen = BTreeSet::new();
             let mut truncated = false;
             let mut examined = 0;
+            let mut bytes_read = 0;
             while let Some(row) = rows.next()? {
                 if examined == limit {
                     truncated = true;
                     break;
                 }
                 examined += 1;
+                let bytes: i64 = row.get(4)?;
+                let total: i64 = row.get(5)?;
+                if total < 0 || bytes < 0 || total > max_bytes.min(1_048_576) as i64 || bytes > 1_048_576 {
+                    truncated = true;
+                    break;
+                }
+                bytes_read = total as usize;
                 let project: String = row.get(0)?;
                 let run: String = row.get(1)?;
                 let task: String = row.get(2)?;
                 let id: String = row.get(3)?;
-                let record: AttemptRecord = decode(&row.get::<_, Vec<u8>>(4)?)?;
+                let record: AttemptRecord = decode(&row.get::<_, Vec<u8>>(6)?)?;
                 if record.project_id.to_string() != project
                     || record.run_id.to_string() != run
                     || record.task_id.to_string() != task
@@ -85,6 +102,7 @@ impl RunStore {
             }
             Ok(RunOverview {
                 attempts,
+                bytes_read,
                 truncated,
             })
         })

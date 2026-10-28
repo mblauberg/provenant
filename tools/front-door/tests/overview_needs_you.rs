@@ -127,6 +127,48 @@ fn overview_needs_you() -> Result {
     assert_eq!(with_lane["data"]["counts"]["running"], 1);
     assert!(!with_lane.to_string().contains("PRIVATE PROMPT MARKER"));
 
+    // The inbox and run scans share one budget, including unprojected bodies.
+    let fabric_db = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
+    let run_db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+    let run_len: u32 =
+        run_db.query_row("SELECT length(record) FROM attempts", [], |row| row.get(0))?;
+    let original: Vec<u8> =
+        fabric_db.query_row("SELECT record FROM human_requests", [], |row| row.get(0))?;
+    let target = 1_048_576 - run_len as usize + 1;
+    let mut added_ids = Vec::new();
+    let project_id = project.to_string();
+    for index in 0..5 {
+        let mut inflated: Value = serde_json::from_slice(&original)?;
+        let row_target = target / 5 + usize::from(index < target % 5);
+        let extra_id =
+            provenant_core::HumanRequestId::from_bytes([index as u8 + 20; 16]).to_string();
+        if index != 0 {
+            inflated["id"] = json!(extra_id);
+        }
+        inflated["request"]["body"] = json!("");
+        let overhead = serde_json::to_vec(&inflated)?.len();
+        inflated["request"]["body"] = json!("x".repeat(row_target - overhead));
+        let inflated = serde_json::to_vec(&inflated)?;
+        assert_eq!(inflated.len(), row_target);
+        if index == 0 {
+            fabric_db.execute("UPDATE human_requests SET record=?1", [&inflated])?;
+        } else {
+            fabric_db.execute(
+                "INSERT INTO human_requests VALUES(?1,?2,1,'chair-a','open',?3)",
+                rusqlite::params![project_id, extra_id, inflated],
+            )?;
+            added_ids.push(extra_id);
+        }
+    }
+    let bounded = call(&rig, &["console", "overview"])?;
+    assert_eq!(bounded["data"]["coverage"]["inbox"], "complete");
+    assert_eq!(bounded["data"]["coverage"]["runs"], "partial");
+    assert_eq!(bounded["data"]["lanes"], json!([]));
+    for added_id in added_ids {
+        fabric_db.execute("DELETE FROM human_requests WHERE id=?1", [&added_id])?;
+    }
+    fabric_db.execute("UPDATE human_requests SET record=?1", [&original])?;
+
     let human = rig.command(&["console", "overview"])?;
     assert_eq!(code(&human), 0);
     let human = String::from_utf8(human.stdout.bytes)?;

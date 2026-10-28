@@ -52,18 +52,63 @@ fn overview_reads_committed_wal_and_limits_rows() {
             .unwrap();
     }
     let reader = Store::open_existing(&f.root, &f.request()).unwrap();
-    let page = reader.pending_human_requests(1, &f.request()).unwrap();
+    let page = reader
+        .pending_human_requests(1, 1_048_576, &f.request())
+        .unwrap();
     assert!(page.truncated);
     assert_eq!(page.items[0].title, "Title 0");
     assert_eq!(page.items[0].project_key.as_deref(), Some("demo"));
     assert_eq!(
         reader
-            .pending_human_requests(100, &f.request())
+            .pending_human_requests(100, 1_048_576, &f.request())
             .unwrap()
             .items
             .len(),
         2
     );
+}
+
+#[test]
+fn overview_bounds_aggregate_request_bytes_before_decoding() {
+    let f = Fixture::new();
+    let writer = f.open();
+    let project = project().to_string();
+    let mut lengths = Vec::new();
+    for n in 0..3 {
+        let id = HumanRequestId::from_bytes([n + 1; 16]).to_string();
+        let record = serde_json::json!({
+            "schema_version": 1, "id": id, "project_id": project,
+            "project_key": "demo", "request": { "title": format!("Title {n}"), "body": "x".repeat(200) }
+        }).to_string();
+        lengths.push(record.len());
+        writer
+            .db
+            .execute(
+                "INSERT INTO human_requests VALUES(?1,?2,1,'chair','open',?3)",
+                params![project, id, record.as_bytes()],
+            )
+            .unwrap();
+    }
+    let reader = Store::open_existing(&f.root, &f.request()).unwrap();
+    let batch = reader
+        .pending_human_requests(3, lengths[0] + lengths[1] - 1, &f.request())
+        .unwrap();
+    assert_eq!(batch.items.len(), 1);
+    assert_eq!(batch.bytes_read, lengths[0]);
+    assert!(batch.truncated);
+
+    // Invalid JSON exposes any attempt to decode a row beyond the budget.
+    writer
+        .db
+        .execute(
+            "UPDATE human_requests SET record=?1 WHERE id=(SELECT min(id) FROM human_requests)",
+            params![vec![b'x'; 4096]],
+        )
+        .unwrap();
+    let batch = reader.pending_human_requests(3, 100, &f.request()).unwrap();
+    assert!(batch.items.is_empty());
+    assert_eq!(batch.bytes_read, 0);
+    assert!(batch.truncated);
 }
 
 #[test]

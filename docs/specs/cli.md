@@ -30,7 +30,9 @@ attention in one bounded read. Project labels use the registered Git common
 directory's parent name; unavailable labels and task titles are null. Inbox
 requests have no task association, so their task label is always null. Bodies,
 prompts and results are excluded. The inbox scan returns at most 100 requests;
-the run scan examines at most 128 recent attempts, deduplicating retries.
+the run scan examines at most 128 recent attempts, deduplicating retries. Both
+scans share a 1 MiB budget for stored record bytes, with inbox records first;
+reaching the budget marks the affected source partial.
 Counts describe the observed rows and are partial when their source reports
 `partial`. Running includes queued, starting, running and settling attempts;
 attention includes terminal outcomes other than success or cancellation.

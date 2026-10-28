@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> {
+    const BYTE_BUDGET: usize = 1_048_576;
     let labels: BTreeMap<_, _> = projects
         .iter()
         .map(|p| {
@@ -31,10 +32,12 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
         backoff: &provenant_fabric_store::ThreadWait,
     };
     let mut needs_you = Vec::new();
+    let mut remaining_bytes = BYTE_BUDGET;
     let fabric = match provenant_fabric_store::Store::open_existing(&roots.state, &fabric_call)
-        .and_then(|s| s.pending_human_requests(100, &fabric_call))
+        .and_then(|s| s.pending_human_requests(100, remaining_bytes, &fabric_call))
     {
         Ok(page) => {
+            remaining_bytes -= page.bytes_read;
             for item in page.items {
                 if let Some(label) = labels.get(&item.project_id) {
                     needs_you.push(json!({"id":item.id,"project_id":item.project_id,"project_label":label,"title":item.title,"task_label":null}));
@@ -68,7 +71,7 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
     let mut lanes = Vec::new();
     let (mut running, mut attention) = (0usize, 0usize);
     let run = match RunStore::open_read_only(&context, &run_call) {
-        Ok(Some(store)) => match store.overview_attempts(128, &run_call) {
+        Ok(Some(store)) => match store.overview_attempts(128, remaining_bytes, &run_call) {
             Ok(batch) => {
                 for item in batch.attempts {
                     let Some(label) = labels.get(&item.project_id.to_string()) else {
