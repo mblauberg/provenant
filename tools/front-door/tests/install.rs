@@ -61,15 +61,24 @@ fn staged_named(rig: &TestRig, name: &str, identity: &[u8]) -> Result<PathBuf> {
     let skill = b"---\nname: example\ndescription: fixture\n---\n";
     let mut asset_bytes = vec![0];
     asset_bytes.extend(skill);
+    let installer = fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh"))?;
+    let mut installer_bytes = vec![0];
+    installer_bytes.extend(&installer);
     let version = VersionInfo {
         source_digest: source_digest(&[SourceInput {
             name: "fixture.rs",
             bytes: identity,
         }])?,
-        asset_digest: source_digest(&[SourceInput {
-            name: "skills/example/SKILL.md",
-            bytes: &asset_bytes,
-        }])?,
+        asset_digest: source_digest(&[
+            SourceInput {
+                name: "skills/example/SKILL.md",
+                bytes: &asset_bytes,
+            },
+            SourceInput {
+                name: "scripts/install.sh",
+                bytes: &installer_bytes,
+            },
+        ])?,
         target: env!("PROVENANT_TARGET_TRIPLE").into(),
         toolchain: "fixture-toolchain".into(),
         record_schema_version: 1,
@@ -97,6 +106,12 @@ fn staged_named(rig: &TestRig, name: &str, identity: &[u8]) -> Result<PathBuf> {
     let path = stage.join("skills/example/SKILL.md");
     fs::write(&path, skill)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    fs::create_dir_all(stage.join("scripts"))?;
+    fs::write(stage.join("scripts/install.sh"), installer)?;
+    fs::set_permissions(
+        stage.join("scripts/install.sh"),
+        fs::Permissions::from_mode(0o600),
+    )?;
     provenant_config::package_release(
         &stage,
         &version,
@@ -753,6 +768,65 @@ fn bare_install_preserves_recorded_custom_paths() -> Result {
     Ok(())
 }
 #[test]
+fn bootstrap_truncated_pipe_runs_nothing() -> Result {
+    let mut rig = TestRig::new()?;
+    let temporary = rig.root.join("temporary");
+    fs::create_dir(&temporary)?;
+    rig.env.push(("TMPDIR".into(), temporary.clone().into()));
+    let script =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh"))?;
+    let truncated = script.split("instruction_count=0").next().ok_or("script")?;
+    let _ = rig.execute_os(
+        Path::new("/bin/sh"),
+        &["-s".into(), "--".into(), "--yes".into()],
+        Some(truncated.as_bytes()),
+    )?;
+    assert_eq!(fs::read_dir(temporary)?.count(), 0);
+    Ok(())
+}
+
+#[test]
+fn bootstrap_help_and_unsupported_hosts_need_no_download() -> Result {
+    let mut rig = TestRig::new()?;
+    let fake_bin = rig.root.join("fake-bin");
+    fs::create_dir(&fake_bin)?;
+    let uname = fake_bin.join("uname");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
+    for (key, value) in &mut rig.env {
+        if key == "PATH" {
+            *value = format!("{}:/usr/bin:/bin", fake_bin.display()).into();
+        }
+    }
+    for (system, architecture) in [("Darwin", "x86_64"), ("Linux", "aarch64")] {
+        fs::write(
+            &uname,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in -s) echo {system} ;; -m) echo {architecture} ;; esac\n"
+            ),
+        )?;
+        fs::set_permissions(&uname, fs::Permissions::from_mode(0o755))?;
+        let help = rig.execute_os(
+            Path::new("/bin/sh"),
+            &[script.clone().into(), "--help".into()],
+            None,
+        )?;
+        assert_eq!(code(&help), 0);
+        assert!(String::from_utf8(help.stdout.bytes)?.contains("--upgrade"));
+        let failed = rig.execute_os(
+            Path::new("/bin/sh"),
+            &[script.clone().into(), "--yes".into()],
+            None,
+        )?;
+        assert_eq!(code(&failed), 4, "{failed:?}");
+        assert_eq!(
+            failed.stderr.bytes,
+            b"only macOS arm64 release packages are published; use --source\n"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn bootstrap_verifies_release_checksum() -> Result {
     let mut rig = TestRig::new()?;
     let fixtures = rig.root.join("downloads");
@@ -775,7 +849,17 @@ fn bootstrap_verifies_release_checksum() -> Result {
     fs::write(
         &executable,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
+            r#"#!/bin/sh
+if IFS= read -r unexpected; then exit 91; fi
+printf '%s\n' "$@" >> '{}'
+if [ "${{PROVENANT_TEST_ACCOUNT_FAILURE:-}}" = 1 ]; then
+    [ "${{CLAUDE_CONFIG_DIR##*/}}" != .claude-work ] || exit 17
+    printf '%s\n' published > "$HOME/published-instructions"
+    ln -s "$HOME/published-instructions" "$CLAUDE_CONFIG_DIR/CLAUDE.md"
+    mkdir -p "$PROVENANT_STATE_DIR/install"
+    printf '%s\n' published > "$PROVENANT_STATE_DIR/install/receipt.json"
+fi
+"#,
             recorded.display()
         ),
     )?;
@@ -854,6 +938,25 @@ esac
     let installed = fs::read_to_string(&recorded)?;
     assert!(installed.contains("install\n--source\n"));
     assert!(!installed.contains("--harness"));
+    // A curl | sh invocation must not infer a checkout tag, and children must
+    // not consume shell input after the final main call.
+    let git = fake_bin.join("git");
+    let git_called = rig.root.join("git-called");
+    fs::write(
+        &git,
+        format!("#!/bin/sh\ntouch '{}'\nexit 92\n", git_called.display()),
+    )?;
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o755))?;
+    let mut piped_script = fs::read(&args[0])?;
+    piped_script.extend_from_slice(b"printf '%s\\n' PIPE_COMPLETE\n");
+    let piped = rig.execute_os(
+        Path::new("/bin/sh"),
+        &["-s".into(), "--".into(), "--yes".into()],
+        Some(&piped_script),
+    )?;
+    assert_eq!(code(&piped), 0, "{piped:?}");
+    assert_eq!(piped.stdout.bytes, b"PIPE_COMPLETE\n");
+    assert!(!git_called.exists());
     fs::remove_file(&recorded)?;
     rig.env.push(("PROVENANT_INSTALL_TTY".into(), "1".into()));
     let codex = rig.root.join("codex/AGENTS.md");
@@ -918,6 +1021,34 @@ esac
     let prompts = String::from_utf8(account_setup.stderr.bytes)?;
     assert_eq!(prompts.matches("CLAUDE.md: replace").count(), 1);
     fs::remove_file(&recorded)?;
+    // Preserve the first install's published links and receipt if a later
+    // account fails after replace selections.
+    let primary = rig.root.join("claude");
+    for (key, value) in &mut rig.env {
+        if key == "CLAUDE_CONFIG_DIR" {
+            *value = primary.clone().into_os_string();
+        }
+    }
+    fs::write(primary.join("CLAUDE.md"), "original primary\n")?;
+    fs::write(account.join("CLAUDE.md"), "original account\n")?;
+    rig.env
+        .push(("PROVENANT_TEST_ACCOUNT_FAILURE".into(), "1".into()));
+    let failed_account = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"y\nn\nn\nn\nn\nreplace\nskip\nreplace\nskip\nn\nn\n"),
+    )?;
+    assert_eq!(code(&failed_account), 17, "{failed_account:?}");
+    assert_eq!(
+        fs::read_link(primary.join("CLAUDE.md"))?,
+        rig.home.join("published-instructions")
+    );
+    assert_eq!(
+        fs::read_to_string(rig.state.join("install/receipt.json"))?,
+        "published\n"
+    );
+    assert!(!account.join("CLAUDE.md").exists());
+    fs::remove_file(&recorded)?;
     fs::write(
         fixtures.join("checksum"),
         format!("{}  package.tar.gz\n", "0".repeat(64)),
@@ -941,12 +1072,17 @@ fn bootstrap_source_build_requires_consent_and_cleans_its_target() -> Result {
     fs::create_dir(&fake_bin)?;
     let record = rig.root.join("build-target");
     for (name, content) in [
-        ("rustup", "#!/bin/sh\n[ \"$1\" != run ]\n".to_owned()),
+        (
+            "rustup",
+            "#!/bin/sh\nif IFS= read -r unexpected; then exit 91; fi\n[ \"$1\" != run ]\n"
+                .to_owned(),
+        ),
         (
             "cargo",
             format!(
                 r#"#!/bin/sh
 [ "$CARGO_TARGET_DIR" = "$CARGO_BUILD_BUILD_DIR" ] || exit 90
+if IFS= read -r unexpected; then exit 91; fi
 printf '%s\n' "$CARGO_TARGET_DIR" > '{}'
 [ "$1" = run ] || exit 0
 while [ "$1" != --out ]; do shift; done
@@ -977,7 +1113,11 @@ chmod +x "$2/bin/provenant"
     assert_eq!(code(&declined), 3);
     assert!(!record.exists());
     args.push("--yes".into());
-    let built = rig.execute_os(Path::new("/bin/sh"), &args, None)?;
+    let mut input = fs::read(&args[0])?;
+    input.extend_from_slice(b"printf '%s\\n' SOURCE_COMPLETE\n");
+    let mut piped_args = vec!["-s".into(), "--".into()];
+    piped_args.extend_from_slice(&args[1..]);
+    let built = rig.execute_os(Path::new("/bin/sh"), &piped_args, Some(&input))?;
     assert_eq!(
         code(&built),
         0,
@@ -985,6 +1125,7 @@ chmod +x "$2/bin/provenant"
         String::from_utf8_lossy(&built.stderr.bytes)
     );
     let target = fs::read_to_string(record)?;
+    assert_eq!(built.stdout.bytes, b"SOURCE_COMPLETE\n");
     assert!(
         !Path::new(target.trim())
             .parent()
@@ -1064,9 +1205,6 @@ fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Resul
         ),
     )?;
     let curl = fake_bin.join("curl");
-    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../install.sh")
-        .canonicalize()?;
     fs::write(
         &curl,
         format!(
@@ -1079,13 +1217,11 @@ while [ "$#" -gt 0 ]; do
 done
 case "$url" in
   */releases/latest) printf '%s\n' '{{"tag_name":"v9.8.7"}}' ;;
-  */v9.8.7/install.sh) cat '{}' ;;
-  */download/v9.8.7/*.sha256) printf '%s  package.tar.gz\n' '{digest}' > "$out" ;;
+  */download/v9.8.7/*.sha256) printf '%s  package.tar.gz\n' "${{PROVENANT_TEST_CHECKSUM:-{digest}}}" > "$out" ;;
   */download/v9.8.7/*.tar.gz) cp '{}' "$out" ;;
   *) exit 99 ;;
 esac
 "#,
-            script.display(),
             archive.display()
         ),
     )?;
@@ -1095,6 +1231,32 @@ esac
             *value = format!("{}:/usr/bin:/bin", fake_bin.display()).into();
         }
     }
+    rig.env
+        .push(("PROVENANT_TEST_CHECKSUM".into(), "0".repeat(64).into()));
+    let rejected = rig.command(&["upgrade", "--hosts", "all", "--json"])?;
+    let rejected_value: serde_json::Value = serde_json::from_slice(&rejected.stdout.bytes)?;
+    assert_ne!(code(&rejected), 0, "{rejected_value}");
+    assert_eq!(
+        rejected_value["data"][0]["success"], false,
+        "{rejected_value}"
+    );
+    assert!(
+        rejected_value["data"][0]["output"]
+            .as_str()
+            .ok_or("output")?
+            .contains("Release checksum mismatch")
+    );
+    let before: provenant_records::InstallReceipt = provenant_records::decode_v1(
+        fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
+        provenant_records::Limits::CONFIG,
+    )?;
+    assert_eq!(
+        before.source_digest,
+        Release::read(&first, env!("PROVENANT_TARGET_TRIPLE"))?
+            .manifest()
+            .source_digest
+    );
+    rig.env.retain(|(key, _)| key != "PROVENANT_TEST_CHECKSUM");
     let result = rig.command(&["upgrade", "--hosts", "all", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&result.stdout.bytes)?;
     assert_eq!(value["data"][0]["host"], "local", "{value}");

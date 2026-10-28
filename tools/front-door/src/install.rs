@@ -980,21 +980,11 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 })
                 .ok_or("Latest release has no valid tag")?;
             install_args.extend(["--tag".into(), tag.into()]);
-            script = runner.execute(
-                &[
-                    "curl".into(),
-                    "-fLsS".into(),
-                    "--proto".into(),
-                    "=https".into(),
-                    format!(
-                        "https://raw.githubusercontent.com/mblauberg/provenant/{tag}/install.sh"
-                    )
-                    .into(),
-                ],
-                None,
-                1_048_576,
-                30,
-            )?;
+            script = format!(
+                "release_tag='{tag}'\n{}",
+                include_str!("upgrade-release.sh")
+            )
+            .into_bytes();
         }
         let ssh = if fabric.peers.is_empty() {
             None
@@ -1006,7 +996,14 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 .map_err(|error| error.to_string())?,
             )
         };
-        let mut local: Vec<std::ffi::OsString> = vec!["/bin/sh".into(), "-s".into(), "--".into()];
+        // Pass complete shell code as an argument, leaving stdin closed for children.
+        let script = String::from_utf8(script).map_err(|error| error.to_string())?;
+        let mut local: Vec<std::ffi::OsString> = vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            script.clone().into(),
+            "install.sh".into(),
+        ];
         local.extend(install_args.clone());
         local.extend([
             "--state-dir".into(),
@@ -1026,15 +1023,16 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         };
         let mut results = vec![report(
             "local".into(),
-            runner.execute(&local, Some(&script), 1_048_576, 3600),
+            runner.execute(&local, None, 1_048_576, 3600),
         )];
         // SSH uses Fabric's validated destination, batch mode and connection deadline.
         for (name, peer) in fabric.peers {
             let (command, input) = if let Some(archive) = &source_archive {
-                ("set -eu; scratch=$(mktemp -d); trap 'rm -rf \"$scratch\"' 0; tar -xzf - -C \"$scratch\"; git -C \"$scratch\" init -q; git -C \"$scratch\" add -f .; sh \"$scratch/install.sh\" --yes --upgrade --from-source \"$scratch\"".to_owned(), archive.as_slice())
+                ("set -eu; scratch=$(mktemp -d); trap 'rm -rf \"$scratch\"' 0; tar -xzf - -C \"$scratch\"; git -C \"$scratch\" init -q </dev/null; git -C \"$scratch\" add -f . </dev/null; sh \"$scratch/install.sh\" --yes --upgrade --from-source \"$scratch\" </dev/null".to_owned(), archive.as_slice())
             } else {
                 let command = format!(
-                    "sh -s -- {}",
+                    "sh -c '{}' install.sh {} </dev/null",
+                    script.replace('\'', "'\\''"),
                     install_args
                         .iter()
                         .map(|arg| {
@@ -1043,7 +1041,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                         .collect::<Vec<_>>()
                         .join(" ")
                 );
-                (command, script.as_slice())
+                (command, &[][..])
             };
             let argv = vec![
                 ssh.as_ref()

@@ -1,12 +1,18 @@
 #!/bin/sh
 # Bootstrap a verified release. Exit: 2 usage, 3 toolchain consent, 4 download/checksum,
 # 5 build/package; installation failures retain the CLI's exit code.
+# Parse the entire download before executing any of it.
+main() {
 set -eu
 
 die() { printf '%s\n' "$2" >&2; exit "$1"; }
 ask() {
     printf '%s [%s] ' "$1" "$2" >&2
-    IFS= read -r answer || die 2 'Input ended during setup'
+    if [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; then
+        IFS= read -r answer || die 2 'Input ended during setup'
+    else
+        IFS= read -r answer </dev/tty || die 2 'Input ended during setup'
+    fi
     answer=${answer:-$2}
 }
 
@@ -19,7 +25,7 @@ upgrade=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --yes) yes=true; shift ;;
-        --from-source)
+        --source|--from-source)
             source_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
             shift
             if [ "$#" -gt 0 ] && [ "${1#--}" = "$1" ]; then source_dir=$1; shift; fi ;;
@@ -29,7 +35,7 @@ while [ "$#" -gt 0 ]; do
             shift 2 ;;
         --upgrade) upgrade=true; shift ;;
         --help)
-            printf '%s\n' 'Usage: install.sh [--yes] [--from-source [DIR]] [--tag TAG] [--state-dir DIR] [--bin-dir DIR]'
+            printf '%s\n' 'Usage: install.sh [--yes] [--upgrade] [--source|--from-source [DIR]] [--tag TAG] [--state-dir DIR] [--bin-dir DIR]'
             exit 0 ;;
         *) die 2 "Unknown option: $1" ;;
     esac
@@ -37,12 +43,18 @@ done
 case "$state" in /*) ;; *) die 2 '--state-dir must be absolute' ;; esac
 case "$bin_dir" in ''|/*) ;; *) die 2 '--bin-dir must be absolute' ;; esac
 case "$tag" in *[!a-zA-Z0-9._-]*) die 2 'Invalid release tag' ;; esac
+if [ -z "$source_dir" ]; then
+    case "$(uname -s)/$(uname -m)" in
+        Darwin/arm64) target=aarch64-apple-darwin ;;
+        *) die 4 'only macOS arm64 release packages are published; use --source' ;;
+    esac
+fi
 receipt=$state/install/receipt.json
 if "$upgrade" && [ ! -f "$receipt" ]; then die 2 'No install receipt; run install first'; fi
 
 guided=false
 if ! "$yes" && [ ! -f "$receipt" ]; then
-    if { [ -t 0 ] && [ -t 1 ]; } || [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; then guided=true; fi
+    if { [ -t 1 ] && ( : </dev/tty ) 2>/dev/null; } || [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; then guided=true; fi
 fi
 umask 077
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/provenant-install.XXXXXX")
@@ -75,42 +87,40 @@ if [ -n "$source_dir" ]; then
     [ -n "$toolchain" ] || die 2 'Pinned toolchain is missing'
     PATH=$HOME/.cargo/bin:$PATH
     export PATH
-    if ! command -v rustup >/dev/null 2>&1 || ! rustup run "$toolchain" rustc --version >/dev/null 2>&1; then
+    if ! command -v rustup >/dev/null 2>&1 || ! rustup run "$toolchain" rustc --version </dev/null >/dev/null 2>&1; then
         if ! "$yes"; then
-            if [ -t 0 ] || [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; then
+            if ( : </dev/tty ) 2>/dev/null || [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; then
                 ask "Install Rust $toolchain with rustup? y/n" n
                 case "$answer" in y|Y|yes) ;; *) die 3 'Toolchain installation declined' ;; esac
             else die 3 'Pinned Rust toolchain missing; rerun with --yes to install it'; fi
         fi
         if ! command -v rustup >/dev/null 2>&1; then
-            curl -fLsS --proto '=https' --tlsv1.2 https://sh.rustup.rs -o "$scratch/rustup.sh" || die 4 'Cannot download rustup'
-            sh "$scratch/rustup.sh" -y --no-modify-path --default-toolchain none || die 5 'Cannot install rustup'
+            curl -fLsS --proto '=https' --tlsv1.2 https://sh.rustup.rs -o "$scratch/rustup.sh" </dev/null || die 4 'Cannot download rustup'
+            sh "$scratch/rustup.sh" -y --no-modify-path --default-toolchain none </dev/null || die 5 'Cannot install rustup'
         fi
-        rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy || die 5 'Cannot install toolchain'
+        rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy </dev/null || die 5 'Cannot install toolchain'
     fi
     (
         cd "$workspace"
         CARGO_TARGET_DIR=$scratch/target
         CARGO_BUILD_BUILD_DIR=$scratch/target
         export CARGO_TARGET_DIR CARGO_BUILD_BUILD_DIR
-        cargo build --release --locked --bin provenant &&
-        cargo run --release --locked --example package-release -- --out "$release"
+        cargo build --release --locked --bin provenant </dev/null &&
+        cargo run --release --locked --example package-release -- --out "$release" </dev/null
     ) || die 5 'Build or packaging failed'
 else
-    case "$(uname -s)/$(uname -m)" in
-        Darwin/arm64) target=aarch64-apple-darwin ;;
-        Darwin/x86_64) target=x86_64-apple-darwin ;;
-        *) die 4 'No release package for this host; use --from-source in a checkout' ;;
-    esac
-    if [ -z "$tag" ] && command -v git >/dev/null 2>&1; then
+    if [ -z "$tag" ] && [ -f "$0" ] && command -v git >/dev/null 2>&1; then
         repo=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-        tag=$(git -C "$repo" describe --tags --exact-match HEAD 2>/dev/null || :)
+        # With /bin/sh -s, $0 can be the shell binary itself.
+        if [ -f "$repo/tools/front-door/Cargo.toml" ]; then
+            tag=$(git -C "$repo" describe --tags --exact-match HEAD </dev/null 2>/dev/null || :)
+        fi
     fi
     base=https://github.com/mblauberg/provenant/releases
     if [ -n "$tag" ]; then base=$base/download/$tag; else base=$base/latest/download; fi
     archive=provenant-$target.tar.gz
-    curl -fLsS --proto '=https' --tlsv1.2 "$base/$archive" -o "$scratch/package.tar.gz" || die 4 'Cannot download release package'
-    curl -fLsS --proto '=https' --tlsv1.2 "$base/$archive.sha256" -o "$scratch/checksum" || die 4 'Cannot download release checksum'
+    curl -fLsS --proto '=https' --tlsv1.2 "$base/$archive" -o "$scratch/package.tar.gz" </dev/null || die 4 'Cannot download release package'
+    curl -fLsS --proto '=https' --tlsv1.2 "$base/$archive.sha256" -o "$scratch/checksum" </dev/null || die 4 'Cannot download release checksum'
     expected=$(awk 'NR == 1 {print $1}' "$scratch/checksum")
     [ "${#expected}" -eq 64 ] || die 4 'Invalid checksum'
     case "$expected" in *[!0-9a-fA-F]*) die 4 'Invalid checksum' ;; esac
@@ -118,7 +128,7 @@ else
     actual=${actual%% *}
     [ "$actual" = "$expected" ] || die 4 'Release checksum mismatch'
     mkdir "$release"
-    tar -xzpf "$scratch/package.tar.gz" -C "$release" || die 4 'Cannot unpack release'
+    tar -xzpf "$scratch/package.tar.gz" -C "$release" </dev/null || die 4 'Cannot unpack release'
 fi
 [ -x "$release/bin/provenant" ] || die 4 'Release binary is missing'
 
@@ -212,7 +222,8 @@ if "$guided"; then
         fi ;;
     esac
 fi
-"$release/bin/provenant" "$@"
+"$release/bin/provenant" "$@" </dev/null
+instructions_committed=true
 if "$guided"; then
     case " $providers " in *' claude '*)
         for directory in "$HOME"/.claude-*; do
@@ -220,16 +231,17 @@ if "$guided"; then
             if [ "$directory" != "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ]; then
                 set -- --state-dir "$state" install --source "$release" --harness claude --hooks "$hooks"
                 if [ -n "$bin_dir" ]; then set -- "$@" --bin-dir "$bin_dir"; fi
-                CLAUDE_CONFIG_DIR=$directory "$release/bin/provenant" "$@"
+                CLAUDE_CONFIG_DIR=$directory "$release/bin/provenant" "$@" </dev/null
             fi
         done ;;
     esac
 fi
-instructions_committed=true
 if "$register"; then
     for directory in "$HOME"/.claude-*; do
         [ -d "$directory" ] || continue
         label=${directory##*/.claude-}
-        "$release/bin/provenant" --state-dir "$state" accounts register "$label" --adapter claude --directory "$directory"
+        "$release/bin/provenant" --state-dir "$state" accounts register "$label" --adapter claude --directory "$directory" </dev/null
     done
 fi
+}
+main "$@"

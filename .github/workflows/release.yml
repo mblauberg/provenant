@@ -11,13 +11,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     runs-on: macos-latest
     timeout-minutes: 40
     permissions:
-      contents: write
+      contents: read
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PROVENANT_ROOT: ${{ github.workspace }}
       RELEASE_TAG: ${{ github.ref_name }}
     steps:
@@ -25,8 +24,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Check release inputs
         run: |
+          git merge-base --is-ancestor HEAD origin/main
           test "$(uname -m)" = arm64
           test -f "docs/release-notes/$RELEASE_TAG.md"
       - name: Install pinned toolchain
@@ -45,12 +46,41 @@ jobs:
           cargo run --release --locked --example package-release -- --out "$RUNNER_TEMP/release"
           archive="$RUNNER_TEMP/provenant-aarch64-apple-darwin.tar.gz"
           tar -czf "$archive" -C "$RUNNER_TEMP/release" .
+          cp "$PROVENANT_ROOT/docs/release-notes/$RELEASE_TAG.md" "$RUNNER_TEMP/$RELEASE_TAG.md"
           cd "$RUNNER_TEMP"
           shasum -a 256 "$(basename "$archive")" > "$archive.sha256"
+      - name: Upload release artefacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            ${{ runner.temp }}/provenant-aarch64-apple-darwin.tar.gz
+            ${{ runner.temp }}/provenant-aarch64-apple-darwin.tar.gz.sha256
+            ${{ runner.temp }}/${{ github.ref_name }}.md
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artefacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
       - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          cd "$RUNNER_TEMP/release"
+          sha256sum -c provenant-aarch64-apple-darwin.tar.gz.sha256
           gh release create "$RELEASE_TAG" \
-            "$RUNNER_TEMP/provenant-aarch64-apple-darwin.tar.gz" \
-            "$RUNNER_TEMP/provenant-aarch64-apple-darwin.tar.gz.sha256" \
+            provenant-aarch64-apple-darwin.tar.gz \
+            provenant-aarch64-apple-darwin.tar.gz.sha256 \
             --verify-tag --title "$RELEASE_TAG" \
-            --notes-file "docs/release-notes/$RELEASE_TAG.md"
+            --notes-file "$RELEASE_TAG.md"

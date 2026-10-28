@@ -14,8 +14,9 @@ links are no-ops, including after a crash before receipt publication.
 latest release otherwise. `--tag vX.Y.Z` selects a release explicitly. Packages
 are named `provenant-<target>.tar.gz` with a matching `.tar.gz.sha256` file;
 the script verifies SHA-256 before unpacking and running the packaged binary.
-The release workflow currently publishes `aarch64-apple-darwin`. Other hosts
-can build a checkout with `./install.sh --from-source --yes`.
+The release workflow publishes only `aarch64-apple-darwin`; other hosts fail
+before downloading. Build a checkout with `./install.sh --source --yes`
+(`--from-source` is also accepted).
 
 `--from-source [DIR]` uses that checkout's pinned Rust toolchain and asks before
 installing a missing toolchain through rustup. `--yes` authorises this step
@@ -33,8 +34,11 @@ replace, append to or skip each instruction file, enable Claude hooks and
 register the discovered Claude accounts. Append copies the release's instruction
 text into the existing file; later upgrades preserve that user-owned text.
 Skip preserves existing text or creates an empty user-owned file. Replace lets
-the installer create its managed link. Piped invocations, `--yes` and receipt
-reruns do not enter guided setup.
+the installer create its managed link. Prompts read the controlling terminal,
+including when the script is piped into `sh`; `--yes` and receipt reruns skip
+guided setup. A truncated script runs nothing, and child commands cannot consume
+the shell's input. After the first successful install, a later account failure
+preserves the published instruction links and receipt.
 
 A bare `provenant install --source "$RELEASE"` detects executable `claude`,
 `codex`, `cursor-agent`, `agy` and `opencode` commands on PATH and every
@@ -53,8 +57,9 @@ provenant upgrade --from-source /absolute/path/to/provenant --hosts all
 Upgrade requires a receipt. It downloads one release tag for this host and all
 registered Fabric peers, or builds the selected source checkout on every host.
 It uses Fabric's SSH executable, destination and connection timeout, and each
-host's own receipt settings. Source transfers contain tracked working files;
-peers build a temporary indexed checkout. Keep source changes stable during
+host's own receipt settings. Release upgrades verify each host's package checksum
+before running its bundled `scripts/install.sh`. Source transfers contain tracked
+working files; peers build a temporary indexed checkout. Keep source changes stable during
 the upgrade. Every host needs build tools for a source upgrade. Peer receipts
 must be in their default state directory or selected by the peer's login
 environment. Results identify each host; any failure makes the command fail.
@@ -65,9 +70,11 @@ Bootstrap exits 2 for invalid arguments or interrupted prompts, 3 when a
 missing toolchain needs consent, 4 for a failed download or checksum, and 5
 for a failed build or package. Installation errors retain the CLI's exit code.
 
-Tags matching `v*` trigger `.github/workflows/release.yml`. The workflow builds
-and ad-hoc signs the arm64 binary, runs `package-release`, and publishes the
-archive and checksum using `GITHUB_TOKEN`. Before tagging, commit
+Tags matching `v*` trigger `.github/workflows/release.yml`. The tag commit must
+be reachable from `origin/main`. A job with read access builds and ad-hoc signs
+the arm64 binary, runs `package-release`, and checksums the archive. A separate
+publish job verifies the transferred bytes and publishes the archive and checksum;
+only its publish step receives `GITHUB_TOKEN`. Before tagging, commit
 `docs/release-notes/<tag>.md`; that file becomes the GitHub Release body.
 
 ## Build a staged release
