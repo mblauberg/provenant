@@ -30,6 +30,9 @@ pub struct RouteSelectionReceipt {
     pub roll: u64,
     pub total_weight: u64,
     pub pick: String,
+    /// Why normal selection was used despite live capacity cooldowns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redraws: Vec<RouteSelectionRedraw>,
 }

@@ -244,9 +244,62 @@ describes defaults, ceilings, budget telemetry and resuming a paused graph.
 
 Each node has an optional task `title`, defaulting to its ID; titles use the
 shared task title validation and appear in lanes and graph status. A node may
-specify a single `route` or an ordered `routes` list. A route can name a pool
+specify a single `route` or an ordered `routes` list for agent work. A route can name a pool
 with just `alias`, resolved as for `dispatch --route`, or supply an explicit
 adapter. Routes require an adapter or alias and may mix these forms in a list.
+
+### Synthesise agents
+
+An agent node may set `kind` to `synthesise` and must select one or more direct
+dependencies with `inputs`. Its configured prompt states the synthesis purpose.
+The runtime uses the same bounded, untrusted-data handoff and typed settlement
+as a task. Omitting `kind`, or setting it to `task`, preserves task behaviour.
+
+- Why: one configurable agent can combine results for different purposes without
+  adding a node kind for each purpose.
+- Test: `crates/fabric-runtime/src/graph.rs::synthesise_receives_selected_reviewer_findings_and_emits_typed_output`;
+  `crates/fabric-runtime/src/graph.rs::synthesise_requires_selected_inputs`;
+  `crates/fabric-runtime/src/graph.rs::synthesise_json_preserves_purpose_and_rejects_unknown_configuration`.
+- Owner: `crates/fabric-runtime/src/graph.rs`
+
+### Deterministic gates
+
+A `gate` must evaluate its condition without a model or attempt. Verdict gates
+must compare selected direct dependencies' verdicts exactly, with missing
+verdicts counting as non-matches. Malformed, repeated or non-final verdicts
+must fail the gate regardless of its threshold. Majority requires strictly more than half;
+count requires at least the configured positive count. Budget gates must check
+settled attempt usage at evaluation time against the effective host budgets, including saved
+extensions, and fail on unknown or partial usage for a configured metric.
+Gates must save their decision before dependants run and retain it on replay,
+even if budgets change. Gates expose `PASS` or `FAIL` as their typed verdict.
+
+A failure target named by `on_fail` must depend on its gate, so ordinary cycle
+and edge limits cover the failure path. Only that target may follow a failed
+gate; other dependants and inactive failure paths must be skipped. An unhandled
+failure or failed recovery must prevent graph delivery. Dependencies requiring
+both outcomes of a gate must be rejected as unreachable. A recovered graph may
+deliver once its active paths succeed, with gate evidence and skipped nodes
+recorded in the final PR body.
+
+- Why: deterministic decisions need durable evidence without a provider launch.
+- Test: `crates/fabric-runtime/src/graph.rs::gate_verdict_fixture_is_attempt_less_and_replays`;
+  `::gate_threshold_fixtures_count_missing_verdicts_and_strict_majorities`;
+  `::gate_budget_fixtures_fail_closed_and_preserve_the_decision_on_resume`;
+  `::gate_on_fail_routes_only_the_active_path_and_delivers_after_recovery`;
+  `::gate_inactive_path_waits_for_other_parents_before_settling`;
+  `::gate_checkpoint_rejects_attempts_inconsistent_results_and_forged_skips`;
+  `::gate_validation_rejects_agent_fields_bad_thresholds_and_failure_cycles`;
+  `::gate_rejects_unreachable_joins_of_mutually_exclusive_paths`;
+  `::gate_only_graph_obeys_structural_limits_before_evaluating`;
+  `::gate_verdict_rejects_spoofed_multiple_and_malformed_lines`;
+  `::gate_budget_overrides_warn_only_for_configured_metrics`;
+  `::agent_json_still_requires_explicit_access`;
+  `::legacy_checkpoint_keeps_its_digest_without_delivery_fields`;
+  `::gate_skipped_chain_replays_every_save_after_the_gate_decision`;
+  `::gate_reachability_handles_two_gates_and_deep_paths`;
+  `::gate_reachability_accepts_a_limit_sized_graph_and_rejects_lower_limits`.
+- Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`
 
 ### Typed node outputs
 
@@ -262,15 +315,25 @@ stored result or redacted text exceeded that window. A local attempt may also
 have a run-file path. The runtime retains only the excerpt and a 16 KiB tail
 of the redacted text for parsing.
 
-When `required_verdict` matches, the recorded verdict is that exact trimmed
-line. Otherwise the optional verdict is the last `VERDICT:` line in the tail
-window, falling back to the last such line in the head window, and may be
-absent. Findings use a fenced `findings` JSON block with `schema_version: 1`
+The optional typed verdict must be the final non-empty standalone line of the
+complete redacted stream. Its syntax is `VERDICT: TOKEN`, with an uppercase
+ASCII token containing only letters, digits, underscores or hyphens. The line
+must fit within 1024 bytes, including surrounding whitespace. Repeated verdict
+markers anywhere in the stream, even in quotations or outside the retained
+windows, invalidate the evidence. Case differences, trailing text or an overlong
+line also invalidate it. Invalid evidence is recorded
+in `verdict_error` and must fail any consuming verdict gate. A missing verdict
+is a non-match; a matched `required_verdict` contract must not override invalid
+typed evidence.
+Run-store integrity verification rejects incomplete artifacts before their
+verdicts can be consumed; excerpt truncation alone does not invalidate a verdict.
+
+Findings use a fenced `findings` JSON block with `schema_version: 1`
 and a `findings` array; each item has string fields `id`, `severity`, `file`, `summary` and
 `status`, and an optional non-negative integer `line` (which may be null).
 Unknown fields or a different schema version make the block invalid. Parsing
-only uses complete lines and blocks within a window, so content in the middle
-of a large result may not be captured. A block may contain at most 32 findings
+of findings only uses complete lines and blocks within a window, so content
+in the middle of a large result may not be captured. A block may contain at most 32 findings
 and 8 KiB of JSON, and text fields are
 limited to 1024 bytes each; a block with an overlong field is invalid. Missing
 or invalid findings produce an empty list and, when a result exists, a warning,
@@ -300,10 +363,12 @@ briefs.
 - Test: `crates/fabric-runtime/src/graph.rs::outputs_feed_direct_dependants_and_survive_replay`;
   `::output_parsing_is_lenient_and_rendering_fails_instead_of_omitting`;
   `::findings_and_verdict_at_the_end_of_a_large_result_are_parsed`;
-  `::matched_required_verdict_takes_precedence_even_in_middle`;
+  `::matched_required_contract_cannot_override_ambiguous_verdict_evidence`;
   `::upstream_data_boundary_cannot_be_closed_by_result_content`;
   `crates/records/src/result_capture.rs::hashes_all_bytes_and_keeps_bounded_windows`;
+  `crates/records/src/result_capture.rs::verdict_evidence_is_unique_final_and_independent_of_chunk_boundaries`;
   `crates/run/src/tests.rs::streamed_result_is_verified_and_redacted_across_chunks`;
+  `crates/run/src/tests.rs::streamed_verdict_evidence_validates_complete_large_artifacts`;
   `src/fabric.rs::graph_owner_fails_node_when_result_integrity_is_lost`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
@@ -487,14 +552,14 @@ execution record before the first node is admitted. Replays preserve that base;
 final PR commit messages
 cover only `base..integration-head`, regardless of the primary checkout's HEAD.
 A legacy graph without a recorded base must use a new graph ID for PR delivery.
-Once every node succeeds and custody is released, the graph publishes local
+Once all active paths succeed, gate failures are handled and custody is released, the graph publishes local
 integration through a separately created graph branch,
 recovering an interrupted publication when its unmarked ref still points at
 the exact graph head. A matching sealed marker also permits recreating an absent
 publication ref at that same head. A different marker, a different ref head or
 a symbolic ref refuses. Alternatively,
 the graph uses its existing remote integration branch, and opens one PR. Its body
-contains bounded commit messages and run and attempt IDs. The checkpoint
+contains bounded commit messages, run and attempt IDs, gate decisions and skipped nodes. The checkpoint
 records the PR URL and successful final delivery;
 replay observes it. A failed final delivery keeps its advance error and remains
 eligible for advancement or manual resume. Neither conflicts nor unknown

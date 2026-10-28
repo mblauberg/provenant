@@ -374,13 +374,10 @@ fn delivery_capabilities_publish_only_tested_fabric_fallback_for_each_provider()
     let capabilities = delivery_capabilities();
     assert_eq!(
         capabilities.iter().map(|c| c.provider).collect::<Vec<_>>(),
-        vec![
-            provenant_records::Harness::Claude,
-            provenant_records::Harness::Codex,
-            provenant_records::Harness::Cursor,
-            provenant_records::Harness::Agy,
-            provenant_records::Harness::Opencode
-        ]
+        provenant_records::ADAPTER_SPECS
+            .iter()
+            .map(|spec| spec.id)
+            .collect::<Vec<_>>()
     );
     for capability in capabilities {
         assert_eq!(capability.transport, AnswerTransport::FabricMail);
@@ -1130,4 +1127,72 @@ fn request_correlation_repository_bound_counts_encoded_wire_bytes() {
         }
         assert_eq!(input.validate().is_ok(), valid);
     }
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // The bounded hook offer API uses real deadlines.
+fn hook_offers_retry_idempotently_without_hiding_later_queued_answers() {
+    use std::time::{Duration, Instant};
+    let f = Fixture::new();
+    for n in 0..18 {
+        let created = receipt(
+            f.call(ask(RequestKind::Decision, &format!("once-ask-{n}")))
+                .unwrap(),
+        );
+        f.call(answer(created.request_id, &format!("once-answer-{n}")))
+            .unwrap();
+    }
+    let target = AnswerTarget {
+        host: f.identity.host,
+        project: f.identity.project,
+        actor: f.identity.inbox.actor,
+        session: "session-a".into(),
+    };
+    let deadline = || Instant::now() + Duration::from_secs(2);
+    let read = || {
+        let store = Store::open_read_only(&f.root, deadline()).unwrap().unwrap();
+        store
+            .read_queued_human_answers(&target, deadline())
+            .unwrap()
+    };
+    let first = read();
+    assert_eq!(first.items.len(), 16);
+    let claim = |page, until| {
+        Store::offer_human_answers_once(&f.root, &target, page, f.clock.wall_now().unwrap(), until)
+    };
+    let barrier = std::sync::Barrier::new(2);
+    let claimed = std::thread::scope(|scope| {
+        let worker = || {
+            barrier.wait();
+            claim(first.clone(), deadline())
+        };
+        let a = scope.spawn(worker);
+        let b = scope.spawn(worker);
+        [a.join().unwrap(), b.join().unwrap()]
+            .into_iter()
+            .filter_map(Result::ok)
+            .map(|page| page.items.len())
+            .sum::<usize>()
+    });
+    assert_eq!(claimed, 16);
+    assert!(claim(first, deadline()).unwrap().items.is_empty());
+    let remaining = read();
+    assert_eq!(remaining.items.len(), 2);
+    assert!(matches!(
+        claim(remaining.clone(), Instant::now()),
+        Err(provenant_fabric_store::Error::Busy)
+    ));
+    assert_eq!(read(), remaining);
+    assert_eq!(claim(remaining, deadline()).unwrap().items.len(), 2);
+    // A committed offer that missed the host's deadline or stdout is still
+    // eligible for the exact same session, without recording another attempt.
+    let retries = Store::open_read_only(&f.root, deadline())
+        .unwrap()
+        .unwrap()
+        .read_offered_human_answers(&target, deadline())
+        .unwrap();
+    assert_eq!(retries.items.len(), 16);
+    let retried = claim(retries.clone(), deadline()).unwrap();
+    assert_eq!(retried, retries);
+    assert!(retried.items.iter().all(|item| item.delivery.attempts == 1));
 }
