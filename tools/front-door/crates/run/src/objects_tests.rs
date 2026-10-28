@@ -876,6 +876,26 @@ fn shared_duplicate_object_is_never_replaced_or_chmodded() -> TestResult {
 }
 
 #[test]
+fn private_duplicate_cannot_hide_a_corrupt_shared_object_during_import() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let common = object_path(&fixture.common_objects(), fixture.base_blob);
+    let duplicate = object_path(&fixture.source, fixture.base_blob);
+    fs::create_dir_all(duplicate.parent().ok_or("duplicate parent")?)?;
+    fs::copy(&common, duplicate)?;
+    fs::set_permissions(&common, fs::Permissions::from_mode(0o600))?;
+    fs::write(
+        &common,
+        fs::read(object_path(&fixture.source, fixture.blob))?,
+    )?;
+    assert!(
+        fixture.import().is_err(),
+        "private duplicate hid shared corruption"
+    );
+    fixture.assert_not_published();
+    Ok(())
+}
+
+#[test]
 fn forged_duplicate_object_cannot_replace_shared_content() -> TestResult {
     let fixture = Fixture::new("sha1")?;
     let common = object_path(&fixture.common_objects(), fixture.base_blob);
