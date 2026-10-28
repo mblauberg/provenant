@@ -2837,6 +2837,7 @@ mod tests {
                 run_id,
                 operation_id: paths.operation_id.clone(),
                 request: run::CanonicalRequest {
+                    child_attempt_id_version: None,
                     chair: None,
                     fresh_continuation: None,
                     schema_version: 1,

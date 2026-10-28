@@ -1046,6 +1046,7 @@ fn persisted_attempt_with(
         run_id,
         operation_id: OperationId::parse(&format!("{provider}-cooldown"))?,
         request: CanonicalRequest {
+            child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,

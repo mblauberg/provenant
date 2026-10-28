@@ -75,7 +75,7 @@ fn dispatch_validates_review_commits() -> TestResult {
     Ok(())
 }
 
-fn submission(prompt: &str) -> DispatchRequest {
+pub(super) fn submission(prompt: &str) -> DispatchRequest {
     DispatchRequest {
         chair: None,
         operation_id: OperationId::parse("service-dispatch").unwrap(),
@@ -103,6 +103,94 @@ fn submission(prompt: &str) -> DispatchRequest {
         lane_depth: 1,
         parent_attempt: None,
     }
+}
+
+#[test]
+fn child_dispatch_replays_original_id_scheme() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let proposal = || {
+        let mut input = submission("child");
+        input.parent_attempt = Some(provenant_core::AttemptId::from_bytes([9; 16]));
+        input.lane_depth = 2;
+        input
+    };
+    let original = Service::new(&store).dispatch(proposal(), temp.path(), &call)?;
+    let original_attempt = store.pending_attempts(original.run_id, &call)?[0].clone();
+    assert_eq!(
+        Service::new(&store)
+            .dispatch(proposal(), temp.path(), &call)?
+            .run_id,
+        original.run_id
+    );
+    assert_eq!(
+        store.pending_attempts(original.run_id, &call)?[0].attempt_id,
+        original_attempt.attempt_id
+    );
+    let legacy_dir = temp.path().join("legacy");
+    std::fs::create_dir(&legacy_dir)?;
+    let legacy = RunStore::open(&context(&legacy_dir)?, &call)?;
+    let mut request = store.request(original.run_id, &call)?;
+    request.child_attempt_id_version = None;
+    let accepted = legacy.create(
+        &PreparedRun {
+            run_id: original.run_id,
+            operation_id: original.operation_id,
+            request,
+            attempts: vec![NewAttempt {
+                attempt_id: original_attempt.attempt_id,
+                task_id: original_attempt.task_id,
+                prompt: "child".into(),
+            }],
+            created_at: original.created_at,
+        },
+        &call,
+    )?;
+    assert_eq!(
+        Service::new(&legacy)
+            .dispatch(proposal(), temp.path(), &call)?
+            .run_id,
+        accepted.run_id
+    );
+    assert_eq!(
+        legacy
+            .request(accepted.run_id, &call)?
+            .child_attempt_id_version,
+        None
+    );
+    // A pre-upgrade crash may reserve rows without publishing request.json.
+    let mut operation = legacy
+        .operation(&accepted.operation_id, &call)?
+        .ok_or("operation")?;
+    operation.state = OperationState::Prepared;
+    legacy.db.execute(
+        "UPDATE operations SET record=?1",
+        [crate::db::bytes(&operation)?],
+    )?;
+    std::fs::remove_file(
+        legacy
+            .context
+            .state_root
+            .as_path()
+            .join("runs")
+            .join(accepted.run_id.to_string())
+            .join("request.json"),
+    )?;
+    assert_eq!(
+        Service::new(&legacy)
+            .dispatch(proposal(), temp.path(), &call)?
+            .run_id,
+        accepted.run_id
+    );
+    assert_eq!(
+        legacy
+            .request(accepted.run_id, &call)?
+            .child_attempt_id_version,
+        None
+    );
+    Ok(())
 }
 
 #[test]
