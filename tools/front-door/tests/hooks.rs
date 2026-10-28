@@ -370,3 +370,254 @@ fn publish_checkpoint(rig: &TestRig) -> Result {
     )?;
     Ok(())
 }
+
+fn json_command(rig: &TestRig, args: &[&str]) -> Result<serde_json::Value> {
+    let mut args = args.to_vec();
+    args.push("--json");
+    let output = rig.command(&args)?;
+    assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
+    Ok(serde_json::from_slice(&output.stdout.bytes)?)
+}
+
+#[test]
+fn hook_recovers_committed_offers_and_advances_past_an_oversized_head_page() -> Result {
+    use serde_json::json;
+    let rig = TestRig::new()?;
+    let checkpoint = rig.root.join("checkpoint.md");
+    fs::write(&checkpoint, "chair checkpoint")?;
+    json_command(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "chair",
+            "--file",
+            checkpoint.to_str().ok_or("path")?,
+            "--client",
+            "claude",
+        ],
+    )?;
+    json_command(&rig, &["inbox", "--state", "all"])?;
+    let hook = |command: &str| -> Result<provenant_os::exec::ExecOutcome> {
+        rig.execute(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &[
+                "--state-dir",
+                rig.state.to_str().ok_or("state")?,
+                "hook",
+                "claude",
+                "pre-tool-use",
+            ],
+            Some(&serde_json::to_vec(
+                &json!({"hook_event_name":"PreToolUse", "tool_name":"Bash",
+                "tool_input":{"command":command}, "session_id":"chair", "cwd":rig.project}),
+            )?),
+        )
+    };
+    hook("git status")?; // Warm identity/discovery before testing delivery.
+    let draft = rig.root.join("question.json");
+    fs::write(
+        &draft,
+        serde_json::to_vec(&json!({"kind":"question","title":"Next?","body":"Choose"}))?,
+    )?;
+    let created = json_command(
+        &rig,
+        &[
+            "ask",
+            "--file",
+            draft.to_str().ok_or("path")?,
+            "--session",
+            "chair",
+        ],
+    )?;
+    let id = created["data"]["request_id"].as_str().ok_or("request")?;
+    let reply = rig.root.join("reply.txt");
+    fs::write(&reply, "Proceed carefully")?;
+    json_command(
+        &rig,
+        &[
+            "answer",
+            id,
+            "--action",
+            "reply",
+            "--text-file",
+            reply.to_str().ok_or("path")?,
+            "--expect-revision",
+            "1",
+            "--channel",
+            "console",
+        ],
+    )?;
+    let denied = hook("rm -rf /")?;
+    assert_eq!(code(&denied), 0);
+    let denial: serde_json::Value = serde_json::from_slice(&denied.stdout.bytes)?;
+    assert_eq!(denial["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(
+        denial["hookSpecificOutput"]
+            .get("additionalContext")
+            .is_none()
+    );
+    let db = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
+    // Warm a durable write, including BEGIN IMMEDIATE and fsync, without
+    // changing the queued state. The empty lookup above only warms reads.
+    db.execute_batch("BEGIN IMMEDIATE; UPDATE human_answer_outbox SET record=record; COMMIT;")?;
+    db.execute_batch("CREATE TRIGGER reject_hook_offer BEFORE UPDATE ON human_answer_outbox BEGIN SELECT RAISE(ABORT,'offer refused'); END;")?;
+    let failed = hook("git status")?;
+    assert_eq!(code(&failed), 0);
+    assert!(
+        failed.stdout.bytes.is_empty(),
+        "record failure injected context"
+    );
+    assert!(
+        String::from_utf8_lossy(&failed.stderr.bytes).contains("SQLite operation failed"),
+        "{}",
+        String::from_utf8_lossy(&failed.stderr.bytes)
+    );
+    let queued = json_command(&rig, &["inbox", id])?;
+    assert_eq!(queued["data"]["item"]["delivery"]["state"], "queued");
+    db.execute_batch("DROP TRIGGER reject_hook_offer;")?;
+
+    // An unwritable stdout fails after recording. The exact session must
+    // recover this committed offer on its next hook invocation.
+    rig.with_process_spawn_lock(|| {
+        use std::{
+            io::Write,
+            process::{Command, Stdio},
+        };
+        #[allow(clippy::disallowed_methods)] // Exercise a real unwritable hook stdout fd.
+        let mut child = Command::new(env!("CARGO_BIN_EXE_provenant"))
+            .args(["hook", "claude", "pre-tool-use"])
+            .current_dir(&rig.project)
+            .env_clear()
+            .envs(rig.env.iter().cloned())
+            .stdin(Stdio::piped())
+            .stdout(fs::File::open(&reply)?)
+            .stderr(Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or("stdin")?
+            .write_all(&serde_json::to_vec(
+                &json!({"hook_event_name":"PreToolUse", "tool_name":"Bash",
+            "tool_input":{"command":"git status"}, "session_id":"chair", "cwd":rig.project}),
+            )?)?;
+        let output = child.wait_with_output()?;
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("response write failed"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    })?;
+    let committed = json_command(&rig, &["inbox", id])?;
+    assert_eq!(committed["data"]["item"]["delivery"]["state"], "offered");
+    // The entire first page is individually too large for the hook envelope.
+    // A seventeenth queued answer must still be delivered before offered retries.
+    let project = committed["data"]["item"]["request"]["project_id"]
+        .as_str()
+        .ok_or("project")?;
+    db.execute_batch("BEGIN IMMEDIATE")?;
+    let mut tail_request = String::new();
+    let mut tail_answer = String::new();
+    for n in 1..=17 {
+        let request_id = provenant_core::HumanRequestId::from_bytes([n; 16]).to_string();
+        let answer_id = provenant_core::HumanAnswerId::from_bytes([n; 16]).to_string();
+        let mut request = committed["data"]["item"]["request"].clone();
+        request["id"] = request_id.clone().into();
+        request["answer_id"] = answer_id.clone().into();
+        let mut answer = committed["data"]["item"]["answer"].clone();
+        answer["id"] = answer_id.clone().into();
+        answer["request_id"] = request_id.clone().into();
+        answer["text"] = if n == 17 {
+            "Deliver the queued tail".into()
+        } else {
+            "\"".repeat(3500).into()
+        };
+        let mut delivery = committed["data"]["item"]["delivery"].clone();
+        delivery["answer_id"] = answer_id.clone().into();
+        delivery["state"] = "queued".into();
+        delivery["attempts"] = 0.into();
+        delivery["last_attempt_at"] = serde_json::Value::Null;
+        db.execute(
+            "INSERT INTO human_requests VALUES(?1,?2,2,'chair','answered',?3)",
+            rusqlite::params![project, request_id, serde_json::to_vec(&request)?],
+        )?;
+        db.execute(
+            "INSERT INTO human_answers VALUES(?1,?2,?3,?4)",
+            rusqlite::params![project, answer_id, request_id, serde_json::to_vec(&answer)?],
+        )?;
+        db.execute(
+            "INSERT INTO human_answer_outbox VALUES(?1,?2,?3)",
+            rusqlite::params![project, answer_id, serde_json::to_vec(&delivery)?],
+        )?;
+        tail_request = request_id;
+        tail_answer = answer_id;
+    }
+    db.execute_batch("COMMIT")?;
+    let allowed = hook("git status")?;
+    assert_eq!(code(&allowed), 0, "{:?}", allowed.stderr.bytes);
+    assert!(allowed.stdout.bytes.len() <= provenant_records::inbox::MAX_OFFER_BYTES);
+    let wire: serde_json::Value = serde_json::from_slice(&allowed.stdout.bytes)?;
+    assert!(
+        wire["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .ok_or("context")?
+            .contains("Deliver the queued tail")
+    );
+    assert!(
+        wire["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none()
+    );
+    let context = wire["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .ok_or("context")?;
+    assert!(
+        context.contains(&format!(
+            "provenant --state-dir '{}' inbox acknowledge",
+            rig.state.display()
+        )),
+        "{context}"
+    );
+    json_command(
+        &rig,
+        &[
+            "inbox",
+            "acknowledge",
+            &tail_request,
+            "--answer",
+            &tail_answer,
+            "--session",
+            "chair",
+            "--operation-id",
+            "ack-tail-test",
+        ],
+    )?;
+    assert!(!hook("git status")?.stdout.bytes.is_empty());
+    let item = json_command(&rig, &["inbox", id])?;
+    assert_eq!(item["data"]["item"]["delivery"]["state"], "offered");
+    assert_eq!(item["data"]["item"]["delivery"]["attempts"], 1);
+    assert!(item["data"]["item"]["delivery"]["last_attempt_at"].is_string());
+    let answer = item["data"]["item"]["answer"]["id"]
+        .as_str()
+        .ok_or("answer ID")?;
+    json_command(
+        &rig,
+        &[
+            "inbox",
+            "acknowledge",
+            id,
+            "--answer",
+            answer,
+            "--session",
+            "chair",
+            "--operation-id",
+            "ack-hook-test",
+        ],
+    )?;
+    assert!(hook("git status")?.stdout.bytes.is_empty());
+    Ok(())
+}
