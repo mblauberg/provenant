@@ -1,4 +1,4 @@
-//! Explicit chair registration, committed with checkpoint revision metadata.
+//! Explicit chair registration, published after checkpoint revision metadata.
 use super::*;
 use provenant_core::{ActorId, HostId};
 
@@ -9,7 +9,10 @@ pub(super) struct ChairIdentity {
     pub actor: ActorId,
 }
 
-/// One per-session index entry, stored in `revisions.json`. Unknown provider,
+const DISCOVERY: &str = "discovery.json";
+const DISCOVERY_LIMIT: u64 = 4096;
+
+/// One per-session index entry, stored in `discovery.json`. Unknown provider,
 /// summary, lifecycle and lane facts are not inferred from a checkpoint save.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,15 +83,26 @@ impl SessionStore {
         self
     }
 
-    pub(super) fn load_for_save(&self, dir: &Directory) -> Result<Manifest, SessionError> {
-        match load(dir) {
-            Ok(manifest) => Ok(manifest),
-            Err(SessionError::Filesystem(error)) if error.is_not_found() => Ok(Manifest::default()),
-            // Legacy callers keep their history-recovery behaviour. Explicit
-            // chairs fail closed rather than overwrite an unreadable binding.
-            Err(_) if self.chair.is_none() => Ok(Manifest::default()),
-            Err(error) => Err(error),
+    pub(super) fn load_discovery(
+        &self,
+        dir: &Directory,
+    ) -> Result<Option<SessionDiscovery>, SessionError> {
+        match dir.read_bounded(OsStr::new(DISCOVERY), DISCOVERY_LIMIT) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|_| SessionError::History),
+            Err(error) if error.is_not_found() => Ok(None),
+            Err(error) => Err(error.into()),
         }
+    }
+
+    pub(super) fn publish_discovery(
+        &self,
+        dir: &Directory,
+        record: &SessionDiscovery,
+    ) -> Result<(), SessionError> {
+        let bytes = serde_json::to_vec(record).map_err(|_| SessionError::History)?;
+        publish(dir, DISCOVERY, &bytes)
     }
 
     pub(super) fn check_discovery_identity(
@@ -139,13 +153,13 @@ impl SessionStore {
             Err(error) if error.is_not_found() => return Ok(None),
             Err(error) => return Err(error.into()),
         };
+        let Some(record) = self.load_discovery(&dir)? else {
+            return Ok(None);
+        };
         let manifest = match load(&dir) {
             Ok(manifest) => manifest,
-            Err(SessionError::Filesystem(error)) if error.is_not_found() => return Ok(None),
+            Err(SessionError::Filesystem(error)) if error.is_not_found() => Manifest::default(),
             Err(error) => return Err(error),
-        };
-        let Some(record) = manifest.discovery else {
-            return Ok(None);
         };
         self.check_discovery_identity(Some(&record))?;
         let consistency = match read_current(&dir)? {

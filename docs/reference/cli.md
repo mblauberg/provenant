@@ -3191,6 +3191,7 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `session_id` | `{"name": "session_id", "positional": true, "required": true}` |
 | `--file` | `{"name": "file", "required": true}` |
+| `--client` | `{"name": "client", "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -3203,7 +3204,8 @@ bounds are null. Positional arguments have no long flag.
     {
       "arguments": [
         "session_id",
-        "file"
+        "file",
+        "client"
       ],
       "multiple": true,
       "name": "Save",

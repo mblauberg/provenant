@@ -70,6 +70,9 @@ pub enum Session {
         /// Markdown checkpoint file, or `-` for standard input.
         #[arg(long)]
         file: String,
+        /// Bind the chair actor using this harness's MCP client default
+        #[arg(long, value_parser = crate::install::harness_parser())]
+        client: Option<provenant_records::Harness>,
     },
     /// Show a session checkpoint, one of its retained revisions or their list
     Show {
@@ -406,7 +409,15 @@ fn execute(
     ) {
         return read_session(cmd, &roots, cwd);
     }
-    let (roots, project, actor) = crate::fabric::identity(roots, home, cwd)?;
+    let context = crate::fabric::Context::open(roots, home, cwd)?;
+    let actor = match &cmd {
+        Workflow::Session(Session::Save { client, .. }) => {
+            session_actor(&context, *client).map_err(|e| invalid(e.to_string()))?
+        }
+        _ => context.identity.inbox.actor,
+    };
+    let project = context.identity.project;
+    let roots = context.roots;
     let edge = Edge {
         roots,
         project,
@@ -440,7 +451,9 @@ fn execute(
             expected_revision,
             request(&input.request)?,
         ),
-        Workflow::Session(Session::Save { session_id, file }) => {
+        Workflow::Session(Session::Save {
+            session_id, file, ..
+        }) => {
             let id = HostSessionId::parse(&session_id).map_err(|e| invalid(e.to_string()))?;
             let text = read_input(&file)?;
             let keep = session_revisions(&edge.roots);
@@ -469,6 +482,24 @@ fn execute(
 
 fn unreachable_read() -> Result<Value, Error> {
     Err(invalid("session reads require the read-only context"))
+}
+
+/// Match the MCP client's default actor without overriding an explicit label.
+pub fn session_actor(
+    context: &crate::fabric::Context,
+    client: Option<provenant_records::Harness>,
+) -> Result<ActorId, provenant_fabric_runtime::identity::IdentityError> {
+    if let Some(client) = client
+        && context.config.agent_label.is_empty()
+        && std::env::var_os("PROVENANT_AGENT_LABEL").is_none_or(|v| v.is_empty())
+    {
+        return provenant_fabric_runtime::identity::Address::new(
+            context.identity.host,
+            client.spec().name,
+        )
+        .map(|address| address.actor);
+    }
+    Ok(context.identity.inbox.actor)
 }
 
 fn read_session(cmd: Workflow, roots: &Roots, cwd: &Path) -> Result<Value, Error> {
@@ -640,6 +671,9 @@ fn classify(error: &Error) -> (Outcome, &'static str) {
         }
         Error::Session(provenant_workflow::session::SessionError::History) => {
             (Outcome::Failed, "HISTORY")
+        }
+        Error::Session(provenant_workflow::session::SessionError::DiscoveryIdentity) => {
+            (Outcome::Refused, "IDENTITY")
         }
         _ => (Outcome::Error, "IO"),
     }

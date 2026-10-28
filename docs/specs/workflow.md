@@ -118,9 +118,8 @@ The order is: store the old text, publish the new checkpoint, publish the
 history, then delete revisions beyond `retention.session_revisions` (default 8,
 1 to 64, current included), whether the save comes from `session save` or from
 `session handoff`. A save that stops part-way leaves a complete
-checkpoint, and the next one records the revision it finds. Legacy saves can
-restart unreadable history; explicit chair saves refuse unreadable history to
-preserve the registered identity. Identical text adds no revision. Each revision is held to
+checkpoint, and the next one records the revision it finds; unreadable revision
+history never blocks a save. Identical text adds no revision. Each revision is held to
 the 256 KiB checkpoint bound. `session show --rev N` and `session diff N` print
 a retained revision, or its unified line diff against the current one, as plain
 text. Lines compare with their terminators, so text that differs only in its final
@@ -140,10 +139,14 @@ marks it. A revision whose text fails its hash is refused with `HISTORY`.
 ### Explicit chairs are discoverable
 
 `workflow session save SESSION` registers the caller's exact Fabric host,
-bound project, supplied host session ID and trusted actor as a chair. Source
+bound project, supplied host session ID and trusted actor as a chair.
+`save --client HARNESS` uses the same default actor as `fabric mcp --client
+HARNESS`, while preserving explicit environment/configured agent labels.
+Without `--client`, the normal CLI Fabric identity applies; MCP chairs without
+an explicit agent label must supply their client on each save. Source
 checkpoint saves during `session handoff` use the same binding. The workflow
-owner stores a per-session index entry in the optional `discovery` member of
-`workflow/projects/<project>/sessions/<session>/revisions.json`:
+owner stores a per-session index entry in
+`workflow/projects/<project>/sessions/<session>/discovery.json` (at most 4 KiB):
 
 | Field | Contract |
 |---|---|
@@ -161,16 +164,21 @@ attempt is never registration evidence. Autosave and checkpoint reads do not
 register chairs. Legacy manifests and bare checkpoints remain readable with no
 discovery entry; summaries remain unavailable.
 
-The save holds `checkpoint.lock` across the checkpoint replacement and the
-atomic manifest replacement. History and discovery commit in the same manifest,
-so no separate shared index can race another session's writer. If a process
-stops after publishing the checkpoint but before the manifest, an earlier entry
-remains at its earlier revision/hash. `SessionStore::discovery` compares the
+The save holds `checkpoint.lock` across checkpoint replacement, atomic revision
+manifest replacement, then atomic discovery replacement, in that order. A
+successful save makes all three durable. The revision manifest stays unchanged
+in shape, so older binaries can read and save it without losing history; an
+older writer leaves the discovery entry stale. There is no shared index that
+can race another session's writer. If a process stops after publishing the
+checkpoint or manifest but before discovery, an earlier entry remains at its
+earlier revision/hash. `SessionStore::discovery` compares the
 held checkpoint's hash and manifest revision against that entry, returning
 `current`, `checkpoint_changed` or `checkpoint_missing`. These are bounded
 observations, not a lease or an assertion that the provider is alive. Unreadable
 files return an error. A crash on the first save can leave a readable checkpoint
 without registration, which remains unknown until an explicit save succeeds.
+Unreadable discovery metadata blocks a save before replacing checkpoint or
+history. An explicit host/actor mismatch is refused as `IDENTITY`.
 The next save reconciles revisions and publishes the corresponding entry;
 identity must be supplied again when registration was never committed.
 

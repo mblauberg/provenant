@@ -77,9 +77,18 @@ fn session_reads_allocate_nothing() -> Result {
 
 #[test]
 fn session_save_discovery_restart() -> Result {
-    let rig = TestRig::new()?;
-    let identity = call(&rig, &["fabric", "identity"], 0)?;
-    let identity = &identity["data"];
+    let mut rig = TestRig::new()?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
+    let mut mcp = support::mcp::McpClient::default();
+    mcp.initialise("2025-11-25")?;
+    mcp.initialised()?;
+    let id = mcp.call("fabric_context", json!({"op":"inspect"}))?;
+    let replies = mcp.eof(
+        &rig,
+        std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &["fabric", "mcp", "--client", "codex"],
+    )?;
+    let identity = &replies.get(&id).ok_or("MCP identity")?["result"]["structuredContent"];
     let file = rig.root.join("checkpoint.md");
     std::fs::write(&file, "# Goal\nExact chair identity.\n")?;
     call(
@@ -91,6 +100,8 @@ fn session_save_discovery_restart() -> Result {
             "chair-1",
             "--file",
             &file.to_string_lossy(),
+            "--client",
+            "codex",
         ],
         0,
     )?;
@@ -99,7 +110,9 @@ fn session_save_discovery_restart() -> Result {
         "workflow/projects/{project}/sessions/chair-1/revisions.json"
     ));
     let manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
-    let discovery = &manifest["discovery"];
+    let discovery_path = manifest_path.with_file_name("discovery.json");
+    let discovery: Value = serde_json::from_slice(&std::fs::read(&discovery_path)?)?;
+    assert!(manifest.get("discovery").is_none());
     assert_eq!(discovery["schema_version"], 1);
     assert_eq!(discovery["host"], identity["host"]);
     assert_eq!(discovery["project_id"], identity["project"]);
@@ -122,13 +135,27 @@ fn session_save_discovery_restart() -> Result {
     )?;
     call(&rig, &["workflow", "session", "diff", "chair-1", "1"], 0)?;
     assert_eq!(state_snapshot(&rig.state)?, before);
+    let refused = call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "chair-1",
+            "--file",
+            &file.to_string_lossy(),
+            "--client",
+            "claude",
+        ],
+        1,
+    )?;
+    assert_eq!(refused["status"], "refused");
+    assert_eq!(refused["error"]["code"], "IDENTITY");
+    // Only the attempted write's demand telemetry may change on refusal.
+    let unchanged: Value = serde_json::from_slice(&std::fs::read(&discovery_path)?)?;
+    assert_eq!(unchanged, discovery);
     // A legacy manifest has no registration; showing it must not register it.
-    let mut legacy = manifest;
-    legacy
-        .as_object_mut()
-        .ok_or("manifest")?
-        .remove("discovery");
-    std::fs::write(manifest_path, serde_json::to_vec(&legacy)?)?;
+    std::fs::remove_file(discovery_path)?;
     let before = state_snapshot(&rig.state)?;
     call(&rig, &["workflow", "session", "show", "chair-1"], 0)?;
     assert_eq!(state_snapshot(&rig.state)?, before);

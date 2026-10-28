@@ -414,9 +414,11 @@ fn execute(
         .map(|(_, lanes)| lanes)
         .map_err(|fail| fail.message);
     let project = context.identity.project;
+    let actor =
+        provenant_cli::workflow::session_actor(context, Some(provenant_records::Harness::Claude))
+            .map_err(|e| Refusal::invalid(e.to_string()))?;
     let store = session.as_ref().filter(|_| !args.no_checkpoint).map(|id| {
-        checkpoint_store(&src.roots, project, id.clone())
-            .with_chair(context.identity.host, context.identity.inbox.actor)
+        checkpoint_store(&src.roots, project, id.clone()).with_chair(context.identity.host, actor)
     });
     let checkpoint = store
         .as_ref()

@@ -8,6 +8,10 @@ and read it with `provenant workflow session show SESSION`. Each checkpoint is
 limited to 256 KiB. Session hooks and hand-off prompts can include a shorter
 excerpt.
 
+For an MCP chair without an explicit agent label, include `--client claude` or
+`--client codex` on each save to use the same actor as its MCP inbox. Saves keep
+that host/actor binding; a different actor is refused with `IDENTITY`.
+
 ## Earlier saves
 
 A save keeps the checkpoint it replaces as a numbered revision. Each revision

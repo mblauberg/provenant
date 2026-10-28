@@ -45,8 +45,6 @@ struct Manifest {
     schema_version: u64,
     /// Oldest first; the last is the checkpoint in `checkpoint.md`.
     revisions: Vec<Revision>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    discovery: Option<SessionDiscovery>,
 }
 /// What a save recorded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -279,12 +277,12 @@ impl SessionStore {
     }
     /// As `save`, keeping the checkpoint it replaces as a numbered revision.
     /// The previous text is stored first, then the new checkpoint is published,
-    /// then the history that names both, so a failure between steps leaves a
-    /// complete checkpoint and the next save records the revision it finds.
+    /// then the history that names both and the discovery sidecar. A failure
+    /// between steps leaves a complete checkpoint; the next save records it.
     /// Revisions beyond the keep count are deleted after the history is
     /// written; a deletion that fails is retried by the next save. Unreadable
-    /// history never blocks a save: it restarts the chain after the highest
-    /// revision file present.
+    /// revision history restarts after the highest revision file present.
+    /// Unreadable discovery metadata blocks a save to preserve chair identity.
     pub fn save_revision(
         &self,
         text: &[u8],
@@ -313,8 +311,9 @@ impl SessionStore {
         let now = clock.wall_now()?;
         // A checkpoint that cannot be read (a symlink, say) is replaced, not kept.
         let existing = read_current(&dir).ok().flatten();
-        let mut manifest = self.load_for_save(&dir)?;
-        self.check_discovery_identity(manifest.discovery.as_ref())?;
+        let discovery = self.load_discovery(&dir)?;
+        self.check_discovery_identity(discovery.as_ref())?;
+        let mut manifest = load(&dir).unwrap_or_default();
         let floor = highest_revision_file(&dir)?;
         let mut chain = reconcile(&manifest, existing.as_ref(), floor);
         let digest = provenant_records::CanonicalV1::file_digest(text);
@@ -337,11 +336,13 @@ impl SessionStore {
         let current = chain.last().cloned().ok_or(SessionError::History)?;
         let keep = usize::try_from(self.keep).unwrap_or(usize::MAX);
         let pruned: Vec<Revision> = chain.drain(..chain.len().saturating_sub(keep)).collect();
-        manifest.discovery = self.saved_discovery(manifest.discovery, &current, now);
         manifest.schema_version = 1;
         manifest.revisions = chain;
         let manifest_bytes = serde_json::to_vec(&manifest).map_err(|_| SessionError::History)?;
         publish(&dir, MANIFEST, &manifest_bytes)?;
+        if let Some(record) = self.saved_discovery(discovery, &current, now) {
+            self.publish_discovery(&dir, &record)?;
+        }
         // The history is durable, so these files are unreachable. A failed
         // delete leaves an orphan that the next save removes.
         for old in &pruned {
@@ -719,6 +720,8 @@ mod tests {
         saved(&selected, "before");
         let dir = path(&root, project, "chair");
         let manifest = std::fs::read(dir.join(MANIFEST)).unwrap();
+        let discovery_path = dir.join("discovery.json");
+        let discovery = std::fs::read(&discovery_path).unwrap();
         // Crash after checkpoint replacement, before manifest publication.
         std::fs::write(dir.join("checkpoint.md"), "interrupted").unwrap();
         assert_eq!(
@@ -730,13 +733,49 @@ mod tests {
         let repaired = selected.discovery().unwrap().unwrap();
         assert_eq!(repaired.consistency, DiscoveryConsistency::Current);
         assert_eq!(repaired.record.checkpoint.revision, 2);
+        // Crash after manifest publication but before index publication.
+        std::fs::write(&discovery_path, &discovery).unwrap();
+        assert_eq!(
+            selected.discovery().unwrap().unwrap().consistency,
+            DiscoveryConsistency::CheckpointChanged
+        );
+        saved(&selected, "interrupted");
+        assert_eq!(
+            selected
+                .discovery()
+                .unwrap()
+                .unwrap()
+                .record
+                .checkpoint
+                .revision,
+            2
+        );
+        // Unreadable identity must not overwrite either checkpoint or history.
+        let manifest = std::fs::read(dir.join(MANIFEST)).unwrap();
+        let discovery = std::fs::read(&discovery_path).unwrap();
+        std::fs::write(&discovery_path, "{not json").unwrap();
+        assert!(matches!(
+            save(&selected, b"blocked"),
+            Err(SessionError::History)
+        ));
+        assert_eq!(std::fs::read(dir.join(MANIFEST)).unwrap(), manifest);
+        assert_eq!(selected.read().unwrap().unwrap().markdown, "interrupted");
+        std::fs::write(&discovery_path, discovery).unwrap();
+        // History recovery still works without losing the separate identity.
+        std::fs::write(dir.join(MANIFEST), "{not json").unwrap();
+        saved(&selected, "interrupted");
+        assert_eq!(
+            selected.discovery().unwrap().unwrap().consistency,
+            DiscoveryConsistency::Current
+        );
         std::fs::remove_file(dir.join("checkpoint.md")).unwrap();
         assert_eq!(
             selected.discovery().unwrap().unwrap().consistency,
             DiscoveryConsistency::CheckpointMissing
         );
-        // On the first save, a crash before the manifest leaves unknown identity.
+        // On the first save, a crash before the index leaves unknown identity.
         std::fs::remove_file(dir.join(MANIFEST)).unwrap();
+        std::fs::remove_file(discovery_path).unwrap();
         std::fs::write(dir.join("checkpoint.md"), "legacy").unwrap();
         assert!(selected.discovery().unwrap().is_none());
         assert_eq!(selected.read().unwrap().unwrap().markdown, "legacy");
