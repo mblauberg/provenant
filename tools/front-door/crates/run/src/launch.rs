@@ -192,10 +192,10 @@ impl RunStore {
         child: Option<&ValidatedChild>,
     ) -> TaskRequest {
         let mut task = child.map_or_else(|| task.clone(), |value| value.effective_task(task));
-        if request.parent.is_some()
-            && (request.parent_attempt.is_some()
-                || self.sealed_requester.is_some()
-                || self.context.state_root.as_path() != self.writer_registry())
+        if (request.parent.is_some() && request.parent_attempt.is_some())
+            || (child.is_none()
+                && (self.sealed_requester.is_some()
+                    || self.context.state_root.as_path() != self.writer_registry()))
         {
             let bound = self
                 .sealed_parent_network
@@ -800,16 +800,16 @@ impl RunStore {
             }
             None => self.run(run, call)?.actor_id,
         };
-        if request.parent.is_some()
-            && self.sealed_parent_network.is_none()
-            && (request.parent_attempt.is_some()
-                || self.sealed_requester.is_some()
-                || self.context.state_root.as_path() != self.writer_registry())
+        if self.sealed_parent_network.is_none()
+            && ((request.parent.is_some() && request.parent_attempt.is_some())
+                || (child.is_none()
+                    && (self.sealed_requester.is_some()
+                        || self.context.state_root.as_path() != self.writer_registry())))
         {
             use std::io::Write;
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "warning: parent network unavailable; child continuation uses provider-only network"
+                "warning: parent network unavailable; child-store launch uses provider-only network"
             );
         }
         let resume = request

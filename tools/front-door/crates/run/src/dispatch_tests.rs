@@ -1089,6 +1089,7 @@ fn lane_continuation_respects_sealed_parent_or_provider_fallback() -> TestResult
         let run = store.create(&proposal, &call)?;
         let expected_request = proposal.request.clone();
         proposal.request.tasks[0].access.network = Some(NetworkAccess::Open);
+        proposal.request.parent = None;
         rewrite_child_request(&store, run.run_id, &proposal.request, &call)?;
         let fake = Fake {
             refuse: true,
