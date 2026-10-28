@@ -25,6 +25,12 @@ stale discovery. The registry is limited to 16,384 entries (excluding its
 lock); an invalid project entry name fails the whole catalogue. Valid
 in-progress binding stages are skipped.
 
+`chair summary show SESSION` reads the current checkpoint summary without
+allocating identity. `chair summary update SESSION --file PATCH.json
+--expect-revision N` applies selected fields under the checkpoint save lock.
+Revision 0 creates a summary; stale edits return `SUMMARY_STALE` with the
+current summary revision. The returned checkpoint includes publication warnings.
+
 `console overview` combines local pending request titles and recent lane
 attention in one bounded read. Project labels use the registered Git common
 directory's parent name; unavailable labels and task titles are null. Inbox

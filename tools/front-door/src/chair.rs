@@ -1,6 +1,6 @@
 //! Opt-in chair handoff composition. Hooks read cached quota, never probe it.
-use provenant_cli::{Chair, ChairLog, Globals};
-use provenant_core::Roots;
+use provenant_cli::{Chair, ChairLog, ChairSummary, Globals};
+use provenant_core::{Clock, Roots};
 use provenant_os::{
     exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
     fs::Directory,
@@ -437,6 +437,7 @@ fn prepared_response(context: &Context, handoff: &Handoff) -> Value {
 pub fn run(chair: Chair, globals: &Globals) -> u8 {
     let chair = match chair {
         Chair::Log(log) => return log_run(log, globals),
+        Chair::Summary(summary) => return summary_run(summary, globals),
         chair => chair,
     };
     let Chair::Switch {
@@ -517,7 +518,7 @@ struct LogInput {
 
 // The standard input transport has a real deadline.
 #[allow(clippy::disallowed_methods)]
-fn log_input(path: &str) -> Result<LogInput, Error> {
+fn log_input<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, Error> {
     const LIMIT: usize = 256 * 1024;
     let bytes = if path == "-" {
         hook_io::read_stdin(LIMIT, Instant::now() + Duration::from_secs(30))?
@@ -532,6 +533,123 @@ fn log_input(path: &str) -> Result<LogInput, Error> {
         bytes
     };
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
+    use provenant_workflow::session::{SessionError, SummaryPatch, parse_summary};
+    let read_only = matches!(command, ChairSummary::Show { .. });
+    let path = if read_only {
+        "chair summary show"
+    } else {
+        "chair summary update"
+    };
+    let result = (|| -> Result<Value, Error> {
+        let resolved = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::Project,
+            crate::roots::Product::Required,
+        )?;
+        match command {
+            ChairSummary::Show { session } => {
+                let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+                let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+                let executor = SystemExecutor::new(1)?;
+                let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+                let location = runtime
+                    .project_location(
+                        &executor,
+                        &resolved.project,
+                        budget,
+                        &provenant_core::CancelToken::new(),
+                    )?
+                    .location;
+                let project = provenant_config::lookup_project(&resolved.roots, &location)?
+                    .ok_or("project not registered")?
+                    .project_id();
+                let store = SessionStore::new(
+                    resolved.roots.state,
+                    project,
+                    HostSessionId::parse(&session)?,
+                );
+                let checkpoint = store
+                    .read()?
+                    .ok_or(SessionError::MissingCheckpoint { session })?;
+                Ok(json!({"summary": parse_summary(&checkpoint.markdown)?}))
+            }
+            ChairSummary::Update {
+                session,
+                file,
+                expect_revision,
+            } => {
+                let patch: SummaryPatch = log_input(&file)?;
+                let context = provenant_cli::fabric::Context::open(
+                    resolved.roots,
+                    &resolved.home,
+                    &resolved.project,
+                )?;
+                if context.in_lane {
+                    return Err("a lane cannot update a chair summary".into());
+                }
+                let actor = provenant_cli::workflow::session_actor(&context, None)?;
+                let keep = provenant_cli::workflow::session_revisions(&context.roots);
+                let clock = provenant_os::clock::SystemClock::new();
+                let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 5)?;
+                let store = SessionStore::new(
+                    context.roots.state,
+                    context.identity.project,
+                    HostSessionId::parse(&session)?,
+                )
+                .with_chair(context.identity.host, actor)
+                .with_revisions(keep);
+                store.validate_chair()?;
+                let (summary, saved) = store.update_summary(
+                    patch,
+                    expect_revision,
+                    budget,
+                    &provenant_core::CancelToken::new(),
+                    &clock,
+                )?;
+                Ok(json!({"summary": summary, "checkpoint": saved}))
+            }
+        }
+    })();
+    match result {
+        Ok(value) => {
+            let human = serde_json::to_string_pretty(&value).unwrap_or_default();
+            crate::emit(
+                &CommandResult::new(path, Outcome::Ok, value),
+                globals,
+                &human,
+                read_only,
+            )
+        }
+        Err(error) => {
+            if let Some(SessionError::SummaryStale { current_revision }) =
+                error.downcast_ref::<SessionError>()
+            {
+                let mut result = CommandResult::new(
+                    path,
+                    Outcome::Refused,
+                    json!({"current_revision": current_revision}),
+                );
+                result.error = Some(provenant_records::CommandError {
+                    code: "SUMMARY_STALE".into(),
+                    message: error.to_string(),
+                    cause: None,
+                    repair: Some("Reread with `provenant chair summary show` and reapply the intended change.".into()),
+                });
+                crate::emit(&result, globals, "", false)
+            } else {
+                crate::fail(
+                    path,
+                    Outcome::Refused,
+                    "CHAIR_SUMMARY",
+                    &error.to_string(),
+                    globals,
+                )
+            }
+        }
+    }
 }
 
 fn log_run(command: ChairLog, globals: &Globals) -> u8 {
@@ -575,7 +693,7 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 if context.in_lane {
                     return Err("a lane cannot append a chair log".into());
                 }
-                let input = log_input(&file)?;
+                let input: LogInput = log_input(&file)?;
                 let config = provenant_config::read_with_domains(
                     &context.roots,
                     &provenant_cli::domains::SECTIONS,
