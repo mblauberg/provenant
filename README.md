@@ -129,11 +129,11 @@ Claude account directories, and checks the installation. A rerun upgrades the
 recorded selection. Output summarises changes and targets, for example:
 
 ```text
-install: 86 changes; 2 targets; 0 findings; 0 manual includes
+install: 86 changes (78 links, 4 hooks, 4 MCP); 2 targets
 ```
 
 Counts depend on the release and installed harnesses. Findings and manual
-includes are listed when action is needed. Use `--json` for detailed records.
+includes appear only when action is needed. Use `--json` for detailed records.
 Active lanes supervise disk pressure using `gc.free_floor`; settlement and
 worktree removal reclaim eligible data, with a daily GC backstop.
 
