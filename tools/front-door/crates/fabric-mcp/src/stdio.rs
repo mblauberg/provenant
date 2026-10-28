@@ -51,6 +51,10 @@ pub trait Factory: Send + Sync + 'static {
     where
         Self: 'a;
     fn open(&self) -> Result<Service<'_, Self::Facade<'_>>, ServiceError>;
+    /// Context-only refusals must precede unrelated owner initialisation.
+    fn preflight(&self, _call: &tools::ToolCall) -> Result<(), ServiceError> {
+        Ok(())
+    }
     /// Log maintenance runs only on an existing worker.
     fn maintain_usage(&self) {}
     /// Optional composition hook. Names/outcomes are fixed metadata, never arguments.
@@ -361,6 +365,17 @@ fn serve_with_timeouts(
                     }
                     tools::tool_error(Some(job.tool), "cancelled", detail)
                 } else {
+                    if let Err(error) = factory.preflight(&job.call) {
+                        let error = match job.call.operation_id() {
+                            Some(operation_id) => ServiceError::Mutation {
+                                operation_id,
+                                source: Box::new(error),
+                            },
+                            None => error,
+                        };
+                        completion.response = Some(service_error(job.tool, &error));
+                        continue;
+                    }
                     if service.is_none() {
                         match factory.open() {
                             Ok(opened) => service = Some(opened),

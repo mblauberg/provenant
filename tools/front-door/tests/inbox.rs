@@ -244,6 +244,89 @@ fn mcp_call(rig: &TestRig, name: &str, arguments: Value) -> Result<Value> {
 }
 
 #[test]
+fn inbox_mcp_remote_owner_refuses_before_coordination_setup() -> Result {
+    for with_peer in [false, true] {
+        let mut rig = TestRig::new()?;
+        let moved = rig.home.join("repo");
+        std::fs::rename(&rig.project, &moved)?;
+        rig.project = moved;
+        for (key, value) in &mut rig.env {
+            if key == "PROVENANT_ROOT" {
+                *value = rig.project.clone().into();
+            }
+        }
+        let identity = call(&rig, &["fabric", "identity"], None, 0)?;
+        let key = identity["data"]["federation"]["key"]
+            .as_str()
+            .ok_or("project key")?;
+        let remote = "09".repeat(16);
+        assert_ne!(identity["data"]["host"], remote);
+        let file = rig.state.join("config.toml");
+        let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&file)?.parse()?;
+        config["domains"]["fabric"]["home_hosts"][key] = toml_edit::value(remote.clone());
+        if with_peer {
+            config["domains"]["fabric"]["peers"]["fixture"]["host"] = toml_edit::value(remote);
+            config["domains"]["fabric"]["peers"]["fixture"]["destination"] =
+                toml_edit::value("fixture");
+        }
+        std::fs::write(file, config.to_string())?;
+        assert!(!rig.state.join("fabric").exists());
+        let reply = mcp_call(&rig, "fabric_inbox", json!({"op":"list"}))?;
+        assert_eq!(
+            reply["structuredContent"]["code"], "unsupported_owner",
+            "with_peer={with_peer}: {reply}"
+        );
+        assert!(!rig.state.join("fabric").exists(), "with_peer={with_peer}");
+    }
+    Ok(())
+}
+
+#[test]
+fn inbox_close_uses_the_same_configured_body_limit_on_both_edges() -> Result {
+    let rig = TestRig::new()?;
+    let file = rig.state.join("config.toml");
+    let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&file)?.parse()?;
+    config["domains"]["fabric"]["limits"]["body_bytes"] = toml_edit::value(64);
+    std::fs::write(file, config.to_string())?;
+    let file = draft(&rig, "question")?;
+    let created = call(
+        &rig,
+        &["ask", "--file", &file, "--session", "chair-a"],
+        None,
+        0,
+    )?;
+    let id = created["data"]["request_id"].as_str().ok_or("request ID")?;
+    let reason = "x".repeat(65);
+    let cli = call(
+        &rig,
+        &[
+            "inbox",
+            "close",
+            id,
+            "--state",
+            "withdrawn",
+            "--reason",
+            &reason,
+            "--expect-revision",
+            "1",
+        ],
+        None,
+        2,
+    )?;
+    assert_eq!(cli["error"]["code"], "invalid_input");
+    let mcp = mcp_call(
+        &rig,
+        "fabric_inbox",
+        json!({"op":"close","id":id,"state":"withdrawn","reason":reason,"expect_revision":1}),
+    )?;
+    assert_eq!(mcp["structuredContent"]["code"], "invalid_input");
+    let current = call(&rig, &["inbox", id], None, 0)?;
+    assert_eq!(current["data"]["item"]["request"]["revision"], 1);
+    assert_eq!(current["data"]["item"]["request"]["state"], "open");
+    Ok(())
+}
+
+#[test]
 fn inbox_mcp_and_cli_share_the_same_authoritative_records() -> Result {
     let rig = TestRig::new()?;
     let file = draft(&rig, "question")?;

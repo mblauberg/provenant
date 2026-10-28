@@ -179,6 +179,17 @@ pub fn execute(
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<InboxResult, InboxError> {
+    validate_request(identity, config, in_lane, &input)?;
+    InboxService::open(root, identity, clock, budget, cancel)?.execute(input, budget, cancel)
+}
+
+/// Context-only validation runs before either transport opens a coordination store.
+pub fn validate_request(
+    identity: &Identity,
+    config: &crate::config::FabricConfig,
+    in_lane: bool,
+    input: &InboxInput,
+) -> Result<(), InboxError> {
     input.validate()?;
     if in_lane && input.is_mutation() {
         return Err(InboxError::LaneMutation);
@@ -191,22 +202,25 @@ pub fn execute(
     {
         return Err(InboxError::UnsupportedOwner);
     }
-    if let InboxInput::List { limit, .. } = &input
+    if let InboxInput::List { limit, .. } = input
         && *limit > config.limits.page_rows
     {
         return Err(InboxError::Invalid("limit"));
     }
     let body_limit = usize::try_from(config.limits.body_bytes).unwrap_or(usize::MAX);
-    match &input {
+    match input {
         InboxInput::Ask { request, .. } if request.body.len() > body_limit => {
             return Err(InboxError::Invalid("body"));
         }
         InboxInput::Answer {
             text: Some(text), ..
         } if text.len() > body_limit => return Err(InboxError::Invalid("text")),
+        InboxInput::Close { reason, .. } if reason.len() > body_limit => {
+            return Err(InboxError::Invalid("reason"));
+        }
         _ => {}
     }
-    InboxService::open(root, identity, clock, budget, cancel)?.execute(input, budget, cancel)
+    Ok(())
 }
 impl From<provenant_fabric_store::Error> for InboxError {
     fn from(error: provenant_fabric_store::Error) -> Self {

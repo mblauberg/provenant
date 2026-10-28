@@ -100,6 +100,18 @@ impl stdio::Factory for Factory {
         );
     }
     type Facade<'a> = BoundFacade<'a>;
+    fn preflight(&self, call: &provenant_fabric_mcp::tools::ToolCall) -> Result<(), ServiceError> {
+        if let provenant_fabric_mcp::tools::ToolCall::Inbox(input) = call {
+            let ctx = &self.context;
+            provenant_fabric_runtime::inbox::validate_request(
+                &ctx.identity,
+                &ctx.config,
+                ctx.in_lane,
+                input,
+            )?;
+        }
+        Ok(())
+    }
     fn input_limits(&self) -> provenant_records::Limits {
         provenant_records::Limits {
             max_bytes: self.context.config.limits.input_frame_bytes,
