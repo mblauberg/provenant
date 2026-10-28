@@ -15,7 +15,7 @@ use std::io::Read;
 use thiserror::Error;
 
 mod loops;
-pub use loops::{LoopDecision, LoopRound, LoopSpec};
+pub use loops::{LoopAsk, LoopDecision, LoopRound, LoopScope, LoopSpec, close_resolved_loop_asks};
 
 const MAX_CHECKPOINT_BYTES: u64 = 16_777_216;
 const MAX_ADVANCE_ERROR_BYTES: usize = 2_048;
@@ -275,6 +275,8 @@ pub enum AccessMode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphCheckpoint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
     #[serde(default, skip_serializing_if = "not_delivered")]
     pub delivery_required: bool,
     #[serde(default, skip_serializing_if = "not_delivered")]
@@ -312,6 +314,12 @@ fn not_delivered(delivered: &bool) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeProgress {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loop_asks: Vec<LoopAsk>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_pause: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_inbox_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round: Option<LoopRound>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -552,13 +560,12 @@ pub trait AttemptOwner {
 
     fn loop_decision(
         &mut self,
-        _graph_id: &str,
-        _node_id: &str,
-        _rounds: usize,
-        _session: &str,
-        _actor: &str,
+        _scope: LoopScope<'_>,
     ) -> Result<Option<LoopDecision>, Self::Error> {
         Ok(None)
+    }
+    fn close_loop_ask(&mut self, _scope: LoopScope<'_>) -> Result<(), Self::Error> {
+        Ok(())
     }
     fn deliver_graph(
         &mut self,
@@ -800,7 +807,13 @@ impl FileJournal {
                     || !stored.checkpoint.delivered
                         && stored.execution.document.delivery
                             == Some(provenant_records::run::DeliveryMode::Pr)
-                        && stored.checkpoint.successful()))
+                        && stored.checkpoint.successful())
+                || stored.checkpoint.nodes.iter().any(|n| {
+                    n.loop_asks.iter().any(|ask| {
+                        !ask.closed
+                            && (ask.resolved || stored.checkpoint.cancelled || n.state.settled())
+                    })
+                }))
             .then_some(stored.execution)
         }))
     }
@@ -1009,6 +1022,8 @@ fn open_or_create(directory: &Directory, name: &OsStr) -> Result<Directory, FsEr
 
 #[derive(Debug, Error)]
 pub enum GraphError<RunError: Error + 'static, JournalError: Error + 'static> {
+    #[error("cannot create graph checkpoint instance identity")]
+    Instance(#[source] FsError),
     #[error("invalid graph: {0}")]
     Invalid(&'static str),
     #[error("invalid extension: {0}")]
@@ -1175,6 +1190,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
         None => {
             let checkpoint = GraphCheckpoint {
+                instance_id: if plan.nodes.iter().any(|n| n.loop_body.is_some()) {
+                    Some(provenant_core::hex(
+                        &provenant_os::fs::entropy_128().map_err(GraphError::Instance)?,
+                    ))
+                } else {
+                    None
+                },
                 delivery_required: document.delivery
                     == Some(provenant_records::run::DeliveryMode::Pr),
                 delivered: false,
@@ -1192,6 +1214,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .nodes
                     .iter()
                     .map(|node| NodeProgress {
+                        loop_asks: Vec::new(),
+                        loop_pause: None,
+                        loop_inbox_error: None,
                         round: node.round.clone(),
                         loop_decision_actor: node.loop_body.as_ref().map(|_| owner.actor()),
                         gate: None,
@@ -1210,6 +1235,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
     };
 
+    if plan.nodes.iter().any(|n| n.loop_body.is_some()) && checkpoint.instance_id.is_none() {
+        checkpoint.instance_id = Some(provenant_core::hex(
+            &provenant_os::fs::entropy_128().map_err(GraphError::Instance)?,
+        ));
+        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+    }
     let mut effective_budget = budget.clone();
     let mut effective_limits = limits.clone();
     for (extension, replay) in
@@ -1243,11 +1274,53 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         if extensions.iter().any(|e| e.starts_with("loop.")) {
             let mut prospective = checkpoint.clone();
             for extension in extensions.iter().filter(|e| e.starts_with("loop.")) {
+                loops::validate_resume_extension(document, &checkpoint, extension)
+                    .map_err(GraphError::Extension)?;
                 loops::validate_resume_extension(document, &prospective, extension)
                     .map_err(GraphError::Extension)?;
                 if !prospective.extensions.contains(extension) {
                     prospective.extensions.push(extension.clone());
                 }
+            }
+        }
+        if extensions.iter().any(|e| {
+            e.starts_with("loop.")
+                && e.split_once('=')
+                    .is_some_and(|(key, _)| key.ends_with(".rounds"))
+        }) {
+            let mut prospective = checkpoint.clone();
+            for extension in extensions {
+                if !prospective.extensions.contains(extension) {
+                    prospective.extensions.push(extension.clone());
+                }
+            }
+            let preview =
+                loops::expand(document, &prospective.extensions).map_err(GraphError::Invalid)?;
+            let (preview_plan, _) =
+                validate_flat_plan(&preview, &unbounded).map_err(GraphError::Invalid)?;
+            if let Some(reason) = structural_limit_reason(
+                &preview,
+                &preview_plan,
+                &effective_limits,
+                &prospective.extensions,
+            ) {
+                for extension in extensions.iter().filter(|e| e.starts_with("loop.")) {
+                    let name = extension
+                        .strip_prefix("loop.")
+                        .and_then(|e| e.split_once('=').map(|(key, _)| key))
+                        .and_then(|key| key.rsplit_once('.').map(|(name, _)| name))
+                        .ok_or(GraphError::Invalid("loop extension"))?;
+                    loops::pause_invalid_decision(&mut checkpoint, name, &reason, journal)?;
+                }
+                return Ok(GraphRun {
+                    status: if checkpoint.cancelled {
+                        GraphStatus::Cancelled
+                    } else {
+                        GraphStatus::Paused
+                    },
+                    checkpoint,
+                    advance_error: None,
+                });
             }
         }
         for extension in extensions {
@@ -1261,6 +1334,17 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 loops::expand(document, &checkpoint.extensions).map_err(GraphError::Invalid)?;
             let (extended, _) =
                 validate_flat_plan(&expanded, &unbounded).map_err(GraphError::Invalid)?;
+            for extension in extensions.iter().filter(|e| e.starts_with("loop.")) {
+                let name = extension
+                    .strip_prefix("loop.")
+                    .and_then(|e| e.split_once('=').map(|(key, _)| key))
+                    .and_then(|key| key.rsplit_once('.').map(|(name, _)| name))
+                    .ok_or(GraphError::Invalid("loop extension"))?;
+                if let Some(node) = checkpoint.nodes.iter_mut().find(|n| n.id == name) {
+                    node.loop_pause = None;
+                    node.loop_inbox_error = None;
+                }
+            }
             loops::reconcile(&mut checkpoint, &extended);
             checkpoint.cancelled = false;
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
@@ -1287,6 +1371,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
 
+    close_resolved_loop_asks(&mut checkpoint, owner, journal)?;
     if checkpoint.cancelled {
         if !resume {
             return Ok(GraphRun {
@@ -1311,7 +1396,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             continue;
         }
         if let Some(spec) = &node.loop_body {
-            if structural_pause.is_none()
+            let terminal_decision = checkpoint.extensions.iter().any(|e| {
+                e == &format!("loop.{}.decision=stop", node.id)
+                    || e == &format!("loop.{}.decision=accept", node.id)
+            });
+            let body_settled = checkpoint
+                .nodes
+                .iter()
+                .filter(|n| n.round.as_ref().is_some_and(|r| r.loop_id == node.id))
+                .all(|n| n.state.settled());
+            if (structural_pause.is_none() || terminal_decision || body_settled)
                 && let Some(extension) = loops::settle(
                     node_index,
                     spec,
@@ -1322,9 +1416,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     journal,
                 )?
             {
-                if let Err(reason) =
-                    loops::prepare_decision_extension(document, &checkpoint, &extension, &unbounded)
-                {
+                if let Err(reason) = loops::prepare_decision_extension(
+                    document,
+                    &checkpoint,
+                    &extension,
+                    &effective_limits,
+                ) {
+                    for ask in &mut checkpoint.nodes[node_index].loop_asks {
+                        ask.resolved = true;
+                    }
                     loops::pause_invalid_decision(&mut checkpoint, &node.id, &reason, journal)?;
                 } else {
                     return advance_inner(
@@ -1620,6 +1720,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
     }
 
+    close_resolved_loop_asks(&mut checkpoint, owner, journal)?;
+    loops::refresh_pause(&mut checkpoint);
     let all_settled = checkpoint.nodes.iter().all(|node| node.state.settled());
     if all_settled && checkpoint.pause_reason.take().is_some() {
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
@@ -2659,6 +2761,13 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
     plan: &PlannedGraph,
     digest: &str,
 ) -> Result<(), GraphError<R, J>> {
+    if checkpoint
+        .instance_id
+        .as_ref()
+        .is_some_and(|id| id.parse::<provenant_core::RunId>().is_err())
+    {
+        return Err(GraphError::BadCheckpoint);
+    }
     if checkpoint.schema_version != 1
         || checkpoint.graph_id != plan.graph_id
         || checkpoint.delivery_required

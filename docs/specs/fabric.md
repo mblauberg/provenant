@@ -267,20 +267,27 @@ recorded in the final PR body.
 ### Bounded loops
 
 A node with `kind: "loop"` and `access: "read_only"` declares a `loop` object
-containing `body`, `until` and a positive `max_rounds`. The body is a
+containing `body`, `until` and a positive `max_rounds`. Optional
+`max_extension_rounds` caps each extension decision and defaults to five
+(allowed range 1 to 1024). The body is a
 self-contained DAG of task, synthesise and gate nodes. `until` names a body
 gate that follows every other body node, directly or transitively. Nested loops,
 body `on_fail` routes and body delivery are rejected. The wrapper has no
 prompt, route, worktree, inputs, condition or delivery configuration. All body
 writers must name the same existing worktree; every round continues on its
-branch without creating a checkout.
+branch without creating a checkout. Body writer worktrees, including no-op
+rounds, remain available through exhaustion, acceptance and cancellation for
+explicit delivery or later collection.
 
 The runtime expands the full allowance before admission. Node, edge, prompt,
 depth and fan-out limits therefore cover every possible round, including rounds
 that later become inactive. Admission counts `max_rounds` copies of the body
 plus the wrapper, with cross-round edges included. Budget and concurrency
 checks use the ordinary scheduler and attempt telemetry. Extensions must also
-fit these limits. Independent safety bounds reject more than 1024 rounds,
+fit effective limits and their host ceilings before any additional rounds are
+saved. A refusal retains the exhausted checkpoint and its stop/accept path.
+The default depth and ceiling are four; larger bodies require explicit host
+configuration, as shown in the host runbook. Independent safety bounds reject more than 1024 rounds,
 more than 16384 expanded nodes or an expanded node ID longer than 64 bytes.
 
 Within a body, ordinary dependencies and inputs refer to nodes in the current
@@ -308,10 +315,18 @@ their actor. With this field, exhaustion posts one blocking human request per
 exhausted allowance using the existing inbox service. The request offers
 `stop`, `extend` and `accept`: stop fails the wrapper, extend adds one round,
 and accept succeeds with the existing outputs. A reply of
-`{"decision":"extend","rounds":K}` adds a positive integer K within the safety bounds. The saved
-request identity and original actor survive replay. Resume reads and
+`{"decision":"extend","rounds":K}` adds a positive integer K within the safety bounds. A random checkpoint instance ID and the original actor bind the request.
+Both survive replay; recreating state for the same document gets a new instance
+and cannot reuse an old answer. Resume reads and
 acknowledges an immutable answer and saves its decision before advancing;
-answer delivery alone does not resume work.
+answer delivery alone does not resume work. Resolved, rejected and cancelled
+asks are superseded through the inbox's revision-checked close path after the
+graph transition is saved. Pending cleanup survives crashes and is retried on graph advancement or an
+explicit resume/cancel command. Inbox access restrictions still apply; a failed
+close remains visible as `loop_inbox_error` until it can be retried.
+Inbox availability errors retain a per-loop pause and explicit-resume hint;
+they do not stop observations of independent running attempts. Status retains
+all loop pause reasons when several loops exhaust together.
 
 Without a decision session, or to resolve exhaustion explicitly, resume the
 unchanged document with `--extend loop.ID.rounds=N`, where N is an absolute

@@ -202,7 +202,19 @@ existing branch. The `until` gate must follow the entire body. Body delivery,
 negative `until` verdict starts the next round.
 
 Configure host limits for the full expansion before running. This example
-requires seven nodes and a dependency depth of six. All allowed rounds count
+requires seven nodes and a dependency depth of six. The default host depth and
+ceiling are four, so this example needs explicit host configuration before it
+runs. To run two rounds and permit an extension to four, set:
+
+```toml
+[domains.fabric.graph.limits]
+expansion_depth = 6
+
+[domains.fabric.graph.limit_ceiling]
+expansion_depth = 12
+```
+
+All allowed rounds count
 towards structural and prompt limits even if the first round passes. An
 extension adds to that expansion and must fit host ceilings. The safety bounds
 are 1024 rounds, 16384 expanded nodes and 64 bytes per expanded node ID.
@@ -218,11 +230,17 @@ allowance to four:
 
 ```sh
 provenant fabric graph resume --document graph.json \
-  --extend loop.repair-review.rounds=4
+  --extend loop.repair-review.rounds=4 \
+  --extend limits.expansion_depth=12
 ```
 
-Loop extensions and decisions require an exhausted loop. The extension is
-saved, so retrying this command retains four total rounds.
+Loop extensions and decisions require an exhausted loop. A decision adds at most
+`max_extension_rounds` (default five); set this positive field in the `loop`
+object to choose another cap. The total remains at most 1024 rounds. The runtime
+checks the full expansion against effective host limits before saving an
+extension. A refused extension leaves the original rounds available for stop or
+accept. Saved allowances are absolute, so retrying this command retains four
+total rounds.
 Use `--extend loop.repair-review.decision=stop` to fail the loop, or
 `--extend loop.repair-review.decision=accept` to accept the existing outputs
 and continue. Budget and structural limit extensions may also be needed.

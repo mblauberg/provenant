@@ -2266,6 +2266,7 @@ struct BoundGraphOwner<'a> {
 
 struct GraphLoopInbox<'a> {
     graph_id: &'a str,
+    instance_id: &'a str,
     node_id: &'a str,
     rounds: usize,
     session: &'a str,
@@ -2315,7 +2316,13 @@ fn graph_loop_inbox_ask(
     let operation = provenant_records::CanonicalV1::record_digest(
         "graph-loop-inbox",
         1,
-        &(scope.graph_id, scope.node_id, scope.rounds, scope.session),
+        &(
+            scope.graph_id,
+            scope.instance_id,
+            scope.node_id,
+            scope.rounds,
+            scope.session,
+        ),
     )
     .map_err(|_| FacadeError::StateCorrupt)?;
     let operation_id = provenant_core::OperationId::parse(&format!(
@@ -2327,7 +2334,7 @@ fn graph_loop_inbox_ask(
         kind: RequestKind::Decision,
         title: format!("Graph loop {} exhausted", scope.node_id),
         body: format!(
-            "Graph {}, loop {} exhausted after {} rounds. Choose stop to stop the loop, extend to add one round, or accept to use the current outputs as is. To add K rounds, reply with JSON {{\"decision\":\"extend\",\"rounds\":K}} where K is a positive integer. Continue with fabric graph resume using the original document. This decision does not replace review or grant new authority.",
+            "Graph {}, loop {} exhausted after {} rounds. Choose stop to stop the loop, extend to add one round, or accept to use the current outputs as is. To add K rounds, reply with JSON {{\"decision\":\"extend\",\"rounds\":K}} where K is positive and within max_extension_rounds (default 5) and the host limits. Continue with fabric graph resume using the original document. This decision does not replace review or grant new authority.",
             scope.graph_id, scope.node_id, scope.rounds
         ),
         blocking: true,
@@ -2418,6 +2425,133 @@ fn graph_loop_inbox_decision(
         )
         .map_err(inbox_error)?;
     Ok(Some(decision))
+}
+
+fn graph_loop_inbox_edge(
+    factory: &Factory,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    origin: provenant_fabric_runtime::graph::LoopScope<'_>,
+    close: bool,
+) -> Result<Option<provenant_fabric_runtime::graph::LoopDecision>, FacadeError> {
+    use provenant_fabric_runtime::inbox::InboxService;
+    let context = &factory.context;
+    let mut identity = context.identity.clone();
+    // Settlement can run under another client label. Keep the actor saved
+    // before escalation, just as an attempt retains its launch actor.
+    identity.inbox.actor = origin
+        .actor
+        .parse()
+        .map_err(|_| FacadeError::StateCorrupt)?;
+    let scope = GraphLoopInbox {
+        graph_id: origin.graph_id,
+        instance_id: origin.instance_id,
+        node_id: origin.node_id,
+        rounds: origin.rounds,
+        session: origin.session,
+    };
+    // Validate the ordinary inbox edge before opening local state. Graph
+    // escalation obeys lane and configured home-host restrictions too.
+    provenant_fabric_runtime::inbox::validate_request(
+        &identity,
+        &context.config,
+        context.in_lane,
+        &graph_loop_inbox_ask(&scope)?,
+    )
+    .map_err(|error| FacadeError::DispatchRefused {
+        reason: format!("loop inbox decision: {error}"),
+    })?;
+    let service = InboxService::open(
+        &context.roots.state,
+        &identity,
+        &factory.clock,
+        budget,
+        cancel,
+    )
+    .map_err(|error| FacadeError::DispatchRefused {
+        reason: format!("loop inbox decision: {error}"),
+    })?;
+    if close {
+        graph_loop_inbox_close(&service, &scope, identity.inbox.actor, budget, cancel)?;
+        Ok(None)
+    } else {
+        graph_loop_inbox_decision(&service, &scope, budget, cancel)
+    }
+}
+
+fn graph_loop_inbox_close(
+    service: &provenant_fabric_runtime::inbox::InboxService<'_>,
+    scope: &GraphLoopInbox<'_>,
+    actor: provenant_core::ActorId,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<(), FacadeError> {
+    use provenant_fabric_runtime::inbox::{InboxFilter, InboxInput, InboxResult};
+    use provenant_records::inbox::RequestState;
+    let map = |e: provenant_fabric_runtime::inbox::InboxError| FacadeError::DispatchRefused {
+        reason: format!("close loop inbox ask: {e}"),
+    };
+    let InboxInput::Ask {
+        operation_id: Some(operation),
+        ..
+    } = graph_loop_inbox_ask(scope)?
+    else {
+        return Err(FacadeError::StateCorrupt);
+    };
+    // Find the request through the normal bounded inbox list. Closing never creates an ask.
+    let mut cursor = None;
+    loop {
+        let InboxResult::Listed {
+            items, next_cursor, ..
+        } = service
+            .execute(
+                InboxInput::List {
+                    id: None,
+                    session: Some(scope.session.into()),
+                    state: InboxFilter::All,
+                    limit: 50,
+                    cursor,
+                },
+                budget,
+                cancel,
+            )
+            .map_err(map)?
+        else {
+            return Err(FacadeError::StateCorrupt);
+        };
+        if let Some(item) = items
+            .into_iter()
+            .find(|item| item.operation_id == operation && item.chair_actor == actor)
+        {
+            if matches!(
+                item.state,
+                RequestState::Withdrawn | RequestState::Superseded | RequestState::Expired
+            ) {
+                return Ok(());
+            }
+            service
+                .execute(
+                    InboxInput::Close {
+                        id: item.id,
+                        state: RequestState::Superseded,
+                        reason: "Graph loop decision resolved or cancelled".into(),
+                        expect_revision: item.revision,
+                        operation_id: Some(
+                            provenant_core::OperationId::parse(&format!("loop-close-{}", item.id))
+                                .map_err(|_| FacadeError::StateCorrupt)?,
+                        ),
+                    },
+                    budget,
+                    cancel,
+                )
+                .map_err(map)?;
+            return Ok(());
+        }
+        let Some(next) = next_cursor else {
+            return Ok(());
+        };
+        cursor = Some(next);
+    }
 }
 
 fn load_graph_prices(assets: &std::path::Path) -> Result<provenant_telemetry::PriceTable, String> {
@@ -2621,6 +2755,69 @@ fn settle_owned_worktree(
     let Some(writer) = task.writer else {
         return Ok(());
     };
+    if task.deliver.is_none()
+        && delivery_override.is_none()
+        && record.delivery.is_none()
+        && store.delivered(record.attempt_id, &call)?.is_none()
+    {
+        let mut ownership_unknown = false;
+        let ids = match provenant_fabric_runtime::graph::FileJournal::graph_ids(
+            &roots.state,
+            settled.project_id,
+        ) {
+            Ok(ids) => ids,
+            Err(_) => {
+                ownership_unknown = true;
+                Vec::new()
+            }
+        };
+        let mut loop_member = false;
+        for id in ids {
+            let checkpoint = match provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+                &roots.state,
+                settled.project_id,
+                &id,
+            ) {
+                Ok(Some(checkpoint)) => checkpoint,
+                Ok(None) => continue,
+                Err(_) => {
+                    ownership_unknown = true;
+                    continue;
+                }
+            };
+            for node in checkpoint.nodes.iter().filter(|node| node.round.is_some()) {
+                for attempt in &node.attempts {
+                    if attempt
+                        .attempt_ref
+                        .as_deref()
+                        .and_then(|reference| reference.rsplit('/').next())
+                        == Some(record.attempt_id.to_string().as_str())
+                        || graph_operation("graph-attempt-operation", &attempt.key)
+                            .is_ok_and(|operation| operation == record.operation_id)
+                    {
+                        loop_member = true;
+                    }
+                }
+            }
+            if loop_member {
+                break;
+            }
+        }
+        // Unknown graph custody retains graph operations conservatively; unrelated lanes still settle.
+        if loop_member || ownership_unknown && record.operation_id.as_str().starts_with("graph-") {
+            let reason = if loop_member {
+                "graph loop writer worktree retained for later rounds and explicit delivery"
+            } else {
+                "graph custody could not be read; worktree retained for explicit delivery"
+            };
+            record_worktree_settlement(
+                &store,
+                record.attempt_id,
+                &serde_json::json!({"schema_version":1,"state":"retained","worktree":writer.worktree,"reason":reason}),
+            )?;
+            return Ok(());
+        }
+    }
     // Refresh before taking the collection lock and before the prune budget starts.
     // Explicit worktrees have no owner record, so use their verified HEAD.
     let mut tracking_ref_warning = None;
@@ -3126,46 +3323,15 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     }
     fn loop_decision(
         &mut self,
-        graph_id: &str,
-        node_id: &str,
-        rounds: usize,
-        session: &str,
-        actor: &str,
+        scope: provenant_fabric_runtime::graph::LoopScope<'_>,
     ) -> Result<Option<provenant_fabric_runtime::graph::LoopDecision>, Self::Error> {
-        use provenant_fabric_runtime::inbox::InboxService;
-        let context = &self.factory.context;
-        let mut identity = context.identity.clone();
-        // Settlement can run under another client label. Keep the actor saved
-        // before escalation, just as an attempt retains its launch actor.
-        identity.inbox.actor = actor.parse().map_err(|_| FacadeError::StateCorrupt)?;
-        let scope = GraphLoopInbox {
-            graph_id,
-            node_id,
-            rounds,
-            session,
-        };
-        // Validate the ordinary inbox edge before opening local state. Graph
-        // escalation obeys lane and configured home-host restrictions too.
-        provenant_fabric_runtime::inbox::validate_request(
-            &identity,
-            &context.config,
-            context.in_lane,
-            &graph_loop_inbox_ask(&scope)?,
-        )
-        .map_err(|error| FacadeError::DispatchRefused {
-            reason: format!("loop inbox decision: {error}"),
-        })?;
-        let service = InboxService::open(
-            &context.roots.state,
-            &identity,
-            &self.factory.clock,
-            self.budget,
-            self.cancel,
-        )
-        .map_err(|error| FacadeError::DispatchRefused {
-            reason: format!("loop inbox decision: {error}"),
-        })?;
-        graph_loop_inbox_decision(&service, &scope, self.budget, self.cancel)
+        graph_loop_inbox_edge(self.factory, self.budget, self.cancel, scope, false)
+    }
+    fn close_loop_ask(
+        &mut self,
+        scope: provenant_fabric_runtime::graph::LoopScope<'_>,
+    ) -> Result<(), Self::Error> {
+        graph_loop_inbox_edge(self.factory, self.budget, self.cancel, scope, true).map(|_| ())
     }
     fn cost_unknown_reason(&mut self) -> Option<String> {
         let graph_budget = &self.factory.context.config.graph.budget;
@@ -3761,6 +3927,22 @@ impl Factory {
                     }
                 }
             }
+            let mut graph_owner = BoundGraphOwner {
+                factory: self,
+                integration_base: None,
+                budget,
+                cancel,
+                prices: None,
+            };
+            if provenant_fabric_runtime::graph::close_resolved_loop_asks(
+                &mut checkpoint,
+                &mut graph_owner,
+                &mut journal,
+            )
+            .is_err()
+            {
+                first_error.get_or_insert_with(|| FacadeError::io("close cancelled graph asks"));
+            }
             if let Some(error) = first_error {
                 return Err(error);
             }
@@ -4196,6 +4378,7 @@ mod graph_loop_inbox_tests {
         {
             let scope = GraphLoopInbox {
                 graph_id: "fixture",
+                instance_id: "instance-one",
                 node_id: "review",
                 rounds: index + 1,
                 session: "chair-session",
@@ -4252,6 +4435,11 @@ mod graph_loop_inbox_tests {
             );
             assert_eq!(item.request.chair_actor, identity.inbox.actor);
             assert_eq!(item.request.chair_session_id, scope.session);
+            if index == 1 {
+                let fresh = GraphLoopInbox { instance_id: "instance-two", ..scope };
+                assert_eq!(graph_loop_inbox_decision(&service, &fresh, budget()?, &cancel)?, None, "same document recreated state must ask again");
+                graph_loop_inbox_close(&service, &fresh, identity.inbox.actor, budget()?, &cancel)?;
+            }
             if index == 0 {
                 service.execute(
                     InboxInput::Close {
@@ -4270,6 +4458,9 @@ mod graph_loop_inbox_tests {
                     "a superseded request reused its historical answer"
                 );
             }
+            graph_loop_inbox_close(&service, &scope, identity.inbox.actor, budget()?, &cancel)?;
+            graph_loop_inbox_close(&service, &scope, identity.inbox.actor, budget()?, &cancel)?;
+            assert_eq!(graph_loop_inbox_decision(&service, &scope, budget()?, &cancel)?, None);
         }
         let InboxResult::Listed { items, .. } = service.execute(
             InboxInput::List {
@@ -4285,7 +4476,16 @@ mod graph_loop_inbox_tests {
         else {
             return Err("missing inbox listing".into());
         };
-        assert_eq!(items.len(), 5, "replay created duplicate decisions");
+        assert_eq!(
+            items.len(),
+            6,
+            "replay or cleanup created duplicate decisions"
+        );
+        assert!(
+            items
+                .iter()
+                .all(|item| item.state == RequestState::Superseded)
+        );
         Ok(())
     }
 
@@ -4433,6 +4633,10 @@ mod peer_tests {
                 .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
                 .collect()
         }
+    }
+
+    mod loop_repair_tests {
+        include!("fabric/loop_repair_tests.rs");
     }
 
     struct SettlementFixture {
