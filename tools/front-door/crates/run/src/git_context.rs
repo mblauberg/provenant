@@ -198,6 +198,33 @@ pub fn resolve_git_base(git: &Path, cwd: &Path, base: &str) -> Result<String> {
     resolve(&executor, git, cwd, base, &env)
 }
 
+/// Resolve the merge base against the locally recorded default origin branch.
+pub fn review_merge_base(git: &Path, cwd: &Path, head: &str) -> Result<String> {
+    let executor = SystemExecutor::new(1).map_err(execution_error)?;
+    let env = repository_environment(&executor, git, cwd)?;
+    let default = resolve(&executor, git, cwd, "refs/remotes/origin/HEAD", &env).map_err(|_| {
+        RunError::Validation("cannot resolve origin's default branch; supply --base")
+    })?;
+    let (out, timed_out) = read_git_with_env(
+        &executor,
+        git,
+        cwd,
+        &["merge-base", head, &default],
+        256,
+        &env,
+    )
+    .map_err(|_| RunError::Validation("cannot find review merge base; supply --base"))?;
+    let value = std::str::from_utf8(&out.bytes)
+        .map_err(execution_error)?
+        .trim();
+    if timed_out || out.truncated || provenant_core::GitOid::parse(value).is_err() {
+        return Err(RunError::Validation(
+            "cannot find review merge base; supply --base",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
 pub struct GitContext {
     base: String,
     head: String,
@@ -207,6 +234,11 @@ pub struct GitContext {
     diff_timed_out: bool,
 }
 impl GitContext {
+    /// Capture a specified review head on the host.
+    pub fn capture_at(git: &Path, cwd: &Path, base: &str, head: &str) -> Result<Self> {
+        let executor = SystemExecutor::new(1).map_err(execution_error)?;
+        Self::capture_with_head(&executor, git, cwd, base, head)
+    }
     /// Capture on the host once, before preparing any provider candidate.
     pub fn capture(git: &Path, cwd: &Path, base: &str) -> Result<Self> {
         let executor = SystemExecutor::new(1).map_err(execution_error)?;
@@ -214,9 +246,19 @@ impl GitContext {
     }
 
     fn capture_with(executor: &dyn Executor, git: &Path, cwd: &Path, base: &str) -> Result<Self> {
+        Self::capture_with_head(executor, git, cwd, base, "HEAD")
+    }
+
+    fn capture_with_head(
+        executor: &dyn Executor,
+        git: &Path,
+        cwd: &Path,
+        base: &str,
+        head: &str,
+    ) -> Result<Self> {
         let env = repository_environment(executor, git, cwd)?;
         let base = resolve(executor, git, cwd, base, &env)?;
-        let head = resolve(executor, git, cwd, "HEAD", &env)?;
+        let head = resolve(executor, git, cwd, head, &env)?;
         let range = format!("{base}..{head}");
         let (log, log_timed_out) = read_git_with_env(
             executor,
@@ -383,6 +425,63 @@ mod tests {
             options.stop_on_output_limit = false;
             self.0.execute(options)
         }
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn capture_uses_requested_head_instead_of_checkout() -> TestResult {
+        use std::process::Command;
+        let temp = tempfile::tempdir()?;
+        let git = |args: &[&str]| -> TestResult {
+            assert!(
+                Command::new("git")
+                    .current_dir(temp.path())
+                    .args(args)
+                    .status()?
+                    .success()
+            );
+            Ok(())
+        };
+        git(&["init", "-q"])?;
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.org",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ])?;
+        let oid = || -> std::result::Result<String, Box<dyn std::error::Error>> {
+            Ok(String::from_utf8(
+                Command::new("git")
+                    .current_dir(temp.path())
+                    .args(["rev-parse", "HEAD"])
+                    .output()?
+                    .stdout,
+            )?
+            .trim()
+            .to_owned())
+        };
+        let base = oid()?;
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.org",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "reviewed",
+        ])?;
+        let head = oid()?;
+        git(&["checkout", "-q", "--detach", &base])?;
+        let binary = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let context = GitContext::capture_at(&binary, temp.path(), &base, &head)?;
+        assert_eq!(context.head, head);
+        assert!(String::from_utf8_lossy(&context.log.bytes).contains("reviewed"));
+        Ok(())
     }
 
     #[test]

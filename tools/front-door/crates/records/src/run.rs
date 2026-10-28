@@ -1,7 +1,8 @@
 //! Strict run-store records. Facts are constructed only after store validation.
 use crate::{CanonicalError, CanonicalV1, FileDigest, PathWire};
 use provenant_core::{
-    ActorId, AttemptId, DeliveryId, Digest, GitOid, OperationId, ProjectId, RunId, TaskId, WallTime,
+    ActorId, AttemptId, DeliveryId, Digest, GitOid, HostId, OperationId, ProjectId, RunId, TaskId,
+    WallTime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -12,9 +13,20 @@ pub const RESULT_LIMIT: u64 = 4 * 1024 * 1024;
 pub const CAPTURE_LIMIT: u64 = 64 * 1024 * 1024;
 pub const OUTPUT_LIMIT: u64 = 65536;
 
+/// Explicit submitting chair identity, separate from a worker provider session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChairBinding {
+    pub host: HostId,
+    pub actor: ActorId,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalRequest {
+    /// Submission proposal only. Readers trust the host-owned Fabric index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chair: Option<ChairBinding>,
     /// A fresh continuation retains the parent for lineage and admission, but
     /// starts the provider without its previous session. The reason is sealed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,6 +80,9 @@ impl HarnessProfile {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskRequest {
+    /// Select the build-heavy scheduling priority for this task.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub build_heavy: bool,
     /// Human-supplied task title, when provided at submission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -75,6 +90,9 @@ pub struct TaskRequest {
     pub profile: HarnessProfile,
     pub task_id: TaskId,
     pub prompt_digest: FileDigest,
+    /// Chair-verified review head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
     /// Git base for host-written attempt context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
@@ -252,11 +270,20 @@ pub enum WriterDeliveryState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct WriterReviewAcceptance {
+    pub actor: ActorId,
+    pub protected_paths: Vec<PathWire>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WriterDeliveryReceipt {
     pub schema_version: u64,
     pub remote: String,
     pub branch: String,
     pub head: Option<GitOid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_acceptance: Option<WriterReviewAcceptance>,
     pub state: WriterDeliveryState,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -560,6 +587,12 @@ pub struct AttemptRecord {
     pub session: Option<String>,
     pub queued_at: WallTime,
     pub started_at: Option<WallTime>,
+    /// Observed nice value of the provider process, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    /// Scheduling priority requested for the provider process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_priority: Option<u8>,
     /// Most recent supervisor-observed stdout/stderr activity while running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_at: Option<WallTime>,
@@ -677,9 +710,11 @@ mod tests {
     fn request_with_a_removed_task_class_retains_its_sealed_digest()
     -> Result<(), Box<dyn std::error::Error>> {
         let request = CanonicalRequest {
+            chair: None,
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                build_heavy: false,
                 title: None,
                 profile: HarnessProfile {
                     name: "rigorous".into(),
@@ -688,6 +723,7 @@ mod tests {
                 task_id: TaskId::from_bytes([3; 16]),
                 prompt_digest: CanonicalV1::file_digest(b"prompt"),
                 base: None,
+                head: None,
                 base_ref: None,
                 route: RequestedRoute::Named {
                     name: "senior".into(),

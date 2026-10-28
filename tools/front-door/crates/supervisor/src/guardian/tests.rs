@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 #[test]
 fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
     let message = LaunchMessage {
+        priority: 0,
         schema_version: 1,
         scope: Scope {
             run: provenant_core::RunId::from_bytes([1; 16]),

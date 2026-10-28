@@ -1,14 +1,14 @@
 # Workflow
 
-Owner: `crates/workflow` (coverage, receipts, sessions, writing),
+Owner: `crates/workflow` (coverage, receipts, sessions, chair logs, writing),
 `crates/fabric-runtime/src/handoff/session` (session handoff)
 Anchor: `crates/workflow/src/coverage.rs`, `crates/workflow/src/store/tests.rs`,
-`crates/workflow/src/session.rs`, `tests/workflow.rs`
+`crates/workflow/src/session.rs`, `crates/workflow/src/log.rs`, `tests/workflow.rs`
 
-Workflow is a small synchronous policy library: a pure review coverage check,
-a minimal delivery receipt, bounded session checkpoints and a writing
-matcher that runs on JSON rules, with no SQLite, process runner or MCP tool. Pull requests carry their own
-evidence. This spec grants no merge,
+Workflow is a small synchronous library: a pure review coverage check,
+a minimal delivery receipt, bounded session checkpoints, a SQLite-backed chair
+log and a writing matcher that runs on JSON rules, with no process runner or MCP
+tool. Pull requests carry their own evidence. This spec grants no merge,
 install or release authority. Paths are relative to `tools/front-door/`.
 
 ## Review coverage
@@ -118,8 +118,8 @@ The order is: store the old text, publish the new checkpoint, publish the
 history, then delete revisions beyond `retention.session_revisions` (default 8,
 1 to 64, current included), whether the save comes from `session save` or from
 `session handoff`. A save that stops part-way leaves a complete
-checkpoint, and the next one records the revision it finds; unreadable history
-never blocks a save. Identical text adds no revision. Each revision is held to
+checkpoint, and the next one records the revision it finds; unreadable revision
+history never blocks a save. Identical text adds no revision. Each revision is held to
 the 256 KiB checkpoint bound. `session show --rev N` and `session diff N` print
 a retained revision, or its unified line diff against the current one, as plain
 text. Lines compare with their terminators, so text that differs only in its final
@@ -135,6 +135,128 @@ marks it. A revision whose text fails its hash is refused with `HISTORY`.
   `src/handoff.rs::a_handoff_checkpoint_keeps_the_configured_number_of_revisions`;
   `tests/workflow.rs::session_checkpoints_keep_bounded_revisions_and_show_what_changed`
 - Owner: `crates/workflow/src/session.rs`, `crates/workflow/src/session/diff.rs`
+
+### Explicit chairs are discoverable
+
+Catalogue composition uses the bounded discovery reader with a shared entry
+budget. Every enumerated session-directory entry consumes that budget, even if
+its name is invalid or it has no discovery record. Reaching the budget reports
+truncation without reading a further entry; an exact fit is conservatively
+reported as truncated. The original discovery reader retains its existing limit
+and error behaviour for other callers.
+
+**Contract for later slices:** `discovery.json` is advisory. The checkpoint and
+revision manifest commit before the separate discovery replacement. Failure of
+that replacement returns a successful save with a warning; the next save repairs
+the entry. Readers must compare its revision and hash with the manifest and
+checkpoint and explicitly report stale metadata before using it.
+
+`workflow session save SESSION` registers the caller's exact Fabric host,
+bound project, supplied host session ID and trusted actor as a chair.
+Chair identity paths use Fabric's shared inbox derivation: host plus the first
+nonempty label from `PROVENANT_AGENT_LABEL`, configured `fabric.agent_label`,
+the harness client, then configured `fabric.client_label` (default `agent`).
+The client is explicit `--client HARNESS` when supplied. Hook-generated save
+commands pass the installing harness as `--client claude` or `--client codex`.
+Otherwise, a nonempty `CODEX_THREAD_ID` identifies Codex; `CLAUDECODE=1`,
+`CLAUDE_CODE_SESSION_ID` or `CLAUDE_SESSION_ID` identifies Claude.
+If both families have markers, no harness is inferred: supply `--client`.
+Configuration directory variables do not identify an active harness.
+With the same labels and client, the chair actor equals its Fabric inbox actor;
+unlabelled Claude and Codex chairs on the same host have different actors.
+The same derivation applies to CLI saves, MCP and source checkpoint saves
+during `session handoff`. Hooks include the client in
+`provenant workflow session save SESSION --file <checkpoint.md> --client HARNESS`.
+General CLI Fabric and lane commands retain their configured actor and
+`identity.client` (default `agent`); harness markers do not change either.
+Handoff validates the binding before peer delivery. Its recovery command
+includes the supplied client or `--client HARNESS` when none was supplied.
+Lanes (`context.in_lane`) are refused before saving or registering a
+chair, including when they request `--rebind`. The workflow
+owner stores a per-session index entry in
+`workflow/projects/<project>/sessions/<session>/discovery.json` (at most 4 KiB):
+
+| Field | Contract |
+|---|---|
+| `schema_version` | `1` |
+| `host`, `project_id`, `host_session_id` | Exact session key; host/project IDs come from their existing owners |
+| `chair_actor` | Canonical Fabric actor; only an explicit `save --rebind` may replace it or the host |
+| `created_at`, `last_saved_at` | Canonical RFC3339 UTC with microseconds; first registration and latest save whose discovery was published, including unchanged saves |
+| `checkpoint` | The complete current `Revision`: revision, parent, SHA-256, bytes and saved time |
+| `rebound_from` | Optional list of the last 8 previous host/actor bindings and `changed_at`, oldest first; preserved by ordinary saves. Longer lists are truncated to the newest 8 on read. Legacy single-hop objects remain readable and become lists on save |
+
+The discovery key is scoped to this host's state directory. Separate host state
+directories can contain the same project/session ID without collision. Shared
+state directories across hosts are unsupported; peer composition belongs to
+slice 16.
+
+The entry denotes role `chair` and evidence source `checkpoint_save`. No
+provider, provider session, label, title, parent, route, summary, log, lifecycle,
+lane association or interaction channel is inferred. Those absent facts remain
+unknown; later slices own their capture. A provider session handle in a worker
+attempt is never registration evidence. Autosave and checkpoint reads do not
+register chairs. Legacy manifests and bare checkpoints remain readable with no
+discovery entry; summaries remain unavailable.
+
+The save holds `checkpoint.lock` across checkpoint replacement, atomic revision
+manifest replacement, then atomic discovery replacement, in that order. Each
+replacement is atomic; the group is not a transaction. A discovery publication
+failure is returned in `warnings` (handoff: `checkpoint_warnings`), with the
+checkpoint save still successful. The revision manifest stays unchanged
+in shape, so older binaries can read and save it without losing history; an
+older writer leaves the discovery entry stale. There is no shared index that
+can race another session's writer. If a process stops after publishing the
+checkpoint or manifest but before discovery, an earlier entry remains at its
+earlier revision/hash. `SessionStore::discovery` compares the
+held checkpoint's hash and manifest revision against that entry, returning
+`current`, `checkpoint_changed` or `checkpoint_missing`. These are bounded
+observations, not a lease or an assertion that the provider is alive. Unreadable
+files return an error. A crash on the first save can leave a readable checkpoint
+without registration, which remains unknown until an explicit save succeeds.
+Unreadable discovery metadata blocks a save before replacing checkpoint or
+history. An explicit host/actor mismatch is refused as `IDENTITY`, with an error
+instructing callers to repeat `workflow session save <id>` with the same options
+and add `--rebind`. Handoff refusals provide a save command with the actual
+session ID, explicit client, project and state directory. To recover an older
+binding under `agent` or deliberately change labels, run
+`provenant workflow session save SESSION --file FILE --client HARNESS --rebind`.
+This records the previous identity and change time under the checkpoint lock.
+Human and JSON saves report discovery warnings. If publication warns, repeat
+the same command, including `--rebind` when used, to commit the new binding.
+For unreadable discovery, restore a readable record from backup before retrying;
+`--rebind` does not bypass corrupt metadata or a project/session key mismatch.
+The next save reconciles revisions and publishes the corresponding entry;
+identity must be supplied again when registration was never committed.
+
+`discover_sessions` enumerates only committed explicit entries, in session-key
+order, with a 16,384-directory-entry scan ceiling. Exceeding it or encountering
+unreadable state returns an error rather than claiming complete coverage.
+Discovery, `session show` (all modes) and `session diff` create no files, locks,
+directories or project/host identities, and never repair state. These CLI reads
+also skip demand-usage recording. Consumers must
+check consistency before treating cached checkpoint metadata as current.
+`show` and `diff` honour `--project` and `--state-dir`, including missing stores
+and unbound projects, without allocating state.
+
+CLI error codes: `IDENTITY` for a binding/key mismatch; `IN_LANE` for a lane's
+chair save; `HISTORY` for malformed discovery JSON or invalid revision history;
+`IO` for unreadable discovery files (permissions, symlinks, size limits or other
+filesystem failures), checkpoint encoding and pre-commit filesystem/deadline
+errors; `MISSING` for an unbound project or absent checkpoint/revision; `INVALID`
+for invalid session IDs, options or oversized checkpoint input. A post-manifest
+discovery publication failure is a warning, not an error code. Discovery library
+readers return `SessionError::History`, `DiscoveryIdentity` or `Filesystem`
+rather than claiming complete coverage of unreadable state.
+
+- Why: later delivery and catalogue readers need durable exact identities without guessing ownership.
+- Test: `crates/workflow/src/session.rs::session_save_discovery_restart`;
+  `::discovery_reports_interrupted_publication_without_read_repair`;
+  `::discovery_publication_failure_warns_after_manifest_commit_and_next_save_repairs`;
+  `tests/workflow.rs::session_save_discovery_restart`;
+  `::session_reads_allocate_nothing`;
+  `::session_show_honours_project_and_state_dir_without_allocating`;
+  `::a_lane_cannot_register_or_overwrite_a_chair`
+- Owner: `crates/workflow/src/session/discovery.rs`, `crates/cli/src/workflow.rs`
 
 ### Session hooks are advisory
 
@@ -202,6 +324,35 @@ following it reaches the store the hook used; one that cannot is not printed.
   `crates/workflow/src/session.rs::the_save_command_carries_a_custom_state_dir_or_refuses_to_show_one`;
   `::the_excerpt_notice_carries_the_state_dir_and_stays_within_the_cap`
 - Owner: `crates/workflow/src/session/state.rs`, `crates/workflow/src/session.rs`, `src/hooks.rs`
+
+## Chair logs
+
+Chair updates are scoped to a project and session. Each operation has an opaque
+operation ID and caller-supplied `issued_at` time, fixed when it is created and
+reused on retry. While the operation remains inside the configured horizon
+and the persisted expiry boundary, the same ID and payload return the original
+sequence, including after payload pruning; a different payload with that ID must
+be refused. Appends older than the replay horizon
+return an explicit expired result, and timestamps more than five minutes in the
+future are refused. Receipts expire after the replay horizon; no lifetime
+operation limit may prevent appends. Persisted expiry boundaries must not move
+backwards when the clock or configuration changes.
+
+Entries are returned in sequence order with bounded pagination. Retention
+removes oldest payloads under the configured age, count and byte limits.
+Listing applies these limits before pagination without changing storage, and
+full GC applies them to idle sessions. A correction is a new entry referencing an earlier sequence, which may have been
+pruned. Lanes must not append chair updates. Listing must not create state or
+require write access. The cost of append and list must depend on retained data
+and the replay horizon, not the session's lifetime history.
+- Why: retries must not duplicate updates, and inactive or long-lived sessions
+  must remain bounded without preventing read-only use.
+- Test: `crates/workflow/src/log.rs::log_operation_replay_pagination_correction_pruning_and_restart`;
+  `::replay_horizon_expires_receipts_and_survives_clock_and_config_changes`;
+  `::replay_store_has_no_lifetime_receipt_cap`;
+  `tests/workflow.rs::chair_log_cli_replay_and_pages`;
+  `::chair_log_cli_retention_replay_and_lane_refusal`
+- Owner: `crates/workflow/src/log.rs`, `src/chair.rs`
 
 ## Session handoff
 

@@ -866,14 +866,34 @@ fn submit_accepts_optional_bounded_git_base() {
         .unwrap()["inputSchema"];
     let mut input = json!({
         "op":"submit", "operation_id":"git-context", "tasks":[{
-            "prompt":"review", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1, "base":"main"
+            "prompt":"review", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1, "base":"main", "build_heavy":true
         }]
     });
     assert!(accepts(schema, schema, &input));
     assert!(ToolCall::parse("fabric_run", input.clone()).is_ok());
     let SubmitInput::Submit { tasks, .. } = serde_json::from_value(input.clone()).unwrap();
     assert_eq!(tasks[0].base.as_deref(), Some("main"));
+    assert!(tasks[0].build_heavy);
     input["tasks"][0]["base"] = json!("a".repeat(1025));
+    assert!(!accepts(schema, schema, &input));
+    assert!(ToolCall::parse("fabric_run", input).is_err());
+}
+
+#[test]
+fn submit_head_matches_schema_length_bound() {
+    let schema = &all_catalogue()
+        .iter()
+        .find(|tool| tool["name"] == "fabric_run")
+        .unwrap()["inputSchema"];
+    let mut input = json!({
+        "op":"submit", "operation_id":"git-head", "tasks":[{
+            "prompt":"review", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1,
+            "head":"a".repeat(64)
+        }]
+    });
+    assert!(accepts(schema, schema, &input));
+    assert!(ToolCall::parse("fabric_run", input.clone()).is_ok());
+    input["tasks"][0]["head"] = json!("a".repeat(65));
     assert!(!accepts(schema, schema, &input));
     assert!(ToolCall::parse("fabric_run", input).is_err());
 }

@@ -1935,6 +1935,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
 | `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
@@ -1961,6 +1962,7 @@ bounds are null. Positional arguments have no long flag.
 | `--knob` | `{"name": "knobs", "repeatable": true}` |
 | `--host` | `{"name": "host"}` |
 | `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "name": "worktree_branch"}` |
+| `--head` | `{"name": "head"}` |
 | `--base` | `{"name": "base"}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
@@ -2105,6 +2107,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
 | `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
@@ -2133,6 +2136,7 @@ bounds are null. Positional arguments have no long flag.
 | `--host` | `{"name": "host"}` |
 | `--branch` | `{"name": "branch"}` |
 | `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "name": "worktree_branch"}` |
+| `--head` | `{"name": "head"}` |
 | `--base` | `{"name": "base"}` |
 | `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
@@ -2390,6 +2394,7 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `attempt` | `{"name": "attempt", "positional": true, "required": true}` |
 | `--deliver` | `{"name": "deliver"}` |
+| `--accept-review` | `{"defaults": ["false"], "name": "accept_review", "values": ["true", "false"]}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -2402,7 +2407,8 @@ bounds are null. Positional arguments have no long flag.
     {
       "arguments": [
         "attempt",
-        "deliver"
+        "deliver",
+        "accept_review"
       ],
       "multiple": true,
       "name": "Deliver",
@@ -2452,6 +2458,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `--claude-subagents` | `{"conflicts": ["usage", "since", "until", "run_id"], "name": "claude_subagents"}` |
 | `--usage` | `{"defaults": ["false"], "name": "usage", "values": ["true", "false"]}` |
 | `--since` | `{"name": "since"}` |
 | `--until` | `{"name": "until"}` |
@@ -2472,6 +2479,7 @@ bounds are null. Positional arguments have no long flag.
   "groups": [
     {
       "arguments": [
+        "claude_subagents",
         "usage",
         "since",
         "until",
@@ -2662,6 +2670,56 @@ bounds are null. Positional arguments have no long flag.
 }
 ```
 
+## `provenant console`
+
+| Argument | Contract |
+|---|---|
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant console projects`
+
+| Argument | Contract |
+|---|---|
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant console sessions`
+
+| Argument | Contract |
+|---|---|
+| `session` | `{"name": "session", "positional": true}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
+| `--cursor` | `{"name": "cursor"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "session",
+        "limit",
+        "cursor"
+      ],
+      "multiple": true,
+      "name": "Sessions",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant chair`
 
 | Argument | Contract |
@@ -2671,6 +2729,81 @@ bounds are null. Positional arguments have no long flag.
 | `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
+
+## `provenant chair log`
+
+| Argument | Contract |
+|---|---|
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant chair log append`
+
+| Argument | Contract |
+|---|---|
+| `--session` | `{"name": "session", "required": true}` |
+| `--file` | `{"name": "file", "required": true}` |
+| `--operation-id` | `{"name": "operation_id", "requires": ["issued_at"]}` |
+| `--issued-at` | `{"name": "issued_at", "requires": ["operation_id"]}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "constraints": [
+    "operation-id and issued-at are generated when omitted; supply both for planned retries"
+  ],
+  "groups": [
+    {
+      "arguments": [
+        "session",
+        "file",
+        "operation_id",
+        "issued_at"
+      ],
+      "multiple": true,
+      "name": "Append",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant chair log list`
+
+| Argument | Contract |
+|---|---|
+| `--session` | `{"name": "session", "required": true}` |
+| `--after` | `{"name": "after"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "session",
+        "after",
+        "limit"
+      ],
+      "multiple": true,
+      "name": "List",
+      "required": false
+    }
+  ]
+}
+```
 
 ## `provenant chair switch`
 
@@ -3195,6 +3328,8 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `session_id` | `{"name": "session_id", "positional": true, "required": true}` |
 | `--file` | `{"name": "file", "required": true}` |
+| `--client` | `{"name": "client", "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
+| `--rebind` | `{"defaults": ["false"], "name": "rebind", "values": ["true", "false"]}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -3207,7 +3342,9 @@ bounds are null. Positional arguments have no long flag.
     {
       "arguments": [
         "session_id",
-        "file"
+        "file",
+        "client",
+        "rebind"
       ],
       "multiple": true,
       "name": "Save",
@@ -3292,6 +3429,7 @@ bounds are null. Positional arguments have no long flag.
 | `--dry-run` | `{"defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
 | `--no-launch` | `{"defaults": ["false"], "name": "no_launch", "values": ["true", "false"]}` |
 | `--session-id` | `{"name": "session_id"}` |
+| `--client` | `{"name": "client", "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -3315,7 +3453,8 @@ bounds are null. Positional arguments have no long flag.
         "allow_dirty",
         "dry_run",
         "no_launch",
-        "session_id"
+        "session_id",
+        "client"
       ],
       "multiple": true,
       "name": "Handoff",

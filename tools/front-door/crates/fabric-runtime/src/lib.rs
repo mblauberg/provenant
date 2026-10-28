@@ -1,5 +1,6 @@
 //! Fabric identity, home-host coordination and bounded federation.
 #![forbid(unsafe_code)]
+pub mod chairs;
 pub mod config;
 pub mod coordination;
 pub mod fetch;

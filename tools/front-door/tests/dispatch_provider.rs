@@ -214,7 +214,10 @@ fn opencode_dispatch_observes_v2_wal_session() -> Result {
                     "{lane}"
                 );
             } else {
-                assert_eq!(lane["reason"], "Model unavailable: opencode/misspelt-free");
+                assert_eq!(
+                    lane["reason"],
+                    "provider model unavailable: Model unavailable: opencode/misspelt-free"
+                );
             }
         }
         rig.assert_legacy_unchanged()?;
@@ -386,11 +389,54 @@ fn claude_fixture() -> Result<TestRig> {
 }
 
 fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
+    {
+        let rig = claude_fixture()?;
+        let cleanup = rig.process_cleanup();
+        let mut config = OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?;
+        writeln!(
+            config,
+            "\n[domains.routing.pacing.accounts.pro]\ndeadline={{reset_of='removed'}}"
+        )?;
+        let prompt = rig.root.join("prompt.md");
+        fs::write(&prompt, "Reply OK.")?;
+        let out = rig.command(&[
+            "dispatch",
+            "--operation-id",
+            "stale-profile",
+            "--model",
+            "claude/claude-sonnet-5-5",
+            "--account",
+            "pro",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--wait",
+            "10s",
+            "--json",
+        ])?;
+        assert_eq!(code(&out), 0, "{out:?}");
+        let result: Value = serde_json::from_slice(&out.stdout.bytes)?;
+        let run = result["data"]["run_id"].as_str().ok_or("run")?;
+        let lanes = rig.command(&["lanes", "--id", run, "--json"])?;
+        assert_eq!(code(&lanes), 0, "{lanes:?}");
+        let result: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+        let lane = &result["data"]["lanes"][0];
+        assert_eq!(lane["state"], "rejected", "{lane}");
+        assert!(
+            lane["reason"].as_str().is_some_and(|message| message
+                .contains("pacing.accounts.pro.deadline.reset_of")
+                && message.contains("removed")),
+            "{lane}"
+        );
+        cleanup.disarm();
+    }
     for (model, writer, suppress) in [
         ("claude/claude-opus-5-5", true, false),
         ("claude/claude-opus-5-5", true, true),
         ("claude/claude-opus-5-5", false, false),
         ("claude/claude-sonnet-5-5", true, false),
+        ("claude/claude-sonnet-5-6", false, false),
     ] {
         let rig = claude_fixture()?;
         let cleanup = rig.process_cleanup();
@@ -447,6 +493,7 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
             String::from_utf8_lossy(&out.stderr.bytes)
         );
         let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+        assert!(!stderr.contains("not in the catalogue"), "{stderr}");
         let reply: Value = serde_json::from_slice(&out.stdout.bytes)?;
         assert_eq!(reply["status"], "ok", "{reply}");
         if !writer || suppress || model.contains("sonnet") {
@@ -475,6 +522,9 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
 
 fn claude_dispatch_refreshes_registered_account() -> Result {
     let rig = claude_fixture()?;
+    // Open-network Claude dispatch must not require a Rust installation.
+    assert!(!rig.home.join(".cargo").exists());
+    assert!(!rig.home.join(".rustup").exists());
     let cleanup = rig.process_cleanup();
     let account = rig.home.join(".claude-pro");
     let manifest = rig.root.join("manifest.json");
@@ -850,6 +900,33 @@ fn graph_settlement_advances_writer_and_account_routed_review() -> Result {
     Ok(())
 }
 
+fn codex_capacity_settles_without_quota_refusal() -> Result {
+    let message = "Selected model is at capacity. Please try a different model.";
+    let stdout = format!(
+        "{{\"type\":\"thread.started\",\"thread_id\":\"01234567-89ab-cdef-0123-456789abcdef\"}}\n{{\"type\":\"turn.failed\",\"error\":{{\"message\":\"{message}\",\"codex_error_info\":\"server_overloaded\"}}}}\n"
+    );
+    let (rig, terminal) = persisted_attempt(
+        "codex",
+        "codex/gpt-6.1-sol",
+        ("work", "codex-fixture"),
+        stdout.as_bytes(),
+        b"",
+        1,
+    )?;
+    assert!(matches!(
+        terminal.state,
+        provenant_run::AttemptState::Terminal {
+            outcome: provenant_run::Outcome::ModelUnavailable,
+            ..
+        }
+    ));
+    assert!(
+        matches!(&terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason == &format!("provider capacity: {message}"))
+    );
+    assert!(!rig.state.join("quota/codex-fixture/codex.json").exists());
+    Ok(())
+}
+
 /// Finish one attempt on `stdout` as provider output and return the quota
 /// record its refusal persisted for the applied account.
 fn persisted_refusal(
@@ -941,11 +1018,14 @@ fn persisted_attempt(
         run_id,
         operation_id: OperationId::parse(&format!("{provider}-cooldown"))?,
         request: CanonicalRequest {
+            chair: None,
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                build_heavy: false,
                 title: None,
                 base: None,
+                head: None,
                 base_ref: None,
                 profile: HarnessProfile::default(),
                 task_id,
@@ -1664,6 +1744,7 @@ fn main() -> ExitCode {
                 "agy_individual_quota_cools_model_until_reset",
                 "agy_denied_command_reaches_result_and_terminal_reason",
                 "agy_denial_result_reaches_terminal_reason",
+                "codex_capacity_settles_without_quota_refusal",
             ],
             |name| {
                 let result = match name {
@@ -1703,6 +1784,9 @@ fn main() -> ExitCode {
                     }
                     "agy_denial_result_reaches_terminal_reason" => {
                         agy_denial_result_reaches_terminal_reason()
+                    }
+                    "codex_capacity_settles_without_quota_refusal" => {
+                        codex_capacity_settles_without_quota_refusal()
                     }
                     _ => opencode_free_pool_cools_second_model(),
                 };

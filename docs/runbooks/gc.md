@@ -15,6 +15,13 @@ Provider-state retention covers indexed terminal attempts in the resolved
 host run store and its child stores. It does not depend on the selected
 project's cache idle threshold or free-space floor.
 
+Full GC also prunes chair log replay receipts beyond the replay horizon and
+removes payloads exceeding the age, count or byte limits across all project
+sessions, including abandoned sessions. The JSON report's
+`chair_logs.expired` counts removed or eligible entries and `chair_logs.errors` names
+failures. A dry run counts eligible entries without changing them. Pressure
+collection does not scan chair logs.
+
 Set the resume window in `<state>/config.toml`:
 
 ```toml

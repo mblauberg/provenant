@@ -3,6 +3,10 @@ client_label = "agent"
 ssh_executable = "" # empty selects shared system SSH discovery
 home_hosts = {}
 peers = {}
+[lanes.priority]
+writer = 10
+read-only = 5
+build-heavy = 15
 [limits]
 body_bytes = 65536
 input_frame_bytes = 1048576

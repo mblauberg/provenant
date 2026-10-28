@@ -1,4 +1,4 @@
-use crate::{Categories, PriceError, PriceIdentity, PriceTable};
+use crate::{BillingKind, Categories, PriceError, PriceIdentity, PriceTable};
 use provenant_core::{AttemptId, ProjectId, TaskId, WallTime};
 use provenant_records::{AttemptFact, AttemptOutcome, RouteFact, Usage};
 use serde::Serialize;
@@ -85,7 +85,10 @@ pub fn quota_usage(
             account_label: None,
         });
         let key = (route.provider, route.account_label, Some(fact.project_id));
-        rows.entry(key).or_default().0.record(&fact, 0, false)?;
+        rows.entry(key)
+            .or_default()
+            .0
+            .record(&fact, 0, false, false)?;
         if rows.len() as u64 > MAX_GROUPS {
             return Err(TelemetryError::TooLarge("10,000 groups"));
         }
@@ -124,7 +127,7 @@ pub struct Money {
     pub usd: String,
 }
 impl Money {
-    fn from_numerator(numerator: u128) -> Result<Self, TelemetryError> {
+    pub(crate) fn from_numerator(numerator: u128) -> Result<Self, TelemetryError> {
         // Quotient/remainder avoids overflowing the numerator when rounding.
         let rounded = (numerator / 1_000_000)
             .checked_add(u128::from(numerator % 1_000_000 >= 500_000))
@@ -142,12 +145,15 @@ impl Money {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct CostTotal {
+    pub cost_basis: &'static str,
     /// API-equivalent estimate, not a bill. Absent when any cost is unknown.
     pub complete: Option<Money>,
     /// Absent when no attempt is priced and no partial cost is known.
     pub known_lower_bound: Option<Money>,
     pub priced_attempts: u64,
     pub missing_attempts: u64,
+    /// Attempts marked subscription by the model price table, not account billing.
+    pub subscription_attempts: u64,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Totals {
@@ -209,6 +215,7 @@ struct Accumulator {
     usage: Categories<TokenTotal>,
     numerator: u128,
     missing_cost: u64,
+    subscription_attempts: u64,
     outcomes: BTreeMap<AttemptOutcome, u64>,
 }
 fn add(value: &mut u64, increment: u64) -> Result<(), TelemetryError> {
@@ -232,6 +239,7 @@ impl Accumulator {
         fact: &AttemptFact,
         numerator: u128,
         missing: bool,
+        subscription: bool,
     ) -> Result<(), TelemetryError> {
         add(&mut self.attempts, 1)?;
         for (total, count) in self.usage.values_mut().into_iter().zip(counts(&fact.usage)) {
@@ -245,6 +253,7 @@ impl Accumulator {
             .checked_add(numerator)
             .ok_or(TelemetryError::Overflow)?;
         add(&mut self.missing_cost, u64::from(missing))?;
+        add(&mut self.subscription_attempts, u64::from(subscription))?;
         add(self.outcomes.entry(fact.terminal_state).or_default(), 1)
     }
     fn finish(self) -> Result<Totals, TelemetryError> {
@@ -253,6 +262,7 @@ impl Accumulator {
             attempts: self.attempts,
             usage: self.usage,
             cost: CostTotal {
+                cost_basis: "api_equivalent_estimate",
                 complete: (self.missing_cost == 0).then(|| known_lower_bound.clone()),
                 known_lower_bound: (self.attempts == 0
                     || self.missing_cost < self.attempts
@@ -260,6 +270,7 @@ impl Accumulator {
                     .then_some(known_lower_bound),
                 priced_attempts: self.attempts - self.missing_cost,
                 missing_attempts: self.missing_cost,
+                subscription_attempts: self.subscription_attempts,
             },
             outcomes: self.outcomes,
         })
@@ -362,13 +373,13 @@ pub fn stats(
         });
         // Unknown routes and models have no rates. A validated table only holds
         // all-zero rates for verified-free entries.
-        let rates = key
+        let price = key
             .provider
             .as_deref()
             .zip(key.model.as_deref())
-            .and_then(|(p, m)| prices.get(p, m))
-            .cloned()
-            .unwrap_or_default();
+            .and_then(|(p, m)| prices.get(p, m));
+        let subscription = price.is_some_and(|(_, billing)| *billing == BillingKind::Subscription);
+        let rates = price.map(|(rates, _)| rates.clone()).unwrap_or_default();
         let verified_free = rates.values() == [Some(0); 4];
         let counts = counts(&fact.usage);
         let mut numerator = 0u128;
@@ -405,9 +416,12 @@ pub fn stats(
             &mut coverage.missing_account,
             u64::from(key.account_label.is_none()),
         )?;
-        budget
-            .group(&mut routes, key.clone(), bytes)?
-            .record(&fact, numerator, missing_cost)?;
+        budget.group(&mut routes, key.clone(), bytes)?.record(
+            &fact,
+            numerator,
+            missing_cost,
+            subscription,
+        )?;
         if window.detail {
             let day = fact
                 .finished_at
@@ -416,9 +430,12 @@ pub fn stats(
                 .date()
                 .to_string();
             let bytes = bytes + day.len();
-            budget
-                .group(&mut daily, (day, key), bytes)?
-                .record(&fact, numerator, missing_cost)?;
+            budget.group(&mut daily, (day, key), bytes)?.record(
+                &fact,
+                numerator,
+                missing_cost,
+                subscription,
+            )?;
         }
         let current = latest
             .entry((fact.project_id, fact.task_id))
@@ -426,7 +443,7 @@ pub fn stats(
         if fact.attempt_number > current.0 {
             *current = (fact.attempt_number, fact.terminal_state);
         }
-        total.record(&fact, numerator, missing_cost)?;
+        total.record(&fact, numerator, missing_cost, subscription)?;
     }
     coverage.selected_attempts = total.attempts;
     let mut latest_task_outcomes = BTreeMap::new();

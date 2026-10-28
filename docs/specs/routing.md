@@ -220,11 +220,13 @@ Unknown or stale quota never causes a refusal. Refusals are model- and
 account-scoped unless wire evidence proves a wider pool, and independent
 pools never exhaust each other. A newer comparable observation or the reset
 clears only that refusal. Only a quota-limited outcome cools an account;
-rate limits are short per-model waits and auth failures never switch
-accounts.
+auth failures never switch accounts. Provider capacity errors settle as
+`model_unavailable` with the provider's reason visible in lanes. They do not
+currently record a routing cooldown.
 - Why: one probe outage or model limit must not take a provider offline.
 - Test: `crates/quota/src/admission.rs::unknown_and_stale_do_not_manufacture_exhaustion`;
-  `::independent_pool_reset_and_refusal_scope`
+  `::independent_pool_reset_and_refusal_scope`;
+  `tests/dispatch_provider.rs::codex_capacity_settles_without_quota_refusal`
 - Owner: `crates/quota/src/admission.rs`
 
 ### Revisioned, bounded refresh
@@ -249,6 +251,8 @@ generated MCP entry; the user's hook and MCP configuration is excluded.
 Each lane's provider environment and MCP entry pin
 `PROVENANT_LANE_DEPTH`, `PROVENANT_PARENT_ATTEMPT_ID`,
 `PROVENANT_RUN_STATE_DIR` and `PROVENANT_AGENT_LABEL=lane-<AttemptId>`.
+Review lanes dispatched with a head also receive `PROVENANT_LANE_HEAD` and
+`PROVENANT_LANE_BASE`, containing the resolved commit SHAs.
 In that environment Fabric refuses coordination mutations
 (`lane_coordination_refused`) and local resume (`continuation_unsupported`);
 reads, and submit, cancel and output on the child store, remain.

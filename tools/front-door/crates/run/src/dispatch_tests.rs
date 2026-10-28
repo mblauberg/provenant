@@ -1162,6 +1162,65 @@ impl Providers for Ready {
     }
 }
 
+struct FirstPriorityFailure(TaskId);
+impl Providers for FirstPriorityFailure {
+    fn priority(&self, task: &TaskRequest) -> std::result::Result<u8, String> {
+        if task.task_id == self.0 {
+            Err("priority configuration unavailable".into())
+        } else {
+            Ok(5)
+        }
+    }
+    fn prepare(
+        &self,
+        task: &TaskRequest,
+        prompt: &str,
+        paths: &LaunchPaths,
+        resume: Option<&AttemptRecord>,
+    ) -> std::result::Result<PreparedLaunch, String> {
+        Ready.prepare(task, prompt, paths, resume)
+    }
+    fn decode(
+        &self,
+        route: &RouteRecord,
+        output: &[u8],
+        exit: &ExitObservation,
+        path: &std::path::Path,
+    ) -> std::result::Result<Decoded, String> {
+        Ready.decode(route, output, exit, path)
+    }
+}
+
+#[test]
+fn priority_selection_failure_does_not_stall_siblings() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let prepared = two_tasks(2);
+    store.create(&prepared, &call)?;
+    let first = prepared.attempts[0].attempt_id;
+    let sibling = prepared.attempts[1].attempt_id;
+    let held = RefCell::new(Vec::new());
+    let holder = |record: &AttemptRecord, _| {
+        held.borrow_mut().push(record.attempt_id);
+        Err(RunError::Validation("fixture holder"))
+    };
+    let started = store.start(
+        prepared.run_id,
+        &FirstPriorityFailure(prepared.attempts[0].task_id),
+        &holder,
+        &call,
+    )?;
+    assert!(matches!(started.as_slice(), [
+        Started::Refused { attempt, kind: RefusalKind::Preparation, reason },
+        Started::Refused { attempt: second, .. },
+    ] if *attempt == first && reason.contains("priority configuration unavailable") && *second == sibling));
+    assert_eq!(*held.borrow(), [sibling]);
+    assert_eq!(terminal(&store, first, &call)?, Outcome::Rejected);
+    Ok(())
+}
+
 /// Carries a real permission plan through launch, stopping before compilation.
 struct Confined {
     writer: bool,
@@ -4009,12 +4068,106 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
 }
 
 #[test]
+fn rejected_resume_remains_visible_and_addressable() -> TestResult {
+    struct RouteMismatch;
+    impl Providers for RouteMismatch {
+        fn prepare(
+            &self,
+            _: &TaskRequest,
+            _: &str,
+            _: &LaunchPaths,
+            prior: Option<&AttemptRecord>,
+        ) -> std::result::Result<PreparedLaunch, String> {
+            assert!(prior.is_some());
+            Err("route differs from the prior attempt's provider, model or account".into())
+        }
+        fn decode(
+            &self,
+            _: &RouteRecord,
+            _: &[u8],
+            _: &ExitObservation,
+            _: &std::path::Path,
+        ) -> std::result::Result<Decoded, String> {
+            unreachable!()
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let initial = input();
+    store.create(&initial, &call)?;
+    let refusal = Fake {
+        refuse: true,
+        ..Fake::default()
+    };
+    store.start(initial.run_id, &refusal, &|_, _| unreachable!(), &call)?;
+    let resumed = Resume {
+        prior: initial.attempts[0].attempt_id,
+        expected_generation: 0,
+        operation_id: "rejected-resume".parse()?,
+        run_id: RunId::from_bytes([20; 16]),
+        attempt_id: AttemptId::from_bytes([21; 16]),
+        prompt: "answer".into(),
+        created_at: WallTime::from_micros(100)?,
+    };
+    store.resume(&resumed, &call)?;
+    store.start(
+        resumed.run_id,
+        &RouteMismatch,
+        &|_, _| unreachable!(),
+        &call,
+    )?;
+    let reader =
+        RunStore::open_read_only(&context(temp.path())?, &call)?.ok_or("run store missing")?;
+    let lanes = reader.lanes(
+        &LaneQuery {
+            targets: vec![],
+            all: true,
+            limit: 10,
+            after: 0,
+            newest_first: false,
+            owner: None,
+            unseen_after: None,
+        },
+        &call,
+    )?;
+    let rejected = lanes
+        .lanes
+        .iter()
+        .find(|lane| lane.attempt_id == resumed.attempt_id)
+        .ok_or("rejected resume missing from lanes")?;
+    assert!(matches!(
+        rejected.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Rejected,
+            ..
+        }
+    ));
+    assert!(
+        matches!(&rejected.state, AttemptState::Terminal { reason: Some(reason), .. } if reason.contains("route differs"))
+    );
+    let output = Service::new(&reader).output(
+        resumed.attempt_id,
+        ArtifactPart::Result,
+        ByteRange::default(),
+        &call,
+    )?;
+    assert!(output.bytes.is_empty());
+    Ok(())
+}
+
+#[test]
 fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut run = input();
+    run.request.chair = Some(ChairBinding {
+        host: provenant_core::HostId::from_bytes([30; 16]),
+        actor: provenant_core::ActorId::from_bytes([31; 16]),
+    });
     let outer_parent = AttemptId::from_bytes([19; 16]);
     run.request.lane_depth = Some(1);
     run.request.parent_attempt = Some(outer_parent);
@@ -4046,6 +4199,10 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
 
     let continued = store.resume(&resume("r1", 0, 20)?, &call)?;
     assert_eq!(continued.parent, Some(prior));
+    assert_eq!(
+        store.request(continued.run_id, &call)?.chair,
+        run.request.chair
+    );
     assert_eq!(
         store.request(continued.run_id, &call)?.tasks[0]
             .account
@@ -4151,7 +4308,11 @@ fn fresh_resume_preserves_lineage_and_authority_without_provider_state() -> Test
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let original = input();
+    let mut original = input();
+    original.request.chair = Some(ChairBinding {
+        host: provenant_core::HostId::from_bytes([32; 16]),
+        actor: provenant_core::ActorId::from_bytes([33; 16]),
+    });
     store.create(&original, &call)?;
     let fake = Fake {
         refuse: true,
@@ -4175,6 +4336,7 @@ fn fresh_resume_preserves_lineage_and_authority_without_provider_state() -> Test
     );
     let request = store.request(run.run_id, &call)?;
     assert_eq!(request.parent, Some(prior));
+    assert_eq!(request.chair, original.request.chair);
     assert_eq!(
         request.tasks[0].authority_digest,
         original.request.tasks[0].authority_digest

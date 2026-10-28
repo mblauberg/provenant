@@ -1306,6 +1306,9 @@
                       }
                     ]
                   },
+                  "build_heavy": {
+                    "type": "boolean"
+                  },
                   "deliver": {
                     "anyOf": [
                       {
@@ -1338,6 +1341,17 @@
                     "anyOf": [
                       {
                         "$ref": "#/$defs/Id"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "head": {
+                    "anyOf": [
+                      {
+                        "maxLength": 64,
+                        "type": "string"
                       },
                       {
                         "type": "null"

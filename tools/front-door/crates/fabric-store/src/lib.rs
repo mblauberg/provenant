@@ -1,6 +1,7 @@
 //! Project-scoped mail, tasks and events. One concrete connection per worker.
 #![forbid(unsafe_code)]
 
+mod chairs;
 mod claims;
 mod db;
 mod events;
@@ -11,6 +12,7 @@ mod messages;
 mod operations;
 mod tasks;
 
+pub use chairs::*;
 pub use claims::*;
 pub use db::{Request, RetryWait, Store, ThreadWait};
 pub use events::*;

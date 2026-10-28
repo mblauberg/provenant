@@ -56,6 +56,11 @@ receipt.
   in a named artifact. Herdr observes and sends steering only.
 - Prefer per-dispatch flags. Editing global provider configuration requires
   explicit authority.
+- Fabric lanes must keep the supplied `CARGO_TARGET_DIR`,
+  `CARGO_BUILD_BUILD_DIR` and `CARGO_HOME`. For lint-only runs, writer lanes
+  may set both build directories to `PROVENANT_LANE_CARGO_LINT_TARGET`.
+  Native unconfined agents should use one shared per-host Cargo target outside
+  worktrees, separate from Fabric lane caches.
 
 ## Adaptive loop
 

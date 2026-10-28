@@ -280,6 +280,16 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
             &reason,
             &call,
             |id, validated| {
+                let stored = session.store.request(id, &call)?;
+                with_chair_index(&roots, &call, |index, index_call| {
+                    index.inherit(
+                        context.project_id,
+                        (context.run_id, sealed.request_digest),
+                        id,
+                        &stored,
+                        index_call,
+                    )
+                })?;
                 launch_on_host(
                     &session,
                     id,
@@ -794,11 +804,14 @@ mod tests {
             operation_id: OperationId::parse("deferred-child")?,
             created_at: clock.wall_now()?,
             request: run::CanonicalRequest {
+                chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    build_heavy: false,
                     title: None,
                     base: None,
+                    head: None,
                     base_ref: None,
                     task_id,
                     prompt_digest: CanonicalV1::file_digest(b"child"),

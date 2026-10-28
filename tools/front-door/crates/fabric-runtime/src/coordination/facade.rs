@@ -20,6 +20,8 @@ pub struct AttemptTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubmittedTask {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub build_heavy: bool,
     #[serde(default)]
     pub account: Option<String>,
     #[serde(default)]
@@ -31,6 +33,8 @@ pub struct SubmittedTask {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
     pub route: provenant_records::run::RequestedRoute,
     pub timeout_seconds: u64,
     #[serde(default)]

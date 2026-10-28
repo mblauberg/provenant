@@ -3,7 +3,9 @@ use crate::launch::{
     uuid_v4,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
-use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
+use provenant_confinement::permissions::{
+    NetworkAccess, NetworkEndpoint, ProviderProfile, ProviderProfileSpec,
+};
 use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
 use provenant_os::clock::SystemClock;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
@@ -560,16 +562,22 @@ fn prepare(
     });
     argv.push(session_id.clone().into());
     let shell = access == Access::WorktreeWrite;
+    let web = plan.network == NetworkAccess::Open;
     let (mode, tools) = match access {
         Access::ReadOnly => ("dontAsk", "Read,Grep,Glob,Bash"),
         Access::WorktreeWrite => ("default", "Read,Grep,Glob,Edit,Write,Bash"),
+    };
+    let tools = if web {
+        format!("{tools},WebFetch,WebSearch")
+    } else {
+        tools.to_owned()
     };
     argv.extend(
         [
             "--permission-mode",
             mode,
             "--tools",
-            tools,
+            &tools,
             "--model",
             input.route.model.as_str(),
         ]
@@ -607,9 +615,15 @@ fn prepare(
     } else {
         "Bash,mcp__fabric__*"
     };
-    let mut setup = input.provenant.claude(scratch, &mut argv, allowed_tools)?;
+    let allowed_tools = if web {
+        format!("{allowed_tools},WebFetch,WebSearch")
+    } else {
+        allowed_tools.to_owned()
+    };
+    let mut setup = input.provenant.claude(scratch, &mut argv, &allowed_tools)?;
 
-    let path = if shell {
+    let toolchain = shell || web;
+    let path = if toolchain {
         format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display())
     } else {
         "/usr/bin:/bin".into()
@@ -651,15 +665,27 @@ fn prepare(
     ]);
     // The git wrapper script; the scrub drops GIT_CONFIG_GLOBAL from Bash.
     tool_exec_roots.push(subtree(scratch.join("bin")));
-    if shell {
-        crate::launch::rust_tools(
-            input,
-            access,
-            &mut runtime_reads,
-            &mut tool_exec_roots,
-            &mut env,
-            &mut setup,
-        );
+    // Use the same read-only toolchain, public TLS configuration and CLT
+    // selection as Codex. Access still controls private caches and writes.
+    if toolchain {
+        // Network access must not make Rust an installation prerequisite.
+        // Every subtree grant needs an existing directory at anchoring time.
+        let rust_installed = [".cargo/bin", ".rustup/toolchains"]
+            .iter()
+            .all(|path| input.home.join(path).is_dir());
+        if shell || rust_installed {
+            crate::launch::rust_tools(
+                input,
+                access,
+                &mut runtime_reads,
+                &mut tool_exec_roots,
+                &mut env,
+                &mut setup,
+            );
+        } else {
+            crate::launch::system_tools(access, &mut runtime_reads, &mut tool_exec_roots, &mut env);
+            tool_exec_roots.push(subtree(input.cwd));
+        }
         crate::launch::node_tools(
             input.home,
             access,
@@ -746,6 +772,8 @@ enum Event {
         error: Option<String>,
         #[serde(default)]
         is_api_error_message: bool,
+        #[serde(default)]
+        api_error_status: Option<u16>,
     },
     #[serde(rename = "result")]
     Result {
@@ -808,20 +836,33 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             parent_tool_use_id: None,
             error,
             is_api_error_message,
+            api_error_status,
         } if message.role == "assistant" => {
             let mut events = vec![E::Session(session_id)];
             if error.is_none() && !is_api_error_message && message.model != "<synthetic>" {
                 events.push(E::Model(message.model));
             }
             let failed = error.is_some() || is_api_error_message;
-            if let Some(error) = error {
-                events.push(if error == "authentication_failed" {
+            if failed {
+                let overload = api_error_status == Some(529)
+                    || matches!(error.as_deref(), Some("overloaded" | "overloaded_error"));
+                events.push(if overload {
+                    let message = message
+                        .content
+                        .iter()
+                        .find_map(|content| match content {
+                            Content::Text { text } if !text.is_empty() => Some(text.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| "provider overloaded".into());
+                    E::ModelOverloaded { message }
+                } else if error.as_deref() == Some("authentication_failed")
+                    || api_error_status == Some(401)
+                {
                     E::AuthRequired
                 } else {
                     E::Error
                 });
-            } else if is_api_error_message {
-                events.push(E::Error);
             }
             // The result event repeats the final answer, so assistant text is
             // kept only as error evidence; otherwise every answer lands twice.
@@ -851,10 +892,18 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                     cache_write: usage.cache_creation_input_tokens,
                 });
             }
-            if api_error_status == Some(401) {
-                events.push(E::AuthRequired);
-            } else if is_error || subtype != "success" {
-                events.push(E::Error);
+            if is_error || subtype != "success" {
+                if api_error_status == Some(401) {
+                    events.push(E::AuthRequired);
+                } else if api_error_status == Some(529) {
+                    events.push(E::ModelOverloaded {
+                        message: result
+                            .filter(|message| !message.is_empty())
+                            .unwrap_or_else(|| "provider overloaded (HTTP 529)".into()),
+                    });
+                } else {
+                    events.push(E::Error);
+                }
             } else {
                 if let Some(result) = result {
                     events.push(E::Text(result));
@@ -865,6 +914,49 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         }
         _ => vec![],
     })
+}
+
+#[cfg(test)]
+mod overload_tests {
+    use super::*;
+
+    #[test]
+    fn result_529_is_typed_overload_with_provider_reason() {
+        let events = decode(br#"{"type":"result","session_id":"s","subtype":"error_during_execution","is_error":true,"api_error_status":529,"result":"Overloaded"}"#).unwrap();
+        assert!(events.contains(&E::ModelOverloaded {
+            message: "Overloaded".into()
+        }));
+        let events = decode(br#"{"type":"result","session_id":"s","subtype":"error_during_execution","is_error":true,"api_error_status":500,"result":"Overloaded"}"#).unwrap();
+        assert!(events.contains(&E::Error));
+        let events = decode(br#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"api_error_status":529,"result":"ok"}"#).unwrap();
+        assert!(events.contains(&E::Terminal));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, E::ModelOverloaded { .. }))
+        );
+    }
+
+    #[test]
+    fn assistant_typed_overload_keeps_reason_and_session() {
+        for error in ["overloaded", "overloaded_error"] {
+            let raw = format!(
+                r#"{{"type":"assistant","session_id":"s","error":"{error}","is_api_error_message":true,"message":{{"role":"assistant","model":"<synthetic>","content":[{{"type":"text","text":"service unavailable"}}]}}}}"#
+            );
+            let events = decode(raw.as_bytes()).unwrap();
+            assert!(events.contains(&E::Session("s".into())));
+            assert!(events.contains(&E::ModelOverloaded {
+                message: "service unavailable".into()
+            }));
+        }
+        let raw = br#"{"type":"assistant","session_id":"s","is_api_error_message":true,"api_error_status":529,"message":{"role":"assistant","model":"<synthetic>","content":[]}}"#;
+        assert!(
+            decode(raw)
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, E::ModelOverloaded { .. }))
+        );
+    }
 }
 
 /// Metadata only. The caller must never read a token to establish presence.

@@ -24,6 +24,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/006-federation.sql"),
     include_str!("migrations/007-remove-legacy-import.sql"),
     include_str!("migrations/008-human-inbox.sql"),
+    include_str!("migrations/009-run-chairs.sql"),
 ];
 // Index of 007, which may drop only the always-null legacy members and the
 // traces of an import that brought nothing over. Anything the removed import
@@ -138,12 +139,27 @@ impl Request<'_> {
 
 pub struct Store {
     pub(crate) db: Connection,
-    pub(crate) locks: Directory,
+    pub(crate) locks: Option<Directory>,
     // SQLite supports movable connections, but Fabric requires worker ownership.
     _owner: PhantomData<Rc<()>>,
 }
 impl Store {
     pub fn open(root: &StateRoot, request: &Request<'_>) -> Result<Self> {
+        Self::open_database(root, request, "fabric.sqlite3", Some("locks"))
+    }
+
+    /// Host-only records live outside the exact coordination DB grants lanes
+    /// receive. Reuse all directory, companion and migration checks.
+    pub(crate) fn open_host(root: &StateRoot, request: &Request<'_>) -> Result<Self> {
+        Self::open_database(root, request, "host.sqlite3", None)
+    }
+
+    fn open_database(
+        root: &StateRoot,
+        request: &Request<'_>,
+        database: &str,
+        locks_name: Option<&str>,
+    ) -> Result<Self> {
         request.check()?;
         let mut directory = Directory::root(true)?;
         for part in root.as_path().components() {
@@ -183,8 +199,8 @@ impl Store {
         )?;
         let path = root.as_path().join("fabric");
         private(&fabric, &path)?;
-        let db_path = path.join("fabric.sqlite3");
-        match fabric.create_new(OsStr::new("fabric.sqlite3")) {
+        let db_path = path.join(database);
+        match fabric.create_new(OsStr::new(database)) {
             Ok(file) => {
                 file.sync()?;
                 fabric.sync()?;
@@ -192,28 +208,33 @@ impl Store {
             Err(error) if error.is_exists() => {}
             Err(error) => return Err(error.into()),
         }
-        companions(&fabric, &path, request)?;
+        companions(&fabric, &path, database, request)?;
         let db = provenant_sqlite::open_connection(&db_path, false)?;
         // Refuse future versions before journal-mode changes or schema writes.
         request.retry(|| schema_version(&db))?;
         request.retry(|| enable_wal(&db))?;
-        match fabric.mkdir(OsStr::new("locks"), 0o700) {
-            Ok(()) => fabric.sync()?,
-            Err(error) if error.is_exists() => {}
-            Err(error) => return Err(error.into()),
-        }
-        let locks = checked_directory(
-            &fabric,
-            OsStr::new("locks"),
-            Some(fabric.metadata()?.device),
-        )?;
-        private(&locks, &path.join("locks"))?;
+        let locks = if let Some(locks_name) = locks_name {
+            match fabric.mkdir(OsStr::new(locks_name), 0o700) {
+                Ok(()) => fabric.sync()?,
+                Err(error) if error.is_exists() => {}
+                Err(error) => return Err(error.into()),
+            }
+            let locks = checked_directory(
+                &fabric,
+                OsStr::new(locks_name),
+                Some(fabric.metadata()?.device),
+            )?;
+            private(&locks, &path.join(locks_name))?;
+            Some(locks)
+        } else {
+            None
+        };
         let store = Self {
             db,
             locks,
             _owner: PhantomData,
         };
-        loop {
+        while request.retry(|| schema_version(&store.db))? < MIGRATIONS.len() {
             let done = store.write(request, |tx| {
                 let version = schema_version(tx)?;
                 let Some(sql) = MIGRATIONS.get(version) else {
@@ -230,7 +251,7 @@ impl Store {
                 break;
             }
         }
-        companions(&fabric, &path, request)?;
+        companions(&fabric, &path, database, request)?;
         Ok(store)
     }
     pub(crate) fn write<T>(
@@ -258,14 +279,14 @@ fn private(directory: &Directory, path: &std::path::Path) -> Result<()> {
     }
     Ok(())
 }
-fn companions(directory: &Directory, path: &std::path::Path, request: &Request<'_>) -> Result<()> {
-    let names = [
-        "fabric.sqlite3",
-        "fabric.sqlite3-wal",
-        "fabric.sqlite3-shm",
-        "fabric.sqlite3-journal",
-    ]
-    .map(OsString::from);
+fn companions(
+    directory: &Directory,
+    path: &std::path::Path,
+    database: &str,
+    request: &Request<'_>,
+) -> Result<()> {
+    let names = ["", "-wal", "-shm", "-journal"]
+        .map(|suffix| OsString::from(format!("{database}{suffix}")));
     provenant_sqlite::check_companions(
         directory,
         &names,
@@ -360,10 +381,10 @@ mod tests {
         // Entering WAL can leave a valid rollback journal for recovery.
         directory.create_new(OsStr::new("fabric.sqlite3-journal"))?;
         std::fs::write(&path, b"rollback journal data")?;
-        companions(&directory, temp.path(), &request)?;
+        companions(&directory, temp.path(), "fabric.sqlite3", &request)?;
         directory.unlink(OsStr::new("fabric.sqlite3-journal"))?;
         std::os::unix::fs::symlink(temp.path().join("missing"), &path)?;
-        let error = companions(&directory, temp.path(), &request).unwrap_err();
+        let error = companions(&directory, temp.path(), "fabric.sqlite3", &request).unwrap_err();
         assert!(matches!(&error, Error::UnsafePath(p) if p == &path));
         assert!(error.to_string().contains("fabric.sqlite3-journal"));
         Ok(())

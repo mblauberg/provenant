@@ -216,6 +216,13 @@ default output shows aggregate counts and exceptions; `--json` retains each path
 `retention.logs_days = 30` (range 1 to 3650) expires stdout and stderr
 captures larger than 64 KiB, and intermediate event log rows, from runs whose
 attempts are all terminal.
+Chair log retention is per session: `[retention] chair_log_days = 30` (1 to
+3650), `chair_log_entries = 10000` (1 to 100000), and `chair_log_bytes =
+16777216` (65536 to 1073741824). Appends apply all three limits; listing
+shows the retained view, and full `gc` removes excess payloads. The optional
+`chair_log_replay_days` (7 to 3650) controls receipt retention and defaults to
+the larger of `chair_log_days` and 7 days. See the
+[chair log](session-checkpoints.md#chair-log) for replay and pruning behaviour.
 The last 64 KiB survives as `stdout.log.tail` or `stderr.log.tail`;
 results, exit evidence, recorded digests and small captures survive. The same
 rule applies inside child stores, whose databases and retained evidence stay.
@@ -360,8 +367,10 @@ or names a credential directory such as `~/.ssh`; a launch is refused if an
 entry overlaps the state directory's protected parts or Git metadata.
 `/usr/bin` is already executable in lanes, so `/usr/bin/lockf` works.
 
-A shared Cargo target across worktrees is unsupported because it can run another
-checkout's stale test binaries; see [writer lanes](providers.md#writer-lanes).
+Fabric supplies private Cargo paths to each lane; see
+[writer lanes](providers.md#writer-lanes). Native unconfined agents may share a
+per-host target outside worktrees, taking care to run the intended checkout's
+test binaries.
 
 ## Routing pools
 

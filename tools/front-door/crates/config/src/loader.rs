@@ -389,6 +389,10 @@ fn inspect<T: DeserializeOwned + Serialize>(
     origins.insert("retention.provider_state_days".into(), compiled.clone());
     origins.insert("retention.logs_days".into(), compiled.clone());
     origins.insert("retention.session_revisions".into(), compiled.clone());
+    origins.insert("retention.chair_log_days".into(), compiled.clone());
+    origins.insert("retention.chair_log_replay_days".into(), compiled.clone());
+    origins.insert("retention.chair_log_entries".into(), compiled.clone());
+    origins.insert("retention.chair_log_bytes".into(), compiled.clone());
     for provider in providers.keys() {
         for field in [
             "update",

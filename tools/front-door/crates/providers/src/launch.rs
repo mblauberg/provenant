@@ -146,7 +146,9 @@ pub(crate) fn admit(
 }
 
 /// Minimal environment: the user's identity, a fixed search path and TMPDIR
-/// under the attempt's private tmp directory. Callers append provider keys.
+/// under the attempt's private tmp directory. Repository-specific Git object
+/// routing belongs in the shell Git wrapper, never this lane-wide environment.
+/// Callers append provider keys.
 pub(crate) fn base_env(
     input: &PrepareInput<'_>,
     scratch: &Path,
@@ -166,10 +168,227 @@ pub(crate) fn base_env(
     env
 }
 
+/// Git's temporary object directories must live in attempt-owned scratch.
+/// Scope the override to shell Git operating on the bound common directory.
+/// The host verifies the alternate target at preparation only: the lane can
+/// rewrite alternates and shadow objects, so its Git output is not host evidence.
+pub(crate) fn read_only_git_objects(
+    input: &PrepareInput<'_>,
+    spec: &mut LaunchSpec,
+) -> Result<(), ProviderError> {
+    let Some(grants) = input.confined.permissions().read_only.as_ref() else {
+        return Ok(());
+    };
+    let common = grants
+        .git_read_paths()
+        .next()
+        .ok_or(ProviderError::InvalidPath)?;
+    let objects = input
+        .confined
+        .permissions()
+        .scratch
+        .path
+        .join("git-objects");
+    let info = objects.join("info");
+    let quoted = quote_alternate(&common.join("objects"));
+    spec.setup.extend([
+        SetupStep::CreateDir(info.clone()),
+        SetupStep::WriteFile {
+            path: info.join("alternates"),
+            bytes: quoted.into_bytes(),
+        },
+    ]);
+    let bin = input.confined.permissions().scratch.path.join("bin");
+    let wrapper = bin.join("git");
+    // Preserve Claude's configuration scrub and identity exports before probing
+    // repository discovery. Other adapters previously used the real Git directly.
+    let scrubbed = spec.setup.iter().any(|step| {
+        matches!(step,
+            SetupStep::WriteExecutable { path, .. } if path == &wrapper
+        )
+    });
+    spec.setup.retain(|step| {
+        !matches!(step,
+            SetupStep::WriteExecutable { path, .. } | SetupStep::Symlink { link: path, .. }
+            if path == &wrapper
+        )
+    });
+    let routing = scoped_git_routing(input.provenant.git, common, &objects);
+    let bytes = if scrubbed {
+        input.provenant.git_wrapper(&spec.env, &routing)?
+    } else {
+        [
+            b"#!/bin/sh\n".as_slice(),
+            &routing,
+            b"exec \"$lane_git\" \"$@\"\n",
+        ]
+        .concat()
+    };
+    if !spec.setup.contains(&SetupStep::CreateDir(bin.clone())) {
+        spec.setup.push(SetupStep::CreateDir(bin.clone()));
+    }
+    spec.setup.push(SetupStep::WriteExecutable {
+        path: wrapper.clone(),
+        bytes,
+    });
+    let (_, path) = spec
+        .env
+        .iter_mut()
+        .find(|(key, _)| key == "PATH")
+        .ok_or(ProviderError::InvalidPath)?;
+    if std::env::split_paths(path).next().as_ref() != Some(&bin) {
+        *path =
+            std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(path)))
+                .map_err(|_| ProviderError::InvalidPath)?;
+    }
+    // Like Claude's existing scrub wrapper, this is attempt-owned shell code.
+    spec.profile.spec.tool_exec_roots.push(subtree(bin));
+    spec.profile
+        .spec
+        .process_executables
+        .extend([exact("/bin/sh"), exact(input.provenant.git)]);
+    spec.profile.spec.runtime_reads.extend(
+        crate::dylib::linked_libraries(input.provenant.git)
+            .into_iter()
+            .map(exact),
+    );
+    Ok(())
+}
+
+fn scoped_git_routing(git: &Path, common: &Path, objects: &Path) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for (name, path) in [
+        ("lane_git", git),
+        ("lane_common", common),
+        ("lane_objects", objects),
+    ] {
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.extend_from_slice(b"=");
+        shell_quote_path(&mut bytes, path);
+        bytes.push(b'\n');
+    }
+    bytes.extend_from_slice(br#"unset GIT_OBJECT_DIRECTORY
+lane_git_common() {
+    remaining=$#
+    # Rotate recognised global options to the end, discarding the subcommand
+    # and its arguments. The outer invocation keeps its original argv intact.
+    while [ "$remaining" -gt 0 ]; do
+        option=$1; shift; remaining=$((remaining - 1))
+        case "$option" in
+            -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix)
+                [ "$remaining" -gt 0 ] || return 1
+                value=$1; shift; remaining=$((remaining - 1))
+                set -- "$@" "$option" "$value" ;;
+            --git-dir=*|--work-tree=*|--namespace=*|--config-env=*|--super-prefix=*|--bare|--no-replace-objects|--no-lazy-fetch|--no-optional-locks|--literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--no-advice|-p|--paginate|-P|--no-pager)
+                set -- "$@" "$option" ;;
+            -*) return 1 ;;
+            *)
+                # Shell aliases and external git-* commands may enter another
+                # repository through Git's own exec-path, bypassing this shim.
+                # Only the object-producing builtins need the override.
+                case "$option" in
+                    show|log|diff|merge-tree|hash-object) ;;
+                    *) return 1 ;;
+                esac
+                while [ "$remaining" -gt 0 ]; do
+                    shift; remaining=$((remaining - 1))
+                done
+                break ;;
+        esac
+    done
+    "$lane_git" "$@" rev-parse --path-format=absolute --git-common-dir
+}
+# Preserve even trailing newlines in native paths. rev-parse adds one newline.
+if found=$(lane_git_common "$@" 2>/dev/null && printf '.'); then
+    found=${found%.}
+    if [ "$found" = "$lane_common
+" ]; then
+        GIT_OBJECT_DIRECTORY=$lane_objects
+        export GIT_OBJECT_DIRECTORY
+    fi
+fi
+"#);
+    bytes
+}
+
+/// Shell quoting must preserve native path bytes, including non-UTF-8 roots.
+fn shell_quote_path(bytes: &mut Vec<u8>, path: &Path) {
+    bytes.push(b'\'');
+    for byte in path.as_os_str().as_encoded_bytes() {
+        if *byte == b'\'' {
+            bytes.extend_from_slice(b"'\\''");
+        } else {
+            bytes.push(*byte);
+        }
+    }
+    bytes.push(b'\'');
+}
+
+/// Git accepts C-quoted native paths in info/alternates.
+fn quote_alternate(alternate: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut quoted = String::from("\"");
+    for byte in alternate.as_os_str().as_bytes() {
+        match byte {
+            b'"' | b'\\' => {
+                quoted.push('\\');
+                quoted.push(char::from(*byte));
+            }
+            0x20..=0x7e => quoted.push(char::from(*byte)),
+            _ => quoted.push_str(&format!("\\{byte:03o}")),
+        }
+    }
+    quoted.push_str("\"\n");
+    quoted
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
-mod git_identity_tests {
+mod git_tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn git_reads_quoted_alternate_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo café: space\"\\\n");
+        std::fs::create_dir(&repo).unwrap();
+        let run = |args: &[&str], objects: Option<&Path>| {
+            let mut command = std::process::Command::new("/usr/bin/git");
+            command.current_dir(&repo).args(args);
+            if let Some(objects) = objects {
+                command.env("GIT_OBJECT_DIRECTORY", objects);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-q"], None);
+        run(
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ],
+            None,
+        );
+        let objects = temp.path().join("objects");
+        std::fs::create_dir_all(objects.join("info")).unwrap();
+        std::fs::write(
+            objects.join("info/alternates"),
+            quote_alternate(&repo.join(".git/objects")),
+        )
+        .unwrap();
+        run(&["cat-file", "-e", "HEAD^{commit}"], Some(&objects));
+    }
 
     #[test]
     #[allow(clippy::disallowed_methods)]
@@ -298,6 +517,38 @@ pub(crate) fn rust_tools(
             ("CARGO_CACHE_AUTO_CLEAN_FREQUENCY".into(), "never".into()),
         ]);
     }
+    system_tools(access, runtime_reads, tool_exec_roots, env);
+    // Homebrew resolves bin/git into its versioned keg. Its remote helpers
+    // live beside bin/, independently of whether Node enables Homebrew tools.
+    // Grant only the selected Git's helper directory, and only to writers.
+    if access == Access::WorktreeWrite
+        && let Some(prefix) = input.provenant.git.parent().and_then(Path::parent)
+    {
+        let core = prefix.join("libexec/git-core");
+        if core.is_dir() {
+            runtime_reads.push(subtree(&core));
+            tool_exec_roots.push(subtree(core));
+        }
+    }
+    if access == Access::ReadOnly {
+        setup.push(SetupStep::CreateDir(target));
+    }
+    // Repository scripts (a Cargo rustc wrapper, test runners) run directly.
+    // Children inherit this profile, so exec stays confined; read and write
+    // grants and the protected and credential denials are unchanged.
+    tool_exec_roots.push(subtree(input.cwd));
+}
+
+/// Public TLS files and macOS developer tools, independent of whether Rust
+/// is installed. Keep these grants shared by Codex and Claude.
+// The non-macOS no-op keeps the append-capable macOS signature.
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables, clippy::ptr_arg))]
+pub(crate) fn system_tools(
+    access: Access,
+    runtime_reads: &mut Vec<PathGrant>,
+    tool_exec_roots: &mut Vec<PathGrant>,
+    env: &mut Vec<(OsString, OsString)>,
+) {
     // Cargo's system LibreSSL reads its public default configuration
     // (openssl.cnf) and the TLS trust roots (cert.pem, certs/) to download
     // crates. Read-only; the whole public directory holds no secrets.
@@ -326,25 +577,6 @@ pub(crate) fn rust_tools(
             ]);
         }
     }
-    // Homebrew resolves bin/git into its versioned keg. Its remote helpers
-    // live beside bin/, independently of whether Node enables Homebrew tools.
-    // Grant only the selected Git's helper directory, and only to writers.
-    if access == Access::WorktreeWrite
-        && let Some(prefix) = input.provenant.git.parent().and_then(Path::parent)
-    {
-        let core = prefix.join("libexec/git-core");
-        if core.is_dir() {
-            runtime_reads.push(subtree(&core));
-            tool_exec_roots.push(subtree(core));
-        }
-    }
-    if access == Access::ReadOnly {
-        setup.push(SetupStep::CreateDir(target));
-    }
-    // Repository scripts (a Cargo rustc wrapper, test runners) run directly.
-    // Children inherit this profile, so exec stays confined; read and write
-    // grants and the protected and credential denials are unchanged.
-    tool_exec_roots.push(subtree(input.cwd));
 }
 
 /// Git's default XDG global ignore and attributes files, read-only. Cargo's

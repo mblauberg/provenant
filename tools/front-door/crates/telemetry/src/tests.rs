@@ -471,14 +471,23 @@ fn bundled_toml_uses_exact_rates_and_unknowns_without_aliases() {
     let mut input = fact(1, Some(1_000_000));
     input.resolved_route = Some(RouteFact {
         provider: Some("codex".into()),
-        model: Some("gpt-6.1-sol".into()),
+        model: Some("codex/gpt-6.1-sol".into()),
         effort: None,
         account_label: None,
     });
     let report = stats([input.clone()], &table, Window::default()).unwrap();
     assert_eq!(report.prices.reviewed_at, "2026-10-27");
     assert_eq!(report.totals.cost.complete.unwrap().usd, "2.000000");
-    input.resolved_route.as_mut().unwrap().model = Some("gpt-6.1-sol-alias".into());
+    input.usage.cache_write = None;
+    input.usage.reasoning = None;
+    let report = stats([input.clone()], &table, Window::default()).unwrap();
+    assert!(report.totals.cost.complete.is_none());
+    assert_eq!(
+        report.totals.cost.known_lower_bound.unwrap().usd,
+        "2.000000"
+    );
+    assert_eq!(report.totals.cost.subscription_attempts, 1);
+    input.resolved_route.as_mut().unwrap().model = Some("codex/gpt-6.1-sol-alias".into());
     let report = stats([input], &table, Window::default()).unwrap();
     assert_eq!(report.coverage.missing_price, 1);
     let minimal = r#"schema_version = 1
@@ -496,9 +505,51 @@ billing = "subscription"
     let table = validate_prices(&config).unwrap();
     let report = stats([fact(1, Some(1))], &table, Window::default()).unwrap();
     assert!(report.totals.cost.complete.is_none());
+    assert_eq!(report.totals.cost.subscription_attempts, 1);
+    assert_eq!(report.routes[0].totals.cost.subscription_attempts, 1);
     let bad = minimal.replace("[models.rates]", "[models.rates]\nother = 1");
     let error = toml_edit::de::from_str::<ConfiguredPrices>(&bad).unwrap_err();
     assert!(error.message().contains("unknown field `other`"));
+}
+
+#[test]
+fn subscription_classification_requires_an_exact_price_table_identity() {
+    let mut config = configured(Some(1));
+    let mut free = config.models[0].clone();
+    free.model = "free".into();
+    free.billing = BillingKind::Free;
+    free.zero_rate_verified = true;
+    free.rates = Rates {
+        uncached_input: Some(0),
+        cache_read: Some(0),
+        cache_write: Some(0),
+        output_excluding_reasoning: Some(0),
+    };
+    config.models.push(free);
+    let table = validate_prices(&config).unwrap();
+    let mut unknown = fact(2, Some(1));
+    unknown.resolved_route.as_mut().unwrap().model = Some("unknown".into());
+    let mut free = fact(3, Some(1));
+    free.resolved_route.as_mut().unwrap().model = Some("free".into());
+    let report = stats([fact(1, Some(1)), unknown, free], &table, detail()).unwrap();
+    assert_eq!(report.totals.cost.subscription_attempts, 1);
+    assert_eq!(
+        report
+            .routes
+            .iter()
+            .map(|r| r.totals.cost.subscription_attempts)
+            .sum::<u64>(),
+        1
+    );
+    assert_eq!(
+        report
+            .daily_accounts
+            .unwrap()
+            .iter()
+            .map(|r| r.totals.cost.subscription_attempts)
+            .sum::<u64>(),
+        1
+    );
 }
 
 #[test]

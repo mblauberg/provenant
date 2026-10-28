@@ -129,6 +129,48 @@ fn session_revision_retention_defaults_overrides_and_validation() {
 }
 
 #[test]
+fn chair_log_retention_defaults_overrides_and_validation() {
+    let defaults = serde_json::to_value(load::<&[u8]>(&roots(), None).unwrap()).unwrap();
+    assert_eq!(defaults["retention"]["chair_log_days"], 30);
+    assert_eq!(
+        load::<&[u8]>(&roots(), None)
+            .unwrap()
+            .retention
+            .chair_log_replay_seconds(),
+        30 * 86_400
+    );
+    let short = load(
+        &roots(),
+        Some(&b"schema_version=1\n[retention]\nchair_log_days=1"[..]),
+    )
+    .unwrap();
+    assert_eq!(short.retention.chair_log_replay_seconds(), 7 * 86_400);
+    assert_eq!(defaults["retention"]["chair_log_entries"], 10_000);
+    assert_eq!(defaults["retention"]["chair_log_bytes"], 16_777_216);
+    let config = load(&roots(), Some(&b"schema_version=1\n[retention]\nchair_log_days=12\nchair_log_replay_days=8\nchair_log_entries=20\nchair_log_bytes=65536"[..])).unwrap();
+    test_support::assert_leaf_origins(&config);
+    let value = serde_json::to_value(config).unwrap();
+    assert_eq!(value["retention"]["chair_log_days"], 12);
+    assert_eq!(value["retention"]["chair_log_replay_days"], 8);
+    assert_eq!(value["retention"]["chair_log_entries"], 20);
+    assert_eq!(value["retention"]["chair_log_bytes"], 65_536);
+    for (key, value) in [
+        ("chair_log_days", "0"),
+        ("chair_log_days", "3651"),
+        ("chair_log_replay_days", "6"),
+        ("chair_log_replay_days", "3651"),
+        ("chair_log_entries", "0"),
+        ("chair_log_entries", "100001"),
+        ("chair_log_bytes", "65535"),
+        ("chair_log_bytes", "1073741825"),
+    ] {
+        let text = format!("schema_version=1\n[retention]\n{key}={value}");
+        let error = load(&roots(), Some(text.as_bytes())).unwrap_err();
+        assert_refusal(&error, &format!("{key}_range"));
+    }
+}
+
+#[test]
 fn gc_settings_parse_defaults_overrides_and_refuse_invalid_values() {
     let defaults = serde_json::to_value(load::<&[u8]>(&roots(), None).unwrap()).unwrap();
     assert_eq!(defaults["gc"]["schedule"], true);
@@ -435,6 +477,38 @@ impl Files {
     fn config(&self) -> PathBuf {
         self.roots.state.as_path().join("config.toml")
     }
+}
+
+#[test]
+fn github_policy_is_scoped_to_project_and_defaults_only_when_absent() {
+    let fixture = Files::new();
+    let state = fixture.roots.state.as_path();
+    std::fs::create_dir(state).unwrap();
+    let project = provenant_core::ProjectId::from_bytes([1; 16]);
+    let other = provenant_core::ProjectId::from_bytes([2; 16]);
+    assert_eq!(
+        GithubPolicy::read(&fixture.roots.state, project).unwrap(),
+        GithubPolicy::default()
+    );
+    let dir = state.join("projects").join(project.to_string());
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("github.json"),
+        r#"{"deny_verbs":["release create"],"deny_labels":[" ci ","", " \t ","needs review"]}"#,
+    )
+    .unwrap();
+    let policy = GithubPolicy::read(&fixture.roots.state, project).unwrap();
+    assert_eq!(policy.deny_verbs, ["release create"]);
+    assert_eq!(policy.deny_labels, ["ci", "needs review"]);
+    assert_eq!(
+        GithubPolicy::read(&fixture.roots.state, other).unwrap(),
+        GithubPolicy::default()
+    );
+    std::fs::write(dir.join("github.json"), b"{broken").unwrap();
+    assert!(matches!(
+        GithubPolicy::read(&fixture.roots.state, project),
+        Err(ConfigError::InvalidGithubPolicy)
+    ));
 }
 
 #[test]

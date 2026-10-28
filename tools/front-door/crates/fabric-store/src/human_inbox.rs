@@ -26,6 +26,93 @@ pub struct HumanAcknowledgement<'a> {
 }
 
 impl Store {
+    /// Atomically record bounded at-least-once offers. Overflow is untouched;
+    /// reading ordinary mail never advances or acknowledges this outbox.
+    pub fn offer_human_answers(
+        &self,
+        target: &AnswerTarget,
+        limit: u64,
+        max_bytes: usize,
+        at: WallTime,
+        request: &Request<'_>,
+    ) -> Result<Page<AnswerOffer>> {
+        page(0, limit)?;
+        if !(64..=MAX_OFFER_BYTES).contains(&max_bytes) {
+            return Err(Error::Invalid("offer byte limit"));
+        }
+        self.write(request, |tx| {
+            let mut statement = tx.prepare(
+                "SELECT substr(o.record,1,?3),substr(a.record,1,?3)
+                 FROM human_answer_outbox o
+                 JOIN human_answers a ON a.project=o.project AND a.id=o.answer
+                 JOIN human_requests r ON r.project=a.project AND r.id=a.request
+                 WHERE r.project=?1 AND r.session=?2 ORDER BY o.answer LIMIT ?4",
+            )?;
+            let mut rows = statement.query(params![
+                target.project.to_string(),
+                target.session,
+                MAX_RECORD_READ_BYTES,
+                MAX_HUMAN_REQUESTS + 1
+            ])?;
+            let mut batch = Page {
+                items: Vec::new(),
+                truncated: false,
+            };
+            let mut scanned = 0;
+            while let Some(row) = rows.next()? {
+                request.check()?;
+                scanned += 1;
+                if scanned > MAX_HUMAN_REQUESTS {
+                    return Err(Error::Invalid("human request retention limit"));
+                }
+                let mut delivery: AnswerDelivery = decode(&row.get::<_, Vec<u8>>(0)?)?;
+                if delivery.target_host != target.host
+                    || delivery.target_actor != target.actor
+                    || delivery.target_session != target.session
+                    || delivery.state == AnswerDeliveryState::Acknowledged
+                {
+                    continue;
+                }
+                if batch.items.len() == limit as usize {
+                    batch.truncated = true;
+                    break;
+                }
+                let answer: HumanAnswer = decode(&row.get::<_, Vec<u8>>(1)?)?;
+                if delivery.schema_version != 1
+                    || answer.schema_version != 1
+                    || delivery.answer_id != answer.id
+                {
+                    return Err(Error::Invalid("stored answer identity or version"));
+                }
+                delivery.state = AnswerDeliveryState::Offered;
+                delivery.attempts = delivery
+                    .attempts
+                    .checked_add(1)
+                    .ok_or(Error::Invalid("offer attempts"))?;
+                delivery.last_attempt_at = Some(at);
+                batch.items.push(AnswerOffer { answer, delivery });
+                // Reserve the entire JSON envelope, including escaping and the
+                // longer `false` spelling of the final truncation flag.
+                if encode(&batch)?.len() > max_bytes {
+                    batch.items.pop();
+                    batch.truncated = true;
+                    continue;
+                }
+            }
+            for offer in &batch.items {
+                tx.execute(
+                    "UPDATE human_answer_outbox SET record=?3 WHERE project=?1 AND answer=?2",
+                    params![
+                        target.project.to_string(),
+                        offer.answer.id.to_string(),
+                        encode(&offer.delivery)?
+                    ],
+                )?;
+            }
+            Ok(batch)
+        })
+    }
+
     pub fn human_generation(&self, project: ProjectId, request: &Request<'_>) -> Result<u64> {
         request.retry(|| {
             let generation: i64 = self.db.query_row(

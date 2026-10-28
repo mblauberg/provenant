@@ -7,8 +7,10 @@ use std::ffi::OsStr;
 use thiserror::Error;
 
 mod diff;
+mod discovery;
 mod hooks;
 mod state;
+pub use discovery::*;
 pub use hooks::*;
 pub use state::*;
 
@@ -53,6 +55,8 @@ pub struct Saved {
     pub unchanged: bool,
     /// Revisions kept after pruning, including this one.
     pub retained: usize,
+    /// Advisory discovery publication failed after the manifest was committed.
+    pub warnings: Vec<String>,
 }
 /// A retained revision's text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -207,6 +211,10 @@ pub enum SessionError {
     Deadline,
     #[error("session revision history is unreadable or does not match its recorded hash")]
     History,
+    #[error(
+        "session discovery identity does not match the registered chair; repeat workflow session save <id> with the same options and add --rebind to explicitly replace the binding"
+    )]
+    DiscoveryIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -231,6 +239,8 @@ pub struct SessionStore {
     project: ProjectId,
     session: HostSessionId,
     keep: u64,
+    chair: Option<ChairIdentity>,
+    rebind: bool,
 }
 impl SessionStore {
     pub fn new(root: StateRoot, project: ProjectId, session: HostSessionId) -> Self {
@@ -239,6 +249,8 @@ impl SessionStore {
             project,
             session,
             keep: REVISIONS_DEFAULT,
+            chair: None,
+            rebind: false,
         }
     }
     /// Keep this many revisions, current included, clamped to 1 through 64.
@@ -271,18 +283,33 @@ impl SessionStore {
     }
     /// As `save`, keeping the checkpoint it replaces as a numbered revision.
     /// The previous text is stored first, then the new checkpoint is published,
-    /// then the history that names both, so a failure between steps leaves a
-    /// complete checkpoint and the next save records the revision it finds.
+    /// then the history that names both and the advisory discovery sidecar.
+    /// Discovery publication failure warns after the manifest commit; the next
+    /// save repairs it. A failure before that commit leaves a complete
+    /// checkpoint; the next save records it.
     /// Revisions beyond the keep count are deleted after the history is
     /// written; a deletion that fails is retried by the next save. Unreadable
-    /// history never blocks a save: it restarts the chain after the highest
-    /// revision file present.
+    /// revision history restarts after the highest revision file present.
+    /// Unreadable discovery metadata blocks a save to preserve chair identity.
     pub fn save_revision(
         &self,
         text: &[u8],
         budget: WaitBudget,
         cancel: &CancelToken,
         clock: &dyn Clock,
+    ) -> Result<Saved, SessionError> {
+        self.save_revision_with(text, budget, cancel, clock, |dir, record| {
+            self.publish_discovery(dir, record)
+        })
+    }
+
+    fn save_revision_with(
+        &self,
+        text: &[u8],
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+        publish_discovery: impl FnOnce(&Directory, &SessionDiscovery) -> Result<(), SessionError>,
     ) -> Result<Saved, SessionError> {
         if text.len() as u64 > CHECKPOINT_LIMIT {
             return Err(SessionError::TooLarge);
@@ -305,6 +332,8 @@ impl SessionStore {
         let now = clock.wall_now()?;
         // A checkpoint that cannot be read (a symlink, say) is replaced, not kept.
         let existing = read_current(&dir).ok().flatten();
+        let discovery = self.load_discovery(&dir)?;
+        self.check_discovery_identity(discovery.as_ref())?;
         let mut manifest = load(&dir).unwrap_or_default();
         let floor = highest_revision_file(&dir)?;
         let mut chain = reconcile(&manifest, existing.as_ref(), floor);
@@ -332,6 +361,17 @@ impl SessionStore {
         manifest.revisions = chain;
         let manifest_bytes = serde_json::to_vec(&manifest).map_err(|_| SessionError::History)?;
         publish(&dir, MANIFEST, &manifest_bytes)?;
+        let mut warnings = Vec::new();
+        if let Some(record) = self.saved_discovery(discovery, &current, now)
+            && let Err(error) = publish_discovery(&dir, &record)
+        {
+            let rebind = if self.rebind {
+                " (including --rebind)"
+            } else {
+                ""
+            };
+            warnings.push(format!("checkpoint saved; discovery publication failed: {error}; repeat the same command{rebind} to repair discovery"));
+        }
         // The history is durable, so these files are unreachable. A failed
         // delete leaves an orphan that the next save removes.
         for old in &pruned {
@@ -343,6 +383,7 @@ impl SessionStore {
             parent: current.parent,
             unchanged,
             retained: manifest.revisions.len(),
+            warnings,
         })
     }
     /// The retained revisions, oldest first; the last is the current checkpoint.
@@ -637,6 +678,305 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+    #[test]
+    fn session_save_discovery_restart() {
+        use provenant_core::{ActorId, HostId};
+        let (_temp, root, project) = setup();
+        let host = HostId::from_bytes([3; 16]);
+        let actor = ActorId::from_bytes([4; 16]);
+        let selected = store(&root, project, "explicit-chair").with_chair(host, actor);
+        assert!(selected.discovery().unwrap().is_none());
+        assert!(discover_sessions(&root, project).unwrap().is_empty());
+        assert!(!root.as_path().join("workflow").exists());
+        saved(&selected, "chair notes\n");
+        drop(selected);
+        let restarted = store(&root, project, "explicit-chair");
+        let found = restarted.discovery().unwrap().unwrap();
+        assert_eq!(
+            discover_sessions(&root, project).unwrap(),
+            std::slice::from_ref(&found)
+        );
+        assert_eq!(found.consistency, DiscoveryConsistency::Current);
+        let record = found.record;
+        assert_eq!(
+            (record.host, record.project_id, record.chair_actor),
+            (host, project, actor)
+        );
+        assert_eq!(record.host_session_id.as_str(), "explicit-chair");
+        assert_eq!(record.checkpoint, restarted.revisions().unwrap()[0]);
+        // Unchanged saves refresh observation without adding a revision, and
+        // saves through an existing store preserve the explicit registration.
+        let later = clock(10);
+        restarted
+            .save(
+                b"chair notes\n",
+                WaitBudget::cli(later.mono_now(), 1).unwrap(),
+                &CancelToken::new(),
+                &later,
+            )
+            .unwrap();
+        let updated = restarted.discovery().unwrap().unwrap().record;
+        assert_eq!(updated.created_at, record.created_at);
+        assert_eq!(updated.last_saved_at, later.wall_now().unwrap());
+        assert_eq!(updated.checkpoint.revision, 1);
+        for wrong in [
+            store(&root, project, "another-chair"),
+            store(&root, ProjectId::from_bytes([2; 16]), "explicit-chair"),
+        ] {
+            assert!(wrong.discovery().unwrap().is_none());
+        }
+        let wrong_actor =
+            store(&root, project, "explicit-chair").with_chair(host, ActorId::from_bytes([5; 16]));
+        assert!(matches!(
+            save(&wrong_actor, b"wrong"),
+            Err(SessionError::DiscoveryIdentity)
+        ));
+        let wrong_host =
+            store(&root, project, "explicit-chair").with_chair(HostId::from_bytes([6; 16]), actor);
+        assert!(matches!(
+            save(&wrong_host, b"wrong"),
+            Err(SessionError::DiscoveryIdentity)
+        ));
+        assert_eq!(restarted.read().unwrap().unwrap().markdown, "chair notes\n");
+    }
+
+    #[test]
+    fn discovery_reports_interrupted_publication_without_read_repair() {
+        use provenant_core::{ActorId, HostId};
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "chair")
+            .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([4; 16]));
+        saved(&selected, "before");
+        let dir = path(&root, project, "chair");
+        let manifest = std::fs::read(dir.join(MANIFEST)).unwrap();
+        let discovery_path = dir.join("discovery.json");
+        let discovery = std::fs::read(&discovery_path).unwrap();
+        // Crash after checkpoint replacement, before manifest publication.
+        std::fs::write(dir.join("checkpoint.md"), "interrupted").unwrap();
+        assert_eq!(
+            selected.discovery().unwrap().unwrap().consistency,
+            DiscoveryConsistency::CheckpointChanged
+        );
+        assert_eq!(std::fs::read(dir.join(MANIFEST)).unwrap(), manifest);
+        saved(&selected, "interrupted");
+        let repaired = selected.discovery().unwrap().unwrap();
+        assert_eq!(repaired.consistency, DiscoveryConsistency::Current);
+        assert_eq!(repaired.record.checkpoint.revision, 2);
+        // Crash after manifest publication but before index publication.
+        std::fs::write(&discovery_path, &discovery).unwrap();
+        assert_eq!(
+            selected.discovery().unwrap().unwrap().consistency,
+            DiscoveryConsistency::CheckpointChanged
+        );
+        saved(&selected, "interrupted");
+        assert_eq!(
+            selected
+                .discovery()
+                .unwrap()
+                .unwrap()
+                .record
+                .checkpoint
+                .revision,
+            2
+        );
+        // Unreadable identity must not overwrite either checkpoint or history.
+        let manifest = std::fs::read(dir.join(MANIFEST)).unwrap();
+        let discovery = std::fs::read(&discovery_path).unwrap();
+        std::fs::write(&discovery_path, "{not json").unwrap();
+        assert!(matches!(
+            save(&selected, b"blocked"),
+            Err(SessionError::History)
+        ));
+        assert_eq!(std::fs::read(dir.join(MANIFEST)).unwrap(), manifest);
+        assert_eq!(selected.read().unwrap().unwrap().markdown, "interrupted");
+        std::fs::write(&discovery_path, discovery).unwrap();
+        // History recovery still works without losing the separate identity.
+        std::fs::write(dir.join(MANIFEST), "{not json").unwrap();
+        saved(&selected, "interrupted");
+        assert_eq!(
+            selected.discovery().unwrap().unwrap().consistency,
+            DiscoveryConsistency::Current
+        );
+        std::fs::remove_file(dir.join("checkpoint.md")).unwrap();
+        assert_eq!(
+            selected.discovery().unwrap().unwrap().consistency,
+            DiscoveryConsistency::CheckpointMissing
+        );
+        // On the first save, a crash before the index leaves unknown identity.
+        std::fs::remove_file(dir.join(MANIFEST)).unwrap();
+        std::fs::remove_file(discovery_path).unwrap();
+        std::fs::write(dir.join("checkpoint.md"), "legacy").unwrap();
+        assert!(selected.discovery().unwrap().is_none());
+        assert_eq!(selected.read().unwrap().unwrap().markdown, "legacy");
+        // Autosave and legacy writes alone never establish chair identity.
+        let worker = store(&root, project, "worker");
+        saved(&worker, "worker checkpoint");
+        worker
+            .write_autosave(
+                b"derived",
+                WaitBudget::cli(clock(0).mono_now(), 1).unwrap(),
+                &CancelToken::new(),
+                &clock(0),
+            )
+            .unwrap();
+        assert!(worker.discovery().unwrap().is_none());
+        assert!(discover_sessions(&root, project).unwrap().is_empty());
+    }
+
+    #[test]
+    fn discovery_truncates_overlong_rebind_history_on_read() {
+        use provenant_core::{ActorId, HostId};
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "chair")
+            .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([20; 16]));
+        saved(&selected, "notes");
+        let mut record = selected.discovery().unwrap().unwrap().record;
+        record.rebound_from = (0..10)
+            .map(|actor| ChairRebind {
+                host: record.host,
+                actor: ActorId::from_bytes([actor; 16]),
+                changed_at: record.last_saved_at,
+            })
+            .collect();
+        let discovery = path(&root, project, "chair").join("discovery.json");
+        let bytes = serde_json::to_vec(&record).unwrap();
+        std::fs::write(&discovery, &bytes).unwrap();
+        let expected = record.rebound_from[2..].to_vec();
+        assert_eq!(
+            selected.discovery().unwrap().unwrap().record.rebound_from,
+            expected
+        );
+        assert_eq!(std::fs::read(&discovery).unwrap(), bytes);
+        saved(&selected, "notes");
+        let persisted: SessionDiscovery =
+            serde_json::from_slice(&std::fs::read(discovery).unwrap()).unwrap();
+        assert_eq!(persisted.rebound_from, expected);
+    }
+
+    #[test]
+    fn rebind_keeps_eight_changes_and_upgrades_single_hop_records() {
+        use provenant_core::{ActorId, HostId};
+        let (_temp, root, project) = setup();
+        let host = HostId::from_bytes([3; 16]);
+        let selected = |actor| {
+            store(&root, project, "chair")
+                .with_chair(host, ActorId::from_bytes([actor; 16]))
+                .with_rebind(true)
+        };
+        saved(&selected(0), "notes");
+        for actor in 1..=10 {
+            saved(&selected(actor), "notes");
+        }
+        let record = selected(10).discovery().unwrap().unwrap().record;
+        assert_eq!(record.rebound_from.len(), 8);
+        assert_eq!(record.rebound_from[0].actor, ActorId::from_bytes([2; 16]));
+        assert_eq!(record.rebound_from[7].actor, ActorId::from_bytes([9; 16]));
+        saved(&selected(10).with_rebind(false), "same chair");
+        assert_eq!(
+            selected(10)
+                .discovery()
+                .unwrap()
+                .unwrap()
+                .record
+                .rebound_from,
+            record.rebound_from
+        );
+        // Old single-hop JSON remains readable and is retained on migration.
+        let mut legacy = serde_json::to_value(&record).unwrap();
+        legacy["rebound_from"] = serde_json::to_value(&record.rebound_from[7]).unwrap();
+        let discovery = path(&root, project, "chair").join("discovery.json");
+        std::fs::write(&discovery, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        saved(&selected(11), "notes");
+        let record = selected(11).discovery().unwrap().unwrap().record;
+        assert_eq!(record.rebound_from.len(), 2);
+        assert_eq!(record.rebound_from[0].actor, ActorId::from_bytes([9; 16]));
+        assert_eq!(record.rebound_from[1].actor, ActorId::from_bytes([10; 16]));
+        assert!(std::fs::metadata(discovery).unwrap().len() <= 4096);
+    }
+
+    #[test]
+    fn hook_save_commands_preserve_the_installing_harness() {
+        let (_temp, root, project) = setup();
+        for (harness, fixture) in [
+            (provenant_records::Harness::Claude, FIXTURES[0].0),
+            (provenant_records::Harness::Codex, FIXTURES[2].0),
+        ] {
+            let response = hook_context_with(
+                &root,
+                project,
+                HookEvent::SessionStart,
+                fixture.as_bytes(),
+                &clock(0),
+                DurationMicros::ZERO,
+                Advice {
+                    digest: "",
+                    commands: &CommandPrefix::default(),
+                    client: Some(harness),
+                },
+            );
+            let text = context(&response);
+            assert!(
+                text.contains(&format!(
+                    "--file <checkpoint.md> --client {}",
+                    harness.spec().name
+                )),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_publication_failure_warns_after_manifest_commit_and_next_save_repairs() {
+        use provenant_core::{ActorId, HostId};
+        for rebind in [false, true] {
+            let (_temp, root, project) = setup();
+            let selected = store(&root, project, "chair")
+                .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([4; 16]))
+                .with_rebind(rebind);
+            for first_save in [true, false] {
+                let clock = clock(10);
+                let saved = selected
+                    .save_revision_with(
+                        if first_save { b"first" } else { b"second" },
+                        WaitBudget::cli(clock.mono_now(), 1).unwrap(),
+                        &CancelToken::new(),
+                        &clock,
+                        |dir, record| {
+                            // Inject failure at the actual second publication boundary.
+                            assert_eq!(
+                                load(dir).unwrap().revisions.last(),
+                                Some(&record.checkpoint)
+                            );
+                            Err(SessionError::Deadline)
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(saved.warnings.len(), 1);
+                assert!(
+                    saved.warnings[0].contains("checkpoint saved; discovery publication failed")
+                );
+                assert!(saved.warnings[0].contains("repeat the same command"));
+                assert_eq!(saved.warnings[0].contains("including --rebind"), rebind);
+                let expected = if first_save { "first" } else { "second" };
+                assert_eq!(selected.read().unwrap().unwrap().markdown, expected);
+                if first_save {
+                    assert!(selected.discovery().unwrap().is_none());
+                } else {
+                    assert_eq!(
+                        selected.discovery().unwrap().unwrap().consistency,
+                        DiscoveryConsistency::CheckpointChanged
+                    );
+                }
+                let repaired = super::tests::saved(&selected, expected);
+                assert!(repaired.unchanged);
+                assert!(repaired.warnings.is_empty());
+                assert_eq!(
+                    selected.discovery().unwrap().unwrap().consistency,
+                    DiscoveryConsistency::Current
+                );
+            }
+        }
     }
     #[test]
     fn enforces_utf8_and_byte_bounds_on_read_and_write() {
@@ -1303,6 +1643,7 @@ mod tests {
             Advice {
                 digest: "",
                 commands,
+                client: None,
             },
         )
     }

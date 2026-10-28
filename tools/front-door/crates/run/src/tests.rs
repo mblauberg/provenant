@@ -45,11 +45,14 @@ pub(super) fn input() -> PreparedRun {
         operation_id: OperationId::parse("run-test").unwrap(),
         created_at: WallTime::from_micros(100).unwrap(),
         request: CanonicalRequest {
+            chair: None,
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                build_heavy: false,
                 title: None,
                 base: None,
+                head: None,
                 base_ref: None,
                 writer: None,
                 profile: HarnessProfile::default(),
@@ -736,6 +739,7 @@ fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
             "schema_version": 1,
             "scope": {"run": input.run_id, "attempt": input.attempts[0].attempt_id, "generation": 0},
             "last_output_at": expected,
+            "priority": 15,
             "publication_pending": false
         }))?,
         RECORD_LIMIT,
@@ -745,6 +749,10 @@ fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
             .record(input.attempts[0].attempt_id, &call)?
             .last_output_at,
         Some(expected)
+    );
+    assert_eq!(
+        store.record(input.attempts[0].attempt_id, &call)?.priority,
+        Some(15)
     );
     Ok(())
 }
