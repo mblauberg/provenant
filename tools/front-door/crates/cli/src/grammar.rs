@@ -696,6 +696,9 @@ pub enum Lane {
         /// Override the recorded delivery mode (default push when none recorded)
         #[arg(long)]
         deliver: Option<provenant_records::run::DeliveryMode>,
+        /// Accept the settled writer's protected-path review as chair
+        #[arg(long)]
+        accept_review: bool,
     },
 }
 #[derive(Debug, Subcommand)]

@@ -4728,6 +4728,7 @@ mod peer_tests {
             remote: "origin".into(),
             branch: "resumed-lane".into(),
             head: None,
+            review_acceptance: None,
             state: provenant_run::WriterDeliveryState::NotAttempted,
         };
         let collection = crate::worktrees::collection_lock(&fixture.roots)?;
@@ -5038,6 +5039,7 @@ mod peer_tests {
             remote: "origin".into(),
             branch: "lane".into(),
             head: None,
+            review_acceptance: None,
             state: WriterDeliveryState::Delivered { pull_request: None },
         };
         for outcome in [

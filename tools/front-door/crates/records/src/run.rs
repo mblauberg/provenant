@@ -258,11 +258,20 @@ pub enum WriterDeliveryState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct WriterReviewAcceptance {
+    pub actor: ActorId,
+    pub protected_paths: Vec<PathWire>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WriterDeliveryReceipt {
     pub schema_version: u64,
     pub remote: String,
     pub branch: String,
     pub head: Option<GitOid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_acceptance: Option<WriterReviewAcceptance>,
     pub state: WriterDeliveryState,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

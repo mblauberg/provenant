@@ -658,6 +658,159 @@ fn concise_delivery_preserves_alias_contract_and_refuses_injection() -> Result<(
 }
 
 #[test]
+fn review_delivery_requires_acceptance_and_exact_head()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    struct Free;
+    impl provenant_confinement::worktrees::WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[std::path::PathBuf],
+        ) -> std::collections::BTreeMap<
+            std::path::PathBuf,
+            provenant_confinement::worktrees::WorkerState,
+        > {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .collect()
+        }
+    }
+    use provenant_core::{CancelToken, Clock, RootInputs};
+    use provenant_os::clock::SystemClock;
+    let fixture = PrepareFixture::new()?;
+    let mut execution = tests::context(&fixture.root)?;
+    let mut inputs = RootInputs::new(fixture.root.join("home"), fixture.root.join("checkout"));
+    inputs.state_dir = Some(execution.state_root.as_path().into());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    std::fs::create_dir_all(roots.state.as_path())?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(
+        roots.state.as_path(),
+        std::fs::Permissions::from_mode(0o700),
+    )?;
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    execution.project_id = provenant_confinement::worktrees::with_context(
+        &roots,
+        &fixture.root.join("home"),
+        &fixture.writer.project,
+        &clock,
+        &cancel,
+        |context| {
+            let context = provenant_confinement::worktrees::WorktreeContext {
+                workers: &Free,
+                ..*context
+            };
+            let owner = provenant_confinement::worktrees::WorktreeOwner {
+                attempt_id: None,
+                operation_id: None,
+                branch: "lane".into(),
+                base: String::new(),
+                host: provenant_core::HostId::from_bytes([3; 16]),
+                created_at: clock
+                    .wall_now()
+                    .map_err(|_| provenant_confinement::worktrees::WorktreeError::InvalidOutput)?,
+                origin: provenant_confinement::worktrees::WorktreeOrigin::Adopted,
+                label: None,
+            };
+            let head = provenant_confinement::run_utility(
+                context.executor,
+                provenant_confinement::GitRead::RevParseHead,
+                context.repo,
+                context.utility,
+                context.utility_budget,
+                &cancel,
+            )?;
+            let owner = provenant_confinement::worktrees::WorktreeOwner {
+                base: String::from_utf8_lossy(&head.stdout.bytes).trim().into(),
+                ..owner
+            };
+            provenant_confinement::worktrees::adopt(
+                &context,
+                &fixture.writer.worktree,
+                &owner,
+                &cancel,
+            )?;
+            Ok(context.binding.project_id())
+        },
+    )?;
+    let call = Request {
+        clock: &clock,
+        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
+        cancel: &cancel,
+    };
+    let store = RunStore::open(&execution, &call)?;
+    let mut input = tests::input();
+    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    input.request.tasks[0].deliver = Some(fixture.request.clone());
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    let host = fixture.prepare()?;
+    let head = host.head(&fixture.writer)?;
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let path = provenant_records::PathWire::from_relative(&provenant_core::RelativePath::parse(
+        ".github/workflows/ci.yml",
+    )?)?;
+    artifacts::seal(
+        &attempt,
+        "writer-terminal.json",
+        &db::bytes(&writer::WriterTerminal {
+            schema_version: 1,
+            head,
+            protected_paths: vec![path.clone()],
+        })?,
+        RECORD_LIMIT,
+    )?;
+    let exit = tests::exit();
+    tests::seal_observation(&store, &input, &exit)?;
+    let lock = attempt.lock(
+        std::ffi::OsStr::new(provenant_records::AttemptFile::CustodyLock.name()),
+        provenant_os::fs::LockMode::Exclusive,
+        call.budget,
+        &cancel,
+        &clock,
+    )?;
+    drop(lock);
+    let mut publication = tests::publication();
+    publication.outcome = Outcome::ReviewRequired;
+    publication.reason = Some("protected changes require review".into());
+    store.publish_terminal(id, 1, &publication, &exit, &call)?;
+    let deliver = |accept_review| {
+        store.deliver(
+            id,
+            None,
+            HostDeliveryContext::new(fixture.environment.clone()),
+            accept_review,
+            &call,
+        )
+    };
+    let refusal = deliver(false).expect_err("review requires explicit acceptance");
+    assert!(refusal.to_string().contains("--accept-review"));
+    fixture.commit(&fixture.writer.worktree, "moved after review")?;
+    assert!(matches!(
+        deliver(true),
+        Err(RunError::Validation(
+            "worktree head differs from the settled receipt"
+        ))
+    ));
+    fixture.lane_git(&["reset", "--hard", &head.to_string()])?;
+    let receipt = deliver(true)?;
+    assert!(matches!(
+        receipt.state,
+        WriterDeliveryState::Delivered { .. }
+    ));
+    let acceptance = receipt.review_acceptance.as_ref().ok_or("acceptance")?;
+    assert_eq!(acceptance.protected_paths, vec![path]);
+    assert_eq!(acceptance.actor, execution.actor_id);
+    assert_eq!(
+        store.delivered(id, &call)?.map(|(_, receipt)| receipt),
+        Some(receipt)
+    );
+    Ok(())
+}
+
+#[test]
 fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     struct Free;
@@ -774,6 +927,7 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
             id,
             Some(fixture.request.clone()),
             HostDeliveryContext::new(fixture.environment.clone()),
+            false,
             &call,
         )
     };
@@ -803,6 +957,7 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
             remote: fixture.request.remote.clone(),
             branch: fixture.request.branch.clone(),
             head: Some(head),
+            review_acceptance: None,
             state: WriterDeliveryState::Failed {
                 stage: WriterDeliveryStage::Interrupted,
             },
