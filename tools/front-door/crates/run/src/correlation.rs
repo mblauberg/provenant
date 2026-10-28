@@ -22,19 +22,15 @@ pub struct WorkSelector {
     pub repository: Option<AbsolutePath>,
     pub head: Option<GitOid>,
 }
-// Order encodes the aggregation precedence; contradictions outrank missing facts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum WorkCoverage {
-    /// Includes unknown, historical and not yet prepared work.
-    Unindexed,
-    Verified,
-    /// The index cannot prove a complete run roster.
-    Partial,
-    HeadUnavailable,
-    RepositoryUnavailable,
-    Mismatch,
-    /// More candidates remain. Absence has not been established.
-    Limit,
+pub use provenant_records::inbox::WorkCoverage;
+
+/// Validate only against the configured host state root. No caller store locator.
+pub fn validate_work(
+    host: &provenant_core::StateRoot,
+    selection: &WorkSelector,
+    call: &Request<'_>,
+) -> Result<WorkCoverage> {
+    WorkIndex::open(host.as_path(), call)?.validate(selection, call)
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Membership {

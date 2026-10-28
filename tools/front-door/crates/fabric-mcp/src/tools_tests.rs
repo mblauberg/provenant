@@ -404,3 +404,16 @@ fn removed_tools_are_unknown_and_merged_operations_are_typed() {
         assert_eq!(call.name(), "fabric_lease");
     }
 }
+
+#[test]
+fn request_correlation_mcp_accepts_links_but_rejects_caller_coverage() {
+    let mut input = json!({"op":"ask","session":"chair-a","request":{
+        "kind":"question","title":"Repair","body":"Which repair?",
+        "work":{"run_id":"00000000000000000000000000000001",
+            "attempt_id":"00000000000000000000000000000002",
+            "repository":{"relative_to_root":{"encoding":"utf8","path":"repo/.git"}},
+            "head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}});
+    assert!(ToolCall::parse("fabric_inbox", input.clone()).is_ok());
+    input["request"]["work_coverage"] = json!("verified");
+    assert!(ToolCall::parse("fabric_inbox", input).is_err());
+}

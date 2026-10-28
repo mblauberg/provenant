@@ -29,7 +29,7 @@ fn draft(rig: &TestRig, kind: &str) -> Result<String> {
     std::fs::write(
         &path,
         serde_json::to_vec(
-            &json!({"kind":kind,"title":"Repair choice","body":"Choose how to repair the check.","blocking":kind=="decision","options":[{"id":"repair","label":"Repair","description":"Repair the failing check"}],"recommended_option_id":"repair","proceeding_with":if kind=="assumption" {json!("Repair the failing check")}else{Value::Null}}),
+            &json!({"work":{"run_id":"00000000000000000000000000000001","task_id":"00000000000000000000000000000002"},"kind":kind,"title":"Repair choice","body":"Choose how to repair the check.","blocking":kind=="decision","options":[{"id":"repair","label":"Repair","description":"Repair the failing check"}],"recommended_option_id":"repair","proceeding_with":if kind=="assumption" {json!("Repair the failing check")}else{Value::Null}}),
         )?,
     )?;
     Ok(path.to_str().ok_or("draft path")?.into())
@@ -80,6 +80,17 @@ fn inbox_cli_posts_lists_and_resolves_all_kinds_without_apps() -> Result {
                 .iter()
                 .any(|item| item["id"] == id)
         );
+        let item = listed["data"]["items"]
+            .as_array()
+            .ok_or("items")?
+            .iter()
+            .find(|item| item["id"] == id)
+            .ok_or("created request")?;
+        assert_eq!(
+            item["request"]["work"]["task_id"],
+            "00000000000000000000000000000002"
+        );
+        assert_eq!(item["work_coverage"], "unindexed");
         let action = match kind {
             "assumption" => "confirm",
             "question" => "reply",

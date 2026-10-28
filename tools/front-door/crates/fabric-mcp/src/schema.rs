@@ -162,6 +162,13 @@ fn build_strict() -> Vec<Value> {
     let mut inbox_session = pattern(r"^[a-z0-9]([a-z0-9_-]|\.[a-z0-9_-])*\.?$");
     inbox_session["maxLength"] = json!(128);
     let inbox_request = object(json!({
+        "work?":nullable(object(json!({
+            "run_id":reference("Id"),"task_id?":nullable(reference("Id")),
+            "attempt_id?":nullable(reference("Id")),"repository?":nullable(object(json!({"relative_to_root":object(json!({
+                "encoding":choices(&["utf8","native_bytes"]),"path":text(4096)
+            }))}))),
+            "head?":nullable(reference("GitOid"))
+        }))),
         "kind":choices(&["decision","assumption","question"]),"title":text(256),
         "body":text(provenant_records::inbox::REQUEST_BODY_BYTES),"blocking?":{"type":"boolean"},
         "options?":array(object(json!({"id":reference("OperationId"),"label":text(256),"description":text(1024)})),0,16),

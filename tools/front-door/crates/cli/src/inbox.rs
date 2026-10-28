@@ -35,7 +35,7 @@ pub fn resolve_delivery_target(
 
 #[derive(Debug, Args)]
 pub struct Ask {
-    /// JSON request content; ownership comes from the current Fabric identity
+    /// JSON request content, including optional work links; ownership comes from Fabric
     #[arg(long)]
     pub file: PathBuf,
     /// Explicit originating chair session; never inferred from the agent label

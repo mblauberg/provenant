@@ -164,6 +164,8 @@ pub enum InboxError {
     #[error(transparent)]
     Store(provenant_fabric_store::Error),
     #[error(transparent)]
+    Work(#[from] provenant_run::RunError),
+    #[error(transparent)]
     Coordination(#[from] CoordinationError),
 }
 
@@ -286,6 +288,14 @@ impl InboxInput {
                 session, request, ..
             } => {
                 session_id(session)?;
+                if let Some(work) = &request.work
+                    && work.repository.as_ref().is_some_and(|repo| {
+                        repo.to_path_buf()
+                            .map_or(true, |path| path.as_os_str().len() > 4096)
+                    })
+                {
+                    return Err(InboxError::Invalid("work.repository"));
+                }
                 bounded(&request.title, 256, "title")?;
                 bounded(&request.body, REQUEST_BODY_BYTES, "body")?;
                 if request.options.len() > MAX_OPTIONS {
@@ -494,6 +504,7 @@ pub fn offer_until_ack(
 
 pub struct InboxService<'a> {
     store: Store,
+    root: StateRoot,
     identity: &'a Identity,
     clock: &'a dyn Clock,
 }
@@ -513,6 +524,7 @@ impl<'a> InboxService<'a> {
         };
         Ok(Self {
             store: Store::open(root, &request)?,
+            root: root.clone(),
             identity,
             clock,
         })
@@ -647,6 +659,32 @@ impl<'a> InboxService<'a> {
                 request: draft,
                 ..
             } => {
+                let work_coverage = draft
+                    .work
+                    .as_ref()
+                    .map(|work| {
+                        let coverage = provenant_run::validate_work(
+                            &self.root,
+                            &provenant_run::WorkSelector {
+                                project: self.identity.project,
+                                run: work.run_id,
+                                task: work.task_id,
+                                attempt: work.attempt_id,
+                                repository: work.repository.clone(),
+                                head: work.head,
+                            },
+                            &provenant_run::Request {
+                                clock: request.clock,
+                                budget: request.budget,
+                                cancel: request.cancel,
+                            },
+                        )?;
+                        if coverage == WorkCoverage::Mismatch {
+                            return Err(InboxError::Invalid("work repository or head mismatch"));
+                        }
+                        Ok(coverage)
+                    })
+                    .transpose()?;
                 let value = HumanRequest {
                     schema_version: 1,
                     id: HumanRequestId::from_bytes(entropy()?),
@@ -664,6 +702,7 @@ impl<'a> InboxService<'a> {
                     chair_session_id: session.clone(),
                     chair_actor: self.identity.inbox.actor,
                     request: draft.clone(),
+                    work_coverage,
                     state: RequestState::Open,
                     answer_id: None,
                     closure_reason: None,

@@ -4,7 +4,7 @@ mod admission;
 mod artifacts;
 mod controls;
 mod correlation;
-pub use correlation::{WORK_INDEX_FILE, WorkCoverage, WorkIndex, WorkSelector};
+pub use correlation::{WORK_INDEX_FILE, WorkCoverage, WorkIndex, WorkSelector, validate_work};
 mod db;
 mod delivery;
 mod disk;

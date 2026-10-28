@@ -1,6 +1,7 @@
 //! Provider-neutral human requests. These records confer no workflow authority.
 use provenant_core::{
-    ActorId, HostId, HumanAnswerId, HumanRequestId, OperationId, ProjectId, WallTime,
+    ActorId, AttemptId, GitOid, HostId, HumanAnswerId, HumanRequestId, OperationId, ProjectId,
+    RunId, TaskId, WallTime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -93,10 +94,36 @@ pub struct RequestOption {
     pub description: String,
 }
 
+/// Claimed links. Repository is a canonical Git common directory, not a checkout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestWork {
+    pub run_id: RunId,
+    pub task_id: Option<TaskId>,
+    pub attempt_id: Option<AttemptId>,
+    pub repository: Option<crate::AbsolutePath>,
+    pub head: Option<GitOid>,
+}
+
+/// Coverage of the creation-time host lookup, never inferred from caller claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkCoverage {
+    Unindexed,
+    Verified,
+    Partial,
+    HeadUnavailable,
+    RepositoryUnavailable,
+    Mismatch,
+    Limit,
+}
+
 /// Caller-authored content only. The service binds project, host and actor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequestDraft {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<RequestWork>,
     pub kind: RequestKind,
     pub title: String,
     pub body: String,
@@ -124,6 +151,8 @@ pub struct HumanRequest {
     pub chair_session_id: String,
     pub chair_actor: ActorId,
     pub request: RequestDraft,
+    #[serde(default)]
+    pub work_coverage: Option<WorkCoverage>,
     pub state: RequestState,
     pub answer_id: Option<HumanAnswerId>,
     pub closure_reason: Option<String>,
