@@ -277,6 +277,8 @@ enum Event {
     },
     Error {
         error: Failure,
+        #[serde(rename = "sessionID", default)]
+        session: Option<String>,
         #[serde(rename = "retryAfterMs", default)]
         retry_after_ms: Option<serde_json::Value>,
     },
@@ -431,37 +433,40 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         Event::Error {
             error,
             retry_after_ms,
-        } if error.kind == "provider.quota" || error.kind == "provider.free-limit" => {
-            let is_free_kind = error.kind == "provider.free-limit";
-            vec![quota(
-                error.message,
-                error.response,
-                error.retry_after_ms.or(retry_after_ms),
-                is_free_kind,
-            )]
+            session,
+        } => {
+            let mut events = Vec::new();
+            if let Some(session) = session.filter(|session| !session.is_empty()) {
+                events.push(E::Session(session));
+            }
+            let event = if error.kind == "provider.quota" || error.kind == "provider.free-limit" {
+                let is_free_kind = error.kind == "provider.free-limit";
+                quota(
+                    error.message,
+                    error.response,
+                    error.retry_after_ms.or(retry_after_ms),
+                    is_free_kind,
+                )
+            } else if error.kind == "provider.no-route" {
+                // OpenCode 2.2.0 maps ModelUnavailableError to this type.
+                E::ModelUnavailable {
+                    message: error
+                        .message
+                        .unwrap_or_else(|| "provider model unavailable".into()),
+                }
+            } else if error.kind == "provider.internal" && error.status == Some(529) {
+                E::ModelOverloaded {
+                    message: error
+                        .message
+                        .filter(|message| !message.is_empty())
+                        .unwrap_or_else(|| "provider overloaded (HTTP 529)".into()),
+                }
+            } else {
+                E::Error
+            };
+            events.push(event);
+            events
         }
-        // OpenCode 2.2.0 maps ModelUnavailableError to this structured type.
-        // https://github.com/anomalyco/opencode/blob/v2.2.0/packages/core/src/session/to-session-error.ts
-        Event::Error { error, .. } if error.kind == "provider.no-route" => {
-            vec![E::ModelUnavailable {
-                message: error
-                    .message
-                    .unwrap_or_else(|| "provider model unavailable".into()),
-            }]
-        }
-        // OpenCode reports upstream HTTP status on provider.internal errors.
-        // Anthropic's 529 is a temporary overload, rather than a generic 5xx.
-        Event::Error { error, .. }
-            if error.kind == "provider.internal" && error.status == Some(529) =>
-        {
-            vec![E::ModelOverloaded {
-                message: error
-                    .message
-                    .filter(|message| !message.is_empty())
-                    .unwrap_or_else(|| "provider overloaded (HTTP 529)".into()),
-            }]
-        }
-        Event::Error { .. } => vec![E::Error],
         _ => vec![],
     })
 }
@@ -505,6 +510,7 @@ mod tests {
         assert!(events.contains(&E::ModelUnavailable {
             message: "Model unavailable: opencode/misspelt-free".into(),
         }));
+        assert!(events.contains(&E::Session("ses_x".into())));
         let outcome = OpenCode
             .finish(
                 stream,
@@ -515,6 +521,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(outcome.status(), crate::OutcomeStatus::Refused);
+        assert_eq!(outcome.session(), Some("ses_x"));
     }
 
     #[test]
@@ -532,6 +539,16 @@ mod tests {
         ] {
             assert_eq!(decode(raw).unwrap(), vec![E::Error]);
         }
+        let events = decode(br#"{"type":"error","sessionID":"ses_x","error":{"type":"provider.internal","status":529,"message":"Overloaded"}}"#).unwrap();
+        assert_eq!(
+            events,
+            vec![
+                E::Session("ses_x".into()),
+                E::ModelOverloaded {
+                    message: "Overloaded".into()
+                }
+            ]
+        );
     }
 
     #[test]

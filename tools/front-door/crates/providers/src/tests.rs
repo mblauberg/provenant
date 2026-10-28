@@ -490,7 +490,6 @@ fn codex_capacity_failure_is_typed_without_misclassifying_other_failures()
     for raw in [
         r#"{"type":"turn.failed","error":{"message":"Selected model is at capacity. Please try a different model.","codex_error_info":"server_overloaded"}}"#,
         r#"{"type":"turn.failed","error":{"message":"Temporarily unavailable","codex_error_info":"server_overloaded"}}"#,
-        r#"{"type":"turn.failed","error":{"message":"Model is AT CAPACITY"}}"#,
     ] {
         let (events, outcome) = replay(&codex::Codex, &format!("{raw}\n"), EXIT)?;
         assert_eq!(outcome.status(), OutcomeStatus::Refused);
@@ -500,17 +499,20 @@ fn codex_capacity_failure_is_typed_without_misclassifying_other_failures()
                 .any(|event| matches!(event, ProviderEvent::ModelOverloaded { .. }))
         );
     }
-    let (events, outcome) = replay(
-        &codex::Codex,
-        "{\"type\":\"turn.failed\",\"error\":{\"message\":\"invalid request\"}}\n",
-        EXIT,
-    )?;
-    assert_eq!(outcome.status(), OutcomeStatus::Failed);
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, ProviderEvent::ModelOverloaded { .. }))
-    );
+    for raw in [
+        r#"{"type":"turn.failed","error":{"message":"upstream cache is at capacity"}}"#,
+        r#"{"type":"turn.failed","error":{"codex_error_info":"server_overloaded"}}"#,
+        r#"{"type":"turn.failed","error":{"codex_error_info":{"code":"server_overloaded"}}}"#,
+        r#"{"type":"turn.failed","error":"unexpected"}"#,
+    ] {
+        let (events, outcome) = replay(&codex::Codex, &format!("{raw}\n"), EXIT)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Failed);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::ModelOverloaded { .. }))
+        );
+    }
     Ok(())
 }
 #[test]

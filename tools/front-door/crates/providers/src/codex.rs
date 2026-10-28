@@ -180,7 +180,7 @@ enum Event {
     #[serde(rename = "error")]
     Error { message: String },
     #[serde(rename = "turn.failed")]
-    Failed { error: Option<TurnError> },
+    Failed { error: Option<serde_json::Value> },
     #[serde(other)]
     Other,
 }
@@ -196,16 +196,6 @@ enum Item {
 struct Usage {
     input_tokens: u64,
     output_tokens: u64,
-}
-#[derive(Deserialize)]
-struct TurnError {
-    message: String,
-    #[serde(default)]
-    codex_error_info: Option<serde_json::Value>,
-}
-fn overloaded(message: &str, info: Option<&serde_json::Value>) -> bool {
-    info.and_then(serde_json::Value::as_str) == Some("server_overloaded")
-        || message.to_ascii_lowercase().contains("at capacity")
 }
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     Ok(match wire::<Event>(bytes)? {
@@ -232,14 +222,19 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                 E::Error
             }]
         }
-        Event::Failed { error } => match error {
-            Some(error) if overloaded(&error.message, error.codex_error_info.as_ref()) => {
-                vec![E::ModelOverloaded {
-                    message: error.message,
-                }]
-            }
-            _ => vec![E::Error],
-        },
+        Event::Failed { error } => {
+            let capacity = error.as_ref().and_then(|error| {
+                if error.get("codex_error_info")?.as_str()? == "server_overloaded" {
+                    error.get("message")?.as_str().map(str::to_owned)
+                } else {
+                    None
+                }
+            });
+            capacity.map_or_else(
+                || vec![E::Error],
+                |message| vec![E::ModelOverloaded { message }],
+            )
+        }
         _ => vec![],
     })
 }

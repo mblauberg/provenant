@@ -220,14 +220,13 @@ Unknown or stale quota never causes a refusal. Refusals are model- and
 account-scoped unless wire evidence proves a wider pool, and independent
 pools never exhaust each other. A newer comparable observation or the reset
 clears only that refusal. Only a quota-limited outcome cools an account;
-rate limits and model capacity failures cause short per-model waits, and auth
-failures never switch accounts. Provider capacity errors settle as
-`model_unavailable` with the provider's reason visible in lanes. For a known
-account, host settlement records a model-scoped refusal with the existing
-one-hour expiry; nested lanes cannot write the host quota store.
+auth failures never switch accounts. Provider capacity errors settle as
+`model_unavailable` with the provider's reason visible in lanes. They do not
+currently record a routing cooldown.
 - Why: one probe outage or model limit must not take a provider offline.
 - Test: `crates/quota/src/admission.rs::unknown_and_stale_do_not_manufacture_exhaustion`;
-  `::independent_pool_reset_and_refusal_scope`
+  `::independent_pool_reset_and_refusal_scope`;
+  `tests/dispatch_provider.rs::codex_capacity_settles_without_quota_refusal`
 - Owner: `crates/quota/src/admission.rs`
 
 ### Revisioned, bounded refresh
