@@ -151,6 +151,8 @@ pub struct AccountRecord {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auth_retry_pending: bool,
     pub refusals: Vec<crate::Refusal>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capacity_cooldowns: Vec<crate::CapacityCooldown>,
 }
 impl AccountRecord {
     pub fn empty(account: AccountScope) -> Self {
@@ -168,6 +170,7 @@ impl AccountRecord {
             credential_metadata: Vec::new(),
             auth_retry_pending: false,
             refusals: Vec::new(),
+            capacity_cooldowns: Vec::new(),
         }
     }
     pub fn validate(&self) -> Result<(), QuotaError> {
@@ -217,6 +220,17 @@ impl AccountRecord {
             })
         {
             return Err(QuotaError::Invalid("refusal scope or bounds"));
+        }
+        if self.capacity_cooldowns.len() > MAX_WINDOWS
+            || self.capacity_cooldowns.iter().any(|c| {
+                c.account != self.account
+                    || c.model.is_empty()
+                    || c.model.len() > 256
+                    || c.model.chars().any(char::is_control)
+                    || c.expires_unix_seconds <= c.observed_unix_seconds
+            })
+        {
+            return Err(QuotaError::Invalid("capacity cooldown scope or bounds"));
         }
         if let Some(snapshot) = &self.snapshot {
             snapshot.validate()?;
@@ -288,9 +302,20 @@ pub struct AccountRow {
     pub next_due_unix_seconds: Option<i64>,
     pub refreshing: bool,
     pub error: Option<ProbeFailure>,
+    /// Live provider capacity cooldowns for this account.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capacity_cooldowns: Vec<CapacityCooldownRow>,
     /// Menu bar choices from the matching registered account, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<RowDisplay>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityCooldownRow {
+    pub model: String,
+    pub observed_unix_seconds: i64,
+    pub expires_unix_seconds: i64,
+    pub remaining_seconds: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
