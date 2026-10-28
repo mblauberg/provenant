@@ -4,7 +4,7 @@ use provenant_core::HostId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FabricConfig {
     pub agent_label: String,
@@ -15,7 +15,99 @@ pub struct FabricConfig {
     pub peers: BTreeMap<String, Peer>,
     pub limits: Limits,
     #[serde(default)]
+    pub graph: GraphConfig,
+    #[serde(default)]
     pub lanes: Lanes,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct GraphConfig {
+    pub limits: GraphLimits,
+    pub limit_ceiling: GraphLimits,
+    pub budget: GraphBudget,
+}
+
+// Omitted ceiling fields inherit the corresponding resolved host limit. The
+// compiled asset leaves the ceiling absent so overrides precede this fallback.
+impl<'de> Deserialize<'de> for GraphConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Default, Deserialize)]
+        #[serde(default, deny_unknown_fields)]
+        struct RawGraphConfig {
+            limits: GraphLimits,
+            limit_ceiling: crate::graph::GraphLimitOverrides,
+            budget: GraphBudget,
+        }
+        let raw = RawGraphConfig::deserialize(deserializer)?;
+        let mut ceiling = raw.limits.clone();
+        macro_rules! inherit {
+            ($($field:ident),+ $(,)?) => {$(
+                if let Some(value) = raw.limit_ceiling.$field {
+                    ceiling.$field = value;
+                }
+            )+};
+        }
+        inherit!(
+            nodes,
+            edges,
+            routes_per_node,
+            node_prompt_bytes,
+            graph_prompt_bytes,
+            expansion_depth,
+            fan_out_width
+        );
+        if let Some(value) = raw.limit_ceiling.concurrency {
+            ceiling.concurrency = (value != 0).then_some(value);
+        }
+        Ok(Self {
+            limits: raw.limits,
+            limit_ceiling: ceiling,
+            budget: raw.budget,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GraphLimits {
+    pub nodes: usize,
+    pub edges: usize,
+    pub routes_per_node: usize,
+    pub node_prompt_bytes: usize,
+    pub graph_prompt_bytes: usize,
+    pub expansion_depth: usize,
+    pub fan_out_width: usize,
+    #[serde(
+        deserialize_with = "deserialize_concurrency",
+        serialize_with = "serialise_concurrency"
+    )]
+    pub concurrency: Option<usize>,
+}
+fn serialise_concurrency<S: serde::Serializer>(
+    value: &Option<usize>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_u64(value.unwrap_or(0) as u64)
+}
+fn deserialize_concurrency<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<usize>::deserialize(deserializer)?.filter(|value| *value != 0))
+}
+impl Default for GraphLimits {
+    fn default() -> Self {
+        Self {
+            nodes: 512,
+            edges: 4096,
+            routes_per_node: 16,
+            node_prompt_bytes: 256 * 1024,
+            graph_prompt_bytes: 4 * 1024 * 1024,
+            expansion_depth: 4,
+            fan_out_width: 32,
+            concurrency: None,
+        }
+    }
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -40,6 +132,30 @@ impl Default for LanePriority {
             build_heavy: 15,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GraphBudget {
+    pub unknown_usage: UnknownUsage,
+    pub per_node: BudgetLimit,
+    pub per_graph: BudgetLimit,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnknownUsage {
+    #[default]
+    Warn,
+    Pause,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BudgetLimit {
+    pub tokens: Option<u64>,
+    pub cost_usd: Option<f64>,
+    pub wall_time_seconds: Option<u64>,
 }
 
 impl LanePriority {
@@ -178,6 +294,61 @@ impl DomainConfig for FabricConfig {
         if l.graph_timeout_seconds == 0 || l.graph_timeout_seconds > 14_400 {
             reject("limits.graph_timeout_seconds".into());
         }
+        let limits = &self.graph.limits;
+        let ceiling = &self.graph.limit_ceiling;
+        for (name, value, maximum) in [
+            ("nodes", limits.nodes, ceiling.nodes),
+            ("edges", limits.edges, ceiling.edges),
+            (
+                "routes_per_node",
+                limits.routes_per_node,
+                ceiling.routes_per_node,
+            ),
+            (
+                "node_prompt_bytes",
+                limits.node_prompt_bytes,
+                ceiling.node_prompt_bytes,
+            ),
+            (
+                "graph_prompt_bytes",
+                limits.graph_prompt_bytes,
+                ceiling.graph_prompt_bytes,
+            ),
+            (
+                "expansion_depth",
+                limits.expansion_depth,
+                ceiling.expansion_depth,
+            ),
+            ("fan_out_width", limits.fan_out_width, ceiling.fan_out_width),
+        ] {
+            if maximum == 0 && value != 0 {
+                reject(format!("graph.limit_ceiling.{name}"));
+            }
+            if value == 0 || value > maximum {
+                reject(format!("graph.limits.{name}"));
+            }
+        }
+        if matches!((limits.concurrency, ceiling.concurrency), (Some(value), Some(maximum)) if value > maximum)
+        {
+            reject("graph.limits.concurrency".into());
+        }
+        for (name, budget) in [
+            ("per_node", &self.graph.budget.per_node),
+            ("per_graph", &self.graph.budget.per_graph),
+        ] {
+            if budget.tokens == Some(0) {
+                reject(format!("graph.budget.{name}.tokens"));
+            }
+            if budget.wall_time_seconds == Some(0) {
+                reject(format!("graph.budget.{name}.wall_time_seconds"));
+            }
+            if budget
+                .cost_usd
+                .is_some_and(|cost| !cost.is_finite() || cost <= 0.0)
+            {
+                reject(format!("graph.budget.{name}.cost_usd"));
+            }
+        }
         for (name, value) in [
             ("writer", self.lanes.priority.writer),
             ("read-only", self.lanes.priority.read_only),
@@ -254,6 +425,7 @@ mod tests {
                 },
             )]),
             ssh_executable: Some(PathBuf::from("/opt/homebrew/bin/ssh")),
+            graph: GraphConfig::default(),
             lanes: Lanes::default(),
             limits: Limits {
                 body_bytes: 65536,
@@ -342,5 +514,122 @@ mod tests {
             peer.connect_timeout_seconds = 31;
         }
         assert!(!config.validate().is_empty());
+    }
+
+    #[test]
+    fn graph_policy_defaults_and_validation() {
+        let mut config = config();
+        assert_eq!(config.graph.limits.nodes, 512);
+        assert_eq!(config.graph.limits.graph_prompt_bytes, 4 * 1024 * 1024);
+        assert!(config.graph.budget.per_graph.tokens.is_none());
+        config.graph.limits.nodes = 513;
+        assert!(
+            config
+                .validate()
+                .iter()
+                .any(|e| e.field == "graph.limits.nodes")
+        );
+        config.graph.limit_ceiling.nodes = 1024;
+        assert!(config.validate().is_empty());
+        config.graph.budget.per_node.cost_usd = Some(-1.0);
+        assert!(
+            config
+                .validate()
+                .iter()
+                .any(|e| e.field == "graph.budget.per_node.cost_usd")
+        );
+    }
+
+    #[test]
+    fn graph_ceilings_inherit_each_configured_limit() {
+        let graph: GraphConfig = serde_json::from_value(serde_json::json!({
+            "limits": {"nodes": 10, "edges": 20, "concurrency": 3},
+            "limit_ceiling": {"edges": 30}
+        }))
+        .unwrap();
+        assert_eq!(graph.limit_ceiling.nodes, 10);
+        assert_eq!(graph.limit_ceiling.edges, 30);
+        assert_eq!(graph.limit_ceiling.concurrency, Some(3));
+        assert_eq!(graph.budget.unknown_usage, UnknownUsage::Warn);
+
+        let unlimited: GraphConfig = serde_json::from_value(serde_json::json!({
+            "limits": {"concurrency": 3},
+            "limit_ceiling": {"concurrency": 0},
+            "budget": {"unknown_usage": "pause"}
+        }))
+        .unwrap();
+        assert_eq!(unlimited.limit_ceiling.concurrency, None);
+        assert_eq!(unlimited.budget.unknown_usage, UnknownUsage::Pause);
+        let round_trip: GraphConfig =
+            serde_json::from_value(serde_json::to_value(&unlimited).unwrap()).unwrap();
+        assert_eq!(round_trip, unlimited);
+    }
+
+    #[test]
+    fn configured_graph_ceilings_and_diagnostics_survive_config_layering() {
+        #[derive(Serialize, Deserialize)]
+        struct Domains {
+            fabric: FabricConfig,
+        }
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(
+                &self,
+                path: &std::path::Path,
+            ) -> std::io::Result<PathBuf> {
+                Ok(path.to_owned())
+            }
+        }
+        let mut inputs =
+            provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/checkout".into());
+        inputs.state_dir = Some("/fixture/state".into());
+        let roots = inputs.resolve(&Resolver).unwrap();
+        let sections = provenant_config::DomainSections::<Domains>::new(&[SECTION]);
+        let text = b"schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 10\nedges = 20\n[domains.fabric.graph.limit_ceiling]\nedges = 30\n";
+        let config =
+            provenant_config::load_with_domains(&roots, Some(&text[..]), &sections).unwrap();
+        assert_eq!(config.domains.fabric.graph.limit_ceiling.nodes, 10);
+        assert_eq!(config.domains.fabric.graph.limit_ceiling.edges, 30);
+
+        let text = b"schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 11\n[domains.fabric.graph.limit_ceiling]\nnodes = 10\n";
+        let error = provenant_config::load_with_domains(&roots, Some(&text[..]), &sections)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("graph.limits.nodes"), "{error}");
+        assert!(error.contains("11"), "{error}");
+
+        for (text, key, rejected, should_echo, rule) in [
+            (
+                "schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 0\n",
+                "graph.limits.nodes",
+                "rejected value: 0",
+                true,
+                "range",
+            ),
+            (
+                "schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 'private-sentinel'\n",
+                "graph.limits.nodes",
+                "private-sentinel",
+                false,
+                "type",
+            ),
+            (
+                "schema_version = 1\n[domains.fabric.graph.budget]\nunknown_usage = 'bad'\n",
+                "graph.budget.unknown_usage",
+                "bad",
+                false,
+                "range",
+            ),
+        ] {
+            let error =
+                provenant_config::load_with_domains(&roots, Some(text.as_bytes()), &sections)
+                    .err()
+                    .unwrap()
+                    .to_string();
+            assert!(error.contains(key), "{error}");
+            assert_eq!(error.contains(rejected), should_echo, "{error}");
+            assert!(error.contains(rule), "{error}");
+        }
     }
 }

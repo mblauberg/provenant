@@ -10,6 +10,35 @@ define the envelope, exit codes and wait budgets. The machine-readable help
 catalogue owns command syntax; the generated [CLI reference](../reference/cli.md)
 lists every leaf, flag and bound. Paths are relative to `tools/front-door/`.
 
+## Local console catalogue
+
+`console projects` lists registered project IDs and their canonical Git common
+directories. Linked worktrees share a binding. `console sessions [SESSION]`
+lists only explicitly registered chairs, with the discovery record and its
+checkpoint consistency. Summary is null with `summary_status: unavailable`;
+provider, lifecycle and lane facts are not inferred. Legacy checkpoints without
+discovery remain readable through `workflow session show` and are not chairs
+inferred by the catalogue. Both commands cover local state only. `--project`
+selects an existing binding by checkout path; without it all registered local
+projects are included. Reads create no state or identity and do not repair
+stale discovery. The registry is limited to 16,384 entries (excluding its
+lock); an invalid project entry name fails the whole catalogue. Valid
+in-progress binding stages are skipped.
+
+Session pages default to 50 rows and cap at 100. The cursor binds the selected
+project, session filter, page size and observed session records; an invalid or
+changed snapshot requires restarting without the cursor. A scan is limited to
+16,384 directory entries across projects, including invalid or unregistered
+names. Exhaustion conservatively sets `scan_truncated` and `truncated`; it does
+not provide a cursor beyond the scanned subset. Directory iteration order is not
+guaranteed, so a repeated truncated scan can invalidate its cursor. An oversized
+result over 1 MiB is refused without publishing an artefact. Unreadable
+owner records return an error rather than implying complete coverage. Directory
+paths are tagged as UTF-8 or hex-encoded native bytes.
+
+- Test: `tests/catalogue_read_only.rs::catalogue_read_only`
+- Owner: `crates/cli/src/console.rs`, `src/console.rs`
+
 ## Parsing
 
 ### Pure entry points, one spelling
@@ -53,6 +82,48 @@ and a clamped tail reports its effective bound. The generated
 - Test: `tests/parser.rs::run_leaves_accept_control_and_report_work_refused_per_task`;
   `tests/fabric_transport.rs::read_only_dispatch_places_on_a_peer_and_forwards_by_id`
 - Owner: `crates/cli/src/run.rs`, `crates/cli/src/run/remote.rs`
+
+### Settled attempt provenance receipts
+
+`output TARGET --part receipt` prints one local, settled attempt's applied
+route, resolution source and canonical reviewer attribution. An attempt target
+is exact; `RUN` or `RUN/TASK` is accepted only when it selects exactly one
+attempt. Ambiguous targets,
+nonterminal attempts and peer transport are refused. `--trace` conflicts with
+`--part receipt`.
+
+The human output has this exact shape:
+
+```text
+Reviewer: codex/gpt-6.1-sol@high (openai; resolved from explicit), run RUN/TASK/ATTEMPT
+Reviewer provenance: observed, actor ACTOR, model codex/gpt-6.1-sol, family openai
+```
+
+A canonical task with a writer request uses `Writer:` instead of `Reviewer:`.
+The resolution source is `explicit`, `pool NAME`, `fallback` or `unknown`.
+A matching recorded pool pick proves `pool NAME`; an applied model matching the
+requested model proves `explicit`. A different applied model proves `fallback`
+only when it matches a canonical task fallback and the requested route was
+recorded as skipped. Other records print `unknown`.
+
+A settled attempt without a recorded route still produces a receipt. Missing
+route fields, unrecorded effort and uncatalogued model family print `unknown`;
+no provider default effort is inferred. Model names are qualified with their
+adapter before family lookup. The second line reports `AttemptFact.reviewer`
+provenance and actor identity, with its observed model and catalogue family.
+Missing reviewer fields print `unknown`.
+
+`--json` returns `run_id`, `task_id`, `attempt_id`, `adapter`, `model`, `effort`,
+`family`, `role` (`reviewer` or `writer`), `resolved_from`, the exact first
+`receipt` line and second `reviewer_provenance` line without trailing newlines,
+and `reviewer` with `provenance`, `actor_id`, `model` and `family`.
+- Why: chairs can cite grep-able provenance without calling a writer a reviewer
+  or guessing provider defaults.
+- Test: `tests/dispatch_provider.rs::receipt_output_resolves_run_task_and_attempt`;
+  `::receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts`;
+  `::receipt_output_reports_unknown_route_for_settled_lost_attempt`;
+  `crates/cli/src/lib.rs::bounded_waits_counts_and_byte_windows`
+- Owner: `crates/cli/src/run.rs`
 
 ### Positional route resolution
 
@@ -177,8 +248,20 @@ local branch and its worktree alone, so does a branch recreated or advanced to
 any other tip (even one the base contains), and a local branch whose tip the
 fetched base does not contain is refused and keeps its worktree as well as the
 branch. Removal carries that head and refuses, under the worktree lock, if the
-worktree's HEAD has moved since it was checked. The branch deletion carries it
-too: with no registered worktree it refuses a branch that any worktree has
+worktree's HEAD has moved since it was checked. When the selected project is
+that worktree, cleanup uses the verified primary checkout as its repository
+anchor, process cwd and output project. Canonical paths and NUL-delimited Git
+inventory handle symlink aliases and quoted paths. The landing worker census
+ignores itself and only its ancestor chain through the session leader; other
+observable live processes inside the lane refuse removal. An incomplete census
+or unknown ancestor hop refuses landing with a retry message; each exempted
+ancestor requires a strictly older native start stamp. Landing clears a writer reservation only
+through custody recovery: a verified prepared reservation never handed off,
+or an absent writer with a matching canonical terminal attempt, worktree/Git
+binding and verified settlement. Dirty and ignored-output prechecks pass under
+writer exclusion before lease clearance. Unknown, malformed and live reservations stay.
+The branch deletion carries the head too:
+with no registered worktree it refuses a branch that any worktree has
 checked out, is rebasing (paused or not) or is bisecting, as `git branch -d`
 does (read from Git's administrative directories, so a missing or unmounted
 checkout still holds its branch and an unreadable entry refuses), then deletes
@@ -191,6 +274,13 @@ instead of forcing, and the command exits 1 with `merged: true`.
 - Why: a landing is four routine steps, and none of them may widen what was
   reviewed or delete work that is not merged.
 - Test: `src/pr_land_tests.rs::pr_land_merges_then_fetches_fast_forwards_and_prunes`;
+  `::pr_land_prunes_the_selected_merged_worktree`;
+  `::pr_land_from_lane_ignores_only_its_callers`;
+  `::pr_land_refuses_incomplete_worker_census`;
+  `::pr_land_canonicalises_quoted_worktree_paths`;
+  `::pr_land_recovers_only_abandoned_prepared_writer_leases`;
+  `::pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores`;
+  `::pr_land_primary_with_separate_git_directory`;
   `::pr_land_refuses_each_unsafe_step_and_reports_the_rest`;
   `::pr_land_changes_nothing_when_the_merge_does_not_happen`;
   `::pr_land_leaves_a_local_namesake_of_a_fork_branch_alone`;

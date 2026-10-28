@@ -7,7 +7,9 @@
 
 mod domains;
 mod gc;
+mod github_policy;
 pub use gc::{ForeignWorktrees, GcSettings, ProjectGcSettings, parse_cache_size};
+pub use github_policy::GithubPolicy;
 mod harness;
 mod hooks;
 pub use harness::mcp_entry;
@@ -45,7 +47,8 @@ use serde::{Deserialize, Serialize, Serializer};
 use std::{collections::BTreeMap, fmt, path::PathBuf};
 use thiserror::Error;
 
-/// Errors never contain TOML text, rejected values or parser input excerpts.
+/// Errors contain no TOML text or parser excerpts; only numeric graph policy
+/// values may be included when rejected.
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("cannot encode config path at {path}")]
@@ -77,11 +80,13 @@ pub enum ConfigError {
     UnsupportedVersion { location: Location },
     #[error("config exceeds collection bounds at {location}")]
     CollectionLimit { location: Location },
-    #[error("invalid domain configuration at {location}: {source}")]
+    #[error("invalid domain configuration at {location}: {source}{rejected}")]
     Domain {
         location: Location,
         #[source]
         source: SectionError,
+        /// Safe numeric graph policy value, when available.
+        rejected: Box<String>,
     },
     #[error("config edit refused: {reason}")]
     Edit { reason: &'static str },
@@ -93,6 +98,8 @@ pub enum ConfigError {
     KnobRegistry,
     #[error("project location must be an absolute canonical directory path")]
     InvalidProjectLocation,
+    #[error("project GitHub policy is invalid")]
+    InvalidGithubPolicy,
     #[error("project binding state is invalid")]
     InvalidProjectBinding,
     #[error("project binding lock budget is invalid")]

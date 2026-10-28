@@ -25,6 +25,7 @@ struct Issue {
     location: Location,
     rule: &'static str,
     source: Option<SectionError>,
+    rejected: String,
 }
 impl Issue {
     fn error(self) -> ConfigError {
@@ -32,6 +33,7 @@ impl Issue {
             Some(source) => ConfigError::Domain {
                 location: self.location,
                 source,
+                rejected: Box::new(self.rejected),
             },
             None => ConfigError::Schema {
                 location: self.location,
@@ -339,7 +341,9 @@ fn inspect<T: DeserializeOwned + Serialize>(
         // A bad compiled asset is a build defect, not a finding in the user's
         // file. Validate it before any user override can mask the defect.
         if let Some(error) = (entry.validate)(&table).into_iter().next() {
-            return Err(domain_issue(entry.name, error, &compiled_sites, &compiled).error());
+            return Err(
+                domain_issue(entry.name, error, &table, &compiled_sites, &compiled).error(),
+            );
         }
         domains.insert(entry.name, Item::Table(table));
     }
@@ -418,6 +422,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
     let mut semantic_sites = compiled_sites.clone();
     Overrides {
         defaults: &defaults,
+        user: &user,
         sites: &user_sites,
         origin: &user_origin,
         origins: &mut origins,
@@ -436,7 +441,13 @@ fn inspect<T: DeserializeOwned + Serialize>(
             for error in (entry.validate)(table) {
                 let key = qualify(entry.name, &error.field);
                 let origin = origins.get(&key).unwrap_or(&compiled);
-                issues.push(domain_issue(entry.name, error, &semantic_sites, origin));
+                issues.push(domain_issue(
+                    entry.name,
+                    error,
+                    table,
+                    &semantic_sites,
+                    origin,
+                ));
             }
         }
     }
@@ -487,12 +498,34 @@ fn qualify(name: &str, field: &str) -> String {
     }
 }
 
+fn numeric_rejected(item: Option<&Item>) -> String {
+    item.and_then(Item::as_value)
+        .and_then(|value| match value {
+            Value::Integer(_) | Value::Float(_) => Some(format!(" (rejected value: {value})")),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 fn domain_issue(
     name: &str,
     mut error: SectionError,
+    table: &Table,
     sites: &BTreeMap<String, Site>,
     origin: &Origin,
 ) -> Issue {
+    // Graph policy bounds are numeric, so they can be shown without exposing
+    // arbitrary user strings such as credentials or private paths.
+    let rejected = if name == "fabric" && error.field.starts_with("graph.") {
+        let mut parts = error.field.split('.');
+        let mut item = parts.next().and_then(|key| table.get(key));
+        for key in parts {
+            item = item.and_then(|value| value.get(key));
+        }
+        numeric_rejected(item)
+    } else {
+        String::new()
+    };
     error.field = qualify(name, &error.field);
     let location = site(sites, &error.field, origin, false);
     error.field = location.key_path.clone();
@@ -501,12 +534,14 @@ fn domain_issue(
             location,
             rule: "type",
             source: None,
+            rejected,
         }
     } else {
         Issue {
             location,
             rule: "domain",
             source: Some(error),
+            rejected,
         }
     }
 }
@@ -552,6 +587,7 @@ fn decodes<T: DeserializeOwned>(table: &Table) -> bool {
 // cannot hide another. Only validated overrides enter the effective snapshot.
 struct Overrides<'a> {
     defaults: &'a Table,
+    user: &'a Table,
     sites: &'a BTreeMap<String, Site>,
     origin: &'a Origin,
     origins: &'a mut BTreeMap<String, Origin>,
@@ -561,6 +597,13 @@ struct Overrides<'a> {
 }
 impl Overrides<'_> {
     fn issue(&mut self, path: &[String], rule: &'static str) {
+        let graph_policy =
+            path.len() >= 4 && path[0] == "domains" && path[1] == "fabric" && path[2] == "graph";
+        let rejected = if graph_policy {
+            numeric_rejected(at(self.user, path))
+        } else {
+            String::new()
+        };
         self.issues.push(Issue {
             location: site(
                 self.sites,
@@ -569,7 +612,11 @@ impl Overrides<'_> {
                 rule == "unknown_key",
             ),
             rule,
-            source: None,
+            source: graph_policy.then(|| SectionError {
+                field: path.join("."),
+                code: rule,
+            }),
+            rejected,
         });
     }
     fn apply<T: DeserializeOwned>(
