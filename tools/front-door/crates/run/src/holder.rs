@@ -693,6 +693,7 @@ impl RunStore {
                 )
             };
             let check = match check {
+                Err(error) if crate::writer::worktree_removed(writer) => Err(error),
                 Err(error) if !matches!(error, RunError::ObjectImportLimit(_)) => {
                     if crate::artifacts::read_sealed(attempt, "cancel.json", RECORD_LIMIT)?
                         .is_some()
