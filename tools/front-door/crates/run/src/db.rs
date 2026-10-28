@@ -438,7 +438,7 @@ fn private_root(directory: &Directory) -> Result<()> {
     }
     Ok(())
 }
-fn companions(directory: &Directory, base: &str, request: &Request<'_>) -> Result<()> {
+pub(crate) fn companions(directory: &Directory, base: &str, request: &Request<'_>) -> Result<()> {
     let names = ["", "-wal", "-shm", "-journal"]
         .map(|suffix| std::ffi::OsString::from(format!("{base}{suffix}")));
     provenant_sqlite::check_companions(

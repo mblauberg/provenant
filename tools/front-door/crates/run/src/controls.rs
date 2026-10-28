@@ -1539,6 +1539,12 @@ impl RunStore {
             }
         }
         let run = created?;
+        self.inherit_contribution(
+            input.prior,
+            run.run_id,
+            writer.map(|(_, branch)| branch),
+            call,
+        )?;
         if run.run_id != prepared.run_id {
             ready = None;
         }

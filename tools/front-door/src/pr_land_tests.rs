@@ -10,6 +10,329 @@ use std::{
 
 const NUMBER: &str = "1668";
 
+/// Capture through dispatch, then retain through real land and gc.
+pub(crate) fn pr_contribution_roundtrip() -> Result {
+    use provenant_core::{CancelToken, Clock, OperationId, TaskId};
+    use provenant_run::{DispatchRequest, DispatchTask, Service};
+    let landing = landing()?;
+    let (_, context) = super::worktree_tests::writer_context(&landing.rig)?;
+    let store = super::worktree_tests::open_writer_store(&context)?;
+    fs::write(
+        landing.rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[domains.fabric.peers.unreachable]\nhost='{}'\ndestination='unreachable.invalid'\n",
+            provenant_core::HostId::from_bytes([99; 16]),
+        ),
+    )?;
+    let wall = provenant_os::clock::SystemClock::new().wall_now()?;
+    let clock = provenant_core::TestClock::new(
+        provenant_core::WallTime::from_micros(wall.as_micros() - 31 * 86_400_000_000)?,
+        provenant_core::MonoTime::from_micros(0),
+    );
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
+        cancel: &cancel,
+    };
+    let mut ids = Vec::new();
+    for index in 0..4_u8 {
+        let submit = || -> Result<DispatchRequest> {
+            Ok(DispatchRequest {
+                chair: None,
+                operation_id: OperationId::parse(&format!("contribution-{index}"))?,
+                tasks: vec![DispatchTask {
+                    build_heavy: false,
+                    title: None,
+                    profile: Default::default(),
+                    task_id: TaskId::from_bytes([index + 1; 16]),
+                    prompt: "local work".into(),
+                    base: None,
+                    head: None,
+                    route: provenant_run::RequestedRoute::Named {
+                        name: "senior".into(),
+                        effort: None,
+                    },
+                    account: None,
+                    fallback: vec![],
+                    timeout_seconds: 60,
+                    delivery_id: None,
+                    deliver: None,
+                    worktree: (index < 3).then(|| landing.worktree.clone()),
+                    access: Default::default(),
+                }],
+                concurrency: 1,
+                lane_depth: 1,
+                parent_attempt: None,
+            })
+        };
+        let run = Service::new(&store).dispatch(submit()?, &landing.worktree, &call)?;
+        let attempt = store.pending_attempts(run.run_id, &call)?[0].attempt_id;
+        ids.push(attempt.to_string());
+        assert_eq!(
+            Service::new(&store)
+                .dispatch(submit()?, &landing.worktree, &call)?
+                .run_id,
+            run.run_id
+        );
+        if index < 2 {
+            contribution_terminal(
+                &store,
+                &context,
+                attempt,
+                &landing.head,
+                if index == 0 {
+                    provenant_run::Outcome::Succeeded
+                } else {
+                    provenant_run::Outcome::Failed
+                },
+                &call,
+            )?;
+            continue;
+        }
+        store.withdraw(
+            attempt,
+            provenant_run::AttemptState::Queued,
+            provenant_run::Outcome::Cancelled,
+            "fixture ended",
+            clock.wall_now()?,
+            &call,
+        )?;
+        if index == 2 {
+            let resume = provenant_run::Resume {
+                prior: attempt,
+                expected_generation: 0,
+                operation_id: OperationId::parse("contribution-repair")?,
+                run_id: provenant_core::RunId::from_bytes([91; 16]),
+                attempt_id: provenant_core::AttemptId::from_bytes([92; 16]),
+                prompt: "repair".into(),
+                created_at: clock.wall_now()?,
+            };
+            let repaired = store.resume_fresh(&resume, "repair fixture", &call)?;
+            assert_eq!(
+                store.resume_fresh(&resume, "repair fixture", &call)?.run_id,
+                repaired.run_id
+            );
+            let id = store.pending_attempts(repaired.run_id, &call)?[0].attempt_id;
+            ids.push(id.to_string());
+            store.cancel(id, "repair cancelled", &call)?;
+        }
+    }
+    let read = || -> Result<serde_json::Value> {
+        let output = command(&landing.rig, &["pr", "contributions", NUMBER, "--json"])?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stdout.bytes)
+        );
+        Ok(json(&output)?["data"].clone())
+    };
+    assert!(read()?["attempts"].as_array().ok_or("attempts")?.is_empty());
+    git(&landing.rig, &["push", "-q", "origin", "feat"])?;
+    let template = landing.rig.project.join(".github/pull_request_template.md");
+    fs::write(
+        &template,
+        include_str!("../../../.github/pull_request_template.md"),
+    )?;
+    let summary = landing.rig.root.join("summary.md");
+    fs::write(
+        &summary,
+        "# Capture contributions\n\nRetain local attempts.\n",
+    )?;
+    let open_args = [
+        "pr",
+        "open",
+        "--from-attempt",
+        &ids[0],
+        "--branch",
+        "feat",
+        "--base",
+        "main",
+        "--summary-file",
+        summary.to_str().ok_or("path")?,
+        "--json",
+    ];
+    let mut dry = open_args.to_vec();
+    dry.push("--dry-run");
+    let preview = command(&landing.rig, &dry)?;
+    assert_eq!(
+        code(&preview),
+        0,
+        "{}",
+        String::from_utf8_lossy(&preview.stdout.bytes)
+    );
+    assert!(read()?["attempts"].as_array().ok_or("attempts")?.is_empty());
+    let opened = command(&landing.rig, &open_args)?;
+    assert_eq!(
+        code(&opened),
+        0,
+        "{}",
+        String::from_utf8_lossy(&opened.stdout.bytes)
+    );
+    let bound = read()?;
+    assert_eq!(bound["attempts"].as_array().ok_or("attempts")?.len(), 5);
+    fs::remove_file(template)?;
+    let landed = land(&landing)?;
+    assert_eq!(status(&landed, "worktree")?, "done", "{landed}");
+    assert!(!landing.worktree.exists());
+    let before = read()?;
+    let rows = before["attempts"].as_array().ok_or("attempts")?;
+    assert_eq!(rows.len(), 5, "{before}");
+    assert_eq!(before, bound);
+    for id in &ids {
+        let row = rows
+            .iter()
+            .find(|row| row["attempt"] == id.as_str())
+            .ok_or("missing attempt")?;
+        assert!(row["weight_millionths"].is_null());
+        if row["attempt"] == ids[0] || row["attempt"] == ids[1] {
+            assert_eq!(row["model"], "codex/fixture");
+            assert_eq!(row["account"], "fixture");
+        } else {
+            assert!(row["model"].is_null());
+            assert!(row["account"].is_null());
+        }
+        assert_eq!(row["head"], landing.head);
+    }
+    assert_eq!(rows.iter().filter(|row| row["role"] == "review").count(), 1);
+    assert_eq!(rows.iter().filter(|row| row["role"] == "repair").count(), 1);
+    assert_eq!(before["coverage"]["peer_attempts"], "unknown");
+    assert_eq!(
+        before["coverage"]["known_peer_hosts"],
+        serde_json::json!(["unreachable"])
+    );
+    let text = command(&landing.rig, &["pr", "contributions", NUMBER])?;
+    assert_eq!(code(&text), 0);
+    let text = String::from_utf8(text.stdout.bytes)?;
+    assert!(text.contains("role=repair model=unknown account=unknown weight=unknown"));
+    assert!(text.contains("peer_attempts: unknown (known hosts: unreachable)"));
+    let first = store.record(ids[0].parse()?, &call)?;
+    let log = context.state_root.as_path().join(format!(
+        "runs/{}/attempts/{}/stdout.log",
+        first.run_id, first.attempt_id
+    ));
+    fs::write(&log, vec![b'x'; 128 * 1024])?;
+    let gc = command(&landing.rig, &["gc", "--apply", "--json"])?;
+    assert_eq!(
+        code(&gc),
+        0,
+        "{}",
+        String::from_utf8_lossy(&gc.stdout.bytes)
+    );
+    assert!(!log.exists(), "expired capture was collected");
+    assert_eq!(
+        fs::metadata(log.with_file_name("stdout.log.tail"))?.len(),
+        64 * 1024
+    );
+    assert_eq!(read()?, before);
+    land(&landing)?;
+    assert_eq!(read()?, before);
+    Ok(())
+}
+
+/// Provider exit seam shared with the landing fixtures; publication is real.
+fn contribution_terminal(
+    store: &provenant_run::RunStore,
+    context: &provenant_run::ExecutionContext,
+    id: provenant_core::AttemptId,
+    head: &str,
+    outcome: provenant_run::Outcome,
+    call: &provenant_run::Request<'_>,
+) -> Result {
+    use provenant_supervisor::custody::{
+        ExitObservation, PublicationState, Scope, SettlementEvidence,
+    };
+    use std::os::unix::fs::OpenOptionsExt;
+    let record = store.record(id, call)?;
+    let exit = ExitObservation {
+        publication: PublicationState::Durable,
+        scope: Scope {
+            run: record.run_id,
+            attempt: id,
+            generation: record.generation,
+        },
+        termination: Some(provenant_os::exec::Termination::Exit(
+            if outcome == provenant_run::Outcome::Succeeded {
+                0
+            } else {
+                1
+            },
+        )),
+        never_spawned: false,
+        stop_reason: None,
+        delivered_signals: vec![],
+        reaped: vec![],
+        omitted_reaped: 0,
+        spared: vec![],
+        omitted_spared: 0,
+        warnings: vec![],
+        omitted_warnings: 0,
+        terminal_observed: true,
+        unresolved_cleanup: false,
+        unresolved_pids: vec![],
+        settlement_evidence: SettlementEvidence::DarwinCensusAndCustodyLease,
+        stdout: Default::default(),
+        stderr: Default::default(),
+    };
+    let mut evidence = serde_json::to_value(&exit)?;
+    evidence
+        .as_object_mut()
+        .ok_or("exit fixture")?
+        .remove("publication");
+    evidence["schema_version"] = 1.into();
+    let directory = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}", record.run_id));
+    for (name, bytes) in [
+        ("process-exit.json", serde_json::to_vec(&evidence)?),
+        (
+            "writer-terminal.json",
+            serde_json::to_vec(
+                &serde_json::json!({"schema_version":1,"head":head,"protected_paths":[]}),
+            )?,
+        ),
+        ("custody.lock", vec![]),
+    ] {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(directory.join(name))?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+    }
+    let route = provenant_run::RouteRecord {
+        provider: Some("codex".into()),
+        model: Some("codex/fixture".into()),
+        account_label: Some("fixture".into()),
+        ..Default::default()
+    };
+    store.publish_terminal(
+        id,
+        record.revision,
+        &provenant_run::TerminalPublication {
+            outcome,
+            started_at: Some(record.queued_at),
+            finished_at: call.clock.wall_now()?,
+            provider_ms: Some(1),
+            reason: None,
+            result: "fixture output",
+            complete: true,
+            redacted: false,
+            resolved_route: Some(route.clone()),
+            applied_route: Some(route.clone()),
+            observed_route: Some(route),
+            usage: Default::default(),
+            session: None,
+        },
+        &exit,
+        call,
+    )?;
+    Ok(())
+}
+
 /// The fake `gh` the driver re-enters as: a passing, unchanged pull request.
 pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
     let call = args.join(" ");
@@ -24,6 +347,13 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
         "{call}"
     )?;
     match call.as_str() {
+        value if value.starts_with("pr create ") => {
+            std::io::copy(&mut io::stdin(), &mut io::sink())?;
+            io::stdout().write_all(b"https://github.com/owner/repo/pull/1668\n")?;
+        }
+        "repo view --json nameWithOwner" => {
+            io::stdout().write_all(br#"{"nameWithOwner":"owner/repo"}"#)?;
+        }
         "pr view 1668 --json headRefOid" => {
             io::stdout().write_all(&fs::read(dir.join("head.json"))?)?
         }

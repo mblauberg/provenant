@@ -330,6 +330,9 @@ impl RunStore {
         if !crate::reader::write_grants_fit(&write_grants.grants) {
             return Err(RunError::Validation("invalid write grants"));
         }
+        let mut contribution = expected.clone();
+        contribution.resolved_route = Some(route.clone());
+        self.retain_contribution_route(&contribution, call)?;
         self.write(call, |tx| {
             let old = self.record(id, call)?;
             if old.state != AttemptState::Queued

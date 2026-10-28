@@ -119,7 +119,7 @@ pub fn main() -> std::process::ExitCode {
         Some("exec" | "-p") => exit("lane provider", lane_provider()),
         Some("--writer-provider") => exit("writer provider", provider(&args)),
         // The fake `gh` of the `land` fixtures.
-        Some("pr") => {
+        Some("pr" | "repo") => {
             let args: Vec<String> = std::env::args().skip(1).collect();
             match crate::pr_land_tests::fake_gh(&args) {
                 Ok(code) => ExitCode::from(code),
@@ -228,9 +228,11 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "pr_land_refuses_when_a_worktree_entry_cannot_be_read",
             "pr_land_refuses_when_worktree_state_is_malformed",
             "pr_open_refuses_what_the_receipts_cannot_support",
+            "pr_contribution_roundtrip",
         ],
         |name| {
             let result = match name {
+                "pr_contribution_roundtrip" => crate::pr_land_tests::pr_contribution_roundtrip(),
                 "gc_fetches_default_and_removes_only_clean_merged_worktrees" => gc_fetches_default_and_removes_only_clean_merged_worktrees(),
                 "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links" => gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links(),
                 "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch" => gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch(),

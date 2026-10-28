@@ -894,6 +894,11 @@ impl RunStore {
                 });
                 continue;
             }
+            if child.is_some()
+                && let Some(parent) = request.parent_attempt
+            {
+                self.capture_child_contribution(parent, &record, call)?;
+            }
             // At the cap the attempt stays Queued: a terminal refusal would spend
             // the task's only child attempt. Later attempts meet the same cap.
             if self.sealed_requester.is_some() && self.check_held_capacity(id).is_err() {

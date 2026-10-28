@@ -708,6 +708,7 @@ impl RunStore {
         let AttemptState::Terminal { finished_at, .. } = next.state else {
             return Err(RunError::Validation("terminal state missing"));
         };
+        self.retain_contribution_route(next, call)?;
         let id = old.attempt_id;
         self.write(call, |tx| {
             let changed = tx.execute("UPDATE attempts SET revision=?1,terminal=1,tmp_retained=1,record=?2 WHERE id=?3 AND revision=?4 AND terminal=0", params![sql_int(next.revision)?, bytes(next)?, id.to_string(), sql_int(old.revision)?])?;

@@ -243,6 +243,21 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
             let number = url
                 .and_then(|url| url.trim().rsplit('/').next())
                 .and_then(|tail| tail.parse::<u64>().ok());
+            let captured = number
+                .ok_or_else(|| "opened PR but its number could not be read".to_owned())
+                .map_err(Into::into)
+                .and_then(|number| {
+                    super::contributions::bind(&resolved, &plan.branch, number, plan.head)
+                });
+            if let Err(error) = captured {
+                return fail(
+                    LEAF,
+                    Outcome::Error,
+                    "PR_CONTRIBUTIONS",
+                    &format!("PR opened, contribution binding failed: {error}"),
+                    globals,
+                );
+            }
             data["url"] = json!(url.map(str::trim));
             data["number"] = json!(number);
             let line = match (number, url) {

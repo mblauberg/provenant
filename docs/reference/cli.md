@@ -3392,6 +3392,32 @@ bounds are null. Positional arguments have no long flag.
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
+## `provenant pr contributions`
+
+| Argument | Contract |
+|---|---|
+| `number` | `{"name": "number", "positional": true, "required": true}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "number"
+      ],
+      "multiple": true,
+      "name": "Contributions",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant pr watch`
 
 | Argument | Contract |

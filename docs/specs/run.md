@@ -85,13 +85,45 @@ after sealing are refused. Callers must establish contribution from trusted
 host facts, not transcripts. The database and its SQLite companions are part
 of host state and must be retained in backups.
 
-This is a storage primitive only. Dispatch, review, repair, PR and landing
-paths do not yet populate it, and there is no CLI reader or complete-coverage
-claim. In particular the round-trip test does not establish GC or landing
-retention. A later integration must settle how to handle a PR discovered after
-allocation is sealed and exercise those paths before using it for a study.
-- Test: `crates/run/src/pr_contribution.rs::pr_contribution_roundtrip`
-- Owner: `crates/run/src/pr_contribution.rs`
+Capture uses facts owned by the attempt's local host. Writer dispatch into a
+registered worktree snapshots project, branch and attempt before launch.
+Read-only dispatch from that worktree records the `review` role; writers use
+`worker`, and their continuations use `repair`. Capture includes queued,
+failed and cancelled attempts. An attempt appears once per PR, including on
+dispatch, continuation or binding replay. Resolved model and account labels
+are retained at admission and terminal publication; requested placement is
+not substituted for unknown execution facts.
+
+`pr open` binds the branch to its canonical GitHub repository, PR number and
+head after creation; `--dry-run` captures nothing. `land` binds before merging
+or removing worktrees. Landing skips new bindings for fork PRs, protecting
+local namesake branches. Binding resolves every captured local attempt on the
+branch, and later dispatches
+resolve against retained bindings. Links describe branch participation, not
+commit authorship. Branch names are scoped by the local project identity;
+historical links remain when the branch is removed. Automatic capture leaves
+weights unknown and never seals an allocation. An explicit sealed allocation
+continues to refuse a newly discovered link transactionally.
+
+`provenant pr contributions N [--json]` reads retained local links with role,
+model, account, branch, head and `weight_millionths`. JSON null and text
+`unknown` preserve missing facts. The reader opens an existing store without
+creating or migrating it; GitHub's repository lookup supplies the canonical
+repository namespace. Version 1 stores migrate at the next host capture or
+binding. The database is outside attempts and worktrees, so `gc --apply`,
+landing cleanup and worktree removal retain links and metadata.
+
+Coverage is explicitly local and prospective. Peer-owned attempts are out of
+scope: `coverage.peer_attempts` is always `unknown`, accompanied by known
+configured peer host labels. The reader never opens peer records or forwards
+peer queries. Older attempts without captured membership are not inferred
+from transcripts or centrally backfilled.
+
+- Tests: `src/pr_land_tests.rs::pr_contribution_roundtrip` drives dispatch,
+  continuation, PR creation, landing, worktree removal and GC;
+  `crates/run/src/pr_contribution.rs` covers allocation and retained placement.
+- Owners: `crates/run/src/pr_contribution.rs`, `crates/run/src/service.rs`,
+  `src/pr/contributions.rs`.
 
 ## Work correlation lookup
 

@@ -693,6 +693,15 @@ pub(crate) fn run(
         if expected.is_some_and(|expected| current != expected) {
             return Err(format!("pull request head moved to {current}").into());
         }
+        let view = pull(&project, &text)?;
+        if !view.cross_repository {
+            let resolved = roots::resolve(
+                globals,
+                roots::Workspace::Checkout,
+                roots::Product::Optional,
+            )?;
+            super::contributions::bind(&resolved, &view.branch, number, current)?;
+        }
         checks(&project, &text, current, true)?;
         merge(&project, &text, current)?;
         let view = pull(&project, &text)?;
