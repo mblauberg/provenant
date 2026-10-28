@@ -30,8 +30,9 @@ final class QuotaModel {
     private(set) var overview: ConsoleOverview?
     private(set) var overviewError: String?
     private(set) var overviewUpdatedAt: Date?
-    @ObservationIgnored private var readingLanes = false
+    @ObservationIgnored private var overviewGate = OverviewReadGate()
     @ObservationIgnored private var lanesReadAt: Date?
+    @ObservationIgnored private var overviewWatcher: OverviewWatcher?
     /// The status item's content, replaced only when it changes.
     private(set) var label = MenuLabel()
     @ObservationIgnored private var timer: Timer?
@@ -71,32 +72,36 @@ final class QuotaModel {
             MainActor.assumeIsolated { self?.online = path.status == .satisfied; self?.tickOnceOnline() }
         }
         network.start(queue: .main)
+        overviewWatcher = OverviewWatcher(root: stateRoot) { [weak self] in
+            MainActor.assumeIsolated { self?.refreshLanes(force: true) }
+        }
+        refreshLanes(force: true)
         loadCurrent()
     }
 
-    /// Reads the overview only when the panel opens (nothing in the status item uses it), at most once every
-    /// 10 s and never two at once.
-    private func refreshLanes() {
-        guard !fixture, !readingLanes else { return }
-        if let at = lanesReadAt, Date.now.timeIntervalSince(at) < 10 { return }
-        readingLanes = true
+    /// One read at a time; an invalidation during the read always gets a follow-up.
+    private func refreshLanes(force: Bool = false) {
+        guard !fixture else { return }
+        if !force, !overviewGate.reading, let at = lanesReadAt, Date.now.timeIntervalSince(at) < 10 { return }
+        guard overviewGate.begin(force: force) else { return }
         lanesReadAt = .now
         let cached = launcher
         Task {
             let (resolved, outcome) = await Task.detached(priority: .background) { CLI.overview(cached) }.value
-            readingLanes = false
+            let rerun = overviewGate.finish()
             launcher = launcher ?? resolved
             switch outcome {
             case .success(let found): overview = found; overviewError = nil; overviewUpdatedAt = .now
             case .failure(let failure): overviewError = failure.message; log.error("\(failure.message, privacy: .public)")
             }
+            if rerun { refreshLanes(force: true) }
         }
     }
 
     var stateRoot: URL { LaneBoard.stateRoot(report: report) }
 
     /// ⌘R.
-    func refresh() { lanesReadAt = nil; refreshLanes(); run(.manual) }
+    func refresh() { refreshLanes(force: true); run(.manual) }
 
     /// Each menu open; avoid closely spaced ticks.
     func panelOpened() {
@@ -257,17 +262,46 @@ final class QuotaModel {
 final class ReportWatcher {
     private let file: URL, changed: (Data) -> Void
     private var source: DispatchSourceFileSystemObject?
+    private var parent: DispatchSourceFileSystemObject?
+    private var parentPath: String?
     private var seen: [Int]?
 
     init(file: URL, changed: @escaping (Data) -> Void) {
         (self.file, self.changed) = (file, changed)
+        watchParent()
         arm()
     }
 
-    deinit { source?.cancel() }
+    deinit { source?.cancel(); parent?.cancel() }
+
+    private func watchParent() {
+        var ancestor = file.deletingLastPathComponent().deletingLastPathComponent()
+        while !FileManager.default.fileExists(atPath: ancestor.path), ancestor.path != "/" {
+            ancestor.deleteLastPathComponent()
+        }
+        if parent != nil, parentPath == ancestor.path { return }
+        parent?.cancel(); parent = nil; parentPath = nil
+        let fd = open(ancestor.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let parent = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .delete, .rename], queue: .main)
+        parent.setEventHandler { [weak self] in
+            guard let self else { return }
+            if let events = self.parent?.data, !events.isDisjoint(with: [.delete, .rename]) {
+                self.parent?.cancel(); self.parent = nil; self.parentPath = nil
+                self.source?.cancel(); self.source = nil
+            }
+            self.watchParent()
+            self.arm()
+        }
+        parent.setCancelHandler { close(fd) }
+        self.parent = parent
+        parentPath = ancestor.path
+        parent.resume()
+    }
 
     /// Opens the report directory; it may not exist until the first tick creates it.
     func arm() {
+        if parent == nil { watchParent() }
         guard source == nil else { return }
         let fd = open(file.deletingLastPathComponent().path, O_EVTONLY)
         guard fd >= 0 else { return }
