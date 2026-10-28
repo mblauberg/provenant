@@ -42,7 +42,7 @@ Apply the character budget, front-loading and exclusion-naming rules in the
 description contract in [../SKILL.md](../SKILL.md). This branch's own
 consequence: write it as `Use for`/`Use when`, third person, describing
 *when* to load the skill rather than summarising its workflow, in the
-concrete symptoms/tools/file types a user would actually say — not generic
+concrete symptoms/tools/file types a user would actually say, not generic
 capability language.
 
 ## Body contract

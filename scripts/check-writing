@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Check skill and library Markdown for the audited house-style regressions."""
+
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+
+ROOT = Path(__file__).resolve().parent.parent
+# These are required output formats, not prose punctuation.
+EXACT_FORMATS = {
+    "skills/prototype/SKILL.md": {
+        "**Answer:** yes/no/partial — <one paragraph, numbers where measured>",
+    },
+    "skills/code-review/references/finding-contract.md": {
+        "[P1][introduced] path/file.ts:42 — Short title",
+        "[P1][introduced] path/file.ts:42 — problem; mechanism/impact; fix; evidence.",
+    },
+}
+US_BEHAVIOUR = re.compile(r"\bbehavi[o]rs?\b", re.IGNORECASE)
+
+
+def violations(path, content):
+    for number, line in enumerate(content.splitlines(), 1):
+        if line in EXACT_FORMATS.get(path, set()):
+            continue
+        if "—" in line:
+            yield f"{path}:{number}: replace em dash punctuation"
+        # Preserve identifiers and syntax in inline code.
+        prose = re.sub(r"`[^`]*`", "", line)
+        if US_BEHAVIOUR.search(prose):
+            yield f"{path}:{number}: use Australian spelling: behaviour"
+
+
+def main():
+    paths = subprocess.check_output(
+        ["git", "ls-files", "-z", "--", "skills/*.md", "library/*.md"],
+        cwd=ROOT,
+    ).decode().split("\0")
+    findings = [
+        finding
+        for path in paths if path
+        for finding in violations(path, (ROOT / path).read_text())
+    ]
+    for finding in findings:
+        print(finding, file=sys.stderr)
+    return int(bool(findings))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""Exercise writing regressions and the required-format exceptions."""
+
+from pathlib import Path
+import runpy
+
+
+check = runpy.run_path(str(Path(__file__).with_name("check-writing")))
+violations = check["violations"]
+assert not list(violations("skills/example.md", "Expected behaviour."))
+assert list(violations("skills/example.md", "Expected behavi" + "or."))
+assert list(violations("skills/example.md", "Expected BEHAVI" + "ORS."))
+assert not list(violations("skills/example.md", "The `behavi" + "or` field."))
+assert list(violations("skills/example.md", "An aside \u2014 prose."))
+for path, formats in check["EXACT_FORMATS"].items():
+    for line in formats:
+        assert not list(violations(path, line))
+        assert list(violations("skills/example.md", line))
+        assert list(violations(path, line + " changed"))
+print("Writing check fixtures passed.")

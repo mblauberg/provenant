@@ -5,10 +5,10 @@ Anchor: `tests/parser.rs`, `crates/cli/src/render.rs`, `tests/hooks.rs`
 
 One executable, `provenant`, serves people, skills, hooks and CI. The `cli`
 crate parses arguments, calls typed library operations and renders typed
-results. The [cross-cutting decisions](README.md#cross-cutting-decisions) define the envelope, exit codes and wait budgets. `provenant help --json` is the
-authoritative catalogue, and the generated [CLI
-reference](../reference/cli.md) lists every leaf, flag and bound. Paths are
-relative to `tools/front-door/`.
+results. The [cross-cutting decisions](README.md#cross-cutting-decisions)
+define the envelope, exit codes and wait budgets. The machine-readable help
+catalogue owns command syntax; the generated [CLI reference](../reference/cli.md)
+lists every leaf, flag and bound. Paths are relative to `tools/front-door/`.
 
 ## Parsing
 
@@ -25,11 +25,9 @@ duplicate or conflicting options fail with exit 2, and paths stay raw bytes.
 
 ### Targets and manifests never guess
 
-`TARGET` is `RUN[/TASK[/ATTEMPT]]`, and an ambiguous name fails and lists the
-candidates rather than picking the newest. A manifest must be exactly
-`{schema_version:1,tasks:[…]}` with the tagged `route` object shared with
-Fabric; flat route fields are rejected, and a manifest conflicts with the
-per-task route, access and timeout flags.
+An ambiguous target fails and lists candidates rather than picking the newest.
+CLI and Fabric submissions share one typed request model. Manifest validation
+rejects conflicting task settings rather than silently choosing a source.
 - Why: cancel and resume act on exactly one attempt, and one request shape
   serves CLI and MCP.
 - Test: `crates/run/src/service.rs::bare_target_resolves_attempts_and_unambiguous_runs`;
@@ -38,11 +36,9 @@ per-task route, access and timeout flags.
 
 ### Output references and bounded tails
 
-`output` accepts a bare attempt, `RUN/ATTEMPT`, `HOST/ATTEMPT`, or the
-three-part target. `--host` selects a configured peer's own attempt. Local
-tails above 500 lines are clamped to 500 and the JSON result reports the
-effective tail and whether it was clamped. Peer output retains its existing
-part and tail restrictions.
+Output resolves the requested attempt on its owning host. Reads are bounded,
+and a clamped tail reports its effective bound. The generated
+[CLI reference](../reference/cli.md) owns target syntax and read limits.
 - Why: a chair can inspect a precise attempt without copying a full target or
   opening a shell on its host.
 - Test: `tests/parser.rs::run_leaves_accept_control_and_report_work_refused_per_task`;
@@ -51,9 +47,8 @@ part and tail restrictions.
 
 ### Positional route resolution
 
-`route resolve NAME` accepts a route name or an unambiguous catalogue model
-name, alongside the explicit `--route` and `--model` forms. Unknown or
-ambiguous names report candidates and examples.
+Route lookup resolves only a named route or an unambiguous catalogue model.
+Unknown or ambiguous names report candidates and examples.
 - Why: interactive route lookup should explain how to select a specific match.
 - Test: `tests/route.rs`
 - Owner: `crates/cli/src/route.rs`
@@ -62,13 +57,13 @@ ambiguous names report candidates and examples.
 
 ### One bounded envelope, never truncated
 
-With `--json` every command emits one envelope with area-specific fields inside
-`data`. Results are capped at 1 MiB: the renderer checks size before
-writing, and an oversized result fails with `RESULT_TOO_LARGE` (exit 3) with a
-pointer to a published file or paged read. The renderer never truncates a result or reruns a
-mutation. Paged lists bind a cursor to the input digest and keep findings at
-exit 1 on every page. Human-readable output escapes terminal control sequences, including in
-peer text.
+The renderer checks result size before writing. An oversized result fails
+with `RESULT_TOO_LARGE` (exit 3) and a pointer to a published file or paged
+read; it never truncates a result
+or reruns a mutation. Paged lists bind their cursor to the input digest and
+preserve findings on every page. Human-readable output escapes terminal
+control sequences, including in peer text. Envelope and exit-code contracts
+belong to the [cross-cutting decisions](README.md#cross-cutting-decisions).
 - Why: a result must be whole or absent, and a lane must not forge terminal
   output.
 - Test: `crates/cli/src/render.rs::oversize_is_rejected_before_any_stdout_and_lf_counts`;
@@ -78,9 +73,10 @@ peer text.
 
 ### Waits are readers
 
-Every wait takes an explicit budget (1 to 14400 s on the CLI, 1 to 55 s
-over MCP). A met condition, including a lane needing input, exits 0. Expiry
-exits 124, and neither expiry nor cancelling a wait stops the work.
+Every wait has an explicit budget. A lane needing input can satisfy a wait.
+Neither expiry nor cancelling a wait stops the work. The generated
+[CLI](../reference/cli.md) and [MCP](../reference/mcp-tools.md) references
+own the accepted bounds.
 - Why: an impatient reader must never kill a healthy lane.
 - Test: `crates/cli/src/lib.rs::bounded_waits_counts_and_byte_windows`;
   `crates/supervisor/tests/custody.rs::cancelled_reader_preserves_healthy_custody_and_cancel_escalates`
@@ -88,35 +84,21 @@ exits 124, and neither expiry nor cancelling a wait stops the work.
 
 ### Lane waits count only new settlements
 
-`lanes --wait` counts a lane only if it was unsettled when the wait started
+An unqualified lane wait counts a lane only if it was unsettled when the wait started
 or settled since, so a settled older attempt never satisfies a wait on a newer
 one. The wait starts at command entry, not at the first answer, so a lane
 that settles while a peer is unreachable still counts when the peer returns.
-`--since TIME` also counts lanes that settled at or after that time. Without
-`--id` the lanes are chosen by settlement time, not queue order, so one queued
-before the window that settled inside it counts; the scan covers the session's
-newest 1000 lanes and is refused beyond that. An attempt named by its exact ID
-counts whenever it settled. When every lane
-named by `--id RUN[/TASK]` settled before the wait started, the wait is
-refused (exit 2) with the count, instead of returning at once or idling to
-expiry; the result reports `ignored_settled` otherwise. Without `--id`, a wait
-covers the calling session's lanes and resumes after the settlements that
-session last acknowledged. `--session LABEL` selects the lanes another agent
-label submitted on this host, and narrows `--id` and listings the same way.
-`--host PEER` waits on or lists the peer's own lanes (its newest 100, with any
-lane it saw running tracked by ID until it settles) and reads `--session` as an
-agent label on the peer. One poll
-of a wait or watch draws every peer read (each host, each 100 lanes, and the
-lookup of tracked lanes) on a single deadline fixed when the poll starts. A read is
-capped by what the earlier reads left (at most `limits.peer_seconds`), and no
-read after the first starts at or after the deadline, so a one-second watch
-ends in about a second. The cap covers the whole SSH child: its termination
-and reap grace come out of the time left, not on top of it, so even a wrapper
-that ignores `TERM` is gone by the deadline (to scheduling accuracy). The one
-exception is the first read of `--wait 0`, which has no time left and keeps a
-one-second minimum with the usual quarter-second termination and reap
-allowances after it. `--wait` still excludes `--state` and
-`--cursor`.
+Time-filtered waits select by settlement time rather than queue order. An
+exactly named attempt counts whenever it settled; naming only lanes that
+already settled refuses with an explanation. Session selection narrows
+listings and waits consistently, including on peers. An unqualified wait
+resumes after the calling session's last acknowledged settlements.
+
+Each poll shares one deadline across all peer reads, including lookups of
+previously observed running lanes that have moved off the page. Reads consume
+the remaining budget, including child termination and reap time. A zero-budget
+wait still makes its first bounded read. Failed or incomplete bounded scans
+refuse rather than silently omitting lanes.
 - Why: a stale settlement must never wake a chair that waits for newer work,
   and selecting by session removes hand-copied ID lists.
 - Test: `crates/cli/src/run/watch.rs::a_settled_older_attempt_never_satisfies_a_wait_on_a_newer_one`;
@@ -142,15 +124,10 @@ allowances after it. `--wait` still excludes `--state` and
 
 ### Lane watch is one stable line per event
 
-`lanes --watch[=SECONDS]` (default and maximum 14400) selects lanes as a wait
-does and prints one line per state a counted lane enters, then `end settled
-lanes=N`, or `end timeout lanes=N pending=M` with exit 124 when the budget
-passes first. A line is `STATE RUN/TASK/ATTEMPT`, with ` host=ID` for a peer's
-lane, and carries no free text. Each line is flushed as written, so a
-background shell or monitor sees it at once. A lane dispatched during the
-watch joins it. With `--json` each line is a JSON object with `event: lane`
-and the final line is the usual envelope. `--watch` excludes `--wait`,
-`--state`, `--all` and `--cursor`.
+A lane watch uses the same selection rules as a wait and emits each observed
+state transition once. Event lines contain stable identifiers rather than free
+text and are flushed immediately. Newly dispatched lanes join the watch.
+The final event distinguishes settlement from timeout.
 - Why: a chair must be told when work settles without polling for it.
 - Test: `crates/cli/src/run/watch.rs::watch_emits_each_state_once_and_ends_when_all_settle`;
   `::watch_times_out_with_pending_lanes_and_names_the_host`
@@ -158,19 +135,16 @@ and the final line is the usual envelope. `--watch` excludes `--wait`,
 
 ### Status selection
 
-`status` lists every active lane and the twenty newest settled lanes, newest
-first. `status --json` returns the same selection as full records. `--all`
-selects all history, paged by `--limit` and `--cursor`.
+Status prioritises active work and recent settlements. Human and structured
+output use the same selection; historical reads are paged.
 
 ## Guards
 
 ### Merge guard
 
-`land NUMBER` merges only the head it verified: the pull request head read
-before the checks, or the full object ID given with the hidden `--head SHA`.
-Landing a reviewed head passes `--head SHA`; `land NUMBER` alone lands the
-current verified head. Human output prints `merged #NUMBER FULL_SHA`; JSON
-retains the full SHA in `data.head`.
+Landing merges only the head it verified. When the caller pins a reviewed
+head, a mismatch refuses before checks or merge. Otherwise, verification
+captures the current head. Reports retain the full verified object ID.
 `pr watch` and `land` need at least one passing check (the rest passing or
 skipped), refuse a head change during verification and fail closed on
 incomplete evidence.
@@ -215,22 +189,12 @@ instead of forcing, and the command exits 1 with `merged: true`.
 
 ### Pull request bodies come from receipts
 
-`pr open --from-attempt ATTEMPT --summary-file FILE` fills the repository's
-`.github/pull_request_template.md` from the local attempt's record and, when
-the attempt has one, its delivery receipt: the summary (whose heading or first
-line is the title), `Closes #N` for each `--issue`, the head to approve, the
-risk tier, the author and reviewer routes with their receipt paths, the head
-each review read, and a gate table whose empty cells say `pending`, `none` or
-`not recorded` rather than staying empty. Reviews come from `--review` or the
-delivery receipt. Only a `succeeded` or `review_required` attempt with a
-recorded head can back a pull request; a template missing a section it fills
-is refused; the delivered branch must be at the attempt's head on the remote;
-and an attempt that ran on a peer is refused, as its record lives there. The
-attempt records no issue, so issues are named with `--issue`. `--dry-run`
-prints the title and body and opens nothing. `pr status [N...]` prints one
-line per pull request: `#N STATE HEAD checks=P/T [fail=F] [pending=W]
-merge=STATE review=DECISION`, with `draft` appended for a draft, and this
-account's open pull requests when none is named.
+Pull request creation fills the repository template from a local settled
+attempt and its delivery receipt. The recorded head must match the delivered
+remote branch. The body identifies the head reviewed, route provenance and
+gate evidence; absent evidence is stated explicitly. Missing required template
+sections, unsuitable attempt states and peer-owned records refuse creation.
+The generated [CLI reference](../reference/cli.md) owns invocation syntax.
 - Why: the chair rebuilt the same body by hand for every pull request, and a
   hand-built body can state a head or route the receipts do not hold.
 - Test: `crates/cli/src/pr_body.rs::the_repository_template_is_filled_from_the_receipts`;
@@ -320,6 +284,6 @@ clean result. No check fetches or rewrites.
 
 ## Not provided
 
-- Top-level `run`, `batch`, `reap` or `fabric dispatch`: the run verbs cover them.
+- Separate `batch`, `reap` or `fabric dispatch` commands: run submission covers them.
 - `worktree remove --force` or remote branch deletion.
 - `commit-msg`, Codex or OpenCode hooks: no recorded protocol.

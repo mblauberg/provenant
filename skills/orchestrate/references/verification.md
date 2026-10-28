@@ -1,13 +1,13 @@
 # Cross-family verification
 
 Cross-family review works because different families miss different things, so an outside judge catches
-errors a self-check won't. That gain is **decorrelation pressure, not magic** — and it is fragile.
+errors a self-check won't. That gain is **decorrelation pressure, not magic**, and it is fragile.
 Protect it.
 
 ## Why self-verification is weak
 
 A model self-grading shares the latent cause of its own error (hallucinated premise, missed constraint,
-"house style"). It also exhibits **self-preference** — it favours outputs that look like its own. A
+"house style"). It also exhibits **self-preference**: it favours outputs that look like its own. A
 different family removes that specific bias. (The bias is real but smaller than folklore; treat the
 effect as "may reduce", not "removes".)
 
@@ -15,18 +15,18 @@ effect as "may reduce", not "removes".)
 
 1. **Different family, always.** Never let the generating model be the final judge of its own output.
 2. **Independence is earned, not assumed.** Two things silently re-correlate cross-family errors:
-   - **Shared context / scratchpad** — if the verifier reads your reasoning, it inherits your framing.
+   - **Shared context / scratchpad**: if the verifier reads your reasoning, it inherits your framing.
      Give it the **artifact only**, plus the minimum it needs, not your scratchpad.
-   - **Shared prompt template** — identical phrasing pushes different models toward the same answer.
+   - **Shared prompt template**: identical phrasing pushes different models toward the same answer.
      **Vary the framing** of the verification prompt.
    When it matters, **measure** overlap: run two families on a small set and check how often they agree
    *and are both wrong*. If overlap is high, the second opinion is buying little.
 3. **Scout ≠ veto.** Match judge competence to task difficulty. A weaker/cheaper cross-family model may
-   *flag* candidates for review, but must **never override** a stronger model's nuanced output — on hard
+   *flag* candidates for review, but must **never override** a stronger model's nuanced output; on hard
    items a weak judge throws false rejections of correct work. Escalate real disagreement to a strong
    judge or to ground truth.
-4. **Objective checks beat taste.** Prefer locally-checkable verification — does the cited source exist
-   and say that? does the test pass? does the number reconcile? does the quote match? — over holistic
+4. **Objective checks beat taste.** Prefer locally-checkable verification (does the cited source exist
+   and say that? does the test pass? does the number reconcile? does the quote match?) over holistic
    "is this good?". Holistic judging is the most bias-prone and adversary-fragile mode.
 
 ## How to run a verification pass
@@ -42,7 +42,7 @@ effect as "may reduce", not "removes".)
    Ask for a ranked list of problems with location + fix, and an explicit "what it gets right".
    Follow the [review outcome](../../code-review/references/finding-contract.md#review-outcome) rule.
 4. For high-stakes work, use **two** different families (a small jury) when cost/data policy allow it.
-   Don't simple-majority-vote — weigh by competence and by whether a flag is objectively checkable.
+   Don't simple-majority-vote; weigh by competence and by whether a flag is objectively checkable.
 5. **Beware debate convergence:** multi-round debate can settle on a confident *falsehood* if the
    models share a blind spot or the judge rewards confidence. Keep an objective anchor in the loop.
 6. Fold corrections; record unresolved disagreements in the scratchpad for a user decision.
@@ -135,15 +135,15 @@ deterministic gates and user one-way-door decisions still win.
 ### Panel presets and receipts
 
 The council above is one shape of a general mechanism. A panel is a chair-run
-reduction over review records the chair already dispatched — it spawns nothing
+reduction over review records the chair already dispatched; it spawns nothing
 of its own.
 
 | preset | distribution | reduction | minimum completed |
 |---|---|---|---|
-| `council` | `shared` — every member answers the same question | `agreements-conflicts` | 3 |
-| `breadth` | `split` — members take disjoint scopes | `union` | 1 |
+| `council` | `shared`: every member answers the same question | `agreements-conflicts` | 3 |
+| `breadth` | `split`: members take disjoint scopes | `union` | 1 |
 
-Resolve the named preset, then override any of the four axes — membership,
+Resolve the named preset, then override any of the four axes: membership,
 distribution, reduction, degradation. There is no other precedence, and no
 automatic model or provider routing.
 
@@ -156,7 +156,7 @@ deduplicated `findings` union.
 
 A member whose status is `failed`, `unavailable` or `omitted` does not count
 towards the minimum. Falling below it records an explicit shortfall rather than
-failing — a panel is advisory and never blocks.
+failing; a panel is advisory and never blocks.
 
 ### Research anchors
 

@@ -1,12 +1,12 @@
 # Layering & context discipline
 
 The reason to use multiple agents is **context isolation**. Each worker runs in a clean window on one
-subtask; you aggregate the results without any single context carrying the whole load. Depth is a cost
-— add a layer only when it buys real isolation.
+subtask; you aggregate the results without any single context carrying the whole load. Depth is a cost.
+Add a layer only when it buys real isolation.
 
 ## Context rot (why this matters)
 
-Model accuracy declines as a context fills — not only near the window limit but well inside it, and
+Model accuracy declines as a context fills, not only near the window limit but well inside it, and
 even when the relevant fact is present (irrelevant *volume* alone degrades reasoning). So the failure
 to avoid is **letting raw sub-outputs accumulate in the orchestrator**. Keep your own context small and
 high-signal; push detail to files.
@@ -36,7 +36,7 @@ prohibited-action:  <anything the next layer must NOT do, or none>
 validation:         <checked? how? by whom?>
 ```
 
-Validate a worker's output before a downstream worker consumes it — one agent's hallucination must not
+Validate a worker's output before a downstream worker consumes it; one agent's hallucination must not
 become another's "fact".
 
 ## Reversible compression
@@ -50,7 +50,7 @@ the main long-run failure mode.
 - Cap **inline** workers per orchestrator at ~**3–5**; beyond that, use a native workflow or add a
   **tier** (a synthesiser over groups of workers) rather than shrinking a task that really needs wider
   fan-out.
-- **Read-heavy parallel = safe.** **Concurrent shared-state writes = forbidden** — partition work so
+- **Read-heavy parallel = safe.** **Concurrent shared-state writes = forbidden**: partition work so
   no two workers write the same file/state at once (append-only, namespaced).
 - Prefer **fewer, structured handoffs** over elaborate manager hierarchies. More hierarchy is not more
   reliable.

@@ -52,10 +52,8 @@ tracker that owns it. External tracker changes need their own authority. A
 session handoff should link to evidence and state what remains; it should not
 copy the project record.
 
-Run scratch is settled by the run guardian, and merged worktrees are pruned
-with `provenant worktree remove --merged --integration OID --branch NAME`. Remove only paths that are in scope
-and explicitly authorised; never delete unknown, user-owned, or pre-existing files. Do not
-migrate old state roots as part of a fresh session.
+Follow the [retention procedure](references/context-hygiene.md#retention)
+for run scratch, merged worktrees and old state roots.
 
 For more detail, see the [chair continuity reference](references/chair-state.md),
 [context hygiene reference](references/context-hygiene.md), the

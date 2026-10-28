@@ -70,10 +70,10 @@ mechanisms into existing local owners.
 Return a compact table with score, evidence and confidence, then P0/P1/P2
 findings. Every behavioural rate names its numerator, denominator, source,
 window and limitations. Suggested description changes must name the confusion
-case and a balanced regression fixture — build it with
+case and a balanced regression fixture; build it with
 [author.md](author.md)'s fixture step. Prefer tiering detail into references;
 merge or split only when triggers, authority, artifacts and completion gates
 support a stable boundary (`MAINTAINING.md`).
 
-Do not cross into authoring from here — [../SKILL.md](../SKILL.md)'s
+Do not cross into authoring from here; [../SKILL.md](../SKILL.md)'s
 audit → edit rule governs; a fix needs its own authority grant.

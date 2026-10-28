@@ -163,15 +163,15 @@ If the active integration cannot carry a Fabric request and reply, record
 collection step, and report the degraded manual path. Never describe pane
 status or scrollback as an automatic callback.
 
-Observed raw-send failure modes (2026-07-10, one session lost ~20 min to these —
+Observed raw-send failure modes (2026-07-10, one session lost ~20 min to these;
 use the helper instead):
 
 - `herdr agent send <pane> '\r'` sends the two literal characters `\r`, never
   a submit; the draft sits in the composer looking sent.
-- Targeting by session UUID fails with `agent_not_found` — target the pane id
+- Targeting by session UUID fails with `agent_not_found`: target the pane id
   (`w3:p2`), not the session id.
-- The pane buffer scrolls: output longer than the buffer is unrecoverable via
-  `read` — ask the worker to re-emit only the missing span, or have it write
+- The pane buffer scrolls. Output longer than the buffer is unrecoverable via
+  `read`; ask the worker to re-emit only the missing span, or have it write
   findings to a file from the start.
 - `pane run` can still leave a long draft unsubmitted. The helper follows it
   with a settled Enter; still read the pane after dispatch because successful

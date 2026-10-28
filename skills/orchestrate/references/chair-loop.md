@@ -19,7 +19,7 @@ wake, in this order:
    A `quarantined` lane kept its result but not its `.agents/` edits: review the listed `protected.patch`, apply it deliberately in a worktree if adopted. Its history still holds the edit commit, so claim verification and Fabric landing refuse it until the chair rewrites the lane without that commit or releases the reviewed tip (see `orchestrate`). A `failed` lane with a restore fix still carries the edits: restore `.agents/` to the start commit first.
 4. **Refill** from the frontier up to the resource budget.
 5. **Tracker:** make issues and the board match what started and landed, when
-   tracker writes are authorised — following `tracker`'s filing, linking and
+   tracker writes are authorised, following `tracker`'s filing, linking and
    hygiene rules rather than restating them here; hand steady-state upkeep to
    its steward mode instead of doing it inline.
 6. **Checkpoint** the state file, then arm the wait.
@@ -79,8 +79,8 @@ status lines and receipts group them: `tool-`, `skill-`, `ui-`, `api-`, `db-`,
 short slug, and the issue number where one helps a human scan the status line:
 `fix-1234-ledger-rounding`. A lane id is a status-line label, not a branch
 name. When the lane owns a registered worktree, name its branch and worktree
-per `setup-repo`'s branch naming doctrine instead — no issue number, no lane
-code — independently of this lane id.
+per `setup-repo`'s branch naming doctrine instead, with no issue number or lane
+code, independently of this lane id.
 
 ## Waiting
 

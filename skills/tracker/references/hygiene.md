@@ -23,14 +23,14 @@ Run this checklist when asked to sweep, and as part of a steward pass's
 
 Close with one of:
 
-- **Completed**, with merge evidence (PR link, merged commit) — not "planned"
+- **Completed**, with merge evidence (PR link, merged commit), not "planned"
   with a successor mapped, which is still open work under another number.
 - **Not planned**, with an evidence-based reason and, if relevant, the
   condition that would reopen it.
 - **Duplicate-of**, linking the canonical issue.
 
 An epic closes on its own `Done when` being met, never on its child count
-reaching zero open — a completed child count can still leave the stated
+reaching zero open; a completed child count can still leave the stated
 outcome unmet, and a `Done when` can be met before every discretionary child
 lands. Quiet (no recent comments) is not evidence of done; check the actual
 state before closing or before leaving an issue open on the strength of

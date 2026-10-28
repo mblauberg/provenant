@@ -78,7 +78,7 @@ engine.pinned -> backend
 backend -> output
 ```
 
-Evaluation flow (reader concepts, not filenames — the schematic still obeys the de-jargon rule):
+Evaluation flow (reader concepts, not filenames; the schematic still obeys the de-jargon rule):
 
 ```d2
 inputs: "Input cases"

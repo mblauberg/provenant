@@ -48,7 +48,8 @@ cross-tracker routes, not a second current-work owner.
   [`docs/release-notes/next.d/`](docs/release-notes/next.d/). To release, run
   `scripts/collate-release-notes vX.Y.Z`, which writes
   `docs/release-notes/vX.Y.Z.md` and deletes the fragments but `_intro.md`;
-  edit `_intro.md` for the next release.
+  add the released version to the [release-notes index](docs/release-notes/README.md)
+  and edit `_intro.md` for the next release.
 
 ### Specifications
 

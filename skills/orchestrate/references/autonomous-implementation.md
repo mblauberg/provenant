@@ -15,20 +15,20 @@ issue. `implement` only requires one for substantial+ work (see
 `implement/SKILL.md`); an unattended queue has no user to notice a missing
 receipt. It always directs `implement` to record the delivery receipt
 (`provenant workflow receipt save`) for **every** queued issue, including routine minor ones, and only ever reads/reports the one
-receipt `implement` produces — it never creates, assumes, or forks a second
+receipt `implement` produces; it never creates, assumes, or forks a second
 one.
 
 ## Entry gate
 
 - Only issues already in an **accepted/ready** state route here. An issue
   missing acceptance criteria, non-goals, or authority bounds is out of scope
-  for this mode — route it to `scope` first; never infer owner decisions to
+  for this mode. Route it to `scope` first; never infer owner decisions to
   make an issue "ready enough".
 - Requires the same build ceiling / write / external-action authority
   `implement`'s entry gate requires. Missing authority stops the mode before
   dispatch, not mid-run.
 - Requires `implement` to record a delivery receipt for every
-  issue this mode dispatches — treat unattended queue processing as the
+  issue this mode dispatches; treat unattended queue processing as the
   "project policy requests one" condition in `implement`'s own entry gate, so
   the routine-minor-work exemption never applies here. This mode has no
   receipt of its own; it needs one machine-checkable receipt per issue to
@@ -38,14 +38,14 @@ one.
 
 1. **SELECT** the next ready/accepted issue from the queue (oldest-first
    unless the user orders otherwise). One issue in flight per lease unless
-   independent partitions justify parallel issues — apply the normal
+   independent partitions justify parallel issues; apply the normal
    decomposition/value gate ("When This Pays" in `SKILL.md`) before running
    more than one at once.
 2. **RUN** `implement` for that issue verbatim: its entry gate, adaptive
    plan, `tdd`/`refactor`/`diagnose` legs, `code-review`, and `evaluate`
-   where required — and its loop step 1, directed to record the delivery
+   where required, and its loop step 1, directed to record the delivery
    receipt for this issue regardless of size. This mode
-   adds no parallel review path of its own — it delegates the entire
+   adds no parallel review path of its own; it delegates the entire
    verified-implementation loop, including receipt creation; it never
    pre-supposes a receipt is already sitting there.
 3. **COMPLETE** delivery acceptance through objective checks and tier-required
@@ -58,7 +58,7 @@ one.
    current verified head. Where no such policy exists,
    do not merge. Never promote, and do not carry
    that issue's receipt past the state `implement` leaves it in. **Never
-   fork a new receipt** — the delivery receipt
+   fork a new receipt**: the delivery receipt
    created by `implement` at this
    mode's direction for this specific issue, is the only receipt; this mode
    reads and reports it, it never replaces it and never keeps a shadow
@@ -83,22 +83,22 @@ one.
 | Duration | one bounded pass over the current queue snapshot | persistent, survives sessions/crashes, until user `STATUS: STOP` |
 | User gate | scope and one-way doors; final acceptance only for `terminal` or approved scope; repository merge policy governs landing | user-out-of-loop during the loop; reaches users only at hard/one-way-door gates |
 | State | uses `implement`/`deliver` evidence, no separate mission ledger | run lanes and Fabric tasks own live state; `resume`/`reconcile` continue execution, and a bounded host-keyed Markdown checkpoint carries session context; the user-owned goal retains the STOP gate |
-| Authority | lower — never proceeds past the per-issue merge gate its repository's policy sets | higher — authorised to keep driving without per-item user sign-off |
+| Authority | lower; never proceeds past the per-issue merge gate its repository's policy sets | higher; authorised to keep driving without per-item user sign-off |
 
 Trigger this mode only on an explicit **bounded, pre-scoped issue queue**
 ("work through the ready/accepted issues", "implement the accepted backlog to
-PR"). A request for a standing, run-until-STOP mission — even one whose work
-is also software implementation — is `autopilot`'s territory; keep the
+PR"). A request for a standing, run-until-STOP mission, even one whose work
+is also software implementation, is `autopilot`'s territory; keep the
 two triggers from overlapping. When a mission's boundedness is unclear,
 default to this lower-authority mode and let the user explicitly promote to
 `autopilot` if the work turns out to be open-ended.
 
 ## What this mode is not
 
-- Not a scoping tool — an issue without acceptance criteria stops the mode;
+- Not a scoping tool; an issue without acceptance criteria stops the mode;
   it does not trigger ad hoc scoping to make the issue runnable.
-- Not a release tool — `release` remains a separate, user-authorised step.
+- Not a release tool; `release` remains a separate, user-authorised step.
   Merging follows the nearest repository merge policy; absent one, user merge
   happens after this mode stops.
-- Not a new receipt format — every issue's evidence lives in its own
+- Not a new receipt format; every issue's evidence lives in its own
   `implement`/`deliver` receipt; this mode only sequences and reports them.

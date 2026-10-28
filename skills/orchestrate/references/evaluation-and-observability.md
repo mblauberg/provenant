@@ -58,7 +58,7 @@ recorded when external verification is unavailable, adversarial cross-review bef
 
 ## Judge-bias checklist (when a worker or panel scores outputs)
 
-LLM-as-judge steps — panels, review-refine loops, pairwise picks — carry systematic biases. Check and
+LLM-as-judge steps (panels, review-refine loops, pairwise picks) carry systematic biases. Check and
 mitigate each before trusting a score:
 
 | Bias | Symptom | Mitigation |
@@ -69,7 +69,7 @@ mitigate each before trusting a score:
 | **Verbosity** | excess detail reads as quality | criteria-specific rubric that penalises irrelevant detail |
 | **Authority** | confident tone scores higher than accuracy | require evidence/citation; add an objective fact-check layer |
 
-Ask judges for locations, evidence, and fixes — not a global score alone — and prefer objective checks
+Ask judges for locations, evidence, and fixes, rather than a global score alone, and prefer objective checks
 (tests, source anchors, arithmetic) over any judge verdict on high-stakes findings.
 
 ## Research anchors

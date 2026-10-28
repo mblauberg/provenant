@@ -30,7 +30,7 @@ does not define another queue or scheduler.
    Keep authority/evidence references, progress, next actions, blockers, and a
    resume trigger within the 32 KiB limit.
 9. Check `STATUS` again before ending. If the run has no eligible or active
-   work, follow run admission and pause behavior, state what would resume it,
+   work, follow run admission and pause behaviour, state what would resume it,
    and end this invocation. Idle is a waiting condition, never mission
    completion. Only the user sets `STATUS: STOP`.
 

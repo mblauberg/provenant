@@ -48,7 +48,7 @@ the search:
 
 An epic is an outcome with a stated `Done when`, not a folder for related
 work. Nest a new issue under an epic only when the issue is genuinely part of
-that outcome — never because a parent happens to exist nearby. Parents are
+that outcome; never because a parent happens to exist nearby. Parents are
 optional:
 
 - A bug stands alone unless it is explicitly a slice of an epic's `Done when`.
