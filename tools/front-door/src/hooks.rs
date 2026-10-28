@@ -19,6 +19,16 @@ use std::{
 const INPUT_CAP: usize = 1024 * 1024;
 const LOCAL_BUDGET: Duration = Duration::from_secs(1);
 const ANSWER_BUDGET: Duration = Duration::from_millis(50);
+// Debug builds let integration tests on loaded runners widen delivery; release keeps 50 ms.
+fn answer_budget() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var_os("PROVENANT_TEST_ANSWER_BUDGET_MS")
+        .and_then(|value| value.to_str()?.parse().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    ANSWER_BUDGET
+}
 /// Cap for hooks that read lane and PR state through this binary's own commands.
 const SESSION_BUDGET: Duration = Duration::from_secs(4);
 type Error = Box<dyn std::error::Error>;
@@ -191,7 +201,7 @@ fn guard_reply(
         project: globals.project.clone(),
         ..Default::default()
     };
-    let deadline = deadline.min(Instant::now() + ANSWER_BUDGET);
+    let deadline = deadline.min(Instant::now() + answer_budget());
     Ok(delivery_before(deadline, move || {
         let resolved = crate::roots::resolve(
             &selected,
