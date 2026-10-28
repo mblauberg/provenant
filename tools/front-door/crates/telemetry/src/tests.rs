@@ -212,7 +212,10 @@ fn missing_usage_and_prices_preserve_known_lower_bounds() {
     third.usage = Usage::default();
     let report = reduce([first, second, third], Some(2_000_000)).unwrap();
     assert!(report.totals.cost.complete.is_none());
-    assert_eq!(report.totals.cost.known_lower_bound.usd, "2.000000");
+    assert_eq!(
+        report.totals.cost.known_lower_bound.as_ref().unwrap().usd,
+        "2.000000"
+    );
     assert_eq!(report.totals.cost.missing_attempts, 3);
     assert_eq!(report.totals.usage.uncached_input.known, 2_000_000);
     assert_eq!(report.totals.usage.uncached_input.missing, 1);
@@ -223,6 +226,30 @@ fn missing_usage_and_prices_preserve_known_lower_bounds() {
     let wire = serde_json::to_value(&report).unwrap();
     assert!(wire["totals"]["cost"]["complete"].is_null());
     assert_eq!(wire["scope"], "supervised_terminal_attempts");
+}
+
+#[test]
+fn cost_coverage_distinguishes_unknown_partial_and_measured_zero() {
+    let unknown = reduce([fact(1, Some(10)), fact(2, Some(20))], None).unwrap();
+    let wire = serde_json::to_value(&unknown).unwrap();
+    assert!(wire["totals"]["cost"]["complete"].is_null());
+    assert!(wire["totals"]["cost"]["known_lower_bound"].is_null());
+    assert_eq!(wire["totals"]["cost"]["priced_attempts"], 0);
+    assert_eq!(wire["totals"]["cost"]["missing_attempts"], 2);
+
+    let mut missing = fact(2, Some(20));
+    missing.resolved_route = None;
+    let partial = reduce([fact(1, Some(1_000_000)), missing], Some(2_000_000)).unwrap();
+    assert!(partial.totals.cost.complete.is_none());
+    assert_eq!(partial.totals.cost.priced_attempts, 1);
+    assert_eq!(partial.totals.cost.missing_attempts, 1);
+    assert_eq!(
+        partial.totals.cost.known_lower_bound.unwrap().usd,
+        "2.000000"
+    );
+    let zero = reduce([fact(1, Some(0))], None).unwrap();
+    assert_eq!(zero.totals.cost.priced_attempts, 1);
+    assert_eq!(zero.totals.cost.known_lower_bound.unwrap().usd, "0.000000");
 }
 
 #[test]

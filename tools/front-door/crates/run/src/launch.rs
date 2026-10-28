@@ -1094,7 +1094,14 @@ impl RunStore {
             task: task.task_id,
             requester,
             protected_commands: vec![],
-            config_environment: vec![],
+            // OpenCode stores answering-model evidence in its shared XDG data
+            // directory. The guardian otherwise starts with an empty environment
+            // and no Registry home; retain the absolute path selected at launch.
+            config_environment: if provider == "opencode" {
+                vec!["XDG_DATA_HOME".into()]
+            } else {
+                vec![]
+            },
             argv: plan.argv,
             environment: plan.environment,
             cwd: plan.cwd,

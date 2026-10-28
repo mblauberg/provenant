@@ -809,7 +809,6 @@ fn availability_reason(
 }
 fn account_reason<'q>(
     model: &ModelId,
-    listed: bool,
     availability: &AvailabilityRecord,
     access: Option<&AccessContext<'_>>,
     context: &'q RoutingContext<'_>,
@@ -821,17 +820,8 @@ fn account_reason<'q>(
     if reason.is_none() && access.is_none_or(|a| a.confinement_ref.is_empty()) {
         reason = Some(RouteExclusionReason::ConfinementUnavailable);
     }
-    // Known catalogue controls can use the fresh executable/account preflight.
-    // An unlisted exact ID additionally needs a current provider observation.
-    if reason.is_none()
-        && !listed
-        && !availability
-            .observed_models
-            .iter()
-            .any(|m| m == model.model())
-    {
-        reason = Some(RouteExclusionReason::UnverifiedModel);
-    }
+    // Explicit exact IDs use the executable/account preflight too. The provider
+    // owns model availability; named routes and pools require catalogue entries.
     let quota = context
         .quota
         .iter()
@@ -934,7 +924,7 @@ fn candidate(
         .iter()
         .filter(|a| a.adapter == model.adapter())
         .map(|a| {
-            let (reason, _) = account_reason(model, entry.is_some(), a, access, context);
+            let (reason, _) = account_reason(model, a, access, context);
             let (policy, _, _, _) = effective_profile(context, model, a.account_key.as_deref());
             let (headroom, _, standby) =
                 pacing_factor_basis_points(policy, model, a.account_key.as_deref(), context);
@@ -1126,6 +1116,9 @@ fn resolve_inner(
                     .routes
                     .get(name)
                     .ok_or(RoutingError::UnknownRoute)?;
+                if context.catalogue.model(&named.model).is_none() {
+                    return Err(RoutingError::Catalogue);
+                }
                 if !privacy_allowed(&named.model, request.confidential, context.catalogue) {
                     return Err(RoutingError::ConfidentialModel);
                 }

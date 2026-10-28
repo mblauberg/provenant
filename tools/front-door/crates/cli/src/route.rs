@@ -385,6 +385,7 @@ fn quota_observations(
     catalogue: &Catalogue,
     availability: &[AvailabilityRecord],
     records: &[provenant_quota::AccountRecord],
+    requested_models: &[ModelId],
 ) -> Result<Vec<QuotaObservation>, EdgeError> {
     let policies = provenant_providers::quota_policies(REGISTRY);
     let mut observations = Vec::new();
@@ -421,6 +422,12 @@ fn quota_observations(
         {
             models.insert(ModelId::parse(&format!("{}/{}", adapter, observed_model))?);
         }
+        models.extend(
+            requested_models
+                .iter()
+                .filter(|model| model.adapter() == adapter)
+                .cloned(),
+        );
         models.retain(|model| snapshot_governs(adapter, model));
         if observations.len().saturating_add(models.len()) > 256 {
             return Err(provenant_quota::QuotaError::Invalid("quota observation bound").into());
@@ -440,6 +447,7 @@ fn with_context<T>(
     availability: &[AvailabilityRecord],
     access: &[AccessContext<'_>],
     host: &str,
+    requested_models: &[ModelId],
     action: impl FnOnce(&RoutingContext<'_>, &[provenant_quota::AccountRecord]) -> Result<T, EdgeError>,
 ) -> Result<T, EdgeError> {
     let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
@@ -460,7 +468,7 @@ fn with_context<T>(
     };
     // Cached accounts also supply reset_of references outside the probed route.
     // Quota facts never grant executable or account readiness.
-    let quota = quota_observations(&catalogue, availability, &quota_records)?;
+    let quota = quota_observations(&catalogue, availability, &quota_records, requested_models)?;
     let timestamp = jiff::Timestamp::now();
     let now = WallTime::from_micros(timestamp.as_microsecond())?;
     action(
@@ -488,66 +496,84 @@ pub(crate) fn resolve_dispatch(
     access: &[AccessContext<'_>],
     host: &str,
 ) -> Result<provenant_records::ResolvedRoute, String> {
-    with_context(roots, availability, access, host, |context, records| {
-        let mut excluded_members = Vec::new();
-        let mut resolved = provenant_routing::resolve_for_account_with_seed_excluding(
-            request,
-            context,
-            account,
-            seed.0,
-            seed.1,
-            &excluded_members,
-        )?;
-        loop {
-            if !matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
+    let mut requested_models = Vec::new();
+    if let RouteChoice::Model(model) = &request.choice {
+        requested_models.push(model.clone());
+    }
+    if let Fallback::Models(models) = &request.fallback {
+        requested_models.extend_from_slice(models.as_slice());
+    }
+    with_context(
+        roots,
+        availability,
+        access,
+        host,
+        &requested_models,
+        |context, records| {
+            let mut excluded_members = Vec::new();
+            let mut resolved = provenant_routing::resolve_for_account_with_seed_excluding(
+                request,
+                context,
+                account,
+                seed.0,
+                seed.1,
+                &excluded_members,
+            )?;
+            loop {
+                if !matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
+                    break;
+                }
+                let model = ModelId::parse(&format!("{}/{}", resolved.adapter, resolved.model))?;
+                let pools = free_pools(&resolved.adapter, || {
+                    context.catalogue.is_free_model(&model)
+                });
+                let now_unix_seconds = context.now.as_timestamp().as_second();
+                let policies = provenant_providers::quota_policies(context.registry);
+                let admission = provenant_quota::Admission {
+                    policies: &policies,
+                    now_unix_seconds,
+                    records,
+                    pools: &pools,
+                };
+                if let Err(error) = admission.check(&resolved) {
+                    if !matches!(&request.choice, RouteChoice::NamedRoute(_))
+                        || resolved.pool_selection.is_none()
+                        || excluded_members.contains(&model)
+                    {
+                        return Err(error.into());
+                    }
+                    let reason = error.to_string();
+                    excluded_members.push(model);
+                    let mut replacement =
+                        match provenant_routing::resolve_for_account_with_seed_excluding(
+                            request,
+                            context,
+                            account,
+                            seed.0,
+                            seed.1,
+                            &excluded_members,
+                        ) {
+                            Ok(route)
+                                if matches!(&route.readiness, RouteReadiness::Ready { .. }) =>
+                            {
+                                route
+                            }
+                            Ok(_) | Err(_) => return Err(error.into()),
+                        };
+                    if replacement.adapter == resolved.adapter
+                        && replacement.model == resolved.model
+                    {
+                        return Err(error.into());
+                    }
+                    record_pool_redraw(&resolved, &mut replacement, &reason)?;
+                    resolved = replacement;
+                    continue;
+                }
                 break;
             }
-            let model = ModelId::parse(&format!("{}/{}", resolved.adapter, resolved.model))?;
-            let pools = free_pools(&resolved.adapter, || {
-                context.catalogue.is_free_model(&model)
-            });
-            let now_unix_seconds = context.now.as_timestamp().as_second();
-            let policies = provenant_providers::quota_policies(context.registry);
-            let admission = provenant_quota::Admission {
-                policies: &policies,
-                now_unix_seconds,
-                records,
-                pools: &pools,
-            };
-            if let Err(error) = admission.check(&resolved) {
-                if !matches!(&request.choice, RouteChoice::NamedRoute(_))
-                    || resolved.pool_selection.is_none()
-                    || excluded_members.contains(&model)
-                {
-                    return Err(error.into());
-                }
-                let reason = error.to_string();
-                excluded_members.push(model);
-                let mut replacement =
-                    match provenant_routing::resolve_for_account_with_seed_excluding(
-                        request,
-                        context,
-                        account,
-                        seed.0,
-                        seed.1,
-                        &excluded_members,
-                    ) {
-                        Ok(route) if matches!(&route.readiness, RouteReadiness::Ready { .. }) => {
-                            route
-                        }
-                        Ok(_) | Err(_) => return Err(error.into()),
-                    };
-                if replacement.adapter == resolved.adapter && replacement.model == resolved.model {
-                    return Err(error.into());
-                }
-                record_pool_redraw(&resolved, &mut replacement, &reason)?;
-                resolved = replacement;
-                continue;
-            }
-            break;
-        }
-        Ok(resolved)
-    })
+            Ok(resolved)
+        },
+    )
     .map_err(|error| error.to_string())
 }
 
@@ -643,7 +669,7 @@ fn list_data(
     roots: &Roots,
     query: &RouteListRequest,
 ) -> Result<Box<provenant_routing::RouteList>, EdgeError> {
-    with_context(roots, &[], &[], "local-preview", |context, _| {
+    with_context(roots, &[], &[], "local-preview", &[], |context, _| {
         Ok(Box::new(provenant_routing::list(
             &provenant_routing::RouteListQuery {
                 adapter: query.adapter.clone(),
@@ -963,12 +989,14 @@ fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<(), EdgeE
 fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
     match command {
         Route::List(query) => Ok(Data::List(list_data(roots, query)?)),
-        Route::Resolve(query) => with_context(roots, &[], &[], "local-preview", |context, _| {
-            let route = provenant_routing::resolve(&resolve_request(query, context)?, context)?;
-            let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
-            let pacing = provenant_routing::pacing_preview(&model, context);
-            Ok(Data::Resolved(Box::new(RoutePreview { route, pacing })))
-        }),
+        Route::Resolve(query) => {
+            with_context(roots, &[], &[], "local-preview", &[], |context, _| {
+                let route = provenant_routing::resolve(&resolve_request(query, context)?, context)?;
+                let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
+                let pacing = provenant_routing::pacing_preview(&model, context);
+                Ok(Data::Resolved(Box::new(RoutePreview { route, pacing })))
+            })
+        }
         Route::Set(request) => {
             set_pool(roots, request)?;
             Ok(Data::List(list_data(
@@ -1229,6 +1257,125 @@ mod route_tests {
     }
 
     #[test]
+    fn unlisted_exact_models_keep_account_quota_gates() -> Result<(), Box<dyn Error>> {
+        use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus};
+        use provenant_records::RouteExclusionReason;
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(
+                &self,
+                path: &std::path::Path,
+            ) -> std::io::Result<std::path::PathBuf> {
+                Ok(path.into())
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&Resolver)?;
+        let now = jiff::Timestamp::now().as_second();
+        let catalogue = super::Catalogue::bundled()?;
+        let mut availability = Vec::new();
+        for (key, status) in [
+            ("exhausted", QuotaStatus::Exhausted),
+            ("fresh", QuotaStatus::Available),
+        ] {
+            let account = AccountScope {
+                adapter: "codex".into(),
+                account_key: key.into(),
+                label: key.into(),
+            };
+            let mut record = AccountRecord::empty(account.clone());
+            record.snapshot = Some(QuotaSnapshot {
+                schema_version: 1,
+                account,
+                revision: 0,
+                status,
+                observed_unix_seconds: now,
+                source_ref: "fixture".into(),
+                authority_ref: None,
+                details: None,
+                windows: Vec::new(),
+            });
+            let quota = roots.state.as_path().join("quota");
+            let directory = quota.join(key);
+            std::fs::create_dir_all(&directory)?;
+            for directory in [roots.state.as_path(), quota.as_path(), directory.as_path()] {
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+            }
+            let path = directory.join("codex.json");
+            std::fs::write(&path, serde_json::to_vec(&record)?)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            availability.push(provenant_providers::AvailabilityRecord {
+                schema_version: 1,
+                adapter: "codex".into(),
+                executable: "/fixture/codex".into(),
+                version: "fixture".into(),
+                fixture_ref: "fixture".into(),
+                catalogue_revision: catalogue.revision().into(),
+                account_key: Some(key.into()),
+                observed_models: Vec::new(),
+                observed_unix_seconds: now,
+                expires_unix_seconds: now + 300,
+            });
+        }
+        let request = super::RouteRequest {
+            model: Some(super::Model("codex/unlisted-exact".into())),
+            route: None,
+            effort: None,
+            confidential: false,
+            allow_free: false,
+            fallback: vec![super::Model("codex/unlisted-fallback".into())],
+        }
+        .to_domain()?;
+        let access = [provenant_routing::AccessContext {
+            adapter: "codex",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        }];
+        let exhausted = super::resolve_dispatch(
+            &request,
+            &roots,
+            None,
+            ("fixture", 0),
+            &availability[..1],
+            &access,
+            "fixture",
+        )?;
+        assert_eq!(
+            exhausted.readiness,
+            RouteReadiness::Unavailable {
+                reason: RouteExclusionReason::Exhausted,
+            }
+        );
+        assert_eq!(
+            exhausted.alternatives.as_slice()[0].readiness,
+            RouteReadiness::Unavailable {
+                reason: RouteExclusionReason::Exhausted,
+            }
+        );
+        let fresh = super::resolve_dispatch(
+            &request,
+            &roots,
+            None,
+            ("fixture", 0),
+            &availability,
+            &access,
+            "fixture",
+        )?;
+        assert!(matches!(fresh.readiness, RouteReadiness::Ready { .. }));
+        assert_eq!(fresh.account_key.as_deref(), Some("fresh"));
+        assert_eq!(
+            fresh.alternatives.as_slice()[0].account_key.as_deref(),
+            Some("fresh")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn exhausted_go_plan_binds_only_go_models() -> Result<(), Box<dyn Error>> {
         use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus};
         let account = AccountScope {
@@ -1265,9 +1412,15 @@ mod route_tests {
             expires_unix_seconds: 200,
         }];
         let catalogue = super::Catalogue::bundled()?;
-        let observed = super::quota_observations(&catalogue, &availability, &[record])?;
+        let requested = [
+            super::ModelId::parse("opencode/opencode-go/unlisted")?,
+            super::ModelId::parse("opencode/opencode/unlisted")?,
+            super::ModelId::parse("opencode/openrouter/unlisted")?,
+        ];
+        let observed = super::quota_observations(&catalogue, &availability, &[record], &requested)?;
         let bound: Vec<_> = observed.iter().map(|o| o.model.as_str()).collect();
         assert!(bound.contains(&"opencode/opencode-go/glm-5.1"));
+        assert!(bound.contains(&"opencode/opencode-go/unlisted"));
         assert!(!bound.contains(&"opencode/opencode/glm-5.3-flash-free"));
         assert!(!bound.contains(&"opencode/openrouter/some-model"));
         assert!(bound.iter().all(|m| m.starts_with("opencode/opencode-go/")));

@@ -256,17 +256,7 @@ impl RunStore {
             .ok_or(RunError::Validation("terminal task missing"))?;
         let recovery = if let Some(writer) = &task.writer {
             let directory = self.writer_custody_directory(&record, writer)?;
-            if matches!(record.state, AttemptState::Terminal { .. }) {
-                match directory.metadata_at(std::ffi::OsStr::new("reservation.json"), false) {
-                    Err(error) if error.is_not_found() => return Ok(record),
-                    Err(error) => return Err(error.into()),
-                    Ok(_) => {}
-                }
-            }
-            Some(
-                custody::acquire_recovery(directory, call.budget, call.cancel, call.clock)
-                    .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?,
-            )
+            self.recover_writer_exit(directory, Self::scope(&record), call)?
         } else {
             None
         };
@@ -284,6 +274,31 @@ impl RunStore {
             crate::writer::settle_launch_staging(attempt)?;
         }
         Ok(record)
+    }
+    fn recover_writer_exit(
+        &self,
+        directory: Directory,
+        scope: custody::Scope,
+        call: &Request<'_>,
+    ) -> Result<Option<custody::Recovery>> {
+        match custody::acquire_recovery(directory, call.budget, call.cancel, call.clock) {
+            Ok(recovery) => Ok(Some(recovery)),
+            Err(error) => {
+                if let CustodyError::Filesystem(filesystem) = &error
+                    && filesystem.is_not_found()
+                {
+                    // The guardian can commit and release custody after finish
+                    // reads the attempt but before recovery acquires the lock.
+                    let current = self.record(scope.attempt, call)?;
+                    if Self::scope(&current) == scope
+                        && matches!(current.state, AttemptState::Terminal { .. })
+                    {
+                        return Ok(None);
+                    }
+                }
+                Err(RunError::Io(std::io::Error::other(error.to_string())))
+            }
+        }
     }
     pub(crate) fn settle_recovered(
         &self,
@@ -748,5 +763,83 @@ mod disk_admission_tests {
                 floor: 100
             }
         ));
+    }
+}
+
+#[cfg(test)]
+mod writer_recovery_tests {
+    use super::*;
+    use crate::tests::{call, clock, context, input, route};
+
+    #[test]
+    fn writer_recovery_accepts_only_matching_terminal_absence()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let custody_dir = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let run = input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        let starting = store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let scope = RunStore::scope(&starting);
+        let directory = || Directory::open_anchor(custody_dir.path());
+        assert!(
+            store
+                .recover_writer_exit(directory()?, scope, &call)
+                .is_err(),
+            "missing custody cannot settle a nonterminal attempt"
+        );
+        drop(custody::acquire_reader(
+            directory()?,
+            scope,
+            call.budget,
+            call.cancel,
+            call.clock,
+        )?);
+        let recovery = store
+            .recover_writer_exit(directory()?, scope, &call)?
+            .ok_or("prepared reservation must remain recoverable")?;
+        recovery.withdraw_prepared()?;
+        store.withdraw(
+            id,
+            AttemptState::Starting,
+            Outcome::Cancelled,
+            "fixture cancellation",
+            clock.wall_now()?,
+            &call,
+        )?;
+        // The caller holds a starting snapshot while the guardian has committed
+        // cancellation and removed the reservation.
+        assert_eq!(starting.state, AttemptState::Starting);
+        assert!(
+            store
+                .recover_writer_exit(directory()?, scope, &call)?
+                .is_none()
+        );
+        let mut changed = scope;
+        changed.generation += 1;
+        assert!(
+            store
+                .recover_writer_exit(directory()?, changed, &call)
+                .is_err(),
+            "another generation's terminal state is not settlement"
+        );
+        std::fs::write(custody_dir.path().join("reservation.json"), b"{")?;
+        assert!(
+            store
+                .recover_writer_exit(directory()?, scope, &call)
+                .is_err(),
+            "terminal state must not hide corrupt retained custody"
+        );
+        Ok(())
     }
 }
