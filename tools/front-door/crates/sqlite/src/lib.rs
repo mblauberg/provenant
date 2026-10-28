@@ -1,4 +1,6 @@
 use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
+#[allow(unsafe_code)]
+mod read_only_vfs;
 use provenant_os::fs::{Directory, FileKind, FsError, Metadata, verify_directory_identity};
 use rusqlite::{Connection, OpenFlags};
 use std::{
@@ -118,13 +120,32 @@ pub fn is_private(metadata: Metadata) -> bool {
     metadata.mode & 0o077 == 0 && metadata.uid == provenant_os::fs::effective_uid()
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct UnsafeCompanion;
+/// Why a database or companion file was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompanionFault {
+    NotRegular,
+    Symlink,
+    Owner,
+    Mode,
+    Links,
+}
 
 /// Return false when the observed inode disappeared so the caller can retry.
-fn companion_is_safe(metadata: Metadata) -> Result<bool, UnsafeCompanion> {
-    if metadata.kind != FileKind::Regular || !is_private(metadata) || metadata.links > 1 {
-        return Err(UnsafeCompanion);
+fn companion_is_safe(metadata: Metadata) -> Result<bool, CompanionFault> {
+    if metadata.kind == FileKind::Symlink {
+        return Err(CompanionFault::Symlink);
+    }
+    if metadata.kind != FileKind::Regular {
+        return Err(CompanionFault::NotRegular);
+    }
+    if metadata.uid != provenant_os::fs::effective_uid() {
+        return Err(CompanionFault::Owner);
+    }
+    if metadata.mode & 0o077 != 0 {
+        return Err(CompanionFault::Mode);
+    }
+    if metadata.links > 1 {
+        return Err(CompanionFault::Links);
     }
     Ok(metadata.links == 1)
 }
@@ -136,14 +157,14 @@ pub fn check_companions<E>(
     names: &[OsString],
     mut retry: impl FnMut(&mut dyn FnMut() -> Result<Option<()>, E>) -> Result<(), E>,
     mut filesystem_error: impl FnMut(FsError) -> E,
-    mut unsafe_name: impl FnMut(&OsStr) -> E,
+    mut unsafe_name: impl FnMut(&OsStr, CompanionFault) -> E,
 ) -> Result<(), E> {
     for name in names {
         check_companion(
             || directory.metadata_at(name, false),
             &mut retry,
             &mut filesystem_error,
-            || unsafe_name(name),
+            |fault| unsafe_name(name, fault),
         )?;
     }
     Ok(())
@@ -155,13 +176,13 @@ pub fn check_companion<E>(
     mut metadata: impl FnMut() -> Result<Metadata, FsError>,
     mut retry: impl FnMut(&mut dyn FnMut() -> Result<Option<()>, E>) -> Result<(), E>,
     mut filesystem_error: impl FnMut(FsError) -> E,
-    mut unsafe_error: impl FnMut() -> E,
+    mut unsafe_error: impl FnMut(CompanionFault) -> E,
 ) -> Result<(), E> {
     let mut check = || match metadata() {
         Ok(metadata) => match companion_is_safe(metadata) {
             Ok(true) => Ok(Some(())),
             Ok(false) => Ok(None),
-            Err(UnsafeCompanion) => Err(unsafe_error()),
+            Err(fault) => Err(unsafe_error(fault)),
         },
         Err(error) if error.is_not_found() => Ok(Some(())),
         Err(error) => Err(filesystem_error(error)),
@@ -183,6 +204,35 @@ pub fn open_connection(path: &Path, read_only: bool) -> rusqlite::Result<Connect
     )?;
     db.busy_timeout(Duration::ZERO)?;
     Ok(db)
+}
+
+/// Unlike mode=ro alone, readonly_shm forbids opening WAL shared memory for
+/// writing or creating it. Keep WAL visibility; immutable=1 would ignore WAL.
+pub fn open_read_only_connection(path: &Path) -> rusqlite::Result<Connection> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut uri = String::from("file:");
+    for byte in path.as_os_str().as_bytes() {
+        use std::fmt::Write;
+        let _ = write!(uri, "%{byte:02X}");
+    }
+    uri.push_str("?mode=ro&readonly_shm=1");
+    read_only_vfs::register()?;
+    let db = Connection::open_with_flags_and_vfs(
+        uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        "provenant-read-only",
+    )?;
+    db.busy_timeout(Duration::ZERO)?;
+    Ok(db)
+}
+
+/// Writer-only preparation for a read-only WAL consumer after the last close.
+pub fn retain_read_only_wal(db: &Connection) -> rusqlite::Result<()> {
+    read_only_vfs::persist_wal(db)?;
+    db.pragma_update(None, "journal_size_limit", 0)
 }
 
 #[derive(Debug)]

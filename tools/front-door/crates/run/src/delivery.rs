@@ -1,8 +1,8 @@
 //! Host-only delivery. Credential environment travels on the private handoff
 //! pipe, never in provider environment, launch records or the delivery receipt.
 use crate::{
-    Result, RunError, WriterDeliveryReceipt, WriterDeliveryRequest, WriterDeliveryStage as Stage,
-    WriterDeliveryState, WriterRequest,
+    PathCheck, Result, RunError, WriterDeliveryReceipt, WriterDeliveryRequest,
+    WriterDeliveryStage as Stage, WriterDeliveryState, WriterRequest,
 };
 use provenant_confinement::redact::Redactor;
 use provenant_confinement::repo::GitRefName;
@@ -861,7 +861,9 @@ impl HostDeliveryContext {
         GitOid::parse(&head).map_err(|_| RunError::Delivery(Stage::Head))
     }
     fn clean(&self, writer: &WriterRequest) -> Result<()> {
-        let path = writer.worktree.to_str().ok_or(RunError::UnsafePath)?;
+        let path = writer.worktree.to_str().ok_or_else(|| {
+            RunError::unsafe_path(writer.worktree.clone(), PathCheck::Containment)
+        })?;
         let status = self.command(
             &writer.worktree,
             "git",
@@ -1630,7 +1632,11 @@ impl crate::RunStore {
             return Err(RunError::Validation("writer custody has not settled"));
         }
         let mut launch = crate::prepare_writer(&writer, &self.writer_registry, record.project_id)?;
-        let state = launch.custody.take().ok_or(RunError::UnsafePath)?.0;
+        let state = launch
+            .custody
+            .take()
+            .ok_or_else(|| RunError::unsafe_path(writer.worktree.clone(), PathCheck::Missing))?
+            .0;
         let _writer = state.lock(
             OsStr::new("writer.lock"),
             LockMode::Exclusive,

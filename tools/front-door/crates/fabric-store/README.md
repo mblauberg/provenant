@@ -36,7 +36,8 @@ Lanes can write the coordination database and child run stores;
 their exact grants exclude `host.sqlite3` and its companions. The authoritative
 index seals project/run, request digest and optional chair. Readers ignore any
 association rows in lane-writable databases.
-Previous binaries refuse schema 9, so rollback requires restoring a pre-upgrade store backup or a forward repair;
+Migration 10 adds the partial destination index for local answer observations.
+Previous binaries refuse schema 10, so rollback requires restoring a pre-upgrade store backup or a forward repair;
 do not change `user_version` by hand or delete pending answers.
 
 Requests retain history without automatic pruning, up to 10,000 items per
@@ -53,6 +54,18 @@ Offers contain at most 100 answers and 8 KiB of compact JSON; overflow keeps its
 previous state. Acknowledged answers never return. Pending answers remain
 eligible after restart or adapter failure. Mail read cursors stay independent.
 This uses the existing outbox without another schema migration.
+
+`Store::open_read_only` never creates, migrates or enables WAL. It opens the
+database, WAL and shared memory read-only (`readonly_shm=1`), starts one read
+snapshot and sets a SQLite progress deadline without busy retries. Missing or
+uninitialised WAL shared memory fails closed. `read_human_answers` requires
+the migration-10 index and reads at most limit+1 pending rows for an exact
+host/project/session/actor. It leaves state, attempts and timestamps untouched.
+The composition edge validates the current session-discovery registration.
+The private SQLite VFS forces main/WAL file opens to read-only and refuses
+creation, temporary files, journals and deletion. Normal coordination writers
+retain WAL/shared-memory companions and truncate WAL after the final checkpoint,
+so the idle reader works without allocating them.
 
 Tasks start Open. Claims atomically activate them, increment the persistent
 generation and bind actor, token and expiry. Callers supply a lease duration;

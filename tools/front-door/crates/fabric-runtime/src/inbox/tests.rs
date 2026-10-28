@@ -385,6 +385,7 @@ fn delivery_capabilities_publish_only_tested_fabric_fallback_for_each_provider()
     for capability in capabilities {
         assert_eq!(capability.transport, AnswerTransport::FabricMail);
         assert!(!capability.live_injection);
+        assert!(!capability.local_offer_reader);
         let mut f = Fixture::new();
         f.identity.client = capability.provider.spec().name.into();
         register(&f, "session-a");

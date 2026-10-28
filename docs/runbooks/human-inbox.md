@@ -129,15 +129,23 @@ its original timestamp on retries. Neither offering nor mail-read success proves
 model consumption. Deduplicate by answer ID before taking action. An adapter
 failure after an offer commits leaves it eligible to be offered again.
 
-`delivery_capabilities()` publishes the implemented fallback matrix:
+`provenant_cli::hooks::delivery_capabilities()` composes the delivery matrix.
+The records-level matrix supplies Fabric mail fallback:
 
-| Provider | Transport | Live injection |
-|---|---|---|
-| Claude | Fabric mail | Unavailable |
-| Codex | Fabric mail | Unavailable |
-| Cursor | Fabric mail | Unavailable |
-| Agy | Fabric mail | Unavailable |
-| OpenCode | Fabric mail | Unavailable |
+| Provider | Transport | Local offer reader | Live injection |
+|---|---|---|---|
+| Claude | Fabric mail | Library API | Unavailable |
+| Codex | Fabric mail | Unavailable | Unavailable |
+| Cursor | Fabric mail | Unavailable | Unavailable |
+| Agy | Fabric mail | Unavailable | Unavailable |
+| OpenCode | Fabric mail | Unavailable | Unavailable |
+
+The local reader observes up to 16 indexed pending answers within an explicit
+deadline. It creates no state and never records an offer attempt or acknowledges
+an answer. It requires a current explicit save from that working directory.
+Configured Fabric home mappings defer to mail; no remote I/O runs in the reader.
+Internal candidate pages cap at 128 KiB; adapters must fit their final protocol
+output within 8 KiB, skipping oversized candidates without hiding smaller ones.
 
 This slice adds the service API. CLI/MCP syntax is unchanged. Hook composition,
 remote delivery and provider input adapters remain separate work. Both apps may

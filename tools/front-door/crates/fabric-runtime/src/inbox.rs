@@ -14,6 +14,63 @@ use provenant_fabric_store::{Request, Store, ThreadWait};
 use provenant_records::{CanonicalV1, RecordHeader, inbox::*};
 use serde::{Deserialize, Serialize};
 
+/// Compact read-only inbox projection for local overview composition.
+pub struct OverviewItem {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub chair_session_id: Option<String>,
+}
+
+pub struct OverviewBatch {
+    pub items: Vec<OverviewItem>,
+    pub truncated: bool,
+    pub bytes_read: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverviewError {
+    Incompatible,
+    Unavailable,
+}
+
+/// Open existing state without initialising it and read one bounded batch.
+pub fn overview(
+    root: &StateRoot,
+    clock: &dyn Clock,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    max_bytes: usize,
+) -> Result<OverviewBatch, OverviewError> {
+    let call = Request {
+        clock,
+        budget,
+        cancel,
+        backoff: &ThreadWait,
+    };
+    let page = Store::open_existing(root, &call)
+        .and_then(|store| store.pending_human_requests(100, max_bytes, &call))
+        .map_err(|error| match error {
+            provenant_fabric_store::Error::SchemaVersion(_)
+            | provenant_fabric_store::Error::UnversionedDatabase => OverviewError::Incompatible,
+            _ => OverviewError::Unavailable,
+        })?;
+    Ok(OverviewBatch {
+        items: page
+            .items
+            .into_iter()
+            .map(|item| OverviewItem {
+                id: item.id,
+                project_id: item.project_id,
+                title: item.title,
+                chair_session_id: item.chair_session_id,
+            })
+            .collect(),
+        truncated: page.truncated,
+        bytes_read: page.bytes_read,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InboxInput {

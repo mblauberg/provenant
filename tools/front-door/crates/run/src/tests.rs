@@ -137,6 +137,72 @@ pub(super) fn exit() -> ExitObservation {
     }
 }
 #[test]
+fn overview_reads_committed_wal_and_bounds_rows() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let writer = RunStore::open(&context, &call)?;
+    let reader = RunStore::open_read_only(&context, &call)?.ok_or("missing reader")?;
+    let mut first = input();
+    first.request.tasks[0].title = Some("Review changes".into());
+    writer.create(&first, &call)?;
+    let batch = reader.overview_attempts(1, 1_048_576, &call)?;
+    assert!(!batch.truncated);
+    assert_eq!(batch.attempts.len(), 1);
+    assert_eq!(batch.attempts[0].title.as_deref(), Some("Review changes"));
+    assert_eq!(batch.attempts[0].state, OverviewState::Queued);
+    assert_eq!(batch.attempts[0].project_id, context.project_id);
+    let empty = reader.overview_attempts(0, 1_048_576, &call)?;
+    assert!(empty.attempts.is_empty());
+    assert!(empty.truncated);
+    Ok(())
+}
+
+#[test]
+fn overview_bounds_aggregate_record_bytes_before_decoding() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let writer = RunStore::open(&context, &call)?;
+    for n in 1..=3 {
+        let mut value = input();
+        value.run_id = RunId::from_bytes([n; 16]);
+        value.operation_id = OperationId::parse(&format!("run-{n}"))?;
+        value.request.tasks[0].task_id = TaskId::from_bytes([n; 16]);
+        value.attempts[0].task_id = value.request.tasks[0].task_id;
+        value.attempts[0].attempt_id = AttemptId::from_bytes([n; 16]);
+        value.request.tasks[0].title = Some("x".repeat(200));
+        writer.create(&value, &call)?;
+    }
+    let mut statement = writer
+        .db
+        .prepare("SELECT length(record) FROM attempts ORDER BY sequence DESC")?;
+    let lengths = statement
+        .query_map([], |row| row.get::<_, u32>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let reader = RunStore::open_read_only(&context, &call)?.ok_or("missing reader")?;
+    let batch = reader.overview_attempts(3, (lengths[0] + lengths[1] - 1) as usize, &call)?;
+    assert_eq!(batch.attempts.len(), 1);
+    assert_eq!(batch.bytes_read, lengths[0] as usize);
+    assert!(batch.truncated);
+
+    // Invalid JSON exposes any attempt to decode a row beyond the budget.
+    writer.db.execute(
+        "UPDATE attempts SET record=?1 WHERE sequence=(SELECT max(sequence) FROM attempts)",
+        [vec![b'x'; 4096]],
+    )?;
+    let batch = reader.overview_attempts(3, 100, &call)?;
+    assert!(batch.attempts.is_empty());
+    assert_eq!(batch.bytes_read, 0);
+    assert!(batch.truncated);
+    Ok(())
+}
+
+#[test]
 fn read_only_data_version_detects_a_new_queued_attempt() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
@@ -368,14 +434,14 @@ fn opens_refuse_unsafe_database_companions() -> TestResult {
             assert!(
                 matches!(
                     RunStore::open(&context, &request),
-                    Err(RunError::UnsafePath)
+                    Err(RunError::UnsafePath { .. })
                 ),
                 "{suffix}/{kind}"
             );
             assert!(
                 matches!(
                     RunStore::open_read_only(&context, &request),
-                    Err(RunError::UnsafePath)
+                    Err(RunError::UnsafePath { .. })
                 ),
                 "read-only {suffix}/{kind}"
             );
@@ -488,6 +554,54 @@ fn missing_output_is_not_found_only_after_terminal() -> TestResult {
             .bytes
             .is_empty()
     );
+    Ok(())
+}
+
+#[test]
+fn streamed_result_is_verified_and_redacted_across_chunks() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let secret = format!("ghp_{}", "a".repeat(36));
+    let text = format!("{} {}\n{}", "x".repeat(8189), secret, "z".repeat(1000));
+    let mut done = publication();
+    done.result = &text;
+    store.publish_terminal(id, 1, &done, &exit(), &call)?;
+    let result = store.stream_result(id, &call, None)?;
+    assert_eq!(
+        result.digest,
+        CanonicalV1::file_digest(text.as_bytes()).to_string()
+    );
+    assert!(result.source_truncated);
+    assert!(!result.tail.contains(&secret));
+    assert!(result.tail.contains("[REDACTED]"));
+    let path = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}/result.md", input.run_id));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
+        let expected =
+            std::path::PathBuf::from(format!("runs/{}/attempts/{id}/result.md", input.run_id));
+        assert!(
+            matches!(store.stream_result(id, &call, None), Err(RunError::UnsafePath { path, check: PathCheck::Mode }) if path == expected)
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::write(path, vec![b'x'; text.len()])?;
+    assert!(matches!(
+        store.stream_result(id, &call, None),
+        Err(RunError::ArtifactMismatch)
+    ));
     Ok(())
 }
 
