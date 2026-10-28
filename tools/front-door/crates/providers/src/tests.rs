@@ -1238,6 +1238,10 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                     "npm_config_cache_dir",
                     "pnpm_config_cache_dir",
                     "COREPACK_HOME",
+                    "npm_config_manage_package_manager_versions",
+                    "pnpm_config_manage_package_manager_versions",
+                    "npm_config_package_manager_strict",
+                    "pnpm_config_package_manager_strict",
                 ],
             );
         }
@@ -3076,6 +3080,45 @@ fn no_lane_can_write_shared_toolchain_stores() -> Result<(), ProviderError> {
     Ok(())
 }
 
+/// pnpm switches to the version a project pins by downloading `@pnpm/exe`, whose
+/// launcher is a placeholder until its install step hard-links the native
+/// binary over it. Lanes cannot create hard links, so the placeholder stays and
+/// running it fails with ENOEXEC. Lanes run the host's pnpm as it is.
+#[test]
+fn lanes_run_the_installed_pnpm_instead_of_downloading_a_pinned_one() -> Result<(), ProviderError> {
+    if !["/opt/homebrew", "/usr/local"]
+        .iter()
+        .any(|prefix| Path::new(prefix).join("bin/node").exists())
+    {
+        return Ok(());
+    }
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture prompt".into());
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let plan = fixture_access_plan(access, Some("login"), false);
+        let launch = crate::codex::Codex.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            None,
+        ))?;
+        for key in [
+            "npm_config_manage_package_manager_versions",
+            "pnpm_config_manage_package_manager_versions",
+            "npm_config_package_manager_strict",
+            "pnpm_config_package_manager_strict",
+        ] {
+            assert!(
+                launch.env.iter().any(|(k, v)| k == key && v == "false"),
+                "{access:?} {key}"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderError> {
     let cases: &[(&str, &[&str])] = &[
@@ -3845,6 +3888,46 @@ fn rust_tools_exec_repository_scripts_in_the_working_directory() {
         && g.scope == provenant_confinement::permissions::PathScope::Subtree));
     // Exec does not widen reads: the worktree was already readable.
     assert!(!exec.iter().any(|g| g.path == Path::new("/fixture/home")));
+}
+
+/// `/usr/bin/python3` is a shim that runs the Command Line Tools' python3, a
+/// symlink into its Python framework, which lies outside `usr/bin`.
+#[test]
+fn shell_lanes_exec_the_command_line_tools_python() {
+    let framework =
+        Path::new("/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework");
+    if !cfg!(target_os = "macos") || !framework.is_dir() {
+        return;
+    }
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture".into());
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let plan = fixture_access_plan(access, Some("login"), false);
+        let spec = crate::codex::Codex
+            .prepare(fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                None,
+            ))
+            .unwrap();
+        let profile = &spec.profile.spec;
+        let subtree = |grants: &[provenant_confinement::permissions::PathGrant]| {
+            grants.iter().any(|grant| {
+                grant.path == framework
+                    && grant.scope == provenant_confinement::permissions::PathScope::Subtree
+            })
+        };
+        assert!(subtree(&profile.tool_exec_roots), "{access:?}");
+        assert!(
+            !profile
+                .tool_writes
+                .iter()
+                .any(|g| g.path.starts_with(framework))
+        );
+    }
 }
 
 #[test]

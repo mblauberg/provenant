@@ -254,14 +254,18 @@ denial cannot be written it exits 2. It never echoes or persists input.
 
 ### Bash guard policy
 
-The guard refuses pattern-based and group process control (a literal
-`kill [-SIGNAL] PID` above 1 is allowed), then applies the configured rule
-IDs to every simple command. Unreadable or invalid config keeps the default
-rules on. The guard is advisory: confinement and custody stay authoritative.
-- Why: pattern kills hit sibling lanes, and config damage must not disable
-  protection.
+The guard refuses only irreversible actions, naming the alternative: a force
+push to the default branch, and recursive `rm` of the home directory, the
+repository root or the Provenant state directory (or a parent of any). It
+applies the configured rule IDs `force-push`, `rm-root` and `rm-state` to every
+simple command, looking through wrappers and shells. Process control, dynamic
+command names, `sleep`, `git stash`, `reset --hard`, `clean -f` and branch
+changes are allowed. Unreadable or invalid config keeps the default rules on.
+The guard is advisory: confinement and custody stay authoritative.
+- Why: an aligned model is trusted with everything it can undo; config damage
+  must not disable protection.
 - Test: `tests/hooks.rs::unreadable_guard_config_keeps_the_default_rules_on`;
-  `crates/confinement/src/shell_command.rs::process_control_never_obtains_authority_from_shell_wrapping`
+  `crates/confinement/src/guard.rs::force_pushes_to_the_default_branch_are_refused`
 - Owner: `crates/confinement/src/guard.rs`, `src/hooks.rs`
 
 ### Pre-push refuses data loss

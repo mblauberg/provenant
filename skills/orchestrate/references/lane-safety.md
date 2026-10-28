@@ -9,19 +9,18 @@ false report. Paste the first section into every lane and reviewer brief.
   and any test suite, build, browser walk or process that starts a database or
   server in a shared checkout. Before trusting a review, check no suite ran;
   cancel and redispatch a lane that started one.
-- Pattern and group process control (`pkill`, `killall`, `kill` of non-literal
-  or PIDs below 2) is refused; `kill [-SIGNAL] PID` is allowed. Use
-  `fabric_run`'s `cancel` for owned work (one attempt; without MCP, `provenant
-  cancel RUN/TASK/ATTEMPT` does the same and RUN/TASK cancels every attempt of
-  the task). The optional Bash hook is `provenant hook claude pre-tool-use`;
-  confinement and owned process handles enforce the underlying policy. The
-  same hook denies bare `git stash`, `git reset --hard`, `git clean -f`,
-  force pushes (not `--force-with-lease`), branch changes in a
-  primary checkout and foreground `sleep N` of 5 s or more, each with a
-  one-line remedy. `[domains.guard] deny = [...]` in `config.toml` lists the
-  rules that are on; omit an id to turn it off. Only Claude has a
-  registrable pre-tool surface; Codex and OpenCode lanes rely on the sandbox
-  and the pre-push hook.
+- The optional Bash hook is `provenant hook claude pre-tool-use`. It refuses only
+  irreversible actions, each with the alternative: a force push to the default
+  branch, and recursive `rm` of the home directory, the repository root or the
+  Provenant state directory. Everything else runs, including `kill`, `sleep`
+  and `git stash`; confinement and owned process handles enforce the
+  underlying policy. Use `fabric_run`'s `cancel` for owned work (one attempt;
+  without MCP, `provenant cancel RUN/TASK/ATTEMPT` does the same and RUN/TASK
+  cancels every attempt of the task). `[domains.guard] deny = [...]` in
+  `config.toml` lists the rules that are on (`force-push`, `rm-root`,
+  `rm-state`); omit an id to turn it off. Only Claude has a registrable
+  pre-tool surface; Codex and OpenCode lanes rely on the sandbox and the
+  pre-push hook.
 - `provenant hook git pre-push` refuses default-branch deletion,
   non-fast-forward pushes, default-branch pushes from linked worktrees and
   conflict markers in pushed commits. `install --hooks on` registers only

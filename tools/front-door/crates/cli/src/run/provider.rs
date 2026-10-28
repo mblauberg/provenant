@@ -1405,6 +1405,27 @@ struct ConfinementRoots<'a> {
     prompt_file: Option<&'a Path>,
 }
 
+/// Read access to the primary checkout's project scratch (`.provenant/scratch`, or
+/// `.agent-run`), where briefs and graph documents live. Git excludes it, so a
+/// writer's linked worktree does not hold it. Final-component links are refused;
+/// parent links may only resolve within the canonical primary checkout.
+fn project_scratch_reads(project: &Path) -> Vec<PathGrant> {
+    let Ok(project) = std::fs::canonicalize(project) else {
+        return Vec::new();
+    };
+    [".provenant/scratch", ".agent-run"]
+        .map(|name| project.join(name))
+        .into_iter()
+        .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()))
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .filter(|path| path.starts_with(&project))
+        .map(|path| PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        })
+        .collect()
+}
+
 /// Dispatch write roots, plus host-configured shared run state for writers only.
 fn write_roots(
     access: &run::LaneAccess,
@@ -1460,6 +1481,12 @@ fn confinement_request(
             private_state: Some(grant(roots.private_state)),
             read_roots: std::iter::once(grant(roots.assets))
                 .chain(writer.is_none().then(|| grant(roots.cwd)))
+                .chain(
+                    writer
+                        .and_then(|writer| writer.worktree.repo().common_git_dir().parent())
+                        .into_iter()
+                        .flat_map(project_scratch_reads),
+                )
                 .chain(access.read_roots.iter().map(|path| grant(path)))
                 .chain(roots.prompt_file.map(|path| PathGrant {
                     path: path.to_owned(),
@@ -3441,6 +3468,57 @@ mod tests {
                     .any(|grant| { grant.path == prompt.parent().expect("attempt") })
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn writers_read_the_primary_checkouts_untracked_scratch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let project = tempfile::tempdir()?;
+        let canonical = std::fs::canonicalize(project.path())?;
+        let root = canonical.as_path();
+        assert!(project_scratch_reads(root).is_empty());
+        std::fs::create_dir_all(root.join(".provenant/scratch"))?;
+        std::fs::create_dir(root.join(".agent-run"))?;
+        std::fs::create_dir(root.join(".provenant/other"))?;
+        let paths = |grants: Vec<PathGrant>| -> Vec<PathBuf> {
+            assert!(grants.iter().all(|grant| grant.scope == PathScope::Subtree));
+            grants.into_iter().map(|grant| grant.path).collect()
+        };
+        assert_eq!(
+            paths(project_scratch_reads(root)),
+            [root.join(".provenant/scratch"), root.join(".agent-run")]
+        );
+        // A link could point the grant anywhere.
+        std::fs::remove_dir(root.join(".agent-run"))?;
+        std::os::unix::fs::symlink("/", root.join(".agent-run"))?;
+        assert_eq!(
+            paths(project_scratch_reads(root)),
+            [root.join(".provenant/scratch")]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn project_scratch_reads_rejects_a_symlinked_parent_outside_the_checkout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let project = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        std::fs::create_dir(outside.path().join("scratch"))?;
+        std::os::unix::fs::symlink(outside.path(), project.path().join(".provenant"))?;
+        assert!(project_scratch_reads(project.path()).is_empty());
+        // An in-checkout parent link is safe, and grants its canonical target.
+        std::fs::remove_file(project.path().join(".provenant"))?;
+        std::fs::create_dir_all(project.path().join("owned/scratch"))?;
+        std::os::unix::fs::symlink("owned", project.path().join(".provenant"))?;
+        let canonical = std::fs::canonicalize(project.path())?;
+        assert_eq!(
+            project_scratch_reads(project.path()),
+            vec![PathGrant {
+                path: canonical.join("owned/scratch"),
+                scope: PathScope::Subtree,
+            }]
+        );
         Ok(())
     }
 

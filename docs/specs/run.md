@@ -206,12 +206,16 @@ refused, and the attempt records every granted path.
 
 ## Writer hard-link refusal
 
-On macOS, launch refuses a writable tree containing an existing hard-linked
-regular file and names the offending path. An operator can inspect it and
-remove or rebuild it if it is disposable output before retrying.
+On macOS, launch refuses a writable worktree containing an existing hard-linked
+regular file and names the offending path. Directories Git ignores wholesale,
+such as an in-tree Cargo `target/` or `node_modules/`, are skipped by the
+census and its entry bound. An operator can inspect a refused file and remove or
+rebuild it if it is disposable output before retrying.
 - Why: a writable hard link could modify data outside the granted tree.
-- Test: `crates/confinement/src/permissions.rs::writable_tree_hard_link_refusal_names_nested_file`
-- Owner: `crates/confinement/src/permissions.rs`
+- Test: `crates/confinement/src/permissions.rs::writable_tree_hard_link_refusal_names_nested_file`;
+  `::the_census_neither_walks_nor_counts_skipped_directories`;
+  `crates/confinement/src/ignored.rs::wholly_ignored_directories_are_listed_and_others_are_not`
+- Owner: `crates/confinement/src/permissions.rs`, `crates/confinement/src/ignored.rs`
 
 ## Reconcile and temporary cleanup
 

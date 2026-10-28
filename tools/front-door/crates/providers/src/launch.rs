@@ -260,6 +260,12 @@ pub(crate) fn rust_tools(
         if developer.is_dir() {
             runtime_reads.push(subtree(developer));
             tool_exec_roots.push(subtree(developer.join("usr/bin")));
+            // `/usr/bin/python3` runs the tools' python3, a symlink into this
+            // framework, and Seatbelt checks the resolved path.
+            let python = developer.join("Library/Frameworks/Python3.framework");
+            if python.is_dir() {
+                tool_exec_roots.push(subtree(python));
+            }
             if access == Access::WorktreeWrite {
                 tool_exec_roots.push(subtree(developer.join("usr/libexec/git-core")));
             }
@@ -341,6 +347,15 @@ pub(crate) fn node_tools(
                 ("pnpm_config_cache_dir".into(), pnpm_cache.into()),
                 ("COREPACK_HOME".into(), corepack.into()),
             ]);
+            // Run the installed pnpm whatever version a project pins. Switching
+            // downloads `@pnpm/exe`, whose launcher stays a non-executable
+            // placeholder when hard links are denied, so running it fails
+            // with ENOEXEC.
+            for name in ["manage_package_manager_versions", "package_manager_strict"] {
+                for prefix in ["npm", "pnpm"] {
+                    env.push((format!("{prefix}_config_{name}").into(), "false".into()));
+                }
+            }
             return;
         }
     }

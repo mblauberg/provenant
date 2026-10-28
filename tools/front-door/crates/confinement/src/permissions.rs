@@ -37,6 +37,16 @@ const MAX_NETWORK_GRANTS: usize = 128;
 const MAX_GIT_HEAD_BYTES: u64 = 1024;
 #[cfg(target_os = "macos")]
 const MAX_WRITABLE_TREE_ENTRIES: usize = 100_000;
+/// Include ignored build and dependency trees, without an unbounded walk.
+#[cfg(target_os = "macos")]
+const MAX_WORKTREE_ENTRIES: usize = 500_000;
+/// Allow thousands of build/dependency aliases, bounded by both count and bytes.
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+const MAX_HARD_LINK_DENIES: usize = 4096;
+/// Profiles travel in argv: leave headroom below macOS's 1 MiB ARG_MAX for
+/// provider arguments and environment. The ordinary profile keeps its 64 KiB cap.
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+const HARD_LINK_PROFILE_LIMIT: usize = 512 * 1024;
 /// The lane build cache is disposable but grows with every build (a Rust
 /// workspace's `target/` holds ~100,000 entries), so its census bound is
 /// higher than a worktree's. It stays bounded and censused.
@@ -187,6 +197,14 @@ pub enum PermissionError {
         "writable tree contains a hard-linked regular file: {0:?}; inspect it and remove or rebuild it if it is disposable build output, then retry"
     )]
     HardLinkedWritableFile(PathBuf),
+    #[error(
+        "hard-link write denials exceed the {bound} limit ({limit}) in {directory:?}; delete or move disposable build/dependency output from this directory (for Rust, set CARGO_TARGET_DIR outside the worktree), then retry"
+    )]
+    HardLinkDenyBound {
+        directory: PathBuf,
+        bound: &'static str,
+        limit: usize,
+    },
     #[error("path is not valid UTF-8 for the SBPL source format")]
     NonUtf8Path,
     #[error("profile or fixture record is malformed")]
@@ -1262,8 +1280,9 @@ fn compile_sbpl(
             Some(verify_worktree_authority(authority, anchors)?)
         }
     };
+    let mut hard_link_denies = BTreeSet::new();
     if let Some(grants) = &worktree_grants {
-        verify_writable_tree(&grants.worktree.path, anchors)?;
+        hard_link_denies = verify_worktree_tree(&grants.worktree.path, anchors)?;
         verify_writable_tree(&grants.objects.path, anchors)?;
     }
     if let Some(read_only) = &plan.read_only {
@@ -1285,7 +1304,9 @@ fn compile_sbpl(
             verify_writable_tree(&grant.path, anchors)?;
         }
     }
-    let grants = GrantSet::build(plan, profile, anchors.home, worktree_grants)?;
+    let mut grants = GrantSet::build(plan, profile, anchors.home, worktree_grants)?;
+    grants.hard_link_denies = hard_link_denies;
+    let hard_link_denies = &grants.hard_link_denies;
     let read_grants = &grants.reads;
     let all_reads = || read_grants.iter().chain(&profile.spec.discovery_reads);
     let credential_writes = &grants.credential_writes;
@@ -1422,9 +1443,6 @@ fn compile_sbpl(
     }
 
     let mut profile_bytes = render(&grants)?.into_bytes();
-    if profile_bytes.len() > PROFILE_LIMIT {
-        return Err(PermissionError::ProfileTooLarge);
-    }
     let profile_digest = Sha256::digest(&profile_bytes).into();
     // SBPL grants pathnames, so rebind them to their held identities after
     // rendering, immediately before returning the launch profile.
@@ -1432,7 +1450,9 @@ fn compile_sbpl(
         verify_worktree_authority(authority, anchors)?;
     }
     if let Some(grants) = &worktree_grants {
-        verify_writable_tree(&grants.worktree.path, anchors)?;
+        if verify_worktree_tree(&grants.worktree.path, anchors)? != *hard_link_denies {
+            return Err(PermissionError::AnchorMismatch);
+        }
         verify_writable_tree(&grants.objects.path, anchors)?;
     }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
@@ -1491,6 +1511,7 @@ pub(crate) struct GrantSet<'a> {
     reads: Vec<PathGrant>,
     credential_writes: Vec<PathGrant>,
     worktree: Option<WorktreeWriteGrants>,
+    hard_link_denies: BTreeSet<PathBuf>,
 }
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
@@ -1532,6 +1553,7 @@ impl<'a> GrantSet<'a> {
             reads,
             credential_writes,
             worktree,
+            hard_link_denies: BTreeSet::new(),
         })
     }
 }
@@ -1539,7 +1561,7 @@ impl<'a> GrantSet<'a> {
 /// Render a built grant set without filesystem or environment access.
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 pub(crate) fn render(grants: &GrantSet<'_>) -> Result<String, PermissionError> {
-    String::from_utf8(render_profile(
+    let mut source = String::from_utf8(render_profile(
         grants.plan,
         grants.profile,
         &grants.reads,
@@ -1547,7 +1569,56 @@ pub(crate) fn render(grants: &GrantSet<'_>) -> Result<String, PermissionError> {
         grants.worktree.as_ref(),
         grants.home,
     )?)
-    .map_err(|_| PermissionError::NonUtf8Path)
+    .map_err(|_| PermissionError::NonUtf8Path)?;
+    if grants.hard_link_denies.len() > MAX_HARD_LINK_DENIES {
+        return Err(PermissionError::HardLinkDenyBound {
+            directory: grants
+                .worktree
+                .as_ref()
+                .ok_or(PermissionError::AnchorMismatch)?
+                .worktree
+                .path
+                .clone(),
+            bound: "path count",
+            limit: MAX_HARD_LINK_DENIES,
+        });
+    }
+    let mut ancestors = BTreeSet::new();
+    for path in &grants.hard_link_denies {
+        push_rule(&mut source, "deny", "file-write*", path, PathScope::Exact)?;
+        if let Some(worktree) = &grants.worktree {
+            ancestors.extend(
+                path.ancestors()
+                    .skip(1)
+                    .take_while(|parent| parent.starts_with(&worktree.worktree.path))
+                    .map(Path::to_owned),
+            );
+        }
+    }
+    // A directory rename would otherwise give a shared inode a new pathname
+    // outside its literal deny. Keep ancestors in place, but allow other writes.
+    for path in ancestors {
+        push_rule(
+            &mut source,
+            "deny",
+            "file-write-unlink",
+            &path,
+            PathScope::Exact,
+        )?;
+    }
+    if source.len() > HARD_LINK_PROFILE_LIMIT {
+        let directory = grants
+            .worktree
+            .as_ref()
+            .map(|worktree| worktree.worktree.path.clone())
+            .ok_or(PermissionError::AnchorMismatch)?;
+        return Err(PermissionError::HardLinkDenyBound {
+            directory,
+            bound: "profile byte count",
+            limit: HARD_LINK_PROFILE_LIMIT,
+        });
+    }
+    Ok(source)
 }
 
 /// Provider state writes stay outside every secret, protected and Git root, and
@@ -1594,7 +1665,12 @@ fn verify_state_write(
         }
     }
     match grant.scope {
-        PathScope::Subtree => verify_writable_tree_within(&grant.path, anchors, entry_limit)?,
+        PathScope::Subtree => verify_writable_tree_within(
+            &grant.path,
+            anchors,
+            entry_limit,
+            &mut WritableTreeLinks::Refuse,
+        )?,
         PathScope::Exact => anchors.verify_single_link_grant(grant)?,
     }
     Ok(())
@@ -1702,7 +1778,63 @@ fn verify_private_scratch(
 
 #[cfg(target_os = "macos")]
 fn verify_writable_tree(path: &Path, anchors: &Anchors<'_>) -> Result<(), PermissionError> {
-    verify_writable_tree_within(path, anchors, MAX_WRITABLE_TREE_ENTRIES)
+    verify_writable_tree_within(
+        path,
+        anchors,
+        MAX_WRITABLE_TREE_ENTRIES,
+        &mut WritableTreeLinks::Refuse,
+    )
+}
+
+/// Ignored directories receive the same census as source directories. Every
+/// pathname of a multi-linked regular file is denied, even for in-tree aliases.
+#[cfg(target_os = "macos")]
+fn verify_worktree_tree(
+    path: &Path,
+    anchors: &Anchors<'_>,
+) -> Result<BTreeSet<PathBuf>, PermissionError> {
+    let mut links = WritableTreeLinks::Deny {
+        root: path.to_owned(),
+        paths: BTreeSet::new(),
+    };
+    verify_writable_tree_within(path, anchors, MAX_WORKTREE_ENTRIES, &mut links)?;
+    let WritableTreeLinks::Deny { paths, .. } = links else {
+        return Err(PermissionError::AnchorMismatch);
+    };
+    Ok(paths)
+}
+
+#[cfg(target_os = "macos")]
+enum WritableTreeLinks {
+    Refuse,
+    Deny {
+        root: PathBuf,
+        paths: BTreeSet<PathBuf>,
+    },
+}
+
+#[cfg(target_os = "macos")]
+impl WritableTreeLinks {
+    fn record(&mut self, path: PathBuf, metadata: &Metadata) -> Result<(), PermissionError> {
+        if metadata.kind != FileKind::Regular || metadata.links <= 1 {
+            return Ok(());
+        }
+        match self {
+            Self::Refuse => Err(PermissionError::HardLinkedWritableFile(path)),
+            Self::Deny { root, paths } => {
+                let directory = path.parent().unwrap_or(root).to_owned();
+                paths.insert(path);
+                if paths.len() > MAX_HARD_LINK_DENIES {
+                    return Err(PermissionError::HardLinkDenyBound {
+                        directory,
+                        bound: "path count",
+                        limit: MAX_HARD_LINK_DENIES,
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1710,6 +1842,7 @@ fn verify_writable_tree_within(
     path: &Path,
     anchors: &Anchors<'_>,
     entry_limit: usize,
+    links: &mut WritableTreeLinks,
 ) -> Result<(), PermissionError> {
     let root = anchors
         .directories
@@ -1725,7 +1858,7 @@ fn verify_writable_tree_within(
         return Err(PermissionError::AnchorMismatch);
     }
     let mut entries = 0;
-    inspect_writable_directory(&root.directory, path, 0, &mut entries, entry_limit)?;
+    inspect_writable_directory(&root.directory, path, 0, &mut entries, entry_limit, links)?;
     let after = root
         .directory
         .metadata()
@@ -1744,6 +1877,7 @@ fn inspect_writable_directory(
     depth: usize,
     count: &mut usize,
     entry_limit: usize,
+    links: &mut WritableTreeLinks,
 ) -> Result<(), PermissionError> {
     if depth > MAX_WRITABLE_TREE_DEPTH {
         return Err(PermissionError::BoundExceeded {
@@ -1765,9 +1899,7 @@ fn inspect_writable_directory(
         let before = directory
             .metadata_at(&name, false)
             .map_err(PermissionError::Filesystem)?;
-        if before.kind == FileKind::Regular && before.links != 1 {
-            return Err(PermissionError::HardLinkedWritableFile(path.join(&name)));
-        }
+        links.record(path.join(&name), &before)?;
         if before.kind == FileKind::Directory {
             let child = directory
                 .open_verified_directory(&name)
@@ -1776,7 +1908,14 @@ fn inspect_writable_directory(
             if !before.unchanged(&opened) {
                 return Err(PermissionError::AnchorMismatch);
             }
-            inspect_writable_directory(&child, &path.join(&name), depth + 1, count, entry_limit)?;
+            inspect_writable_directory(
+                &child,
+                &path.join(&name),
+                depth + 1,
+                count,
+                entry_limit,
+                links,
+            )?;
             let after = directory
                 .metadata_at(&name, false)
                 .map_err(PermissionError::Filesystem)?;
@@ -1790,9 +1929,7 @@ fn inspect_writable_directory(
             if !before.unchanged(&after) {
                 return Err(PermissionError::AnchorMismatch);
             }
-            if after.kind == FileKind::Regular && after.links != 1 {
-                return Err(PermissionError::HardLinkedWritableFile(path.join(&name)));
-            }
+            links.record(path.join(&name), &after)?;
         }
     }
     Ok(())
@@ -2509,13 +2646,26 @@ mod tests {
         let alias = nested.join("object.o");
         std::fs::hard_link(&original, &alias)?;
         let directory = Directory::open_anchor(&nested)?;
-        let error =
-            inspect_writable_directory(&directory, &nested, 0, &mut 0, MAX_WRITABLE_TREE_ENTRIES)
-                .unwrap_err();
+        let error = inspect_writable_directory(
+            &directory,
+            &nested,
+            0,
+            &mut 0,
+            MAX_WRITABLE_TREE_ENTRIES,
+            &mut WritableTreeLinks::Refuse,
+        )
+        .unwrap_err();
         assert!(matches!(&error, PermissionError::HardLinkedWritableFile(path) if path == &alias));
         assert!(error.to_string().contains("disposable build output"));
         std::fs::remove_file(alias)?;
-        inspect_writable_directory(&directory, &nested, 0, &mut 0, MAX_WRITABLE_TREE_ENTRIES)?;
+        inspect_writable_directory(
+            &directory,
+            &nested,
+            0,
+            &mut 0,
+            MAX_WRITABLE_TREE_ENTRIES,
+            &mut WritableTreeLinks::Refuse,
+        )?;
         Ok(())
     }
 
@@ -2528,7 +2678,15 @@ mod tests {
             std::fs::write(temp.path().join(format!("file-{index}")), b"x")?;
         }
         let directory = Directory::open_anchor(temp.path())?;
-        let error = inspect_writable_directory(&directory, temp.path(), 0, &mut 0, 3).unwrap_err();
+        let error = inspect_writable_directory(
+            &directory,
+            temp.path(),
+            0,
+            &mut 0,
+            3,
+            &mut WritableTreeLinks::Refuse,
+        )
+        .unwrap_err();
         assert!(matches!(
             &error,
             PermissionError::BoundExceeded { family, limit: 3, path }
@@ -2537,6 +2695,133 @@ mod tests {
         assert!(!error.to_string().contains("byte bound"));
         // The disposable lane build cache outgrows a worktree-sized census.
         const { assert!(MAX_CACHE_TREE_ENTRIES >= 5 * MAX_WRITABLE_TREE_ENTRIES) };
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_census_walks_and_counts_ignored_directories() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        std::fs::write(root.join(".gitignore"), "target/\n")?;
+        std::fs::create_dir_all(root.join("target/debug"))?;
+        std::fs::write(root.join("kept"), b"x")?;
+        for index in 0..5 {
+            std::fs::write(root.join(format!("target/debug/file-{index}")), b"x")?;
+        }
+        let directory = Directory::open_anchor(&root)?;
+        let links = &mut WritableTreeLinks::Deny {
+            root: root.clone(),
+            paths: BTreeSet::new(),
+        };
+        let error = inspect_writable_directory(&directory, &root, 0, &mut 0, 3, links).unwrap_err();
+        assert!(matches!(
+            error,
+            PermissionError::BoundExceeded {
+                family: "writable tree entry count",
+                limit: 3,
+                ..
+            }
+        ));
+        let mut count = 0;
+        inspect_writable_directory(&directory, &root, 0, &mut count, 100, links)?;
+        assert_eq!(count, 9); // .gitignore, kept, target, debug and five files.
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hard_link_deny_count_is_bounded_and_actionable() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::NamedTempFile::new()?;
+        let mut metadata = Metadata::from_std(temp.as_file().metadata()?);
+        metadata.links = 2;
+        let root = PathBuf::from("/fixture/repo/node_modules");
+        let mut links = WritableTreeLinks::Deny {
+            root: root.clone(),
+            paths: BTreeSet::new(),
+        };
+        for index in 0..MAX_HARD_LINK_DENIES {
+            links.record(root.join(index.to_string()), &metadata)?;
+        }
+        // Recording the same path twice (before/after metadata) costs one slot.
+        links.record(root.join("0"), &metadata)?;
+        let error = links.record(root.join("overflow"), &metadata).unwrap_err();
+        assert!(
+            matches!(&error, PermissionError::HardLinkDenyBound { directory, bound: "path count", limit: MAX_HARD_LINK_DENIES } if directory == &root)
+        );
+        assert!(error.to_string().contains("/fixture/repo/node_modules"));
+        assert!(error.to_string().contains("delete or move"));
+        assert!(
+            error
+                .to_string()
+                .contains("CARGO_TARGET_DIR outside the worktree")
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hard_link_denies_keep_aliases_and_ancestors_immutable_with_a_byte_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (plan, profile) = write_grants_fixture();
+        let mut grants = GrantSet::build(
+            &plan,
+            &profile,
+            Path::new("/fixture/home"),
+            Some(worktree_grants_fixture()),
+        )?;
+        for path in [
+            "/fixture/repo/target/debug/object.o",
+            "/fixture/repo/node_modules/pkg/file",
+            "/fixture/repo/node_modules/pkg/alias",
+        ] {
+            grants.hard_link_denies.insert(path.into());
+        }
+        let source = render(&grants)?;
+        for path in &grants.hard_link_denies {
+            assert!(source.contains(&format!(
+                "(deny file-write* (literal \"{}\"))",
+                path.display()
+            )));
+        }
+        for path in [
+            "/fixture/repo",
+            "/fixture/repo/target",
+            "/fixture/repo/target/debug",
+            "/fixture/repo/node_modules",
+            "/fixture/repo/node_modules/pkg",
+        ] {
+            assert!(source.contains(&format!("(deny file-write-unlink (literal \"{path}\"))")));
+            assert!(!source.contains(&format!("(deny file-write* (subpath \"{path}\"))")));
+        }
+        // A typical short-path batch fits; long paths must fail with recovery
+        // advice even while below the path-count bound.
+        grants.hard_link_denies = (0..MAX_HARD_LINK_DENIES)
+            .map(|index| PathBuf::from(format!("/fixture/repo/node_modules/pkg/file-{index}")))
+            .collect();
+        assert!(render(&grants)?.len() <= HARD_LINK_PROFILE_LIMIT);
+        grants.hard_link_denies = (0..MAX_HARD_LINK_DENIES / 2)
+            .map(|index| {
+                PathBuf::from(format!(
+                    "/fixture/repo/node_modules/{}/file-{index}",
+                    "x".repeat(240)
+                ))
+            })
+            .collect();
+        let error = render(&grants).unwrap_err();
+        assert!(matches!(
+            error,
+            PermissionError::HardLinkDenyBound {
+                bound: "profile byte count",
+                limit: HARD_LINK_PROFILE_LIMIT,
+                ..
+            }
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("CARGO_TARGET_DIR outside the worktree")
+        );
         Ok(())
     }
 
@@ -4163,7 +4448,7 @@ mod tests {
         };
         let backend = MacOsSandboxBackend { ready: true };
         let hardlink_path = linked.path().join("hardlink");
-        for writable_path in [&grants.worktree.path, &grants.objects.path, &scratch] {
+        for writable_path in [&grants.objects.path, &scratch] {
             let alias = writable_path.join("hardlink-probe");
             std::fs::hard_link(&protected_file, &alias)?;
             assert!(matches!(
@@ -4172,8 +4457,55 @@ mod tests {
             ));
             std::fs::remove_file(alias)?;
         }
+        std::fs::write(linked.path().join(".gitignore"), "target/\nnode_modules/\n")?;
+        let aliases = [
+            "target/debug/object.o",
+            "node_modules/pkg/file",
+            "node_modules/pkg/alias",
+        ]
+        .map(|path| linked.path().join(path));
+        for alias in &aliases {
+            std::fs::create_dir_all(alias.parent().ok_or("alias parent")?)?;
+            std::fs::hard_link(&protected_file, alias)?;
+        }
         let compiled = backend.compile(&plan, &profile, &anchors)?;
         let sbpl = String::from_utf8(compiled.profile)?;
+        for alias in &aliases {
+            assert!(sbpl.contains(&format!(
+                "(deny file-write* (literal \"{}\"))",
+                alias.display()
+            )));
+        }
+        for directory in [
+            linked.path().join("target"),
+            linked.path().join("node_modules/pkg"),
+        ] {
+            assert!(sbpl.contains(&format!(
+                "(deny file-write-unlink (literal \"{}\"))",
+                directory.display()
+            )));
+        }
+        // Refuse excessive denials before producing a launch, with recovery advice.
+        let overflow = linked.path().join("target/overflow");
+        std::fs::create_dir(&overflow)?;
+        for index in 0..MAX_HARD_LINK_DENIES {
+            std::fs::hard_link(&protected_file, overflow.join(index.to_string()))?;
+        }
+        let error = backend
+            .compile(&plan, &profile, &anchors)
+            .err()
+            .ok_or("overflow accepted")?;
+        assert!(
+            matches!(&error, PermissionError::HardLinkDenyBound { bound: "path count", limit: MAX_HARD_LINK_DENIES, directory } if directory.starts_with(linked.path()))
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("CARGO_TARGET_DIR outside the worktree")
+        );
+        for index in 0..MAX_HARD_LINK_DENIES {
+            std::fs::remove_file(overflow.join(index.to_string()))?;
+        }
         assert!(sbpl.contains("(deny file-link)"));
         assert!(sbpl.contains("(allow sysctl-read)"));
         // A writer may run what it builds into a write root.
@@ -4238,6 +4570,21 @@ mod tests {
             executor.execute(options).expect("bounded sandbox child")
         };
         let run = |program: &Path, args: &[&Path]| run_in(&sbpl, program, args);
+        for alias in &aliases {
+            assert!(denied_probe(&run(&executables[0], &[alias])));
+        }
+        // Rename through Perl so this probes filesystem permissions, without
+        // depending on whether a separate mv binary has execution authority.
+        let rename = run(
+            &executables[6],
+            &[
+                Path::new("-e"),
+                Path::new("rename $ARGV[0], $ARGV[1] or die \"rename: $!\\n\""),
+                &linked.path().join("node_modules"),
+                &linked.path().join("moved-modules"),
+            ],
+        );
+        assert!(denied_probe(&rename));
 
         // The per-user peer agent relays to fresh `fabric peer` children in
         // the login session, so no lane may connect to its socket. The

@@ -289,13 +289,16 @@ when no explicitly named file exists in the current directory. Explicit project-
 paths remain supported. Scratch setup appends its anchored directory pattern to
 Git's common `info/exclude` under a stable lock, preserving existing bytes and
 never editing tracked `.gitignore`. Symlinked scratch roots and exclude files
-are refused. The graph path error and CLI help name these directories. Scratch
+are refused. Writer lanes get a
+read-only grant on the primary checkout's scratch root (never a symlink), so
+briefs there stay readable from a linked worktree. The graph path error and CLI help name these directories. Scratch
 is disposable operator data, separate from authoritative run state; expiry is
 owned by GC rather than graph execution.
 - Why: graph documents and lane briefs need a discoverable project-local home
   without creating tracked configuration changes.
-- Test: `crates/confinement/src/scratch.rs::scratch_is_local_excluded_idempotent_and_refuses_links`.
-- Owner: `crates/confinement/src/scratch.rs`, `src/fabric.rs`
+- Test: `crates/confinement/src/scratch.rs::scratch_is_local_excluded_idempotent_and_refuses_links`;
+  `crates/cli/src/run/provider.rs::writers_read_the_primary_checkouts_untracked_scratch`.
+- Owner: `crates/confinement/src/scratch.rs`, `crates/cli/src/run/provider.rs`, `src/fabric.rs`
 
 ### Graph delivery
 

@@ -114,16 +114,19 @@ fn guard(globals: &Globals, deadline: Instant) -> u8 {
     let Ok(tool) = serde_json::from_value::<ToolInput>(event.tool_input) else {
         return deny("hook input rejected: bounded-input error (invalid Bash command)");
     };
-    if let Err(refusal) = provenant_confinement::shell_command::check(&tool.command) {
-        return deny(refusal.0.message());
-    }
     let cwd = event
         .cwd
         .filter(|cwd| cwd.is_absolute())
         .or_else(|| std::env::current_dir().ok());
     if let Some(cwd) = cwd {
-        let config = guard_config(globals, &cwd);
-        if let Some(remedy) = provenant_confinement::guard::violation(&tool.command, &cwd, &config)
+        let policy = guard_policy(globals, &cwd);
+        let ctx = provenant_confinement::guard::Context {
+            cwd: &cwd,
+            home: policy.home.as_deref(),
+            state: policy.state.as_deref(),
+        };
+        if let Some(remedy) =
+            provenant_confinement::guard::violation(&tool.command, &ctx, &policy.config)
         {
             return deny(remedy);
         }
@@ -133,21 +136,35 @@ fn guard(globals: &Globals, deadline: Instant) -> u8 {
     }
     0
 }
-/// The `[domains.guard]` rules. Unreadable config keeps every rule on, since
-/// the rules only refuse patterns and the remedy is always available.
-fn guard_config(globals: &Globals, cwd: &Path) -> provenant_confinement::guard::GuardConfig {
-    let read = || -> Result<_, Error> {
-        let roots = crate::roots::resolve(
-            globals,
-            crate::roots::Workspace::At(cwd),
-            crate::roots::Product::Required,
-        )?
-        .roots;
-        let domains =
-            provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?.domains;
-        Ok(domains.guard)
+/// The `[domains.guard]` rules and the directories they protect. Unreadable
+/// config keeps every rule on, since the rules only refuse irreversible
+/// actions and the alternative is always available.
+struct GuardPolicy {
+    config: provenant_confinement::guard::GuardConfig,
+    home: Option<PathBuf>,
+    state: Option<PathBuf>,
+}
+fn guard_policy(globals: &Globals, cwd: &Path) -> GuardPolicy {
+    let Ok(resolved) = crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::At(cwd),
+        crate::roots::Product::Optional,
+    ) else {
+        return GuardPolicy {
+            config: Default::default(),
+            home: None,
+            state: None,
+        };
     };
-    read().unwrap_or_default()
+    let config =
+        provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)
+            .map(|read| read.domains.guard)
+            .unwrap_or_default();
+    GuardPolicy {
+        config,
+        home: Some(resolved.home),
+        state: Some(resolved.roots.state.as_path().to_owned()),
+    }
 }
 // Advisory work is abandoned when its real-time host deadline expires.
 #[allow(clippy::disallowed_methods)]
