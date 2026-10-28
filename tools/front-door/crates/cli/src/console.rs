@@ -22,7 +22,7 @@ pub enum Console {
         /// Maximum rows in a page
         #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u64).range(1..=100))]
         limit: u64,
-        /// Continue the same filters and generation
+        /// Continue the same filters and attempt high-water mark
         #[arg(long)]
         cursor: Option<String>,
     },
