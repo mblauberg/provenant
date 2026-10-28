@@ -166,8 +166,7 @@ fn route_names_validate_at_the_string_boundary() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn exact_unknown_is_retained_but_never_upgraded_or_activated()
--> Result<(), Box<dyn std::error::Error>> {
+fn exact_unknown_is_retained_but_requires_availability() -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
@@ -190,17 +189,86 @@ fn exact_unknown_is_retained_but_never_upgraded_or_activated()
     Ok(())
 }
 #[test]
+fn explicit_unlisted_model_is_ready_without_provider_listing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let mut record = availability();
+    record.adapter = "opencode".into();
+    record.observed_models.clear();
+    let records = [record];
+    let access = [AccessContext {
+        adapter: "opencode",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut context = context(&catalogue, &config, now()?);
+    context.availability = &records;
+    context.access = &access;
+    let query = request("opencode/opencode/beam-free")?;
+    let route = resolve(&query, &context)?;
+    assert_eq!(route.model, "opencode/beam-free");
+    assert_eq!(route.eligibility, RouteEligibility::UnverifiedModel);
+    assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    assert!(route.exclusions.is_empty());
+    let mut with_effort = query.clone();
+    with_effort.effort = Some("high".into());
+    assert!(matches!(
+        resolve(&with_effort, &context),
+        Err(RoutingError::UnsupportedEffort)
+    ));
+    let mut confidential = query;
+    confidential.confidential = true;
+    assert!(matches!(
+        resolve(&confidential, &context),
+        Err(RoutingError::ConfidentialModel)
+    ));
+    Ok(())
+}
+
+#[test]
+fn named_routes_reject_unlisted_models_even_when_provider_observed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig {
+        routes: BTreeMap::from([(
+            "review".into(),
+            NamedRoute {
+                model: ModelId::parse("codex/test")?,
+                effort: None,
+            },
+        )]),
+        ..RoutingConfig::default()
+    };
+    let records = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut context = context(&catalogue, &config, now()?);
+    context.availability = &records;
+    context.access = &access;
+    let mut query = request("codex/test")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("review")?);
+    assert!(
+        config
+            .validate()
+            .iter()
+            .any(|error| { error.field == "routes.review.model" && error.code == "unknown_model" })
+    );
+    assert!(matches!(
+        resolve(&query, &context),
+        Err(RoutingError::InvalidValue)
+    ));
+    Ok(())
+}
+
+#[test]
 fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut catalogue = Catalogue::bundled()?;
-    let model = ModelId::parse("codex/fixture-model")?;
-    catalogue.models.push(ModelEntry {
-        model: model.clone(),
-        efforts: vec!["low".into(), "high".into()],
-        evidence_ref: "synthetic-controls".into(),
-        family: None,
-        trains_on_prompts: None,
-    });
+    let catalogue = Catalogue::bundled()?;
+    let model = ModelId::parse("codex/gpt-6.1-sol")?;
     let config = RoutingConfig {
         routes: BTreeMap::from([(
             "review".into(),
@@ -222,7 +290,7 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
     assert_eq!(resolve(&query, &context)?.effort.as_deref(), Some("low"));
     query.effort = Some("high".into());
     assert_eq!(resolve(&query, &context)?.effort.as_deref(), Some("high"));
-    query.effort = Some("max".into());
+    query.effort = Some("invented".into());
     assert!(matches!(
         resolve(&query, &context),
         Err(RoutingError::UnsupportedEffort)
@@ -1056,7 +1124,10 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     let roots = inputs.resolve(&Resolver)?;
     let cfg = provenant_config::load_with_domains(
         &roots,
-        Some("schema_version=1\n[domains.routing.routes.review]\nmodel='codex/exact'\n".as_bytes()),
+        Some(
+            "schema_version=1\n[domains.routing.routes.review]\nmodel='codex/gpt-6.1-sol'\n"
+                .as_bytes(),
+        ),
         &sections,
     )?;
     assert_eq!(
@@ -1065,14 +1136,15 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
             .routes
             .get("review")
             .map(|r| r.model.model()),
-        Some("exact")
+        Some("gpt-6.1-sol")
     );
-    let cfg: RoutingConfig =
-        toml_edit::de::from_str("[routes.review]\nmodel = 'opencode/openrouter/vendor/model'\n")?;
+    let cfg: RoutingConfig = toml_edit::de::from_str(
+        "[routes.review]\nmodel = 'opencode/opencode/glm-5.3-flash-free'\n",
+    )?;
     assert!(cfg.validate().is_empty());
     assert_eq!(
         cfg.routes.get("review").map(|r| r.model.model()),
-        Some("openrouter/vendor/model")
+        Some("opencode/glm-5.3-flash-free")
     );
     assert!(toml_edit::de::from_str::<RoutingConfig>("preferences = true\n[routes]").is_err());
     Ok(())
@@ -1397,10 +1469,10 @@ fn availability_access_and_scoped_quota_are_independent_gates()
     assert!(reason(&route).is_none());
     assert_eq!(route.confidentiality.evidence_ref, "policy");
     assert_eq!(route.account_key.as_deref(), Some("opaque-account"));
-    assert_eq!(
-        reason(&resolve(&request("codex/not-observed")?, &context)?),
-        Some(&RouteExclusionReason::UnverifiedModel)
-    );
+    assert!(matches!(
+        resolve(&request("codex/not-observed")?, &context)?.readiness,
+        RouteReadiness::Ready { .. }
+    ));
     let stale = [quota(
         "codex/test",
         "opaque-account",

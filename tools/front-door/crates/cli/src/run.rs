@@ -477,15 +477,24 @@ impl run::Providers for Registry<'_> {
             }
             reason.push_str(repair);
             decoded.reason = Some(reason);
-        } else if let Some(ProviderEvent::RateLimited { message }) = events
-            .iter()
-            .find(|event| matches!(event, ProviderEvent::RateLimited { .. }))
+        } else if let Some((outcome, message, description)) =
+            events.iter().find_map(|event| match event {
+                ProviderEvent::RateLimited { message } => {
+                    Some((run::Outcome::RateLimited, message, "provider rate limited"))
+                }
+                ProviderEvent::ModelUnavailable { message } => Some((
+                    run::Outcome::ModelUnavailable,
+                    message,
+                    "provider model unavailable",
+                )),
+                _ => None,
+            })
         {
-            decoded.outcome = run::Outcome::RateLimited;
+            decoded.outcome = outcome;
             let mut reason = provenant_confinement::redact::known_shapes(message.as_bytes())
                 .ok()
                 .and_then(|bytes| String::from_utf8(bytes).ok())
-                .unwrap_or_else(|| "provider rate limited (message redaction unavailable)".into());
+                .unwrap_or_else(|| format!("{description} (message redaction unavailable)"));
             let mut end = reason.len().min(8192);
             while !reason.is_char_boundary(end) {
                 end -= 1;
@@ -6314,6 +6323,33 @@ mod tests {
             stdout: CaptureTotals::default(),
             stderr: CaptureTotals::default(),
         }
+    }
+
+    #[test]
+    fn opencode_unavailable_model_reaches_the_decoded_outcome() {
+        let route = run::RouteRecord {
+            provider: Some("opencode".into()),
+            model: Some("opencode/opencode/misspelt-free".into()),
+            ..Default::default()
+        };
+        let mut exit = clean_exit();
+        exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+        let decoded = Registry::default()
+            .decode(
+                &route,
+                include_bytes!(
+                    "../../../tests/fixtures/providers/opencode/model-unavailable.jsonl"
+                ),
+                &exit,
+                Path::new("/nonexistent"),
+            )
+            .unwrap();
+        assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("Model unavailable: opencode/misspelt-free")
+        );
+        assert!(decoded.observed_route.is_none());
     }
 
     #[test]
