@@ -246,15 +246,22 @@ complete redacted stream. Writers can also provide a branch or commit.
 A node's `inputs` list selects `result`, `verdict`, `findings`, `branch` or
 `commit` from named direct dependencies. Each dependency and output selector
 may occur only once. The selected data is rendered into its brief, which is
-bounded by the effective per-node prompt byte limit. If selected outputs do not
-fit, the node fails before admission with a per-node advance error. Selected
-outputs appear in a delimited block labelled as untrusted data, with delimiter
-collisions escaped. Result digests and excerpts are passed instead of
-transcripts. Paths remain visible in status but
-are omitted from downstream briefs.
+bounded by the effective per-node prompt byte limit. If the node prompt leaves
+no room for the block, or the selected outputs do not fit, the node fails
+before its next attempt is admitted with a per-node advance error. A failure
+before a fallback preserves the earlier attempt's outcome and creates no
+fallback attempt. An admitted attempt retains its admission cap on replay; a
+node without selected inputs replays its full admitted prompt even if the
+limit is lowered. Increase `node_prompt_bytes` within the host ceiling and start a new
+graph to retry a failed node. A document prompt exceeding a structural limit
+instead pauses the graph; it may be resumed after extending that limit.
+Selected outputs appear in a delimited block labelled as untrusted data, with
+delimiter collisions escaped. Result digests and excerpts are passed instead
+of transcripts. Paths remain visible in status but are omitted from downstream
+briefs.
 - Why: downstream nodes can use bounded evidence without copying transcripts.
 - Test: `crates/fabric-runtime/src/graph.rs::outputs_feed_direct_dependants_and_survive_replay`;
-  `::output_parsing_is_lenient_and_rendering_is_bounded`;
+  `::output_parsing_is_lenient_and_rendering_fails_instead_of_omitting`;
   `::findings_and_verdict_at_the_end_of_a_large_result_are_parsed`;
   `::matched_required_verdict_takes_precedence_even_in_middle`;
   `::upstream_data_boundary_cannot_be_closed_by_result_content`;

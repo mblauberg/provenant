@@ -85,10 +85,15 @@ stored artifact; hashing the redacted output may yield a different digest.
 The path is available in status for a local attempt with a result; remote
 attempts may have no local path. Paths are omitted from downstream briefs.
 Selected outputs appear in a block marked as untrusted data. The rendered brief
-is bounded by the effective `node_prompt_bytes`
-limit; if the selected data does not fit, the node fails before admission with
-an advance error.
-Inspect the checkpoint's node outputs with `provenant fabric graph status --json`.
+is bounded by the effective `node_prompt_bytes` limit. If the prompt leaves no
+room for the block or the selected data does not fit, the node fails before its
+next attempt is admitted and reports an advance error. A failure before a
+fallback preserves the previous attempt without creating a fallback attempt.
+An admitted node without selected inputs replays its full prompt even if the
+limit is lowered. Increase the limit within the host ceiling and start a new graph to
+retry a failed node. A document prompt over a structural limit instead pauses
+the graph, which can be resumed after the limit is extended. Inspect node
+outputs with `provenant fabric graph status --json`.
 
 To report findings, include a fenced `findings` block in the result containing
 JSON with `schema_version: 1` and a `findings` array. Each finding has `id`,
