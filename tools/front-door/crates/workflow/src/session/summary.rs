@@ -26,12 +26,12 @@ pub fn parse_summary(markdown: &str) -> Result<Option<Summary>, SummaryError> {
         return Ok(None);
     }
     let end = markdown
-        .lines()
-        .skip(1)
-        .scan(4usize, |offset, line| {
-            *offset += line.len() + 1;
-            Some((*offset, line.trim_end_matches('\r')))
+        .split_inclusive('\n')
+        .scan(0usize, |offset, line| {
+            *offset += line.len();
+            Some((*offset, line.trim_end_matches('\n').trim_end_matches('\r')))
         })
+        .skip(1)
         .find(|(_, line)| *line == "---")
         .map(|(offset, _)| offset)
         .ok_or(SummaryError)?;
@@ -116,5 +116,20 @@ mod tests {
             parse_summary(&source.replace("revision: 12", "revision: 12\n  revision: 13")).is_err()
         );
         assert!(parse_summary("plain checkpoint").unwrap().is_none());
+    }
+
+    #[test]
+    fn summary_header_counts_crlf_bytes_at_limit() {
+        let prefix = "---\r\nprovenant_summary:\r\n  schema_version: 1\r\n  revision: 1\r\n  updated_at: \"2026-10-28T03:00:00Z\"\r\n  now: \"";
+        let suffix = "\"\r\n  next: \"Next\"\r\n  needs_you: []\r\n  risk: \"None\"\r\n---\r\n";
+        let header = format!(
+            "{prefix}{}{suffix}",
+            "x".repeat(8192 - prefix.len() - suffix.len())
+        );
+        assert_eq!(header.len(), 8192);
+        assert!(parse_summary(&header).unwrap().is_some());
+        let oversized = header.replacen("  now: \"", "  now: \"x", 1);
+        assert_eq!(oversized.len(), 8193);
+        assert!(parse_summary(&oversized).is_err());
     }
 }
