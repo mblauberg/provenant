@@ -51,6 +51,8 @@ fn board_read_only() -> Result {
     assert_eq!(board["data"]["lanes"], json!([]));
     assert_eq!(board["data"]["generation"], "empty");
     assert_eq!(board["data"]["coverage"]["runs"], "empty");
+    let tree = call(&empty, &["console", "tree"], 0)?;
+    assert_eq!(tree["data"]["nodes"], json!([]));
     assert!(!empty.state.exists());
     let rig = TestRig::new()?;
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
@@ -93,6 +95,9 @@ fn board_read_only() -> Result {
     }
     drop(store);
     let before = snapshot(&rig.state)?;
+    let tree = call(&rig, &["console", "tree"], 0)?;
+    assert_eq!(tree["data"]["totals"]["attempts"], 2);
+    assert!(!serde_json::to_string(&tree)?.contains("private"));
     let first = call(&rig, &["console", "board", "--limit", "1"], 0)?;
     assert_eq!(first["data"]["lanes"].as_array().ok_or("lanes")?.len(), 1);
     let cursor = first["data"]["next_cursor"].as_str().ok_or("cursor")?;

@@ -12,6 +12,30 @@ lists every leaf, flag and bound. Paths are relative to `tools/front-door/`.
 
 ## Local console catalogue
 
+### Nested tree
+
+`console tree` reads host-local attempts, including retained terminal attempts,
+and follows each attempt's isolated `children/<attempt_id>` store. It uses the
+board's validated indexed reader and creates no store, identity or index.
+`--project` restricts records to the selected local project. Depth includes the
+host store; depth and examined-row limits bound the walk. `truncated` and
+`unfetched_children` identify depth and node limits, missing stores and failed
+child reads. A missing store is not proof that no child ever existed. Corrupt
+host state fails the read; child failures preserve the remaining observations.
+
+Nodes contain the owner records and host/project-qualified lane identities.
+Dispatch (`parent_attempt`), continuation (`parent`) and retry (`retry_of`)
+edges remain distinct; each reports whether its project-qualified parent was
+observed. Missing may mean outside the bounds, not necessarily nonexistent.
+Attempts are counted once per project and attempt ID, with duplicate observations
+and conflicting run/task identities reported separately. Usage totals contain a
+known sum and a missing count per token category; they describe observed nodes,
+not an estimate of unseen work. Provider-internal children are not inferred.
+
+- Why: nested work must remain visible without inventing edges or complete totals.
+- Test: `crates/cli/src/console/tree.rs::tests::nested_tree_once`
+- Owner: `crates/cli/src/console/tree.rs`, `crates/run/src/board.rs`
+
 ### Board snapshot and cursor contract
 
 `console board` must return current host-local facts in descending immutable
