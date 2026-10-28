@@ -655,6 +655,17 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
                     repair: Some("Reread with `provenant chair summary show` and reapply the intended change.".into()),
                 });
                 crate::emit(&result, globals, "", false)
+            } else if matches!(
+                error.downcast_ref::<SessionError>(),
+                Some(SessionError::MissingCheckpoint { .. })
+            ) {
+                crate::fail(
+                    path,
+                    Outcome::Failed,
+                    "MISSING",
+                    &error.to_string(),
+                    globals,
+                )
             } else {
                 crate::fail(
                     path,
