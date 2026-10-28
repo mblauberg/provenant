@@ -189,7 +189,30 @@ fn resolve(
     let oid = text.trim().to_owned();
     // A tracking ref can alias a differently spelled ref on the host's
     // filesystem. Verify the exact advertised head before trusting its OID.
-    let remote_name = base.strip_prefix("refs/remotes/").unwrap_or(base);
+    let (symbolic, timed_out) = read_git_with_env(
+        executor,
+        git,
+        cwd,
+        &[
+            "rev-parse",
+            "--symbolic-full-name",
+            "--verify",
+            "--end-of-options",
+            base,
+        ],
+        4096,
+        env,
+    )
+    .map_err(|_| invalid())?;
+    if timed_out || symbolic.truncated {
+        return Err(invalid());
+    }
+    let symbolic = std::str::from_utf8(&symbolic.bytes)
+        .map_err(|_| invalid())?
+        .trim();
+    let remote_name = symbolic
+        .strip_prefix("refs/remotes/")
+        .unwrap_or(base.strip_prefix("refs/remotes/").unwrap_or(base));
     if let Some((remote, branch)) = remote_name.split_once('/') {
         let (remotes, timed_out) = read_git_with_env(executor, git, cwd, &["remote"], 16384, env)
             .map_err(|_| invalid())?;

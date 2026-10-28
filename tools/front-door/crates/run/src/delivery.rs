@@ -708,24 +708,54 @@ impl HostDeliveryContext {
         )?;
         let mut default = None;
         let mut heads = Vec::new();
+        use std::io::Write;
         for line in advertised.lines() {
-            let (value, name) = line
-                .split_once('\t')
-                .ok_or_else(|| prepare_error("origin refresh", "malformed remote advertisement"))?;
+            let Some((value, name)) = line.split_once('\t') else {
+                if line.starts_with("ref:") {
+                    return Err(prepare_error("origin refresh", "malformed remote HEAD"));
+                }
+                continue;
+            };
             if name == "HEAD" {
                 if let Some(branch) = value.strip_prefix("ref: refs/heads/") {
+                    if default.is_some() || branch.is_empty() {
+                        return Err(prepare_error("origin refresh", "malformed remote HEAD"));
+                    }
                     default = Some(branch.to_owned());
-                } else if GitOid::parse(value).is_err() {
+                } else if value.starts_with("ref:") {
                     return Err(prepare_error("origin refresh", "malformed remote HEAD"));
                 }
             } else if let Some(branch) = name.strip_prefix("refs/heads/") {
                 if GitOid::parse(value).is_err() || GitRefName::branch(branch).is_err() {
-                    return Err(prepare_error("origin refresh", "malformed advertised head"));
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: skipping unsupported origin branch {branch:?}"
+                    );
+                    continue;
                 }
                 heads.push(branch.to_owned());
-            } else {
-                return Err(prepare_error("origin refresh", "unexpected advertised ref"));
             }
+        }
+        if default.is_none()
+            && let Ok(configured) = host.command(
+                &writer.worktree,
+                "git",
+                &[
+                    "--git-dir",
+                    git_dir,
+                    "--work-tree",
+                    worktree,
+                    "symbolic-ref",
+                    "--quiet",
+                    "refs/remotes/origin/HEAD",
+                ],
+                Stage::Prepare,
+            )
+        {
+            default = configured
+                .trim()
+                .strip_prefix("refs/remotes/origin/")
+                .map(str::to_owned);
         }
         let refused: Vec<_> = heads
             .iter()
@@ -735,11 +765,10 @@ impl HostDeliveryContext {
                     .any(|other| provenant_core::refs_collide(name, other))
             })
             .collect();
-        use std::io::Write;
         for name in &refused {
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "warning: refusing colliding origin branch {name:?}"
+                "warning: refusing colliding origin branch {name:?}; an existing tracking ref may be stale"
             );
         }
         if default

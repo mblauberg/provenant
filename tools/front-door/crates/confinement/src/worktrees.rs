@@ -1853,12 +1853,32 @@ fn pin_revision(
     revision: &str,
     cancel: &CancelToken,
 ) -> Result<GitOid, WorktreeError> {
+    let parsed = GitRevision::new(revision).map_err(|_| WorktreeError::InvalidRequest)?;
+    let symbolic = run_git(
+        context,
+        context.repo,
+        GitRead::SymbolicRevision { revision: parsed },
+        cancel,
+    )?;
+    let symbolic_name = if exit_code(&symbolic)? == 0 {
+        std::str::from_utf8(trim_ascii(&symbolic.stdout.bytes))
+            .map_err(|_| WorktreeError::InvalidOutput)?
+    } else {
+        ""
+    };
+    let candidate = if revision.ends_with("/HEAD") {
+        revision
+    } else if symbolic_name.starts_with("refs/remotes/") {
+        symbolic_name
+    } else {
+        revision
+    };
     let remote = crate::utility::fetch_missing_remote_branch(
         context.executor,
         context.repo,
         context.utility,
         context.home,
-        revision,
+        candidate,
         context.mutation_budget,
         cancel,
     )?;

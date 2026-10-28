@@ -172,6 +172,9 @@ pub enum GitRead {
     ResolveRevision {
         revision: GitRevision,
     },
+    SymbolicRevision {
+        revision: GitRevision,
+    },
     Diff {
         base: GitOid,
         head: GitOid,
@@ -990,6 +993,13 @@ fn git_args(
             "--verify".into(),
             "--end-of-options".into(),
             format!("{}^{{commit}}", revision.as_str()).into(),
+        ],
+        GitRead::SymbolicRevision { revision } => vec![
+            "rev-parse".into(),
+            "--symbolic-full-name".into(),
+            "--verify".into(),
+            "--end-of-options".into(),
+            revision.as_str().into(),
         ],
         GitRead::ChangedPaths { base, head } => vec![
             "diff".into(),
