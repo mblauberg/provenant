@@ -1430,4 +1430,17 @@ fn configured_frame_limit_stops_at_one_byte_beyond_the_cap() {
     assert_eq!(framer.next_frame().unwrap(), Some(b"1234".to_vec()));
 }
 
-impl crate::tools::McpFacade for FakeFacade {}
+impl crate::tools::McpFacade for FakeFacade {
+    fn inbox_owner(
+        &mut self,
+        input: provenant_fabric_runtime::inbox::InboxInput,
+        host: Option<String>,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<provenant_fabric_runtime::inbox::InboxResult, ServiceError> {
+        if host.is_some() {
+            return Err(ServiceError::Facade(FacadeError::InvalidInput));
+        }
+        Ok(self.inbox(input, budget, cancel)?)
+    }
+}

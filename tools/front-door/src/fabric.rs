@@ -405,33 +405,7 @@ impl BoundFacade<'_> {
             return Err(FacadeError::Cancelled.into());
         }
         if output.termination != Termination::Exit(0) {
-            let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout.bytes).ok();
-            if let Some(value) = parsed.as_ref()
-                && let (Some(code), Some(message)) = (
-                    value["error"]["code"].as_str(),
-                    value["error"]["message"].as_str(),
-                )
-            {
-                return Err(ServiceError::Cli {
-                    code: code.to_owned(),
-                    message: message.to_owned(),
-                    data: value
-                        .get("data")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null),
-                });
-            }
-            let stderr = String::from_utf8_lossy(&output.stderr.bytes);
-            return Err(ServiceError::Cli {
-                code: "cli_failed".into(),
-                message: stderr
-                    .lines()
-                    .next()
-                    .filter(|line| !line.is_empty())
-                    .unwrap_or("CLI service failed without an error message")
-                    .to_owned(),
-                data: serde_json::Value::Null,
-            });
+            return Err(cli_failure(&output.stdout.bytes, &output.stderr.bytes));
         }
         if output.stdout.truncated {
             return Err(ServiceError::ResultTooLarge);
@@ -440,6 +414,44 @@ impl BoundFacade<'_> {
             .map_err(|_| FacadeError::OwnerUnavailable)?;
         Ok(value["data"].clone())
     }
+}
+
+fn cli_failure(stdout: &[u8], stderr: &[u8]) -> ServiceError {
+    let parsed = serde_json::from_slice::<serde_json::Value>(stdout).ok();
+    if let Some(value) = parsed.as_ref()
+        && let (Some(code), Some(message)) = (
+            value["error"]["code"].as_str(),
+            value["error"]["message"].as_str(),
+        )
+    {
+        return ServiceError::Cli {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            data: value
+                .get("data")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        };
+    }
+    let stderr = String::from_utf8_lossy(stderr);
+    ServiceError::Cli {
+        code: "cli_failed".into(),
+        message: stderr
+            .lines()
+            .next()
+            .filter(|line| !line.is_empty())
+            .unwrap_or("CLI service failed without an error message")
+            .to_owned(),
+        data: serde_json::Value::Null,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn cli_failure_uses_stderr_without_structured_json() {
+    let error = cli_failure(b"not json", b"specific failure\nadditional detail\n");
+    assert!(matches!(error, ServiceError::Cli { code, message, data }
+        if code == "cli_failed" && message == "specific failure" && data.is_null()));
 }
 impl F3Facade for BoundFacade<'_> {
     fn inbox(

@@ -122,12 +122,7 @@ pub trait McpFacade: F3Facade {
         host: Option<String>,
         budget: WaitBudget,
         cancel: &CancelToken,
-    ) -> Result<provenant_fabric_runtime::inbox::InboxResult, ServiceError> {
-        if host.is_some() {
-            return Err(ServiceError::Facade(FacadeError::InvalidInput));
-        }
-        Ok(self.inbox(input, budget, cancel)?)
-    }
+    ) -> Result<provenant_fabric_runtime::inbox::InboxResult, ServiceError>;
     fn console(
         &mut self,
         _input: ConsoleInput,
