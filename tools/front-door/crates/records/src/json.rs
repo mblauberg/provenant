@@ -71,7 +71,6 @@ impl<'de> Deserialize<'de> for RecordHeader {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct WireHeader {
             schema_version: u64,
         }

@@ -22,15 +22,15 @@ const MAX_CLEANUP_DEPTH: usize = 64;
 const MAX_CLEANUP_DIRECTORY_ENTRIES: usize = 100_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FetchFile {
     pub path: String,
     pub size: u64,
     pub digest: FileDigest,
+    #[serde(flatten)]
+    pub extras: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FetchManifest {
     pub version: u8,
     pub files: Vec<FetchFile>,
@@ -390,6 +390,7 @@ mod tests {
             path: path.to_owned(),
             size: bytes.len() as u64,
             digest: FileDigest::from_bytes(Sha256::digest(bytes).into()),
+            extras: BTreeMap::new(),
         }
     }
 
@@ -399,6 +400,18 @@ mod tests {
             offset,
             bytes: bytes.to_vec(),
         }
+    }
+
+    #[test]
+    fn manifest_preserves_digest_with_future_file_fields() {
+        let mut entry = file("output", b"payload");
+        entry
+            .extras
+            .insert("future".into(), serde_json::json!({"nested": true}));
+        let manifest = FetchManifest::new(vec![entry]).unwrap();
+        let decoded = FetchManifest::decode(&manifest.encode().unwrap()).unwrap();
+        assert_eq!(decoded.digest, manifest.digest);
+        assert_eq!(decoded.files, manifest.files);
     }
 
     #[test]
