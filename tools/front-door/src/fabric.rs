@@ -4285,6 +4285,7 @@ mod peer_tests {
             configuration_root: fixture.rig.state.clone(),
             cwd: fixture.rig.project.clone(),
             executables: Default::default(),
+            executable_search_path: Vec::new(),
             git: provenant_os::git::git_executable().ok_or("git")?,
             codex_home: None,
             fixture_state_write: false,

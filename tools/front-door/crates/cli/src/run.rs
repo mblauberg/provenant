@@ -31,7 +31,7 @@ mod remote;
 mod targets;
 mod watch;
 pub use children::HostHolder;
-pub(crate) use provider::resolve_executable as provider_executable;
+pub(crate) use provider::find_executable as provider_executable;
 #[cfg(feature = "fixture")]
 pub use provider::{prepare_fixture, writer_fixture_plan};
 
@@ -161,6 +161,7 @@ pub struct Registry<'a> {
     pub state_root: Option<&'a Path>,
     pub project_id: Option<provenant_core::ProjectId>,
     pub host: Option<&'a run::HostLaunchContext>,
+    pub cancel: Option<&'a CancelToken>,
 }
 impl Registry<'_> {
     /// Each adapter supports resume; the attempt must carry a session handle.
@@ -511,6 +512,17 @@ impl run::Providers for Registry<'_> {
                 Some(reason) => format!("{reason}; {note}"),
                 None => note,
             });
+        }
+        if decoded.outcome == run::Outcome::Succeeded
+            && std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_none()
+            && let Some(state_root) = provider_state.ancestors().nth(5)
+        {
+            // Housekeeping must not change a successful lane's outcome.
+            let _ = crate::quota::persist_provider_success(
+                state_root,
+                route,
+                jiff::Timestamp::now().as_second(),
+            );
         }
         Ok(decoded)
     }
@@ -2279,20 +2291,20 @@ fn launch_on_host(
     validated: Option<&run::CanonicalRequest>,
     ready: Option<&run::PreparedStart>,
 ) -> Result<Vec<run::Started>, Fail> {
+    let inherited_host = host.is_some();
     let host = match host {
         Some(host) => host.clone(),
         None => run::HostLaunchContext {
             configuration_root: edge.roots.state.as_path().into(),
             cwd: edge.cwd.into(),
-            executables: REGISTRY
-                .iter()
-                .map(|entry| entry.adapter.id())
-                .filter_map(|name| {
-                    provider::resolve_executable(name)
-                        .ok()
-                        .map(|path| (name.into(), path))
+            executables: std::collections::BTreeMap::new(),
+            executable_search_path: std::env::var_os("PATH")
+                .map(|path| {
+                    std::env::split_paths(&path)
+                        .filter(|path| path.is_absolute())
+                        .collect()
                 })
-                .collect(),
+                .unwrap_or_default(),
             git: provenant_os::git::git_executable()
                 .ok_or_else(|| Fail::new(Status::Refused, ErrorKind::Git, "Git unavailable"))?,
             codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
@@ -2316,6 +2328,15 @@ fn launch_on_host(
     };
     let holder = |attempt: &run::AttemptRecord, requester| {
         let mut host = host.clone();
+        if !inherited_host {
+            // Called after preparation, while its selected provider lease is held.
+            for registration in REGISTRY {
+                let name = registration.adapter.id();
+                if let Ok(path) = provider::find_executable(name) {
+                    host.executables.insert(name.into(), path);
+                }
+            }
+        }
         if let Some(writer) = request
             .tasks
             .iter()
@@ -2375,7 +2396,10 @@ fn launch_on_host(
         cwd: Some(edge.cwd),
         state_root: Some(session.context.state_root.as_path()),
         project_id: Some(session.context.project_id),
-        host: Some(&host),
+        // Top-level discovery runs in prepare under its lease. Child launches
+        // continue to use their sealed host executable authority.
+        host: inherited_host.then_some(&host),
+        cancel: Some(call.cancel),
     };
     let providers = PreparedProvider {
         fallback: &registry,
@@ -3637,6 +3661,7 @@ fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                     state_root: Some(session.context.state_root.as_path()),
                     project_id: Some(session.context.project_id),
                     host: None,
+                    cancel: Some(&cancel),
                 };
                 let recovered = request(&clock, &cancel).and_then(|call| {
                     Ok(session
@@ -4006,6 +4031,7 @@ pub fn continue_attempt_mode(
                 state_root: Some(session.context.state_root.as_path()),
                 project_id: Some(session.context.project_id),
                 host: None,
+                cancel: Some(call.cancel),
             };
             session
                 .store
@@ -4351,6 +4377,7 @@ fn reconcile_inner(
             state_root: Some(session.context.state_root.as_path()),
             project_id: Some(session.context.project_id),
             host: None,
+            cancel: Some(&cancel),
         };
         // Each step gets a fresh budget; recovery waits on custody locks.
         let found = match request(&clock, &cancel)
@@ -6361,6 +6388,7 @@ mod tests {
             state_root: None,
             project_id: None,
             host: None,
+            cancel: None,
         };
         for (message, expected) in [
             (
@@ -6563,6 +6591,7 @@ mod tests {
             state_root: None,
             project_id: None,
             host: None,
+            cancel: None,
         };
         let stream = [
             json!({"type":"thread.started","thread_id":"01234567-89ab-cdef-0123-456789abcdef"}),

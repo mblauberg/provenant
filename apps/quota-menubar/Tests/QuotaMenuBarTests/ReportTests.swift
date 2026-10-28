@@ -2,6 +2,17 @@ import XCTest
 @testable import QuotaMenuBar
 
 final class ReportTests: XCTestCase {
+    func testPanelEventIsRetainedDuringRefresh() {
+        XCTAssertEqual(Trigger.panel.queued(after: nil), .panel)
+        XCTAssertEqual(Trigger.panel.queued(after: .power), .panel)
+        XCTAssertEqual(Trigger.timer.queued(after: .panel), .panel)
+        XCTAssertEqual(Trigger.power.queued(after: .panel), .panel)
+        XCTAssertEqual(Trigger.panel.queued(after: .wake), .wake)
+        XCTAssertEqual(Trigger.manual.queued(after: .panel), .manual)
+        XCTAssertEqual(Trigger.panel.queued(after: .manual), .manual)
+        XCTAssertNil(Trigger.timer.queued(after: nil))
+    }
+
     func testSnapshotDetailsFromRustEnvelope() throws {
         let json = #"""
         {

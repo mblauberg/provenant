@@ -147,6 +147,10 @@ pub struct ExecOptions<'a> {
     pub cwd: &'a Path,
     pub stdin: Option<&'a [u8]>,
     pub secret_input: Option<&'a SecretInput>,
+    /// Pass a lane or updater lease through exec, including to descendants.
+    pub inherited_lease: Option<&'a crate::fs::LockGuard>,
+    /// Run in a private session and kill the whole group immediately on timeout.
+    pub process_group: bool,
     pub stdout: StreamPolicy<'a>,
     pub stderr: StreamPolicy<'a>,
     pub stdout_decoder: Option<&'a dyn FrameSink>,
@@ -167,6 +171,8 @@ impl<'a> ExecOptions<'a> {
             cwd,
             stdin: None,
             secret_input: None,
+            inherited_lease: None,
+            process_group: false,
             stdout: StreamPolicy::default(),
             stderr: StreamPolicy::default(),
             stdout_decoder: None,
@@ -229,6 +235,32 @@ impl SystemExecutor {
         })
     }
 }
+
+/// Start a one-shot worker in its own session with no terminal or pipe handles.
+/// The process reaper owns its eventual exit while the caller remains alive.
+pub fn spawn_detached(argv: &[OsString], cwd: &Path) -> Result<(), ExecError> {
+    crate::sys::raw_exec::verify_child_wait_policy().map_err(ExecError::ChildWaitPolicy)?;
+    let reaper = Reaper::new(1).map_err(io_error("start reaper"))?;
+    let permit = reaper.reserve().ok_or(ExecError::Busy)?;
+    let child = RawChild::spawn(
+        permit,
+        crate::sys::raw_exec::SpawnSpec {
+            argv,
+            env: None,
+            cwd,
+            input: false,
+            secret_input: None,
+            inherited_lease: None,
+            process_group: true,
+            capture_stdout: false,
+            capture_stderr: false,
+        },
+    )
+    .map_err(io_error("spawn detached worker"))?;
+    drop(child); // Transfer custody without waiting or signalling the worker.
+    Ok(())
+}
+
 impl Executor for SystemExecutor {
     fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
         run(&self.reaper, options)
@@ -264,6 +296,8 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
             cwd: options.cwd,
             input: options.stdin.is_some(),
             secret_input: options.secret_input,
+            inherited_lease: options.inherited_lease,
+            process_group: options.process_group,
             capture_stdout: options.stdout.piped(),
             capture_stderr: options.stderr.piped(),
         },
@@ -349,7 +383,11 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
         let cancelled = options.cancel.is_some_and(CancelToken::is_cancelled);
         if status.is_none() && term_at.is_none() && (now >= deadline || overflow || cancelled) {
             stdin = None;
-            let delivered = match child.signal(Signal::Terminate) {
+            let delivered = match child.signal(if options.process_group {
+                Signal::Kill
+            } else {
+                Signal::Terminate
+            }) {
                 Ok(delivered) => delivered,
                 Err(error) => {
                     child.fail_and_transfer();

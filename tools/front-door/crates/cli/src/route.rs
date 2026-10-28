@@ -1371,6 +1371,7 @@ mod route_tests {
             ],
             observed_unix_seconds: now,
             expires_unix_seconds: now + 300,
+            last_update: None,
         }];
         let access = [provenant_routing::AccessContext {
             adapter: "opencode",
@@ -1539,6 +1540,7 @@ mod route_tests {
                 adapter: "codex".into(),
                 executable: "/fixture/codex".into(),
                 version: "fixture".into(),
+                last_update: None,
                 fixture_ref: "fixture".into(),
                 catalogue_revision: catalogue.revision().into(),
                 account_key: Some(key.into()),
@@ -1625,6 +1627,7 @@ mod route_tests {
             adapter: "opencode".into(),
             executable: "opencode".into(),
             version: "fixture".into(),
+            last_update: None,
             fixture_ref: "fixture".into(),
             catalogue_revision: "fixture".into(),
             account_key: Some("go".into()),

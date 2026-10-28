@@ -19,6 +19,7 @@ pub mod opencode;
 pub mod quota;
 pub mod quota_live;
 mod stream;
+pub mod update;
 pub use contract::*;
 pub use launch::{Access, LaunchSpec, PrepareInput, Session, SetupStep, Stdin};
 pub use stream::*;

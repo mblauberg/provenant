@@ -827,6 +827,7 @@ mod tests {
                 .collect(),
             observed_unix_seconds: 80,
             expires_unix_seconds: 120,
+            last_update: None,
         }];
         let access = [AccessContext {
             adapter: "opencode",

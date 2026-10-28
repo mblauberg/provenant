@@ -66,14 +66,14 @@ pub fn next_due(
     let Some(ttl) = interval(policies, &record.account.adapter, trigger, power) else {
         return Ok(None);
     };
-    let manual_auth_retry =
-        trigger == Trigger::Manual && record.last_error == Some(ProbeFailure::Auth);
+    let event_auth_retry = record.auth_retry_pending
+        || (trigger == Trigger::Manual && record.last_error == Some(ProbeFailure::Auth));
     let mut due = match record.last_attempt_unix_seconds {
-        Some(at) if !manual_auth_retry => add(at, ttl)?,
+        Some(at) if !event_auth_retry => add(at, ttl)?,
         _ => i64::MIN,
     };
     if let Some(backoff) = record.backoff_until_unix_seconds
-        && !manual_auth_retry
+        && !event_auth_retry
     {
         due = due.max(backoff);
     }
@@ -134,6 +134,7 @@ pub fn reserve(
         deadline_unix_seconds: add(now, TICK_BUDGET_SECONDS as u64)?,
     });
     record.backoff_until_unix_seconds = None;
+    record.auth_retry_pending = false;
     record.last_attempt_unix_seconds = Some(now);
     record.validate()?;
     Ok(UpdateIntent {
@@ -182,6 +183,9 @@ pub fn complete(
             next.backoff_until_unix_seconds = None;
         }
         Err(failure) => {
+            if failure == ProbeFailure::Auth {
+                next.auth_verified_unix_seconds = None;
+            }
             next.failures = next.failures.saturating_add(1);
             next.last_error = Some(failure);
             next.backoff_until_unix_seconds = Some(add(
@@ -301,20 +305,21 @@ pub fn plan_tick_with_settings(
         .iter()
         .filter(|d| {
             selected(&d.adapter)
-                // Skip probing on AuthRequired only when unambiguous (single account),
-                // so multi-account adapters still probe each account to learn its auth state.
+                // An unambiguous ambient auth failure without a recorded failure
+                // needs no probe. A recorded failure still gets its paced retry.
                 && !(d.status == QuotaStatus::AuthRequired
                     && d.accounts.as_ref().is_some_and(|a| a.len() == 1)
-                    && !(tick.trigger == Trigger::Manual
-                        && records.iter().any(|record| {
-                            record.last_error == Some(ProbeFailure::Auth)
+                    && !records.iter().any(|record| {
+                        (record.auth_retry_pending
+                            || record.last_error == Some(ProbeFailure::Auth)
+                            || record.auth_verified_unix_seconds.is_some())
                                 && d.accounts.as_ref().is_some_and(|accounts| {
                                     accounts.iter().any(|account| {
                                         account.adapter == record.account.adapter
                                             && account.account_key == record.account.account_key
                                     })
                                 })
-                        })))
+                        }))
         })
         .filter_map(|d| d.accounts.as_ref())
         .flatten()
@@ -420,11 +425,14 @@ pub fn report(
             u64::try_from(now.saturating_sub(s.observed_unix_seconds).max(0)).unwrap_or(u64::MAX)
         });
         let auth_required = record.last_error == Some(ProbeFailure::Auth)
-            || detections.iter().any(|d| {
-                d.adapter == record.account.adapter
-                    && d.status == QuotaStatus::AuthRequired
-                    && d.accounts.as_ref().is_some_and(|a| a.len() == 1)
-            });
+            || (!record
+                .auth_verified_unix_seconds
+                .is_some_and(|at| at <= now && now.saturating_sub(at) < 900)
+                && detections.iter().any(|d| {
+                    d.adapter == record.account.adapter
+                        && d.status == QuotaStatus::AuthRequired
+                        && d.accounts.as_ref().is_some_and(|a| a.len() == 1)
+                }));
         let fresh = record.snapshot.as_ref().is_some_and(|s| {
             s.observed_unix_seconds <= now
                 && record.last_error.is_none()
@@ -627,6 +635,138 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn credential_event_retries_auth_once_and_keeps_active_claim() {
+        let mut record = AccountRecord::empty(account());
+        record.last_attempt_unix_seconds = Some(100);
+        record.last_error = Some(ProbeFailure::Auth);
+        record.failures = 1;
+        record.backoff_until_unix_seconds = Some(1000);
+        record.auth_retry_pending = true;
+        let detection = Detection {
+            adapter: "claude".into(),
+            accounts: Some(vec![record.account.clone()]),
+            status: QuotaStatus::AuthRequired,
+        };
+        for trigger in [Trigger::Panel, Trigger::Wake] {
+            let tick = QuotaTick {
+                adapter: None,
+                trigger,
+                power: Power::Ac,
+            };
+            let plan = plan_tick(
+                crate::source::TEST_POLICIES,
+                &[record.clone()],
+                std::slice::from_ref(&detection),
+                &tick,
+                110,
+            )
+            .unwrap();
+            assert_eq!(plan.batches, vec![vec![record.account.clone()]]);
+            let reserved = reserve(
+                crate::source::TEST_POLICIES,
+                Some(&record),
+                &record.account,
+                110,
+                "claim",
+                trigger,
+                Power::Ac,
+            )
+            .unwrap()
+            .replacement
+            .unwrap();
+            assert!(!reserved.auth_retry_pending);
+            let mut live = reserved.clone();
+            live.auth_retry_pending = true;
+            assert!(
+                reserve(
+                    crate::source::TEST_POLICIES,
+                    Some(&live),
+                    &record.account,
+                    111,
+                    "second",
+                    trigger,
+                    Power::Ac
+                )
+                .is_err()
+            );
+            let failed = complete(&reserved, "claim", 112, Err(ProbeFailure::Auth), None)
+                .unwrap()
+                .replacement
+                .unwrap();
+            assert_eq!(
+                next_due(crate::source::TEST_POLICIES, &failed, trigger, Power::Ac).unwrap(),
+                Some(1012)
+            );
+        }
+    }
+    #[test]
+    fn single_account_auth_failure_gets_a_paced_fallback_retry() {
+        let mut record = AccountRecord::empty(account());
+        record.last_attempt_unix_seconds = Some(100);
+        record.last_error = Some(ProbeFailure::Auth);
+        record.failures = 1;
+        record.backoff_until_unix_seconds = Some(1000);
+        let detection = Detection {
+            adapter: "claude".into(),
+            accounts: Some(vec![record.account.clone()]),
+            status: QuotaStatus::AuthRequired,
+        };
+        let tick = QuotaTick {
+            adapter: None,
+            trigger: Trigger::Timer,
+            power: Power::Ac,
+        };
+        let before = plan_tick(
+            crate::source::TEST_POLICIES,
+            &[record.clone()],
+            std::slice::from_ref(&detection),
+            &tick,
+            999,
+        )
+        .unwrap();
+        assert!(before.batches.is_empty());
+        let after = plan_tick(
+            crate::source::TEST_POLICIES,
+            &[record.clone()],
+            &[detection],
+            &tick,
+            1000,
+        )
+        .unwrap();
+        assert_eq!(after.batches, vec![vec![record.account]]);
+    }
+    #[test]
+    fn lane_success_temporarily_overrides_ambient_auth_detection() {
+        let mut record = AccountRecord::empty(account());
+        record.auth_verified_unix_seconds = Some(100);
+        let detection = Detection {
+            adapter: "claude".into(),
+            accounts: Some(vec![record.account.clone()]),
+            status: QuotaStatus::AuthRequired,
+        };
+        let query = QuotaQuery { adapter: None };
+        let recent = report(
+            crate::source::TEST_POLICIES,
+            &[record.clone()],
+            std::slice::from_ref(&detection),
+            &query,
+            101,
+            "/report".into(),
+        )
+        .unwrap();
+        assert_eq!(recent.accounts[0].status, QuotaStatus::Unknown);
+        let expired = report(
+            crate::source::TEST_POLICIES,
+            &[record],
+            &[detection],
+            &query,
+            1000,
+            "/report".into(),
+        )
+        .unwrap();
+        assert_eq!(expired.accounts[0].status, QuotaStatus::AuthRequired);
     }
     #[test]
     fn backoff_has_bounded_exponential_and_retry_after_floor() {

@@ -18,6 +18,7 @@ mod grammar;
 pub mod inbox;
 pub mod install;
 pub mod pr_body;
+pub mod provider_updates;
 mod render;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
 pub use grammar::*;

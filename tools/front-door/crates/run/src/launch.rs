@@ -47,6 +47,8 @@ pub fn capture_plan(task: &TaskRequest) -> CapturePlan {
 /// One prepared provider invocation. Secret inputs stay in memory and travel
 /// on the handoff pipe, then a dedicated read pipe into the provider.
 pub struct PreparedLaunch {
+    /// Provider lease acquired before executable and availability probes.
+    pub provider_lease: Option<provenant_os::fs::LockGuard>,
     pub argv: Vec<OsString>,
     pub environment: Vec<(OsString, OsString)>,
     pub stdin: Vec<u8>,
@@ -1089,6 +1091,7 @@ impl RunStore {
             _ => format!("{provider}/{model}"),
         };
         let command = ProviderCommand {
+            provider_lease: plan.provider_lease,
             resolved_route: route,
             permission_plan_digest: task.authority_digest,
             task: task.task_id,

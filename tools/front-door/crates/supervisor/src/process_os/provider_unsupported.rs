@@ -171,6 +171,8 @@ mod tests {
                 cwd: root.path(),
                 input: false,
                 secret_input: None,
+                inherited_lease: None,
+                process_group: false,
                 capture_stdout: false,
                 capture_stderr: false,
             },

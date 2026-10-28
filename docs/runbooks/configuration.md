@@ -76,6 +76,69 @@ see each knob's value and source. Preview install registrations with
 `provenant install --source /absolute/path/to/release --harness claude --dry-run`
 before applying an authorised install.
 
+## Provider updates
+
+Provider updates are enabled by default and checked on existing housekeeping
+events, with at least 24 hours between attempts. Updates run outside lanes
+when the provider is idle; lanes keep self-update disabled. Configure each
+provider in the same `config.toml`:
+
+```toml
+[providers.claude]
+update_interval_seconds = 86400
+update_timeout_seconds = 300
+
+[providers.codex]
+update = { command = ["brew", "upgrade", "codex"] }
+
+[providers.opencode]
+update = false
+```
+
+`update = false` opts out, `true` selects the detected native updater, and
+`update = { command = ["program", "argument"] }` overrides it with an argv
+array executed directly without a shell. The array must contain a non-empty
+program name. The interval and timeout are positive numbers of seconds.
+Supported provider IDs are `claude`, `codex`, `cursor`, `agy` and `opencode`;
+providers without a known native update method need a command override.
+
+Quota ticks are the housekeeping events. A tick schedules due work in a
+detached, one-shot process and returns without waiting for an updater. The
+worker takes exclusive leases without waiting and stops after one completed
+native update attempt. An error checking one provider is recorded without
+preventing checks of the remaining providers. Updates default to a 300-second
+timeout, configurable per provider with `update_timeout_seconds`.
+Claude uses `claude update`, OpenCode uses `opencode upgrade`, and Codex uses
+Homebrew or npm when its resolved executable identifies that installation.
+An unknown installation produces one activity note until its method becomes
+known or a command override is configured.
+
+Lanes hold shared leases from provider preparation through completion; updates
+need an exclusive lease. Busy providers are excluded from a lane's candidates
+without delaying other providers. Only when every candidate is busy does
+preparation wait, for up to 30 seconds total, before asking for a retry.
+Cancellation interrupts this wait. Nested launches retry missing executable
+discovery under the lease using the host's sealed search directories.
+Provider children inherit their shared lease: a long-lived background process
+keeps it and defers updates until it exits.
+
+The updater inherits the exclusive lease, keeping it held if the worker is
+killed. On timeout the worker kills the updater's whole process group. The
+lease remains held until the last inheriting process exits. A descendant that
+leaves the group with `setsid` or daemonises also keeps the lease until it exits;
+the group timeout cannot terminate it. Kernel lock release covers crashes;
+stable `.lock` files remain in
+`<state>/provider-updates/` to avoid inode replacement races. An interrupted
+update is recorded as failed and retried after the configured interval, as are
+other failed attempts. Interruption can leave a partially replaced installation;
+the next attempt uses the same native updater to repair it. Update failures
+are recorded once per interval, with updater output discarded. An independent
+attempt record preserves backoff if publishing the result record fails.
+Worker failures surface through the activity note and update records only;
+the quota tick does not report them. Activity records the old and new versions.
+Each lane's `availability.json`
+also includes its observed version and the latest update result.
+
 ## OpenCode Go monthly allowance floor
 
 OpenCode Go models must have a documented monthly allowance at or above the

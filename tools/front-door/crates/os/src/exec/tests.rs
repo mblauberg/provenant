@@ -1,6 +1,84 @@
 use super::*;
 use std::sync::Mutex;
 struct Decoder(Mutex<Vec<Vec<u8>>>);
+
+#[test]
+fn detached_worker_returns_before_its_work_finishes() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{Clock, DurationMicros, WaitBudget};
+    let temp = tempfile::tempdir()?;
+    let argv = [
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        OsString::from("while [ ! -e release ]; do /bin/sleep 0.05; done; echo finished > done"),
+    ];
+    spawn_detached(&argv, temp.path())?;
+    // The caller must regain control before the worker can finish.
+    assert!(!temp.path().join("done").exists());
+    std::fs::write(temp.path().join("release"), b"continue")?;
+    let clock = crate::clock::SystemClock::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+    while !temp.path().join("done").exists() && budget.remaining(clock.mono_now()).as_micros() != 0
+    {
+        clock.wait_until(
+            clock
+                .mono_now()
+                .checked_add(DurationMicros::from_micros(10_000))?,
+        )?;
+    }
+    assert!(temp.path().join("done").exists());
+    Ok(())
+}
+
+#[test]
+fn inherited_lane_lease_survives_the_callers_handle() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::fs::LockMode;
+    let temp = tempfile::tempdir()?;
+    let lease = crate::provider_fence::acquire(temp.path(), "codex", LockMode::Shared)?;
+    let reaper = Reaper::new(1)?;
+    let permit = reaper.reserve().ok_or("missing executor permit")?;
+    let argv = [
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        OsString::from("read reply"),
+    ];
+    let mut child = RawChild::spawn(
+        permit,
+        crate::sys::raw_exec::SpawnSpec {
+            argv: &argv,
+            env: None,
+            cwd: temp.path(),
+            input: true,
+            secret_input: None,
+            inherited_lease: Some(&lease),
+            process_group: false,
+            capture_stdout: false,
+            capture_stderr: false,
+        },
+    )?;
+    drop(lease);
+    assert!(matches!(
+        crate::provider_fence::acquire(temp.path(), "codex", LockMode::Exclusive),
+        Err(crate::fs::FsError::LockTimeout { .. })
+    ));
+    child
+        .stdin
+        .take()
+        .ok_or("missing child stdin")?
+        .write_all(b"finish\n")?;
+    // The OS lock boundary provides a bounded wait, including scheduler delay.
+    let clock = crate::clock::SystemClock::new();
+    use provenant_core::Clock;
+    let _available = crate::provider_fence::wait(
+        temp.path(),
+        "codex",
+        LockMode::Exclusive,
+        provenant_core::WaitBudget::cli(clock.mono_now(), 5)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+    let _ = child.observe()?;
+    Ok(())
+}
 impl FrameSink for Decoder {
     fn try_frame(&self, bytes: &[u8]) -> Result<(), QueueLoss> {
         self.0.lock().unwrap().push(bytes.to_vec());
@@ -67,6 +145,8 @@ fn post_spawn_setup_failure_kills_child_and_releases_unknown_wait_slot() {
             cwd: Path::new("/"),
             input: false,
             secret_input: None,
+            inherited_lease: None,
+            process_group: false,
             capture_stdout: false,
             capture_stderr: false,
         },

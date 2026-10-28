@@ -1052,6 +1052,7 @@ fn availability() -> AvailabilityRecord {
         adapter: "codex".into(),
         executable: "/fixture/codex".into(),
         version: "fixture".into(),
+        last_update: None,
         fixture_ref: "test".into(),
         catalogue_revision: Catalogue::bundled().unwrap().revision,
         account_key: Some("opaque-account".into()),

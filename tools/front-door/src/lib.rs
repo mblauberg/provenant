@@ -430,6 +430,31 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Internal(provenant_cli::Internal::Supervise { descriptors }) => {
             supervise(&descriptors, globals, process)
         }
+        Command::Internal(provenant_cli::Internal::ProviderUpdates) => {
+            match roots::resolve(globals, Workspace::Project, Product::Required) {
+                Ok(resolved) => match provenant_cli::provider_updates::housekeep(
+                    &resolved.roots,
+                    &resolved.home,
+                    &resolved.project,
+                ) {
+                    Ok(()) => 0,
+                    Err(error) => fail(
+                        &inv.leaf,
+                        Outcome::Error,
+                        "PROVIDER_UPDATE",
+                        &error,
+                        globals,
+                    ),
+                },
+                Err(error) => fail(
+                    &inv.leaf,
+                    Outcome::Error,
+                    "ROOT",
+                    &error.to_string(),
+                    globals,
+                ),
+            }
+        }
         Command::Help { .. } => fail(
             "help",
             Outcome::Invalid,
@@ -614,14 +639,24 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             }));
             match roots::resolve(globals, Workspace::Project, Product::Required) {
                 Ok(resolved) => match live_quota(&resolved) {
-                    Ok(effects) => provenant_cli::quota::run(
-                        cmd,
-                        globals,
-                        &resolved.roots,
-                        provenant_providers::REGISTRY,
-                        &effects,
-                        |result| crate::overflow::publish(result, globals),
-                    ),
+                    Ok(effects) => {
+                        let housekeeping = matches!(cmd, provenant_cli::Quota::Tick { .. });
+                        let result = provenant_cli::quota::run(
+                            cmd,
+                            globals,
+                            &resolved.roots,
+                            provenant_providers::REGISTRY,
+                            &effects,
+                            |result| crate::overflow::publish(result, globals),
+                        );
+                        if housekeeping {
+                            let _ = provenant_cli::provider_updates::schedule(
+                                &resolved.roots,
+                                &resolved.project,
+                            );
+                        }
+                        result
+                    }
                     Err(_) => fail(
                         &inv.leaf,
                         Outcome::Invalid,

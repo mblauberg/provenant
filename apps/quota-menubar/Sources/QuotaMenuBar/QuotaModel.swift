@@ -7,7 +7,16 @@ import os
 let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "dev.provenant.quota-menubar", category: "refresh")
 
 /// What asked for a refresh, as `provenant quota tick --trigger` names it.
-enum Trigger: String { case timer, panel, manual, wake, power }
+enum Trigger: String {
+    case timer, panel, manual, wake, power
+
+    /// Coalesce events arriving during a refresh; due timers need no replay.
+    func queued(after pending: Trigger?) -> Trigger? {
+        let strength: [Trigger] = [.power, .panel, .wake, .manual]
+        guard let rank = strength.firstIndex(of: self) else { return pending }
+        return rank > pending.flatMap(strength.firstIndex) ?? -1 ? self : pending
+    }
+}
 
 /// Watches the current report and runs `provenant quota tick` when an account is due or something happens.
 @MainActor @Observable
@@ -89,7 +98,7 @@ final class QuotaModel {
     /// Each menu open; avoid closely spaced ticks.
     func panelOpened() {
         refreshLanes()
-        if let updatedAt, Date.now.timeIntervalSince(updatedAt) < 5 { return }
+        if !isRefreshing, let updatedAt, Date.now.timeIntervalSince(updatedAt) < 5 { return }
         run(.panel)
     }
 
@@ -136,6 +145,7 @@ final class QuotaModel {
                 relabel()
                 schedule(nil)
             }
+            if let next = pending { pending = nil; run(next) }
         }
     }
 
@@ -166,8 +176,7 @@ final class QuotaModel {
     private func run(_ trigger: Trigger) {
         guard !fixture else { return }
         guard !isRefreshing else {
-            let strength: [Trigger] = [.power, .wake, .manual]
-            if let rank = strength.firstIndex(of: trigger), rank > pending.flatMap(strength.firstIndex) ?? -1 { pending = trigger }
+            pending = trigger.queued(after: pending)
             return
         }
         isRefreshing = true

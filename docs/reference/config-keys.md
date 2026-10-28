@@ -4,6 +4,38 @@
 
 Source: `config/harness-knobs.json`.
 
+## Provider updates
+
+```json
+{
+  "path": "providers.<id>",
+  "provider_ids": [
+    "claude",
+    "codex",
+    "cursor",
+    "agy",
+    "opencode"
+  ],
+  "update": {
+    "default": true,
+    "effect": "Run the detected native updater between lanes in a detached one-shot worker scheduled by quota events. false opts out; {command: [program, argument, ...]} overrides the updater directly without a shell.",
+    "type": "bool_or_command_argv"
+  },
+  "update_interval_seconds": {
+    "default": 86400,
+    "effect": "Minimum time between update attempts, checked on existing housekeeping events. Failed and interrupted attempts and result-write errors wait the same interval.",
+    "min": 1,
+    "type": "int"
+  },
+  "update_timeout_seconds": {
+    "default": 300,
+    "effect": "Maximum native updater duration in the detached worker. Timeout kills the updater process group and records failure. Updater descendants retain the exclusive lease until exit, including descendants that leave the group.",
+    "min": 1,
+    "type": "int"
+  }
+}
+```
+
 ## `chair.auto_switch`
 
 | Field | Value |

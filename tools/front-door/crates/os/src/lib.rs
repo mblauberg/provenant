@@ -10,6 +10,7 @@ pub mod git;
 pub mod home;
 mod identity;
 pub mod pid;
+pub mod provider_fence;
 pub mod scratch;
 #[allow(unsafe_code, clippy::disallowed_methods)]
 pub mod sys;

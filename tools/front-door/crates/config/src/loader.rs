@@ -254,6 +254,26 @@ fn inspect<T: DeserializeOwned + Serialize>(
         crate::RetentionSettings::default()
     };
 
+    let providers_item = user.remove("providers");
+    let mut providers = crate::providers::defaults();
+    if let Some(item) = &providers_item {
+        let mut table = Table::new();
+        table.insert("providers", item.clone());
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Settings {
+            providers: BTreeMap<String, crate::ProviderSettings>,
+        }
+        let settings: Settings = decode(table.clone()).map_err(|error| {
+            section_error(&error, &table, "providers", &user_sites, &user_origin)
+        })?;
+        crate::providers::validate(&settings.providers).map_err(|rule| ConfigError::Schema {
+            location: site(&user_sites, "providers", &user_origin, false),
+            rule,
+        })?;
+        providers.extend(settings.providers);
+    }
+
     let knobs_item = user.remove("knobs");
     let version = user.get("schema_version");
     if text.is_some() {
@@ -365,6 +385,20 @@ fn inspect<T: DeserializeOwned + Serialize>(
     origins.insert("retention.provider_state_days".into(), compiled.clone());
     origins.insert("retention.logs_days".into(), compiled.clone());
     origins.insert("retention.session_revisions".into(), compiled.clone());
+    for provider in providers.keys() {
+        for field in [
+            "update",
+            "update_interval_seconds",
+            "update_timeout_seconds",
+        ] {
+            origins.insert(format!("providers.{provider}.{field}"), compiled.clone());
+        }
+    }
+    if let Some(item) = &providers_item {
+        walk_item(item, "providers", None, &mut |key, _, _| {
+            origins.insert(key.into(), user_origin.clone());
+        });
+    }
     if let Some(item) = &retention_item {
         walk_item(item, "retention", None, &mut |key, _, _| {
             origins.insert(key.into(), user_origin.clone());
@@ -434,6 +468,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
             install,
             gc,
             retention,
+            providers,
             knobs,
             origins,
         },

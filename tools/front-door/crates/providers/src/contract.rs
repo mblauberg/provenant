@@ -46,6 +46,8 @@ pub struct AvailabilityRecord {
     pub adapter: String,
     pub executable: String,
     pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_update: Option<crate::update::UpdateRecord>,
     pub fixture_ref: String,
     pub catalogue_revision: String,
     pub account_key: Option<String>,

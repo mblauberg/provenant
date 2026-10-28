@@ -26,6 +26,58 @@ fn explicit_profile_selects_the_compiled_preset() {
 }
 
 #[test]
+fn provider_update_settings_defaults_opt_out_commands_and_validation() {
+    let defaults = load::<&[u8]>(&roots(), None).unwrap();
+    assert_eq!(
+        defaults.providers["codex"].update,
+        ProviderUpdate::Enabled(true)
+    );
+    assert_eq!(defaults.providers["claude"].update_interval_seconds, 86_400);
+    test_support::assert_leaf_origins(&defaults);
+    let text = "schema_version=1\n[providers.codex]\nupdate=false\n[providers.claude]\nupdate={command=['claude','update']}\nupdate_interval_seconds=3600\nupdate_timeout_seconds=600";
+    let config = load(&roots(), Some(text.as_bytes())).unwrap();
+    assert_eq!(
+        config.providers["codex"].update,
+        ProviderUpdate::Enabled(false)
+    );
+    assert_eq!(
+        config.providers["claude"].update,
+        ProviderUpdate::Command {
+            command: vec!["claude".into(), "update".into()]
+        }
+    );
+    assert_eq!(config.providers["claude"].update_interval_seconds, 3600);
+    assert_eq!(config.providers["claude"].update_timeout_seconds, 600);
+    assert_eq!(defaults.providers["claude"].update_timeout_seconds, 300);
+    assert_eq!(config.providers["opencode"], ProviderSettings::default());
+    test_support::assert_leaf_origins(&config);
+    for (section, setting, rule) in [
+        ("codex", "update=42", "type"),
+        ("codex", "update='shell string'", "type"),
+        ("codex", "update={command=[],typo=1}", "type"),
+        ("codex", "update={command=[]}", "provider_update_command"),
+        ("codex", "update={command=['']}", "provider_update_command"),
+        (
+            "codex",
+            "update_timeout_seconds=0",
+            "update_timeout_seconds_range",
+        ),
+        ("codex", "update_timeout_seconds=-1", "type"),
+        (
+            "codex",
+            "update_interval_seconds=0",
+            "update_interval_seconds_range",
+        ),
+        ("codex", "update_interval_seconds=-1", "type"),
+        ("codex", "typo=false", "unknown_key"),
+        ("unknown", "update=false", "provider_id"),
+    ] {
+        let text = format!("schema_version=1\n[providers.{section}]\n{setting}");
+        assert_refusal(&load(&roots(), Some(text.as_bytes())).unwrap_err(), rule);
+    }
+}
+
+#[test]
 fn provider_state_retention_defaults_overrides_and_validation() {
     let defaults = serde_json::to_value(load::<&[u8]>(&roots(), None).unwrap()).unwrap();
     assert_eq!(defaults["retention"]["provider_state_days"], 7);

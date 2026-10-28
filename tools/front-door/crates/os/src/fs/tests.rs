@@ -1128,6 +1128,8 @@ fn process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes() {
                 cwd: temp.path(),
                 input: false,
                 secret_input: None,
+                inherited_lease: None,
+                process_group: false,
                 capture_stdout: false,
                 capture_stderr: false,
             },
