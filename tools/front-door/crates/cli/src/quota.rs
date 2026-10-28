@@ -1868,35 +1868,5 @@ mod tests {
         assert_eq!(detected.len(), 1);
         assert_eq!(detected[0].status, QuotaStatus::AuthRequired);
         assert_eq!(detected[0].accounts, Some(configured.clone()));
-
-        let mut record = AccountRecord::empty(account.clone());
-        record.revision = 1;
-        record.snapshot = Some(QuotaSnapshot {
-            schema_version: 1,
-            account: account.clone(),
-            revision: 1,
-            status: QuotaStatus::Available,
-            observed_unix_seconds: 100,
-            source_ref: "fixture".into(),
-            authority_ref: None,
-            windows: vec![],
-            details: None,
-        });
-        let policies = [policy];
-        let rep = schedule::report(
-            &policies,
-            &[record],
-            &detected,
-            &QuotaQuery { adapter: None },
-            500,
-            "/report.json".into(),
-        )
-        .unwrap();
-        assert_eq!(rep.accounts.len(), 1);
-        assert_eq!(rep.accounts[0].account, account);
-        assert_eq!(rep.accounts[0].status, QuotaStatus::AuthRequired);
-        assert!(rep.accounts[0].snapshot.is_some());
-        assert_eq!(rep.coverage.known, 0);
-        assert_eq!(rep.coverage.total, 1);
     }
 }

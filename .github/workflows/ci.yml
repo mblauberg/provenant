@@ -237,14 +237,19 @@ jobs:
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest@0.9.149
+      - name: Build macOS test archive
+        working-directory: tools/front-door
+        run: >-
+          cargo nextest archive --locked --workspace
+          --archive-file "$RUNNER_TEMP/macos-tests.tar.zst"
       - name: Run macOS supervisor custody tests
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
-        run: cargo nextest run --profile ci --locked -p provenant-supervisor -p provenant-confinement -p provenant-os
+        run: cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'package(=provenant-supervisor) | package(=provenant-confinement) | package(=provenant-os)'
       - name: Run macOS Cargo seed tests
         working-directory: tools/front-door
-        run: cargo nextest run --profile ci --locked -p provenant-run -E 'test(cargo_seed)'
+        run: cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'package(=provenant-run) & test(cargo_seed)'
       - name: Run dispatch confinement integration tests
         working-directory: tools/front-door
         env:
@@ -252,25 +257,25 @@ jobs:
         # One thread keeps these writer fixtures serial, as the separate
         # cargo test invocations did.
         run: >-
-          cargo nextest run --profile ci --locked --test worktrees --test-threads 1
-          -E 'test(=lane_prepare_isolates_nested_state)
+          cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --test-threads 1
+          -E 'binary(=worktrees) & (test(=lane_prepare_isolates_nested_state)
           | test(=read_only_dispatch_applies_bound_git_and_project_writes)
           | test(=writer_dispatch_uses_lane_cache_and_narrow_provider_state)
           | test(=writer_dispatch_edits_a_linked_worktree)
           | test(=second_writer_is_refused_while_first_holds_the_worktree)
           | test(=writer_terminal_refuses_sequencer_state)
           | test(=writer_production_plan_denies_outside_writes)
-          | test(=writer_reconcile_refuses_unfinished_cherry_pick_and_releases)'
+          | test(=writer_reconcile_refuses_unfinished_cherry_pick_and_releases))'
       - name: Run provider dispatch integration tests
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
-        run: cargo nextest run --profile ci --locked --test dispatch_provider
+        run: cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'binary(=dispatch_provider)'
       - name: Require Claude network and native TLS file probes
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
-        run: cargo nextest run --profile ci --locked -p provenant-providers -E 'test(claude_network_on)'
+        run: cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'package(=provenant-providers) & test(claude_network_on)'
       - name: Run menu bar tests
         working-directory: apps/quota-menubar
         run: swift test

@@ -260,8 +260,13 @@ fn seatbelt_profiles_match_snapshots() -> Result<(), Box<dyn std::error::Error>>
             case.name
         );
         let rendered = render(&case.plan, &case.profile, Path::new(HOME))?;
-        let path = dir.join(format!("{}.sb", case.name));
-        if update {
+        let snapshot_name = if case.name == "claude-continuation-read-only" {
+            "claude-read-only"
+        } else {
+            &case.name
+        };
+        let path = dir.join(format!("{snapshot_name}.sb"));
+        if update && case.name != "claude-continuation-read-only" {
             std::fs::create_dir_all(&dir)?;
             std::fs::write(&path, &rendered)?;
             continue;
