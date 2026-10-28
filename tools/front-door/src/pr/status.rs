@@ -217,11 +217,10 @@ pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use provenant_fabric_runtime::graph::CiState;
-
     #[test]
     fn gate_check_buckets_fail_closed() {
+        use super::*;
+        use provenant_fabric_runtime::graph::CiState;
         let observe = |buckets: &[&str]| {
             summarise_ci(Some(
                 buckets
