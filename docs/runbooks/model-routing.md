@@ -62,6 +62,62 @@ under `[domains.routing]` in the selected state's `config.toml`. Catalogue
 presence does not establish adapter availability; readiness is decided at
 dispatch, so inspect the resolved route recorded for the attempt.
 
+## Review shapes
+
+Review shapes describe groups of read-only reviewers. Each group names a
+routing pool and a count, and may assign one lens to each reviewer and request
+distinct model families. Configure them in the selected state's `config.toml`:
+
+```toml
+[domains.routing.review.shapes.quick]
+reviewers = [{ pool = "junior", count = 1 }]
+
+[domains.routing.review.shapes.standard]
+reviewers = [{ pool = "junior", count = 2, distinct_families = true }]
+
+[domains.routing.review.shapes.deep]
+reviewers = [
+  { pool = "junior", count = 4, lenses = ["correctness", "security", "failure-isolation", "tests"], distinct_families = true },
+  { pool = "senior", count = 2, distinct_families = true },
+]
+
+[domains.routing.review.select]
+default = "standard"
+by_risk = { low = "quick", high = "deep" }
+by_paths = { ".github/workflows/**" = "deep" }
+```
+
+The bundled shapes are `quick`, `standard` and `deep`. Tables layer over the
+bundled configuration; a `reviewers` array replaces the earlier array. Each
+count must be between 1 and 32, and a non-empty `lenses` array must have one
+identifier per reviewer. Pools and selected shape names must exist. A shape may
+dispatch at most 64 reviewers.
+
+For example, review a commit with changed paths from a Git range:
+
+```sh
+provenant review HEAD --brief-file review-brief.md --risk high --kind code --range origin/main...HEAD
+provenant --json review HEAD --brief-file review-brief.md --shape quick
+```
+
+The target must resolve to a commit. `--range` supplies changed paths for
+selection; without it no path rules match. `--shape` overrides selection.
+`--wait` sets the overall wait limit, defaulting to one hour, and accepts
+seconds or durations such as `30m`, from one second to four hours.
+
+Selection uses an explicit shape first, then the first matching `by_paths`
+pattern in lexicographic order, then `by_risk`, `by_kind` and finally `default`.
+In path patterns, `*` and `?` do not cross directory separators; `**` does.
+The selected shape and its source appear in the review summary. Family
+distinctness is requested within each group; the summary records a substitution
+when the pool cannot provide another family. Each reviewer goes through normal
+dispatch, so pacing and quota apply independently. The summary collates each
+run's route, state, verdict and full output path without merging findings. A
+reviewer is asked to begin with `Verdict: approve`, `Verdict: request_changes`
+or `Verdict: inconclusive`; any other first line is reported as `unknown`.
+The command reports a failed reviewer or timeout, and a verdict does not itself
+decide delivery acceptance.
+
 ## Per-account pacing
 
 Account profiles layer over provider pacing. An active temporary override takes

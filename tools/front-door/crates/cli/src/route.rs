@@ -604,6 +604,7 @@ fn with_context<T>(
 }
 /// Resolve one production dispatch against fresh provider facts and validated
 /// task access. Account aliases must already have been mapped to registered keys.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_dispatch(
     request: &provenant_routing::RouteRequest,
     roots: &Roots,
@@ -612,6 +613,62 @@ pub(crate) fn resolve_dispatch(
     availability: &[AvailabilityRecord],
     access: &[AccessContext<'_>],
     host: &str,
+    excluded_families: Option<&[String]>,
+) -> Result<provenant_records::ResolvedRoute, String> {
+    let catalogue = Catalogue::bundled().map_err(|error| error.to_string())?;
+    let excluded: Vec<ModelId> = catalogue
+        .models()
+        .iter()
+        .filter(|model| {
+            excluded_families.is_some_and(|families| {
+                model
+                    .family
+                    .as_ref()
+                    .is_none_or(|family| families.contains(family))
+            })
+        })
+        .map(|model| model.model.clone())
+        .collect();
+    let selected = resolve_dispatch_excluding(
+        request,
+        roots,
+        account,
+        seed,
+        availability,
+        access,
+        host,
+        &excluded,
+    );
+    let exhausted = match &selected {
+        Ok(route) => !matches!(route.readiness, RouteReadiness::Ready { .. }),
+        Err(error) => error.starts_with("no eligible pool member:"),
+    };
+    if !excluded.is_empty() && exhausted {
+        resolve_dispatch_excluding(
+            request,
+            roots,
+            account,
+            seed,
+            availability,
+            access,
+            host,
+            &[],
+        )
+    } else {
+        selected
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_dispatch_excluding(
+    request: &provenant_routing::RouteRequest,
+    roots: &Roots,
+    account: Option<&str>,
+    seed: (&str, u64),
+    availability: &[AvailabilityRecord],
+    access: &[AccessContext<'_>],
+    host: &str,
+    initial_exclusions: &[ModelId],
 ) -> Result<provenant_records::ResolvedRoute, String> {
     let mut requested_models = Vec::new();
     if let RouteChoice::Model(model) = &request.choice {
@@ -627,7 +684,7 @@ pub(crate) fn resolve_dispatch(
         host,
         &requested_models,
         |context, records| {
-            let mut excluded_members = Vec::new();
+            let mut excluded_members = initial_exclusions.to_vec();
             let mut refusals = Vec::new();
             let mut resolved = provenant_routing::resolve_for_account_with_seed_excluding(
                 request,
@@ -1625,6 +1682,7 @@ mod route_tests {
                 &availability,
                 &access,
                 "fixture",
+                None,
             )
         };
         let preview = super::Route::Resolve(super::RouteResolve {
@@ -1798,6 +1856,7 @@ mod route_tests {
             &availability[..1],
             &access,
             "fixture",
+            None,
         )?;
         assert_eq!(
             exhausted.readiness,
@@ -1819,6 +1878,7 @@ mod route_tests {
             &availability,
             &access,
             "fixture",
+            None,
         )?;
         assert!(matches!(fresh.readiness, RouteReadiness::Ready { .. }));
         assert_eq!(fresh.account_key.as_deref(), Some("fresh"));
@@ -1957,6 +2017,107 @@ mod route_tests {
             .ok_or("rejected candidate")?;
         assert_eq!(rejected["exclusion"], "admission rejected");
         assert_eq!(rejected["readiness"]["status"], "ready");
+        Ok(())
+    }
+    #[test]
+    fn review_uses_unused_families_and_substitutes_when_exhausted() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(
+                &self,
+                path: &std::path::Path,
+            ) -> std::io::Result<std::path::PathBuf> {
+                Ok(path.into())
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&Resolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        std::fs::set_permissions(
+            roots.state.as_path(),
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        let path = roots.state.as_path().join("config.toml");
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='codex/gpt-6-luna',weight=1,effort='high',efforts=['high']},{model='claude/claude-haiku-5-5',weight=1,effort='high',efforts=['high']}]\n",
+        )?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let catalogue = super::Catalogue::bundled()?;
+        let now = jiff::Timestamp::now().as_second();
+        let availability: Vec<_> = [("codex", "gpt-6-luna"), ("claude", "claude-haiku-5-5")]
+            .into_iter()
+            .map(|(adapter, model)| provenant_providers::AvailabilityRecord {
+                schema_version: 1,
+                adapter: adapter.into(),
+                executable: "/fixture/provider".into(),
+                version: "fixture".into(),
+                fixture_ref: "fixture".into(),
+                catalogue_revision: catalogue.revision().into(),
+                account_key: Some(format!("{adapter}-account")),
+                observed_models: vec![model.into()],
+                observed_unix_seconds: now,
+                expires_unix_seconds: now + 300,
+                last_update: None,
+            })
+            .collect();
+        let access = [
+            provenant_routing::AccessContext {
+                adapter: "codex",
+                disclosure_ref: "fixture",
+                confinement_ref: "fixture",
+            },
+            provenant_routing::AccessContext {
+                adapter: "claude",
+                disclosure_ref: "fixture",
+                confinement_ref: "fixture",
+            },
+        ];
+        let request = super::RouteRequest {
+            model: None,
+            route: Some("test".into()),
+            effort: None,
+            confidential: false,
+            allow_free: false,
+            fallback: vec![],
+        }
+        .to_domain()?;
+        let resolve = |excluded: &[String]| {
+            super::resolve_dispatch(
+                &request,
+                &roots,
+                None,
+                ("fixture", 0),
+                &availability,
+                &access,
+                "fixture",
+                Some(excluded),
+            )
+        };
+        let first = resolve(&[])?;
+        let first_id =
+            provenant_routing::ModelId::parse(&format!("{}/{}", first.adapter, first.model))?;
+        let family = catalogue
+            .model(&first_id)
+            .and_then(|row| row.family.clone())
+            .ok_or("family")?;
+        let second = resolve(std::slice::from_ref(&family))?;
+        let second_id =
+            provenant_routing::ModelId::parse(&format!("{}/{}", second.adapter, second.model))?;
+        let other = catalogue
+            .model(&second_id)
+            .and_then(|row| row.family.clone())
+            .ok_or("family")?;
+        assert_ne!(family, other);
+        let fallback = resolve(&[family, other])?;
+        assert!(matches!(
+            fallback.readiness,
+            provenant_records::RouteReadiness::Ready { .. }
+        ));
         Ok(())
     }
 }

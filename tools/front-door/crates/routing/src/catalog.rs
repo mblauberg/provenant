@@ -187,6 +187,7 @@ pub struct RoutingConfig {
     /// Silence the advisory for Opus implementation lanes.
     pub suppress_opus_writer_warning: bool,
     pub capacity_cooldown_seconds: u64,
+    pub review: crate::ReviewConfig,
     pub routes: BTreeMap<String, NamedRoute>,
     pub pools: BTreeMap<String, Vec<RoutePoolMember>>,
     pub pacing: PacingSettings,
@@ -200,6 +201,7 @@ impl Default for RoutingConfig {
         Self {
             suppress_opus_writer_warning: false,
             capacity_cooldown_seconds: 600,
+            review: crate::ReviewConfig::default(),
             routes: BTreeMap::new(),
             pools: BTreeMap::new(),
             pacing: PacingSettings::default(),
@@ -311,6 +313,7 @@ impl DomainConfig for RoutingConfig {
             });
         }
         let catalogue = Catalogue::bundled().ok();
+        self.review.validate(self, catalogue.as_ref(), &mut errors);
         for (name, route) in &self.routes {
             if catalogue
                 .as_ref()
@@ -657,7 +660,7 @@ mod pacing_profile_tests {
     }
 }
 fn defaults(_: Profile) -> &'static str {
-    "suppress_opus_writer_warning = false\ncapacity_cooldown_seconds = 600\npacing_overrides = []\n[opencode_go]\nmin_monthly_allowance_usd = 60\n[routes]\n[pools]\n[pacing]\n[pacing_reserve]\n"
+    include_str!("../assets/review-defaults.toml")
 }
 pub const SECTION: DomainSection = DomainSection::new::<RoutingConfig>("routing", defaults);
 

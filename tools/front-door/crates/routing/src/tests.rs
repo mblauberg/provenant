@@ -1193,6 +1193,53 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
             .map(|r| r.model.model()),
         Some("gpt-6.1-sol")
     );
+    let layered = provenant_config::load_with_domains(
+        &roots,
+        Some("schema_version=1\n[domains.routing.review.shapes.quick]\nreviewers=[{pool='senior',count=1}]\n[domains.routing.review.select.by_risk]\nmedium='deep'\n".as_bytes()),
+        &sections,
+    )?;
+    assert_eq!(
+        layered.domains.routing.review.shapes["quick"].reviewers[0].pool,
+        "senior"
+    );
+    assert_eq!(
+        layered.domains.routing.review.shapes["standard"].reviewers[0].count,
+        2
+    );
+    assert_eq!(
+        layered.domains.routing.review.select.by_risk["low"],
+        "quick"
+    );
+    assert_eq!(
+        layered.domains.routing.review.select.by_risk["medium"],
+        "deep"
+    );
+    let layered = provenant_config::load_with_domains(
+        &roots,
+        Some("schema_version=1\n[domains.routing.review.shapes.custom]\nreviewers=[{pool='senior',count=1}]\n[domains.routing.review.select]\nby_risk={medium='custom'}\n".as_bytes()),
+        &sections,
+    )?;
+    assert!(layered.domains.routing.review.shapes.contains_key("custom"));
+    assert!(layered.domains.routing.review.shapes.contains_key("quick"));
+    assert_eq!(
+        layered.domains.routing.review.select.by_risk["low"],
+        "quick"
+    );
+    assert_eq!(
+        layered.domains.routing.review.select.by_risk["medium"],
+        "custom"
+    );
+    for invalid in [
+        "schema_version=1\n[domains.routing.review.select]\ntypo=true\n",
+        "schema_version=1\n[domains.routing.review.shapes.quick]\ntypo=true\n",
+        "schema_version=1\n[domains.routing.review.shapes.custom]\nreviewers='wrong'\n",
+    ] {
+        assert!(
+            provenant_config::load_with_domains(&roots, Some(invalid.as_bytes()), &sections)
+                .is_err(),
+            "{invalid}"
+        );
+    }
     let cfg: RoutingConfig = toml_edit::de::from_str(
         "[routes.review]\nmodel = 'opencode/opencode/glm-5.3-flash-free'\n",
     )?;

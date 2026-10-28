@@ -4,11 +4,13 @@ mod catalog;
 mod facts;
 mod request;
 mod resolve;
+mod review;
 pub use catalog::*;
 pub use facts::*;
 pub use provenant_records::ResolvedRoute;
 pub use request::*;
 pub use resolve::*;
+pub use review::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RoutingError {

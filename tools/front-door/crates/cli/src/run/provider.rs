@@ -343,7 +343,7 @@ fn prepare_with(
         run::RequestedRoute::Model { model, .. } => {
             model.split_once('/').map(|(adapter, _)| adapter)
         }
-        run::RequestedRoute::Named { .. } => None,
+        run::RequestedRoute::Named { .. } | run::RequestedRoute::Review { .. } => None,
     };
     // A continuation keeps the prior attempt's account, never a fresh pick.
     let prior_account = resume
@@ -381,6 +381,14 @@ fn prepare_with(
         &availability,
         &access,
         &host,
+        match &task.route {
+            run::RequestedRoute::Review {
+                excluded_families,
+                distinct_families: true,
+                ..
+            } => Some(excluded_families.as_slice()),
+            _ => None,
+        },
     )?;
     if let Some(selection) = &resolved.pool_selection {
         for redraw in &selection.redraws {

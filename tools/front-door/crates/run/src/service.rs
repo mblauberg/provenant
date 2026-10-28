@@ -270,6 +270,17 @@ impl<'a> Service<'a> {
             RequestedRoute::Named { name, effort } if !name.is_empty() => {
                 Ok(RequestedRoute::Named { name, effort })
             }
+            RequestedRoute::Review {
+                name,
+                effort,
+                excluded_families,
+                distinct_families,
+            } if !name.is_empty() => Ok(RequestedRoute::Review {
+                name,
+                effort,
+                excluded_families,
+                distinct_families,
+            }),
             _ => Err(input_error(
                 ErrorKind::Invalid,
                 "named route requires a name",

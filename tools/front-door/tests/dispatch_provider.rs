@@ -116,13 +116,107 @@ fn fixture() -> Result {
         )?;
         return Ok(());
     }
+    let answer = if prompt.contains("Review commit ") {
+        let lens = prompt
+            .lines()
+            .find(|line| line.starts_with("Lens: "))
+            .unwrap_or("Lens: unknown");
+        format!("Verdict: approve\n{lens}")
+    } else {
+        "OK".into()
+    };
     for frame in [
         json!({"type":"thread.started","thread_id":session}),
-        json!({"type":"item.completed","item":{"type":"agent_message","text":"OK"}}),
+        json!({"type":"item.completed","item":{"type":"agent_message","text":answer}}),
         json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
     ] {
         writeln!(io::stdout(), "{frame}")?;
     }
+    Ok(())
+}
+fn review_fans_out_and_collects_fake_provider() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
+        fs::create_dir_all(rig.home.join(path))?;
+    }
+    fs::write(rig.home.join(".rustup/settings.toml"), "")?;
+    let bin = rig.root.join("provider/bin");
+    fs::create_dir_all(&bin)?;
+    rig.copy_executable(&std::env::current_exe()?, &bin.join("codex"))?;
+    fs::write(
+        rig.root.join("codex/auth.json"),
+        br#"{"tokens":{"account_id":"fixture-one"}}"#,
+    )?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.pools]\nreview-fixture = [{{ model = 'codex/gpt-6-luna', effort = 'low' }}]\n[domains.routing.review.shapes.fixture]\nreviewers = [{{ pool = 'review-fixture', count = 2, lenses = ['correctness', 'tests'], distinct_families = true }}]"
+    )?;
+    let git = std::env::var_os("PROVENANT_GIT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/usr/bin/git"));
+    let commit = rig.execute(
+        &git,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "Initial",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&commit), 0);
+    let brief = rig.root.join("review-brief.txt");
+    fs::write(&brief, "Check this change")?;
+    let out = rig.command(&[
+        "review",
+        "HEAD",
+        "--brief-file",
+        brief.to_str().ok_or("brief")?,
+        "--shape",
+        "fixture",
+        "--wait",
+        "60s",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&out),
+        0,
+        "{} {}",
+        String::from_utf8_lossy(&out.stdout.bytes),
+        String::from_utf8_lossy(&out.stderr.bytes)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(result["data"]["shape"], "fixture");
+    assert_eq!(result["data"]["selection_source"], "override");
+    let reviewers = result["data"]["reviewers"].as_array().ok_or("reviewers")?;
+    assert_eq!(reviewers.len(), 2);
+    for (index, lens) in ["correctness", "tests"].iter().enumerate() {
+        let row = &reviewers[index];
+        assert_eq!(row["state"], "succeeded", "{row}");
+        assert_eq!(row["verdict"], "approve", "{row}");
+        assert_eq!(row["lens"], *lens);
+        assert_eq!(row["substitution"], index == 1);
+        assert!(row["run_id"].is_string());
+        assert_eq!(row["applied_route"]["model"], "codex/gpt-6-luna");
+        let output = fs::read_to_string(row["result_path"].as_str().ok_or("result path")?)?;
+        assert!(output.contains(&format!("Lens: {lens}")), "{output}");
+    }
+    cleanup.disarm();
     Ok(())
 }
 fn opencode_dispatch_observes_v2_wal_session() -> Result {
@@ -2186,6 +2280,7 @@ fn main() -> ExitCode {
                 "owned_dispatch_retains_failed_attempt_and_replays",
                 "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation",
                 "codex_dispatch_observes_rollout",
+                "review_fans_out_and_collects_fake_provider",
                 "opencode_dispatch_observes_v2_wal_session",
                 "opus_writer_dispatch_advises_a_cheaper_route",
                 "claude_dispatch_refreshes_registered_account",
@@ -2217,6 +2312,7 @@ fn main() -> ExitCode {
                         owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation()
                     }
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
+                    "review_fans_out_and_collects_fake_provider" => review_fans_out_and_collects_fake_provider(),
                     "opencode_dispatch_observes_v2_wal_session" => {
                         opencode_dispatch_observes_v2_wal_session()
                     }
