@@ -1352,6 +1352,7 @@ impl RunStore {
             run_id: input.run_id,
             operation_id: input.operation_id.clone(),
             request: CanonicalRequest {
+                child_attempt_id_version: None,
                 chair: request.chair.clone(),
                 fresh_continuation: fresh.map(str::to_owned),
                 schema_version: 1,

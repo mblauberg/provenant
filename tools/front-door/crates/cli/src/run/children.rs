@@ -805,6 +805,7 @@ mod tests {
             operation_id: OperationId::parse("deferred-child")?,
             created_at: clock.wall_now()?,
             request: run::CanonicalRequest {
+                child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,

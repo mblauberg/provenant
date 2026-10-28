@@ -58,7 +58,8 @@ impl<'a> Service<'a> {
     ) -> Result<RunRecord> {
         // Reuse the originally resolved boundary before consulting Git. Retrying
         // the same operation must work even after its caller-supplied ref vanishes.
-        let previous = match self.store.operation(&input.operation_id, call)? {
+        let operation = self.store.operation(&input.operation_id, call)?;
+        let previous = match &operation {
             Some(operation) => match self.store.request(operation.run_id, call) {
                 Ok(request) => Some(request),
                 // A prepared operation may have crashed before request publication;
@@ -216,10 +217,15 @@ impl<'a> Service<'a> {
                 prompt: task.prompt,
             });
         }
-        let prepared = PreparedRun {
+        let mut prepared = PreparedRun {
             run_id: fresh(RunId::from_bytes)?,
             operation_id: input.operation_id,
             request: CanonicalRequest {
+                child_attempt_id_version: previous
+                    .as_ref()
+                    .map_or(input.parent_attempt.map(|_| 1), |request| {
+                        request.child_attempt_id_version
+                    }),
                 chair: previous
                     .as_ref()
                     .map_or(input.chair, |request| request.chair.clone()),
@@ -237,6 +243,35 @@ impl<'a> Service<'a> {
                 .wall_now()
                 .map_err(|_| RunError::Validation("wall clock"))?,
         };
+        // Repair an older prepared operation whose request was never published.
+        // Only an exact digest match may retain the legacy, unindexed scheme.
+        if previous.is_none()
+            && let Some(operation) = operation
+            && operation.request_digest != prepared.request.digest()?
+        {
+            let mut legacy = prepared.request.clone();
+            legacy.child_attempt_id_version = None;
+            if legacy.digest()? == operation.request_digest {
+                prepared.request = legacy;
+            }
+        }
+        if let Some(id) = crate::correlation::child_run_id(
+            self.store.context.project_id,
+            &prepared.request,
+            &prepared.operation_id,
+        )? {
+            prepared.run_id = id;
+        }
+        for attempt in &mut prepared.attempts {
+            if let Some(id) = crate::correlation::child_attempt_id(
+                self.store.context.project_id,
+                prepared.run_id,
+                &prepared.request,
+                attempt.task_id,
+            )? {
+                attempt.attempt_id = id;
+            }
+        }
         let record = self.store.create(&prepared, call)?;
         Ok(record)
     }

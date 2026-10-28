@@ -6312,6 +6312,7 @@ mod tests {
             operation_id: OperationId::parse(&format!("trace-{n}"))?,
             created_at,
             request: run::CanonicalRequest {
+                child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,

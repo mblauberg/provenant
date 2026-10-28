@@ -87,7 +87,7 @@ pub enum Graph {
         /// Project-local graph document
         #[arg(long)]
         document: PathBuf,
-        /// Raise a limit or budget (KEY=VALUE); may be repeated
+        /// Raise a limit, budget or loop allowance, or decide a paused loop (KEY=VALUE); may be repeated
         #[arg(long, value_name = "KEY=VALUE")]
         extend: Vec<String>,
     },

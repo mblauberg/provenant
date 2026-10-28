@@ -27,7 +27,7 @@ The app reads all quota data from the CLI. It does not read credentials, tokens 
 
 Register each Claude account under a label in its required `~/.claude-LABEL` directory, for example `work` in `~/.claude-work`; see the [installation procedure](../../docs/runbooks/install.md#install). The CLI matches authenticated identities using fingerprints and selects the freshest unexpired matching credential from the registered directory or `~/.claude`. When needed, it asks Claude Code to refresh the registered directory's expired token. Raw email addresses are not stored.
 
-The menu also lists lanes that need attention under "Needs attention": input required (24 hours), failed in the last hour, lanes held in `queued`, `starting` or `settling` for over 10 minutes, and running lanes with no output for 10 minutes. It reads `provenant lanes --all --since 86400 --json` on each quota refresh, on menu open and once a minute, and shows nothing when no lane qualifies. Choosing a row opens `<state root>/runs/<run id>`.
+The menu shows local requests and lanes needing attention from `provenant console overview --json`. It observes local database, WAL and project registry metadata as invalidation hints, coalesces changes for 250 ms, and reads the overview through the CLI. Overview reads start at least two seconds apart, with one trailing read for changes during that interval or an active read. A failed read retains the previous overview and shows its age and error. A once-per-minute check recovers missed events, retries unavailable watches and retries a failed read. Menu opening and manual refresh also request a read.
 
 ## Build and run
 
@@ -46,6 +46,18 @@ At launch, the app runs `provenant quota show --json` to load the current report
 A successful lane clears an authentication error for its account and publishes the changed report. On menu-open, wake and manual-refresh ticks, the CLI compares metadata for each registered provider's credential files and profile directory. A changed file or selected profile makes an authentication retry due immediately. On macOS, Claude also checks the default login Keychain file's metadata. Change detection never opens credential files or reads their contents, and adds no polling loop. Unchanged signed-out accounts retain the 15-minute authentication backoff; manual refresh can retry sooner.
 
 The CLI command response is a versioned envelope containing the report. The watched file contains the raw report. The state root is `$PROVENANT_STATE_DIR`, defaulting to `~/.local/share/provenant/v1`; quota state and `report.json` live in its `quota` directory.
+
+## Observation benchmark
+
+The slice's hook timing fixture lives in `Fixtures/bench` alongside the menu observation work. From the repository root, run it against a release CLI with an absolute path:
+
+```bash
+python3 apps/quota-menubar/Fixtures/bench/hook.py /absolute/path/to/provenant --samples 100
+```
+
+The default creates an empty temporary state root and measures an unregistered-session lookup, not answer delivery. To measure delivery, supply `--state-dir /absolute/path/to/disposable-state --cwd /absolute/path/to/project --session SESSION` for a registered chair with an answer available to the hook. The hook records offers in that state, so never use a production state root. Every session sample must contain a non-empty answer-offer page or the fixture refuses to report delivery timings. The results include total child CPU and the child lifetime maximum RSS, not per-invocation peaks. These timings alone do not measure menu memory, idle CPU, change latency, provider probes or SSH.
+
+Run the fixture's deterministic checks with `python3 -m unittest discover -s apps/quota-menubar/Fixtures/bench -p 'test_*.py'`.
 
 ## Render the menu
 
