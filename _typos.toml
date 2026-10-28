@@ -2,7 +2,7 @@
 [default]
 locale = "en-au"
 # Code spans quote identifiers verbatim, including upstream API spellings.
-extend-ignore-re = ["`[^`\\n]+`", "align=\"center\"", "unicode-normalization"]
+extend-ignore-re = ["`[^`\\n]+`", "align=\"center\""]
 
 [files]
 # Bench tasks replay recorded diffs verbatim, wrapped fragments included.

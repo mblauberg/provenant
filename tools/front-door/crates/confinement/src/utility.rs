@@ -563,8 +563,7 @@ pub fn run_utility(
     )
 }
 
-/// Host-only remote preparation. Unlike evidence reads, this must retain the
-/// host's transport and credential configuration. It never edits fetch config.
+/// What the remote advertises for a base such as `origin/main`.
 #[derive(Debug)]
 pub(crate) enum RemoteBase {
     NotRemote,
@@ -572,6 +571,9 @@ pub(crate) enum RemoteBase {
     Found(GitOid),
 }
 
+/// Host-only remote preparation. Unlike evidence reads, this must retain the
+/// host's transport and credential configuration. It never edits fetch config.
+/// Fetches the branch's objects and returns the exact advertised commit.
 pub(crate) fn fetch_missing_remote_branch(
     executor: &dyn Executor,
     repo: &VerifiedRepo,
@@ -677,9 +679,9 @@ pub(crate) fn fetch_missing_remote_branch(
     } else {
         branch
     };
-    // Expressions rooted at remote-tracking refs cannot be verified exactly.
+    // Only literal branch names qualify, never revision expressions or options.
     if GitRefName::branch(branch).is_err() {
-        return Err(UtilityError::InvalidOperationValue);
+        return Ok(RemoteBase::NotRemote);
     }
     let refspec = format!("refs/heads/{branch}");
     // A failed fetch can mean either a missing remote ref or a transport fault.

@@ -21,7 +21,6 @@ sha2 = "0.11"
 tempfile = "3"
 thiserror = "2.0"
 toml_edit = { version = "0.25", features = ["serde"] }
-caseless = "0.2"
 
 # Internal crates. Each member may depend only on the crates docs/specs/rust-workspace.md#crate-layering
 # allows it, as `provenant-<name> = { workspace = true }`.

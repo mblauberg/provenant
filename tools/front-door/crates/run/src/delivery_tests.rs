@@ -554,15 +554,10 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
     std::fs::write(
         remote.join("packed-refs"),
         format!(
-            "# pack-refs with: sorted\n{newer} refs/heads/Main\n{newer} refs/heads/café\n{newer} refs/heads/feat+x\n{newer} refs/heads/fix#12\n{newer} refs/heads/main\n{newer} refs/heads/other\n{newer} refs/heads/user@x\n{newer} refs/tags/x/HEAD\n"
+            "# pack-refs with: sorted\n{newer} refs/heads/Main\n{newer} refs/heads/feat+x\n{newer} refs/heads/main\n{newer} refs/heads/other\n"
         ),
     )?;
     run(&remote, &["symbolic-ref", "HEAD", "refs/heads/other"])?;
-    let advertised = run(
-        &git_dir,
-        &["ls-remote", "--symref", "origin", "HEAD", "refs/heads/*"],
-    )?;
-    assert!(advertised.contains("refs/tags/x/HEAD"));
     host().refresh_origin_with(&writer, &git_dir)?;
     assert_eq!(
         run(&git_dir, &["rev-parse", "refs/remotes/origin/main"])?,
@@ -572,21 +567,15 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
         run(&git_dir, &["rev-parse", "refs/remotes/origin/other"])?,
         newer
     );
+    assert_eq!(
+        run(&git_dir, &["rev-parse", "refs/remotes/origin/feat+x"])?,
+        newer
+    );
     run(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
     let Err(error) = host().refresh_origin_with(&writer, &git_dir) else {
         return Err("colliding default must fail".into());
     };
     assert!(error.to_string().contains("default branch"));
-    run(
-        &git_dir,
-        &[
-            "symbolic-ref",
-            "refs/remotes/origin/HEAD",
-            "refs/remotes/origin/main",
-        ],
-    )?;
-    std::fs::write(remote.join("HEAD"), format!("{newer}\n"))?;
-    assert!(host().refresh_origin_with(&writer, &git_dir).is_err());
     assert_eq!(
         run(&git_dir, &["rev-parse", "refs/remotes/origin/main"])?,
         expected

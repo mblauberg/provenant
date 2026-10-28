@@ -708,83 +708,41 @@ impl HostDeliveryContext {
         )?;
         let mut default = None;
         let mut heads = Vec::new();
-        use std::io::Write;
         for line in advertised.lines() {
             let Some((value, name)) = line.split_once('\t') else {
-                if line.starts_with("ref:") {
-                    return Err(prepare_error("origin refresh", "malformed remote HEAD"));
-                }
                 continue;
             };
             if name == "HEAD" {
-                if let Some(branch) = value.strip_prefix("ref: refs/heads/") {
-                    if default.is_some() || branch.is_empty() {
-                        return Err(prepare_error("origin refresh", "malformed remote HEAD"));
-                    }
-                    default = Some(branch.to_owned());
-                } else if value.starts_with("ref:") {
-                    return Err(prepare_error("origin refresh", "malformed remote HEAD"));
-                }
-            } else if let Some(branch) = name.strip_prefix("refs/heads/") {
-                if GitOid::parse(value).is_err() || GitRefName::branch(branch).is_err() {
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "warning: skipping unsupported origin branch {branch:?}"
-                    );
-                    continue;
-                }
-                heads.push(branch.to_owned());
+                default = value.strip_prefix("ref: refs/heads/").map(str::to_owned);
+            } else if let Some(branch) = name.strip_prefix("refs/heads/")
+                && GitOid::parse(value).is_ok()
+            {
+                heads.push(branch);
             }
         }
-        if default.is_none()
-            && let Ok(configured) = host.command(
-                &writer.worktree,
-                "git",
-                &[
-                    "--git-dir",
-                    git_dir,
-                    "--work-tree",
-                    worktree,
-                    "symbolic-ref",
-                    "--quiet",
-                    "refs/remotes/origin/HEAD",
-                ],
-                Stage::Prepare,
-            )
-        {
-            default = configured
-                .trim()
-                .strip_prefix("refs/remotes/origin/")
-                .map(str::to_owned);
+        // Names that alias on a case-insensitive filesystem would share one
+        // tracking ref, so leave them out. Only a colliding default is fatal.
+        let mut refspecs = Vec::new();
+        for name in &heads {
+            let collides = heads
+                .iter()
+                .any(|other| provenant_core::refs_collide(name, other));
+            if collides && default.as_deref() == Some(*name) {
+                return Err(prepare_error(
+                    "origin refresh",
+                    "default branch collides with another branch name",
+                ));
+            }
+            if collides || GitRefName::branch(name).is_err() {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: not refreshing origin branch {name:?}; its name collides or is unsupported, and an existing tracking ref may be stale"
+                );
+                continue;
+            }
+            refspecs.push(format!("+refs/heads/{name}:refs/remotes/origin/{name}"));
         }
-        let refused: Vec<_> = heads
-            .iter()
-            .filter(|name| {
-                heads
-                    .iter()
-                    .any(|other| provenant_core::refs_collide(name, other))
-            })
-            .collect();
-        for name in &refused {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: refusing colliding origin branch {name:?}; an existing tracking ref may be stale"
-            );
-        }
-        if default
-            .as_ref()
-            .is_some_and(|branch| refused.contains(&branch))
-        {
-            return Err(prepare_error(
-                "origin refresh",
-                "default branch has a case or Unicode-normalisation collision",
-            ));
-        }
-        let refspecs: Vec<_> = heads
-            .iter()
-            .filter(|name| !refused.contains(name))
-            .map(|name| format!("+refs/heads/{name}:refs/remotes/origin/{name}"))
-            .collect();
         if refspecs.is_empty() {
             return Ok(());
         }

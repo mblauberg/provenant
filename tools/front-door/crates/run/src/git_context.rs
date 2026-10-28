@@ -156,6 +156,95 @@ fn read_git_with_env(
     Ok((out.stdout, out.timed_out))
 }
 
+/// Look up the exact object ID the remote advertises for a tracking ref named
+/// by `root`. A bare remote name or its `HEAD` stands for the advertised default.
+fn advertised_oid(
+    executor: &dyn Executor,
+    git: &Path,
+    cwd: &Path,
+    root: &str,
+    remote_name: &str,
+    env: &[(OsString, OsString)],
+) -> Option<String> {
+    let (resolved_remote, branch) = remote_name.split_once('/')?;
+    // Symbolic resolution dereferences HEAD. Identify an explicitly requested
+    // remote HEAD from the configured remote names, rather than trusting the
+    // local symref's target to name that remote.
+    let (remotes, timed_out) =
+        read_git_with_env(executor, git, cwd, &["remote"], 16384, env).ok()?;
+    if timed_out || remotes.truncated {
+        return None;
+    }
+    let remotes = std::str::from_utf8(&remotes.bytes).ok()?;
+    let requested_default = remotes.lines().find(|remote| {
+        root == *remote
+            || root == format!("{remote}/HEAD")
+            || root == format!("remotes/{remote}/HEAD")
+            || root == format!("refs/remotes/{remote}/HEAD")
+    });
+    let remote = requested_default.unwrap_or(resolved_remote);
+    let default = requested_default.is_some() || branch == "HEAD";
+    let mut transport_env: Vec<_> = std::env::vars_os()
+        .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
+        .collect();
+    transport_env.extend(
+        env.iter()
+            .filter(|(key, _)| {
+                matches!(
+                    key.to_str(),
+                    Some("GIT_DIR" | "GIT_WORK_TREE" | "GIT_COMMON_DIR")
+                )
+            })
+            .cloned(),
+    );
+    transport_env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
+    let reference = format!("refs/heads/{branch}");
+    let args = if default {
+        vec![
+            "ls-remote",
+            "--symref",
+            "--exit-code",
+            "--",
+            remote,
+            "HEAD",
+            "refs/heads/*",
+        ]
+    } else {
+        vec![
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            "--",
+            remote,
+            reference.as_str(),
+        ]
+    };
+    let (advertised, timed_out) =
+        read_git_with_env(executor, git, cwd, &args, CONTEXT_LIMIT, &transport_env).ok()?;
+    if timed_out || advertised.truncated {
+        return None;
+    }
+    let advertised = std::str::from_utf8(&advertised.bytes).ok()?;
+    let mut default_branch = None;
+    let mut heads = Vec::new();
+    for line in advertised.lines() {
+        let (value, name) = line.split_once('\t')?;
+        if name == "HEAD" && value.starts_with("ref: ") {
+            let name = value.strip_prefix("ref: refs/heads/")?;
+            if default_branch.replace(name).is_some() {
+                return None;
+            }
+        } else if let Some(name) = name.strip_prefix("refs/heads/") {
+            provenant_core::GitOid::parse(value).ok()?;
+            heads.push((name, value));
+        }
+    }
+    let branch = if default { default_branch? } else { branch };
+    let mut matches = heads.iter().filter(|(name, _)| *name == branch);
+    let (_, oid) = matches.next()?;
+    matches.next().is_none().then(|| (*oid).to_owned())
+}
+
 fn resolve(
     executor: &dyn Executor,
     git: &Path,
@@ -168,7 +257,9 @@ fn resolve(
         return Err(invalid());
     }
     // A tracking ref can alias a differently spelled ref on the host's
-    // filesystem. Verify the exact advertised head before trusting its OID.
+    // filesystem. Replace its root with the exact advertised object ID and
+    // apply any revision operators to that.
+    let (root, suffix) = provenant_core::split_revision_root(base);
     let (symbolic, timed_out) = read_git_with_env(
         executor,
         git,
@@ -178,7 +269,7 @@ fn resolve(
             "--symbolic-full-name",
             "--verify",
             "--end-of-options",
-            base,
+            root,
         ],
         4096,
         env,
@@ -190,154 +281,14 @@ fn resolve(
     let symbolic = std::str::from_utf8(&symbolic.bytes)
         .map_err(|_| invalid())?
         .trim();
-    // Revision operators hide their root from --symbolic-full-name.
-    if !symbolic.starts_with("refs/remotes/") {
-        let mut end = base.find(['^', '~', ':']).unwrap_or(base.len());
-        if let Some(at) = base[..end].find("@{") {
-            let suffix = &base[at..end];
-            if let Some(close) = suffix.find('}') {
-                if matches!(&suffix[..=close], "@{u}" | "@{upstream}" | "@{push}") {
-                    end = at + close + 1;
-                } else {
-                    end = at;
-                }
-            } else {
-                end = at;
-            }
-        }
-        if end < base.len() && end > 0 {
-            let (root, timed_out) = read_git_with_env(
-                executor,
-                git,
-                cwd,
-                &[
-                    "rev-parse",
-                    "--symbolic-full-name",
-                    "--verify",
-                    "--end-of-options",
-                    &base[..end],
-                ],
-                4096,
-                env,
-            )
-            .map_err(|_| invalid())?;
-            if timed_out || root.truncated {
-                return Err(invalid());
-            }
-            if root.bytes.starts_with(b"refs/remotes/") {
-                return Err(RunError::Validation(
-                    "remote revision expressions are not supported; use a remote branch ref such as refs/remotes/origin/main",
-                ));
-            }
-        }
-    }
-    if let Some(remote_name) = symbolic.strip_prefix("refs/remotes/") {
-        if let Some((resolved_remote, branch)) = remote_name.split_once('/') {
-            // Symbolic resolution dereferences HEAD. Identify an explicitly
-            // requested remote HEAD from the configured remote names, rather
-            // than trusting the local symref's target to name that remote.
-            let (remotes, timed_out) =
-                read_git_with_env(executor, git, cwd, &["remote"], 16384, env)
-                    .map_err(|_| invalid())?;
-            if timed_out || remotes.truncated {
-                return Err(invalid());
-            }
-            let remotes = std::str::from_utf8(&remotes.bytes).map_err(|_| invalid())?;
-            let requested_default = remotes.lines().find(|remote| {
-                base == *remote
-                    || base == format!("{remote}/HEAD")
-                    || base == format!("remotes/{remote}/HEAD")
-                    || base == format!("refs/remotes/{remote}/HEAD")
-            });
-            let remote = requested_default.unwrap_or(resolved_remote);
-            let default = requested_default.is_some() || branch == "HEAD";
-            if !default {
-                provenant_confinement::repo::GitRefName::branch(branch).map_err(|_| invalid())?;
-            }
-            let reference = format!("refs/heads/{branch}");
-            let mut transport_env: Vec<_> = std::env::vars_os()
-                .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
-                .collect();
-            transport_env.extend(
-                env.iter()
-                    .filter(|(key, _)| {
-                        matches!(
-                            key.to_str(),
-                            Some("GIT_DIR" | "GIT_WORK_TREE" | "GIT_COMMON_DIR")
-                        )
-                    })
-                    .cloned(),
-            );
-            transport_env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
-            let args = if default {
-                vec![
-                    "ls-remote",
-                    "--symref",
-                    "--exit-code",
-                    "--",
-                    remote,
-                    "HEAD",
-                    "refs/heads/*",
-                ]
-            } else {
-                vec![
-                    "ls-remote",
-                    "--exit-code",
-                    "--heads",
-                    "--",
-                    remote,
-                    reference.as_str(),
-                ]
-            };
-            let (advertised, timed_out) =
-                read_git_with_env(executor, git, cwd, &args, CONTEXT_LIMIT, &transport_env)
-                    .map_err(|_| invalid())?;
-            if timed_out || advertised.truncated {
-                return Err(invalid());
-            }
-            let advertised = std::str::from_utf8(&advertised.bytes).map_err(|_| invalid())?;
-            let mut default_branch = None;
-            let mut heads = Vec::new();
-            for line in advertised.lines() {
-                let (value, name) = line.split_once('\t').ok_or_else(invalid)?;
-                if name == "HEAD" && value.starts_with("ref: ") {
-                    let name = value.strip_prefix("ref: refs/heads/").ok_or_else(invalid)?;
-                    if default_branch.replace(name).is_some() {
-                        return Err(invalid());
-                    }
-                } else if let Some(name) = name.strip_prefix("refs/heads/") {
-                    if provenant_core::GitOid::parse(value).is_err() {
-                        return Err(invalid());
-                    }
-                    heads.push((name, value));
-                }
-            }
-            let branch = if default {
-                default_branch.ok_or_else(invalid)?
-            } else {
-                branch
-            };
-            provenant_confinement::repo::GitRefName::branch(branch).map_err(|_| invalid())?;
-            let mut matches = heads.iter().filter(|(name, _)| *name == branch);
-            let oid = matches
-                .next()
-                .map(|(_, value)| *value)
-                .ok_or_else(invalid)?;
-            if matches.next().is_some() {
-                return Err(invalid());
-            }
-            if default
-                && heads
-                    .iter()
-                    .any(|(name, _)| provenant_core::refs_collide(branch, name))
-            {
-                return Err(invalid());
-            }
-            return Ok(oid.to_owned());
-        } else {
-            return Err(invalid());
-        }
-    }
+    let verified;
+    let base = if let Some(remote_name) = symbolic.strip_prefix("refs/remotes/") {
+        let oid = advertised_oid(executor, git, cwd, root, remote_name, env).ok_or_else(invalid)?;
+        verified = format!("{oid}{suffix}");
+        verified.as_str()
+    } else {
+        base
+    };
     let (out, timed_out) = read_git_with_env(
         executor,
         git,
@@ -976,23 +927,12 @@ mod tests {
         for base in aliases {
             assert_eq!(resolve_base(base)?, head, "{base}");
         }
-        for base in [
-            "origin/main^",
-            "remotes/origin/main~1",
-            "@{u}^",
-            "origin/main@{0}",
-            "origin/main:tracked.txt",
-        ] {
-            let error = resolve_base(base).expect_err(base);
-            assert!(
-                error.to_string().contains("refs/remotes/origin/main"),
-                "{base}: {error}"
-            );
+        // Operators apply to the verified root, not to the stale tracking ref.
+        run(&["update-ref", "refs/remotes/origin/main", &fixture.base])?;
+        for base in ["origin/main^", "remotes/origin/main~1", "@{u}^", "origin~1"] {
+            assert_eq!(resolve_base(base)?, fixture.base, "{base}");
         }
-        run(&["pack-refs", "--all"])?;
-        run(&["branch", "Main"])?;
-        assert!(resolve_base("origin").is_err());
-        assert!(resolve_base("refs/remotes/origin/HEAD").is_err());
+        assert_eq!(resolve_base("origin/main^{commit}")?, head);
         Ok(())
     }
 
