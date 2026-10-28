@@ -5970,8 +5970,8 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
         let context = context(temp.path())?;
-        let registry = temp.path().join("registry");
-        std::fs::create_dir(&registry)?;
+        let registry = temp.path().canonicalize()?.join("registry");
+        std::fs::DirBuilder::new().mode(0o700).create(&registry)?;
         std::fs::write(registry.join("config.toml"), "[gc]\nfree_floor='100B'\n")?;
         let mut store = RunStore::open(&context, &call)?.with_writer_registry(&registry);
         std::fs::write(
@@ -6022,8 +6022,8 @@ fn admission_missing_configuration_uses_the_default_host_floor() -> TestResult {
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
         let context = context(temp.path())?;
-        let registry = temp.path().join("registry");
-        std::fs::create_dir(&registry)?;
+        let registry = temp.path().canonicalize()?.join("registry");
+        std::fs::DirBuilder::new().mode(0o700).create(&registry)?;
         let config = registry.join("config.toml");
         std::fs::write(&config, "[gc]\nfree_floor='1B'\n")?;
         let mut store = RunStore::open(&context, &call)?.with_writer_registry(&registry);
