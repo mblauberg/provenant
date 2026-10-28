@@ -195,6 +195,7 @@ fn explicit_unlisted_model_is_ready_without_provider_listing()
     let config = RoutingConfig::default();
     let mut record = availability();
     record.adapter = "opencode".into();
+    record.account_key = Some("zen".into());
     record.observed_models.clear();
     let records = [record];
     let access = [AccessContext {
@@ -1051,7 +1052,7 @@ fn availability() -> AvailabilityRecord {
         executable: "/fixture/codex".into(),
         version: "fixture".into(),
         fixture_ref: "test".into(),
-        catalogue_revision: "route-pools-20261027-v2".into(),
+        catalogue_revision: Catalogue::bundled().unwrap().revision,
         account_key: Some("opaque-account".into()),
         observed_models: vec!["test".into()],
         observed_unix_seconds: 80,
@@ -1856,5 +1857,256 @@ fn probe_adapters_include_only_requested_routes_pools_and_fallbacks()
     ));
     query = request("unknown/fixture")?;
     assert!(names(&query, &config)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn opencode_zen_and_go_use_separate_account_identities() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records: Vec<_> = ["go", "zen"]
+        .into_iter()
+        .map(|key| {
+            let mut record = availability();
+            record.adapter = "opencode".into();
+            record.account_key = Some(key.into());
+            record
+        })
+        .collect();
+    let access = [AccessContext {
+        adapter: "opencode",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    for (model, key) in [
+        ("opencode/opencode/beam-free", "zen"),
+        ("opencode/opencode-go/glm-5.1", "go"),
+    ] {
+        let query = request(model)?;
+        let route = resolve(&query, &ctx)?;
+        assert_eq!(route.account_key.as_deref(), Some(key));
+        assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    }
+    let free = request("opencode/opencode/beam-free")?;
+    let route = resolve_for_account_with_seed(&free, &ctx, Some("go"), "fixture", 0)?;
+    assert!(matches!(
+        route.readiness,
+        RouteReadiness::Unavailable { .. }
+    ));
+    Ok(())
+}
+
+#[test]
+fn go_pool_requires_current_full_calibration_and_paces_the_maximum()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{AccountRecord, Calibration, QuotaDetails, QuotaStatus, QuotaWindow};
+    let catalogue = Catalogue::bundled()?;
+    let model = "opencode/opencode-go/mimo-v2.6-flash";
+    let mut config = RoutingConfig::default();
+    config.pools.insert(
+        "go-trial".into(),
+        vec![RoutePoolMember {
+            model: ModelId::parse(model)?,
+            weight: 1,
+            effort: None,
+            efforts: vec![],
+            free: false,
+        }],
+    );
+    let mut available = availability();
+    available.adapter = "opencode".into();
+    available.account_key = Some("go".into());
+    // A ready account with no trusted quota must not outrank the calibrated
+    // account just because unknown headroom defaults to a neutral factor.
+    let mut uncalibrated = available.clone();
+    uncalibrated.account_key = Some("other-go".into());
+    let availability = [available, uncalibrated];
+    let access = [AccessContext {
+        adapter: "opencode",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut query = request(model)?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("go-trial")?);
+    let mut raw = quota(model, "go", QuotaStatus::Available, 1, 80, 120)?;
+    raw.snapshot.account.adapter = "opencode".into();
+    let duplicate = |observation: &QuotaObservation| QuotaObservation {
+        model: observation.model.clone(),
+        snapshot: observation.snapshot.clone(),
+        expires_unix_seconds: observation.expires_unix_seconds,
+    };
+    raw.snapshot.details = Some(QuotaDetails {
+        source: Some("local-ledger".into()),
+        coverage: Some("partial".into()),
+        ..QuotaDetails::default()
+    });
+    raw.snapshot.windows = [
+        ("five_hour", 401, 18_000),
+        ("seven_day", 160, 604_800),
+        ("thirty_day", 2484, 2_592_000),
+    ]
+    .into_iter()
+    .map(|(pool, used_basis_points, seconds)| QuotaWindow {
+        pool: pool.into(),
+        used_basis_points,
+        window_seconds: Some(seconds),
+        resets_unix_seconds: None,
+    })
+    .collect();
+    let mut settings = provenant_quota::Settings::default();
+    settings.calibration.insert(
+        "go".into(),
+        Calibration {
+            five_hour: Some(43),
+            seven_day: Some(17),
+            thirty_day: Some(59),
+            expires: "1970-01-01T00:01:41Z".into(),
+        },
+    );
+    let apply = |observation: &QuotaObservation| {
+        let mut record = AccountRecord::empty(observation.snapshot.account.clone());
+        record.snapshot = Some(observation.snapshot.clone());
+        let mut records = [record];
+        settings.apply_calibration(&mut records, 100);
+        QuotaObservation {
+            snapshot: records[0].snapshot.clone().unwrap(),
+            ..duplicate(observation)
+        }
+    };
+    let calibrated = apply(&raw);
+    let mut expired = duplicate(&calibrated);
+    expired
+        .snapshot
+        .details
+        .as_mut()
+        .unwrap()
+        .calibration_expires_unix_seconds = Some(100);
+    let mut incomplete = duplicate(&calibrated);
+    incomplete
+        .snapshot
+        .details
+        .as_mut()
+        .unwrap()
+        .calibrated_windows
+        .retain(|pool| pool != "seven_day");
+    let mut missing_window = duplicate(&calibrated);
+    missing_window
+        .snapshot
+        .windows
+        .retain(|window| window.pool != "seven_day");
+    let mut stale = duplicate(&calibrated);
+    stale.expires_unix_seconds = 100;
+    for (name, observations) in [
+        ("missing quota", vec![]),
+        ("partial ledger", vec![duplicate(&raw)]),
+        ("expired calibration", vec![expired]),
+        ("incomplete calibration", vec![incomplete]),
+        ("missing window", vec![missing_window]),
+        ("stale quota", vec![stale]),
+    ] {
+        let mut ctx = context(&catalogue, &config, now()?);
+        ctx.availability = &availability;
+        ctx.access = &access;
+        ctx.quota = &observations;
+        match resolve(&query, &ctx) {
+            Err(RoutingError::NoEligiblePoolMember { exclusions }) => {
+                assert!(
+                    exclusions.iter().any(|reason| reason.contains("Go quota")),
+                    "{name}: {exclusions:?}"
+                );
+            }
+            other => panic!("{name}: expected quota rejection, got {other:?}"),
+        }
+        // The same local ledger remains visible for explicitly selected models.
+        let explicit = resolve(&request(model)?, &ctx)?;
+        assert!(
+            matches!(explicit.readiness, RouteReadiness::Ready { .. }),
+            "{name}"
+        );
+    }
+    let mut higher_ledger = duplicate(&raw);
+    higher_ledger.snapshot.windows[2].used_basis_points = 7000;
+    for (observation, expected_factor) in [(calibrated, 4100), (apply(&higher_ledger), 3000)] {
+        let observations = [observation];
+        let mut ctx = context(&catalogue, &config, now()?);
+        ctx.availability = &availability;
+        ctx.access = &access;
+        ctx.quota = &observations;
+        let route = resolve(&query, &ctx)?;
+        assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+        let receipt = serde_json::to_value(&route)?["pool_selection"].clone();
+        assert_eq!(
+            receipt["candidates"][0]["factor_basis_points"],
+            expected_factor
+        );
+        assert_eq!(route.account_key.as_deref(), Some("go"));
+    }
+    Ok(())
+}
+
+#[test]
+fn opencode_zen_pool_does_not_inherit_go_pacing_quota() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let free = "opencode/opencode/deepseek-v4.1-flash-free";
+    let mut config = RoutingConfig::default();
+    config.pacing.insert("opencode".into(), PacingPolicy::Pace);
+    config.pools.insert(
+        "zen-trial".into(),
+        vec![RoutePoolMember {
+            model: ModelId::parse(free)?,
+            weight: 1,
+            effort: None,
+            efforts: vec![],
+            free: true,
+        }],
+    );
+    let records: Vec<_> = ["go", "zen"]
+        .into_iter()
+        .map(|key| {
+            let mut record = availability();
+            record.adapter = "opencode".into();
+            record.account_key = Some(key.into());
+            record
+        })
+        .collect();
+    let access = [AccessContext {
+        adapter: "opencode",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut observation = quota(
+        "opencode/opencode-go/mimo-v2.6-flash",
+        "go",
+        provenant_quota::QuotaStatus::Exhausted,
+        1,
+        80,
+        120,
+    )?;
+    observation.snapshot.account.adapter = "opencode".into();
+    observation
+        .snapshot
+        .windows
+        .push(provenant_quota::QuotaWindow {
+            pool: "five_hour".into(),
+            window_seconds: Some(18_000),
+            used_basis_points: 10_000,
+            resets_unix_seconds: Some(100 + 18_000),
+        });
+    let quota = [observation];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    ctx.quota = &quota;
+    let mut query = request(free)?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("zen-trial")?);
+    query.allow_free = true;
+    let route = resolve(&query, &ctx)?;
+    assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    assert_eq!(route.account_key.as_deref(), Some("zen"));
+    let receipt = serde_json::to_value(&route)?["pool_selection"].clone();
+    assert_eq!(receipt["candidates"][0]["factor_basis_points"], 10_000);
     Ok(())
 }

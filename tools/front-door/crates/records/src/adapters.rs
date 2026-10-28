@@ -41,10 +41,17 @@ pub struct AdapterSpec {
     pub peer_bootstrap: bool,
     /// A snapshot governs only this model prefix; None governs every model.
     pub quota_model_prefix: Option<&'static str>,
+    /// Account and model prefix served by the free allowance.
+    pub free_account: Option<(&'static str, &'static str)>,
     pub free_pool: Option<&'static str>,
     pub pacing_keys: Option<(&'static str, &'static str)>,
 }
 impl AdapterSpec {
+    pub fn account_serves_model(&self, account: &str, model: &str) -> bool {
+        self.free_account.is_none_or(|(free_account, prefix)| {
+            (account == free_account) == model.starts_with(prefix)
+        })
+    }
     pub fn get(name: &str) -> Option<&'static Self> {
         ADAPTER_SPECS.iter().find(|spec| spec.name == name)
     }
@@ -68,6 +75,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 5] = &[
         quota_identity_check: false,
         peer_bootstrap: true,
         quota_model_prefix: None,
+        free_account: None,
         free_pool: None,
         pacing_keys: None,
     },
@@ -87,6 +95,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 5] = &[
         quota_identity_check: true,
         peer_bootstrap: true,
         quota_model_prefix: None,
+        free_account: None,
         free_pool: None,
         pacing_keys: None,
     },
@@ -106,6 +115,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 5] = &[
         quota_identity_check: true,
         peer_bootstrap: false,
         quota_model_prefix: None,
+        free_account: None,
         free_pool: None,
         pacing_keys: None,
     },
@@ -125,6 +135,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 5] = &[
         quota_identity_check: false,
         peer_bootstrap: false,
         quota_model_prefix: None,
+        free_account: None,
         free_pool: None,
         pacing_keys: None,
     },
@@ -144,6 +155,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 5] = &[
         quota_identity_check: false,
         peer_bootstrap: false,
         quota_model_prefix: Some("opencode-go/"),
+        free_account: Some(("zen", "opencode/")),
         free_pool: Some("opencode-free"),
         pacing_keys: Some(("opencode_free", "opencode_paid")),
     },
@@ -172,5 +184,17 @@ mod tests {
             );
         }
         assert!(AdapterSpec::get("unknown").is_none());
+    }
+}
+
+#[cfg(test)]
+mod free_account_tests {
+    #[test]
+    fn zen_account_does_not_serve_go_models() {
+        let spec = super::AdapterSpec::get("opencode").unwrap();
+        assert!(spec.account_serves_model("zen", "opencode/beam-free"));
+        assert!(!spec.account_serves_model("go", "opencode/beam-free"));
+        assert!(spec.account_serves_model("go", "opencode-go/mimo-v2.6-flash"));
+        assert!(!spec.account_serves_model("zen", "opencode-go/mimo-v2.6-flash"));
     }
 }

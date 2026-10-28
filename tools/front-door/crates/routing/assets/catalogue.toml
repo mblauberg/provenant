@@ -1,7 +1,7 @@
 # Pool metadata is migrated from the legacy routing catalogue; exact execution
 # support still depends on each provider's current availability observation.
 schema_version = 1
-revision = "route-pools-20261027-v2"
+revision = "route-pools-20261028-v1"
 
 [[models]]
 model = "claude/claude-haiku-4-5-20251001"
@@ -32,6 +32,24 @@ evidence_ref = "model-listings/opencode-models.txt"
 model = "opencode/opencode-go/claude-haiku-5-5"
 efforts = []
 evidence_ref = "model-listings/opencode-models.txt"
+trains_on_prompts = false
+
+[[models]]
+model = "opencode/opencode-go/mimo-v2.6-flash"
+efforts = []
+evidence_ref = "docs/research/opencode-go-models.md#mimo-v26; accessed 2026-10-28"
+trains_on_prompts = false
+
+[[models]]
+model = "opencode/opencode-go/mimo-v2.6-pro"
+efforts = []
+evidence_ref = "docs/research/opencode-go-models.md#mimo-v26; accessed 2026-10-28"
+trains_on_prompts = false
+
+[[models]]
+model = "opencode/opencode-go/glm-5.3"
+efforts = []
+evidence_ref = "docs/research/opencode-go-models.md#glm-53; accessed 2026-10-28"
 trains_on_prompts = false
 
 [[models]]
@@ -140,6 +158,8 @@ utility = [
     { model = "opencode/opencode/glm-5.3-flash-free", weight = 1, efforts = [], free = true },
 ]
 junior = [
+    # Provisional pending local trial evidence.
+    { model = "opencode/opencode-go/mimo-v2.6-flash", weight = 1, efforts = [] },
     { model = "codex/gpt-6.1-terra", weight = 2, effort = "low", efforts = ["low", "medium"] },
     { model = "codex/gpt-6-luna", weight = 4, effort = "high", efforts = ["medium", "high", "xhigh"] },
     { model = "claude/claude-haiku-5-5", weight = 4, effort = "high", efforts = ["medium", "high", "xhigh"] },
@@ -149,6 +169,8 @@ junior = [
     { model = "opencode/opencode/deepseek-v4.1-flash-free", weight = 1, efforts = [], free = true },
 ]
 senior = [
+    # Provisional pending local trial evidence.
+    { model = "opencode/opencode-go/mimo-v2.6-flash", weight = 1, efforts = [] },
     { model = "codex/gpt-6.1-sol", weight = 4, effort = "medium", efforts = ["low", "medium", "high"] },
     { model = "codex/gpt-6.1-terra", weight = 4, effort = "high", efforts = ["low", "medium", "high"] },
     { model = "claude/claude-sonnet-5-5", weight = 4, efforts = ["medium", "high", "xhigh"] },

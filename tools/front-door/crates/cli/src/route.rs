@@ -326,15 +326,28 @@ enum EdgeError {
 #[serde(untagged)]
 pub enum Data {
     List(provenant_routing::RouteList),
-    Resolved(Box<provenant_records::ResolvedRoute>),
+    Resolved(Box<ResolvedPreview>),
+}
+#[derive(Serialize)]
+pub struct ResolvedPreview {
+    #[serde(flatten)]
+    route: provenant_records::ResolvedRoute,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quota: Option<provenant_quota::QuotaSnapshot>,
 }
 /// The OpenCode snapshot reports the Go plan's pools, which only govern models
 /// served by the `opencode-go` provider. Free (Zen) and other configured
 /// providers must not inherit its account-level exhaustion.
-fn snapshot_governs(adapter: &str, model: &ModelId) -> bool {
-    provenant_records::AdapterSpec::get(adapter)
-        .and_then(|spec| spec.quota_model_prefix)
-        .is_none_or(|prefix| model.model().starts_with(prefix))
+fn snapshot_governs(adapter: &str, account: &str, model: &ModelId) -> bool {
+    provenant_records::AdapterSpec::get(adapter).is_none_or(|spec| {
+        if let Some((free_account, prefix)) = spec.free_account
+            && account == free_account
+        {
+            return model.model().starts_with(prefix);
+        }
+        spec.quota_model_prefix
+            .is_none_or(|prefix| model.model().starts_with(prefix))
+    })
 }
 fn quota_observations(
     catalogue: &Catalogue,
@@ -386,7 +399,7 @@ fn quota_observations(
                 .filter(|model| model.adapter() == available.adapter)
                 .cloned(),
         );
-        models.retain(|model| snapshot_governs(&available.adapter, model));
+        models.retain(|model| snapshot_governs(&available.adapter, account_key, model));
         if observations.len().saturating_add(models.len()) > 256 {
             return Err(provenant_quota::QuotaError::Invalid("quota observation bound").into());
         }
@@ -408,13 +421,12 @@ fn with_context<T>(
     requested_models: &[ModelId],
     action: impl FnOnce(&RoutingContext<'_>, &[provenant_quota::AccountRecord]) -> Result<T, EdgeError>,
 ) -> Result<T, EdgeError> {
-    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
-        .domains
-        .routing;
+    let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?.domains;
+    let config = domains.routing;
     let catalogue = Catalogue::bundled()?;
     // A lane holds no grant on the shared quota store: route without a
     // snapshot there rather than refusing the nested dispatch.
-    let quota_records = match crate::quota::read_cache(roots) {
+    let mut quota_records = match crate::quota::read_cache(roots) {
         Ok(records) => records,
         Err(crate::quota::EdgeError::Fs(error))
             if error.is_permission_denied()
@@ -424,8 +436,11 @@ fn with_context<T>(
         }
         Err(error) => return Err(error.into()),
     };
-    let quota = quota_observations(&catalogue, availability, &quota_records, requested_models)?;
     let timestamp = jiff::Timestamp::now();
+    domains
+        .quota
+        .apply_calibration(&mut quota_records, timestamp.as_second());
+    let quota = quota_observations(&catalogue, availability, &quota_records, requested_models)?;
     let now = WallTime::from_micros(timestamp.as_microsecond())?;
     action(
         &RoutingContext {
@@ -611,10 +626,17 @@ pub(crate) fn check_dispatch_candidate(
     let model =
         ModelId::parse(&format!("{}/{}", route.adapter, route.model)).map_err(|e| e.to_string())?;
     let pools = free_pools(&route.adapter, || catalogue.is_free_model(&model));
+    let now = jiff::Timestamp::now().as_second();
+    let mut records = crate::quota::read_cache(roots).map_err(|e| e.to_string())?;
+    provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        .map_err(|e| e.to_string())?
+        .domains
+        .quota
+        .apply_calibration(&mut records, now);
     provenant_quota::Admission {
         policies: &provenant_providers::quota_policies(REGISTRY),
-        now_unix_seconds: jiff::Timestamp::now().as_second(),
-        records: &crate::quota::read_cache(roots).map_err(|e| e.to_string())?,
+        now_unix_seconds: now,
+        records: &records,
         pools: &pools,
     }
     .check(route)
@@ -828,11 +850,25 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
     match command {
         Route::List(query) => Ok(Data::List(list_data(roots, query)?)),
         Route::Resolve(query) => {
-            with_context(roots, &[], &[], "local-preview", &[], |context, _| {
-                Ok(Data::Resolved(Box::new(provenant_routing::resolve(
-                    &resolve_request(query, context)?,
-                    context,
-                )?)))
+            with_context(roots, &[], &[], "local-preview", &[], |context, records| {
+                let route = provenant_routing::resolve(&resolve_request(query, context)?, context)?;
+                let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
+                let quota = records
+                    .iter()
+                    .find(|r| {
+                        r.account.adapter == route.adapter
+                            && (route.account_key.as_deref()
+                                == Some(r.account.account_key.as_str())
+                                || (route.account_key.is_none()
+                                    && route.adapter == "opencode"
+                                    && snapshot_governs(
+                                        &route.adapter,
+                                        &r.account.account_key,
+                                        &model,
+                                    )))
+                    })
+                    .and_then(|r| r.snapshot.clone());
+                Ok(Data::Resolved(Box::new(ResolvedPreview { route, quota })))
             })
         }
         Route::Set(request) => {
@@ -954,20 +990,29 @@ pub fn run(
                 }));
                 format!("{}\n", lines.join("\n"))
             }
-            Some(Data::Resolved(route)) => format!(
-                "{}/{} effort={} {:?}{}\n",
-                route.adapter,
-                route.model,
-                route.effort.as_deref().unwrap_or("unspecified"),
-                route.readiness,
-                route
-                    .pool_selection
-                    .as_ref()
-                    .map_or_else(String::new, |receipt| format!(
-                        " pool={} roll={} pick={}",
-                        receipt.pool, receipt.roll, receipt.pick
-                    ))
-            ),
+            Some(Data::Resolved(preview)) => {
+                let route = &preview.route;
+                let mut text = format!(
+                    "{}/{} effort={} {:?}{}\n",
+                    route.adapter,
+                    route.model,
+                    route.effort.as_deref().unwrap_or("unspecified"),
+                    route.readiness,
+                    route
+                        .pool_selection
+                        .as_ref()
+                        .map_or_else(String::new, |receipt| format!(
+                            " pool={} roll={} pick={}",
+                            receipt.pool, receipt.roll, receipt.pick
+                        ))
+                );
+                if let Some(details) = preview.quota.as_ref().and_then(|q| q.details.as_ref())
+                    && let (Some(source), Some(coverage)) = (&details.source, &details.coverage)
+                {
+                    text.push_str(&format!("quota source: {source}, coverage: {coverage}\n"));
+                }
+                text
+            }
             None => String::new(),
         }
     };

@@ -318,13 +318,22 @@ fn pace_snapshot_factor(
         .iter()
         .filter_map(|window| {
             let window_seconds = window.window_seconds?;
-            let reset_seconds = window.resets_unix_seconds?;
-            if window_seconds == 0 || reset_seconds <= now_seconds {
+            let calibrated = snapshot
+                .details
+                .as_ref()
+                .is_some_and(|d| d.calibration_active(&window.pool, now_seconds));
+            if window_seconds == 0 {
                 return None;
             }
-            let remaining_seconds = u64::try_from(reset_seconds.checked_sub(now_seconds)?)
-                .ok()?
-                .min(window_seconds);
+            let remaining_seconds = match window.resets_unix_seconds {
+                Some(reset) if reset > now_seconds => {
+                    u64::try_from(reset.checked_sub(now_seconds)?)
+                        .ok()?
+                        .min(window_seconds)
+                }
+                _ if calibrated => window_seconds,
+                _ => return None,
+            };
             let headroom = 10_000_u64.saturating_sub(window.used_basis_points.min(10_000));
             let factor =
                 (u128::from(headroom) * u128::from(window_seconds)) / u128::from(remaining_seconds);
@@ -348,7 +357,11 @@ fn pacing_reserve_reached(
             Some(604_800) => reserve.seven_day_percent,
             _ => return false,
         };
-        window.resets_unix_seconds.is_some_and(|reset| reset > now)
+        (window.resets_unix_seconds.is_some_and(|reset| reset > now)
+            || snapshot
+                .details
+                .as_ref()
+                .is_some_and(|d| d.calibration_active(&window.pool, now)))
             && window.used_basis_points >= 10_000 - u64::from(percent) * 100
     })
 }
@@ -441,8 +454,12 @@ fn exhaustion_lapsed(snapshot: &provenant_quota::QuotaSnapshot, now_seconds: i64
         .peekable();
     full.peek().is_some()
         && full.all(|w| {
-            w.resets_unix_seconds
-                .is_some_and(|reset| reset <= now_seconds)
+            !snapshot
+                .details
+                .as_ref()
+                .is_some_and(|d| d.calibration_active(&w.pool, now_seconds))
+                && w.resets_unix_seconds
+                    .is_some_and(|reset| reset <= now_seconds)
         })
 }
 /// A registered adapter and, when set, an exact recorded effort control.
@@ -470,6 +487,15 @@ fn candidate(
     effort: Option<&str>,
     context: &ValidatedContext<'_>,
 ) -> Result<RouteAlternative, RoutingError> {
+    candidate_with_quota(model, effort, context, false)
+}
+
+fn candidate_with_quota(
+    model: &ModelId,
+    effort: Option<&str>,
+    context: &ValidatedContext<'_>,
+    require_trustworthy_go: bool,
+) -> Result<RouteAlternative, RoutingError> {
     let entry = admissible(model, effort, context)?;
     let access = context.access.iter().find(|a| a.adapter == model.adapter());
     // Several registered accounts may serve one adapter: take a ready one with
@@ -478,7 +504,16 @@ fn candidate(
     let evaluated: Vec<_> = context
         .availability
         .iter()
-        .filter(|a| a.adapter == model.adapter())
+        .filter(|a| {
+            a.adapter == model.adapter()
+                && (!require_trustworthy_go
+                    || trustworthy_go_quota(model, a.account_key.as_deref(), context))
+                && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
+                    a.account_key
+                        .as_deref()
+                        .is_some_and(|key| spec.account_serves_model(key, model.model()))
+                })
+        })
         .map(|a| {
             let (reason, quota) = account_reason(model, a, access, context);
             let headroom = quota
@@ -748,6 +783,29 @@ struct PoolDraw {
     total_weight: u64,
 }
 
+fn trustworthy_go_quota(
+    model: &ModelId,
+    account: Option<&str>,
+    context: &RoutingContext<'_>,
+) -> bool {
+    if model.adapter() != "opencode" || !model.model().starts_with("opencode-go/") {
+        return true;
+    }
+    let now = context.now_seconds();
+    let snapshot = context
+        .quota
+        .iter()
+        .filter(|q| {
+            q.model == *model
+                && q.snapshot.account.adapter == model.adapter()
+                && Some(q.snapshot.account.account_key.as_str()) == account
+                && q.snapshot.observed_unix_seconds <= now
+                && now < q.expires_unix_seconds
+        })
+        .max_by_key(|q| (q.snapshot.observed_unix_seconds, q.snapshot.revision));
+    snapshot.is_some_and(|q| q.snapshot.trustworthy_go_windows(now))
+}
+
 fn classify_pool(
     members: &[RoutePoolMember],
     request: &RouteRequest,
@@ -801,8 +859,28 @@ fn classify_pool(
             classified.exclusions.push(detail.to_owned());
             Some(kind.to_owned())
         } else {
-            match candidate(&member.model, effort.as_deref(), context) {
+            match candidate_with_quota(&member.model, effort.as_deref(), context, true) {
                 Ok(resolved) => {
+                    if !trustworthy_go_quota(
+                        &member.model,
+                        resolved.account_key.as_deref(),
+                        context,
+                    ) {
+                        let reason = "Go quota source: local-ledger, coverage: partial; requires fresh quota and unexpired calibration for all three windows";
+                        classified
+                            .exclusions
+                            .push(format!("{}: {reason}", member.model.as_str()));
+                        classified.candidates.push(RouteSelectionCandidate {
+                            model: member.model.as_str().into(),
+                            weight: member.weight,
+                            factor_basis_points,
+                            effort,
+                            readiness: None,
+                            exclusion: Some(reason.into()),
+                        });
+                        classified.routes.push(None);
+                        continue;
+                    }
                     factor_basis_points = pacing_factor_basis_points(
                         policy,
                         &member.model,

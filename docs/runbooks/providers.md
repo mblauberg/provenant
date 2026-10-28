@@ -20,6 +20,14 @@ and web access according to the access mode. The adapter sets
 `OPENCODE_DISABLE_AUTOUPDATE`, `OPENCODE_DISABLE_PROJECT_CONFIG`,
 `OPENCODE_DISABLE_CLAUDE_CODE` and `OPENCODE_DISABLE_FILEWATCHER`.
 
+The Console's free models use the derived `zen` account, separate from the
+`go` subscription account. Lanes and telemetry use this identity, and routing
+paces Zen from its own quota observations rather than Go's. The existing free
+pool and free-model opt-in remain unchanged. Quota lists both accounts when an
+OpenCode account is configured; Zen reports only observed free-limit refusals.
+Its allowance and daily reset remain unknown until a provider refusal supplies
+a reset.
+
 ## Writer lanes
 
 A confined writer's environment is built from scratch and sets `CARGO_TARGET_DIR`

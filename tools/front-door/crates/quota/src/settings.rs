@@ -1,6 +1,8 @@
 //! Config can lower execution ceilings, never relax the recorded safety limits.
+use crate::Calibration;
 use provenant_config::{DomainConfig, DomainSection, SectionError};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -8,6 +10,8 @@ pub struct Settings {
     pub wall_budget_seconds: u64,
     #[serde(default)]
     pub display: Display,
+    #[serde(default)]
+    pub calibration: BTreeMap<String, Calibration>,
 }
 /// Which window the menu bar leads with.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +56,7 @@ impl Default for Settings {
             max_parallel: 3,
             wall_budget_seconds: 55,
             display: Display::default(),
+            calibration: BTreeMap::new(),
         }
     }
 }
@@ -76,6 +81,14 @@ impl DomainConfig for Settings {
                 field: "display.icon".into(),
                 code: "icon",
             });
+        }
+        for (account, calibration) in &self.calibration {
+            if !crate::component(account) || !calibration.valid() {
+                errors.push(SectionError {
+                    field: format!("calibration.{account}"),
+                    code: "calibration",
+                });
+            }
         }
         errors
     }

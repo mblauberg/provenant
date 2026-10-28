@@ -86,6 +86,14 @@ pub trait QuotaEffects {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QuotaDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calibration_expires_unix_seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub calibrated_windows: Vec<String>,
     pub plan: Option<String>,
     pub billing_anchor: Option<String>,
     pub fingerprint: Option<String>,
@@ -94,6 +102,13 @@ pub struct QuotaDetails {
     pub reset_credits: Option<u64>,
     pub reset_expiries_unix_seconds: Vec<i64>,
     pub note: Option<String>,
+}
+impl QuotaDetails {
+    pub fn calibration_active(&self, pool: &str, now: i64) -> bool {
+        self.calibration_expires_unix_seconds
+            .is_some_and(|expiry| now < expiry)
+            && self.calibrated_windows.iter().any(|window| window == pool)
+    }
 }
 
 /// Memory-only bytes, deliberately not Debug or Serialize. Never spool a capture.
@@ -139,6 +154,20 @@ pub struct QuotaSnapshot {
     pub windows: Vec<QuotaWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<QuotaDetails>,
+}
+impl QuotaSnapshot {
+    /// Go pools require all allowance windows and either complete coverage or
+    /// an active dashboard floor for each window. Freshness is checked by the caller.
+    pub fn trustworthy_go_windows(&self, now: i64) -> bool {
+        self.validate().is_ok()
+            && matches!(self.status, QuotaStatus::Available | QuotaStatus::Exhausted)
+            && ["five_hour", "seven_day", "thirty_day"].iter().all(|pool| {
+                self.windows.iter().any(|w| w.pool == *pool)
+                    && self.details.as_ref().is_some_and(|d| {
+                        d.coverage.as_deref() == Some("complete") || d.calibration_active(pool, now)
+                    })
+            })
+    }
 }
 
 pub trait QuotaSource: Sync {

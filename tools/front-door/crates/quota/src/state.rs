@@ -61,9 +61,22 @@ impl QuotaSnapshot {
             || self.authority_ref.as_ref().is_some_and(|r| !reference(r))
             || self.details.as_ref().is_some_and(|details| {
                 details
-                    .plan
+                    .source
                     .as_ref()
-                    .is_some_and(|value| !detail_text(value, 128))
+                    .is_some_and(|s| !detail_text(s, 128))
+                    || details
+                        .coverage
+                        .as_ref()
+                        .is_some_and(|s| !detail_text(s, 128))
+                    || details.calibrated_windows.len() > MAX_WINDOWS
+                    || details
+                        .calibrated_windows
+                        .iter()
+                        .any(|s| !detail_text(s, 128))
+                    || details
+                        .plan
+                        .as_ref()
+                        .is_some_and(|value| !detail_text(value, 128))
                     || details
                         .fingerprint
                         .as_ref()

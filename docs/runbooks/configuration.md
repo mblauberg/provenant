@@ -76,6 +76,47 @@ see each knob's value and source. Preview install registrations with
 `provenant install --source /absolute/path/to/release --harness claude --dry-run`
 before applying an authorised install.
 
+## OpenCode Go quota calibration
+
+Go usage from this host's ledger is a partial lower bound. Enter dashboard
+percentages under the quota domain in the selected state root's `config.toml`:
+
+```toml
+[domains.quota.calibration.go]
+five_hour = 43
+seven_day = 17
+thirty_day = 59
+expires = "2026-11-04T00:00:00Z"
+```
+
+The table key is the OpenCode account key, usually `go`. Each percentage is an
+integer from 0 to 100, and expiry is a required timestamp with a UTC offset.
+Quota and pacing use the maximum of the raw ledger and each floor until the
+expiry instant. Editing or removing the table takes effect on the next read;
+floors are never written over the raw ledger cache. Zen does not use Go floors.
+
+MiMo Flash is a provisional junior and senior member at weight 1. Go pool
+selection requires a fresh reading with all three windows and an active floor
+for each, or a future source with complete coverage. Missing or expired floors
+exclude Go members from pools. Exact model selection remains available with
+the partial-coverage diagnostic. MiMo Pro and GLM 5.3 await trials before pool
+membership. Paid OpenCode pacing remains `pace`.
+
+Without an observable reset, a calibrated window uses a full remaining window
+for conservative pacing. Floors stay binding until expiry even if a recorded
+reset passes. Recheck the dashboard and update the floors after a reset or
+substantial usage on another device. Peer ledgers are not aggregated.
+
+OpenCode 2.2.0's help, `stats --help`, `api --help` and an isolated
+`stats --standalone --json` were checked on 28 October 2026 without reading
+credentials. Stats contains session counts, tokens and costs, with no account
+allowance percentages. The [CLI docs](https://opencode.ai/docs/cli/#stats)
+describe session statistics, and the [server API docs](https://opencode.ai/docs/server/)
+describe the local server interface. No documented authoritative account-wide
+quota source was found. The [Go docs](https://opencode.ai/docs/go/)
+describe the allowance windows and per-response consumption; those do not
+establish total usage across devices.
+
 ## Lane cache collection
 
 GC also applies [terminal provider-state retention](gc.md). The separate

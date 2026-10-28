@@ -26,8 +26,13 @@ seven_day_percent = 10
 ```
 
 Reserve percentages range from 0 to 100. Other window durations affect the
-factor but have no reserve. Expired resets do not affect pacing.
-Missing quota data uses 1.0. `spend` and `max` use 1.0; admission handles
+factor but have no reserve. Expired resets do not affect pacing unless an
+active dashboard calibration still binds that window. Calibrated windows with
+no current reset use a full remaining window for conservative pacing; see
+[Go calibration](configuration.md#opencode-go-quota-calibration). Go pool
+members require fresh quota with all three allowance windows and complete
+coverage or an active floor for each window. Other missing quota data uses
+1.0. `spend` and `max` use 1.0; admission handles
 short rate-limit cooldowns, and a paid route remains eligible while credits
 remain. If no weighted member is ready, the first ready zero-weight member is
 selected; otherwise a recoverable unavailable member is preferred, and
