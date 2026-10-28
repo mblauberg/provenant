@@ -2517,6 +2517,33 @@ fn with_chair_index<T>(
         })
 }
 
+/// New lane-local associations need the same namespace proof as WorkIndex.
+/// A legacy row can be replayed, but a lane cannot create or repair one.
+fn check_chair_run_id(
+    session: &Session,
+    roots: &Roots,
+    run: RunId,
+    request: &run::CanonicalRequest,
+    call: &run::Request<'_>,
+) -> Result<(), Fail> {
+    session
+        .store
+        .check_child_run_id(run, request, &session.store.run(run, call)?.operation_id)?;
+    if request.child_attempt_id_version.is_none() {
+        let digest = request.digest().map_err(run::RunError::from)?;
+        with_chair_index(roots, call, |index, c| {
+            match index.read(session.context.project_id, run, c)? {
+                Some(value) if value.request_digest == digest => Ok(()),
+                Some(_) => Err(provenant_fabric_runtime::chairs::Error::Conflict),
+                None => Err(provenant_fabric_runtime::chairs::Error::Invalid(
+                    "new chair associations require host-derived child run IDs",
+                )),
+            }
+        })?;
+    }
+    Ok(())
+}
+
 /// A child carries the request `validate_child` returned, which is the only
 /// copy launched from. The store carries its parent's sealed requester.
 fn launch_on_host(
@@ -2559,14 +2586,43 @@ fn launch_on_host(
     };
     let request_digest = request.digest().map_err(run::RunError::from)?;
     if validated.is_none() {
+        if request.parent.is_some() && session.context.state_root != edge.roots.state {
+            check_chair_run_id(session, edge.roots, run, request, call)?;
+        }
         with_chair_index(edge.roots, call, |index, index_call| {
             if let Some(prior) = request.parent {
+                let lane_local = session.context.state_root != edge.roots.state;
+                if lane_local
+                    && let Some(sealed) = index.read(session.context.project_id, run, index_call)?
+                {
+                    return if sealed.request_digest == request_digest {
+                        Ok(())
+                    } else {
+                        Err(provenant_fabric_runtime::chairs::Error::Conflict)
+                    };
+                }
                 let parent = session.store.record(prior, call).map_err(|_| {
                     provenant_fabric_runtime::chairs::Error::Invalid("continuation parent")
                 })?;
                 let original = session.store.request(parent.run_id, call).map_err(|_| {
                     provenant_fabric_runtime::chairs::Error::Invalid("continuation request")
                 })?;
+                if lane_local {
+                    session
+                        .store
+                        .check_child_attempt_id(&original, &parent)
+                        .map_err(|_| {
+                            provenant_fabric_runtime::chairs::Error::Invalid(
+                                "continuation source identity does not match host-derived IDs",
+                            )
+                        })?;
+                    if index
+                        .read(session.context.project_id, parent.run_id, index_call)?
+                        .is_none()
+                    {
+                        return Err(provenant_fabric_runtime::chairs::Error::NotFound);
+                    }
+                }
                 index.inherit(
                     session.context.project_id,
                     (parent.run_id, original.digest()?),
@@ -6261,7 +6317,15 @@ mod tests {
             roots.state.as_path().join("fabric/host.sqlite3"),
             roots.state.as_path().join("fabric/forged.sqlite3"),
         )?;
-        launch(&session, first.run_id, &edge, &call).map_err(|f| f.message)?;
+        // Reusing an operation from another chair cannot rebind even a missing
+        // host index row. Repair must use the immutable original request.
+        let mut replay = submission("context-base");
+        replay.chair = Some(run::ChairBinding {
+            host: provenant_core::HostId::from_bytes([6; 16]),
+            actor: ActorId::from_bytes([7; 16]),
+        });
+        let (replayed, _) = submit(&session, &edge, replay, &call).map_err(|f| f.message)?;
+        assert_eq!(replayed.run_id, first.run_id);
         let expired = run::Request {
             budget: WaitBudget::nonblocking(clock.mono_now()),
             ..call

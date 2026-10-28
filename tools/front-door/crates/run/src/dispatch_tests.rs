@@ -4242,7 +4242,7 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
             Err(RunError::Conflict)
         ));
     }
-    let next = AttemptId::from_bytes([21; 16]);
+    let next = store.pending_attempts(continued.run_id, &call)?[0].attempt_id;
     let record = store.record(next, &call)?;
     assert_eq!(record.retry_of, Some(prior));
     assert_eq!(record.attempt_number, 2);
@@ -4252,6 +4252,150 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     );
     store.start(continued.run_id, &fake, &|_, _| unreachable!(), &call)?;
     assert_eq!(fake.resumed.get(), Some(prior));
+    Ok(())
+}
+
+#[test]
+fn nested_continuation_uses_host_derived_ids() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut child = input();
+    child.request.parent_attempt = Some(AttemptId::from_bytes([9; 16]));
+    child.request.lane_depth = Some(2);
+    store.create(&child, &call)?;
+    store.refuse_queued(child.run_id, "completed", &call)?;
+    let mut resume = Resume {
+        prior: child.attempts[0].attempt_id,
+        expected_generation: 0,
+        operation_id: provenant_core::OperationId::parse("nested-continuation")?,
+        run_id: RunId::from_bytes([30; 16]),
+        attempt_id: AttemptId::from_bytes([31; 16]),
+        prompt: "answer".into(),
+        created_at: clock.wall_now()?,
+    };
+    let continued = store.resume_fresh(&resume, "fixture", &call)?;
+    let request = store.request(continued.run_id, &call)?;
+    assert_eq!(request.child_attempt_id_version, Some(1));
+    assert_eq!(
+        Some(continued.run_id),
+        correlation::child_run_id(store.context.project_id, &request, &resume.operation_id)?
+    );
+    assert_ne!(continued.run_id, resume.run_id);
+    let attempt = store.pending_attempts(continued.run_id, &call)?.remove(0);
+    assert_eq!(
+        Some(attempt.attempt_id),
+        correlation::child_attempt_id(
+            store.context.project_id,
+            continued.run_id,
+            &request,
+            attempt.task_id
+        )?
+    );
+    resume.run_id = RunId::from_bytes([40; 16]);
+    resume.attempt_id = AttemptId::from_bytes([41; 16]);
+    assert_eq!(
+        store.resume_fresh(&resume, "fixture", &call)?.run_id,
+        continued.run_id
+    );
+    Ok(())
+}
+
+#[test]
+fn nested_continuation_preflight_does_not_reuse_crashed_staging() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut child = input();
+    child.request.parent_attempt = Some(AttemptId::from_bytes([9; 16]));
+    child.request.lane_depth = Some(2);
+    store.create(&child, &call)?;
+    store.refuse_queued(child.run_id, "completed", &call)?;
+    let resume = Resume {
+        prior: child.attempts[0].attempt_id,
+        expected_generation: 0,
+        operation_id: "crashed-continuation".parse()?,
+        run_id: RunId::from_bytes([30; 16]),
+        attempt_id: AttemptId::from_bytes([31; 16]),
+        prompt: "answer".into(),
+        created_at: clock.wall_now()?,
+    };
+    let mut canonical = child.request.clone();
+    canonical.child_attempt_id_version = Some(1);
+    canonical.parent = Some(resume.prior);
+    canonical.fresh_continuation = Some("fixture".into());
+    canonical.tasks[0].prompt_digest = CanonicalV1::file_digest(resume.prompt.as_bytes());
+    let expected =
+        correlation::child_run_id(store.context.project_id, &canonical, &resume.operation_id)?
+            .unwrap();
+    let stale = store
+        .context
+        .state_root
+        .as_path()
+        .join(format!("runs/{expected}"));
+    std::fs::create_dir(&stale)?;
+    std::fs::write(stale.join("retained"), "stale staging")?;
+    let (continued, _) = store.resume_fresh_prepared(&resume, "fixture", None, &Ready, &call)?;
+    assert_eq!(continued.run_id, expected);
+    assert_eq!(
+        std::fs::read_to_string(stale.join("retained"))?,
+        "stale staging"
+    );
+    Ok(())
+}
+
+#[test]
+fn nested_continuation_preserves_legacy_replay_even_before_request_publication() -> TestResult {
+    for published in [true, false] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let mut child = input();
+        child.request.parent_attempt = Some(AttemptId::from_bytes([9; 16]));
+        child.request.lane_depth = Some(2);
+        store.create(&child, &call)?;
+        store.refuse_queued(child.run_id, "completed", &call)?;
+        let prior = child.attempts[0].attempt_id;
+        child.run_id = RunId::from_bytes([30; 16]);
+        child.operation_id = "legacy-continuation".parse()?;
+        child.request.parent = Some(prior);
+        child.request.fresh_continuation = Some("fixture".into());
+        child.attempts[0].attempt_id = AttemptId::from_bytes([31; 16]);
+        store.create(&child, &call)?;
+        if !published {
+            let mut operation = store.operation(&child.operation_id, &call)?.unwrap();
+            operation.state = OperationState::Prepared;
+            store.db.execute(
+                "UPDATE operations SET record=?1 WHERE operation=?2",
+                rusqlite::params![crate::db::bytes(&operation)?, child.operation_id.as_str()],
+            )?;
+            std::fs::remove_file(
+                store
+                    .context
+                    .state_root
+                    .as_path()
+                    .join(format!("runs/{}/request.json", child.run_id)),
+            )?;
+        }
+        let resumed = store.resume_fresh(
+            &Resume {
+                prior,
+                expected_generation: 0,
+                operation_id: child.operation_id.clone(),
+                run_id: RunId::from_bytes([40; 16]),
+                attempt_id: AttemptId::from_bytes([41; 16]),
+                prompt: child.attempts[0].prompt.clone(),
+                created_at: child.created_at,
+            },
+            "fixture",
+            &call,
+        )?;
+        assert_eq!(resumed.run_id, child.run_id);
+        assert_eq!(store.request(resumed.run_id, &call)?, child.request);
+    }
     Ok(())
 }
 

@@ -463,6 +463,7 @@ dependencies = [
  "provenant-telemetry",
  "provenant-workflow",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
