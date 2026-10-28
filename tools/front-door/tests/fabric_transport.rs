@@ -1391,11 +1391,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         )?;
         let result = &replies.iter().find(|r| r["id"] == 1).ok_or("error")?["result"];
         assert_eq!(result["structuredContent"]["code"], expected, "{result}");
-        if expected == "launch_unknown" {
-            assert_eq!(result["structuredContent"]["operation_id"], "local-stop");
-        } else {
-            assert!(result["structuredContent"]["operation_id"].is_null());
-        }
+        assert_eq!(result["structuredContent"]["operation_id"], "local-stop");
     }
 
     // A well-formed run reply must also match the requested operation and target.
