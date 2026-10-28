@@ -33,6 +33,42 @@ pub fn resolve_delivery_target(
     })
 }
 
+/// Compose Run's host lookup with the inbox owner without a runtime dependency.
+pub fn resolve_work(
+    root: &provenant_core::StateRoot,
+    project: provenant_core::ProjectId,
+    work: &RequestWork,
+    clock: &dyn Clock,
+    budget: WaitBudget,
+    cancel: &provenant_core::CancelToken,
+) -> Result<WorkCoverage, InboxError> {
+    provenant_run::validate_work(
+        root,
+        &provenant_run::WorkSelector {
+            project,
+            run: work.run_id,
+            task: work.task_id,
+            attempt: work.attempt_id,
+            repository: work.repository.clone(),
+            head: work.head,
+        },
+        &provenant_run::Request {
+            clock,
+            budget,
+            cancel,
+        },
+    )
+    .map_err(|error| match error {
+        provenant_run::RunError::Contention => {
+            InboxError::Store(provenant_fabric_runtime::StoreError::Busy)
+        }
+        provenant_run::RunError::Cancelled => {
+            InboxError::Store(provenant_fabric_runtime::StoreError::Cancelled)
+        }
+        _ => InboxError::OwnerUnavailable,
+    })
+}
+
 #[derive(Debug, Args)]
 pub struct Ask {
     /// JSON request content, including optional work links; ownership comes from Fabric
@@ -336,6 +372,16 @@ fn execute(
         input,
         budget,
         &provenant_core::CancelToken::new(),
+        &|work, call| {
+            resolve_work(
+                &context.roots.state,
+                context.identity.project,
+                work,
+                call.clock,
+                call.budget,
+                call.cancel,
+            )
+        },
     )?)
 }
 pub fn run(

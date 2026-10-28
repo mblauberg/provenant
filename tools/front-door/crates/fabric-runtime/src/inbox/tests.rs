@@ -824,6 +824,7 @@ fn inbox_remote_owner_and_worker_mutations_are_refused_without_opening_store() {
         ask(RequestKind::Decision, "create"),
         f.budget(),
         &f.cancel,
+        &|_, _| panic!("lookup must not run"),
     );
     assert_eq!(result.unwrap_err().code(), "unsupported_owner");
     assert!(!f.root.as_path().join("fabric").exists());
@@ -856,133 +857,68 @@ fn inbox_remote_owner_and_worker_mutations_are_refused_without_opening_store() {
         ask(RequestKind::Decision, "create"),
         f.budget(),
         &f.cancel,
+        &|_, _| panic!("lookup must not run"),
     );
     assert_eq!(result.unwrap_err().code(), "lane_coordination_refused");
     assert!(!f.root.as_path().join("fabric").exists());
 }
 
 #[test]
-fn request_correlation_coverage_is_host_scoped_and_saved_once() {
-    use provenant_core::{AttemptId, RunId, TaskId};
-    use provenant_records::AbsolutePath;
+fn request_correlation_saves_exact_coverage_once_and_requires_host_lookup() {
     let f = Fixture::new();
+    let mut input = ask(RequestKind::Question, "linked");
     let work = RequestWork {
-        run_id: RunId::from_bytes([3; 16]),
-        task_id: Some(TaskId::from_bytes([4; 16])),
-        attempt_id: Some(AttemptId::from_bytes([5; 16])),
-        repository: Some(AbsolutePath::new(Path::new("/repo/.git")).unwrap()),
-        head: Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
+        run_id: provenant_core::RunId::from_bytes([3; 16]),
+        task_id: Some(provenant_core::TaskId::from_bytes([4; 16])),
+        attempt_id: None,
+        repository: None,
+        head: None,
     };
-    let linked = |work: RequestWork, operation: &str| {
-        let mut input = ask(RequestKind::Question, operation);
-        if let InboxInput::Ask { request, .. } = &mut input {
-            request.work = Some(work);
-        }
-        input
-    };
-    let unindexed = receipt(f.call(linked(work.clone(), "before-index")).unwrap());
-    let read = |id| match f.call(show(id)).unwrap() {
-        InboxResult::Item { item } => item,
-        _ => panic!("item expected"),
-    };
+    if let InboxInput::Ask { request, .. } = &mut input {
+        request.work = Some(work.clone());
+    }
     assert_eq!(
-        read(unindexed.request_id).request.work_coverage,
-        Some(WorkCoverage::Unindexed)
+        f.call(input.clone()).unwrap_err().code(),
+        "inbox_unavailable"
     );
-    // Test-only host facts. Production insertion remains private to Run.
-    let db =
-        rusqlite::Connection::open(f.root.as_path().join(provenant_run::WORK_INDEX_FILE)).unwrap();
-    let membership = serde_json::json!({"schema_version":1,"project":f.identity.project,
-        "run":work.run_id,"task":work.task_id,"attempt":work.attempt_id,
-        "repository":work.repository,"head":work.head});
-    db.execute(
-        "INSERT INTO membership VALUES(?1,?2,?3,?4,?5)",
-        rusqlite::params![
-            f.identity.project.to_string(),
-            work.run_id.to_string(),
-            work.task_id.unwrap().to_string(),
-            work.attempt_id.unwrap().to_string(),
-            serde_json::to_vec(&membership).unwrap()
-        ],
-    )
-    .unwrap();
-    let saved = receipt(f.call(linked(work.clone(), "indexed")).unwrap());
-    let item = read(saved.request_id);
-    assert_eq!(item.request.request.work, Some(work.clone()));
-    assert_eq!(item.request.work_coverage, Some(WorkCoverage::Verified));
-    assert_eq!(item.history[0].work_coverage, Some(WorkCoverage::Verified));
-    assert_eq!(
-        read(unindexed.request_id).request.work_coverage,
-        Some(WorkCoverage::Unindexed)
-    );
-    assert_eq!(
-        receipt(f.call(linked(work.clone(), "before-index")).unwrap()),
-        unindexed
-    );
+    let calls = std::cell::Cell::new(0);
     for (n, coverage) in [
+        WorkCoverage::Unindexed,
+        WorkCoverage::Verified,
         WorkCoverage::Partial,
-        WorkCoverage::Unindexed,
-        WorkCoverage::Unindexed,
-        WorkCoverage::Unindexed,
         WorkCoverage::RepositoryUnavailable,
         WorkCoverage::HeadUnavailable,
+        WorkCoverage::Limit,
+        WorkCoverage::Mismatch,
     ]
     .into_iter()
     .enumerate()
     {
-        let mut selection = work.clone();
-        match n {
-            0 => {
-                selection.task_id = None;
-                selection.attempt_id = None;
-            }
-            1 => selection.run_id = RunId::from_bytes([9; 16]),
-            2 => selection.task_id = Some(TaskId::from_bytes([9; 16])),
-            3 => selection.attempt_id = Some(AttemptId::from_bytes([9; 16])),
-            4 | 5 => {
-                let mut missing = membership.clone();
-                missing[if n == 4 { "repository" } else { "head" }] = serde_json::Value::Null;
-                db.execute(
-                    "UPDATE membership SET record=?1",
-                    [serde_json::to_vec(&missing).unwrap()],
-                )
-                .unwrap();
-            }
-            _ => unreachable!(),
+        let lookup = |selected: &RequestWork, _: &Request<'_>| {
+            assert_eq!(selected, &work);
+            calls.set(calls.get() + 1);
+            Ok(coverage)
+        };
+        let service = f.service().with_work_lookup(&lookup);
+        if let InboxInput::Ask { operation_id, .. } = &mut input {
+            *operation_id = op(&format!("linked-{n}"));
         }
-        let saved = receipt(f.call(linked(selection, &format!("coverage-{n}"))).unwrap());
-        assert_eq!(read(saved.request_id).request.work_coverage, Some(coverage));
-    }
-    db.execute(
-        "UPDATE membership SET record=?1",
-        [serde_json::to_vec(&membership).unwrap()],
-    )
-    .unwrap();
-    for n in 0..2 {
-        let mut bad = work.clone();
-        if n == 0 {
-            bad.head = Some(provenant_core::GitOid::parse(&"b".repeat(40)).unwrap());
-        } else {
-            bad.repository = Some(AbsolutePath::new(Path::new("/foreign/.git")).unwrap());
+        let result = service.execute(input.clone(), f.budget(), &f.cancel);
+        if coverage == WorkCoverage::Mismatch {
+            assert_eq!(result.unwrap_err().code(), "invalid_input");
+            continue;
         }
-        assert!(matches!(f.call(linked(bad, &format!("mismatch-{n}"))),
-            Err(InboxError::Mutation { source, .. }) if matches!(*source, InboxError::Invalid("work repository or head mismatch"))));
+        let saved = receipt(result.unwrap());
+        let InboxResult::Item { item } = f.call(show(saved.request_id)).unwrap() else {
+            panic!("item")
+        };
+        assert_eq!(item.request.request.work, Some(work.clone()));
+        assert_eq!(item.request.work_coverage, Some(coverage));
+        assert_eq!(item.history[0].work_coverage, Some(coverage));
+        // Replay with no resolver available must retain the creation-time result.
+        assert_eq!(receipt(f.call(input.clone()).unwrap()), saved);
     }
-    let mut foreign = membership.clone();
-    foreign["project"] = serde_json::json!(ProjectId::from_bytes([9; 16]));
-    db.execute(
-        "UPDATE membership SET project=?1,record=?2",
-        rusqlite::params![
-            ProjectId::from_bytes([9; 16]).to_string(),
-            serde_json::to_vec(&foreign).unwrap()
-        ],
-    )
-    .unwrap();
-    let saved = receipt(f.call(linked(work, "foreign-project")).unwrap());
-    assert_eq!(
-        read(saved.request_id).request.work_coverage,
-        Some(WorkCoverage::Unindexed)
-    );
+    assert_eq!(calls.get(), 7);
 }
 
 #[test]

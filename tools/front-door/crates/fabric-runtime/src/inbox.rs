@@ -164,8 +164,6 @@ pub enum InboxError {
     #[error(transparent)]
     Store(provenant_fabric_store::Error),
     #[error(transparent)]
-    Work(#[from] provenant_run::RunError),
-    #[error(transparent)]
     Coordination(#[from] CoordinationError),
 }
 
@@ -180,9 +178,12 @@ pub fn execute(
     input: InboxInput,
     budget: WaitBudget,
     cancel: &CancelToken,
+    work_lookup: &WorkLookup<'_>,
 ) -> Result<InboxResult, InboxError> {
     validate_request(identity, config, in_lane, &input)?;
-    InboxService::open(root, identity, clock, budget, cancel)?.execute(input, budget, cancel)
+    InboxService::open(root, identity, clock, budget, cancel)?
+        .with_work_lookup(work_lookup)
+        .execute(input, budget, cancel)
 }
 
 /// Context-only validation runs before either transport opens a coordination store.
@@ -291,7 +292,7 @@ impl InboxInput {
                 if let Some(work) = &request.work
                     && work.repository.as_ref().is_some_and(|repo| {
                         repo.to_path_buf()
-                            .map_or(true, |path| path.as_os_str().len() > 4096)
+                            .map_or(true, |path| path.as_os_str().len() > 4097)
                     })
                 {
                     return Err(InboxError::Invalid("work.repository"));
@@ -502,9 +503,13 @@ pub fn offer_until_ack(
     )?)
 }
 
+/// Supplied by the host composition edge; callers cannot supply coverage.
+pub type WorkLookup<'a> =
+    dyn Fn(&RequestWork, &Request<'_>) -> Result<WorkCoverage, InboxError> + 'a;
+
 pub struct InboxService<'a> {
     store: Store,
-    root: StateRoot,
+    work_lookup: Option<&'a WorkLookup<'a>>,
     identity: &'a Identity,
     clock: &'a dyn Clock,
 }
@@ -524,10 +529,15 @@ impl<'a> InboxService<'a> {
         };
         Ok(Self {
             store: Store::open(root, &request)?,
-            root: root.clone(),
+            work_lookup: None,
             identity,
             clock,
         })
+    }
+
+    pub fn with_work_lookup(mut self, lookup: &'a WorkLookup<'a>) -> Self {
+        self.work_lookup = Some(lookup);
+        self
     }
 
     pub fn execute(
@@ -663,22 +673,8 @@ impl<'a> InboxService<'a> {
                     .work
                     .as_ref()
                     .map(|work| {
-                        let coverage = provenant_run::validate_work(
-                            &self.root,
-                            &provenant_run::WorkSelector {
-                                project: self.identity.project,
-                                run: work.run_id,
-                                task: work.task_id,
-                                attempt: work.attempt_id,
-                                repository: work.repository.clone(),
-                                head: work.head,
-                            },
-                            &provenant_run::Request {
-                                clock: request.clock,
-                                budget: request.budget,
-                                cancel: request.cancel,
-                            },
-                        )?;
+                        let coverage =
+                            self.work_lookup.ok_or(InboxError::OwnerUnavailable)?(work, request)?;
                         if coverage == WorkCoverage::Mismatch {
                             return Err(InboxError::Invalid("work repository or head mismatch"));
                         }

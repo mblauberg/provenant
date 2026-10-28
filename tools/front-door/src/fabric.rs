@@ -158,6 +158,16 @@ impl F3Facade for BoundFacade<'_> {
             input,
             budget,
             cancel,
+            &|work, call| {
+                provenant_cli::inbox::resolve_work(
+                    &ctx.roots.state,
+                    ctx.identity.project,
+                    work,
+                    call.clock,
+                    call.budget,
+                    call.cancel,
+                )
+            },
         )
     }
     fn refresh_events(
