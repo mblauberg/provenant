@@ -175,10 +175,18 @@ fn check_inner(
     let previous = latest(state, provider);
     let argv = command(provider, executable, &settings.update);
     if previous.as_ref().is_some_and(|record| {
-        (record.outcome == "unknown install method" && argv.is_none())
-            || now.saturating_sub(record.checked_unix_seconds)
-                < i64::try_from(settings.update_interval_seconds).unwrap_or(i64::MAX)
+        now.saturating_sub(record.checked_unix_seconds)
+            < i64::try_from(settings.update_interval_seconds).unwrap_or(i64::MAX)
     }) {
+        return Ok(None);
+    }
+    if let Some(mut record) = previous
+        .clone()
+        .filter(|record| record.outcome == "unknown install method" && argv.is_none())
+    {
+        // Restamp so `due` stays false for another interval; no new note.
+        record.checked_unix_seconds = now;
+        save(&dir, &record_name(provider), &record)?;
         return Ok(None);
     }
     // Reserve the interval independently of result publication. If that
@@ -810,6 +818,11 @@ mod tests {
             "unknown install method"
         );
         assert!(check(temp.path(), "codex", &binary, &settings, &fake, 100_000)?.is_none());
+        assert_eq!(
+            latest(temp.path(), "codex").map(|r| r.checked_unix_seconds),
+            Some(100_000)
+        );
+        assert!(!due(temp.path(), "codex", &settings, 100_001));
         assert_eq!(fake.calls.load(Ordering::Relaxed), 0);
         let brew = temp.path().join("Cellar/codex/1/bin/codex");
         let npm = temp
