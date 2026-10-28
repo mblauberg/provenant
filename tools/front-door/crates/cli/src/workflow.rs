@@ -479,6 +479,7 @@ fn execute(
                 .map_err(|error| invalid(error.to_string()))?;
             let saved = SessionStore::new(edge.roots.state.clone(), project, id)
                 .with_chair(host, actor)
+                .with_workspace(cwd.to_owned())
                 .with_rebind(rebind)
                 .with_revisions(keep)
                 .save_revision(&text, edge.budget()?, &edge.cancel, &edge.clock)?;

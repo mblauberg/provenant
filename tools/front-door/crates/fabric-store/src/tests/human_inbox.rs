@@ -147,6 +147,33 @@ fn overview_bounds_aggregate_request_bytes_before_decoding() {
 }
 
 #[test]
+fn local_delivery_target_query_is_indexed() {
+    let f = Fixture::new();
+    let store = f.open();
+    let plan: Vec<String> = store.db.prepare(
+        "EXPLAIN QUERY PLAN SELECT project FROM human_answer_outbox INDEXED BY human_local_delivery
+         WHERE json_extract(CAST(record AS TEXT),'$.target_host')=?1
+         AND json_extract(CAST(record AS TEXT),'$.target_session')=?2
+         AND json_extract(CAST(record AS TEXT),'$.target_actor')=?3
+         AND project=?4
+         AND json_extract(CAST(record AS TEXT),'$.state') IN ('queued','offered')
+         ORDER BY project,answer LIMIT 1"
+    ).unwrap().query_map(params!["host", "session", "actor", "project"], |row| row.get(3))
+      .unwrap().collect::<std::result::Result<_,_>>().unwrap();
+    assert!(
+        plan.iter()
+            .any(|line| line.contains("SEARCH") && line.contains("human_local_delivery")),
+        "{plan:?}"
+    );
+    assert!(
+        plan.iter()
+            .all(|line| !line.contains("SCAN") && !line.contains("TEMP B-TREE")),
+        "{plan:?}"
+    );
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Exercise the real-time reader boundary.
 fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
     let f = Fixture::new();
     let store = f.open();
@@ -255,6 +282,45 @@ fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
         session: delivery.target_session.clone(),
         actor: delivery.target_actor,
     };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+    let reader = Store::open_read_only(&f.root, deadline).unwrap().unwrap();
+    let observed = reader
+        .read_human_answers(&target, 1, MAX_OFFER_BYTES, deadline)
+        .unwrap();
+    assert_eq!(observed.items[0].answer, answer);
+    assert_eq!(observed.items[0].delivery, delivery);
+    assert_eq!(
+        store.human_item(project(), id, &request).unwrap().delivery,
+        Some(delivery.clone())
+    );
+    assert!(
+        reader
+            .read_human_answers(
+                &AnswerTarget {
+                    actor: actor(99),
+                    ..target.clone()
+                },
+                1,
+                MAX_OFFER_BYTES,
+                deadline
+            )
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        reader
+            .read_human_answers(&target, 1, 64, deadline)
+            .unwrap()
+            .truncated
+    );
+    assert!(
+        reader
+            .db
+            .execute("DELETE FROM human_answer_outbox", [])
+            .is_err()
+    );
+    drop(reader);
     store.db.execute_batch("CREATE TRIGGER reject_offer BEFORE UPDATE ON human_answer_outbox BEGIN SELECT RAISE(ABORT,'offer refused'); END;").unwrap();
     assert!(
         store
@@ -311,4 +377,90 @@ fn human_inbox_migration_preserves_existing_mail_and_refuses_old_binary_version(
         provenant_sqlite::read_version(&store.db, 7),
         Err(provenant_sqlite::VersionError::Unsupported(found)) if found == version
     ));
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Exercise the real-time reader boundary.
+fn local_delivery_open_allocates_nothing_and_observes_deadline() {
+    let f = Fixture::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+    assert!(Store::open_read_only(&f.root, deadline).unwrap().is_none());
+    assert!(!f.root.as_path().exists());
+    let writer = f.open();
+    let past = std::time::Instant::now() - std::time::Duration::from_millis(1);
+    assert!(matches!(
+        Store::open_read_only(&f.root, past),
+        Err(Error::Busy)
+    ));
+    writer.db.execute_batch("PRAGMA user_version=9").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    assert!(matches!(
+        Store::open_read_only(&f.root, deadline),
+        Err(Error::Invalid(_))
+    ));
+    assert_eq!(
+        writer
+            .db
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        9
+    );
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Fresh processes exercise native SQLite VFS opens.
+fn local_delivery_fresh_process() -> Result<()> {
+    use std::{
+        process::Command,
+        time::{Duration, Instant},
+    };
+    if let Some(path) = std::env::var_os("PROVENANT_READER_ROOT") {
+        let path = PathBuf::from(path);
+        let mut inputs = RootInputs::new(path.join("home"), path.join("assets"));
+        inputs.state_dir = Some(path);
+        let roots = inputs.resolve(&Resolver).unwrap();
+        let reader =
+            Store::open_read_only(&roots.state, Instant::now() + Duration::from_millis(100))?
+                .unwrap();
+        assert_eq!(
+            reader
+                .db
+                .query_row("SELECT value FROM probe", [], |row| row.get::<_, i64>(0))?,
+            42
+        );
+        return Ok(());
+    }
+    let f = Fixture::new();
+    let writer = f.open();
+    writer
+        .db
+        .execute_batch("CREATE TABLE probe(value INTEGER); INSERT INTO probe VALUES(42)")?;
+    let child = || {
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::human_inbox::local_delivery_fresh_process",
+                "--nocapture",
+            ])
+            .env("PROVENANT_READER_ROOT", f.root.as_path())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    };
+    child(); // Uncheckpointed WAL remains visible from a different process.
+    drop(writer);
+    child(); // The ordinary idle state must also support local delivery.
+    // Missing companions may defer delivery, but may never be recreated.
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", f.path().display()));
+    }
+    assert!(Store::open_read_only(&f.root, Instant::now() + Duration::from_millis(100)).is_err());
+    assert!(!f.path().with_extension("sqlite3-wal").exists());
+    assert!(!f.path().with_extension("sqlite3-shm").exists());
+    Ok(())
 }

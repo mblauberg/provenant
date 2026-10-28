@@ -32,6 +32,7 @@ pub struct DeliveryCapability {
     pub provider: crate::Harness,
     pub transport: AnswerTransport,
     pub live_injection: bool,
+    pub local_offer_reader: bool,
 }
 
 /// Implemented local fallback only. Provider hook/input adapters are separate work.
@@ -42,6 +43,7 @@ pub fn delivery_capabilities() -> Vec<DeliveryCapability> {
             provider: spec.id,
             transport: AnswerTransport::FabricMail,
             live_injection: false,
+            local_offer_reader: false,
         })
         .collect()
 }
@@ -158,6 +160,7 @@ pub enum AnswerDeliveryState {
 #[serde(rename_all = "snake_case")]
 pub enum AnswerTransport {
     FabricMail,
+    ClaudeHook,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
