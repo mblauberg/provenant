@@ -257,6 +257,17 @@ pub trait Providers {
         exit: &ExitObservation,
         provider_state: &std::path::Path,
     ) -> std::result::Result<Decoded, String>;
+    /// Decode with the host-sealed roots used by the guardian.
+    fn decode_with_context(
+        &self,
+        route: &RouteRecord,
+        stdout: &[u8],
+        exit: &ExitObservation,
+        provider_state: &std::path::Path,
+        _context: &crate::HolderContext,
+    ) -> std::result::Result<Decoded, String> {
+        self.decode(route, stdout, exit, provider_state)
+    }
 }
 enum HandOff {
     /// Failed before anything was sent to a guardian.

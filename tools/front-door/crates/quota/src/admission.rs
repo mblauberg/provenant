@@ -15,6 +15,71 @@ pub struct Refusal {
     pub observed_unix_seconds: i64,
     pub resets_unix_seconds: Option<i64>,
 }
+/// Short-lived provider capacity evidence, separate from quota admission.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityCooldown {
+    pub account: AccountScope,
+    pub model: String,
+    pub observed_unix_seconds: i64,
+    pub expires_unix_seconds: i64,
+}
+
+pub fn record_capacity_cooldown(
+    current: Option<&AccountRecord>,
+    account: &AccountScope,
+    model: &str,
+    now: i64,
+    duration_seconds: u64,
+) -> Result<Option<UpdateIntent>, QuotaError> {
+    if duration_seconds == 0 {
+        return Ok(None);
+    }
+    account.validate()?;
+    let prefix = format!("{}/", account.adapter);
+    let model = model
+        .strip_prefix(&prefix)
+        .ok_or(QuotaError::Invalid("capacity model"))?;
+    if model.is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
+        return Err(QuotaError::Invalid("capacity model"));
+    }
+    if current.is_some_and(|record| record.account != *account) {
+        return Err(QuotaError::Conflict);
+    }
+    let expires = now
+        .checked_add(i64::try_from(duration_seconds).map_err(|_| QuotaError::TimeRange)?)
+        .ok_or(QuotaError::TimeRange)?;
+    if expires <= now {
+        return Err(QuotaError::Invalid("capacity duration"));
+    }
+    let mut record = current
+        .cloned()
+        .unwrap_or_else(|| AccountRecord::empty(account.clone()));
+    record.validate()?;
+    record.revision = record
+        .revision
+        .checked_add(1)
+        .ok_or(QuotaError::NumberOutOfRange)?;
+    record
+        .capacity_cooldowns
+        .retain(|c| c.model != model && c.expires_unix_seconds > now);
+    if record.capacity_cooldowns.len() >= MAX_WINDOWS {
+        return Err(QuotaError::Invalid("capacity bound"));
+    }
+    record.capacity_cooldowns.push(CapacityCooldown {
+        account: account.clone(),
+        model: model.into(),
+        observed_unix_seconds: now,
+        expires_unix_seconds: expires,
+    });
+    record.validate()?;
+    Ok(Some(UpdateIntent {
+        account: account.clone(),
+        expected: current.cloned(),
+        replacement: Some(record),
+    }))
+}
+
 pub struct Admission<'a> {
     pub policies: &'a [QuotaPolicy],
     pub now_unix_seconds: i64,
@@ -222,6 +287,39 @@ fn matches_pool(adapter: &str, window: &str, pool: &str) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn capacity_evidence_is_scoped_and_replaced_after_expiry() {
+        let account = AccountScope {
+            adapter: "codex".into(),
+            account_key: "key".into(),
+            label: "label".into(),
+        };
+        let intent = record_capacity_cooldown(None, &account, "codex/model", 100, 600)
+            .unwrap()
+            .unwrap();
+        let first = intent.replacement.unwrap();
+        assert_eq!(first.capacity_cooldowns[0].expires_unix_seconds, 700);
+        assert_eq!(first.capacity_cooldowns[0].model, "model");
+        let intent = record_capacity_cooldown(Some(&first), &account, "codex/other", 700, 600)
+            .unwrap()
+            .unwrap();
+        let second = intent.replacement.unwrap();
+        assert_eq!(second.capacity_cooldowns.len(), 1);
+        assert_eq!(second.capacity_cooldowns[0].model, "other");
+        assert!(record_capacity_cooldown(None, &account, "claude/model", 100, 600).is_err());
+        assert!(
+            record_capacity_cooldown(None, &account, "codex/model", 100, 0)
+                .unwrap()
+                .is_none()
+        );
+        let before = first.clone();
+        assert!(
+            record_capacity_cooldown(Some(&first), &account, "codex/model", 100, 0)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(first, before);
+    }
+    #[test]
     fn dst_reset_rejects_gap_and_fold() {
         let zone = jiff::tz::TimeZone::get("America/New_York").unwrap();
         assert!(local_reset("2026-03-08T02:30:00".parse().unwrap(), zone.clone()).is_err());
@@ -291,6 +389,7 @@ mod admission_tests {
             roll: 0,
             total_weight: 1,
             pick: "opencode/opencode-go/mimo-v2.6-flash".into(),
+            reason: None,
             redraws: vec![],
         });
         let mut record = record(QuotaStatus::Available);
@@ -465,6 +564,47 @@ mod admission_tests {
             }
         }
         assert!(record_refusal(None, &account, &model, None, 1000, Some(1000)).is_err());
+    }
+    #[test]
+    fn capacity_evidence_does_not_refuse_admission_but_quota_refusal_does() {
+        let account = record(QuotaStatus::Available).account;
+        let mut route = route();
+        route.readiness = RouteReadiness::Ready {
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 99_999,
+        };
+        let model = format!("{}/{}", account.adapter, route.model);
+        let capacity = record_capacity_cooldown(None, &account, &model, 1000, 600)
+            .unwrap()
+            .unwrap()
+            .replacement
+            .unwrap();
+        assert!(capacity.refusals.is_empty());
+        let admit = |record: &AccountRecord, now| {
+            Admission {
+                policies: crate::source::TEST_POLICIES,
+                now_unix_seconds: now,
+                records: std::slice::from_ref(record),
+                pools: &[],
+            }
+            .check(&route)
+        };
+        assert!(admit(&capacity, 1001).is_ok());
+        let both = record_refusal(Some(&capacity), &account, &model, None, 1000, Some(3000))
+            .unwrap()
+            .replacement
+            .unwrap();
+        assert_eq!(both.capacity_cooldowns.len(), 1);
+        assert_eq!(both.refusals.len(), 1);
+        assert!(matches!(
+            admit(&both, 1001),
+            Err(QuotaError::Refused("scoped provider refusal"))
+        ));
+        assert!(matches!(
+            admit(&both, 1600),
+            Err(QuotaError::Refused("scoped provider refusal"))
+        ));
+        assert!(admit(&both, 3000).is_ok());
     }
     #[test]
     fn lapsed_window_requires_headroom_to_clear_a_newer_refusal() {

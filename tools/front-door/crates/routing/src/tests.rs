@@ -19,6 +19,7 @@ fn context<'a>(
         registry: REGISTRY,
         availability: &[],
         quota: &[],
+        capacity_cooldowns: &[],
         access: &[],
         now,
         host: "test-host",
@@ -2975,5 +2976,155 @@ fn opencode_zen_pool_does_not_inherit_go_pacing_quota() -> Result<(), Box<dyn st
     assert_eq!(previews.len(), 1);
     assert_eq!(previews[0].account.as_deref(), Some("zen"));
     assert_eq!(previews[0].policy, PacingPolicy::Pace);
+    Ok(())
+}
+
+#[test]
+fn capacity_cooldowns_apply_only_to_draws_and_expire() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pools": {"trial": [
+            {"model":"codex/gpt-6-luna", "weight":1, "efforts":["high"]},
+            {"model":"codex/gpt-6.1-sol", "weight":1, "efforts":["high"]}
+        ]},
+        "pacing": {"accounts": {"opaque-account": {"policy":"pace"}}}
+    }))?;
+    let registry = [provenant_providers::Registration {
+        quota_source: None,
+        ..provenant_providers::codex::REGISTRATION
+    }];
+    let availability = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let cooldown = provenant_quota::CapacityCooldown {
+        account: provenant_quota::AccountScope {
+            adapter: "codex".into(),
+            account_key: "opaque-account".into(),
+            label: "test".into(),
+        },
+        model: "gpt-6-luna".into(),
+        observed_unix_seconds: 90,
+        expires_unix_seconds: 110,
+    };
+    let cooldowns = [cooldown.clone()];
+    let mut observation = quota(
+        "codex/gpt-6-luna",
+        "opaque-account",
+        provenant_quota::QuotaStatus::Available,
+        1,
+        80,
+        120,
+    )?;
+    observation.snapshot.windows = vec![provenant_quota::QuotaWindow {
+        pool: "primary".into(),
+        window_seconds: Some(18_000),
+        used_basis_points: 5_000,
+        resets_unix_seconds: Some(10_000),
+    }];
+    let observations = [observation];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.quota = &observations;
+    ctx.registry = &registry;
+    ctx.availability = &availability;
+    ctx.access = &access;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    let baseline = resolve(&query, &ctx)?
+        .pool_selection
+        .ok_or("receipt")?
+        .candidates[0]
+        .clone();
+    assert!(baseline.pacing_detail.is_some());
+    assert_ne!(baseline.factor_basis_points, 10_000);
+    ctx.capacity_cooldowns = &cooldowns;
+    query.choice = RouteChoice::Model(ModelId::parse("codex/gpt-6-luna")?);
+    let explicit = resolve(&query, &ctx)?;
+    assert_eq!(explicit.model, "gpt-6-luna");
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    let selected = resolve(&query, &ctx)?;
+    assert_eq!(selected.model, "gpt-6.1-sol");
+    let receipt = selected.pool_selection.ok_or("receipt")?;
+    let skipped = &receipt.candidates[0];
+    assert_eq!(skipped.exclusion.as_deref(), Some("capacity cooldown"));
+    assert_eq!(skipped.factor_basis_points, baseline.factor_basis_points);
+    assert_eq!(skipped.pacing_detail, baseline.pacing_detail);
+    let both = [
+        cooldown,
+        provenant_quota::CapacityCooldown {
+            account: provenant_quota::AccountScope {
+                adapter: "codex".into(),
+                account_key: "opaque-account".into(),
+                label: "test".into(),
+            },
+            model: "gpt-6.1-sol".into(),
+            observed_unix_seconds: 90,
+            expires_unix_seconds: 110,
+        },
+    ];
+    ctx.capacity_cooldowns = &both;
+    let fallback = resolve(&query, &ctx)?;
+    let receipt = fallback.pool_selection.unwrap();
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("all eligible candidates cooling, normal selection")
+    );
+    ctx.now = provenant_core::WallTime::from_micros(110_000_000)?;
+    let expired = resolve(&query, &ctx)?.pool_selection.unwrap();
+    assert!(expired.candidates.iter().all(|c| c.exclusion.is_none()));
+    Ok(())
+}
+
+#[test]
+fn cooling_ready_candidate_beats_unavailable_candidate() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pools": {"trial": [
+            {"model":"codex/gpt-6-luna", "weight":1, "efforts":["high"]},
+            {"model":"claude/claude-sonnet-5-5", "weight":1, "efforts":["high"]}
+        ]}
+    }))?;
+    let registry = [
+        provenant_providers::Registration {
+            quota_source: None,
+            ..provenant_providers::codex::REGISTRATION
+        },
+        provenant_providers::Registration {
+            quota_source: None,
+            ..provenant_providers::claude::REGISTRATION
+        },
+    ];
+    let availability = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let cooldowns = [provenant_quota::CapacityCooldown {
+        account: provenant_quota::AccountScope {
+            adapter: "codex".into(),
+            account_key: "opaque-account".into(),
+            label: "test".into(),
+        },
+        model: "gpt-6-luna".into(),
+        observed_unix_seconds: 90,
+        expires_unix_seconds: 110,
+    }];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.registry = &registry;
+    ctx.availability = &availability;
+    ctx.access = &access;
+    ctx.capacity_cooldowns = &cooldowns;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    let selected = resolve(&query, &ctx)?;
+    assert_eq!(selected.model, "gpt-6-luna");
+    assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
+    assert_eq!(
+        selected.pool_selection.unwrap().reason.as_deref(),
+        Some("cooling ready candidate selected over unavailable candidate")
+    );
     Ok(())
 }
