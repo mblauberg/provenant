@@ -14,17 +14,14 @@ use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use thiserror::Error;
 
-pub const MAX_GRAPH_NODES: usize = 64;
-pub const MAX_GRAPH_EDGES: usize = 256;
-pub const MAX_ROUTES_PER_NODE: usize = 8;
-pub const MAX_NODE_PROMPT_BYTES: usize = 64 * 1024;
-pub const MAX_GRAPH_PROMPT_BYTES: usize = 256 * 1024;
-const MAX_CHECKPOINT_BYTES: u64 = 4_194_304;
+const MAX_CHECKPOINT_BYTES: u64 = 16_777_216;
 const MAX_ADVANCE_ERROR_BYTES: usize = 2_048;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<GraphLimitOverrides>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration_branch: Option<String>,
     /// A graph may open one PR after all its nodes succeed.
@@ -33,6 +30,60 @@ pub struct GraphDocument {
     pub schema_version: u64,
     pub graph_id: String,
     pub nodes: Vec<GraphNode>,
+}
+
+/// Graph-specific limits, bounded by the host's configured ceiling.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GraphLimitOverrides {
+    pub nodes: Option<usize>,
+    pub edges: Option<usize>,
+    pub routes_per_node: Option<usize>,
+    pub node_prompt_bytes: Option<usize>,
+    pub graph_prompt_bytes: Option<usize>,
+    pub expansion_depth: Option<usize>,
+    pub fan_out_width: Option<usize>,
+    pub concurrency: Option<usize>,
+}
+
+impl GraphLimitOverrides {
+    pub fn resolve(
+        &self,
+        config: &crate::config::GraphConfig,
+    ) -> Result<crate::config::GraphLimits, String> {
+        let mut limits = config.limits.clone();
+        macro_rules! apply {
+            ($($field:ident),+) => {$({
+                if let Some(value) = self.$field {
+                    if value == 0 {
+                        return Err(format!("limits.{} in graph document must be positive", stringify!($field)));
+                    }
+                    limits.$field = value.min(config.limit_ceiling.$field);
+                }
+            })+};
+        }
+        apply!(
+            nodes,
+            edges,
+            routes_per_node,
+            node_prompt_bytes,
+            graph_prompt_bytes,
+            expansion_depth,
+            fan_out_width
+        );
+        if let Some(value) = self.concurrency {
+            if value == 0 {
+                return Err("limits.concurrency in graph document must be positive".to_owned());
+            }
+            limits.concurrency = Some(
+                config
+                    .limit_ceiling
+                    .concurrency
+                    .map_or(value, |cap| value.min(cap)),
+            );
+        }
+        Ok(limits)
+    }
 }
 
 /// Legacy Fabric route wire shape. Exactly one of `model` and `alias` is
@@ -110,6 +161,19 @@ pub struct GraphCheckpoint {
     /// Durable admission fence. Resume observes the same attempt keys.
     #[serde(default)]
     pub cancelled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_reason: Option<String>,
+    /// Usage fields unavailable for settled attempts, including partial telemetry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unknown_usage: Vec<String>,
+    /// Durable, deduplicated observations of unavailable attempt telemetry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub usage_events: Vec<UnknownUsageEvent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<String>,
+    /// Document limits reduced to the current host ceiling.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limit_notes: Vec<String>,
     pub schema_version: u64,
     pub graph_id: String,
     /// Digest of the validated, normalised plan, including prompt bytes.
@@ -147,6 +211,31 @@ pub struct GraphAttempt {
     /// Actor that first submitted this attempt. Run-store operation replay is
     /// actor-scoped, so a resume submits under it.
     pub launch_actor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AttemptUsage>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptUsage {
+    pub tokens: Option<u64>,
+    pub cost_micro_usd: Option<u64>,
+    pub wall_time_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub tokens_partial: bool,
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub cost_partial: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_unknown_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnknownUsageEvent {
+    pub node_id: String,
+    pub route_index: u16,
+    pub metric: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,6 +308,7 @@ pub enum GraphStatus {
     Pending,
     Complete,
     Cancelled,
+    Paused,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -263,6 +353,14 @@ pub trait AttemptOwner {
         _checkpoint: &GraphCheckpoint,
     ) -> Result<Option<String>, Self::Error> {
         Ok(None)
+    }
+
+    fn usage(&mut self, _attempt_ref: &str) -> Result<AttemptUsage, Self::Error> {
+        Ok(AttemptUsage::default())
+    }
+
+    fn cost_unknown_reason(&mut self) -> Option<String> {
+        None
     }
 
     fn observe_or_start(
@@ -699,6 +797,8 @@ fn open_or_create(directory: &Directory, name: &OsStr) -> Result<Directory, FsEr
 pub enum GraphError<RunError: Error + 'static, JournalError: Error + 'static> {
     #[error("invalid graph: {0}")]
     Invalid(&'static str),
+    #[error("invalid extension: {0}")]
+    Extension(String),
     #[error("graph checkpoint does not match the submitted plan")]
     PlanChanged,
     #[error("graph checkpoint is inconsistent or unsupported")]
@@ -739,32 +839,99 @@ struct PlannedNode {
 }
 
 /// Advance all currently ready nodes once. Independent nodes can progress
-/// while a dependency is still running. Calls are bounded by the document caps
-/// and are safe to repeat after a crash because every route has a stable key.
+/// while a dependency is still running. Stable keys make calls safe to repeat.
+#[cfg(test)]
 pub fn advance<R: AttemptOwner, J: GraphJournal>(
     document: &GraphDocument,
     owner: &mut R,
     journal: &mut J,
 ) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
-    advance_inner(document, owner, journal, false)
+    advance_with_budget(
+        document,
+        owner,
+        journal,
+        &crate::config::GraphLimits::default(),
+        &crate::config::GraphLimits::default(),
+        &crate::config::GraphBudget::default(),
+    )
 }
 
 /// Explicitly reopen graph admission without changing any attempt identity.
+#[cfg(test)]
 pub fn resume<R: AttemptOwner, J: GraphJournal>(
     document: &GraphDocument,
     owner: &mut R,
     journal: &mut J,
 ) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
-    advance_inner(document, owner, journal, true)
+    resume_with_budget(
+        document,
+        owner,
+        journal,
+        &crate::config::GraphLimits::default(),
+        &crate::config::GraphLimits::default(),
+        &crate::config::GraphBudget::default(),
+        &[],
+    )
+}
+
+pub fn advance_with_budget<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    owner: &mut R,
+    journal: &mut J,
+    limits: &crate::config::GraphLimits,
+    ceiling: &crate::config::GraphLimits,
+    budget: &crate::config::GraphBudget,
+) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
+    advance_inner(
+        document,
+        owner,
+        journal,
+        (limits, ceiling),
+        budget,
+        false,
+        &[],
+    )
+}
+
+pub fn resume_with_budget<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    owner: &mut R,
+    journal: &mut J,
+    limits: &crate::config::GraphLimits,
+    ceiling: &crate::config::GraphLimits,
+    budget: &crate::config::GraphBudget,
+    extensions: &[String],
+) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
+    advance_inner(
+        document,
+        owner,
+        journal,
+        (limits, ceiling),
+        budget,
+        true,
+        extensions,
+    )
 }
 
 fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     document: &GraphDocument,
     owner: &mut R,
     journal: &mut J,
+    (limits, ceiling): (&crate::config::GraphLimits, &crate::config::GraphLimits),
+    budget: &crate::config::GraphBudget,
     resume: bool,
+    extensions: &[String],
 ) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
-    let (plan, positions) = validate_plan(document).map_err(GraphError::Invalid)?;
+    let unbounded = crate::config::GraphLimits {
+        nodes: usize::MAX,
+        edges: usize::MAX,
+        routes_per_node: u16::MAX as usize,
+        node_prompt_bytes: usize::MAX,
+        graph_prompt_bytes: usize::MAX,
+        ..limits.clone()
+    };
+    let (plan, positions) =
+        validate_plan_with_limits(document, &unbounded).map_err(GraphError::Invalid)?;
     let plan_digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &plan)
         .map_err(GraphError::Canonical)?
         .to_string();
@@ -782,6 +949,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 pull_request: None,
                 schema_version: 1,
                 cancelled: false,
+                pause_reason: None,
+                unknown_usage: Vec::new(),
+                usage_events: Vec::new(),
+                extensions: Vec::new(),
+                limit_notes: Vec::new(),
                 graph_id: plan.graph_id.clone(),
                 plan_digest,
                 nodes: plan
@@ -800,6 +972,55 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             checkpoint
         }
     };
+
+    let mut effective_budget = budget.clone();
+    let mut effective_limits = limits.clone();
+    for (extension, replay) in
+        checkpoint
+            .extensions
+            .iter()
+            .map(|e| (e, true))
+            .chain(extensions.iter().map(|e| {
+                (
+                    e,
+                    e.starts_with("limits.") && checkpoint.extensions.contains(e),
+                )
+            }))
+    {
+        if extension.starts_with("limits.") {
+            apply_limit_extension(&mut effective_limits, ceiling, extension, replay)
+                .map_err(GraphError::Extension)?;
+        } else {
+            apply_extension(&mut effective_budget, extension, replay)
+                .map_err(GraphError::Extension)?;
+        }
+    }
+    let limit_notes = document_limit_notes(document, ceiling);
+    if checkpoint.limit_notes != limit_notes {
+        checkpoint.limit_notes = limit_notes;
+        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+    }
+    if resume {
+        for extension in extensions {
+            if !checkpoint.extensions.contains(extension) {
+                checkpoint.extensions.push(extension.clone());
+            }
+        }
+        checkpoint.pause_reason = None;
+        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+    }
+
+    if !checkpoint.nodes.iter().all(|node| {
+        matches!(
+            node.state,
+            NodeState::Succeeded | NodeState::Failed | NodeState::Blocked
+        )
+    }) && let Some(reason) =
+        structural_limit_reason(document, &plan, &effective_limits, &checkpoint.extensions)
+    {
+        checkpoint.pause_reason = Some(reason);
+        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+    }
 
     if checkpoint.cancelled {
         if !resume {
@@ -881,6 +1102,29 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 .last()
                 .is_none_or(|last| last.state == AttemptState::Terminal);
             if needs_record {
+                if effective_limits.concurrency.is_some_and(|cap| {
+                    checkpoint
+                        .nodes
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, node)| {
+                            *index != node_index && node.state == NodeState::Running
+                        })
+                        .count()
+                        >= cap
+                }) {
+                    break;
+                }
+                update_usage_warnings(&mut checkpoint, &effective_budget);
+                if let Some(reason) = checkpoint
+                    .pause_reason
+                    .clone()
+                    .or_else(|| budget_reason(&checkpoint, &effective_budget))
+                {
+                    checkpoint.pause_reason = Some(reason);
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                    break;
+                }
                 checkpoint.nodes[node_index].attempts.push(GraphAttempt {
                     key: key.clone(),
                     route: route.clone(),
@@ -889,6 +1133,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     outcome: None,
                     launched: true,
                     launch_actor: owner.actor(),
+                    usage: None,
                 });
                 checkpoint.nodes[node_index].state = NodeState::Running;
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
@@ -919,6 +1164,30 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     },
                 )
                 .map_err(GraphError::Run)?;
+            let mut usage_error = None;
+            let mut cost_error = None;
+            let usage = if let AttemptObservation::Terminal {
+                attempt_ref: Some(reference),
+                ..
+            } = &observation
+            {
+                Some(match owner.usage(reference) {
+                    Ok(usage) => usage,
+                    Err(error) => {
+                        usage_error = Some(error.to_string());
+                        cost_error = owner.cost_unknown_reason();
+                        AttemptUsage::default()
+                    }
+                })
+            } else {
+                if matches!(
+                    &observation,
+                    AttemptObservation::Terminal { launched: true, .. }
+                ) {
+                    cost_error = owner.cost_unknown_reason();
+                }
+                None
+            };
             let should_continue = {
                 let progress = &mut checkpoint.nodes[node_index];
                 let attempt = progress
@@ -944,6 +1213,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         launched,
                         result,
                     } => {
+                        attempt.usage = usage;
                         attempt.launched = launched;
                         attempt.state = AttemptState::Terminal;
                         attempt.attempt_ref = attempt_ref;
@@ -984,6 +1254,23 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                 }
             };
+            if let Some(reason) = usage_error {
+                checkpoint.usage_events.push(UnknownUsageEvent {
+                    node_id: node.id.clone(),
+                    route_index: key.route_index,
+                    metric: "telemetry".to_owned(),
+                    reason: Some(reason),
+                });
+            }
+            if let Some(reason) = cost_error {
+                checkpoint.usage_events.push(UnknownUsageEvent {
+                    node_id: node.id.clone(),
+                    route_index: key.route_index,
+                    metric: "cost_usd".to_owned(),
+                    reason: Some(reason),
+                });
+            }
+            update_usage_warnings(&mut checkpoint, &effective_budget);
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
             if !should_continue {
                 break;
@@ -991,6 +1278,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
     }
 
+    let all_settled = checkpoint.nodes.iter().all(|node| {
+        matches!(
+            node.state,
+            NodeState::Succeeded | NodeState::Failed | NodeState::Blocked
+        )
+    });
+    if all_settled && checkpoint.pause_reason.take().is_some() {
+        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+    }
     if document.delivery == Some(provenant_records::run::DeliveryMode::Pr)
         && !checkpoint.delivered
         && checkpoint
@@ -1004,12 +1300,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         checkpoint.delivered = true;
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
-    let status = if checkpoint.nodes.iter().all(|node| {
-        matches!(
-            node.state,
-            NodeState::Succeeded | NodeState::Failed | NodeState::Blocked
-        )
-    }) {
+    let status = if checkpoint.pause_reason.is_some() {
+        GraphStatus::Paused
+    } else if all_settled {
         GraphStatus::Complete
     } else {
         GraphStatus::Pending
@@ -1019,6 +1312,400 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         checkpoint,
         advance_error: None,
     })
+}
+
+fn apply_limit_extension(
+    limits: &mut crate::config::GraphLimits,
+    ceiling: &crate::config::GraphLimits,
+    extension: &str,
+    replay: bool,
+) -> Result<(), String> {
+    let (key, value) = extension
+        .split_once('=')
+        .ok_or_else(|| format!("{extension}: expected KEY=VALUE"))?;
+    let value: usize = value
+        .parse()
+        .map_err(|_| format!("{extension}: invalid limit value"))?;
+    if value == 0 {
+        return Err(format!("{extension}: limit must be positive"));
+    }
+    if key == "limits.concurrency" {
+        if !replay && ceiling.concurrency.is_some_and(|cap| value > cap) {
+            return Err(format!(
+                "{extension}: exceeds ceiling {:?}",
+                ceiling.concurrency
+            ));
+        }
+        let value = ceiling.concurrency.map_or(value, |cap| value.min(cap));
+        if let Some(old) = limits.concurrency.as_mut() {
+            *old = (*old).max(value);
+        } else if !replay {
+            return Err(format!("{key} is not configured"));
+        }
+        return Ok(());
+    }
+    let (slot, cap) = match key {
+        "limits.nodes" => (&mut limits.nodes, ceiling.nodes),
+        "limits.edges" => (&mut limits.edges, ceiling.edges),
+        "limits.routes_per_node" => (&mut limits.routes_per_node, ceiling.routes_per_node),
+        "limits.node_prompt_bytes" => (&mut limits.node_prompt_bytes, ceiling.node_prompt_bytes),
+        "limits.graph_prompt_bytes" => (&mut limits.graph_prompt_bytes, ceiling.graph_prompt_bytes),
+        "limits.expansion_depth" => (&mut limits.expansion_depth, ceiling.expansion_depth),
+        "limits.fan_out_width" => (&mut limits.fan_out_width, ceiling.fan_out_width),
+        _ => return Err(format!("{extension}: unknown limit key")),
+    };
+    if !replay && value > cap {
+        return Err(format!("{extension}: exceeds ceiling {cap}"));
+    }
+    *slot = (*slot).max(value.min(cap));
+    Ok(())
+}
+
+fn document_limit_notes(
+    document: &GraphDocument,
+    ceiling: &crate::config::GraphLimits,
+) -> Vec<String> {
+    let Some(overrides) = &document.limits else {
+        return Vec::new();
+    };
+    let mut notes = Vec::new();
+    macro_rules! note {
+        ($($field:ident),+) => {$({
+            if let Some(value) = overrides.$field && value > ceiling.$field {
+                notes.push(format!("limits.{}={value} in graph document clamped to ceiling {}", stringify!($field), ceiling.$field));
+            }
+        })+};
+    }
+    note!(
+        nodes,
+        edges,
+        routes_per_node,
+        node_prompt_bytes,
+        graph_prompt_bytes,
+        expansion_depth,
+        fan_out_width
+    );
+    if let (Some(value), Some(cap)) = (overrides.concurrency, ceiling.concurrency)
+        && value > cap
+    {
+        notes.push(format!(
+            "limits.concurrency={value} in graph document clamped to ceiling {cap}"
+        ));
+    }
+    notes
+}
+
+fn structural_limit_reason(
+    document: &GraphDocument,
+    plan: &PlannedGraph,
+    limits: &crate::config::GraphLimits,
+    extensions: &[String],
+) -> Option<String> {
+    let check = |key: &str, actual: usize, max: usize| {
+        let overridden = document.limits.as_ref().is_some_and(|overrides| match key {
+            "nodes" => overrides.nodes.is_some(),
+            "edges" => overrides.edges.is_some(),
+            "routes_per_node" => overrides.routes_per_node.is_some(),
+            "node_prompt_bytes" => overrides.node_prompt_bytes.is_some(),
+            "graph_prompt_bytes" => overrides.graph_prompt_bytes.is_some(),
+            "expansion_depth" => overrides.expansion_depth.is_some(),
+            "fan_out_width" => overrides.fan_out_width.is_some(),
+            _ => false,
+        });
+        let extension_prefix = format!("limits.{key}=");
+        let source = if extensions
+            .iter()
+            .any(|entry| entry.starts_with(&extension_prefix))
+        {
+            "checkpoint extension"
+        } else if overridden {
+            "graph document"
+        } else {
+            "domains.fabric.graph.limits"
+        };
+        (actual > max).then(|| format!("limits.{key}={max} reached ({actual}); set by {source}"))
+    };
+    check("nodes", document.nodes.len(), limits.nodes)
+        .or_else(|| {
+            check(
+                "edges",
+                document
+                    .nodes
+                    .iter()
+                    .map(|node| node.depends_on.len())
+                    .sum(),
+                limits.edges,
+            )
+        })
+        .or_else(|| {
+            document.nodes.iter().find_map(|node| {
+                check(
+                    "routes_per_node",
+                    node.routes
+                        .as_ref()
+                        .map_or(usize::from(node.route.is_some()), Vec::len),
+                    limits.routes_per_node,
+                )
+            })
+        })
+        .or_else(|| {
+            document.nodes.iter().find_map(|node| {
+                check(
+                    "node_prompt_bytes",
+                    node.prompt.len(),
+                    limits.node_prompt_bytes,
+                )
+            })
+        })
+        .or_else(|| {
+            check(
+                "graph_prompt_bytes",
+                document.nodes.iter().map(|node| node.prompt.len()).sum(),
+                limits.graph_prompt_bytes,
+            )
+        })
+        .or_else(|| {
+            let mut children = std::collections::BTreeMap::<&str, usize>::new();
+            for node in &plan.nodes {
+                for parent in &node.depends_on {
+                    *children.entry(parent).or_default() += 1;
+                }
+            }
+            children
+                .values()
+                .find_map(|width| check("fan_out_width", *width, limits.fan_out_width))
+        })
+        .or_else(|| {
+            let mut depths = std::collections::BTreeMap::<&str, usize>::new();
+            for node in &plan.nodes {
+                let depth = node
+                    .depends_on
+                    .iter()
+                    .map(|parent| depths[parent.as_str()] + 1)
+                    .max()
+                    .unwrap_or(0);
+                if let Some(reason) = check("expansion_depth", depth, limits.expansion_depth) {
+                    return Some(reason);
+                }
+                depths.insert(&node.id, depth);
+            }
+            None
+        })
+}
+
+fn apply_extension(
+    budget: &mut crate::config::GraphBudget,
+    extension: &str,
+    replay: bool,
+) -> Result<(), String> {
+    let (key, value) = extension
+        .split_once('=')
+        .ok_or_else(|| format!("{extension}: expected KEY=VALUE"))?;
+    let key = key.strip_prefix("budget.").unwrap_or(key);
+    let (scope, field) = key
+        .split_once('.')
+        .ok_or_else(|| format!("{extension}: unknown budget key"))?;
+    let target = match scope {
+        "per_node" => &mut budget.per_node,
+        "per_graph" => &mut budget.per_graph,
+        _ => return Err(format!("{extension}: unknown budget key")),
+    };
+    match field {
+        "tokens" | "wall_time_seconds" => {
+            let number: u64 = value
+                .parse()
+                .map_err(|_| format!("{extension}: invalid budget value"))?;
+            let slot = if field == "tokens" {
+                &mut target.tokens
+            } else {
+                &mut target.wall_time_seconds
+            };
+            if number == 0 {
+                return Err(format!("{extension}: budget must be positive"));
+            }
+            if let Some(old) = slot.as_mut() {
+                *old = (*old).max(number);
+            } else if !replay {
+                return Err(format!("{key} is not configured"));
+            }
+        }
+        "cost_usd" => {
+            let number: f64 = value
+                .parse()
+                .map_err(|_| format!("{extension}: invalid budget value"))?;
+            if !number.is_finite() || number <= 0.0 {
+                return Err(format!("{extension}: budget must be finite and positive"));
+            }
+            if let Some(old) = target.cost_usd.as_mut() {
+                *old = old.max(number);
+            } else if !replay {
+                return Err(format!("{key} is not configured"));
+            }
+        }
+        _ => return Err(format!("{extension}: unknown budget key")),
+    }
+    Ok(())
+}
+
+fn budget_reason(
+    checkpoint: &GraphCheckpoint,
+    budget: &crate::config::GraphBudget,
+) -> Option<String> {
+    let mut graph_tokens = 0u64;
+    let mut graph_cost = 0u64;
+    let mut graph_seconds = 0u64;
+    let mut graph_unknown = [false; 3];
+    for node in &checkpoint.nodes {
+        let mut tokens = 0u64;
+        let mut cost = 0u64;
+        let mut seconds = 0u64;
+        let mut unknown = [false; 3];
+        for attempt in node
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.state == AttemptState::Terminal && attempt.launched)
+        {
+            let usage = attempt.usage.as_ref();
+            let values = [
+                usage.and_then(|value| value.tokens),
+                usage.and_then(|value| value.cost_micro_usd),
+                usage.and_then(|value| value.wall_time_seconds),
+            ];
+            for (missing, value) in unknown.iter_mut().zip(values) {
+                *missing |= value.is_none();
+            }
+            unknown[0] |= usage.is_some_and(|value| value.tokens_partial);
+            unknown[1] |= usage.is_some_and(|value| value.cost_partial);
+            tokens = tokens.saturating_add(values[0].unwrap_or(0));
+            cost = cost.saturating_add(values[1].unwrap_or(0));
+            seconds = seconds.saturating_add(values[2].unwrap_or(0));
+        }
+        graph_tokens = graph_tokens.saturating_add(tokens);
+        graph_cost = graph_cost.saturating_add(cost);
+        graph_seconds = graph_seconds.saturating_add(seconds);
+        for (total, missing) in graph_unknown.iter_mut().zip(unknown) {
+            *total |= missing;
+        }
+        if let Some(reason) =
+            exceeded("per_node", &budget.per_node, tokens, cost, seconds).or_else(|| {
+                unknown_budget_reason("per_node", &budget.per_node, unknown, budget.unknown_usage)
+            })
+        {
+            return Some(format!("node {}: {reason}", node.id));
+        }
+    }
+    exceeded(
+        "per_graph",
+        &budget.per_graph,
+        graph_tokens,
+        graph_cost,
+        graph_seconds,
+    )
+    .or_else(|| {
+        unknown_budget_reason(
+            "per_graph",
+            &budget.per_graph,
+            graph_unknown,
+            budget.unknown_usage,
+        )
+    })
+}
+
+fn update_usage_warnings(checkpoint: &mut GraphCheckpoint, _budget: &crate::config::GraphBudget) {
+    let mut warnings = Vec::new();
+    let mut events = Vec::new();
+    for node in &checkpoint.nodes {
+        for attempt in node
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.state == AttemptState::Terminal && attempt.launched)
+        {
+            let usage = attempt.usage.as_ref();
+            for (name, known) in [
+                (
+                    "tokens",
+                    usage.is_some_and(|value| value.tokens.is_some() && !value.tokens_partial),
+                ),
+                (
+                    "cost_usd",
+                    usage
+                        .is_some_and(|value| value.cost_micro_usd.is_some() && !value.cost_partial),
+                ),
+                (
+                    "wall_time_seconds",
+                    usage.is_some_and(|value| value.wall_time_seconds.is_some()),
+                ),
+            ] {
+                if !known {
+                    warnings.push(format!(
+                        "node {} route {}: {name} usage unknown",
+                        node.id, attempt.key.route_index
+                    ));
+                    events.push(UnknownUsageEvent {
+                        node_id: node.id.clone(),
+                        route_index: attempt.key.route_index,
+                        metric: name.to_owned(),
+                        reason: if name == "cost_usd" {
+                            usage.and_then(|value| value.cost_unknown_reason.clone())
+                        } else {
+                            None
+                        },
+                    });
+                }
+            }
+        }
+    }
+    checkpoint.unknown_usage = warnings;
+    for event in events {
+        if !checkpoint.usage_events.contains(&event) {
+            checkpoint.usage_events.push(event);
+        }
+    }
+}
+
+fn unknown_budget_reason(
+    scope: &str,
+    limit: &crate::config::BudgetLimit,
+    unknown: [bool; 3],
+    policy: crate::config::UnknownUsage,
+) -> Option<String> {
+    if policy != crate::config::UnknownUsage::Pause {
+        return None;
+    }
+    [
+        ("tokens", limit.tokens.is_some()),
+        ("cost_usd", limit.cost_usd.is_some()),
+        ("wall_time_seconds", limit.wall_time_seconds.is_some()),
+    ]
+    .into_iter()
+    .zip(unknown)
+    .find_map(|((name, configured), missing)| {
+        (configured && missing).then(|| format!("{scope}.{name} usage unknown"))
+    })
+}
+
+fn exceeded(
+    scope: &str,
+    limit: &crate::config::BudgetLimit,
+    tokens: u64,
+    cost: u64,
+    seconds: u64,
+) -> Option<String> {
+    if let Some(max) = limit.tokens.filter(|max| tokens >= *max) {
+        return Some(format!("{scope}.tokens budget {max} reached ({tokens})"));
+    }
+    if let Some(max) = limit
+        .cost_usd
+        .filter(|max| (cost as f64) / 1_000_000.0 >= *max)
+    {
+        return Some(format!("{scope}.cost_usd budget {max} reached"));
+    }
+    if let Some(max) = limit.wall_time_seconds.filter(|max| seconds >= *max) {
+        return Some(format!(
+            "{scope}.wall_time_seconds budget {max} reached ({seconds})"
+        ));
+    }
+    None
 }
 
 pub(crate) fn validate_access(
@@ -1043,8 +1730,16 @@ pub(crate) fn validate_access(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_plan(
     document: &GraphDocument,
+) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), &'static str> {
+    validate_plan_with_limits(document, &crate::config::GraphLimits::default())
+}
+
+fn validate_plan_with_limits(
+    document: &GraphDocument,
+    limits: &crate::config::GraphLimits,
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), &'static str> {
     if document.schema_version != 1 {
         return Err("schema version");
@@ -1065,7 +1760,7 @@ fn validate_plan(
     if !valid_identifier(&document.graph_id) {
         return Err("graph id");
     }
-    if document.nodes.is_empty() || document.nodes.len() > MAX_GRAPH_NODES {
+    if document.nodes.is_empty() || document.nodes.len() > limits.nodes {
         return Err("node count");
     }
 
@@ -1088,7 +1783,7 @@ fn validate_plan(
         }
         if node.required_verdict.as_ref().is_some_and(|line| {
             line.trim().is_empty()
-                || line.len() > MAX_NODE_PROMPT_BYTES
+                || line.len() > limits.node_prompt_bytes
                 || line.contains(['\n', '\r'])
         }) {
             return Err("required verdict must be a non-empty single line");
@@ -1105,19 +1800,19 @@ fn validate_plan(
         if document.delivery == Some(DeliveryMode::Pr) && node.delivery == Some(DeliveryMode::Pr) {
             return Err("graph PR is exclusive with node PRs");
         }
-        if node.prompt.is_empty() || node.prompt.len() > MAX_NODE_PROMPT_BYTES {
+        if node.prompt.is_empty() || node.prompt.len() > limits.node_prompt_bytes {
             return Err("prompt size");
         }
         prompt_bytes = prompt_bytes
             .checked_add(node.prompt.len())
             .ok_or("prompt size")?;
-        if prompt_bytes > MAX_GRAPH_PROMPT_BYTES {
+        if prompt_bytes > limits.graph_prompt_bytes {
             return Err("total prompt size");
         }
         edge_count = edge_count
             .checked_add(node.depends_on.len())
             .ok_or("edge count")?;
-        if edge_count > MAX_GRAPH_EDGES {
+        if edge_count > limits.edges {
             return Err("edge count");
         }
 
@@ -1127,7 +1822,7 @@ fn validate_plan(
             (Some(_), Some(_)) => return Err("route and routes are exclusive"),
             (None, None) | (None, Some(_)) => return Err("route list is empty"),
         };
-        if routes.len() > MAX_ROUTES_PER_NODE {
+        if routes.len() > limits.routes_per_node {
             return Err("route count");
         }
         if routes
@@ -1363,6 +2058,8 @@ mod tests {
         stored_refs: Vec<Option<String>>,
         actor: String,
         launch_actors: Vec<String>,
+        usage: AttemptUsage,
+        usage_fails: bool,
     }
 
     impl AttemptOwner for FakeOwner {
@@ -1370,6 +2067,13 @@ mod tests {
 
         fn actor(&self) -> String {
             self.actor.clone()
+        }
+        fn usage(&mut self, _attempt_ref: &str) -> Result<AttemptUsage, Self::Error> {
+            if self.usage_fails {
+                Err(NoObservation)
+            } else {
+                Ok(self.usage.clone())
+            }
         }
         fn deliver_graph(
             &mut self,
@@ -1428,10 +2132,642 @@ mod tests {
         GraphDocument {
             integration_branch: None,
             delivery: None,
+            limits: None,
             schema_version: 1,
             graph_id: "g-test".to_owned(),
             nodes,
         }
+    }
+
+    #[test]
+    fn usage_fetch_failure_is_unknown_and_does_not_wedge_graph() {
+        let document = graph(vec![
+            node("one", route("first")),
+            node("two", route("first")),
+        ]);
+        let observation = || AttemptObservation::Terminal {
+            attempt_ref: Some("host/attempt".into()),
+            outcome: AttemptOutcome::Succeeded,
+            launched: true,
+            result: None,
+        };
+        for policy in [
+            crate::config::UnknownUsage::Warn,
+            crate::config::UnknownUsage::Pause,
+        ] {
+            let mut owner = FakeOwner {
+                observations: VecDeque::from([observation(), observation()]),
+                usage_fails: true,
+                ..Default::default()
+            };
+            let budget = crate::config::GraphBudget {
+                per_graph: crate::config::BudgetLimit {
+                    tokens: Some(100),
+                    ..Default::default()
+                },
+                unknown_usage: policy,
+                ..Default::default()
+            };
+            let mut journal = MemoryJournal::default();
+            let run = advance_with_budget(
+                &document,
+                &mut owner,
+                &mut journal,
+                &Default::default(),
+                &Default::default(),
+                &budget,
+            )
+            .unwrap();
+            assert_eq!(
+                run.status,
+                if policy == crate::config::UnknownUsage::Warn {
+                    GraphStatus::Complete
+                } else {
+                    GraphStatus::Paused
+                }
+            );
+            assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+            assert!(
+                run.checkpoint
+                    .usage_events
+                    .iter()
+                    .any(|event| event.metric == "telemetry"
+                        && event.reason.as_deref() == Some("no fake observation remains"))
+            );
+        }
+    }
+
+    #[test]
+    fn cost_unknown_reason_is_recorded() {
+        let document = graph(vec![node("one", route("first"))]);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([AttemptObservation::Terminal {
+                attempt_ref: Some("host/attempt".into()),
+                outcome: AttemptOutcome::Succeeded,
+                launched: true,
+                result: None,
+            }]),
+            usage: AttemptUsage {
+                cost_unknown_reason: Some("config/telemetry-prices.toml: missing".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let run = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut MemoryJournal::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(
+            run.checkpoint
+                .usage_events
+                .iter()
+                .any(|event| event.metric == "cost_usd"
+                    && event.reason.as_deref() == Some("config/telemetry-prices.toml: missing"))
+        );
+    }
+
+    #[test]
+    fn document_limits_clamp_and_note_current_ceiling() {
+        let mut document = graph(vec![
+            node("one", route("first")),
+            node("two", route("first")),
+        ]);
+        document.limits = Some(GraphLimitOverrides {
+            nodes: Some(3),
+            ..Default::default()
+        });
+        let mut config = crate::config::GraphConfig::default();
+        config.limit_ceiling.nodes = 1;
+        let limits = document.limits.as_ref().unwrap().resolve(&config).unwrap();
+        assert_eq!(limits.nodes, 1);
+        let run = advance_with_budget(
+            &document,
+            &mut FakeOwner::default(),
+            &mut MemoryJournal::default(),
+            &limits,
+            &config.limit_ceiling,
+            &config.budget,
+        )
+        .unwrap();
+        assert_eq!(run.status, GraphStatus::Paused);
+        assert!(run.checkpoint.limit_notes[0].contains("clamped to ceiling 1"));
+    }
+
+    #[test]
+    fn settled_graph_never_saves_a_new_structural_pause() {
+        struct RecordingJournal {
+            checkpoint: GraphCheckpoint,
+            saves: Vec<GraphCheckpoint>,
+        }
+        impl GraphJournal for RecordingJournal {
+            type Error = Infallible;
+            fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+                Ok(Some(self.checkpoint.clone()))
+            }
+            fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+                self.saves.push(checkpoint.clone());
+                Ok(())
+            }
+        }
+        let document = graph(vec![
+            node("one", route("first")),
+            node("two", route("first")),
+        ]);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                terminal(AttemptOutcome::Succeeded),
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..Default::default()
+        };
+        let completed = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        let mut journal = RecordingJournal {
+            checkpoint: completed.checkpoint,
+            saves: Vec::new(),
+        };
+        let limits = crate::config::GraphLimits {
+            nodes: 1,
+            ..Default::default()
+        };
+        let run = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &limits,
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(run.status, GraphStatus::Complete);
+        assert!(
+            journal
+                .saves
+                .iter()
+                .all(|checkpoint| checkpoint.pause_reason.is_none())
+        );
+    }
+
+    #[test]
+    fn unset_extensions_are_refused() {
+        let mut limits = crate::config::GraphLimits {
+            concurrency: None,
+            ..Default::default()
+        };
+        let err = apply_limit_extension(
+            &mut limits,
+            &Default::default(),
+            "limits.concurrency=2",
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("limits.concurrency") && err.contains("not configured"));
+        for extension in [
+            "per_graph.tokens=20",
+            "per_node.cost_usd=5",
+            "per_graph.wall_time_seconds=10",
+        ] {
+            let err = apply_extension(&mut Default::default(), extension, false).unwrap_err();
+            assert!(
+                err.contains(extension.split('=').next().unwrap())
+                    && err.contains("not configured")
+            );
+        }
+    }
+
+    #[test]
+    fn structural_limit_pauses_and_extension_resumes() {
+        let document = graph(vec![
+            node("one", route("first")),
+            node("two", route("first")),
+        ]);
+        let limits = crate::config::GraphLimits {
+            nodes: 1,
+            ..Default::default()
+        };
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                terminal(AttemptOutcome::Succeeded),
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let paused = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &limits,
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(paused.status, GraphStatus::Paused);
+        assert!(
+            paused
+                .checkpoint
+                .pause_reason
+                .unwrap()
+                .contains("limits.nodes=1")
+        );
+        assert!(owner.calls.is_empty());
+        let resumed = resume_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &limits,
+            &Default::default(),
+            &Default::default(),
+            &["limits.nodes=2".into()],
+        )
+        .unwrap();
+        assert_eq!(resumed.status, GraphStatus::Complete);
+        assert_eq!(resumed.checkpoint.extensions, ["limits.nodes=2"]);
+    }
+
+    #[test]
+    fn extensions_are_absolute_idempotent_and_respect_changed_ceiling() {
+        let mut limits = crate::config::GraphLimits {
+            nodes: 1,
+            ..Default::default()
+        };
+        let mut ceiling = crate::config::GraphLimits {
+            nodes: 3,
+            ..Default::default()
+        };
+        apply_limit_extension(&mut limits, &ceiling, "limits.nodes=2", false).unwrap();
+        apply_limit_extension(&mut limits, &ceiling, "limits.nodes=2", false).unwrap();
+        assert_eq!(limits.nodes, 2);
+        limits.nodes = 3;
+        apply_limit_extension(&mut limits, &ceiling, "limits.nodes=2", true).unwrap();
+        assert_eq!(limits.nodes, 3);
+        limits.nodes = 1;
+        ceiling.nodes = 1;
+        apply_limit_extension(&mut limits, &ceiling, "limits.nodes=2", true).unwrap();
+        assert_eq!(limits.nodes, 1);
+        assert!(
+            apply_limit_extension(&mut limits, &ceiling, "limits.nodes=2", false)
+                .unwrap_err()
+                .contains("limits.nodes=2")
+        );
+        let mut budget = crate::config::GraphBudget {
+            per_graph: crate::config::BudgetLimit {
+                tokens: Some(100),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_extension(&mut budget, "per_graph.tokens=200", false).unwrap();
+        apply_extension(&mut budget, "per_graph.tokens=200", false).unwrap();
+        budget.per_graph.tokens = Some(400);
+        apply_extension(&mut budget, "per_graph.tokens=200", false).unwrap();
+        assert_eq!(budget.per_graph.tokens, Some(400));
+        assert!(
+            apply_extension(&mut budget, "per_graph.tokens=0", false)
+                .unwrap_err()
+                .contains("per_graph.tokens=0")
+        );
+    }
+
+    #[test]
+    fn retried_resume_replays_extension_after_config_and_ceiling_changes() {
+        let document = graph(vec![
+            node("one", route("first")),
+            node("two", route("first")),
+        ]);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                terminal(AttemptOutcome::Succeeded),
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let limits = crate::config::GraphLimits {
+            nodes: 1,
+            ..Default::default()
+        };
+        let ceiling = crate::config::GraphLimits {
+            nodes: 2,
+            ..Default::default()
+        };
+        let extension = ["limits.nodes=2".into()];
+        let first = resume_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &limits,
+            &ceiling,
+            &Default::default(),
+            &extension,
+        )
+        .unwrap();
+        assert_eq!(first.status, GraphStatus::Complete);
+        let raised = crate::config::GraphLimits {
+            nodes: 3,
+            ..Default::default()
+        };
+        let replay = resume_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &raised,
+            &raised,
+            &Default::default(),
+            &extension,
+        )
+        .unwrap();
+        assert_eq!(replay.status, GraphStatus::Complete);
+        assert_eq!(replay.checkpoint.extensions, extension);
+        let replay = resume_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &limits,
+            &limits,
+            &Default::default(),
+            &extension,
+        )
+        .unwrap();
+        assert_eq!(replay.status, GraphStatus::Complete);
+        assert_eq!(owner.calls.len(), 2);
+    }
+
+    #[test]
+    fn fan_out_and_depth_pause_before_launch() {
+        let root = node("root", route("first"));
+        let mut a = node("a", route("first"));
+        a.depends_on.push("root".into());
+        let mut b = node("b", route("first"));
+        b.depends_on.push("root".into());
+        let mut c = node("c", route("first"));
+        c.depends_on.push("a".into());
+        let document = graph(vec![root, a, b, c]);
+        for (limits, key) in [
+            (
+                crate::config::GraphLimits {
+                    fan_out_width: 1,
+                    ..Default::default()
+                },
+                "fan_out_width",
+            ),
+            (
+                crate::config::GraphLimits {
+                    expansion_depth: 1,
+                    ..Default::default()
+                },
+                "expansion_depth",
+            ),
+        ] {
+            let mut owner = FakeOwner::default();
+            let run = advance_with_budget(
+                &document,
+                &mut owner,
+                &mut MemoryJournal::default(),
+                &limits,
+                &Default::default(),
+                &Default::default(),
+            )
+            .unwrap();
+            assert_eq!(run.status, GraphStatus::Paused);
+            assert!(run.checkpoint.pause_reason.unwrap().contains(key));
+            assert!(owner.calls.is_empty());
+        }
+    }
+
+    #[test]
+    fn final_budget_exhaustion_still_delivers() {
+        let mut document = graph(vec![node("one", route("first"))]);
+        document.delivery = Some(provenant_records::run::DeliveryMode::Pr);
+        document.integration_branch = Some("integration".into());
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([AttemptObservation::Terminal {
+                attempt_ref: Some("host/attempt".into()),
+                outcome: AttemptOutcome::Succeeded,
+                launched: true,
+                result: None,
+            }]),
+            usage: AttemptUsage {
+                tokens: Some(10),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let budget = crate::config::GraphBudget {
+            per_graph: crate::config::BudgetLimit {
+                tokens: Some(10),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let run = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut MemoryJournal::default(),
+            &Default::default(),
+            &Default::default(),
+            &budget,
+        )
+        .unwrap();
+        assert_eq!(run.status, GraphStatus::Complete);
+        assert!(run.checkpoint.delivered);
+        assert_eq!(owner.deliveries, 1);
+    }
+
+    #[test]
+    fn budget_pause_stops_admission_and_extension_resumes() {
+        let document = graph(vec![
+            node("one", route("first")),
+            node("two", route("first")),
+        ]);
+        let budget = crate::config::GraphBudget {
+            per_graph: crate::config::BudgetLimit {
+                tokens: Some(10),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let observation = || AttemptObservation::Terminal {
+            attempt_ref: Some("host/attempt".into()),
+            outcome: AttemptOutcome::Succeeded,
+            launched: true,
+            result: None,
+        };
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([observation(), observation()]),
+            usage: AttemptUsage {
+                tokens: Some(10),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let paused = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+            &budget,
+        )
+        .unwrap();
+        assert_eq!(paused.status, GraphStatus::Paused);
+        assert_eq!(owner.calls.len(), 1);
+        let resumed = resume_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+            &budget,
+            &["per_graph.tokens=30".into()],
+        )
+        .unwrap();
+        assert_eq!(resumed.status, GraphStatus::Complete);
+        assert_eq!(owner.calls.len(), 2);
+    }
+
+    #[test]
+    fn unknown_usage_warns_or_pauses_and_events_are_idempotent() {
+        let document = graph(vec![
+            node("one", route("first")),
+            node("two", route("first")),
+        ]);
+        let observation = || AttemptObservation::Terminal {
+            attempt_ref: Some("host/attempt".into()),
+            outcome: AttemptOutcome::Succeeded,
+            launched: true,
+            result: None,
+        };
+        for policy in [
+            crate::config::UnknownUsage::Warn,
+            crate::config::UnknownUsage::Pause,
+        ] {
+            let budget = crate::config::GraphBudget {
+                per_graph: crate::config::BudgetLimit {
+                    tokens: Some(100),
+                    ..Default::default()
+                },
+                unknown_usage: policy,
+                ..Default::default()
+            };
+            let mut owner = FakeOwner {
+                observations: VecDeque::from([observation(), observation()]),
+                usage: AttemptUsage {
+                    tokens: Some(5),
+                    tokens_partial: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut journal = MemoryJournal::default();
+            let run = advance_with_budget(
+                &document,
+                &mut owner,
+                &mut journal,
+                &Default::default(),
+                &Default::default(),
+                &budget,
+            )
+            .unwrap();
+            assert_eq!(
+                run.status,
+                if policy == crate::config::UnknownUsage::Pause {
+                    GraphStatus::Paused
+                } else {
+                    GraphStatus::Complete
+                }
+            );
+            assert_eq!(
+                owner.calls.len(),
+                if policy == crate::config::UnknownUsage::Pause {
+                    1
+                } else {
+                    2
+                }
+            );
+            assert!(
+                run.checkpoint
+                    .unknown_usage
+                    .iter()
+                    .any(|warning| warning.contains("tokens"))
+            );
+            let mut checkpoint = run.checkpoint;
+            let events = checkpoint.usage_events.clone();
+            update_usage_warnings(&mut checkpoint, &budget);
+            assert_eq!(checkpoint.usage_events, events);
+        }
+    }
+
+    #[test]
+    fn graph_wall_budget_sums_provider_time_and_preserves_partial_lower_bound() {
+        let document = graph(vec![
+            node("one", route("first")),
+            node("two", route("first")),
+        ]);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([AttemptObservation::Terminal {
+                attempt_ref: Some("host/attempt".into()),
+                outcome: AttemptOutcome::Succeeded,
+                launched: true,
+                result: None,
+            }]),
+            usage: AttemptUsage {
+                tokens: Some(12),
+                tokens_partial: true,
+                wall_time_seconds: Some(10),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let budget = crate::config::GraphBudget {
+            per_graph: crate::config::BudgetLimit {
+                tokens: Some(12),
+                wall_time_seconds: Some(100),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let run = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut MemoryJournal::default(),
+            &Default::default(),
+            &Default::default(),
+            &budget,
+        )
+        .unwrap();
+        assert_eq!(run.status, GraphStatus::Paused);
+        assert!(
+            run.checkpoint
+                .pause_reason
+                .as_ref()
+                .unwrap()
+                .contains("tokens")
+        );
+        let mut checkpoint = run.checkpoint;
+        let wall_budget = crate::config::GraphBudget {
+            per_graph: crate::config::BudgetLimit {
+                wall_time_seconds: Some(11),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(budget_reason(&checkpoint, &wall_budget).is_none());
+        checkpoint.nodes[0].attempts[0]
+            .usage
+            .as_mut()
+            .unwrap()
+            .wall_time_seconds = Some(11);
+        assert!(
+            budget_reason(&checkpoint, &wall_budget)
+                .unwrap()
+                .contains("wall_time_seconds")
+        );
     }
 
     #[test]
@@ -1990,6 +3326,84 @@ mod tests {
         assert_eq!(owner.calls.len(), 1);
         assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
         assert_eq!(run.checkpoint.nodes[0].attempts.len(), 1);
+    }
+
+    #[test]
+    fn concurrency_cap_observes_running_attempts_before_admitting_more() {
+        let document = graph(vec![
+            node("one", route("first")),
+            node("two", route("first")),
+            node("three", route("first")),
+        ]);
+        let limits = crate::config::GraphLimits {
+            concurrency: Some(2),
+            ..Default::default()
+        };
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                AttemptObservation::Pending { attempt_ref: None },
+                AttemptObservation::Pending { attempt_ref: None },
+                AttemptObservation::Pending { attempt_ref: None },
+                terminal(AttemptOutcome::Succeeded),
+                AttemptObservation::Pending { attempt_ref: None },
+            ]),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let first = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &limits,
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(first.status, GraphStatus::Pending);
+        assert_eq!(owner.calls.len(), 2);
+        assert_eq!(
+            first
+                .checkpoint
+                .nodes
+                .iter()
+                .filter(|n| n.state == NodeState::Running)
+                .count(),
+            2
+        );
+        assert_eq!(
+            first
+                .checkpoint
+                .nodes
+                .iter()
+                .filter(|n| n.state == NodeState::Pending)
+                .count(),
+            1
+        );
+        let first_keys: Vec<_> = owner.calls.iter().map(|call| call.0.clone()).collect();
+        let second = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &limits,
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(second.status, GraphStatus::Pending);
+        assert_eq!(owner.calls.len(), 5);
+        assert_eq!(owner.calls[2].0, first_keys[0]);
+        assert_eq!(owner.calls[3].0, first_keys[1]);
+        assert_ne!(owner.calls[4].0, first_keys[0]);
+        assert_ne!(owner.calls[4].0, first_keys[1]);
+        assert_eq!(
+            second
+                .checkpoint
+                .nodes
+                .iter()
+                .filter(|n| n.state == NodeState::Running)
+                .count(),
+            2
+        );
     }
 
     #[test]

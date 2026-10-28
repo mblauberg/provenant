@@ -28,13 +28,14 @@ use provenant_os::fs::{
 use provenant_os::pid::{CwdObservation, CwdObserver, SystemCwdObserver};
 use provenant_records::{PathWire, PathWireError};
 use provenant_supervisor::census::{
-    ProcessFact, ProcessObservation, ProcessObserver, SystemProcessObserver, current_process,
+    Ancestry, ProcessFact, ProcessLookup, ProcessObservation, ProcessObserver,
+    SystemProcessObserver, current_process,
 };
 use provenant_supervisor::custody::WriterBinding;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
@@ -68,6 +69,10 @@ pub enum WorktreeError {
     GitOperationInProgress,
     #[error("worktree writer is live")]
     LiveWriter,
+    #[error(
+        "incomplete worker census or ancestry; retry `provenant land` when process observation is complete"
+    )]
+    IncompleteCensus,
     #[error("worktree writer or registration is unknown")]
     UnknownWriter,
     #[error("worktree operation was cancelled")]
@@ -286,6 +291,18 @@ pub enum WorkerState {
 /// state per canonical candidate root; they never grant signal authority.
 pub trait WorkerObserver: Send + Sync {
     fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState>;
+
+    /// Landing requires positive observation of a free root. Ordinary removal
+    /// still relies on writer custody when the host census is unobservable.
+    fn requires_complete_census(&self) -> bool {
+        false
+    }
+
+    /// Landing may remove its caller's checkout. Exclude only the caller and
+    /// its verified ancestors through the session leader, never other workers.
+    fn observe_roots_for_land(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        self.observe_roots(roots)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -293,65 +310,101 @@ pub struct SystemWorkerObserver;
 
 impl WorkerObserver for SystemWorkerObserver {
     fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
-        let mut states: BTreeMap<_, _> = roots
+        system_worker_roots(roots, false)
+    }
+
+    fn observe_roots_for_land(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        system_worker_roots(roots, true)
+    }
+}
+
+fn system_worker_roots(roots: &[PathBuf], ancestors: bool) -> BTreeMap<PathBuf, WorkerState> {
+    let ProcessObservation::Present(current) = current_process() else {
+        return roots
             .iter()
             .cloned()
-            .map(|root| (root, WorkerState::Free))
+            .map(|root| (root, WorkerState::Unknown))
             .collect();
-        if roots.is_empty() {
-            return states;
-        }
-        let current = match current_process() {
-            ProcessObservation::Present(fact) => fact.identity,
-            ProcessObservation::Absent | ProcessObservation::Unknown(_) => {
-                return roots
-                    .iter()
-                    .cloned()
-                    .map(|root| (root, WorkerState::Unknown))
-                    .collect();
-            }
-        };
-        let observer = SystemProcessObserver;
-        let census = match observer.census(65_536) {
-            Ok(census) if census.is_complete() => census,
-            Ok(_) | Err(_) => {
-                return roots
-                    .iter()
-                    .cloned()
-                    .map(|root| (root, WorkerState::Unknown))
-                    .collect();
-            }
-        };
-        let cwd_observer = SystemCwdObserver;
-        let mut unknown_all = false;
-        for fact in census.facts() {
-            if fact.identity == current {
-                continue;
-            }
-            match observe_same_process(&observer, &cwd_observer, fact) {
-                NativeCwd::Gone => {}
-                NativeCwd::Unknown => unknown_all = true,
-                NativeCwd::Path(path) => {
-                    let canonical = match canonicalize(&path) {
-                        Ok(path) => path,
-                        Err(_) => {
-                            unknown_all = true;
-                            continue;
-                        }
-                    };
-                    record_live_path(&mut states, &canonical);
-                }
-            }
-        }
-        if unknown_all {
-            for state in states.values_mut() {
-                if *state != WorkerState::Live {
-                    *state = WorkerState::Unknown;
-                }
-            }
-        }
-        states
+    };
+    observe_worker_roots(
+        roots,
+        &SystemProcessObserver,
+        &SystemCwdObserver,
+        &current,
+        ancestors,
+    )
+}
+
+fn observe_worker_roots(
+    roots: &[PathBuf],
+    observer: &dyn ProcessObserver,
+    cwd_observer: &dyn CwdObserver,
+    current: &ProcessFact,
+    ancestors: bool,
+) -> BTreeMap<PathBuf, WorkerState> {
+    let mut states: BTreeMap<_, _> = roots
+        .iter()
+        .cloned()
+        .map(|root| (root, WorkerState::Free))
+        .collect();
+    if roots.is_empty() {
+        return states;
     }
+    let Ok(census) = observer.census(65_536) else {
+        return roots
+            .iter()
+            .cloned()
+            .map(|root| (root, WorkerState::Unknown))
+            .collect();
+    };
+    let mut unknown_all = !census.is_complete();
+    let mut excluded = BTreeSet::from([current.identity.clone()]);
+    if ancestors {
+        let mut child = current;
+        while child.identity.pid != current.identity.session_id {
+            let ProcessLookup::Present(parent) = census.process(child.parent_pid) else {
+                unknown_all = true;
+                break;
+            };
+            if parent.identity.boot != current.identity.boot
+                || parent.identity.session_id != current.identity.session_id
+                || census.ancestry(&child.identity, &parent.identity) != Ancestry::Yes
+                || !excluded.insert(parent.identity.clone())
+            {
+                unknown_all = true;
+                break;
+            }
+            child = parent;
+        }
+    }
+    // An incomplete census must not hide positively observed live workers.
+    for fact in census.facts() {
+        if excluded.contains(&fact.identity) {
+            continue;
+        }
+        match observe_same_process(observer, cwd_observer, fact) {
+            NativeCwd::Gone => {}
+            NativeCwd::Unknown => unknown_all = true,
+            NativeCwd::Path(path) => {
+                let canonical = match canonicalize(&path) {
+                    Ok(path) => path,
+                    Err(_) => {
+                        unknown_all = true;
+                        continue;
+                    }
+                };
+                record_live_path(&mut states, &canonical);
+            }
+        }
+    }
+    if unknown_all {
+        for state in states.values_mut() {
+            if *state != WorkerState::Live {
+                *state = WorkerState::Unknown;
+            }
+        }
+    }
+    states
 }
 
 enum NativeCwd {
@@ -973,6 +1026,9 @@ fn lock_worktree_for_mutation(
         .copied()
         .unwrap_or(WorkerState::Unknown)
     {
+        WorkerState::Unknown if context.workers.requires_complete_census() => {
+            Err(WorktreeError::IncompleteCensus)
+        }
         WorkerState::Free | WorkerState::Unknown => Ok(LockedWorktree {
             verified,
             state,
@@ -1749,7 +1805,9 @@ fn retain_reason(error: &WorktreeError) -> RetainReason {
         WorktreeError::Dirty | WorktreeError::IgnoredPaths(_) => RetainReason::Dirty,
         WorktreeError::GitOperationInProgress => RetainReason::GitOperationInProgress,
         WorktreeError::LiveWriter => RetainReason::LiveWriter,
-        WorktreeError::UnknownWriter | WorktreeError::Cancelled => RetainReason::UnknownWriter,
+        WorktreeError::UnknownWriter
+        | WorktreeError::Cancelled
+        | WorktreeError::IncompleteCensus => RetainReason::UnknownWriter,
         WorktreeError::CheckedOut => RetainReason::CheckedOut,
         WorktreeError::IdentityChanged => RetainReason::Changed,
         WorktreeError::Primary => RetainReason::Primary,
@@ -1964,6 +2022,30 @@ fn primary_integration(
         .strip_prefix("ref: ")
         .ok_or(WorktreeError::InvalidRequest)?;
     pin_branch_ref(context, name, cancel)
+}
+
+/// Read-only dirty/output prechecks before a caller releases recovered writer
+/// custody. The caller holds the writer lock; removal rechecks after recovery.
+pub fn check_removal_preconditions(
+    context: &WorktreeContext<'_>,
+    worktree: &VerifiedWorktree,
+    output: &provenant_config::ProjectGcSettings,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    worktree.repo().revalidate()?;
+    match worktree_dirty_at(context, worktree.repo(), cancel)? {
+        WorktreeCondition::Clean => Ok(()),
+        WorktreeCondition::Ignored => gc::precheck_removal(
+            context,
+            worktree.repo(),
+            &output.regenerable,
+            &output.keep,
+            cancel,
+        ),
+        WorktreeCondition::Dirty => Err(WorktreeError::Dirty),
+        WorktreeCondition::GitOperationInProgress => Err(WorktreeError::GitOperationInProgress),
+        WorktreeCondition::Unknown => Err(WorktreeError::UnknownWriter),
+    }
 }
 
 /// Remove one clean managed linked worktree, or prune a caller-scoped set of
@@ -3187,6 +3269,185 @@ mod lifecycle_tests {
             if change == "ignored" {
                 assert_eq!(fs::read_to_string(path.join(".env"))?, "new secret");
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
+    -> Result<(), Box<dyn Error>> {
+        use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
+        struct Processes(Census);
+        impl ProcessObserver for Processes {
+            fn boot_identity(&self) -> Result<String, CensusError> {
+                Ok("boot".into())
+            }
+            fn observe(&self, pid: i64) -> ProcessObservation {
+                match self.0.process(pid) {
+                    ProcessLookup::Present(fact) => ProcessObservation::Present(fact.clone()),
+                    _ => ProcessObservation::Absent,
+                }
+            }
+            fn census(&self, _: usize) -> Result<Census, CensusError> {
+                Ok(self.0.clone())
+            }
+        }
+        struct Cwds(BTreeMap<i64, PathBuf>);
+        impl CwdObserver for Cwds {
+            fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+                Ok(self
+                    .0
+                    .get(&pid)
+                    .cloned()
+                    .map(CwdObservation::Path)
+                    .unwrap_or(CwdObservation::Gone))
+            }
+        }
+        let fixture = Fixture::new()?;
+        let root = fixture.root.clone();
+        let outside = fixture._temp.path().to_path_buf();
+        let fact = |pid, parent_pid, session_id| ProcessFact {
+            identity: ProcessIdentity {
+                boot: "boot".into(),
+                pid,
+                native_start: pid as u64,
+                group_id: session_id,
+                session_id,
+            },
+            parent_pid,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let current = fact(100, 90, 10);
+        let facts = vec![
+            fact(1, 0, 1),
+            fact(10, 1, 10),
+            fact(80, 10, 10),
+            fact(90, 80, 10),
+            current.clone(),
+            fact(95, 80, 10),
+            fact(110, 100, 10),
+            fact(200, 1, 200),
+        ];
+        for complete in [true, false] {
+            let processes = Processes(Census::from_observations(
+                facts.clone(),
+                [],
+                [],
+                complete,
+                false,
+                32,
+            )?);
+            let mut cwds = Cwds(
+                facts
+                    .iter()
+                    .map(|fact| {
+                        (
+                            fact.identity.pid,
+                            if [10, 80, 90, 100].contains(&fact.identity.pid) {
+                                root.clone()
+                            } else {
+                                outside.clone()
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+            let observe = |cwds: &Cwds, ancestors| {
+                observe_worker_roots(
+                    std::slice::from_ref(&root),
+                    &processes,
+                    cwds,
+                    &current,
+                    ancestors,
+                )[&root]
+            };
+            assert_eq!(observe(&cwds, false), WorkerState::Live);
+            assert_eq!(
+                observe(&cwds, true),
+                if complete {
+                    WorkerState::Free
+                } else {
+                    WorkerState::Unknown
+                }
+            );
+            // Above-session ancestors, siblings, descendants and independent
+            // sessions remain live, even when the census is incomplete.
+            for pid in [1, 95, 110, 200] {
+                cwds.0.insert(pid, root.clone());
+                assert_eq!(observe(&cwds, true), WorkerState::Live, "pid {pid}");
+                cwds.0.insert(pid, outside.clone());
+            }
+        }
+        for ambiguity in [
+            "equal_stamp",
+            "younger_parent",
+            "missing_hop",
+            "cycle",
+            "reused_current",
+        ] {
+            let mut ambiguous = facts.clone();
+            match ambiguity {
+                "equal_stamp" => {
+                    ambiguous
+                        .iter_mut()
+                        .find(|fact| fact.identity.pid == 90)
+                        .ok_or("parent")?
+                        .identity
+                        .native_start = 100
+                }
+                "younger_parent" => {
+                    ambiguous
+                        .iter_mut()
+                        .find(|fact| fact.identity.pid == 90)
+                        .ok_or("parent")?
+                        .identity
+                        .native_start = 101
+                }
+                "missing_hop" => ambiguous.retain(|fact| fact.identity.pid != 90),
+                "cycle" => {
+                    ambiguous
+                        .iter_mut()
+                        .find(|fact| fact.identity.pid == 80)
+                        .ok_or("parent")?
+                        .parent_pid = 90
+                }
+                "reused_current" => {
+                    ambiguous
+                        .iter_mut()
+                        .find(|fact| fact.identity.pid == 100)
+                        .ok_or("current")?
+                        .identity
+                        .native_start += 1
+                }
+                _ => unreachable!(),
+            }
+            let processes = Processes(Census::from_observations(
+                ambiguous,
+                [],
+                [],
+                true,
+                false,
+                32,
+            )?);
+            let cwds = Cwds(
+                facts
+                    .iter()
+                    .map(|fact| (fact.identity.pid, outside.clone()))
+                    .collect(),
+            );
+            assert_eq!(
+                observe_worker_roots(
+                    std::slice::from_ref(&root),
+                    &processes,
+                    &cwds,
+                    &current,
+                    true
+                )[&root],
+                WorkerState::Unknown,
+                "{ambiguity}"
+            );
         }
         Ok(())
     }

@@ -353,7 +353,16 @@ impl ValidateInput for IdentityInput {
 impl ValidateInput for GraphInput {
     fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
-            Self::Run { document } | Self::Resume { document } => path_text(document, "document"),
+            Self::Run { document } => path_text(document, "document"),
+            Self::Resume { document, extend } => {
+                path_text(document, "document")?;
+                if extend.len() > 64 || extend.iter().any(|entry| {
+                    entry.len() > 256 || !matches!(entry.split_once('='), Some((key, value)) if !key.is_empty() && !value.is_empty())
+                }) {
+                    return Err(field("extend"));
+                }
+                Ok(())
+            }
             Self::Status { id } | Self::Cancel { id } => {
                 if crate::graph::valid_identifier(id) {
                     Ok(())
@@ -477,7 +486,7 @@ impl ValidateInput for HostsInput {
 
 #[cfg(test)]
 mod tests {
-    use super::super::facade::{OutputInput, RunInput, SubmitInput};
+    use super::super::facade::{GraphInput, OutputInput, RunInput, SubmitInput};
     use super::super::{
         ClaimInput, CoordinationApi, CoordinationError, CoordinationService, LandingInput,
         TaskInput,
@@ -504,6 +513,19 @@ mod tests {
             "tasks":[{"prompt":"do work","route":{"kind":"named","name":"utility"},"timeout_seconds":1}]
         }))
         .is_ok_and(|input| input.validate_input(provenant_core::WaitTransport::Cli).is_ok())
+    }
+
+    #[test]
+    fn graph_resume_extensions_require_key_value_pairs() {
+        for entry in ["nodes", "=10", "nodes="] {
+            rejects::<GraphInput>(
+                json!({"op":"resume", "document":"graph.json", "extend":[entry]}),
+                "extend",
+            );
+        }
+        assert!(serde_json::from_value::<GraphInput>(json!({
+            "op":"resume", "document":"graph.json", "extend":["nodes=1024", "graph_tokens=10000"]
+        })).is_ok());
     }
 
     #[test]

@@ -330,6 +330,44 @@ impl RunStore {
             }
         }
     }
+    /// Release a landed worktree's retained writer reservation only after its
+    /// canonical terminal transaction and recorded writer binding are verified.
+    /// This never stops a process or settles a nonterminal attempt.
+    pub fn settle_landed_writer(
+        &self,
+        recovery: custody::Recovery,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        let scope = recovery.scope();
+        let record = self.record(scope.attempt, call)?;
+        if record.project_id != self.context.project_id || Self::scope(&record) != scope {
+            return Err(RunError::Validation("land writer custody scope mismatch"));
+        }
+        if !matches!(record.state, AttemptState::Terminal { .. }) {
+            return Err(RunError::Nonterminal);
+        }
+        let request = self.request(record.run_id, call)?;
+        let writer = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == record.task_id)
+            .and_then(|task| task.writer.as_ref())
+            .ok_or(RunError::Validation("land writer request missing"))?;
+        let launch = crate::prepare_writer(writer, &self.writer_registry, record.project_id)?;
+        recovery
+            .writer_base(
+                launch.worktree.repo().root_dir(),
+                launch.worktree.repo().private_dir(),
+                launch.branch.as_str(),
+            )
+            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+        if recovery.observe() != custody::RecoveryState::Absent {
+            return Err(RunError::Validation("land writer custody is not absent"));
+        }
+        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        self.settle_recovered(&attempt, recovery)
+    }
+
     pub(crate) fn settle_recovered(
         &self,
         attempt: &Directory,
