@@ -1180,18 +1180,9 @@ fn read_output(
         Part::Events => OutputPart::Events,
         Part::Transcript => return Err(unsupported("--part transcript")),
     };
-    let offset = if command.tail.is_some() {
-        if !matches!(command.part, Part::Result) {
-            return Err(unsupported("--tail with a part other than result"));
-        }
-        let records = peer.records(&[(host, attempt)])?;
-        records
-            .first()
-            .and_then(|record| record.result.as_ref())
-            .map_or(0, |result| result.bytes.saturating_sub(command.max_bytes))
-    } else {
-        command.offset
-    };
+    if command.tail.is_some() {
+        return Err(unsupported("--tail"));
+    }
     if command.trace {
         return Err(unsupported("--trace"));
     }
@@ -1201,47 +1192,13 @@ fn read_output(
             host: Some(host),
         },
         part,
-        offset,
+        offset: command.offset,
         max_bytes: command.max_bytes,
     };
     let PeerResult::Output(chunk) = peer.call(host, PeerAction::Output { input })? else {
         return Err(corrupt());
     };
-    let chunk = match command.tail {
-        Some(lines) => tail_result(chunk, lines.min(super::TAIL_MAX))?,
-        None => chunk,
-    };
     chunk_response(attempt, host, &command.part, chunk)
-}
-
-fn tail_result(mut chunk: OutputResult, lines: u64) -> Result<OutputResult, Fail> {
-    let OutputResult::Chunk { offset, bytes, .. } = &mut chunk else {
-        return Err(corrupt());
-    };
-    let raw = match bytes {
-        OutputBytes::Utf8(text) => text.as_bytes().to_vec(),
-        OutputBytes::Base64(text) => {
-            provenant_fabric_runtime::handoff::decode_base64(text).ok_or_else(corrupt)?
-        }
-    };
-    let boundary = raw
-        .iter()
-        .position(|byte| byte & 0xc0 != 0x80)
-        .unwrap_or(raw.len());
-    let body = raw[boundary..]
-        .strip_suffix(b"\n")
-        .unwrap_or(&raw[boundary..]);
-    let start = body
-        .iter()
-        .enumerate()
-        .rev()
-        .filter(|(_, byte)| **byte == b'\n')
-        .nth(usize::try_from(lines.saturating_sub(1)).unwrap_or(usize::MAX))
-        .map_or(0, |(index, _)| index + 1)
-        + boundary;
-    *offset += start as u64;
-    *bytes = OutputBytes::from_bytes(raw[start..].to_vec());
-    Ok(chunk)
 }
 
 fn chunk_response(
@@ -1664,34 +1621,6 @@ mod tests {
         assert_eq!(task.base.as_deref(), Some("main"));
         assert_eq!(task.prompt, "review");
         assert_eq!(task.access, AccessMode::ReadOnly);
-    }
-
-    #[test]
-    fn remote_result_tail_keeps_utf8_boundaries_and_byte_offsets() -> Result {
-        let attempt = AttemptId::from_bytes([3; 16]);
-        let host = HostId::from_bytes([7; 16]);
-        let raw = b"\xa9\nfirst\nlast\n";
-        let chunk = OutputResult::Chunk {
-            target: AttemptTarget {
-                attempt,
-                host: Some(host),
-            },
-            part: OutputPart::Result,
-            state: "succeeded".into(),
-            reason: None,
-            offset: 100,
-            next_offset: 100 + raw.len() as u64,
-            eof: true,
-            digest: provenant_core::Digest::from_bytes([0; 32]),
-            bytes: OutputBytes::from_bytes(raw.to_vec()),
-        };
-        let chunk = tail_result(chunk, 1).map_err(|fail| fail.message)?;
-        let (data, text) =
-            chunk_response(attempt, host, &Part::Result, chunk).map_err(|fail| fail.message)?;
-        assert_eq!(text, "last\n");
-        assert_eq!(data["offset"], 108);
-        assert_eq!(data["next_offset"], 113);
-        Ok(())
     }
 
     #[test]

@@ -2905,6 +2905,21 @@ fn peer_dispatch_launches_a_large_argv_prompt() -> Result {
 fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let cancel = provenant_core::CancelToken::new();
+    let backend = provenant_confinement::permissions::system_backend(
+        &provenant_confinement::permissions::BackendContext {
+            executor: &executor,
+            cancel: &cancel,
+            #[cfg(target_os = "macos")]
+            env: &[],
+        },
+    );
+    if std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_some()
+        && let Err(error) = &backend
+    {
+        return Err(error.to_string().into());
+    }
     // A provider the peer can launch: it answers the version probe, then
     // writes a known stderr line. The production read-only profile anchors
     // the host Rust runtime roots.
@@ -2994,7 +3009,7 @@ fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
 
     let peer_text = peer.to_string();
     let (status, stderr) = json_command(&rig, &["output", &target, "--part", "stderr", "--json"])?;
-    if cfg!(target_os = "macos") {
+    if backend.is_ok() {
         assert_eq!(status, 0, "{stderr} {placed}");
         assert_eq!(stderr["data"]["host"], peer.to_string());
         assert_eq!(stderr["data"]["offset"], 0);
@@ -3005,10 +3020,16 @@ fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
             "{stderr}"
         );
     } else {
-        // Confined launch is macOS-only, so the peer rejects before any
-        // captured output exists. The terminal attempt's missing output is
-        // reported by the peer.
+        // Unsupported or nested sandboxes reject before captured output
+        // exists. The peer reports the terminal attempt's missing output.
         assert_eq!(lane["state"], "rejected", "{placed}");
+        let error = backend.as_ref().err().ok_or("backend error")?;
+        assert!(
+            lane["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains(&error.to_string())),
+            "{placed}"
+        );
         assert_eq!(stderr["error"]["code"], "NOT_FOUND", "{stderr}");
         assert!(
             stderr["error"]["message"]
@@ -3033,7 +3054,7 @@ fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
         words.extend(["--part", "stderr", "--json"]);
         let (direct_status, direct) = json_command(&rig, &words)?;
         assert_eq!(direct_status, status_of_stderr, "{words:?} {direct}");
-        if cfg!(target_os = "macos") {
+        if backend.is_ok() {
             assert_eq!(direct["data"]["host"], peer_text, "{words:?} {direct}");
             assert_eq!(direct["data"]["bytes"], stderr["data"]["bytes"], "{direct}");
         } else {
