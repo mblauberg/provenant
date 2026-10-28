@@ -79,7 +79,10 @@ fn overview_needs_you() -> Result {
         [serde_json::to_vec(&legacy)?],
     )?;
     let legacy_overview = call(&rig, &["console", "overview"])?;
-    assert!(legacy_overview["data"]["needs_you"][0]["chair_session_id"].is_null());
+    assert_eq!(
+        legacy_overview["data"]["needs_you"][0]["chair_session_id"],
+        "chair-a"
+    );
     assert_eq!(legacy_overview["data"]["counts"]["needs_you"], 1);
     assert_eq!(legacy_overview["data"]["coverage"]["inbox"], "complete");
     fabric_db.execute("UPDATE human_requests SET record=?1", [&original])?;
@@ -189,6 +192,7 @@ fn overview_needs_you() -> Result {
     assert_eq!(code(&human), 0);
     let human = String::from_utf8(human.stdout.bytes)?;
     assert!(human.contains("Choose a repair"));
+    assert!(human.contains("chair_session_id=chair-a"));
     assert!(!human.contains("PRIVATE BODY MARKER"));
     call(
         &rig,
