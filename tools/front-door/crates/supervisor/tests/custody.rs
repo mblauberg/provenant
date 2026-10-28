@@ -1801,6 +1801,9 @@ fn disk_floor_pauses_and_recovery_resumes_builds(root: &Path) -> Result<()> {
     set_disk_sample(&fixture.state, b"high")?;
     byte(&mut fixture.channel, b'A')?;
     drop(fixture.gate);
+    // The build lives in its own session, so cleanup may not signal it; EOF
+    // lets it exit so the census can settle.
+    drop(fixture.channel);
     assert!(!exited(&fixture.handle)?.unresolved_cleanup);
     Ok(())
 }
@@ -1814,6 +1817,7 @@ fn disk_sample_failure_resumes_paused_builds(root: &Path) -> Result<()> {
     fixture.channel.write_all(b"B")?;
     byte(&mut fixture.channel, b'B')?;
     drop(fixture.gate);
+    drop(fixture.channel);
     assert!(!exited(&fixture.handle)?.unresolved_cleanup);
     Ok(())
 }
@@ -1826,6 +1830,7 @@ fn cancel_resumes_paused_builds_before_delivering_stop(root: &Path) -> Result<()
         StopReceipt::Requested
     );
     byte(&mut fixture.channel, b'A')?;
+    drop(fixture.channel);
     let exit = exited(&fixture.handle)?;
     assert_eq!(exit.stop_reason, Some(StopReason::ExplicitCancellation));
     assert!(!exit.unresolved_cleanup);
@@ -1837,6 +1842,7 @@ fn provider_exit_resumes_paused_builds(root: &Path) -> Result<()> {
 
     drop(fixture.gate);
     byte(&mut fixture.channel, b'A')?;
+    drop(fixture.channel);
     let exit = exited(&fixture.handle)?;
     assert_eq!(
         exit.termination,
@@ -1865,6 +1871,15 @@ fn guardian_sigkill_recovery_resumes_a_build_after_ancestry_is_lost(root: &Path)
     fixture::guardian_exit_status(u32::try_from(guardian.pid)?, Duration::from_secs(5))?;
     fixture::signal_recorded_process(&provider, libc::SIGKILL)?;
     wait_for_identity_absence(&provider)?;
+    // The kernel reparents the build only after the provider is gone; wait for it.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while matches!(
+        fixture::RecordedBootObserver.observe(fixture.build.pid),
+        ProcessObservation::Present(fact) if fact.parent_pid == provider.pid
+    ) && Instant::now() < deadline
+    {
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
     match fixture::RecordedBootObserver.observe(fixture.build.pid) {
         ProcessObservation::Present(fact) => {
             assert_ne!(
