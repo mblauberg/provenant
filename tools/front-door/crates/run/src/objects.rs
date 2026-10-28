@@ -7,6 +7,7 @@ use provenant_os::{
     fs::{Directory, FileKind, LockGuard, LockMode, Metadata, PublishMode, entry_names},
 };
 use std::{
+    collections::BTreeSet,
     ffi::{OsStr, OsString},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -846,11 +847,14 @@ fn import_before(
     // Bind the files before Git hashes them. A still-live pre-v11 lane can
     // reach the common directory even though current lane policies cannot.
     let snapshot = snapshot_files(&objects)?;
+    let staged_bytes = snapshot.iter().fold(0_u64, |total, file| {
+        total.saturating_add(file.stamp.metadata.size)
+    });
     let mut retried = false;
     let (generation, _lock) = loop {
         let generation = store_generation(repo.common_dir())?;
         let check = Verification {
-            deadline: verification_deadline(&generation, MAX_BYTES - bytes),
+            deadline: verification_deadline(&generation, staged_bytes),
             mode: "--full",
         };
         let result = verify(
@@ -884,9 +888,11 @@ fn import_before(
     // Snapshot is verified in full before the first publication. Existing
     // shared objects always win; verify the resulting store before consuming it.
     let mut published = Vec::new();
+    let mut fanouts = BTreeSet::new();
     for file in snapshot {
         let from = objects.open_verified_directory(&file.fanout)?;
         let to = directory(&shared_dir, &file.fanout)?;
+        fanouts.insert(file.fanout.clone());
         file.check(&objects)?;
         match from.rename_noreplace(&file.name, &to, &file.name) {
             Ok(()) => {
@@ -903,7 +909,9 @@ fn import_before(
             Err(error) if error.is_exists() => {}
             Err(error) => return Err(error.into()),
         }
-        to.sync()?;
+    }
+    for fanout in fanouts {
+        shared_dir.open_verified_directory(&fanout)?.sync()?;
     }
     shared_dir.sync()?;
     for file in &published {
@@ -916,7 +924,7 @@ fn import_before(
         repo.root_path(),
         head,
         Verification {
-            deadline: verification_deadline(&generation, MAX_BYTES - bytes),
+            deadline: verification_deadline(&generation, staged_bytes),
             mode: "--connectivity-only",
         },
     )?;
