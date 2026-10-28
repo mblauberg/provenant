@@ -187,6 +187,20 @@ pub struct RoutingConfig {
     pub pacing: PacingSettings,
     pub pacing_reserve: BTreeMap<String, PacingReserve>,
     pub pacing_overrides: Vec<PacingOverride>,
+    pub opencode_go: OpenCodeGoSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OpenCodeGoSettings {
+    pub min_monthly_allowance_usd: u64,
+}
+impl Default for OpenCodeGoSettings {
+    fn default() -> Self {
+        Self {
+            min_monthly_allowance_usd: 60,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -482,6 +496,56 @@ fn validate_profile(field: &str, profile: &PacingProfile, errors: &mut Vec<Secti
 }
 
 #[cfg(test)]
+mod go_allowance_tests {
+    use super::*;
+
+    #[test]
+    fn go_allowance_floor_handles_limits_unknown_and_zen() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let catalogue = Catalogue::bundled()?;
+        let mut config: RoutingConfig = toml_edit::de::from_str("[opencode_go]\n")?;
+        assert_eq!(config.opencode_go.min_monthly_allowance_usd, 60);
+        for id in [
+            "opencode/opencode-go/beam-free",
+            "opencode/opencode-go/glm-5.3-flash",
+            "opencode/opencode-go/deepseek-v4.1-flash",
+            "opencode/opencode/glm-5.3-flash-free",
+        ] {
+            assert!(
+                check_go_allowance(&ModelId::parse(id)?, &config, &catalogue).is_ok(),
+                "{id}"
+            );
+        }
+        for (id, expected) in [
+            ("opencode/opencode-go/claude-haiku-5-5", "$15"),
+            ("opencode/opencode-go/unlisted", "unknown"),
+        ] {
+            let model = ModelId::parse(id)?;
+            let error = check_go_allowance(&model, &config, &catalogue).unwrap_err();
+            assert!(
+                error.contains(id)
+                    && error.contains(expected)
+                    && error.contains("domains.routing.opencode_go.min_monthly_allowance_usd"),
+                "{error}"
+            );
+            config.opencode_go.min_monthly_allowance_usd = 0;
+            assert!(check_go_allowance(&model, &config, &catalogue).is_ok());
+            config.opencode_go.min_monthly_allowance_usd = 60;
+        }
+        config.opencode_go.min_monthly_allowance_usd = 61;
+        assert!(
+            check_go_allowance(
+                &ModelId::parse("opencode/opencode-go/glm-5.3-flash")?,
+                &config,
+                &catalogue
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod pacing_profile_tests {
     use super::*;
 
@@ -563,7 +627,7 @@ mod pacing_profile_tests {
     }
 }
 fn defaults(_: Profile) -> &'static str {
-    "suppress_opus_writer_warning = false\npacing_overrides = []\n[routes]\n[pools]\n[pacing]\n[pacing_reserve]\n"
+    "suppress_opus_writer_warning = false\npacing_overrides = []\n[opencode_go]\nmin_monthly_allowance_usd = 60\n[routes]\n[pools]\n[pacing]\n[pacing_reserve]\n"
 }
 pub const SECTION: DomainSection = DomainSection::new::<RoutingConfig>("routing", defaults);
 
@@ -578,6 +642,44 @@ pub struct ModelEntry {
     /// Unknown is treated as training for confidential selection.
     #[serde(default)]
     pub trains_on_prompts: Option<bool>,
+    #[serde(default)]
+    pub monthly_allowance_usd: Option<MonthlyAllowance>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MonthlyAllowance {
+    Dollars(u64),
+    Unlimited(UnlimitedAllowance),
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnlimitedAllowance {
+    Unlimited,
+}
+
+/// Apply the Go plan floor to every dispatch candidate, including unknown models.
+pub fn check_go_allowance(
+    model: &ModelId,
+    config: &RoutingConfig,
+    catalogue: &Catalogue,
+) -> Result<(), String> {
+    let floor = config.opencode_go.min_monthly_allowance_usd;
+    if floor == 0 || model.adapter() != "opencode" || !model.model().starts_with("opencode-go/") {
+        return Ok(());
+    }
+    let allowance = catalogue
+        .model(model)
+        .and_then(|entry| entry.monthly_allowance_usd.as_ref());
+    let description = match allowance {
+        Some(MonthlyAllowance::Unlimited(_)) => return Ok(()),
+        Some(MonthlyAllowance::Dollars(value)) if *value >= floor => return Ok(()),
+        Some(MonthlyAllowance::Dollars(value)) => format!("${value}"),
+        None => "unknown".to_owned(),
+    };
+    Err(format!(
+        "{}: Go monthly allowance {description}; domains.routing.opencode_go.min_monthly_allowance_usd is {floor}; lower [domains.routing.opencode_go] min_monthly_allowance_usd or choose a model with a documented allowance of at least ${floor} (0 disables the floor)",
+        model.as_str()
+    ))
 }
 /// Pool candidate; list order is used for weight-zero fallback selection.
 #[derive(Debug, Clone, Serialize, Deserialize)]

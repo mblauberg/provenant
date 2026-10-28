@@ -1033,6 +1033,7 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
         evidence_ref: "test".into(),
         family: None,
         trains_on_prompts: None,
+        monthly_allowance_usd: None,
     });
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
@@ -1235,6 +1236,7 @@ fn family_requires_provider_answer_evidence_at_the_same_revision()
         family: Some("anthropic".into()),
         evidence_ref: "test".into(),
         trains_on_prompts: None,
+        monthly_allowance_usd: None,
     });
     assert_eq!(
         FamilyFact::from_verified(
@@ -1926,6 +1928,7 @@ fn account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks()
             evidence_ref: "synthetic-controls".into(),
             family: None,
             trains_on_prompts: None,
+            monthly_allowance_usd: None,
         });
     }
     catalogue.pools.insert(
