@@ -2341,6 +2341,9 @@ fn graph_loop_inbox_ask(
     ))
     .map_err(|_| FacadeError::StateCorrupt)?;
     let request = RequestDraft {
+        supersedes: None,
+        deadline: None,
+        work: None,
         kind: RequestKind::Decision,
         title: format!("Graph loop {} exhausted", scope.node_id),
         body: format!(
@@ -2365,7 +2368,7 @@ fn graph_loop_inbox_ask(
     };
     Ok(InboxInput::Ask {
         session: scope.session.into(),
-        request,
+        request: Box::new(request),
         operation_id: Some(operation_id),
     })
 }
