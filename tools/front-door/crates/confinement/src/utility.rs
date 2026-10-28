@@ -8,6 +8,7 @@ use provenant_os::{
     exec::{ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination},
     fs::{Directory, FileKind, FsError, Metadata, canonicalize, effective_uid},
 };
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -52,18 +53,14 @@ const GIT_CONFIG_OVERRIDES: [(&str, &str); 13] = [
 pub enum UtilityError {
     #[error("invalid pinned {tool} executable")]
     InvalidExecutable { tool: &'static str },
-    #[error("pinned {tool} executable changed after setup")]
-    ExecutableChanged { tool: &'static str },
     #[error("utility home must be an absolute private directory")]
     InvalidHome,
     #[error("utility budget is outside its supported bounds")]
     InvalidBudget,
     #[error("utility operation has an invalid or unsupported value")]
     InvalidOperationValue,
-    #[error("repository Git filters or config includes are not permitted")]
-    UnsafeGitConfiguration,
-    #[error("repository info/attributes is not permitted")]
-    RepositoryAttributes,
+    #[error("repository Git configuration could not be read")]
+    UnreadableGitConfiguration,
     #[error("pinned Git does not support a verified attribute source")]
     AttributeSourceUnsupported,
     #[error("verified repository was not opened with its required Git probes")]
@@ -313,9 +310,10 @@ impl UtilityRuntime {
         self.revalidate()?;
         VerifiedRepo::open(path, |repo| {
             verify_repo_binding(repo)?;
-            reject_info_attributes(repo)?;
-            verify_local_git_configuration(executor, repo, self, budget, cancel)?;
-            let attribute_source = empty_attribute_source(executor, repo, self, budget, cancel)?;
+            let config_overrides =
+                disabled_program_overrides(executor, repo, self, budget, cancel)?;
+            let attribute_source =
+                empty_attribute_source(executor, repo, self, budget, cancel, &config_overrides)?;
             let object_format = match attribute_source.len() {
                 40 => RepoObjectFormat::Sha1,
                 64 => RepoObjectFormat::Sha256,
@@ -324,6 +322,7 @@ impl UtilityRuntime {
             Ok(RepoProbeData {
                 object_format,
                 attribute_source,
+                config_overrides,
             })
         })
     }
@@ -343,9 +342,10 @@ impl UtilityRuntime {
         self.revalidate()?;
         VerifiedRepo::open_mode(path, true, |repo| {
             verify_repo_binding(repo)?;
-            reject_info_attributes(repo)?;
-            verify_local_git_configuration(executor, repo, self, budget, cancel)?;
-            let attribute_source = empty_attribute_source(executor, repo, self, budget, cancel)?;
+            let config_overrides =
+                disabled_program_overrides(executor, repo, self, budget, cancel)?;
+            let attribute_source =
+                empty_attribute_source(executor, repo, self, budget, cancel, &config_overrides)?;
             let object_format = match attribute_source.len() {
                 40 => RepoObjectFormat::Sha1,
                 64 => RepoObjectFormat::Sha256,
@@ -354,6 +354,7 @@ impl UtilityRuntime {
             Ok(RepoProbeData {
                 object_format,
                 attribute_source,
+                config_overrides,
             })
         })
         .map(ReadOnlyRepo)
@@ -399,103 +400,50 @@ impl UtilityRuntime {
     }
 
     fn revalidate(&self) -> Result<(), UtilityError> {
-        self.git.verify()?;
         self.home.verify()?;
         Ok(())
     }
 }
 
+/// The Git executable, resolved once. Later swaps (such as `brew upgrade git`
+/// replacing the file) are not tracked, so long-lived processes keep working.
 struct ExecutablePin {
     path: PathBuf,
-    parent_path: PathBuf,
-    name: OsString,
-    parent_identity: Metadata,
-    identity: Metadata,
-    tool: &'static str,
 }
 
 impl ExecutablePin {
+    /// Resolve symlinks and require a regular file named `tool` that is owned
+    /// by the current user or root and is not world-writable, in a directory
+    /// that is not world-writable. Group-writable directories such as Intel
+    /// Homebrew's `/usr/local/bin` are accepted.
     fn new(input: &Path, tool: &'static str) -> Result<Self, UtilityError> {
+        let invalid = || UtilityError::InvalidExecutable { tool };
         // Canonicalisation would silently anchor a relative path at the cwd.
         if !input.is_absolute() {
-            return Err(UtilityError::InvalidExecutable { tool });
+            return Err(invalid());
         }
-        let path = canonicalize(input).map_err(|_| UtilityError::InvalidExecutable { tool })?;
+        let path = canonicalize(input).map_err(|_| invalid())?;
         if path.file_name().and_then(OsStr::to_str) != Some(tool) {
-            return Err(UtilityError::InvalidExecutable { tool });
+            return Err(invalid());
         }
-        let parent_path = path
-            .parent()
-            .ok_or(UtilityError::InvalidExecutable { tool })?
-            .to_path_buf();
-        let parent = Directory::open_anchor(&parent_path)
-            .map_err(|_| UtilityError::InvalidExecutable { tool })?;
+        let parent_path = path.parent().ok_or_else(invalid)?;
+        let parent = Directory::open_anchor(parent_path).map_err(|_| invalid())?;
         let parent_identity = parent.metadata()?;
-        if parent_identity.kind != FileKind::Directory || parent_identity.mode & 0o022 != 0 {
-            return Err(UtilityError::InvalidExecutable { tool });
+        if parent_identity.kind != FileKind::Directory || parent_identity.mode & 0o002 != 0 {
+            return Err(invalid());
         }
-        let name = path
-            .file_name()
-            .ok_or(UtilityError::InvalidExecutable { tool })?
-            .to_os_string();
-        let identity = verify_executable_at(&parent, &name, tool)?;
-        Ok(Self {
-            path,
-            parent_path,
-            name,
-            parent_identity,
-            identity,
-            tool,
-        })
-    }
-
-    fn verify(&self) -> Result<(), UtilityError> {
-        let fresh = Directory::open_anchor(&self.parent_path)
-            .map_err(|_| UtilityError::ExecutableChanged { tool: self.tool })?;
-        let fresh_identity = fresh
-            .metadata()
-            .map_err(|_| UtilityError::ExecutableChanged { tool: self.tool })?;
-        let current = verify_executable_at(&fresh, &self.name, self.tool)?;
-        if !self.parent_identity.same_identity(&fresh_identity)
-            || !self.identity.same_identity(&current)
-            || self.identity.mode != current.mode
-            || self.identity.uid != current.uid
+        let file = parent
+            .metadata_at(path.file_name().ok_or_else(invalid)?, false)
+            .map_err(|_| invalid())?;
+        if file.kind != FileKind::Regular
+            || file.mode & 0o111 == 0
+            || file.mode & 0o002 != 0
+            || (file.uid != effective_uid() && file.uid != 0)
         {
-            return Err(UtilityError::ExecutableChanged { tool: self.tool });
+            return Err(invalid());
         }
-        Ok(())
+        Ok(Self { path })
     }
-}
-
-fn verify_executable_at(
-    parent: &Directory,
-    name: &OsStr,
-    tool: &'static str,
-) -> Result<Metadata, UtilityError> {
-    let before = parent
-        .metadata_at(name, false)
-        .map_err(|_| UtilityError::InvalidExecutable { tool })?;
-    if before.kind != FileKind::Regular || before.mode & 0o111 == 0 || before.mode & 0o022 != 0 {
-        return Err(UtilityError::InvalidExecutable { tool });
-    }
-    let file = parent
-        .open_read(name)
-        .map_err(|_| UtilityError::InvalidExecutable { tool })?;
-    let opened = file
-        .metadata()
-        .map_err(|_| UtilityError::InvalidExecutable { tool })?;
-    let after = parent
-        .metadata_at(name, false)
-        .map_err(|_| UtilityError::InvalidExecutable { tool })?;
-    if opened.kind != FileKind::Regular
-        || !before.same_identity(&opened)
-        || !opened.same_identity(&after)
-        || opened.mode & 0o111 == 0
-        || opened.mode & 0o022 != 0
-    {
-        return Err(UtilityError::InvalidExecutable { tool });
-    }
-    Ok(opened)
 }
 
 struct PrivateHome {
@@ -597,7 +545,6 @@ pub(crate) fn fetch_missing_remote_branch(
         if cancel.is_cancelled() {
             return Err(UtilityError::Cancelled);
         }
-        runtime.git.verify()?;
         let mut argv = vec![
             runtime.git.path.as_os_str().to_owned(),
             "--git-dir".into(),
@@ -880,7 +827,6 @@ pub(crate) fn advertised_remote_head(
         Some(b""),
         Some(cancel),
     );
-    runtime.git.verify()?;
     validate_outcome(executor.execute(options)?)
 }
 
@@ -913,7 +859,6 @@ fn execute_git(
     runtime.home.verify()?;
     repo.revalidate()?;
     verify_repo_binding(repo)?;
-    reject_info_attributes(repo)?;
     let attribute_source = repo
         .probe_data()
         .ok_or(UtilityError::UnprobedRepository)?
@@ -928,7 +873,6 @@ fn execute_git(
         env.push(("GIT_SHALLOW_FILE".into(), "/dev/null".into()));
     }
     env.push(("GIT_ATTR_SOURCE".into(), attribute_source.into()));
-    runtime.git.verify()?;
     let options = exec_options(
         &argv,
         repo.root_path(),
@@ -1291,6 +1235,17 @@ pub(crate) fn environment(
     runtime: &UtilityRuntime,
     repo: &VerifiedRepo,
 ) -> Vec<(OsString, OsString)> {
+    let overrides = repo
+        .probe_data()
+        .map_or(&[][..], |data| data.config_overrides.as_slice());
+    environment_with(runtime, repo, overrides)
+}
+
+fn environment_with(
+    runtime: &UtilityRuntime,
+    repo: &VerifiedRepo,
+    repo_overrides: &[(String, String)],
+) -> Vec<(OsString, OsString)> {
     let mut env = vec![
         ("HOME".into(), runtime.home.path.as_os_str().to_owned()),
         ("TMPDIR".into(), runtime.home.path.as_os_str().to_owned()),
@@ -1319,15 +1274,22 @@ pub(crate) fn environment(
             "GIT_COMMON_DIR".into(),
             repo.common_git_dir().as_os_str().to_owned(),
         ),
-        (
-            "GIT_CONFIG_COUNT".into(),
-            GIT_CONFIG_OVERRIDES.len().to_string().into(),
-        ),
     ];
-    for (index, (key, value)) in GIT_CONFIG_OVERRIDES.iter().enumerate() {
-        env.push((format!("GIT_CONFIG_KEY_{index}").into(), (*key).into()));
-        env.push((format!("GIT_CONFIG_VALUE_{index}").into(), (*value).into()));
+    let overrides = GIT_CONFIG_OVERRIDES
+        .iter()
+        .map(|(key, value)| (*key, *value))
+        .chain(
+            repo_overrides
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        );
+    let mut count = 0;
+    for (index, (key, value)) in overrides.enumerate() {
+        env.push((format!("GIT_CONFIG_KEY_{index}").into(), key.into()));
+        env.push((format!("GIT_CONFIG_VALUE_{index}").into(), value.into()));
+        count += 1;
     }
+    env.push(("GIT_CONFIG_COUNT".into(), count.to_string().into()));
     env
 }
 
@@ -1408,67 +1370,48 @@ pub fn set_lane_upstream_key(
     Ok(())
 }
 
-/// Inspect only Git config key names, without following include directives or
-/// exposing values. Attribute-selected filters can execute only when a driver
-/// is configured; includes are refused because later Git commands would follow
-/// them and could supply such a driver.
-fn verify_local_git_configuration(
+/// Read the effective Git config key names, following includes but exposing no
+/// values, and disable every configured filter driver. Attributes (including
+/// `info/attributes`, which `--attr-source` does not suppress) can select a
+/// driver whose clean, smudge or process command Git would then run. Overrides
+/// are applied last, so they win over values from any included file.
+fn disabled_program_overrides(
     executor: &dyn Executor,
     repo: &VerifiedRepo,
     runtime: &UtilityRuntime,
     budget: UtilityBudget,
     cancel: &CancelToken,
-) -> Result<(), UtilityError> {
-    let command =
-        ["config", "--no-includes", "--name-only", "--null", "--list"].map(OsString::from);
-    let outcome = run_git_probe(executor, repo, runtime, budget, cancel, &command)?;
+) -> Result<Vec<(String, String)>, UtilityError> {
+    let command = ["config", "--includes", "--name-only", "--null", "--list"].map(OsString::from);
+    let outcome = run_git_probe(executor, repo, runtime, budget, cancel, &[], &command)?;
     if outcome.termination != Termination::Exit(0)
         || (!outcome.stdout.bytes.is_empty() && !outcome.stdout.bytes.ends_with(&[0]))
     {
-        return Err(UtilityError::UnsafeGitConfiguration);
+        return Err(UtilityError::UnreadableGitConfiguration);
     }
+    let mut drivers = BTreeSet::new();
     for key in outcome.stdout.bytes.split(|byte| *byte == 0) {
-        let lower = key
-            .iter()
-            .map(|byte| byte.to_ascii_lowercase())
-            .collect::<Vec<_>>();
-        if lower.starts_with(b"filter.")
-            || lower.starts_with(b"include.")
-            || lower.starts_with(b"includeif.")
-        {
-            return Err(UtilityError::UnsafeGitConfiguration);
-        }
-    }
-    Ok(())
-}
-
-/// Refuse repository-local attribute files, which Git consults even when an
-/// empty tree is selected with `--attr-source`. Both linked-worktree and common
-/// Git directories are checked because Git's lookup spans those locations.
-fn reject_info_attributes(repo: &VerifiedRepo) -> Result<(), UtilityError> {
-    for directory in [repo.private_dir(), repo.common_dir()] {
-        let info_name = OsStr::new("info");
-        let info_metadata = match directory.metadata_at(info_name, false) {
-            Ok(metadata) if metadata.kind == FileKind::Directory => metadata,
-            Ok(_) => return Err(UtilityError::RepositoryAttributes),
-            Err(error) if is_not_found(&error) => continue,
-            Err(error) => return Err(error.into()),
+        let key = String::from_utf8_lossy(key);
+        // Section and variable names are lowercase; the driver name is not.
+        let Some(rest) = key.strip_prefix("filter.") else {
+            continue;
         };
-        let info = directory.open_verified_directory(info_name)?;
-        if !info_metadata.same_identity(&info.metadata()?) {
-            return Err(UtilityError::RepositoryAttributes);
-        }
-        match info.metadata_at(OsStr::new("attributes"), false) {
-            Ok(_) => return Err(UtilityError::RepositoryAttributes),
-            Err(error) if is_not_found(&error) => {}
-            Err(error) => return Err(error.into()),
+        if let Some((driver, _)) = rest.rsplit_once('.') {
+            drivers.insert(driver.to_owned());
         }
     }
-    Ok(())
-}
-
-fn is_not_found(error: &FsError) -> bool {
-    matches!(error, FsError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound)
+    Ok(drivers
+        .into_iter()
+        .flat_map(|driver| {
+            [
+                ("clean", ""),
+                ("smudge", ""),
+                ("process", ""),
+                ("required", "false"),
+            ]
+            .map(|(variable, value)| (format!("filter.{driver}.{variable}"), value.to_owned()))
+        })
+        .collect())
 }
 
 /// Resolve the repository object format once without writing an object, then
@@ -1480,12 +1423,13 @@ fn empty_attribute_source(
     runtime: &UtilityRuntime,
     budget: UtilityBudget,
     cancel: &CancelToken,
+    overrides: &[(String, String)],
 ) -> Result<String, UtilityError> {
     let format_args = [
         OsString::from("rev-parse"),
         OsString::from("--show-object-format"),
     ];
-    let format_outcome = run_git_probe(executor, repo, runtime, budget, cancel, &format_args)?;
+    let format_outcome = run_git_probe(executor, repo, runtime, budget, cancel, &[], &format_args)?;
     if format_outcome.termination != Termination::Exit(0) {
         return Err(UtilityError::AttributeSourceUnsupported);
     }
@@ -1506,7 +1450,15 @@ fn empty_attribute_source(
         OsString::from("--ignore-submodules=all"),
         OsString::from("--untracked-files=no"),
     ];
-    let preflight = run_git_probe(executor, repo, runtime, budget, cancel, &preflight_args)?;
+    let preflight = run_git_probe(
+        executor,
+        repo,
+        runtime,
+        budget,
+        cancel,
+        overrides,
+        &preflight_args,
+    )?;
     if preflight.termination != Termination::Exit(0) {
         return Err(UtilityError::AttributeSourceUnsupported);
     }
@@ -1519,9 +1471,9 @@ fn run_git_probe(
     runtime: &UtilityRuntime,
     budget: UtilityBudget,
     cancel: &CancelToken,
+    overrides: &[(String, String)],
     command: &[OsString],
 ) -> Result<ExecOutcome, UtilityError> {
-    runtime.git.verify()?;
     let mut argv = vec![
         runtime.git.path.as_os_str().to_owned(),
         OsString::from("--git-dir"),
@@ -1531,7 +1483,7 @@ fn run_git_probe(
     ];
     argv.extend(GIT_COMMON.iter().map(OsString::from));
     argv.extend(command.iter().cloned());
-    let env = environment(runtime, repo);
+    let env = environment_with(runtime, repo, overrides);
     let options = exec_options(&argv, repo.root_path(), budget, &env, None, Some(cancel));
     validate_outcome(executor.execute(options)?)
 }
@@ -1620,8 +1572,7 @@ pub(crate) mod tests {
     use std::time::Duration;
 
     #[test]
-    fn executable_pin_resolves_symlink_and_detects_target_replacement() -> Result<(), Box<dyn Error>>
-    {
+    fn executable_pin_resolves_symlink_once() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let target_dir = temp.path().join("target");
         fs::create_dir(&target_dir)?;
@@ -1633,15 +1584,6 @@ pub(crate) mod tests {
 
         let pin = ExecutablePin::new(&link, "git")?;
         assert_eq!(pin.path, fs::canonicalize(&target)?);
-        pin.verify()?;
-        let replacement = target_dir.join("replacement");
-        fs::write(&replacement, b"second")?;
-        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755))?;
-        fs::rename(replacement, target)?;
-        assert!(matches!(
-            pin.verify(),
-            Err(UtilityError::ExecutableChanged { tool: "git" })
-        ));
         Ok(())
     }
 
@@ -1675,25 +1617,29 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn executable_pin_rejects_symlink_to_group_writable_target() -> Result<(), Box<dyn Error>> {
+    fn executable_pin_refuses_world_writable_but_allows_group_writable()
+    -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let target_dir = temp.path().join("target");
         fs::create_dir(&target_dir)?;
         let target = target_dir.join("git");
         fs::write(&target, b"executable")?;
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o775))?;
         let link = temp.path().join("git");
         std::os::unix::fs::symlink(&target, &link)?;
-        assert!(matches!(
-            ExecutablePin::new(&link, "git"),
-            Err(UtilityError::InvalidExecutable { tool: "git" })
-        ));
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o755))?;
-        fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o775))?;
-        assert!(matches!(
-            ExecutablePin::new(&link, "git"),
-            Err(UtilityError::InvalidExecutable { tool: "git" })
-        ));
+        let mode = |file: u32, directory: u32| -> Result<(), Box<dyn Error>> {
+            fs::set_permissions(&target, fs::Permissions::from_mode(file))?;
+            fs::set_permissions(&target_dir, fs::Permissions::from_mode(directory))?;
+            Ok(())
+        };
+        mode(0o775, 0o775)?;
+        ExecutablePin::new(&link, "git")?;
+        for (file, directory) in [(0o757, 0o755), (0o755, 0o757), (0o644, 0o755)] {
+            mode(file, directory)?;
+            assert!(matches!(
+                ExecutablePin::new(&link, "git"),
+                Err(UtilityError::InvalidExecutable { tool: "git" })
+            ));
+        }
         Ok(())
     }
 
@@ -2129,23 +2075,42 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn filter_config_is_refused_and_empty_tree_source_suppresses_worktree_attributes()
+    fn filters_are_disabled_not_refused_and_empty_tree_source_suppresses_worktree_attributes()
     -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
         let tracked = fixture.root.join("tracked.txt");
-        fs::write(&tracked, "baseline\n")?;
-        fixture.run(&["add", "--", "tracked.txt"])?;
+        let included = fixture.root.join("included.txt");
+        for file in [&tracked, &included] {
+            fs::write(file, "baseline\n")?;
+        }
+        fixture.run(&["add", "--", "tracked.txt", "included.txt"])?;
         fixture.run(&["commit", "-m", "tracked fixture"])?;
 
         let marker = fixture._temp.path().join("filter-executed");
         let filter = format!("touch {}; cat", marker.display());
+        // One driver in local config, one reached through an include.
         fixture.run(&["config", "filter.poison.clean", filter.as_str()])?;
+        let extra = fixture.repo.common_git_dir().join("extra.cfg");
+        fs::write(
+            &extra,
+            format!("[filter \"Included\"]\n\tclean = {filter}\n"),
+        )?;
+        fixture.run(&["config", "include.path", "extra.cfg"])?;
         fs::write(
             fixture.root.join(".gitattributes"),
             "tracked.txt filter=poison\n",
         )?;
-        fs::write(&tracked, "modified\n")?;
+        let info = fixture.repo.common_git_dir().join("info");
+        fs::create_dir_all(&info)?;
+        fs::write(
+            info.join("attributes"),
+            "tracked.txt filter=poison\nincluded.txt filter=Included\n",
+        )?;
+        for file in [&tracked, &included] {
+            fs::write(file, "modified\n")?;
+        }
 
+        // Raw Git obeys info/attributes even with an empty attribute source.
         let source = &fixture
             .repo
             .probe_data()
@@ -2154,79 +2119,27 @@ pub(crate) mod tests {
         let source_option = format!("--attr-source={source}");
         let raw = fixture.run(&[source_option.as_str(), "status", "--porcelain=v2", "-z"])?;
         assert_eq!(raw.termination, Termination::Exit(0));
-        assert!(!marker.exists());
+        assert!(marker.exists(), "control: raw Git should run the filter");
+        fs::remove_file(&marker)?;
 
-        let result = run_utility(
+        // The config changed, so the old handle is stale; a fresh open succeeds
+        // and neutralises both drivers.
+        let repo = fixture.runtime.open_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        let status = run_utility(
             &fixture.executor,
             GitRead::Status,
-            &fixture.repo,
+            &repo,
             &fixture.runtime,
             fixture.budget()?,
             &CancelToken::new(),
-        );
-        assert!(matches!(
-            result,
-            Err(UtilityError::Repo(RepoError::IdentityChanged))
-        ));
+        )?;
+        assert_eq!(status.termination, Termination::Exit(0));
         assert!(!marker.exists());
-        assert!(matches!(
-            fixture.runtime.open_repo(
-                &fixture.executor,
-                &fixture.root,
-                fixture.budget()?,
-                &CancelToken::new(),
-            ),
-            Err(UtilityError::UnsafeGitConfiguration)
-        ));
-        fixture.run(&["config", "--unset", "filter.poison.clean"])?;
-        fixture.run(&["config", "extensions.worktreeConfig", "true"])?;
-        fixture.run(&[
-            "config",
-            "--worktree",
-            "filter.poison.process",
-            filter.as_str(),
-        ])?;
-        assert!(matches!(
-            fixture.runtime.open_repo(
-                &fixture.executor,
-                &fixture.root,
-                fixture.budget()?,
-                &CancelToken::new(),
-            ),
-            Err(UtilityError::UnsafeGitConfiguration)
-        ));
-        assert!(!marker.exists());
-        assert!(matches!(
-            run_utility(
-                &fixture.executor,
-                GitRead::Status,
-                &fixture.repo,
-                &fixture.runtime,
-                fixture.budget()?,
-                &CancelToken::new()
-            ),
-            Err(UtilityError::Repo(RepoError::IdentityChanged))
-        ));
-        assert!(!marker.exists());
-        Ok(())
-    }
-
-    #[test]
-    fn utility_refuses_private_or_common_info_attributes() -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
-        let info = fixture.repo.common_git_dir().join("info");
-        fs::create_dir_all(&info)?;
-        fs::write(info.join("attributes"), "*.txt filter=unknown\n")?;
-
-        let result = run_utility(
-            &fixture.executor,
-            GitRead::Status,
-            &fixture.repo,
-            &fixture.runtime,
-            fixture.budget()?,
-            &CancelToken::new(),
-        );
-        assert!(matches!(result, Err(UtilityError::RepositoryAttributes)));
         Ok(())
     }
 

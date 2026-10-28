@@ -51,6 +51,8 @@ pub(crate) enum RepoObjectFormat {
 pub(crate) struct RepoProbeData {
     pub object_format: RepoObjectFormat,
     pub attribute_source: String,
+    /// Config overrides that disable repository-configured programs.
+    pub config_overrides: Vec<(String, String)>,
 }
 
 /// A repository-relative, byte-preserving path. The value cannot name an
@@ -166,27 +168,24 @@ impl GitRevision {
     }
 }
 
+/// Git's own rules for a branch name (`git check-ref-format --branch`), so
+/// anything Git accepts is accepted here. Names reach paths only through
+/// escaped path grants and reach Git only as single argv entries.
 fn valid_branch(branch: &str) -> bool {
-    if branch.is_empty()
+    !(branch.is_empty()
         || branch == "@"
+        || branch == "HEAD"
         || branch.starts_with('-')
-        || branch.starts_with('/')
         || branch.ends_with('/')
         || branch.ends_with('.')
+        || branch.contains("..")
+        || branch.contains("@{")
         || branch
-            .bytes()
-            .any(|byte| !(byte.is_ascii_alphanumeric() || b"._/-".contains(&byte)))
-    {
-        return false;
-    }
-    !branch.split('/').any(|part| {
-        part.is_empty()
-            || part == "."
-            || part == ".."
-            || part.starts_with('.')
-            || part.ends_with(".lock")
-    }) && !branch.contains("..")
-        && !branch.contains("@{")
+            .chars()
+            .any(|character| character.is_ascii_control() || " ~^:?*[\\".contains(character))
+        || branch
+            .split('/')
+            .any(|part| part.is_empty() || part.starts_with('.') || part.ends_with(".lock")))
 }
 
 /// Held, verified repository and Git common/private directories.
@@ -650,10 +649,32 @@ fn open_canonical_anchor(
 #[cfg(test)]
 mod tests {
     use super::{
-        GitRevision, GitRevisionError, RepoError, RepoObjectFormat, RepoProbeData, VerifiedRepo,
-        verify_worktree,
+        GitRefName, GitRevision, GitRevisionError, RepoError, RepoObjectFormat, RepoProbeData,
+        VerifiedRepo, verify_worktree,
     };
     use std::fs;
+
+    #[test]
+    fn branch_names_follow_git_ref_format() {
+        for name in [
+            "feat/a+b",
+            "fix#12",
+            "user@x",
+            "caf\u{e9}",
+            "a\"b",
+            "x/y.z",
+            "v1.0",
+        ] {
+            assert!(GitRefName::branch(name).is_ok(), "{name}");
+        }
+        for name in [
+            "", "@", "HEAD", "-x", "/x", "x/", "x//y", "x.", ".x", "x/.y", "a..b", "a@{b", "a b",
+            "a~b", "a^b", "a:b", "a?b", "a*b", "a[b", "a\\b", "a\u{7f}b", "a\nb", "x.lock",
+            "x.lock/y",
+        ] {
+            assert!(GitRefName::branch(name).is_err(), "{name:?}");
+        }
+    }
 
     #[test]
     fn verify_worktree_refuses_the_primary_checkout() {
@@ -663,6 +684,7 @@ mod tests {
             Ok::<_, RepoError>(RepoProbeData {
                 object_format: RepoObjectFormat::Sha1,
                 attribute_source: String::new(),
+                config_overrides: Vec::new(),
             })
         })
         .unwrap();
@@ -700,6 +722,7 @@ mod tests {
             Ok::<_, RepoError>(RepoProbeData {
                 object_format: RepoObjectFormat::Sha1,
                 attribute_source: String::new(),
+                config_overrides: Vec::new(),
             })
         })
         .unwrap();
