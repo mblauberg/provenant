@@ -1262,6 +1262,191 @@ fn quota(
 }
 
 #[test]
+fn account_spend_and_expiring_override_ignore_reserve() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let catalogue = Catalogue::bundled()?;
+    let registry = [provenant_providers::codex::REGISTRATION];
+    let records = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut observation = quota(
+        "codex/test",
+        "opaque-account",
+        QuotaStatus::Available,
+        1,
+        80,
+        120,
+    )?;
+    observation.snapshot.windows = vec![QuotaWindow {
+        pool: "primary".into(),
+        window_seconds: Some(18_000),
+        used_basis_points: 9_500,
+        resets_unix_seconds: Some(10_000),
+    }];
+    let observations = [observation];
+    for (profile, overrides, excluded) in [
+        ("spend", serde_json::json!([]), false),
+        (
+            "pace",
+            serde_json::json!([{"account":"opaque-account", "policy":"spend", "expires_unix_seconds":101}]),
+            false,
+        ),
+        (
+            "pace",
+            serde_json::json!([{"account":"opaque-account", "policy":"spend", "expires_unix_seconds":100}]),
+            true,
+        ),
+    ] {
+        let config: RoutingConfig = serde_json::from_value(
+            serde_json::json!({"pacing": {"accounts": {"opaque-account": {"policy":profile}}}, "pacing_overrides":overrides}),
+        )?;
+        let mut ctx = context(&catalogue, &config, now()?);
+        ctx.registry = &registry;
+        ctx.availability = &records;
+        ctx.access = &access;
+        ctx.quota = &observations;
+        let route = resolve(&request("codex/test")?, &ctx)?;
+        assert_eq!(
+            reason(&route) == Some(&RouteExclusionReason::PacingReserve),
+            excluded
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn rolling_window_limits_go_despite_monthly_headroom() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pools": {"trial": [{"model":"opencode/opencode-go/claude-haiku-5-5", "weight":1, "efforts":[]}]},
+        "pacing": {"accounts": {"go": {"policy":"pace", "windows":["rolling", "seven_day", "monthly"], "reserve":{"rolling":0}}}}
+    }))?;
+    let model = "opencode/opencode-go/claude-haiku-5-5";
+    let mut record = availability();
+    record.adapter = "opencode".into();
+    record.account_key = Some("go".into());
+    let records = [record];
+    let registry = [provenant_providers::opencode::REGISTRATION];
+    let access = [AccessContext {
+        adapter: "opencode",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut observation = quota(model, "go", QuotaStatus::Available, 1, 80, 120)?;
+    observation.snapshot.account.adapter = "opencode".into();
+    observation.snapshot.windows = vec![
+        QuotaWindow {
+            pool: "five_hour".into(),
+            window_seconds: Some(18_000),
+            used_basis_points: 7_000,
+            resets_unix_seconds: Some(18_100),
+        },
+        QuotaWindow {
+            pool: "thirty_day".into(),
+            window_seconds: Some(2_592_000),
+            used_basis_points: 1_000,
+            resets_unix_seconds: Some(2_592_100),
+        },
+    ];
+    let observations = [observation];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.registry = &registry;
+    ctx.availability = &records;
+    ctx.access = &access;
+    ctx.quota = &observations;
+    let mut query = request(model)?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    query.allow_free = true;
+    let route = resolve_with_seed(&query, &ctx, "rolling", 0)?;
+    let receipt = serde_json::to_value(route)?;
+    assert_eq!(
+        receipt["pool_selection"]["candidates"][0]["factor_basis_points"],
+        3_000
+    );
+    assert!(receipt.to_string().contains("five_hour"));
+    Ok(())
+}
+
+#[test]
+fn past_deadline_account_stands_by_for_an_available_account()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let zone = jiff::tz::TimeZone::system();
+    let local = |day| {
+        zone.to_ambiguous_zoned(jiff::civil::date(2026, 10, day).at(12, 0, 0, 0))
+            .compatible()
+            .map(|z| z.timestamp().as_second())
+    };
+    let now_seconds = local(30)?; // Friday, after Thursday's deadline.
+    let reset = local(31)? + 86_400;
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(
+        serde_json::json!({"pacing":{"accounts":{"michael":{"policy":"pace","windows":["seven_day"],"deadline":{"reset_of":"anese"}},"anese":{"policy":"pace","windows":["seven_day"],"deadline":{"reset_of":"michael"}}}}}),
+    )?;
+    let mut michael = availability();
+    michael.adapter = "claude".into();
+    michael.account_key = Some("michael".into());
+    michael.observed_unix_seconds = now_seconds - 10;
+    michael.expires_unix_seconds = now_seconds + 100;
+    let mut anese = michael.clone();
+    anese.account_key = Some("anese".into());
+    let records = [michael, anese];
+    let model = "claude/claude-haiku-5-5";
+    let mut observations = Vec::new();
+    for account in ["michael", "anese"] {
+        let mut q = quota(
+            model,
+            account,
+            QuotaStatus::Available,
+            1,
+            now_seconds - 10,
+            now_seconds + 100,
+        )?;
+        q.snapshot.account.adapter = "claude".into();
+        q.snapshot.windows = vec![QuotaWindow {
+            pool: "seven_day".into(),
+            window_seconds: Some(604_800),
+            used_basis_points: 2_000,
+            resets_unix_seconds: Some(if account == "anese" {
+                now_seconds - 5
+            } else {
+                reset
+            }),
+        }];
+        observations.push(q);
+    }
+    let registry = [provenant_providers::claude::REGISTRATION];
+    let access = [AccessContext {
+        adapter: "claude",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut ctx = context(
+        &catalogue,
+        &config,
+        provenant_core::WallTime::from_micros(now_seconds * 1_000_000)?,
+    );
+    ctx.registry = &registry;
+    ctx.availability = &records;
+    ctx.access = &access;
+    ctx.quota = &observations;
+    assert_eq!(
+        resolve(&request(model)?, &ctx)?.account_key.as_deref(),
+        Some("anese")
+    );
+    ctx.availability = &records[..1];
+    assert_eq!(
+        resolve(&request(model)?, &ctx)?.account_key.as_deref(),
+        Some("michael")
+    );
+    Ok(())
+}
+
+#[test]
 fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_quota::{QuotaStatus, QuotaWindow};
     let catalogue = Catalogue::bundled()?;
@@ -1784,5 +1969,345 @@ fn probe_adapters_include_only_requested_routes_pools_and_fallbacks()
     ));
     query = request("unknown/fixture")?;
     assert!(names(&query, &config)?.is_empty());
+    Ok(())
+}
+
+/// Exercise profile decisions through the public resolver and its receipt.
+fn profile_preview(
+    mut config: RoutingConfig,
+    model: &str,
+    account: &str,
+    windows: Vec<provenant_quota::QuotaWindow>,
+    mut references: Vec<QuotaObservation>,
+) -> Result<ResolvedRoute, Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let id = ModelId::parse(model)?;
+    config.pools.insert(
+        "profile-test".into(),
+        vec![RoutePoolMember {
+            model: id.clone(),
+            weight: 1,
+            effort: None,
+            efforts: vec![],
+            free: false,
+        }],
+    );
+    let mut record = availability();
+    record.adapter = id.adapter().into();
+    record.account_key = Some(account.into());
+    let records = [record];
+    let access = [AccessContext {
+        adapter: id.adapter(),
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut observation = quota(
+        model,
+        account,
+        provenant_quota::QuotaStatus::Available,
+        1,
+        80,
+        120,
+    )?;
+    observation.snapshot.account.adapter = id.adapter().into();
+    observation.snapshot.windows = windows;
+    references.push(observation);
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    ctx.quota = &references;
+    let mut query = request(model)?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("profile-test")?);
+    query.allow_free = true;
+    Ok(resolve(&query, &ctx)?)
+}
+
+#[test]
+fn reset_reference_uses_fresh_reset_and_reports_unknown_or_stale_fallback()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let model = "claude/claude-haiku-5-5";
+    let config = || {
+        serde_json::from_value::<RoutingConfig>(serde_json::json!({
+            "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["seven_day"],
+                "deadline":{"reset_of":"anese"}}}}
+        }))
+    };
+    let own = QuotaWindow {
+        pool: "seven_day".into(),
+        window_seconds: Some(604_800),
+        used_basis_points: 5_000,
+        resets_unix_seconds: Some(604_900),
+    };
+    let mut reference = quota(model, "anese", QuotaStatus::Available, 1, 80, 120)?;
+    reference.snapshot.account.adapter = "claude".into();
+    reference.snapshot.windows = vec![QuotaWindow {
+        resets_unix_seconds: Some(302_500),
+        ..own.clone()
+    }];
+    for (references, factor, fallback) in [
+        (
+            vec![QuotaObservation {
+                model: reference.model.clone(),
+                expires_unix_seconds: reference.expires_unix_seconds,
+                snapshot: reference.snapshot.clone(),
+            }],
+            10_000,
+            false,
+        ),
+        (vec![], 5_000, true),
+        (
+            {
+                let mut stale = reference;
+                stale.expires_unix_seconds = 100;
+                vec![stale]
+            },
+            5_000,
+            true,
+        ),
+    ] {
+        let route = profile_preview(config()?, model, "michael", vec![own.clone()], references)?;
+        let candidate = &route.pool_selection.as_ref().ok_or("receipt")?.candidates[0];
+        assert_eq!(candidate.factor_basis_points, factor);
+        assert_eq!(
+            candidate
+                .pacing_detail
+                .as_deref()
+                .ok_or("detail")?
+                .contains("falling back"),
+            fallback
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn reset_reference_standby_and_continue_after_observed_deadline()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let model = "claude/claude-haiku-5-5";
+    let own = QuotaWindow {
+        pool: "seven_day".into(),
+        window_seconds: Some(604_800),
+        used_basis_points: 5_000,
+        resets_unix_seconds: Some(604_900),
+    };
+    let mut reference = quota(model, "anese", QuotaStatus::Available, 1, 80, 120)?;
+    reference.snapshot.account.adapter = "claude".into();
+    reference.snapshot.windows = vec![QuotaWindow {
+        resets_unix_seconds: Some(90),
+        ..own.clone()
+    }];
+    for (after, factor) in [("standby", 0), ("continue", 5_000)] {
+        let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+            "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["seven_day"],
+                "deadline":{"reset_of":"anese", "window":"seven_day"}, "after_deadline":after}}}
+        }))?;
+        let route = profile_preview(
+            config,
+            model,
+            "michael",
+            vec![own.clone()],
+            vec![QuotaObservation {
+                model: reference.model.clone(),
+                expires_unix_seconds: reference.expires_unix_seconds,
+                snapshot: reference.snapshot.clone(),
+            }],
+        )?;
+        let candidate = &route.pool_selection.as_ref().ok_or("receipt")?.candidates[0];
+        assert_eq!(candidate.factor_basis_points, factor);
+        assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    }
+    Ok(())
+}
+
+#[test]
+fn selected_windows_cover_pro_cursor_agy_and_free_profiles()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::QuotaWindow;
+    for (model, account, profile, windows, factor, detail) in [
+        (
+            "claude/claude-haiku-5-5",
+            "pro",
+            serde_json::json!({"policy":"pace", "windows":["five_hour"]}),
+            vec![
+                QuotaWindow {
+                    pool: "five_hour".into(),
+                    window_seconds: Some(18_000),
+                    used_basis_points: 4_000,
+                    resets_unix_seconds: Some(18_100),
+                },
+                QuotaWindow {
+                    pool: "seven_day".into(),
+                    window_seconds: Some(604_800),
+                    used_basis_points: 9_500,
+                    resets_unix_seconds: Some(604_900),
+                },
+            ],
+            6_000,
+            "five_hour",
+        ),
+        (
+            "cursor/grok-4.7",
+            "cursor",
+            serde_json::json!({"policy":"pace", "windows":["monthly"]}),
+            vec![QuotaWindow {
+                pool: "billing_cycle".into(),
+                window_seconds: Some(2_592_000),
+                used_basis_points: 4_000,
+                resets_unix_seconds: Some(2_592_100),
+            }],
+            6_000,
+            "billing_cycle",
+        ),
+        (
+            "agy/gemini-3.8-flash",
+            "agy-host",
+            serde_json::json!({"policy":"pace", "windows":["seven_day"]}),
+            vec![
+                QuotaWindow {
+                    pool: "gemini.weekly".into(),
+                    window_seconds: Some(604_800),
+                    used_basis_points: 3_000,
+                    resets_unix_seconds: Some(604_900),
+                },
+                QuotaWindow {
+                    pool: "claude.weekly".into(),
+                    window_seconds: Some(604_800),
+                    used_basis_points: 4_000,
+                    resets_unix_seconds: Some(604_900),
+                },
+            ],
+            6_000,
+            "claude.weekly",
+        ),
+        (
+            "opencode/opencode/glm-5.3-flash-free",
+            "free",
+            serde_json::json!({"policy":"max"}),
+            vec![],
+            10_000,
+            "source=account",
+        ),
+    ] {
+        let config: RoutingConfig = if account == "free" {
+            serde_json::from_value(serde_json::json!({"pacing":{"free":{"opencode":profile}}}))?
+        } else {
+            serde_json::from_value(serde_json::json!({"pacing":{"accounts":{account:profile}}}))?
+        };
+        let route = profile_preview(config, model, account, windows, vec![])?;
+        assert!(
+            matches!(route.readiness, RouteReadiness::Ready { .. }),
+            "{model}"
+        );
+        let candidate = &route.pool_selection.as_ref().ok_or("receipt")?.candidates[0];
+        assert_eq!(candidate.factor_basis_points, factor, "{model}");
+        assert!(
+            candidate
+                .pacing_detail
+                .as_deref()
+                .ok_or("detail")?
+                .contains(detail),
+            "{model}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn fixed_deadlines_use_host_local_weekly_monthly_and_absolute_times()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::QuotaWindow;
+    let zone = jiff::tz::TimeZone::system();
+    let local = |month, day| {
+        zone.to_ambiguous_zoned(jiff::civil::date(1970, month, day).at(0, 0, 0, 0))
+            .compatible()
+            .map(|z| z.timestamp().as_second())
+    };
+    for (deadline, selector, duration, reset, target) in [
+        (
+            "sun 00:00",
+            "seven_day",
+            604_800_u64,
+            local(1, 7)?,
+            local(1, 4)?,
+        ),
+        ("day 25", "monthly", 2_678_400, local(2, 1)?, local(1, 25)?),
+        (
+            "1970-01-03T00:00",
+            "seven_day",
+            604_800,
+            local(1, 7)?,
+            local(1, 3)?,
+        ),
+    ] {
+        let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+            "pacing":{"accounts":{"michael":{"policy":"pace", "windows":[selector],
+                "deadline":deadline}}}
+        }))?;
+        let route = profile_preview(
+            config,
+            "claude/claude-haiku-5-5",
+            "michael",
+            vec![QuotaWindow {
+                pool: selector.into(),
+                window_seconds: Some(duration),
+                used_basis_points: 5_000,
+                resets_unix_seconds: Some(reset),
+            }],
+            vec![],
+        )?;
+        let candidate = &route.pool_selection.as_ref().ok_or("receipt")?.candidates[0];
+        let expected = (5_000 * duration / u64::try_from(target - 100)?).clamp(2_500, 20_000);
+        assert_eq!(
+            u64::from(candidate.factor_basis_points),
+            expected,
+            "{deadline}"
+        );
+        assert!(
+            candidate
+                .pacing_detail
+                .as_deref()
+                .ok_or("detail")?
+                .contains(&format!("deadline={target}")),
+            "{deadline}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn refreshed_peer_reset_preserves_handover_in_the_current_account_cycle()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let model = "claude/claude-haiku-5-5";
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["seven_day"],
+            "deadline":{"reset_of":"anese"}}}}
+    }))?;
+    // Michael's cycle spans [-302300, 302500]. Anese's newly observed next
+    // reset is 432100, so the handover in Michael's cycle was at -172700.
+    let own = QuotaWindow {
+        pool: "seven_day".into(),
+        window_seconds: Some(604_800),
+        used_basis_points: 5_000,
+        resets_unix_seconds: Some(302_500),
+    };
+    let mut peer = quota(model, "anese", QuotaStatus::Available, 1, 80, 120)?;
+    peer.snapshot.account.adapter = "claude".into();
+    peer.snapshot.windows = vec![QuotaWindow {
+        resets_unix_seconds: Some(432_100),
+        ..own.clone()
+    }];
+    let route = profile_preview(config, model, "michael", vec![own], vec![peer])?;
+    let candidate = &route.pool_selection.as_ref().ok_or("receipt")?.candidates[0];
+    assert_eq!(candidate.factor_basis_points, 0);
+    assert!(
+        candidate
+            .pacing_detail
+            .as_deref()
+            .ok_or("detail")?
+            .contains("standby")
+    );
     Ok(())
 }

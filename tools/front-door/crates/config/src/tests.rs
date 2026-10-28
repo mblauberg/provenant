@@ -766,6 +766,31 @@ fn replacement_array_tables_cannot_hide_missing_fields_behind_defaults() {
 }
 
 #[test]
+fn empty_default_array_accepts_valid_typed_table_rows() {
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct List {
+        rows: Vec<Sample>,
+    }
+    impl DomainConfig for List {}
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Aggregate {
+        list: List,
+    }
+    fn defaults(_: Profile) -> &'static str {
+        "rows=[]"
+    }
+    const ENTRIES: DomainSections<Aggregate> =
+        DomainSections::new(&[DomainSection::new::<List>("list", defaults)]);
+    let input = b"schema_version=1\n[domains.list]\nrows=[{limit=2,enabled=false}]";
+    let config = load_with_domains(&roots(), Some(&input[..]), &ENTRIES).unwrap();
+    assert_eq!(config.domains.list.rows.len(), 1);
+    let invalid = b"schema_version=1\n[domains.list]\nrows=[{limit=2}]";
+    assert!(load_with_domains(&roots(), Some(&invalid[..]), &ENTRIES).is_err());
+}
+
+#[test]
 fn every_registered_section_reports_all_its_semantic_failures() {
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]

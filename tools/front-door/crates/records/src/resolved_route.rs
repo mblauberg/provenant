@@ -49,6 +49,8 @@ pub struct RouteSelectionCandidate {
     pub model: String,
     pub weight: u8,
     pub factor_basis_points: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pacing_detail: Option<String>,
     pub effort: Option<String>,
     pub readiness: Option<RouteReadiness>,
     pub exclusion: Option<String>,

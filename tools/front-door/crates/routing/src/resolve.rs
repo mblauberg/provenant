@@ -93,6 +93,19 @@ pub struct RouteList {
     pub named_routes: std::collections::BTreeMap<String, NamedRoute>,
     pub pools: std::collections::BTreeMap<String, Vec<RoutePoolMemberView>>,
     pub pacing: std::collections::BTreeMap<String, PacingPolicy>,
+    pub account_pacing: Vec<AccountPacingView>,
+    pub configured_accounts: BTreeMap<String, PacingProfile>,
+    pub configured_free: BTreeMap<String, PacingProfile>,
+    pub active_overrides: Vec<PacingOverride>,
+}
+#[derive(Debug, Serialize)]
+pub struct AccountPacingView {
+    pub adapter: String,
+    pub account: String,
+    pub policy: PacingPolicy,
+    pub source: String,
+    pub profile: Option<PacingProfile>,
+    pub expires_unix_seconds: Option<i64>,
 }
 #[derive(Debug, Serialize)]
 pub struct RoutePoolMemberView {
@@ -176,6 +189,54 @@ pub fn list(
             .collect(),
         pools,
         pacing,
+        configured_accounts: context.config.pacing.accounts.clone(),
+        configured_free: context.config.pacing.free.clone(),
+        active_overrides: context
+            .config
+            .pacing_overrides
+            .iter()
+            .filter(|o| o.expires_unix_seconds > context.now_seconds())
+            .cloned()
+            .collect(),
+        account_pacing: context
+            .availability
+            .iter()
+            .filter_map(|a| {
+                a.account_key
+                    .as_deref()
+                    .map(|account| (a.adapter.as_str(), account))
+            })
+            .chain(context.quota.iter().map(|q| {
+                (
+                    q.snapshot.account.adapter.as_str(),
+                    q.snapshot.account.account_key.as_str(),
+                )
+            }))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|(adapter, account)| {
+                if !matches(adapter) {
+                    return None;
+                }
+                let model = context
+                    .catalogue
+                    .models
+                    .iter()
+                    .find(|m| m.model.adapter() == adapter)?
+                    .model
+                    .clone();
+                let (policy, profile, source, expiry) =
+                    effective_profile(context, &model, Some(account));
+                Some(AccountPacingView {
+                    adapter: adapter.into(),
+                    account: account.into(),
+                    policy,
+                    source: source.into(),
+                    profile: profile.cloned(),
+                    expires_unix_seconds: expiry,
+                })
+            })
+            .collect(),
     })
 }
 
@@ -271,86 +332,414 @@ const PACE_MIN_BASIS_POINTS: u32 = 2_500;
 const PACE_MAX_BASIS_POINTS: u32 = 20_000;
 const NEUTRAL_FACTOR_BASIS_POINTS: u32 = 10_000;
 
-/// Pace against the latest fresh snapshot for the selected account.
-fn pacing_factor_basis_points(
-    policy: PacingPolicy,
+fn effective_profile<'a>(
+    context: &'a RoutingContext<'_>,
     model: &ModelId,
     account: Option<&str>,
-    quota: &[QuotaObservation],
-    now_seconds: i64,
-) -> u32 {
-    if policy != PacingPolicy::Pace {
-        return NEUTRAL_FACTOR_BASIS_POINTS;
+) -> (
+    PacingPolicy,
+    Option<&'a PacingProfile>,
+    &'static str,
+    Option<i64>,
+) {
+    let profile = if context.catalogue.is_free_model(model) {
+        context.config.pacing.free.get(model.adapter())
+    } else {
+        account.and_then(|a| context.config.pacing.accounts.get(a))
+    };
+    let active = context.config.pacing_overrides.iter().rev().find(|o| {
+        o.expires_unix_seconds > context.now_seconds()
+            && o.account.as_deref().is_none_or(|a| Some(a) == account)
+            && o.provider.as_deref().is_none_or(|p| p == model.adapter())
+    });
+    if let Some(o) = active {
+        return (o.policy, profile, "override", Some(o.expires_unix_seconds));
     }
-    quota
-        .iter()
-        .filter(|observation| {
-            observation.model == *model
-                && observation.snapshot.schema_version == 1
-                && observation.snapshot.account.adapter == model.adapter()
-                && Some(observation.snapshot.account.account_key.as_str()) == account
-                && observation.snapshot.observed_unix_seconds <= now_seconds
-                && observation.snapshot.observed_unix_seconds < observation.expires_unix_seconds
-                && observation.expires_unix_seconds > now_seconds
-        })
-        .max_by_key(|observation| {
-            (
-                observation.snapshot.observed_unix_seconds,
-                observation.snapshot.revision,
-            )
-        })
-        .filter(|observation| {
-            matches!(
-                observation.snapshot.status,
-                QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
-            )
-        })
-        .and_then(|observation| pace_snapshot_factor(&observation.snapshot, now_seconds))
-        .unwrap_or(NEUTRAL_FACTOR_BASIS_POINTS)
+    if let Some(policy) = profile.and_then(|p| p.policy) {
+        return (policy, profile, "account", None);
+    }
+    let source = if profile.is_some() {
+        "account"
+    } else if context.config.pacing.contains_key(model.adapter()) {
+        "provider"
+    } else {
+        "bundled"
+    };
+    (
+        pacing_policy(context.catalogue, context.config, model),
+        profile,
+        source,
+        None,
+    )
 }
-
-fn pace_snapshot_factor(
-    snapshot: &provenant_quota::QuotaSnapshot,
-    now_seconds: i64,
-) -> Option<u32> {
-    snapshot
+fn window_matches(
+    window: &provenant_quota::QuotaWindow,
+    kind: PacingWindow,
+    adapter: &str,
+) -> bool {
+    let pool = window.pool.to_ascii_lowercase();
+    let name = pool.split(':').next().unwrap_or(&pool);
+    match kind {
+        PacingWindow::FiveHour => {
+            window.window_seconds == Some(18_000)
+                || name.ends_with("five_hour")
+                || name.ends_with(".5h")
+        }
+        PacingWindow::SevenDay => {
+            window.window_seconds == Some(604_800)
+                || name.ends_with("seven_day")
+                || name.ends_with("weekly")
+        }
+        PacingWindow::Monthly => {
+            name.ends_with("monthly")
+                || name.ends_with("thirty_day")
+                || name.ends_with("billing_cycle")
+        }
+        PacingWindow::Rolling => {
+            adapter == "opencode" && (name.ends_with("five_hour") || name.ends_with("rolling"))
+        }
+    }
+}
+fn selected_window(
+    window: &provenant_quota::QuotaWindow,
+    profile: Option<&PacingProfile>,
+    adapter: &str,
+) -> bool {
+    profile
+        .and_then(|p| p.windows.as_ref())
+        .is_none_or(|windows| {
+            windows
+                .iter()
+                .any(|kind| window_matches(window, *kind, adapter))
+        })
+}
+fn window_deadline(deadline: &FixedDeadline, window: &provenant_quota::QuotaWindow) -> Option<i64> {
+    let zone = jiff::tz::TimeZone::system();
+    if let FixedDeadline::Absolute(datetime) = deadline {
+        return zone
+            .to_ambiguous_zoned(*datetime)
+            .compatible()
+            .ok()
+            .map(|z| z.timestamp().as_second());
+    }
+    let reset = window.resets_unix_seconds?;
+    let duration = i64::try_from(window.window_seconds?).ok()?;
+    let mut date = jiff::Timestamp::from_second(reset)
+        .ok()?
+        .to_zoned(zone.clone())
+        .date();
+    for _ in 0..=62 {
+        let (matches, hour, minute) = match deadline {
+            FixedDeadline::Monthly { day } => (date.day() == *day, 0, 0),
+            FixedDeadline::Weekly {
+                weekday,
+                hour,
+                minute,
+            } => (
+                date.weekday().to_monday_zero_offset() == i8::try_from(*weekday).ok()?,
+                *hour,
+                *minute,
+            ),
+            FixedDeadline::Absolute(_) => unreachable!("handled above"),
+        };
+        if matches {
+            let instant = zone
+                .to_ambiguous_zoned(date.at(hour, minute, 0, 0))
+                .compatible()
+                .ok()?
+                .timestamp()
+                .as_second();
+            if instant <= reset && instant > reset.saturating_sub(duration) {
+                return Some(instant);
+            }
+        }
+        date = date.yesterday().ok()?;
+    }
+    None
+}
+/// A reference is evidence about another account, not a recursive profile lookup.
+fn reference_deadline(
+    deadline: &ResetDeadline,
+    window: Option<&provenant_quota::QuotaWindow>,
+    context: &RoutingContext<'_>,
+) -> Option<i64> {
+    let observation = context
+        .quota
+        .iter()
+        .filter(|o| {
+            o.snapshot.account.account_key == deadline.reset_of
+                && o.snapshot.schema_version == 1
+                && o.snapshot.observed_unix_seconds <= context.now_seconds()
+                && o.snapshot.observed_unix_seconds < o.expires_unix_seconds
+                && o.expires_unix_seconds > context.now_seconds()
+                && matches!(
+                    o.snapshot.status,
+                    QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
+                )
+        })
+        .max_by_key(|o| (o.snapshot.observed_unix_seconds, o.snapshot.revision))?;
+    observation
+        .snapshot
         .windows
         .iter()
-        .filter_map(|window| {
-            let window_seconds = window.window_seconds?;
-            let reset_seconds = window.resets_unix_seconds?;
-            if window_seconds == 0 || reset_seconds <= now_seconds {
+        .filter(|w| window_matches(w, deadline.window, &observation.snapshot.account.adapter))
+        .filter_map(|peer| {
+            let reset = peer.resets_unix_seconds?;
+            if reset <= observation.snapshot.observed_unix_seconds {
                 return None;
             }
-            let remaining_seconds = u64::try_from(reset_seconds.checked_sub(now_seconds)?)
-                .ok()?
-                .min(window_seconds);
-            let headroom = 10_000_u64.saturating_sub(window.used_basis_points.min(10_000));
-            let factor =
-                (u128::from(headroom) * u128::from(window_seconds)) / u128::from(remaining_seconds);
-            u32::try_from(factor.clamp(
-                u128::from(PACE_MIN_BASIS_POINTS),
-                u128::from(PACE_MAX_BASIS_POINTS),
-            ))
-            .ok()
+            // Keep a handover in this account's current cycle when a freshly
+            // observed peer reset advances into the following cycle.
+            if let Some(window) = window
+                && let (Some(own_reset), Some(own_duration), Some(peer_duration)) = (
+                    window.resets_unix_seconds,
+                    window.window_seconds,
+                    peer.window_seconds,
+                )
+                && reset > own_reset
+                && let Some(previous) = reset.checked_sub(i64::try_from(peer_duration).ok()?)
+                && previous > own_reset.saturating_sub(i64::try_from(own_duration).ok()?)
+            {
+                return Some(previous);
+            }
+            Some(reset)
         })
         .min()
 }
 
-fn pacing_reserve_reached(
+fn pace_snapshot_factor(
+    snapshot: &provenant_quota::QuotaSnapshot,
+    now: i64,
+    profile: Option<&PacingProfile>,
+    adapter: &str,
+    context: &RoutingContext<'_>,
+) -> Option<(u32, String, bool)> {
+    snapshot
+        .windows
+        .iter()
+        .filter(|w| selected_window(w, profile, adapter))
+        .filter_map(|window| {
+            let duration = window.window_seconds?;
+            let reset = window.resets_unix_seconds?;
+            if duration == 0 || reset <= now {
+                return None;
+            }
+            let configured = profile.and_then(|p| p.deadline.as_ref());
+            let deadline = configured
+                .and_then(|d| match d {
+                    PacingDeadline::ResetOf(reference) => {
+                        reference_deadline(reference, Some(window), context)
+                    }
+                    PacingDeadline::Fixed(fixed) => window_deadline(fixed, window),
+                })
+                .map(|d| d.min(reset));
+            let fallback =
+                matches!(configured, Some(PacingDeadline::ResetOf(_))) && deadline.is_none();
+            let passed = deadline.is_some_and(|d| d <= now);
+            let standby =
+                passed && profile.is_some_and(|p| p.after_deadline == AfterDeadline::Standby);
+            let target = deadline.filter(|d| *d > now).unwrap_or(reset).min(reset);
+            let remaining = u64::try_from(target.checked_sub(now)?).ok()?.min(duration);
+            if remaining == 0 {
+                return None;
+            }
+            let headroom = 10_000_u64.saturating_sub(window.used_basis_points.min(10_000));
+            let factor = (u128::from(headroom) * u128::from(duration)) / u128::from(remaining);
+            let factor = u32::try_from(factor.clamp(
+                u128::from(PACE_MIN_BASIS_POINTS),
+                u128::from(PACE_MAX_BASIS_POINTS),
+            ))
+            .ok()?;
+            Some((
+                factor,
+                format!(
+                    "window={} deadline={}{}{}",
+                    window.pool,
+                    deadline.unwrap_or(reset),
+                    if standby { " standby" } else { "" },
+                    if fallback {
+                        " reset_of unknown or stale; falling back to window reset".to_owned()
+                    } else {
+                        String::new()
+                    }
+                ),
+                standby,
+            ))
+        })
+        .min_by_key(|(factor, _, standby)| (!*standby, *factor))
+}
+fn pacing_factor_basis_points(
+    policy: PacingPolicy,
+    model: &ModelId,
+    account: Option<&str>,
+    context: &RoutingContext<'_>,
+) -> (u32, String, bool) {
+    let (_, profile, source, expiry) = effective_profile(context, model, account);
+    let detail = format!(
+        "source={source} policy={policy:?}{}",
+        expiry.map(|e| format!(" until={e}")).unwrap_or_default()
+    );
+    if policy != PacingPolicy::Pace {
+        return (NEUTRAL_FACTOR_BASIS_POINTS, detail, false);
+    }
+    let result = context
+        .quota
+        .iter()
+        .filter(|o| {
+            o.model == *model
+                && o.snapshot.schema_version == 1
+                && o.snapshot.account.adapter == model.adapter()
+                && Some(o.snapshot.account.account_key.as_str()) == account
+                && o.snapshot.observed_unix_seconds <= context.now_seconds()
+                && o.snapshot.observed_unix_seconds < o.expires_unix_seconds
+                && o.expires_unix_seconds > context.now_seconds()
+        })
+        .max_by_key(|o| (o.snapshot.observed_unix_seconds, o.snapshot.revision))
+        .filter(|o| {
+            matches!(
+                o.snapshot.status,
+                QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
+            )
+        })
+        .and_then(|o| {
+            pace_snapshot_factor(
+                &o.snapshot,
+                context.now_seconds(),
+                profile,
+                model.adapter(),
+                context,
+            )
+        });
+    let reserve_detail = context
+        .quota
+        .iter()
+        .filter(|o| {
+            o.model == *model
+                && Some(o.snapshot.account.account_key.as_str()) == account
+                && o.snapshot.observed_unix_seconds <= context.now_seconds()
+                && o.snapshot.observed_unix_seconds < o.expires_unix_seconds
+                && o.expires_unix_seconds > context.now_seconds()
+        })
+        .max_by_key(|o| (o.snapshot.observed_unix_seconds, o.snapshot.revision))
+        .and_then(|o| {
+            pacing_reserve_window(
+                &o.snapshot,
+                context.now_seconds(),
+                context
+                    .config
+                    .pacing_reserve
+                    .get(model.adapter())
+                    .copied()
+                    .unwrap_or_default(),
+                profile,
+                model.adapter(),
+            )
+        })
+        .map(|window| format!(" reserve exclusion window={window}"))
+        .unwrap_or_default();
+    let detail = format!("{detail}{reserve_detail}");
+    let neutral_detail = match profile.and_then(|p| p.deadline.as_ref()) {
+        Some(PacingDeadline::ResetOf(reference))
+            if reference_deadline(reference, None, context).is_none() =>
+        {
+            format!(
+                "{detail} reset_of={} unknown or stale; falling back to window reset; unobserved windows neutral",
+                reference.reset_of
+            )
+        }
+        _ => format!("{detail} unobserved windows neutral"),
+    };
+    result.map_or(
+        (NEUTRAL_FACTOR_BASIS_POINTS, neutral_detail, false),
+        |(factor, window, standby)| {
+            (
+                if standby { 0 } else { factor },
+                format!("{detail} {window}"),
+                standby,
+            )
+        },
+    )
+}
+#[derive(Debug, Serialize)]
+pub struct PacingPreview {
+    pub account: Option<String>,
+    pub policy: PacingPolicy,
+    pub factor_basis_points: u32,
+    pub detail: String,
+}
+/// Explain cached account profiles without probing or granting dispatch readiness.
+pub fn pacing_preview(model: &ModelId, context: &RoutingContext<'_>) -> Vec<PacingPreview> {
+    let mut accounts: BTreeSet<_> = context
+        .quota
+        .iter()
+        .filter(|q| q.snapshot.account.adapter == model.adapter())
+        .map(|q| Some(q.snapshot.account.account_key.clone()))
+        .collect();
+    accounts.extend(
+        context
+            .availability
+            .iter()
+            .filter(|a| a.adapter == model.adapter())
+            .map(|a| a.account_key.clone()),
+    );
+    if accounts.is_empty() {
+        accounts.insert(None);
+    }
+    accounts
+        .into_iter()
+        .map(|account| {
+            let (policy, _, _, _) = effective_profile(context, model, account.as_deref());
+            let (factor_basis_points, detail, _) =
+                pacing_factor_basis_points(policy, model, account.as_deref(), context);
+            PacingPreview {
+                account,
+                policy,
+                factor_basis_points,
+                detail,
+            }
+        })
+        .collect()
+}
+
+fn pacing_reserve_window(
     snapshot: &provenant_quota::QuotaSnapshot,
     now: i64,
     reserve: PacingReserve,
-) -> bool {
-    snapshot.windows.iter().any(|window| {
-        let percent = match window.window_seconds {
-            Some(18_000) => reserve.five_hour_percent,
-            Some(604_800) => reserve.seven_day_percent,
-            _ => return false,
-        };
-        window.resets_unix_seconds.is_some_and(|reset| reset > now)
-            && window.used_basis_points >= 10_000 - u64::from(percent) * 100
-    })
+    profile: Option<&PacingProfile>,
+    adapter: &str,
+) -> Option<String> {
+    snapshot
+        .windows
+        .iter()
+        .filter(|w| selected_window(w, profile, adapter))
+        .find(|window| {
+            let kind = [
+                PacingWindow::Rolling,
+                PacingWindow::FiveHour,
+                PacingWindow::SevenDay,
+                PacingWindow::Monthly,
+            ]
+            .into_iter()
+            .find(|k| window_matches(window, *k, adapter));
+            let percent = profile
+                .and_then(|p| {
+                    p.reserve
+                        .iter()
+                        .find(|(k, _)| window_matches(window, **k, adapter))
+                        .map(|(_, value)| *value)
+                })
+                .unwrap_or(match kind {
+                    Some(PacingWindow::FiveHour | PacingWindow::Rolling) => {
+                        reserve.five_hour_percent
+                    }
+                    Some(PacingWindow::SevenDay) => reserve.seven_day_percent,
+                    _ => 0,
+                });
+            percent > 0
+                && window.resets_unix_seconds.is_some_and(|reset| reset > now)
+                && window.used_basis_points >= 10_000 - u64::from(percent) * 100
+        })
+        .map(|w| w.pool.clone())
 }
 
 fn availability_reason(
@@ -420,14 +809,19 @@ fn account_reason<'q>(
             _ => None,
         };
     }
+    let (policy, profile, _, _) =
+        effective_profile(context, model, availability.account_key.as_deref());
+    if reason.is_none() && policy == PacingPolicy::Off {
+        reason = Some(RouteExclusionReason::Disabled);
+    }
     if reason.is_none()
-        && pacing_policy(context.catalogue, context.config, model) == PacingPolicy::Pace
+        && policy == PacingPolicy::Pace
         && let Some(q) = quota
         && matches!(
             q.snapshot.status,
             QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
         )
-        && pacing_reserve_reached(
+        && pacing_reserve_window(
             &q.snapshot,
             context.now_seconds(),
             context
@@ -436,7 +830,10 @@ fn account_reason<'q>(
                 .get(model.adapter())
                 .copied()
                 .unwrap_or_default(),
+            profile,
+            model.adapter(),
         )
+        .is_some()
     {
         reason = Some(RouteExclusionReason::PacingReserve);
     }
@@ -490,11 +887,11 @@ fn candidate(
         .iter()
         .filter(|a| a.adapter == model.adapter())
         .map(|a| {
-            let (reason, quota) = account_reason(model, entry.is_some(), a, access, context);
-            let headroom = quota
-                .and_then(|q| pace_snapshot_factor(&q.snapshot, context.now_seconds()))
-                .unwrap_or(NEUTRAL_FACTOR_BASIS_POINTS);
-            (a, reason, headroom)
+            let (reason, _) = account_reason(model, entry.is_some(), a, access, context);
+            let (policy, _, _, _) = effective_profile(context, model, a.account_key.as_deref());
+            let (headroom, _, standby) =
+                pacing_factor_basis_points(policy, model, a.account_key.as_deref(), context);
+            (a, reason, (!standby, headroom))
         })
         .collect();
     let best = evaluated
@@ -745,6 +1142,7 @@ struct ClassifiedPool {
     routes: Vec<Option<RouteAlternative>>,
     weighted: Vec<(usize, u64)>,
     first_zero_ready: Option<usize>,
+    first_standby_ready: Option<usize>,
     first_recoverable_unavailable: Option<usize>,
     first_other_unavailable: Option<usize>,
     exclusions: Vec<String>,
@@ -766,13 +1164,13 @@ fn classify_pool(
         routes: Vec::with_capacity(members.len()),
         weighted: Vec::new(),
         first_zero_ready: None,
+        first_standby_ready: None,
         first_recoverable_unavailable: None,
         first_other_unavailable: None,
         exclusions: Vec::new(),
     };
     for member in members {
         let effort = request.effort.clone().or(member.effort.clone());
-        let policy = pacing_policy(context.catalogue, context.config, &member.model);
         let mut factor_basis_points = NEUTRAL_FACTOR_BASIS_POINTS;
         if excluded_members.contains(&member.model) {
             classified
@@ -782,6 +1180,7 @@ fn classify_pool(
                 model: member.model.as_str().into(),
                 weight: member.weight,
                 factor_basis_points,
+                pacing_detail: None,
                 effort,
                 readiness: None,
                 exclusion: Some("admission rejected".into()),
@@ -802,6 +1201,7 @@ fn classify_pool(
         } else {
             None
         };
+        let mut pacing_detail = None;
         let mut readiness = None;
         let mut option = None;
         let exclusion = if let Some((kind, detail)) = exclusion {
@@ -810,16 +1210,23 @@ fn classify_pool(
         } else {
             match candidate(&member.model, effort.as_deref(), context) {
                 Ok(resolved) => {
-                    factor_basis_points = pacing_factor_basis_points(
+                    let (policy, _, _, _) =
+                        effective_profile(context, &member.model, resolved.account_key.as_deref());
+                    let (factor, detail, is_standby) = pacing_factor_basis_points(
                         policy,
                         &member.model,
                         resolved.account_key.as_deref(),
-                        context.quota,
-                        context.now_seconds(),
+                        context,
                     );
+                    factor_basis_points = factor;
+                    pacing_detail = Some(detail);
                     readiness = Some(resolved.readiness.clone());
                     if matches!(resolved.readiness, RouteReadiness::Ready { .. }) {
-                        if member.weight == 0 {
+                        if is_standby {
+                            if classified.first_standby_ready.is_none() {
+                                classified.first_standby_ready = Some(classified.candidates.len());
+                            }
+                        } else if member.weight == 0 {
                             if classified.first_zero_ready.is_none() {
                                 classified.first_zero_ready = Some(classified.candidates.len());
                             }
@@ -866,6 +1273,7 @@ fn classify_pool(
             model: member.model.as_str().into(),
             weight: member.weight,
             factor_basis_points,
+            pacing_detail,
             effort,
             readiness,
             exclusion,
@@ -903,6 +1311,7 @@ fn draw_pool(
     } else {
         classified
             .first_zero_ready
+            .or(classified.first_standby_ready)
             .or(classified.first_recoverable_unavailable)
             .or(classified.first_other_unavailable)
     };

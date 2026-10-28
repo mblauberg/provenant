@@ -60,6 +60,170 @@ fn call(rig: &TestRig, args: &[&str], expected: i64) -> Result<Value> {
     Ok(value)
 }
 #[test]
+fn pacing_override_persists_replaces_and_clears() -> Result {
+    let rig = rig()?;
+    fs::create_dir_all(&rig.state)?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.routing.pacing.accounts.pro]\npolicy = 'pace'\nwindows = ['five_hour']\nreserve = { five_hour = 15 }\n",
+    )?;
+    let list = call(&rig, &["route", "list"], 0)?;
+    assert_eq!(list["data"]["configured_accounts"]["pro"]["policy"], "pace");
+    call(
+        &rig,
+        &[
+            "route", "pacing", "override", "--all", "--policy", "spend", "--until", "0h",
+        ],
+        2,
+    )?;
+    call(
+        &rig,
+        &[
+            "route",
+            "pacing",
+            "override",
+            "--account",
+            "pro",
+            "--policy",
+            "spend",
+            "--until",
+            "2h",
+        ],
+        0,
+    )?;
+    call(
+        &rig,
+        &[
+            "route",
+            "pacing",
+            "override",
+            "--account",
+            "pro",
+            "--policy",
+            "pace",
+            "--until",
+            "1d",
+        ],
+        0,
+    )?;
+    call(
+        &rig,
+        &[
+            "route", "pacing", "override", "--all", "--policy", "spend", "--until", "2h",
+        ],
+        0,
+    )?;
+    let config = call(&rig, &["config", "show"], 0)?;
+    let overrides = config["data"]["domains"]["routing"]["pacing_overrides"]
+        .as_array()
+        .ok_or("overrides")?;
+    assert_eq!(overrides.len(), 2);
+    assert_eq!(overrides[0]["account"], "pro");
+    assert_eq!(overrides[0]["policy"], "pace");
+    assert!(overrides[0]["expires_unix_seconds"].as_i64().is_some());
+    call(&rig, &["route", "pacing", "override", "clear"], 0)?;
+    let config = call(&rig, &["config", "show"], 0)?;
+    assert_eq!(
+        config["data"]["domains"]["routing"]["pacing_overrides"],
+        serde_json::json!([])
+    );
+    Ok(())
+}
+#[test]
+fn cached_account_pacing_is_visible_without_probing() -> Result {
+    use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus, QuotaWindow};
+    let rig = rig()?;
+    let at = jiff::Timestamp::now().as_second();
+    let directory = rig.state.join("quota/michael");
+    fs::create_dir_all(&directory)?;
+    for path in [&rig.state, &rig.state.join("quota"), &directory] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    let account = AccountScope {
+        adapter: "claude".into(),
+        account_key: "michael".into(),
+        label: "michael".into(),
+    };
+    let mut record = AccountRecord::empty(account.clone());
+    record.revision = 1;
+    record.snapshot = Some(QuotaSnapshot {
+        schema_version: 1,
+        account,
+        revision: 1,
+        status: QuotaStatus::Available,
+        observed_unix_seconds: at,
+        source_ref: "fixture".into(),
+        authority_ref: None,
+        details: None,
+        windows: vec![QuotaWindow {
+            pool: "seven_day".into(),
+            window_seconds: Some(604_800),
+            used_basis_points: 9000,
+            resets_unix_seconds: Some(at + 300_000),
+        }],
+    });
+    let path = directory.join("claude.json");
+    fs::write(&path, serde_json::to_vec(&record)?)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.routing.pacing.accounts.michael]\npolicy='pace'\nwindows=['seven_day']\nreserve={seven_day=15}\ndeadline={reset_of='anese'}\n",
+    )?;
+    let list = call(&rig, &["route", "list", "--adapter", "claude"], 0)?;
+    assert_eq!(list["data"]["account_pacing"][0]["account"], "michael");
+    assert_eq!(list["data"]["account_pacing"][0]["source"], "account");
+    let resolved = call(&rig, &["route", "resolve", "claude/claude-haiku-5-5"], 0)?;
+    let detail = resolved["data"]["pacing"][0]["detail"]
+        .as_str()
+        .ok_or("pacing detail")?;
+    assert!(detail.contains("source=account") && detail.contains("seven_day"));
+    assert!(detail.contains("unknown or stale") && detail.contains("falling back"));
+    assert!(detail.contains("reserve exclusion window=seven_day"));
+    call(
+        &rig,
+        &[
+            "route",
+            "pacing",
+            "override",
+            "--account",
+            "michael",
+            "--policy",
+            "spend",
+            "--until",
+            "2h",
+        ],
+        0,
+    )?;
+    let resolved = call(&rig, &["route", "resolve", "claude/claude-haiku-5-5"], 0)?;
+    assert_eq!(resolved["data"]["pacing"][0]["policy"], "spend");
+    assert!(
+        resolved["data"]["pacing"][0]["detail"]
+            .as_str()
+            .ok_or("override detail")?
+            .contains("source=override")
+    );
+    Ok(())
+}
+
+#[test]
+fn pacing_profiles_reject_unknown_keys_and_list_options() -> Result {
+    let rig = rig()?;
+    fs::create_dir_all(&rig.state)?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.routing.pacing.accounts.pro]\nwindow=['five_hour']\n",
+    )?;
+    let output = call(&rig, &["route", "list"], 2)?;
+    let message = output["error"]["message"].as_str().ok_or("config error")?;
+    assert!(message.contains("unknown_key"), "{message}");
+    assert!(
+        message.contains("windows, reserve, deadline, after_deadline"),
+        "{message}"
+    );
+    Ok(())
+}
+
+#[test]
 fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Result {
     let rig = rig()?.without_state()?;
     call(&rig, &["route", "--help"], 0)?;

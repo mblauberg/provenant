@@ -626,6 +626,16 @@ impl Overrides<'_> {
                 self.issue(path, "type");
                 return;
             }
+            // An empty default has no member exemplar. Let the aggregate's
+            // serde type validate a populated array, as for empty maps.
+            if expected_items.as_ref().is_some_and(Vec::is_empty)
+                && probe(&Item::Table(self.defaults.clone()), path, user)
+                    .and_then(|item| item.into_table().ok())
+                    .as_ref()
+                    .is_some_and(decodes::<T>)
+            {
+                return;
+            }
             for (index, value) in items.iter().enumerate() {
                 path.push(index.to_string());
                 self.check::<T>(
