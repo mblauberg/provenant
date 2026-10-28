@@ -137,6 +137,7 @@ pub enum RouteExclusionReason {
     ConfinementUnavailable,
     UnsupportedEffort,
     Exhausted,
+    PacingReserve,
     AuthRequired,
     UnverifiedModel,
 }

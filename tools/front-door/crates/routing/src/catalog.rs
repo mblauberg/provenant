@@ -23,6 +23,22 @@ pub struct RoutingConfig {
     pub routes: BTreeMap<String, NamedRoute>,
     pub pools: BTreeMap<String, Vec<RoutePoolMember>>,
     pub pacing: BTreeMap<String, PacingPolicy>,
+    pub pacing_reserve: BTreeMap<String, PacingReserve>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PacingReserve {
+    pub five_hour_percent: u8,
+    pub seven_day_percent: u8,
+}
+impl Default for PacingReserve {
+    fn default() -> Self {
+        Self {
+            five_hour_percent: 15,
+            seven_day_percent: 10,
+        }
+    }
 }
 impl RoutingConfig {
     /// Suggest a cheaper route in the applied tier. Exact models and custom
@@ -203,6 +219,23 @@ impl DomainConfig for RoutingConfig {
                 errors.push(SectionError {
                     field: format!("pacing.{provider}"),
                     code: "unknown_provider",
+                });
+            }
+        }
+        for (provider, reserve) in &self.pacing_reserve {
+            if !provenant_providers::REGISTRY
+                .iter()
+                .any(|r| r.adapter.id() == provider)
+            {
+                errors.push(SectionError {
+                    field: format!("pacing_reserve.{provider}"),
+                    code: "unknown_provider",
+                });
+            }
+            if reserve.five_hour_percent > 100 || reserve.seven_day_percent > 100 {
+                errors.push(SectionError {
+                    field: format!("pacing_reserve.{provider}"),
+                    code: "range",
                 });
             }
         }
