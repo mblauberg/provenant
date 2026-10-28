@@ -14,6 +14,7 @@ mod git_context;
 mod holder;
 mod launch;
 mod ledger;
+mod objects;
 mod overview;
 mod plan;
 mod reader;

@@ -219,6 +219,8 @@ impl HostDeliveryContext {
             host.refresh_target_and_resolve(&writer, branch, Stage::Head)?
         };
         let head = GitOid::parse(&head).map_err(|_| RunError::Delivery(Stage::Head))?;
+        host.verify_objects(&writer, head, Stage::Head)?;
+        host.verify_objects(&writer, base, Stage::Head)?;
         // A local integration ref may belong to a human. Publish a separate
         // graph-owned ref; never push that existing local branch by name.
         let publication = if local {
@@ -791,10 +793,9 @@ impl HostDeliveryContext {
         if query()? != advertised {
             return Err(RunError::Delivery(stage));
         }
-        self.command(
-            &writer.worktree,
-            "git",
-            &["cat-file", "-e", &format!("{oid}^{{commit}}")],
+        self.verify_objects(
+            writer,
+            GitOid::parse(oid).map_err(|_| RunError::Delivery(stage))?,
             stage,
         )?;
         Ok(oid.to_owned())
@@ -1089,7 +1090,24 @@ impl HostDeliveryContext {
             &["rev-parse", "--verify", "HEAD"],
             Stage::Head,
         )?;
-        GitOid::parse(&head).map_err(|_| RunError::Delivery(Stage::Head))
+        let head = GitOid::parse(&head).map_err(|_| RunError::Delivery(Stage::Head))?;
+        self.verify_objects(writer, head, Stage::Head)?;
+        Ok(head)
+    }
+    fn verify_objects(&self, writer: &WriterRequest, head: GitOid, stage: Stage) -> Result<()> {
+        let git = &self.tools.as_ref().ok_or(RunError::Delivery(stage))?.git;
+        let directory = if let Some(bound) = &self.bound {
+            bound.git_dir.clone()
+        } else {
+            PathBuf::from(self.command(
+                &writer.worktree,
+                "git",
+                &["rev-parse", "--absolute-git-dir"],
+                stage,
+            )?)
+        };
+        crate::objects::verify_graph(git, &directory, &writer.project, head)
+            .map_err(|_| RunError::Delivery(stage))
     }
     fn clean(&self, writer: &WriterRequest) -> Result<()> {
         let path = writer.worktree.to_str().ok_or_else(|| {
@@ -1120,6 +1138,8 @@ impl HostDeliveryContext {
         identity: &str,
     ) -> Result<String> {
         let bound = self.bound.as_ref().ok_or(RunError::Delivery(Stage::Head))?;
+        self.verify_objects(writer, head, Stage::Head)?;
+        self.verify_objects(writer, bound.base_head, Stage::Head)?;
         let range = if bound.base_head == head {
             head.to_string()
         } else {
@@ -1177,8 +1197,18 @@ impl HostDeliveryContext {
                 .bytes()
             )
         );
+        // Establish the owner inode before concurrent acquisitions. Native
+        // macOS can refuse a racing O_CREAT open with ENOENT.
+        match directory.create_new(OsStr::new(&lock_name)) {
+            Ok(file) => {
+                file.sync()?;
+                directory.sync()?;
+            }
+            Err(error) if error.is_exists() => {}
+            Err(_) => return Err(RunError::Delivery(stage)),
+        }
         let _lock = directory
-            .lock(
+            .lock_existing(
                 OsStr::new(&lock_name),
                 LockMode::Exclusive,
                 // Each of at most 24 commands under this lock has a 30s deadline.
@@ -1190,6 +1220,7 @@ impl HostDeliveryContext {
             .map_err(|_| RunError::Delivery(stage))?;
         self.refuse_protected_target(writer, &request.branch)
             .map_err(|_| RunError::Delivery(stage))?;
+        self.verify_objects(writer, head, stage)?;
         self.clean(writer)?;
         if self.head(writer)? != head {
             return Err(RunError::Delivery(Stage::Head));
@@ -1228,6 +1259,7 @@ impl HostDeliveryContext {
             )?
         };
         let expected_oid = GitOid::parse(&expected).map_err(|_| RunError::Delivery(stage))?;
+        self.verify_objects(writer, expected_oid, stage)?;
         if self
             .command(
                 &writer.worktree,
@@ -1419,6 +1451,9 @@ impl HostDeliveryContext {
         head: GitOid,
         body: &str,
     ) -> Result<Option<String>> {
+        if self.head(writer)? != head {
+            return Err(RunError::Delivery(Stage::Head));
+        }
         self.refuse_protected_target(writer, &request.branch)
             .map_err(|_| RunError::Delivery(Stage::Prepare))?;
         self.clean(writer)?;

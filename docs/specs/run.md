@@ -454,6 +454,66 @@ never serve as trusted host evidence. The host uses its own Git environment.
   `crates/providers/src/seatbelt_snapshots.rs::agy_read_only_linked_worktree_git_directories_are_not_writable`
 - Owner: `crates/providers/src/launch.rs`, `crates/confinement/src/permissions.rs`
 
+## Writer object isolation
+
+Writer lanes also use `scratch/git-objects`, with the shared store as a
+read-only alternate. Their repository-scoped shell Git wrapper uses a private
+Git directory at `scratch/git-common` and the actual linked worktree's index.
+The host prepares its config and ref snapshot under the Git setup lock. Commits,
+merge state and `FETCH_HEAD` stay private; pushes use these private objects and
+refs. The shared lane branch stays at its launch base while the lane runs, so
+host and sibling fetches never encounter refs pointing into private stores.
+Seatbelt makes the shared Git metadata immutable except for the selected
+worktree's index and index lock, and denies every write operation on the common
+`objects` subtree, including its root, loose objects, packs and indices. The
+lane Git environment disables automatic GC and maintenance with `gc.auto=0`
+and `maintenance.auto=false`.
+
+The host seals the chosen attempt candidate before launch. At settlement it
+requires absent custody, reads the selected private branch as raw metadata
+without executing its mutable config, and copies canonical loose objects and
+packs into a fresh host-owned snapshot. Traversal
+refuses symlinks and non-regular object files; it copies neither lane alternates
+nor pack indices. The host rebuilds indices with `index-pack --strict` and pins
+the shared store as the only alternate. `fsck --full --no-reflogs --no-dangling
+<head>` checks object contents and connectivity before any instruction recovery,
+diff or ancestry read of the branch. An explicit head avoids consulting another
+live lane's refs or the lane index. A non-commit head or any verification failure
+refuses settlement certification and delivery.
+
+Only a verified snapshot is published, without replacing existing shared files.
+An object-store lock excludes concurrent verification while a loose graph is
+being published. Verification holds the shared side of the same lock.
+The snapshot lives in the common Git directory, so publication uses atomic
+creation on the repository volume even when lane scratch is on another volume.
+The host verifies the resulting shared graph again before consuming it. Existing object
+files retain their contents, inode and permissions. SHA-1 and SHA-256 repositories
+use the same boundary. Only the host's trusted shallow boundary is preserved;
+lane-supplied boundaries cannot excuse missing history. Import is bounded by
+100,000 directory entries and 2 GiB of source objects; each Git
+verification command has a 120-second deadline. Import snapshots are removed
+after each attempt; ordinary terminal cleanup owns lane scratch.
+
+After verification, the host publishes the lane branch with a compare-and-swap
+against its launch base. A replay may retain the same verified head; a divergent
+shared ref refuses publication. Private HEAD must still select the authorised
+branch. Shared ref publication precedes the host's instruction recovery and
+ancestry reads. Verification failure keeps custody and scratch for recovery.
+
+Host integration and delivery hash-check the lane and target graphs before
+reading commit messages, merging or pushing. Remote refresh checks the advertised
+OID and full object contents; existence or connectivity-only checks do not prove
+content integrity. Older attempts without a private-store binding receive the
+same full verification against the shared store.
+- Why: Git's ordinary reads do not prove that stored content matches its OID.
+- Test: `crates/confinement/tests/lane_git_conformance.rs`;
+  `crates/providers/src/tests.rs::prepared_git_reads_linked_and_other_repositories`;
+  `crates/run/src/objects_tests.rs`;
+  `crates/run/src/delivery_tests.rs::terminal_imports_private_objects_before_quarantine_reads_the_lane`;
+  `::delivery_refuses_corrupt_reachable_content_before_log_or_integration`
+- Owner: `crates/confinement/src/permissions.rs`, `crates/providers/src/launch.rs`,
+  `crates/run/src/objects.rs`, `crates/run/src/writer.rs`, `crates/run/src/delivery.rs`
+
 ## Project GitHub policy
 
 `projects/<ProjectId>/github.json` holds an optional host-owned advisory deny

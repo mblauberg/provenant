@@ -167,7 +167,7 @@ pub fn prepare_writer(
     .map_err(error("parse writer branch", Some(&head_path)))?;
     let base = provenant_confinement::run_utility(
         &executor,
-        provenant_confinement::GitRead::ResolveRef {
+        provenant_confinement::GitRead::ResolveRefOid {
             name: branch.clone(),
         },
         worktree.repo(),
@@ -1151,6 +1151,11 @@ impl WriterLaunch {
         remote: &str,
         base_ref: Option<&str>,
     ) -> Result<bool> {
+        if custody.observe() != provenant_supervisor::custody::RecoveryState::Absent {
+            return Err(RunError::Validation(
+                "writer object import requires absent custody",
+            ));
+        }
         let archive = crate::artifacts::subdir(attempt, OsStr::new("quarantine"), false)?;
         let base = custody
             .writer_base(
@@ -1162,6 +1167,45 @@ impl WriterLaunch {
                 "read writer custody base",
                 Some(self.worktree.path()),
             ))?;
+        // The raw branch OID is only a name until the complete graph has been
+        // hash-checked. Do this before instruction recovery, diffs or ancestry.
+        let source = crate::objects::bound_source(attempt)?;
+        let git_executable = provenant_os::git::git_executable()
+            .ok_or(RunError::Validation("Git executable unavailable"))?;
+        let shared_tip = crate::objects::resolve_ref(
+            &git_executable,
+            self.worktree.repo(),
+            self.branch.as_str(),
+        )?;
+        let verified_tip = match &source {
+            Some(source) => crate::objects::private_tip(source, self.branch.as_str())?,
+            None => shared_tip,
+        };
+        let head = self
+            .worktree
+            .repo()
+            .private_dir()
+            .read_stable(OsStr::new("HEAD"), 1024)?;
+        if std::str::from_utf8(&head).map(str::trim).ok()
+            != Some(format!("ref: {}", self.branch.as_str()).as_str())
+        {
+            return Err(RunError::Validation("writer HEAD is not the lane branch"));
+        }
+        crate::objects::settle(
+            &git_executable,
+            self.worktree.repo(),
+            source.as_ref().map(|source| &source.objects),
+            verified_tip,
+        )?;
+        if source.is_some() {
+            crate::objects::publish_branch(
+                &git_executable,
+                self.worktree.repo(),
+                self.branch.as_str(),
+                base,
+                verified_tip,
+            )?;
+        }
         let utility = runtime(state)?;
         let executor =
             SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
@@ -1205,6 +1249,11 @@ impl WriterLaunch {
             self.worktree.repo(),
             provenant_confinement::GitRead::RevParseHead,
         )?;
+        if tip != verified_tip {
+            return Err(RunError::Validation(
+                "writer head changed during object verification",
+            ));
+        }
         // Remote refs only refine attribution. Missing or stale refs must not
         // prevent quarantine from publishing evidence against the lane start.
         let comparison_base = (|| -> Result<GitOid> {

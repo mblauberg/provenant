@@ -335,16 +335,24 @@ pub enum AccessMode {
 }
 
 /// A digest binds the plan to Git grants and its one host-derived build cache.
-/// Neither the selected ref nor concrete Git paths enter the record.
+/// The common directory also binds provider setup to the verified repository.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorktreeWriteAuthority {
     pub git_grants_digest: [u8; 32],
     cargo_cache: PathGrant,
     publishing: bool,
+    /// Older records remain readable, but cannot launch without a verified binding.
+    #[serde(default)]
+    common_git_dir: Option<PathBuf>,
 }
 
 impl WorktreeWriteAuthority {
+    /// Repository selected by the host, for the lane-private object alternate.
+    pub fn common_git_dir(&self) -> Option<&Path> {
+        self.common_git_dir.as_deref()
+    }
+
     pub fn set_publishing(&mut self, enabled: bool) {
         self.publishing = enabled;
     }
@@ -367,6 +375,7 @@ impl WorktreeWriteAuthority {
             git_grants_digest: grants.digest(&cargo_cache),
             cargo_cache,
             publishing: true,
+            common_git_dir: Some(worktree.repo().common_git_dir().to_path_buf()),
         })
     }
 }
@@ -491,6 +500,8 @@ fn validate_writer_cache(
 /// `next-index-<pid>.lock` and unlinks it; the pid is not known in advance.
 const NEXT_INDEX_SAMPLE: &str = "next-index-0.lock";
 
+/// Held Git paths bound into writer authority. Most remain immutable; the
+/// renderer permits only the linked index outside the lane's scratch store.
 pub(crate) struct WorktreeWriteGrants {
     worktree: PathGrant,
     private_git_dir: PathGrant,
@@ -501,11 +512,11 @@ pub(crate) struct WorktreeWriteGrants {
     next_index: PathGrant,
     /// Git reads this shared exclude file during status and build fingerprinting.
     common_exclude: PathGrant,
-    /// Fetch records its result in the linked worktree's private gitdir.
+    /// Host-side FETCH_HEAD path retained in the anchor binding; lane fetches
+    /// use their scratch Git directory.
     fetch_heads: [PathGrant; 1],
-    /// Deleting any ref, even an unpacked pseudoref such as AUTO_MERGE, takes
-    /// this lock. `packed-refs` itself stays read-only, so the lock can never be
-    /// committed over it.
+    /// Shared refs stay at the verified base until host settlement. Git takes
+    /// ref locks in the lane-private common directory under scratch instead.
     packed_refs_lock: PathGrant,
     head: [PathGrant; 14],
     objects: PathGrant,
@@ -586,7 +597,7 @@ impl WorktreeWriteGrants {
 
     fn digest(&self, cache: &PathGrant) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"provenant-worktree-git-grants-v8\0");
+        digest.update(b"provenant-worktree-git-grants-v11\0");
         for grant in self.iter().chain([cache]) {
             let bytes = grant.path.as_os_str().as_encoded_bytes();
             digest.update((bytes.len() as u64).to_be_bytes());
@@ -1281,7 +1292,6 @@ fn compile_sbpl(
     let mut hard_link_denies = BTreeSet::new();
     if let Some(grants) = &worktree_grants {
         hard_link_denies = verify_worktree_tree(&grants.worktree.path, anchors)?;
-        verify_writable_tree(&grants.objects.path, anchors)?;
     }
     if let Some(read_only) = &plan.read_only {
         if !matches!(plan.mode, AccessMode::ReadOnly) {
@@ -1447,11 +1457,10 @@ fn compile_sbpl(
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
         verify_worktree_authority(authority, anchors)?;
     }
-    if let Some(grants) = &worktree_grants {
-        if verify_worktree_tree(&grants.worktree.path, anchors)? != *hard_link_denies {
-            return Err(PermissionError::AnchorMismatch);
-        }
-        verify_writable_tree(&grants.objects.path, anchors)?;
+    if let Some(grants) = &worktree_grants
+        && verify_worktree_tree(&grants.worktree.path, anchors)? != *hard_link_denies
+    {
+        return Err(PermissionError::AnchorMismatch);
     }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
     if let Some(state) = &plan.private_state {
@@ -2037,13 +2046,14 @@ fn render_profile(
         ));
     }
 
-    if let Some(read_only) = &plan.read_only {
-        // The attempt object store is writable, but must not redirect writes
-        // through a lane-planted symlink into the common object store.
+    // The lane-private object store must not redirect Git writes through links.
+    if plan.read_only.is_some() || matches!(plan.mode, AccessMode::WorktreeWrite(_)) {
         source.push_str(&format!(
             "(deny file-write-create (require-all (vnode-type SYMLINK) (subpath \"{}\")))\n",
             sbpl_path(&plan.scratch.path.join("git-objects"))?
         ));
+    }
+    if let Some(read_only) = &plan.read_only {
         for grant in &read_only.writes {
             for operation in ["file-read*", "file-write*"] {
                 push_rule(&mut source, "allow", operation, &grant.path, grant.scope)?;
@@ -2160,25 +2170,22 @@ fn push_worktree_rule(
     source.push_str(&format!(
         "(allow file-write* (require-all (subpath \"{worktree}\") (require-not (subpath \"{git_dir}\")) (require-not (subpath \"{common_dir}\"))))\n"
     ));
-    for grant in grants
-        .index
-        .iter()
-        .chain(std::iter::once(&grants.packed_refs_lock))
-        .chain(&grants.fetch_heads)
-        .chain(&grants.head)
-        .chain(&grants.selected_ref)
-    {
+    // Freeze the repository even when a configured write root overlaps it.
+    // Only the linked index stays shared so host quarantine sees staged edits.
+    for grant in [&grants.common_git_dir, &grants.private_git_dir] {
+        push_rule(source, "deny", "file-write*", &grant.path, grant.scope)?;
+    }
+    for grant in &grants.index {
         push_rule(source, "allow", "file-write*", &grant.path, grant.scope)?;
     }
-    // Anchored to the private git directory: one path component, digits only.
-    let private = sbpl_regex_path(&grants.private_git_dir.path)?;
-    source.push_str(&format!(
-        "(allow file-write* (regex #\"^{private}/next-index-[0-9]+\\.lock$\"))\n"
-    ));
-    let path = sbpl_path(&grants.objects.path)?;
-    source.push_str(&format!(
-        "(allow file-write* (require-all (subpath \"{path}\") (require-not (subpath \"{path}/info\"))))\n"
-    ));
+    // An index spelling must never reopen an aliased shared object for writes.
+    push_rule(
+        source,
+        "deny",
+        "file-write*",
+        &grants.objects.path,
+        grants.objects.scope,
+    )?;
     Ok(())
 }
 
@@ -2197,6 +2204,9 @@ fn verify_worktree_authority(
     let grants = WorktreeWriteGrants::derive(verified, selected_ref);
     grants.validate()?;
     validate_writer_cache(authority, verified, anchors.home)?;
+    if authority.common_git_dir() != Some(grants.common_git_dir.path.as_path()) {
+        return Err(PermissionError::GitWriteAuthorityMissing);
+    }
     if grants.digest(&authority.cargo_cache) != authority.git_grants_digest {
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
@@ -2575,27 +2585,6 @@ fn push_rule(
     Ok(())
 }
 
-/// Escapes a path for a raw SBPL `#"..."` regex literal.
-#[cfg(any(target_os = "macos", feature = "snapshot"))]
-fn sbpl_regex_path(path: &Path) -> Result<String, PermissionError> {
-    let text = path.to_str().ok_or(PermissionError::NonUtf8Path)?;
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '"' => return Err(PermissionError::InvalidPath(path.to_owned())),
-            value if value.is_control() => {
-                return Err(PermissionError::InvalidPath(path.to_owned()));
-            }
-            '\\' | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' => {
-                escaped.push('\\');
-                escaped.push(character);
-            }
-            value => escaped.push(value),
-        }
-    }
-    Ok(escaped)
-}
-
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 fn sbpl_path(path: &Path) -> Result<String, PermissionError> {
     let text = path.to_str().ok_or(PermissionError::NonUtf8Path)?;
@@ -2932,6 +2921,7 @@ mod tests {
         plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
             git_grants_digest: [7; 32],
             publishing: true,
+            common_git_dir: Some("/fixture/git".into()),
             cargo_cache: PathGrant {
                 path: "/fixture/cache".into(),
                 scope: PathScope::Subtree,
@@ -2991,6 +2981,7 @@ mod tests {
                 plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
                     git_grants_digest: [7; 32],
                     publishing: true,
+                    common_git_dir: Some("/fixture/git".into()),
                     cargo_cache: PathGrant {
                         path: "/fixture/cache".into(),
                         scope: PathScope::Subtree,
@@ -3061,6 +3052,7 @@ mod tests {
                 plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
                     git_grants_digest: [7; 32],
                     publishing: true,
+                    common_git_dir: Some("/fixture/git".into()),
                     cargo_cache: subtree("/fixture/cache"),
                 }));
             }
@@ -3079,11 +3071,6 @@ mod tests {
                 line.starts_with("(allow ")
                     && (line.contains("file-write*") || line.contains("file-write-data"))
             }) {
-                // Git's temporary index family is represented by the Git digest.
-                if writer && line.starts_with("(allow file-write* (regex #\"") {
-                    assert!(line.contains("/next-index-[0-9]+"));
-                    continue;
-                }
                 let (scope, tail) = if let Some((_, tail)) = line.split_once("(subpath \"") {
                     (PathScope::Subtree, tail)
                 } else if let Some((_, tail)) = line.split_once("(literal \"") {
@@ -3839,6 +3826,7 @@ mod tests {
         let authority = WorktreeWriteAuthority {
             git_grants_digest: [0; 32],
             publishing: true,
+            common_git_dir: Some("/fixture/git".into()),
             cargo_cache: PathGrant {
                 path: "/fixture/home/Library/Caches/provenant-lane-cargo/fixture".into(),
                 scope: PathScope::Subtree,
@@ -4059,46 +4047,26 @@ mod tests {
         let mut source = String::new();
         push_worktree_rule(&mut source, &verified_grants)?;
         assert!(source.contains("(require-not (subpath "));
-        assert!(source.contains(&format!("{}/objects/info", common.display())));
-        // `git commit` needs its message buffer, only in the private directory.
-        assert!(source.contains(&format!("\"{}\"", private.join("COMMIT_EDITMSG").display())));
-        assert!(!source.contains(&format!("\"{}\"", common.join("COMMIT_EDITMSG").display())));
-        // A local `git merge` records its state only in the private directory.
-        for name in [
-            "MERGE_HEAD",
-            "MERGE_MSG",
-            "MERGE_MODE",
-            "MERGE_RR",
-            "ORIG_HEAD",
-            "ORIG_HEAD.lock",
-        ] {
-            assert!(source.contains(&format!("\"{}\"", private.join(name).display())));
-            assert!(!source.contains(&format!("\"{}\"", common.join(name).display())));
-        }
-        // Pathspec commits write `next-index-<pid>.lock`, only in the private directory.
-        let private_pattern = sbpl_regex_path(&private)?;
-        assert!(source.contains(&format!(
-            "(regex #\"^{private_pattern}/next-index-[0-9]+\\.lock$\")"
-        )));
-        assert!(!source.contains(&format!("^{}/next-index", sbpl_regex_path(&common)?)));
-        // Fetch can record its result in the private git directory.
-        {
-            let directory = &private;
+        for directory in [&common, &private] {
             assert!(source.contains(&format!(
-                "(allow file-write* (literal \"{}\"))",
-                directory.join("FETCH_HEAD").display()
-            )));
-            assert!(!source.contains(&format!(
-                "(allow file-write* (subpath \"{}\"))",
-                directory.join("FETCH_HEAD").display()
+                "(deny file-write* (subpath \"{}\"))",
+                directory.display()
             )));
         }
-        assert!(!source.contains(&format!("\"{}\"", common.join("FETCH_HEAD").display())));
-        // Ref deletion takes the packed-refs lock; packed-refs itself stays read-only.
-        assert!(source.contains(&format!(
-            "\"{}\"",
-            common.join("packed-refs.lock").display()
-        )));
+        let git_writes: Vec<_> = source
+            .lines()
+            .filter(|line| line.starts_with("(allow file-write* (literal "))
+            .collect();
+        let expected: Vec<_> = ["index", "index.lock"]
+            .into_iter()
+            .map(|name| {
+                format!(
+                    "(allow file-write* (literal \"{}\"))",
+                    private.join(name).display()
+                )
+            })
+            .collect();
+        assert_eq!(git_writes, expected);
         for relative in [
             "config",
             "config.lock",
@@ -4163,6 +4131,15 @@ mod tests {
             verify_worktree_authority(&tampered, &anchors),
             Err(PermissionError::GitWriteAuthorityMissing)
         ));
+
+        for common_git_dir in [None, Some(fixture._temp.path().join("other-git"))] {
+            let mut tampered = authority.clone();
+            tampered.common_git_dir = common_git_dir;
+            assert!(matches!(
+                verify_worktree_authority(&tampered, &anchors),
+                Err(PermissionError::GitWriteAuthorityMissing)
+            ));
+        }
 
         let original_head = std::fs::read(private.join("HEAD"))?;
         std::fs::write(private.join("HEAD"), b"ref: refs/heads/s3/other\n")?;
@@ -4396,9 +4373,9 @@ mod tests {
                 ),
                 (FixtureOperation::WorktreeWrite, FixtureOutcome::Allowed),
                 (FixtureOperation::GitIndexWrite, FixtureOutcome::Allowed),
-                (FixtureOperation::GitHeadWrite, FixtureOutcome::Allowed),
-                (FixtureOperation::GitObjectsWrite, FixtureOutcome::Allowed),
-                (FixtureOperation::SelectedRefWrite, FixtureOutcome::Allowed),
+                (FixtureOperation::GitHeadWrite, FixtureOutcome::Denied),
+                (FixtureOperation::GitObjectsWrite, FixtureOutcome::Denied),
+                (FixtureOperation::SelectedRefWrite, FixtureOutcome::Denied),
                 (FixtureOperation::GitConfigWrite, FixtureOutcome::Denied),
                 (FixtureOperation::OtherRefWrite, FixtureOutcome::Denied),
             ]
@@ -4464,8 +4441,8 @@ mod tests {
         };
         let backend = MacOsSandboxBackend { ready: true };
         let hardlink_path = linked.path().join("hardlink");
-        for writable_path in [&grants.objects.path, &scratch] {
-            let alias = writable_path.join("hardlink-probe");
+        {
+            let alias = scratch.join("hardlink-probe");
             std::fs::hard_link(&protected_file, &alias)?;
             assert!(matches!(
                 backend.compile(&plan, &profile, &anchors),
@@ -4673,15 +4650,21 @@ mod tests {
             inside_outcome.termination,
             String::from_utf8_lossy(&inside_outcome.stderr.bytes)
         );
-        {
-            let directory = &private;
-            let fetch_head_outcome = run(&executables[0], &[&directory.join("FETCH_HEAD")]);
+        for name in [
+            "HEAD",
+            "HEAD.lock",
+            "FETCH_HEAD",
+            "COMMIT_EDITMSG",
+            "MERGE_HEAD",
+            "ORIG_HEAD",
+            "next-index-123.lock",
+        ] {
+            let outcome = run(&executables[0], &[&private.join(name)]);
             assert!(
-                successful_probe(&fetch_head_outcome),
-                "{} FETCH_HEAD write failed: {:?}; {}",
-                directory.display(),
-                fetch_head_outcome.termination,
-                String::from_utf8_lossy(&fetch_head_outcome.stderr.bytes)
+                denied_probe(&outcome),
+                "actual linked metadata {name} must be immutable: {:?}; {}",
+                outcome.termination,
+                String::from_utf8_lossy(&outcome.stderr.bytes)
             );
         }
         for relative in [

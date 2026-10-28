@@ -56,29 +56,25 @@ fn prepared_git_objects_are_repository_scoped_for_every_adapter() -> Result<(), 
                     _ => false,
                 })
                 .collect();
-            if access == Access::ReadOnly {
-                assert_eq!(
-                    object_setup,
-                    vec![
-                        &SetupStep::CreateDir("/fixture/scratch/git-objects/info".into()),
-                        &SetupStep::WriteFile {
-                            path: "/fixture/scratch/git-objects/info/alternates".into(),
-                            bytes: b"\"/fixture/repo/.git/objects\"\n".to_vec(),
-                        },
-                    ],
-                    "{id}"
-                );
-                assert!(spec.setup.iter().any(|step| matches!(step,
+            assert_eq!(
+                object_setup,
+                vec![
+                    &SetupStep::CreateDir("/fixture/scratch/git-objects/info".into()),
+                    &SetupStep::WriteFile {
+                        path: "/fixture/scratch/git-objects/info/alternates".into(),
+                        bytes: b"\"/fixture/repo/.git/objects\"\n".to_vec(),
+                    },
+                ],
+                "{id}"
+            );
+            assert!(spec.setup.iter().any(|step| matches!(step,
                     SetupStep::WriteExecutable { path, .. } if path == Path::new("/fixture/scratch/bin/git")
                 )), "{id} must route shell Git through the scoped wrapper");
-                let path = &spec.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
-                assert_eq!(
-                    std::env::split_paths(path).next().unwrap(),
-                    Path::new("/fixture/scratch/bin")
-                );
-            } else {
-                assert!(object_setup.is_empty(), "{id}");
-            }
+            let path = &spec.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
+            assert_eq!(
+                std::env::split_paths(path).next().unwrap(),
+                Path::new("/fixture/scratch/bin")
+            );
         }
     }
     Ok(())
@@ -126,7 +122,11 @@ fn prepared_git_reads_linked_and_other_repositories() -> Result<(), Box<dyn std:
     use std::path::PathBuf;
     use std::process::Command;
 
-    for entry in REGISTRY {
+    for (entry, access) in REGISTRY.iter().flat_map(|entry| {
+        [Access::ReadOnly, Access::WorktreeWrite]
+            .into_iter()
+            .map(move |access| (entry, access))
+    }) {
         let id = entry.adapter.id();
         let temp = tempfile::tempdir()?;
         let root = temp.path().canonicalize()?;
@@ -200,10 +200,20 @@ fn prepared_git_reads_linked_and_other_repositories() -> Result<(), Box<dyn std:
                 linked.as_os_str(),
             ],
         );
+        host_git(
+            &repo,
+            &[
+                "remote".as_ref(),
+                "add".as_ref(),
+                "origin".as_ref(),
+                other.as_os_str(),
+            ],
+        );
         let scratch = root.join("scratch");
-        let base = read_only_plan(
-            root.to_str().unwrap(),
+        let base = fixture_access_plan(
+            access,
             provenant_records::AdapterSpec::get(id).and_then(|spec| spec.authentication),
+            false,
         );
         let mut permissions = base.permissions().clone();
         permissions.scratch.path = scratch.clone();
@@ -214,7 +224,14 @@ fn prepared_git_reads_linked_and_other_repositories() -> Result<(), Box<dyn std:
                 scope: PathScope::Subtree,
             })
             .collect();
-        permissions.read_only = Some(ReadOnlyGrants::for_test(repo.clone(), vec![]));
+        if access == Access::ReadOnly {
+            permissions.read_only = Some(ReadOnlyGrants::for_test(repo.clone(), vec![]));
+        } else {
+            permissions.read_only = None;
+            let mut mode = serde_json::to_value(&permissions.mode)?;
+            mode["authority"]["common_git_dir"] = serde_json::to_value(repo.join(".git"))?;
+            permissions.mode = serde_json::from_value(mode)?;
+        }
         let plan = ConfinedPlan::new(PlanRequest {
             scope: base.scope(),
             permissions,
@@ -259,6 +276,29 @@ fn prepared_git_reads_linked_and_other_repositories() -> Result<(), Box<dyn std:
                     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
                 }
                 _ => {}
+            }
+        }
+        if access == Access::WorktreeWrite {
+            let private_common = scratch.join("git-common");
+            std::fs::create_dir_all(private_common.join("objects"))?;
+            std::fs::create_dir_all(private_common.join("refs"))?;
+            std::fs::write(
+                private_common.join("config"),
+                std::fs::read(repo.join(".git/config"))?,
+            )?;
+            std::fs::write(private_common.join("HEAD"), b"ref: refs/heads/linked\n")?;
+            let refs = host_git(
+                &repo,
+                &[
+                    "for-each-ref".as_ref(),
+                    "--format=%(objectname) %(refname)".as_ref(),
+                ],
+            );
+            for line in std::str::from_utf8(&refs)?.lines() {
+                let (oid, name) = line.split_once(' ').ok_or("fixture ref")?;
+                let path = private_common.join(name);
+                std::fs::create_dir_all(path.parent().ok_or("fixture ref parent")?)?;
+                std::fs::write(path, format!("{oid}\n"))?;
             }
         }
         let lane_git = |args: &[&std::ffi::OsStr]| {
@@ -368,6 +408,130 @@ fn prepared_git_reads_linked_and_other_repositories() -> Result<(), Box<dyn std:
             "{id}"
         );
         assert!(!repo.join(".git/objects").join(&relative).exists(), "{id}");
+        if access == Access::WorktreeWrite {
+            assert_eq!(
+                lane_git(&["config".as_ref(), "--get".as_ref(), "gc.auto".as_ref()]),
+                b"0\n"
+            );
+            assert_eq!(
+                lane_git(&[
+                    "config".as_ref(),
+                    "--get".as_ref(),
+                    "maintenance.auto".as_ref()
+                ]),
+                b"false\n"
+            );
+            std::fs::write(linked.join("lane-blob"), "private committed blob")?;
+            lane_git(&["add".as_ref(), "lane-blob".as_ref()]);
+            lane_git(&[
+                "-c".as_ref(),
+                "user.name=Fixture".as_ref(),
+                "-c".as_ref(),
+                "user.email=fixture@example.test".as_ref(),
+                "commit".as_ref(),
+                "-qm".as_ref(),
+                "private lane commit".as_ref(),
+                "--".as_ref(),
+                "lane-blob".as_ref(),
+            ]);
+            assert_eq!(
+                host_git(&linked, &["rev-parse".as_ref(), "HEAD".as_ref()]),
+                bound_head,
+                "{id} shared branch after private commit"
+            );
+            let head = lane_git(&["rev-parse".as_ref(), "HEAD".as_ref()]);
+            let head = std::str::from_utf8(&head)?.trim();
+            let relative = PathBuf::from(&head[..2]).join(&head[2..]);
+            assert!(
+                scratch.join("git-objects").join(&relative).is_file(),
+                "{id}"
+            );
+            assert!(!repo.join(".git/objects").join(&relative).exists(), "{id}");
+            lane_git(&["cat-file".as_ref(), "-e".as_ref(), "HEAD^{commit}".as_ref()]);
+            assert_eq!(
+                lane_git(&["log".as_ref(), "-1".as_ref(), "--format=%H".as_ref()]),
+                format!("{head}\n").as_bytes()
+            );
+            std::fs::write(other.join("upstream-blob"), "fetched upstream blob")?;
+            host_git(&other, &["add".as_ref(), "upstream-blob".as_ref()]);
+            host_git(
+                &other,
+                &["commit".as_ref(), "-qm".as_ref(), "upstream blob".as_ref()],
+            );
+            lane_git(&[
+                "-c".as_ref(),
+                "protocol.file.allow=always".as_ref(),
+                "fetch".as_ref(),
+                "--quiet".as_ref(),
+                "--refmap=".as_ref(),
+                "origin".as_ref(),
+                "HEAD".as_ref(),
+            ]);
+            assert_eq!(
+                lane_git(&["rev-parse".as_ref(), "FETCH_HEAD".as_ref()]),
+                host_git(&other, &["rev-parse".as_ref(), "HEAD".as_ref()]),
+                "{id} fetched head",
+            );
+            lane_git(&[
+                "-c".as_ref(),
+                "user.name=Fixture".as_ref(),
+                "-c".as_ref(),
+                "user.email=fixture@example.test".as_ref(),
+                "merge".as_ref(),
+                "--quiet".as_ref(),
+                "--no-ff".as_ref(),
+                "--allow-unrelated-histories".as_ref(),
+                "-m".as_ref(),
+                "merge fetched blob".as_ref(),
+                "FETCH_HEAD".as_ref(),
+            ]);
+            assert_eq!(
+                std::fs::read(linked.join("upstream-blob"))?,
+                b"fetched upstream blob"
+            );
+            lane_git(&[
+                "-c".as_ref(),
+                "protocol.file.allow=always".as_ref(),
+                "push".as_ref(),
+                "--quiet".as_ref(),
+                "origin".as_ref(),
+                "HEAD:refs/heads/published".as_ref(),
+            ]);
+            assert_eq!(
+                host_git(
+                    &other,
+                    &["rev-parse".as_ref(), "refs/heads/published".as_ref()]
+                ),
+                lane_git(&["rev-parse".as_ref(), "HEAD".as_ref()]),
+                "{id} pushed merged head",
+            );
+            assert_eq!(
+                host_git(
+                    &other,
+                    &["show".as_ref(), "refs/heads/published:lane-blob".as_ref()]
+                ),
+                b"private committed blob",
+                "{id} pushed private blob",
+            );
+            assert!(!repo.join(".git/objects").join(relative).exists(), "{id}");
+            assert_eq!(
+                host_git(&linked, &["rev-parse".as_ref(), "HEAD".as_ref()]),
+                bound_head,
+                "{id} shared branch remains at base"
+            );
+            host_git(
+                &repo,
+                &[
+                    "-c".as_ref(),
+                    "protocol.file.allow=always".as_ref(),
+                    "fetch".as_ref(),
+                    "--quiet".as_ref(),
+                    "--refmap=".as_ref(),
+                    "origin".as_ref(),
+                    "HEAD".as_ref(),
+                ],
+            );
+        }
     }
     Ok(())
 }
@@ -1292,6 +1456,7 @@ pub(super) fn fixture_access_plan(
         let authority: WorktreeWriteAuthority = serde_json::from_value(serde_json::json!({
             "git_grants_digest": vec![0; 32],
             "publishing": true,
+            "common_git_dir": "/fixture/repo/.git",
             "cargo_cache": {"path": "/fixture/home/Library/Caches/provenant-lane-cargo/fixture", "scope": "subtree"}
         })).expect("fixture authority; no compilation is attempted");
         permissions.mode = AccessMode::WorktreeWrite(Box::new(authority));

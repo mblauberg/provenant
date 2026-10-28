@@ -3,6 +3,7 @@ use super::delivery::*;
 use super::*;
 use provenant_core::GitOid;
 use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+use provenant_os::fs::Directory;
 use std::{ffi::OsString, path::Path, time::Duration};
 
 struct PrepareFixture {
@@ -11,6 +12,164 @@ struct PrepareFixture {
     environment: Vec<(OsString, OsString)>,
     writer: WriterRequest,
     request: WriterDeliveryRequest,
+}
+
+#[test]
+fn terminal_imports_private_objects_before_quarantine_reads_the_lane()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for corrupt in [false, true] {
+        let fixture = PrepareFixture::new()?;
+        let result = fixture.terminal(|| {
+            let attempt_path = fixture.root.join("attempt");
+            let scratch = attempt_path.join("tmp/candidate-0");
+            let objects = scratch.join("git-objects");
+            std::fs::create_dir_all(objects.join("info"))?;
+            std::fs::write(
+                objects.join("info/alternates"),
+                format!(
+                    "{}\n",
+                    fixture.writer.project.join(".git/objects").display()
+                ),
+            )?;
+            let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+            let executor = SystemExecutor::new(1)?;
+            let runtime =
+                provenant_confinement::UtilityRuntime::new(&executable, fixture.root.join("home"))?;
+            let repo = runtime.open_repo(
+                &executor,
+                &fixture.writer.project,
+                provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
+                &provenant_core::CancelToken::new(),
+            )?;
+            let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
+            let base =
+                crate::objects::resolve_ref(&executable, worktree.repo(), "refs/heads/lane")?;
+            crate::objects::prepare_refs(
+                &executable,
+                worktree.repo(),
+                &Directory::open_anchor(&scratch)?,
+                "refs/heads/lane",
+                base,
+            )?;
+            crate::objects::bind(&Directory::open_anchor(&attempt_path)?, &scratch)?;
+            std::fs::write(
+                fixture.writer.worktree.join("private.txt"),
+                "private lane content\n",
+            )?;
+            for args in [
+                vec!["add", "private.txt"],
+                vec![
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "-qm",
+                    "private commit",
+                ],
+            ] {
+                let argv: Vec<OsString> = std::iter::once(executable.as_os_str().to_owned())
+                    .chain(args.into_iter().map(Into::into))
+                    .collect();
+                let mut environment = fixture.environment.clone();
+                environment.push((
+                    "GIT_OBJECT_DIRECTORY".into(),
+                    objects.clone().into_os_string(),
+                ));
+                environment.push((
+                    "GIT_COMMON_DIR".into(),
+                    scratch.join("git-common").into_os_string(),
+                ));
+                environment.push((
+                    "GIT_DIR".into(),
+                    scratch.join("git-common").into_os_string(),
+                ));
+                environment.push((
+                    "GIT_WORK_TREE".into(),
+                    fixture.writer.worktree.clone().into_os_string(),
+                ));
+                environment.push((
+                    "GIT_INDEX_FILE".into(),
+                    worktree
+                        .repo()
+                        .private_git_dir()
+                        .join("index")
+                        .into_os_string(),
+                ));
+                let mut options =
+                    ExecOptions::new(&argv, &fixture.writer.worktree, Duration::from_secs(5));
+                options.env = Some(&environment);
+                let output = SystemExecutor::new(1)?.execute(options)?;
+                assert_eq!(
+                    output.termination,
+                    Termination::Exit(0),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr.bytes)
+                );
+            }
+            assert_eq!(
+                crate::objects::resolve_ref(&executable, worktree.repo(), "refs/heads/lane")?,
+                base
+            );
+            if corrupt {
+                let fanout = std::fs::read_dir(&objects)?
+                    .filter_map(|entry| entry.ok())
+                    .find(|entry| entry.file_name().len() == 2)
+                    .ok_or("loose fanout")?
+                    .path();
+                let object = std::fs::read_dir(fanout)?
+                    .next()
+                    .ok_or("loose object")??
+                    .path();
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&object, std::fs::Permissions::from_mode(0o600))?;
+                std::fs::write(object, "corrupt")?;
+            }
+            Ok(())
+        });
+        if corrupt {
+            assert!(result.is_err());
+            assert!(!fixture.root.join("attempt/writer-terminal.json").exists());
+        } else {
+            assert!(!result?);
+            fixture.lane_git(&["cat-file", "-e", "HEAD:private.txt"])?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn delivery_refuses_corrupt_reachable_content_before_log_or_integration()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let host = fixture.prepare()?;
+    std::fs::write(fixture.writer.worktree.join("blob"), "original content\n")?;
+    fixture.lane_git(&["add", "blob"])?;
+    fixture.commit(&fixture.writer.worktree, "lane blob")?;
+    let head = host.head(&fixture.writer)?;
+    let blob = host.command(
+        &fixture.writer.worktree,
+        "git",
+        &["rev-parse", "HEAD:blob"],
+        WriterDeliveryStage::Head,
+    )?;
+    let object = fixture
+        .writer
+        .project
+        .join(".git/objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&object, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::write(object, "corrupt object content")?;
+    assert!(host.head(&fixture.writer).is_err());
+    assert!(host.commit_body(&fixture.writer, head, "delivery").is_err());
+    fixture.git(&["branch", "integration"])?;
+    let request =
+        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
+            .ok_or("destination")?;
+    assert!(host.integrate(&fixture.writer, &request, head).is_err());
+    Ok(())
 }
 
 #[test]
