@@ -15,6 +15,7 @@ pub use quota::Quota;
 pub use route::Route;
 pub use workflow::Workflow;
 mod grammar;
+pub mod inbox;
 pub mod install;
 pub mod pr_body;
 mod render;
@@ -286,6 +287,12 @@ const CORE_HELP: &str = "Provenant: run work, inspect progress and land changes.
             provenant land 1947
   quota     Show provider quota
             provenant quota
+  ask       Record a decision, assumption or question
+            provenant ask --file request.json --session SESSION --json
+  inbox     List requests or inspect an item
+            provenant inbox --json
+  answer    Resolve a request at the revision you saw
+            provenant help answer
   install   Install harness integrations
             provenant install
   help --all  All commands and advanced options
@@ -388,7 +395,15 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
             && parent == "provenant"
             && !matches!(
                 command.get_name(),
-                "run" | "status" | "land" | "quota" | "install" | "help"
+                "run"
+                    | "status"
+                    | "land"
+                    | "quota"
+                    | "ask"
+                    | "inbox"
+                    | "answer"
+                    | "install"
+                    | "help"
             )
         {
             command = command.hide(true);

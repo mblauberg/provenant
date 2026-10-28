@@ -75,7 +75,17 @@ pub fn decode(
         "codex" => decode_codex(payload, &mut windows, &mut details),
         "agy" => decode_agy(payload, &mut windows)?,
         "cursor" => decode_cursor(payload, &mut windows, &mut details),
-        "opencode" => decode_opencode(payload, &mut windows),
+        "opencode" => {
+            decode_opencode(payload, &mut windows);
+            if account.account_key != "zen" {
+                let details = details_mut(&mut details);
+                details.source = Some("local-ledger".into());
+                details.coverage = Some("partial".into());
+                details.note = Some(
+                    "Partial lower bound: this host only; other devices are not counted".into(),
+                );
+            }
+        }
         _ => return Err(QuotaError::Disabled),
     }
 

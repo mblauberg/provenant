@@ -1,0 +1,141 @@
+use super::*;
+use provenant_core::{HostId, HumanAnswerId, HumanRequestId, OperationId};
+use provenant_records::inbox::*;
+
+#[test]
+fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
+    let f = Fixture::new();
+    let store = f.open();
+    let request = f.request();
+    let id = HumanRequestId::from_bytes([5; 16]);
+    let original = HumanRequest {
+        schema_version: 1,
+        id,
+        revision: 1,
+        operation_id: OperationId::parse("ask").unwrap(),
+        created_at: f.now(),
+        updated_at: f.now(),
+        project_id: project(),
+        project_key: None,
+        owner_host: HostId::from_bytes([8; 16]),
+        chair_session_id: "chair-a".into(),
+        chair_actor: actor(2),
+        request: RequestDraft {
+            kind: RequestKind::Question,
+            title: "Question".into(),
+            body: "What next?".into(),
+            blocking: false,
+            options: vec![],
+            recommended_option_id: None,
+            proceeding_with: None,
+        },
+        state: RequestState::Open,
+        answer_id: None,
+        closure_reason: None,
+    };
+    store.create_human_request(&original, &request).unwrap();
+    let operation = OperationId::parse("answer").unwrap();
+    let answer = HumanAnswer {
+        schema_version: 1,
+        id: HumanAnswerId::from_bytes([6; 16]),
+        request_id: id,
+        request_revision: 1,
+        action: AnswerAction::Reply,
+        option_id: None,
+        text: Some("Ship it".into()),
+        actor: actor(3),
+        channel: InteractionChannel::Cli,
+        answered_at: f.now(),
+        operation_id: operation.clone(),
+    };
+    let mut mail = message(&f, 7);
+    mail.kind = MessageKind::Response;
+    mail.recipients = vec![actor(2)];
+    let delivery = AnswerDelivery {
+        schema_version: 1,
+        answer_id: answer.id,
+        target_host: original.owner_host,
+        target_session: original.chair_session_id.clone(),
+        target_actor: original.chair_actor,
+        transport: AnswerTransport::FabricMail,
+        message_id: mail.id,
+        state: AnswerDeliveryState::Queued,
+        attempts: 1,
+        last_attempt_at: Some(f.now()),
+        acknowledged_at: None,
+        error: None,
+    };
+    store.db.execute_batch("CREATE TRIGGER reject_human_receipt BEFORE INSERT ON coordination_operations BEGIN SELECT RAISE(ABORT,'receipt refused'); END;").unwrap();
+    let action = || store.answer_human_request(&answer, &delivery, &mail, &request);
+    let error = store
+        .coordination_operation(project(), actor(3), &operation, &"answer", &request, action)
+        .unwrap_err();
+    assert!(
+        matches!(error,Error::Sqlite(rusqlite::Error::SqliteFailure(code,_)) if code.code==rusqlite::ErrorCode::ConstraintViolation)
+    );
+    assert_eq!(
+        store.human_item(project(), id, &request).unwrap(),
+        InboxItem {
+            request: original.clone(),
+            answer: None,
+            delivery: None,
+            history: vec![original]
+        }
+    );
+    for table in [
+        "human_answers",
+        "human_answer_outbox",
+        "messages",
+        "deliveries",
+        "coordination_operations",
+    ] {
+        let rows: i64 = store
+            .db
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0, "{table}");
+    }
+    store
+        .db
+        .execute_batch("DROP TRIGGER reject_human_receipt")
+        .unwrap();
+    let resolved = store
+        .coordination_operation(project(), actor(3), &operation, &"answer", &request, action)
+        .unwrap();
+    assert_eq!(resolved.answer_id, Some(answer.id));
+    let plan:Vec<String>=store.db.prepare("EXPLAIN QUERY PLAN SELECT substr(record,1,?6) FROM human_requests WHERE project=?1 AND (?2 IS NULL OR session=?2) AND (?3 OR state='open') AND (?4 IS NULL OR id>?4) ORDER BY id LIMIT ?5").unwrap().query_map(params![project().to_string(),"chair-a",false,id.to_string(),51,MAX_RECORD_READ_BYTES],|row|row.get(3)).unwrap().map(|row|row.unwrap()).collect();
+    assert!(
+        plan.iter()
+            .any(|row| row.contains("SEARCH human_requests USING INDEX")),
+        "{plan:?}"
+    );
+}
+
+#[test]
+fn human_inbox_migration_preserves_existing_mail_and_refuses_old_binary_version() {
+    let f = Fixture::new();
+    let store = f.open();
+    store.send(&message(&f, 9), &f.request()).unwrap();
+    // Reopen is idempotent and all pre-inbox records remain readable.
+    drop(store);
+    let store = f.open();
+    assert_eq!(
+        store
+            .read_mail(project(), actor(3), Some(0), 100, &f.request())
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    let version: i64 = store
+        .db
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 8);
+    assert!(matches!(
+        provenant_sqlite::read_version(&store.db, 7),
+        Err(provenant_sqlite::VersionError::Unsupported(8))
+    ));
+}

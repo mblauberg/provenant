@@ -49,6 +49,12 @@ pub enum Command {
     },
     /// Print the resolved release root
     Root,
+    /// Post a human decision, assumption or question
+    Ask(crate::inbox::Ask),
+    /// List, inspect, close and acknowledge human requests
+    Inbox(crate::inbox::Inbox),
+    /// Answer a request using the revision you saw
+    Answer(crate::inbox::Answer),
     /// Register and list provider accounts
     #[command(subcommand)]
     Accounts(crate::accounts::Accounts),

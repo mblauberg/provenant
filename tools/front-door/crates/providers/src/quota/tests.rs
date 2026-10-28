@@ -200,6 +200,9 @@ fn cursor_uses_usage_summary_and_fills_missing_plan_from_membership() {
 #[test]
 fn opencode_decodes_live_partial_local_ledger_and_reports_exhausted_weekly_pool() {
     let snapshot = decode_fixture("opencode", include_str!("fixtures/opencode.json"));
+    let details = snapshot.details.as_ref().unwrap();
+    assert_eq!(details.source.as_deref(), Some("local-ledger"));
+    assert_eq!(details.coverage.as_deref(), Some("partial"));
 
     assert_eq!(snapshot.status, QuotaStatus::Exhausted);
     assert_eq!(snapshot.windows.len(), 3);
@@ -219,7 +222,7 @@ fn opencode_decodes_live_partial_local_ledger_and_reports_exhausted_weekly_pool(
     assert_eq!(details.plan.as_deref(), Some("Go"));
     assert_eq!(
         details.note.as_deref(),
-        Some("Local estimate, this machine only; calibrated Go caps, other hosts not counted")
+        Some("Partial lower bound: this host only; other devices are not counted")
     );
     let mut envelope: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/opencode.json")).unwrap();

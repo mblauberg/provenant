@@ -25,7 +25,7 @@ exceptions = [
 ]
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 # Include workspace members as well as registry crates. This is an allowlist,
 # not a wildcard for the transitive dependencies of an approved direct crate.
 allow = [

@@ -79,6 +79,178 @@ bounds are null. Positional arguments have no long flag.
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
+## `provenant ask`
+
+| Argument | Contract |
+|---|---|
+| `--file` | `{"name": "file", "required": true}` |
+| `--session` | `{"name": "session", "required": true}` |
+| `--operation-id` | `{"name": "operation_id"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "file",
+        "session",
+        "operation_id"
+      ],
+      "multiple": true,
+      "name": "Ask",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant inbox`
+
+| Argument | Contract |
+|---|---|
+| `id` | `{"name": "id", "positional": true}` |
+| `--state` | `{"defaults": ["open"], "name": "state", "values": ["open", "all"]}` |
+| `--session` | `{"name": "session"}` |
+| `--host` | `{"name": "host"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
+| `--cursor` | `{"name": "cursor"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "id",
+        "state",
+        "session",
+        "host",
+        "limit",
+        "cursor"
+      ],
+      "multiple": true,
+      "name": "Inbox",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant inbox close`
+
+| Argument | Contract |
+|---|---|
+| `id` | `{"name": "id", "positional": true, "required": true}` |
+| `--state` | `{"name": "state", "required": true, "values": ["withdrawn", "superseded", "expired"]}` |
+| `--reason` | `{"bounds": [0, 256], "name": "reason", "required": true}` |
+| `--expect-revision` | `{"name": "expect_revision", "required": true}` |
+| `--operation-id` | `{"name": "operation_id"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "id",
+        "state",
+        "reason",
+        "expect_revision",
+        "operation_id"
+      ],
+      "multiple": true,
+      "name": "Close",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant inbox acknowledge`
+
+| Argument | Contract |
+|---|---|
+| `id` | `{"name": "id", "positional": true, "required": true}` |
+| `--answer` | `{"name": "answer", "required": true}` |
+| `--session` | `{"name": "session", "required": true}` |
+| `--operation-id` | `{"name": "operation_id", "required": true}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "id",
+        "answer",
+        "session",
+        "operation_id"
+      ],
+      "multiple": true,
+      "name": "Acknowledge",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant answer`
+
+| Argument | Contract |
+|---|---|
+| `id` | `{"name": "id", "positional": true, "required": true}` |
+| `--action` | `{"name": "action", "required": true, "values": ["choose", "reply", "confirm", "override"]}` |
+| `--option` | `{"name": "option"}` |
+| `--text-stdin` | `{"defaults": ["false"], "name": "text_stdin", "values": ["true", "false"]}` |
+| `--text-file` | `{"conflicts": ["text_stdin"], "name": "text_file"}` |
+| `--expect-revision` | `{"name": "expect_revision", "required": true}` |
+| `--channel` | `{"name": "channel", "required": true, "values": ["chat", "console", "phone_remote", "cli", "unknown"]}` |
+| `--operation-id` | `{"name": "operation_id"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "id",
+        "action",
+        "option",
+        "text_stdin",
+        "text_file",
+        "expect_revision",
+        "channel",
+        "operation_id"
+      ],
+      "multiple": true,
+      "name": "Answer",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant accounts`
 
 | Argument | Contract |

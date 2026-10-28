@@ -222,7 +222,12 @@ pub fn list(
                     .catalogue
                     .models
                     .iter()
-                    .find(|m| m.model.adapter() == adapter)?
+                    .find(|m| {
+                        m.model.adapter() == adapter
+                            && provenant_records::AdapterSpec::get(adapter).is_none_or(|spec| {
+                                spec.account_serves_model(account, m.model.model())
+                            })
+                    })?
                     .model
                     .clone();
                 let (policy, profile, source, expiry) =
@@ -561,10 +566,29 @@ fn pace_snapshot_factor(
         .filter(|w| selected_window(w, profile, adapter))
         .filter_map(|window| {
             let duration = window.window_seconds?;
-            let reset = window.resets_unix_seconds?;
-            if duration == 0 || reset <= now {
+            if duration == 0 {
                 return None;
             }
+            let calibrated = snapshot
+                .details
+                .as_ref()
+                .is_some_and(|d| d.calibration_active(&window.pool, now));
+            // An active usage floor remains binding after a ledger reset. With
+            // no future reset, use a full remaining window conservatively.
+            let reset_known = window.resets_unix_seconds.is_some_and(|reset| reset > now);
+            let reset = match window.resets_unix_seconds {
+                Some(reset) if reset > now => reset,
+                None if adapter == "opencode"
+                    && snapshot
+                        .details
+                        .as_ref()
+                        .is_some_and(|d| d.source.as_deref() == Some("local-ledger")) =>
+                {
+                    now.checked_add(i64::try_from(duration).ok()?)?
+                }
+                _ if calibrated => now.checked_add(i64::try_from(duration).ok()?)?,
+                _ => return None,
+            };
             let configured = profile.and_then(|p| p.deadline.as_ref());
             let resolved = configured.and_then(|d| match d {
                 PacingDeadline::ResetOf(reference) => {
@@ -594,9 +618,16 @@ fn pace_snapshot_factor(
             Some((
                 factor,
                 format!(
-                    "window={} deadline={}{}{}{}",
+                    "window={} deadline={}{}{}{}{}",
                     window.pool,
                     deadline.unwrap_or(reset),
+                    if reset_known {
+                        ""
+                    } else if calibrated {
+                        " calibration; reset unknown; full window remaining"
+                    } else {
+                        " ledger; reset unknown; full window remaining"
+                    },
                     if standby { " standby" } else { "" },
                     match (fallback, configured) {
                         (true, Some(PacingDeadline::ResetOf(reference))) => format!(
@@ -625,6 +656,31 @@ fn pacing_factor_basis_points(
         "source={source} policy={policy:?}{}",
         expiry.map(|e| format!(" until={e}")).unwrap_or_default()
     );
+    let detail = if model.adapter() == "opencode" && model.model().starts_with("opencode-go/") {
+        let observation = go_quota_observation(model, account, context);
+        let details = observation.and_then(|o| o.snapshot.details.as_ref());
+        if details.is_some_and(|d| d.coverage.as_deref() == Some("complete")) {
+            detail
+        } else {
+            let missing: Vec<_> = ["five_hour", "seven_day", "thirty_day"]
+                .into_iter()
+                .filter(|pool| {
+                    !details.is_some_and(|d| d.calibration_active(pool, context.now_seconds()))
+                })
+                .collect();
+            if missing.is_empty() {
+                format!("{detail}; Go quota source: local-ledger, coverage: partial")
+            } else {
+                format!(
+                    "{detail}; Go quota source: local-ledger, coverage: partial; Go calibration missing or stale: {} (calibration key must match account key {:?}); calibration would tighten pacing",
+                    missing.join(", "),
+                    account.unwrap_or("unknown")
+                )
+            }
+        }
+    } else {
+        detail
+    };
     if policy != PacingPolicy::Pace {
         return (NEUTRAL_FACTOR_BASIS_POINTS, detail, false);
     }
@@ -718,14 +774,26 @@ pub fn pacing_preview(model: &ModelId, context: &RoutingContext<'_>) -> Vec<Paci
     let mut accounts: BTreeSet<_> = context
         .quota
         .iter()
-        .filter(|q| q.snapshot.account.adapter == model.adapter())
+        .filter(|q| {
+            q.snapshot.account.adapter == model.adapter()
+                && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
+                    spec.account_serves_model(&q.snapshot.account.account_key, model.model())
+                })
+        })
         .map(|q| Some(q.snapshot.account.account_key.clone()))
         .collect();
     accounts.extend(
         context
             .availability
             .iter()
-            .filter(|a| a.adapter == model.adapter())
+            .filter(|a| {
+                a.adapter == model.adapter()
+                    && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
+                        a.account_key
+                            .as_deref()
+                            .is_none_or(|key| spec.account_serves_model(key, model.model()))
+                    })
+            })
             .map(|a| a.account_key.clone()),
     );
     if accounts.is_empty() {
@@ -783,7 +851,17 @@ fn pacing_reserve_window(
                     _ => 0,
                 });
             percent > 0
-                && window.resets_unix_seconds.is_some_and(|reset| reset > now)
+                && (window.resets_unix_seconds.is_some_and(|reset| reset > now)
+                    || (window.resets_unix_seconds.is_none()
+                        && adapter == "opencode"
+                        && snapshot
+                            .details
+                            .as_ref()
+                            .is_some_and(|d| d.source.as_deref() == Some("local-ledger")))
+                    || snapshot
+                        .details
+                        .as_ref()
+                        .is_some_and(|d| d.calibration_active(&window.pool, now)))
                 && window.used_basis_points >= 10_000 - u64::from(percent) * 100
         })
         .map(|w| w.pool.clone())
@@ -885,8 +963,12 @@ fn exhaustion_lapsed(snapshot: &provenant_quota::QuotaSnapshot, now_seconds: i64
         .peekable();
     full.peek().is_some()
         && full.all(|w| {
-            w.resets_unix_seconds
-                .is_some_and(|reset| reset <= now_seconds)
+            !snapshot
+                .details
+                .as_ref()
+                .is_some_and(|d| d.calibration_active(&w.pool, now_seconds))
+                && w.resets_unix_seconds
+                    .is_some_and(|reset| reset <= now_seconds)
         })
 }
 /// A registered adapter and, when set, an exact recorded effort control.
@@ -922,7 +1004,14 @@ fn candidate(
     let evaluated: Vec<_> = context
         .availability
         .iter()
-        .filter(|a| a.adapter == model.adapter())
+        .filter(|a| {
+            a.adapter == model.adapter()
+                && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
+                    a.account_key
+                        .as_deref()
+                        .is_none_or(|key| spec.account_serves_model(key, model.model()))
+                })
+        })
         .map(|a| {
             let (reason, _) = account_reason(model, a, access, context);
             let (policy, _, _, _) = effective_profile(context, model, a.account_key.as_deref());
@@ -1191,6 +1280,25 @@ struct PoolDraw {
     index: usize,
     roll: u64,
     total_weight: u64,
+}
+
+fn go_quota_observation<'a>(
+    model: &ModelId,
+    account: Option<&str>,
+    context: &'a RoutingContext<'_>,
+) -> Option<&'a QuotaObservation> {
+    let now = context.now_seconds();
+    context
+        .quota
+        .iter()
+        .filter(|q| {
+            q.model == *model
+                && q.snapshot.account.adapter == model.adapter()
+                && Some(q.snapshot.account.account_key.as_str()) == account
+                && q.snapshot.observed_unix_seconds <= now
+                && now < q.expires_unix_seconds
+        })
+        .max_by_key(|q| (q.snapshot.observed_unix_seconds, q.snapshot.revision))
 }
 
 fn classify_pool(

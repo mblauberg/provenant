@@ -987,7 +987,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json and
   "_meta": {
     "io.provenant/schemaVersion": 2
   },
-  "description": "Discover advanced Fabric tools and their input schemas. Call a discovered tool by its name.",
+  "description": "Discover inbox, graph, task, lease and event tools. Call discovered tools by name.",
   "inputSchema": {
     "additionalProperties": false,
     "properties": {
@@ -1782,5 +1782,352 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json and
     "type": "object"
   },
   "name": "fabric_graph"
+}
+```
+
+### `fabric_inbox`
+
+```json
+{
+  "_meta": {
+    "io.provenant/schemaVersion": 2
+  },
+  "description": "Post human requests, list the local inbox, answer, close or acknowledge. Fabric mail is queued, not live injection; peers are unsupported.",
+  "inputSchema": {
+    "$defs": {
+      "Id": {
+        "pattern": "^[0-9a-f]{32}$",
+        "type": "string"
+      },
+      "OperationId": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+        "type": "string"
+      }
+    },
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "answer_id": {
+            "$ref": "#/$defs/Id"
+          },
+          "id": {
+            "$ref": "#/$defs/Id"
+          },
+          "op": {
+            "const": "acknowledge"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OperationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session": {
+            "maxLength": 128,
+            "pattern": "^[a-z0-9]([a-z0-9_-]|\\.[a-z0-9_-])*\\.?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "answer_id",
+          "id",
+          "op",
+          "session"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "choose",
+              "reply",
+              "confirm",
+              "override"
+            ],
+            "type": "string"
+          },
+          "channel": {
+            "enum": [
+              "chat",
+              "console",
+              "phone_remote",
+              "cli",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "expect_revision": {
+            "maximum": 18446744073709551615,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "id": {
+            "$ref": "#/$defs/Id"
+          },
+          "op": {
+            "const": "answer"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OperationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "option_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OperationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "text": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "action",
+          "channel",
+          "expect_revision",
+          "id",
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "op": {
+            "const": "ask"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OperationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request": {
+            "additionalProperties": false,
+            "properties": {
+              "blocking": {
+                "type": "boolean"
+              },
+              "body": {
+                "maxLength": 8192,
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "decision",
+                  "assumption",
+                  "question"
+                ],
+                "type": "string"
+              },
+              "options": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "description": {
+                      "maxLength": 1024,
+                      "type": "string"
+                    },
+                    "id": {
+                      "$ref": "#/$defs/OperationId"
+                    },
+                    "label": {
+                      "maxLength": 256,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "description",
+                    "id",
+                    "label"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 16,
+                "minItems": 0,
+                "type": "array"
+              },
+              "proceeding_with": {
+                "anyOf": [
+                  {
+                    "maxLength": 1024,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "recommended_option_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OperationId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "title": {
+                "maxLength": 256,
+                "type": "string"
+              }
+            },
+            "required": [
+              "body",
+              "kind",
+              "title"
+            ],
+            "type": "object"
+          },
+          "session": {
+            "maxLength": 128,
+            "pattern": "^[a-z0-9]([a-z0-9_-]|\\.[a-z0-9_-])*\\.?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "request",
+          "session"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "expect_revision": {
+            "maximum": 18446744073709551615,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "id": {
+            "$ref": "#/$defs/Id"
+          },
+          "op": {
+            "const": "close"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OperationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "withdrawn",
+              "superseded",
+              "expired"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "expect_revision",
+          "id",
+          "op",
+          "reason",
+          "state"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{32}\\.sha256:[0-9a-f]{64}\\.[0-9]{1,20}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Id"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "list"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "pattern": "^[a-z0-9]([a-z0-9_-]|\\.[a-z0-9_-])*\\.?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "enum": [
+              "open",
+              "all"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "type": "object"
+      }
+    ],
+    "type": "object"
+  },
+  "name": "fabric_inbox"
 }
 ```

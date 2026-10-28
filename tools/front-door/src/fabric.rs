@@ -100,6 +100,18 @@ impl stdio::Factory for Factory {
         );
     }
     type Facade<'a> = BoundFacade<'a>;
+    fn preflight(&self, call: &provenant_fabric_mcp::tools::ToolCall) -> Result<(), ServiceError> {
+        if let provenant_fabric_mcp::tools::ToolCall::Inbox(input) = call {
+            let ctx = &self.context;
+            provenant_fabric_runtime::inbox::validate_request(
+                &ctx.identity,
+                &ctx.config,
+                ctx.in_lane,
+                input,
+            )?;
+        }
+        Ok(())
+    }
     fn input_limits(&self) -> provenant_records::Limits {
         provenant_records::Limits {
             max_bytes: self.context.config.limits.input_frame_bytes,
@@ -127,6 +139,27 @@ struct BoundFacade<'a> {
     factory: &'a Factory,
 }
 impl F3Facade for BoundFacade<'_> {
+    fn inbox(
+        &mut self,
+        input: provenant_fabric_runtime::inbox::InboxInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<
+        provenant_fabric_runtime::inbox::InboxResult,
+        provenant_fabric_runtime::inbox::InboxError,
+    > {
+        let ctx = &self.factory.context;
+        provenant_fabric_runtime::inbox::execute(
+            &ctx.roots.state,
+            &ctx.identity,
+            &ctx.config,
+            ctx.in_lane,
+            &self.factory.clock,
+            input,
+            budget,
+            cancel,
+        )
+    }
     fn refresh_events(
         &mut self,
         budget: WaitBudget,

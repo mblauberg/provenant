@@ -959,7 +959,7 @@
     "_meta": {
       "io.provenant/schemaVersion": 2
     },
-    "description": "Discover advanced Fabric tools and their input schemas. Call a discovered tool by its name.",
+    "description": "Discover inbox, graph, task, lease and event tools. Call discovered tools by name.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

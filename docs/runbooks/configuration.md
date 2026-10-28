@@ -76,6 +76,51 @@ see each knob's value and source. Preview install registrations with
 `provenant install --source /absolute/path/to/release --harness claude --dry-run`
 before applying an authorised install.
 
+## OpenCode Go quota calibration
+
+Go usage from this host's ledger is a partial lower bound. Enter dashboard
+percentages under the quota domain in the selected state root's `config.toml`:
+
+```toml
+[domains.quota.calibration.go]
+five_hour = 43
+seven_day = 17
+thirty_day = 59
+expires = "2026-11-04T00:00:00Z"
+```
+
+The table key is the OpenCode account key, usually `go`. Each percentage is an
+integer from 0 to 100, and expiry is a required timestamp with a UTC offset.
+Quota and pacing use the maximum of the raw ledger and each floor until the
+expiry instant, even if a ledger window resets sooner. Set the expiry no later
+than the end of each included window. The table has one shared expiry, so use
+the earliest window end and refresh the floors afterwards. For example, a
+five-hour floor entered at 09:00 with a window ending at 13:00 should expire at
+13:00, within five hours. Editing or removing the table takes effect on the next read;
+floors are never written over the raw ledger cache. Zen does not use Go floors.
+
+DeepSeek V4.1 Flash (junior weight 2, senior 1) and GLM-5.3 Flash (junior 1,
+senior 1) are provisional Go pool members. They remain eligible without
+calibration and use the local ledger for pacing. Route diagnostics identify the
+partial coverage and any uncalibrated windows; adding floors can tighten pacing.
+MiMo V2.6 Flash is catalogued for exact selection only. Paid OpenCode pacing
+remains `pace`.
+
+Without an observable reset, a calibrated window uses a full remaining window
+for conservative pacing. Floors stay binding until expiry even if a recorded
+reset passes. Recheck the dashboard and update the floors after a reset or
+substantial usage on another device. Peer ledgers are not aggregated.
+
+OpenCode 2.2.0's help, `stats --help`, `api --help` and an isolated
+`stats --standalone --json` were checked on 28 October 2026 without reading
+credentials. Stats contains session counts, tokens and costs, with no account
+allowance percentages. The [CLI docs](https://opencode.ai/docs/cli/#stats)
+describe session statistics, and the [server API docs](https://opencode.ai/docs/server/)
+describe the local server interface. No documented authoritative account-wide
+quota source was found. The [Go docs](https://opencode.ai/docs/go/)
+describe the allowance windows and per-response consumption; those do not
+establish total usage across devices.
+
 ## Lane cache collection
 
 GC also applies [terminal provider-state retention](gc.md). The separate

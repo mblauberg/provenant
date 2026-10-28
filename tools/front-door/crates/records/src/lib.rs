@@ -34,6 +34,7 @@ pub use yaml::{
     parse_sidecar,
 };
 
+pub mod inbox;
 pub mod workflow;
 
 pub use install::{
