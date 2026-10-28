@@ -36,6 +36,12 @@ fn dispatch_validates_review_commits() -> TestResult {
         .output()?;
     assert!(output.status.success());
     let head = String::from_utf8(output.stdout)?.trim().to_owned();
+    git(&["update-ref", "refs/remotes/origin/main", &head])?;
+    git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+    ])?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
@@ -47,6 +53,14 @@ fn dispatch_validates_review_commits() -> TestResult {
     let task = &store.request(run.run_id, &call)?.tasks[0];
     assert_eq!(task.head.as_deref(), Some(head.as_str()));
     assert_eq!(task.base.as_deref(), Some(head.as_str()));
+    let mut head_only = submission("head only");
+    head_only.operation_id = OperationId::parse("head-only")?;
+    head_only.tasks[0].head = Some(head.clone());
+    let run = service.dispatch(head_only, temp.path(), &call)?;
+    assert_eq!(
+        store.request(run.run_id, &call)?.tasks[0].base.as_deref(),
+        Some(head.as_str())
+    );
     for (head, base) in [
         ("a".repeat(40), None),
         (head.clone(), Some("b".repeat(40))),

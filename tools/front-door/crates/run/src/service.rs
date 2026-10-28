@@ -112,38 +112,52 @@ impl<'a> Service<'a> {
                     Ok::<_, RunError>(writer)
                 })
                 .transpose()?;
-            if let Some(head) = &task.head {
-                let validate = |sha: &str| -> Result<()> {
+            let base_ref = task.base.clone();
+            let prior = previous.as_ref().and_then(|request| {
+                request.tasks.iter().find(|prior| {
+                    prior.task_id == task.task_id
+                        && prior.base_ref == base_ref
+                        && prior.head == task.head
+                })
+            });
+            let git_cwd = writer.as_ref().map_or(cwd, |writer| &writer.worktree);
+            if prior.is_none()
+                && let Some(head) = &task.head
+            {
+                let validate = |sha: &str, label: &str| -> Result<()> {
                     provenant_core::GitOid::parse(sha).map_err(|_| {
-                        input_error(ErrorKind::Invalid, "head and base must be full Git SHAs")
+                        input_error(
+                            ErrorKind::Invalid,
+                            format!("{label} must be a full Git SHA"),
+                        )
                     })?;
                     let git = provenant_os::git::git_executable()
                         .ok_or_else(|| input_error(ErrorKind::Git, "Git unavailable"))?;
-                    let resolved = resolve_git_base(
-                        &git,
-                        writer.as_ref().map_or(cwd, |writer| &writer.worktree),
-                        sha,
-                    )?;
-                    if resolved != sha.to_lowercase() {
-                        return Err(input_error(ErrorKind::Invalid, "SHA must name a commit"));
+                    let resolved = resolve_git_base(&git, git_cwd, sha).map_err(|_| {
+                        input_error(
+                            ErrorKind::Invalid,
+                            format!("invalid Git {label}: expected a resolvable commit SHA"),
+                        )
+                    })?;
+                    if resolved != sha {
+                        return Err(input_error(
+                            ErrorKind::Invalid,
+                            format!("{label} SHA must name a commit"),
+                        ));
                     }
                     Ok(())
                 };
-                validate(head)?;
+                validate(head, "head")?;
                 if let Some(base) = &task.base {
-                    validate(base)?;
+                    validate(base, "base")?;
                 }
             }
-            let base_ref = task.base.clone();
-            let previous_base = previous.as_ref().and_then(|request| {
-                request.tasks.iter().find(|prior| {
-                    base_ref.is_some()
-                        && prior.task_id == task.task_id
-                        && prior.base_ref == base_ref
-                })
-            });
-            let base = if let Some(prior) = previous_base {
+            let base = if let Some(prior) = prior {
                 prior.base.clone()
+            } else if let Some(head) = task.head.as_deref().filter(|_| task.base.is_none()) {
+                let git = provenant_os::git::git_executable()
+                    .ok_or_else(|| input_error(ErrorKind::Git, "Git unavailable"))?;
+                Some(review_merge_base(&git, git_cwd, head)?)
             } else if input.parent_attempt.is_some() {
                 task.base
             } else {
@@ -152,11 +166,7 @@ impl<'a> Service<'a> {
                     .map(|base| {
                         let git = provenant_os::git::git_executable()
                             .ok_or_else(|| input_error(ErrorKind::Git, "Git unavailable"))?;
-                        resolve_git_base(
-                            &git,
-                            writer.as_ref().map_or(cwd, |writer| &writer.worktree),
-                            base,
-                        )
+                        resolve_git_base(&git, git_cwd, base)
                     })
                     .transpose()?
             };

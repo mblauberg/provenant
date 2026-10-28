@@ -198,9 +198,12 @@ push|reconcile`. A terminal without MCP cancels with `provenant cancel ATTEMPT`.
   checkout separately for uncommitted edits. They are removed at settlement, so
   put review evidence in the final answer. Peer writers (`--host` with
   `--branch`) get no context files.
-- For a review of a chair-verified commit, pass `--head SHA --base SHA` to
-  dispatch. Both commits must already exist locally. Tell the lane to review
-  `$PROVENANT_LANE_BASE..$PROVENANT_LANE_HEAD`; it does not need to fetch.
+- For a review of a chair-verified commit, pass `--head SHA` and optionally
+  `--base SHA` to dispatch. Both must be full commit SHAs available on the
+  executing host. Without a base, the host records the merge base with
+  `origin/HEAD`; supply a base if that default branch is unavailable. The host
+  injects the resolved range into the brief and exports `PROVENANT_LANE_BASE`
+  and `PROVENANT_LANE_HEAD`. The lane does not need to fetch.
 - A chair running lanes across many wakes follows
   [chair-loop.md](chair-loop.md), including its reviewer git-verb denylist and
   decision council.

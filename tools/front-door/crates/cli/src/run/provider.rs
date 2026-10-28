@@ -144,7 +144,10 @@ fn prepare_with(
     let git_context = task
         .base
         .as_deref()
-        .map(|base| run::GitContext::capture(&git, &cwd, base))
+        .map(|base| match task.head.as_deref() {
+            Some(head) => run::GitContext::capture_at(&git, &cwd, base, head),
+            None => run::GitContext::capture(&git, &cwd, base),
+        })
         .transpose()
         .map_err(|error| error.to_string())?;
     let user = provenant_os::sys::account(provenant_os::sys::Account::Current)
@@ -2674,10 +2677,11 @@ mod tests {
                 .create(path)?;
         }
         let prompt = "é".repeat(75_000);
+        let review_oid = run::resolve_git_base(&git, &project, "HEAD")?;
         let task = run::TaskRequest {
             title: None,
-            base: Some("HEAD".into()),
-            head: Some("a".repeat(40)),
+            base: Some(review_oid.clone()),
+            head: Some(review_oid.clone()),
             base_ref: None,
             task_id: TaskId::from_bytes([3; 16]),
             profile: provenant_records::run::HarnessProfile {
@@ -2798,14 +2802,13 @@ mod tests {
             launch
                 .environment
                 .iter()
-                .any(|(key, value)| key == "PROVENANT_LANE_HEAD"
-                    && value == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .any(|(key, value)| key == "PROVENANT_LANE_HEAD" && value == review_oid.as_str())
         );
         assert!(
             launch
                 .environment
                 .iter()
-                .any(|(key, value)| key == "PROVENANT_LANE_BASE" && value == "HEAD")
+                .any(|(key, value)| key == "PROVENANT_LANE_BASE" && value == review_oid.as_str())
         );
         // The preferred provider is updating, so preparation must select the
         // explicit fallback rather than just omit an unrelated busy adapter.
@@ -2886,14 +2889,13 @@ mod tests {
             review
                 .environment
                 .iter()
-                .any(|(key, value)| key == "PROVENANT_LANE_HEAD"
-                    && value == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .any(|(key, value)| key == "PROVENANT_LANE_HEAD" && value == review_oid.as_str())
         );
         assert!(
             review
                 .environment
                 .iter()
-                .any(|(key, value)| key == "PROVENANT_LANE_BASE" && value == "HEAD")
+                .any(|(key, value)| key == "PROVENANT_LANE_BASE" && value == review_oid.as_str())
         );
         let executed = executor.execute(ExecOptions::new(
             &launch.argv,
