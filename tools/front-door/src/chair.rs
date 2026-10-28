@@ -571,7 +571,9 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
                     project,
                     HostSessionId::parse(&session)?,
                 );
-                let checkpoint = store.read()?.ok_or(SessionError::MissingCheckpoint)?;
+                let checkpoint = store
+                    .read()?
+                    .ok_or(SessionError::MissingCheckpoint { session })?;
                 Ok(json!({"summary": parse_summary(&checkpoint.markdown)?}))
             }
             ChairSummary::Update {
@@ -588,6 +590,7 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
                 if context.in_lane {
                     return Err("a lane cannot update a chair summary".into());
                 }
+                let actor = provenant_cli::workflow::session_actor(&context, None)?;
                 let keep = provenant_cli::workflow::session_revisions(&context.roots);
                 let clock = provenant_os::clock::SystemClock::new();
                 let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 5)?;
@@ -596,7 +599,9 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
                     context.identity.project,
                     HostSessionId::parse(&session)?,
                 )
+                .with_chair(context.identity.host, actor)
                 .with_revisions(keep);
+                store.validate_chair()?;
                 let (summary, saved) = store.update_summary(
                     patch,
                     expect_revision,
@@ -631,7 +636,7 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
                     code: "SUMMARY_STALE".into(),
                     message: error.to_string(),
                     cause: None,
-                    repair: None,
+                    repair: Some("Reread with `provenant chair summary show` and reapply the intended change.".into()),
                 });
                 crate::emit(&result, globals, "", false)
             } else {

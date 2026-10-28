@@ -51,7 +51,9 @@ impl super::SessionStore {
             .update(
                 false,
                 |current| {
-                    let text = current.ok_or(super::SessionError::MissingCheckpoint)?;
+                    let text = current.ok_or_else(|| super::SessionError::MissingCheckpoint {
+                        session: self.session.as_str().into(),
+                    })?;
                     let mut summary = parse_summary(text)?.unwrap_or(Summary {
                         schema_version: 1,
                         revision: 0,
@@ -88,12 +90,39 @@ impl super::SessionStore {
                 cancel,
                 clock,
             )?
-            .ok_or(super::SessionError::MissingCheckpoint)?;
+            .ok_or_else(|| super::SessionError::MissingCheckpoint {
+                session: self.session.as_str().into(),
+            })?;
         Ok((result.ok_or(SummaryError)?, saved))
     }
 }
 
-fn replace_summary(text: &str, summary: &Summary) -> Result<String, SummaryError> {
+const HEADER_LIMIT: usize = 8192;
+
+// Return the byte offset through the closing delimiter, including its newline.
+fn header_end(text: &str) -> Result<Option<usize>, SummaryError> {
+    if !text.starts_with("---\n") && !text.starts_with("---\r\n") {
+        return Ok(None);
+    }
+    let mut offset = 0;
+    for (index, line) in text.split_inclusive('\n').enumerate() {
+        offset += line.len();
+        if index > 0 && line.trim_end_matches(['\r', '\n']) == "---" {
+            return Ok(Some(offset));
+        }
+    }
+    Err(SummaryError)
+}
+
+fn empty_header(text: &str, end: usize) -> bool {
+    text[..end]
+        .lines()
+        .skip(1)
+        .take_while(|line| line.trim_end_matches('\r') != "---")
+        .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#'))
+}
+
+fn replace_summary(text: &str, summary: &Summary) -> Result<String, super::SessionError> {
     let newline = if text.starts_with("---\r\n") {
         "\r\n"
     } else {
@@ -112,9 +141,15 @@ fn replace_summary(text: &str, summary: &Summary) -> Result<String, SummaryError
     let output = if !text.starts_with("---\n") && !text.starts_with("---\r\n") {
         format!("---\n{block}---\n{text}")
     } else {
-        let parsed = parse_frontmatter_integers(text).map_err(|_| SummaryError)?;
-        let YamlValue::Mapping(root) = parsed.value else {
-            return Err(SummaryError);
+        let header_end = header_end(text)?.ok_or(SummaryError)?;
+        let root = if empty_header(text, header_end) {
+            std::collections::BTreeMap::new()
+        } else {
+            let parsed = parse_frontmatter_integers(text).map_err(|_| SummaryError)?;
+            let YamlValue::Mapping(root) = parsed.value else {
+                return Err(SummaryError.into());
+            };
+            root
         };
         let lines: Vec<&str> = text.split_inclusive('\n').collect();
         let end = lines
@@ -171,8 +206,11 @@ fn replace_summary(text: &str, summary: &Summary) -> Result<String, SummaryError
             lines[stop..].concat()
         )
     };
+    if header_end(&output)?.ok_or(SummaryError)? > HEADER_LIMIT {
+        return Err(super::SessionError::SummaryTooLarge);
+    }
     if parse_summary(&output)?.as_ref() != Some(summary) {
-        return Err(SummaryError);
+        return Err(SummaryError.into());
     }
     Ok(output)
 }
@@ -180,21 +218,14 @@ fn replace_summary(text: &str, summary: &Summary) -> Result<String, SummaryError
 /// Read the summary from YAML frontmatter, without interpreting the Markdown body.
 /// A missing header or absent summary is distinct from an invalid header.
 pub fn parse_summary(markdown: &str) -> Result<Option<Summary>, SummaryError> {
-    if !markdown.starts_with("---\n") && !markdown.starts_with("---\r\n") {
+    let Some(end) = header_end(markdown)? else {
         return Ok(None);
-    }
-    let end = markdown
-        .lines()
-        .skip(1)
-        .scan(4usize, |offset, line| {
-            *offset += line.len() + 1;
-            Some((*offset, line.trim_end_matches('\r')))
-        })
-        .find(|(_, line)| *line == "---")
-        .map(|(offset, _)| offset)
-        .ok_or(SummaryError)?;
-    if end > 8192 {
+    };
+    if end > HEADER_LIMIT {
         return Err(SummaryError);
+    }
+    if empty_header(markdown, end) {
+        return Ok(None);
     }
     let parsed = parse_frontmatter_integers(markdown).map_err(|_| SummaryError)?;
     let YamlValue::Mapping(mut root) = parsed.value else {
@@ -274,5 +305,8 @@ mod tests {
             parse_summary(&source.replace("revision: 12", "revision: 12\n  revision: 13")).is_err()
         );
         assert!(parse_summary("plain checkpoint").unwrap().is_none());
+        assert!(parse_summary("---\n---\n").unwrap().is_none());
+        let updated = replace_summary("---\n---\n", &summary).unwrap();
+        assert_eq!(parse_summary(&updated).unwrap(), Some(summary));
     }
 }

@@ -221,8 +221,10 @@ pub enum SessionError {
     SummaryStale { current_revision: u64 },
     #[error("{0}")]
     Summary(#[from] SummaryError),
-    #[error("checkpoint not found")]
-    MissingCheckpoint,
+    #[error("checkpoint for session {session} not found")]
+    MissingCheckpoint { session: String },
+    #[error("summary update would exceed the 8192-byte frontmatter limit")]
+    SummaryTooLarge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -337,7 +339,7 @@ impl SessionStore {
             }),
             WaitStop::Deadline => SessionError::Deadline,
         })?;
-        self.publish_revision_locked(&dir, text, clock, publish_discovery)
+        self.publish_revision_locked(&dir, text, clock, false, publish_discovery)
     }
 
     /// Publish a replacement while holding the checkpoint lock.
@@ -346,6 +348,7 @@ impl SessionStore {
         dir: &Directory,
         text: &[u8],
         clock: &dyn Clock,
+        field_update: bool,
         publish_discovery: impl FnOnce(&Directory, &SessionDiscovery) -> Result<(), SessionError>,
     ) -> Result<Saved, SessionError> {
         if text.len() as u64 > CHECKPOINT_LIMIT {
@@ -400,7 +403,12 @@ impl SessionStore {
             } else {
                 ""
             };
-            warnings.push(format!("checkpoint saved; discovery publication failed: {error}; repeat the same command{rebind} to repair discovery"));
+            let repair = if field_update {
+                "reread the current checkpoint and save its Markdown".to_string()
+            } else {
+                format!("repeat the same command{rebind}")
+            };
+            warnings.push(format!("checkpoint saved; discovery publication failed: {error}; {repair} to repair discovery"));
         }
         // The history is durable, so these files are unreachable. A failed
         // delete leaves an orphan that the next save removes.
@@ -590,6 +598,7 @@ impl SessionStore {
             cancel,
             clock,
         )?;
+        self.check_discovery_identity(self.load_discovery(&dir)?.as_ref())?;
         let current = match dir.open_read(OsStr::new("checkpoint.md")) {
             Ok(mut file) => {
                 let text = file.read_bounded(CHECKPOINT_LIMIT)?;
@@ -610,9 +619,10 @@ impl SessionStore {
             }),
             WaitStop::Deadline => SessionError::Deadline,
         })?;
-        let saved = self.publish_revision_locked(&dir, next.as_bytes(), clock, |dir, record| {
-            self.publish_discovery(dir, record)
-        })?;
+        let saved =
+            self.publish_revision_locked(&dir, next.as_bytes(), clock, true, |dir, record| {
+                self.publish_discovery(dir, record)
+            })?;
         Ok(Some(saved))
     }
 }
@@ -1091,20 +1101,57 @@ mod tests {
         assert_eq!(discovery.consistency, DiscoveryConsistency::Current);
         assert_eq!(discovery.record.checkpoint.revision, 2);
         assert_eq!(discovery.record.summary.unwrap().now, "Second");
+        let dir = selected.directory(false).unwrap();
+        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+        let lock = dir
+            .lock(
+                OsStr::new("checkpoint.lock"),
+                LockMode::Exclusive,
+                budget,
+                &CancelToken::new(),
+                &clock,
+            )
+            .unwrap();
+        let current = selected.read().unwrap().unwrap().markdown;
+        let interrupted = selected
+            .publish_revision_locked(&dir, current.as_bytes(), &clock, true, |_, _| {
+                Err(SessionError::Deadline)
+            })
+            .unwrap();
+        assert!(
+            interrupted.warnings[0].contains("reread the current checkpoint and save its Markdown")
+        );
+        drop(lock);
+        assert!(saved(&selected, &current).warnings.is_empty());
     }
     #[test]
     fn summary_save_race() {
         use provenant_core::{ActorId, Clock, HostId};
         use provenant_os::clock::SystemClock;
         use std::sync::{Arc, Barrier, mpsc};
+        struct SignallingClock(mpsc::Sender<()>);
+        impl Clock for SignallingClock {
+            fn wall_now(&self) -> Result<UtcMicros, provenant_core::TimeError> {
+                SystemClock::new().wall_now()
+            }
+            fn mono_now(&self) -> MonoTime {
+                let _ = self.0.send(());
+                SystemClock::new().mono_now()
+            }
+            fn wait_until(&self, deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
+                SystemClock::new().wait_until(deadline)
+            }
+        }
         let (_temp, root, project) = setup();
         let selected = store(&root, project, "chair")
             .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([4; 16]));
-        let first = "---\r\nother: \"keep\"\r\n\"provenant_summary\":\r\n  schema_version: 1\r\n  revision: 1\r\n  updated_at: \"2026-10-28T03:00:00Z\"\r\n  now: \"First\"\r\n  next: \"Next\"\r\n  needs_you: []\r\n  risk: \"None\"\r\n# retain comment\r\nafter: \"keep too\"\r\n---\r\nBody\r\n";
+        let first = "---\r\nother: \"keep\"\r\n\"provenant_summary\":\r\n  schema_version: 1\r\n  # interior comment\r\n\r\n  revision: 1\r\n  updated_at: \"2026-10-28T03:00:00Z\"\r\n  now: \"First\"\r\n  next: \"Next\"\r\n  needs_you: []\r\n  risk: \"None\"\r\n# retain comment\r\nafter: \"keep too\"\r\n---\r\nBody\r\n";
         saved(&selected, first);
         let changed = first.replace("Body", "Saved concurrently");
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
+        let (waiting_tx, waiting_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
         std::thread::scope(|scope| {
             let selected_ref = &selected;
             let changed_ref = &changed;
@@ -1125,19 +1172,47 @@ mod tests {
                     .unwrap()
             });
             entered_rx.recv().unwrap();
-            let editing = scope.spawn(|| {
-                let clock = SystemClock::new();
+            // A zero-budget contender proves the save holds the same lock.
+            let expired = TestClock::new(
+                UtcMicros::from_micros(0).unwrap(),
+                MonoTime::from_micros(1_000_000),
+            );
+            let budget = WaitBudget::cli(MonoTime::from_micros(0), 1).unwrap();
+            assert!(matches!(
                 selected.update_summary(
+                    SummaryPatch {
+                        now: Some("contender".into()),
+                        ..Default::default()
+                    },
+                    1,
+                    budget,
+                    &CancelToken::new(),
+                    &expired
+                ),
+                Err(SessionError::Filesystem(FsError::LockTimeout { .. }))
+            ));
+            let selected_ref = &selected;
+            let editing = scope.spawn(move || {
+                let budget = WaitBudget::cli(SystemClock::new().mono_now(), 5).unwrap();
+                let clock = SignallingClock(waiting_tx);
+                let result = selected_ref.update_summary(
                     SummaryPatch {
                         now: Some("Edited".into()),
                         ..Default::default()
                     },
                     1,
-                    WaitBudget::cli(clock.mono_now(), 5).unwrap(),
+                    budget,
                     &CancelToken::new(),
                     &clock,
-                )
+                );
+                done_tx.send(()).unwrap();
+                result
             });
+            waiting_rx.recv().unwrap();
+            assert!(matches!(
+                done_rx.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
             release_tx.send(()).unwrap();
             saving.join().unwrap();
             editing.join().unwrap().unwrap();
@@ -1145,6 +1220,7 @@ mod tests {
         let checkpoint = selected.read().unwrap().unwrap().markdown;
         assert!(checkpoint.contains("Saved concurrently\r\n"));
         assert!(checkpoint.contains("other: \"keep\"\r\n"));
+        assert!(checkpoint.contains("  # interior comment\r\n\r\nprovenant_summary:"));
         assert!(checkpoint.contains("# retain comment\r\nafter: \"keep too\"\r\n"));
         assert_eq!(parse_summary(&checkpoint).unwrap().unwrap().now, "Edited");
         let barrier = Arc::new(Barrier::new(2));
@@ -1195,6 +1271,41 @@ mod tests {
             selected.read_revision(2).unwrap().unwrap().markdown,
             changed
         );
+    }
+    #[test]
+    fn summary_empty_header_and_oversize_are_safe() {
+        use provenant_core::{ActorId, HostId};
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "chair")
+            .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([4; 16]));
+        let original = "---\r\n# existing comment\r\n\r\n---\r\nBody\r\n";
+        saved(&selected, original);
+        assert!(parse_summary(original).unwrap().is_none());
+        let clock = clock(10);
+        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+        let patch = SummaryPatch {
+            now: Some("started".into()),
+            ..Default::default()
+        };
+        selected
+            .update_summary(patch, 0, budget, &CancelToken::new(), &clock)
+            .unwrap();
+        let before = selected.read().unwrap().unwrap().markdown;
+        assert!(before.contains("# existing comment\r\n\r\nprovenant_summary:"));
+        assert!(before.ends_with("---\r\nBody\r\n"));
+        let revisions = selected.revisions().unwrap();
+        let discovery = selected.discovery().unwrap().unwrap();
+        let patch = SummaryPatch {
+            now: Some("x".repeat(8192)),
+            ..Default::default()
+        };
+        assert!(matches!(
+            selected.update_summary(patch, 1, budget, &CancelToken::new(), &clock),
+            Err(SessionError::SummaryTooLarge)
+        ));
+        assert_eq!(selected.read().unwrap().unwrap().markdown, before);
+        assert_eq!(selected.revisions().unwrap(), revisions);
+        assert_eq!(selected.discovery().unwrap().unwrap(), discovery);
     }
     #[test]
     fn enforces_utf8_and_byte_bounds_on_read_and_write() {

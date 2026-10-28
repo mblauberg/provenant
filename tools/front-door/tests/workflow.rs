@@ -77,9 +77,12 @@ fn session_reads_allocate_nothing() -> Result {
 
 #[test]
 fn chair_summary_guarded_update() -> Result {
-    let rig = TestRig::new()?;
+    let mut rig = TestRig::new()?;
     let source = rig.root.join("checkpoint.md");
-    std::fs::write(&source, "# Checkpoint\nOriginal body.\n")?;
+    std::fs::write(
+        &source,
+        "---\r\nowner: \"keep\"\r\n---\r\n# Checkpoint\r\nOriginal body.\r\n",
+    )?;
     let source = source.to_string_lossy();
     call(
         &rig,
@@ -108,6 +111,56 @@ fn chair_summary_guarded_update() -> Result {
     )?;
     assert_eq!(update["data"]["summary"]["revision"], 1);
     assert_eq!(update["data"]["checkpoint"]["revision"], 2);
+    assert_eq!(update["data"]["checkpoint"]["warnings"], json!([]));
+    let before = call(&rig, &["workflow", "session", "show", "chair"], 0)?;
+    let before_revisions = call(
+        &rig,
+        &["workflow", "session", "show", "chair", "--revisions"],
+        0,
+    )?;
+    let before_discovery = call(&rig, &["console", "sessions", "chair"], 0)?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
+    rig.env
+        .push(("PROVENANT_AGENT_LABEL".into(), "other-chair".into()));
+    let refused = call(
+        &rig,
+        &[
+            "chair",
+            "summary",
+            "update",
+            "chair",
+            "--file",
+            &patch,
+            "--expect-revision",
+            "1",
+        ],
+        1,
+    )?;
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("identity")
+    );
+    assert_eq!(
+        call(&rig, &["workflow", "session", "show", "chair"], 0)?["data"],
+        before["data"]
+    );
+    assert_eq!(
+        call(
+            &rig,
+            &["workflow", "session", "show", "chair", "--revisions"],
+            0
+        )?["data"],
+        before_revisions["data"]
+    );
+    assert_eq!(
+        call(&rig, &["console", "sessions", "chair"], 0)?["data"],
+        before_discovery["data"]
+    );
+    rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
+    rig.env
+        .push(("PROVENANT_AGENT_LABEL".into(), "fixture".into()));
     let stale = call(
         &rig,
         &[
@@ -124,6 +177,12 @@ fn chair_summary_guarded_update() -> Result {
     )?;
     assert_eq!(stale["error"]["code"], "SUMMARY_STALE");
     assert_eq!(stale["data"]["current_revision"], 1);
+    assert!(
+        stale["error"]["repair"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("chair summary show")
+    );
     let show = call(&rig, &["chair", "summary", "show", "chair"], 0)?;
     assert_eq!(show["data"]["summary"]["now"], "Working");
     let checkpoint = call(&rig, &["workflow", "session", "show", "chair"], 0)?;
@@ -131,7 +190,56 @@ fn chair_summary_guarded_update() -> Result {
         checkpoint["data"]["markdown"]
             .as_str()
             .unwrap_or_default()
-            .ends_with("# Checkpoint\nOriginal body.\n")
+            .contains("owner: \"keep\"\r\n")
+    );
+    assert!(
+        checkpoint["data"]["markdown"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("# Checkpoint\r\nOriginal body.\r\n")
+    );
+    let owner = call(
+        &rig,
+        &[
+            "chair",
+            "summary",
+            "update",
+            "chair",
+            "--file",
+            &patch,
+            "--expect-revision",
+            "1",
+        ],
+        0,
+    )?;
+    assert_eq!(owner["data"]["summary"]["revision"], 2);
+    let large = request(&rig, "large-summary.json", json!({"now": "x".repeat(8192)}))?;
+    let refused = call(
+        &rig,
+        &[
+            "chair",
+            "summary",
+            "update",
+            "chair",
+            "--file",
+            &large,
+            "--expect-revision",
+            "2",
+        ],
+        1,
+    )?;
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("8192-byte")
+    );
+    let missing = call(&rig, &["chair", "summary", "show", "missing-chair"], 1)?;
+    assert!(
+        missing["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing-chair")
     );
     Ok(())
 }
