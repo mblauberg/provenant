@@ -21,6 +21,16 @@ description: "Use to coordinate bounded work across agents, research lanes or in
 
 ## Always
 
+For an explicit human choice, the optional [human inbox](../../docs/runbooks/human-inbox.md)
+records decisions, assumptions and questions without an app. Bind the exact
+originating chair session, state the recommendation and affected work, and mark
+only blocking decisions as blocking. Reversible assumptions stay within existing
+authority. Record chat answers through the same revision-checked answer path.
+Consume correlated Fabric answers at normal execution boundaries, verify their
+host/project/session/actor and acknowledge each answer ID once before acting.
+Record consequences of a late override. Never poll the inbox with model turns;
+the current transport is queued mail, with no Claude hook injection.
+
 For a CLI submission, use `provenant run --prompt-file BRIEF --route senior`: it
 waits up to 240 seconds and returns the state and result tail. On timeout,
 follow its printed wait command; do not submit again. Run longer waits in the

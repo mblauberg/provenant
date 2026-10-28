@@ -23,6 +23,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/005-coordination-operations.sql"),
     include_str!("migrations/006-federation.sql"),
     include_str!("migrations/007-remove-legacy-import.sql"),
+    include_str!("migrations/008-human-inbox.sql"),
 ];
 // Index of 007, which may drop only the always-null legacy members and the
 // traces of an import that brought nothing over. Anything the removed import

@@ -65,6 +65,8 @@ ids!(
     MessageId,
     AttemptId,
     DeliveryId,
+    HumanRequestId,
+    HumanAnswerId,
 );
 
 impl AttemptId {

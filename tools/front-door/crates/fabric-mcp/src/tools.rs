@@ -8,6 +8,7 @@ pub use provenant_fabric_runtime::coordination::{
     ClaimInput, CoordinationApi, CoordinationError, CoordinationService, EventsInput, LandingInput,
     MailInput, Mutation, TaskInput,
 };
+use provenant_fabric_runtime::inbox::{InboxError, InboxInput};
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
@@ -16,6 +17,7 @@ use thiserror::Error;
 /// contracts; the execution facade contracts also live in runtime for F3.
 pub enum ToolCall {
     Discover,
+    Inbox(InboxInput),
     Identity(IdentityInput),
     Mail(MailInput, Option<OperationId>),
     Task(TaskInput, Option<OperationId>),
@@ -47,6 +49,7 @@ impl ToolCall {
     fn kind(&self) -> schema::ToolKind {
         match self {
             Self::Discover => schema::ToolKind::Discover,
+            Self::Inbox(_) => schema::ToolKind::Inbox,
             Self::Identity(_) => schema::ToolKind::Identity,
             Self::Mail(..) => schema::ToolKind::Mail,
             Self::Task(..) => schema::ToolKind::Task,
@@ -106,6 +109,12 @@ impl ToolCall {
         };
 
         match self {
+            Self::Inbox(InboxInput::Ask { request, .. }) => body(&request.body, "request.body"),
+            Self::Inbox(InboxInput::List { limit, .. }) => page(*limit),
+            Self::Inbox(InboxInput::Answer {
+                text: Some(text), ..
+            }) => body(text, "text"),
+            Self::Inbox(InboxInput::Close { reason, .. }) => body(reason, "reason"),
             Self::Mail(MailInput::Send { body: value, .. }, _) => body(value, "body"),
             Self::Mail(MailInput::Read { limit, .. }, _) => page(*limit),
             Self::Task(TaskInput::Create { objective, note }, _)
@@ -149,6 +158,9 @@ impl ToolCall {
     }
 
     fn is_mutation(&self) -> bool {
+        if let Self::Inbox(input) = self {
+            return input.is_mutation();
+        }
         matches!(
             self,
             Self::Mail(MailInput::Send { .. } | MailInput::MarkRead { .. }, _)
@@ -321,6 +333,7 @@ impl ToolCall {
                 }
             }
             Some(schema::ToolKind::Identity) if operation == "hosts" => parse!(HostsInput, Hosts),
+            Some(schema::ToolKind::Inbox) => parse!(InboxInput, Inbox),
             Some(schema::ToolKind::Identity) => parse!(IdentityInput, Identity),
             Some(schema::ToolKind::Mail) => parse!(MailInput, Mail, operation_id.clone()),
             Some(schema::ToolKind::Task) => parse!(TaskInput, Task, operation_id.clone()),
@@ -349,10 +362,23 @@ impl ToolCall {
     /// A single match composes the runtime and the F3 seam. Cancellation only
     /// abandons the observation; run cancellation remains an explicit call.
     pub fn execute<F: F3Facade>(
-        self,
+        mut self,
         service: &mut Service<'_, F>,
         cancel: &CancelToken,
     ) -> Result<ToolResponse, ServiceError> {
+        if let Self::Inbox(
+            InboxInput::Ask { operation_id, .. }
+            | InboxInput::Answer { operation_id, .. }
+            | InboxInput::Close { operation_id, .. }
+            | InboxInput::Acknowledge { operation_id, .. },
+        ) = &mut self
+            && operation_id.is_none()
+        {
+            *operation_id = Some(
+                OperationId::parse(&new_operation_id()?)
+                    .map_err(|_| CoordinationError::EntropyEncoding)?,
+            );
+        }
         let operation_id = self.operation_id();
         self.execute_inner(service, cancel)
             .map_err(|error| match operation_id {
@@ -366,6 +392,12 @@ impl ToolCall {
 
     pub(crate) fn operation_id(&self) -> Option<OperationId> {
         match self {
+            Self::Inbox(
+                InboxInput::Ask { operation_id, .. }
+                | InboxInput::Answer { operation_id, .. }
+                | InboxInput::Close { operation_id, .. }
+                | InboxInput::Acknowledge { operation_id, .. },
+            ) => operation_id.clone(),
             Self::Submit(SubmitInput::Submit { operation_id, .. })
             | Self::SubmitWait(SubmitInput::Submit { operation_id, .. }, ..)
             | Self::Run(
@@ -387,6 +419,7 @@ impl ToolCall {
         // same transport cap before any coordination or facade side effects.
         match &self {
             Self::Discover => Ok(()),
+            Self::Inbox(input) => input.validate_input(WaitTransport::Mcp),
             Self::Identity(input) => input.validate_input(WaitTransport::Mcp),
             Self::Mail(input, _) => input.validate_input(WaitTransport::Mcp),
             Self::Task(input, _) => input.validate_input(WaitTransport::Mcp),
@@ -410,7 +443,8 @@ impl ToolCall {
             && self.is_mutation()
             && matches!(
                 &self,
-                Self::Mail(..)
+                Self::Inbox(..)
+                    | Self::Mail(..)
                     | Self::Task(..)
                     | Self::Events(..)
                     | Self::Claim(..)
@@ -441,6 +475,7 @@ impl ToolCall {
             ($owner:ident, $method:ident, $input:ident) => {{ response(tool_name, service.$owner.$method($input, budget, cancel)?) }};
         }
         let result = match self {
+            Self::Inbox(input) => call!(facade, inbox, input),
             Self::Discover => response(
                 tool_name,
                 serde_json::json!({"tools": schema::advanced_catalogue()}),
@@ -775,6 +810,8 @@ impl ToolCall {
 /// sources while the protocol exposes a stable domain code.
 #[derive(Debug, Error)]
 pub enum ServiceError {
+    #[error(transparent)]
+    Inbox(#[from] InboxError),
     #[error("{source}")]
     Mutation {
         operation_id: OperationId,
@@ -799,6 +836,7 @@ impl ServiceError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Mutation { source, .. } => source.code(),
+            Self::Inbox(error) => error.code(),
             Self::Invalid(_) => "invalid_input",
             Self::Coordination(error) => error.code(),
             Self::Facade(error) => error.code(),

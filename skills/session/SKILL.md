@@ -46,6 +46,14 @@ the Claude hooks runbook, `docs/runbooks/claude-hooks.md`.
 
 ## Handoff and close
 
+Human inbox requests retain the explicitly declared originating host/session
+and actor. Keep that identity with the checkpoint; do not retarget a pending
+answer by reusing a label. Inbox target transfer is not implemented: consume and
+acknowledge through the original chair identity, or leave delivery queued and
+report it during handoff. The [human inbox runbook](../../docs/runbooks/human-inbox.md)
+describes revision-safe chat answers and acknowledgement. Session saves do not
+yet create an inbox session index or structured chair summary.
+
 Put durable decisions in their existing owner: a decision in its spec or ADR,
 a domain fact in its project documentation, and live work status in the run or
 tracker that owns it. External tracker changes need their own authority. A
