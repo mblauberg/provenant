@@ -48,6 +48,12 @@ pub enum CustodyError {
         "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes; run `provenant gc --apply`"
     )]
     AdmissionDisk { free: u64, floor: u64 },
+    #[error("memory pressure is {level}; wait for host memory pressure to fall")]
+    AdmissionMemoryPressure { level: String },
+    #[error(
+        "writer build slots full: {active} of {limit} active; wait for a writer to finish or adjust lanes.max_concurrent_builds"
+    )]
+    AdmissionBuildSlots { active: u64, limit: u64 },
     #[error("custody I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]

@@ -2297,8 +2297,54 @@ fn memory_pressure_defers_even_when_available_memory_is_high() -> TestResult {
         if level == MemoryPressure::Normal {
             assert_eq!(result?.state, AttemptState::Running);
         } else {
-            assert!(matches!(result, Err(RunError::Refused)));
+            assert!(
+                matches!(result, Err(RunError::MemoryPressure { level: actual }) if actual == format!("{level:?}"))
+            );
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn pressure_errors_fall_back_and_normal_still_obeys_floor() -> TestResult {
+    struct Probe {
+        available: u64,
+        error: bool,
+    }
+    impl Resources for Probe {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            Host {
+                available: self.available,
+            }
+            .memory()
+        }
+        fn pressure(
+            &self,
+        ) -> std::io::Result<Option<provenant_os::sys::resources::MemoryPressure>> {
+            if self.error {
+                Err(std::io::Error::other("unavailable"))
+            } else {
+                Ok(Some(provenant_os::sys::resources::MemoryPressure::Normal))
+            }
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            Ok(u64::MAX)
+        }
+    }
+    for (available, error, admitted) in [(100, true, true), (4, false, false)] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            admission_seconds: 1,
+            ..AdmissionPolicy::default()
+        });
+        let run = lane(58, true);
+        let id = starting(&store, &run, &call)?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let result = store.admit(id, &attempt, &Probe { available, error }, &clock, &cancel);
+        assert_eq!(result.is_ok(), admitted);
     }
     Ok(())
 }
@@ -2330,6 +2376,47 @@ fn writer_build_limit_is_shared_across_runs() -> TestResult {
         store
             .claim_with_build_limit(third, 2, &clock, &call)?
             .is_none()
+    );
+    Ok(())
+}
+#[test]
+fn writer_slot_refusal_and_release() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 0,
+        admission_seconds: 1,
+        ..AdmissionPolicy::default()
+    });
+    let first_run = lane(60, true);
+    let first = starting(&store, &first_run, &call)?;
+    assert!(
+        store
+            .claim_with_build_limit(first, 1, &clock, &call)?
+            .is_some()
+    );
+    let blocked_run = lane(61, true);
+    let blocked = starting(&store, &blocked_run, &call)?;
+    let attempt = store.attempt_dir(blocked_run.run_id, blocked, false)?;
+    assert!(matches!(
+        store.admit(blocked, &attempt, &Host { available: 100 }, &clock, &cancel),
+        Err(RunError::BuildSlots {
+            active: 1,
+            limit: 1
+        })
+    ));
+    // Terminal publication deletes the owner's admission row.
+    store.db.execute(
+        "DELETE FROM admission WHERE attempt=?1",
+        [first.to_string()],
+    )?;
+    let next = starting(&store, &lane(62, true), &call)?;
+    assert!(
+        store
+            .claim_with_build_limit(next, 1, &clock, &call)?
+            .is_some()
     );
     Ok(())
 }

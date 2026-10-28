@@ -148,6 +148,14 @@ impl RunStore {
     /// names a wait only when it can see one: run concurrency, then startup
     /// spacing, then the shared host and project caps and resource floors.
     pub fn lane_waits(&self, lanes: &[AttemptRecord], call: &Request<'_>) -> Vec<LaneWait> {
+        self.lane_waits_with_resources(lanes, call, &SystemResources)
+    }
+    pub fn lane_waits_with_resources(
+        &self,
+        lanes: &[AttemptRecord],
+        call: &Request<'_>,
+        resources: &dyn Resources,
+    ) -> Vec<LaneWait> {
         lanes
             .iter()
             .filter(|lane| {
@@ -192,14 +200,14 @@ impl RunStore {
                     } else if let Ok(Some(
                         pressure @ (resources::MemoryPressure::Warning
                         | resources::MemoryPressure::Critical),
-                    )) = resources::memory_pressure()
+                    )) = resources.pressure()
                     {
                         format!("host capacity: memory pressure {pressure:?}")
                     } else if class == LaneClass::Writer
                         && let (Ok(memory), Ok(settings), Some(count)) = (
-                            resources::memory(),
+                            resources.memory(),
                             provenant_config::LaneBuildSettings::read(&self.writer_registry),
-                            crate::ledger::writer_count(&self.writer_registry),
+                            crate::ledger::writer_count(&self.writer_registry, call),
                         )
                         && count >= settings.build_limit(memory.total_bytes)
                     {
@@ -361,6 +369,7 @@ impl RunStore {
     }
     /// Wait until host capacity, startup spacing and resource floors admit
     /// this attempt, then mark it running. Expiry or a state change refuses.
+    #[allow(clippy::print_stderr)]
     pub fn admit(
         &self,
         id: AttemptId,
@@ -370,7 +379,7 @@ impl RunStore {
         cancel: &CancelToken,
     ) -> Result<AttemptRecord> {
         let mut delay = Duration::from_millis(100);
-        let mut disk_refusal = None;
+        let mut refusal = None;
         loop {
             let call = Request {
                 clock,
@@ -383,10 +392,7 @@ impl RunStore {
                 .wall_now()
                 .map_err(|_| RunError::Validation("wall clock"))?;
             if now >= ticket.admission_deadline {
-                return Err(match disk_refusal {
-                    Some((free, floor)) => RunError::DiskFloor { free, floor },
-                    None => RunError::Refused,
-                });
+                return Err(refusal.unwrap_or(RunError::Refused));
             }
             // An explicit cancel before spawn ends the wait; finish records it.
             if crate::artifacts::read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some() {
@@ -397,29 +403,46 @@ impl RunStore {
             // admitting with the ticket's submission-time observation.
             let disk_floor_bytes = provenant_config::GcSettings::read(&self.writer_registry)
                 .and_then(|settings| settings.free_floor_bytes(&self.writer_registry));
+            let pressure = resources.pressure().unwrap_or_else(|error| {
+                eprintln!("admission: memory pressure probe failed: {error}");
+                None
+            });
             let fits = match (
                 resources.memory(),
-                resources.pressure(),
+                pressure,
                 resources.disk(attempt),
                 disk_floor_bytes,
                 provenant_config::LaneBuildSettings::read(&self.writer_registry),
             ) {
-                (Ok(memory), Ok(pressure), Ok(disk), Ok(floor), Ok(settings)) => {
-                    disk_refusal = (disk < floor).then_some((disk, floor));
-                    let fits = (match pressure {
-                        Some(resources::MemoryPressure::Normal) => true,
-                        Some(_) => false,
-                        None => {
-                            memory.total_bytes > 0
-                                && u128::from(memory.available_bytes) * 10_000
-                                    >= u128::from(memory.total_bytes)
-                                        * u128::from(ticket.memory_floor_basis_points)
-                        }
-                    }) && disk >= floor;
+                (Ok(memory), pressure, Ok(disk), Ok(floor), Ok(settings)) => {
+                    refusal = if disk < floor {
+                        Some(RunError::DiskFloor { free: disk, floor })
+                    } else if let Some(
+                        level @ (resources::MemoryPressure::Warning
+                        | resources::MemoryPressure::Critical),
+                    ) = pressure
+                    {
+                        Some(RunError::MemoryPressure {
+                            level: format!("{level:?}"),
+                        })
+                    } else {
+                        None
+                    };
+                    let fits = !matches!(
+                        pressure,
+                        Some(
+                            resources::MemoryPressure::Warning
+                                | resources::MemoryPressure::Critical
+                        )
+                    ) && memory.total_bytes > 0
+                        && u128::from(memory.available_bytes) * 10_000
+                            >= u128::from(memory.total_bytes)
+                                * u128::from(ticket.memory_floor_basis_points)
+                        && disk >= floor;
                     fits.then_some(settings.build_limit(memory.total_bytes))
                 }
                 _ => {
-                    disk_refusal = None;
+                    refusal = None;
                     None
                 }
             };
@@ -427,7 +450,16 @@ impl RunStore {
                 match self.claim_with_build_limit(id, limit, clock, &call) {
                     Ok(Some(record)) => return Ok(record),
                     // A busy store is transient; keep waiting to the deadline.
-                    Ok(None) | Err(RunError::Contention) => {}
+                    Ok(None) => {
+                        if ticket.lane_class == LaneClass::Writer
+                            && let Some(active) =
+                                crate::ledger::writer_count(&self.writer_registry, &call)
+                            && active >= limit
+                        {
+                            refusal = Some(RunError::BuildSlots { active, limit });
+                        }
+                    }
+                    Err(RunError::Contention) => {}
                     Err(error) => return Err(error),
                 }
             }

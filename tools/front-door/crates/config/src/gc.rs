@@ -295,3 +295,22 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod build_tests {
+    use super::LaneBuildSettings;
+    #[test]
+    fn defaults_and_overrides() {
+        let settings = LaneBuildSettings::default();
+        let boundary = 16 * 1024_u64.pow(3);
+        assert_eq!(settings.build_limit(boundary), 1);
+        assert_eq!(settings.build_limit(boundary + 1), 2);
+        assert!(settings.jobs() >= 1);
+        let settings = LaneBuildSettings {
+            max_concurrent_builds: Some(3),
+            cargo_build_jobs: Some(7),
+        };
+        assert_eq!(settings.build_limit(boundary), 3);
+        assert_eq!(settings.jobs(), 7);
+    }
+}

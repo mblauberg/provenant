@@ -207,6 +207,18 @@ supervisor call happens inside a transaction. Admission bounds active lanes
 at 64 per host and 32 per project and queued lanes at 256 per host, with
 memory and disk floors, startup spacing and a deadline.
 
+On macOS, Warning or Critical kernel memory pressure defers both classes.
+Normal pressure still requires the memory floor. An unavailable or unknown
+pressure sample is logged and falls back to the floor; Linux uses the floor.
+Disk and memory floors apply to both classes. Writers also require a host-wide
+build slot, defaulting to one at or below 16 GiB of RAM and two above that;
+read-only lanes do not consume one. At expiry, disk floor, known pressure and
+full build slots have distinct refusal reasons. The ledger associates new leases
+with the boot and guardian identity; a different boot, a definitely absent
+guardian, a removed admission row, or an unreadable owner store releases a
+lease. Unreadable owner stores are logged. Legacy leases without identity
+remain subject to their owner admission row.
+
 Each ticket and host ledger lease records a lane class: `writer` for a
 `worktree-write` lane, `read_only` for every other. Startup spacing is per
 class and measured only against the last start of that class: writers wait 20 s
@@ -249,15 +261,17 @@ has.
 `lanes` shows each queued or starting lane's `lane_class` and `waiting_for`,
 and uses the latter as its reason: launch not yet handed to a guardian, run
 concurrency, the class's remaining startup spacing, or otherwise host
-capacity. It reads the store and the host's ledger without locking, from a nested
-lane too, and names only a wait it can see. `lanes --host` and the other peer
+capacity. It reads the store and host ledger, from a nested lane too, and names only a wait it can see. `lanes --host` and the other peer
 listings show the same two fields: the peer derives them from its own store and
 ledger (peer action `lane_waits`) and an older peer that does not know the
 action simply shows none.
 - Why: an accepted receipt must mean durable admission, and read-only lanes
   must not queue behind writer spacing that exists to pace worktree and
   provider startup.
-- Test: `crates/run/src/dispatch_tests.rs::admission_holds_run_concurrency_spacing_floors_and_deadline`;
+- Test: `crates/run/src/ledger.rs::tests::prune_releases_old_boot_and_unreadable_owners`;
+  `crates/run/src/dispatch_tests.rs::memory_pressure_defers_even_when_available_memory_is_high`;
+  `crates/config/src/gc.rs::build_tests::defaults_and_overrides`;
+  `crates/run/src/dispatch_tests.rs::admission_holds_run_concurrency_spacing_floors_and_deadline`;
   `::read_only_lane_is_admitted_inside_a_writers_spacing_window`;
   `::writers_stay_20_seconds_apart_and_read_only_starts_do_not_reset_the_clock`;
   `::read_only_lanes_are_spaced_2_seconds_apart`;
