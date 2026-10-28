@@ -226,20 +226,19 @@ The same macOS default-state install also manages
 `StartInterval = 86400` (daily). It runs `provenant gc` for registered projects,
 protecting live writers and reservations. Its stdout and stderr go to `<state>/gc/`.
 `[gc] schedule = false` disables scheduled deletion; rerun install to remove
-the owned agent. `idle_days` and the free-space floor become agent arguments
-on install. When `free_floor` is unset, the floor is 10% of the state volume,
+the owned agent. `idle_days` becomes an agent argument on install. The collector reads
+`gc.free_floor` from configuration each run. When `free_floor` is unset, the floor is 10% of the state volume,
 at least 50 GiB. See [configuration](configuration.md#lane-cache-collection).
 
-The default-state install also manages
-`~/Library/LaunchAgents/dev.provenant.disk-guard.plist`. Enabled by default,
-it runs `provenant disk-guard` at login and every 120 seconds. The plist sets
-`ProcessType = Background`, `LowPriorityIO = true` and `Nice = 10`.
-Thresholds and exact process names are installed as arguments; rerun install
-after changing `[disk_guard]`. The guard warns and runs GC below its warning
-threshold, pauses matching build processes owned by the current user below
-its pause threshold and resumes saved paused processes at its resume threshold.
-Logs and recovery state live under `<state>/disk-guard/`.
-See [configuration](configuration.md#disk-guard) for defaults and rate limits.
+Install quietly boots out and deletes an existing
+`~/Library/LaunchAgents/dev.provenant.disk-guard.plist` on upgrade. Disk checks
+now run inside active lane supervisors. There is no periodic disk-guard agent.
+If the old checker still owns paused builds, install or uninstall keeps it
+running and names the recovery command. Run `provenant gc --apply`, allow that
+checker to resume its saved builds, then retry. It is retired under its lock,
+so a new pause cannot race with bootout. Uninstall also performs this one-time
+retirement when an installation was last managed by an older release.
+See [configuration](configuration.md#disk-pressure) for the shared floor.
 
 To remove an installation, run
 `provenant --state-dir "$STATE" uninstall --harness claude`. It removes only
@@ -247,9 +246,8 @@ unchanged owned entries and keeps the state and release assets. It never
 recursively deletes a checkout, state root or release. With `CLAUDE_CONFIG_DIR`
 or `CODEX_HOME` set, uninstall removes only that directory's target; without
 it, every recorded target of the harness.
-Removing the last recorded target also boots out the peer, GC and disk guard
-LaunchAgents and removes their unchanged plists. Stopping the disk guard
-resumes the saved paused processes after verifying their identities.
+Removing the last recorded target also boots out the peer and GC
+LaunchAgents and removes their unchanged plists.
 A modified plist is kept and reported; its
 service is left running. A failed bootout keeps the plist for a retry.
 A missing recorded plist is stopped by its service label.

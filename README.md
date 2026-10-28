@@ -126,16 +126,16 @@ curl -fsSL https://raw.githubusercontent.com/mblauberg/provenant/main/install.sh
 
 The installer verifies the release checksum, sets up detected harnesses and
 Claude account directories, and checks the installation. A rerun upgrades the
-recorded selection. Output includes one line per harness target, for example:
+recorded selection. Output summarises changes and targets, for example:
 
 ```text
-install:
-  Claude (/Users/you/.claude): 42 changed links, 0 changed hooks, 1 changed MCP, 0 notes; 0 other
-  Codex (/Users/you/.codex): 42 changed links, 0 changed hooks, 1 changed MCP, 0 notes; 0 other
+install: 86 changes; 2 targets; 0 findings; 0 manual includes
 ```
 
-Counts depend on the release and installed harnesses. Findings appear only when
-there are any.
+Counts depend on the release and installed harnesses. Findings and manual
+includes are listed when action is needed. Use `--json` for detailed records.
+Active lanes supervise disk pressure using `gc.free_floor`; settlement and
+worktree removal reclaim eligible data, with a daily GC backstop.
 
 **Installing with a coding agent.** In a checkout, ask the agent to run
 `./install.sh --yes`. Use `./install.sh --from-source --yes` to build locally.
