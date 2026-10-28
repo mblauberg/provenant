@@ -2149,7 +2149,6 @@ mod tests {
             },
         );
         let text = String::from_utf8(response.stdout).unwrap();
-        println!("compact hook fixture: {} bytes", text.len());
         assert!(text.len() < 2048, "{} bytes", text.len());
         assert!(text.contains("10 merged, 0 closed"));
         assert!(text.contains("succeeded: 20"));
