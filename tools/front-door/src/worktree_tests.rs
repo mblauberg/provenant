@@ -2816,7 +2816,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
         let frames = concat!(
             "{\"jsonrpc\":\"2.0\",\"id\":999,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n",
             "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
-            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fabric_run\",\"arguments\":{\"op\":\"submit\",\"operation_id\":\"nested-depth\",\"tasks\":[{\"prompt\":\"read only\",\"route\":{\"kind\":\"model\",\"provider\":\"codex\",\"model\":\"gpt-6-luna\"},\"timeout_seconds\":1}],\"concurrency\":1}}}\n"
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fabric_run\",\"arguments\":{\"op\":\"submit\",\"operation_id\":\"nested-depth\",\"tasks\":[{\"prompt\":\"read only\",\"route\":{\"kind\":\"model\",\"provider\":\"codex\",\"model\":\"gpt-6-luna\"},\"timeout_seconds\":1}],\"concurrency\":1,\"wait_seconds\":1}}}\n"
         );
         let mut options = provenant_os::exec::ExecOptions::new(
             &launch.argv,
@@ -3327,7 +3327,7 @@ fn verify_lane_profile(
         let targets = &accepted
             .iter()
             .find(|reply| reply["id"] == 1)
-            .ok_or("confined child reply")?["result"]["structuredContent"]["targets"];
+            .ok_or("confined child reply")?["result"]["structuredContent"]["receipt"]["targets"];
         assert_eq!(
             targets.as_array().map(Vec::len),
             Some(1),

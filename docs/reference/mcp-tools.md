@@ -2,7 +2,7 @@
 
 # MCP tool reference
 
-Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json`.
+Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json and tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json`.
 
 ## `fabric_context`
 
@@ -424,7 +424,587 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json`.
 }
 ```
 
-## `fabric_task`
+## `fabric_run`
+
+```json
+{
+  "_meta": {
+    "io.provenant/schemaVersion": 2
+  },
+  "description": "Submit and wait for results, list, inspect, wait for, cancel or resume runs. List returns compact attempts newest first; pass next_after as after to continue. Set detail for full records.",
+  "inputSchema": {
+    "$defs": {
+      "AttemptTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "$ref": "#/$defs/Id"
+          },
+          "host": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Id"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "attempt"
+        ],
+        "type": "object"
+      },
+      "Id": {
+        "pattern": "^[0-9a-f]{32}$",
+        "type": "string"
+      },
+      "OperationId": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+        "type": "string"
+      }
+    },
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "type": "boolean"
+          },
+          "op": {
+            "const": "cancel"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "target": {
+            "$ref": "#/$defs/AttemptTarget"
+          }
+        },
+        "required": [
+          "op",
+          "target"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AttemptTarget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "list"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "expected_generation": {
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "no_fallback": {
+            "type": "boolean"
+          },
+          "op": {
+            "const": "resume"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "prompt": {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/$defs/AttemptTarget"
+          }
+        },
+        "required": [
+          "expected_generation",
+          "op",
+          "prompt",
+          "target"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "type": "boolean"
+          },
+          "op": {
+            "const": "status"
+          },
+          "target": {
+            "$ref": "#/$defs/AttemptTarget"
+          }
+        },
+        "required": [
+          "op",
+          "target"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "concurrency": {
+            "anyOf": [
+              {
+                "maximum": 16,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "detail": {
+            "type": "boolean"
+          },
+          "host": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Id"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "knobs": {
+            "items": {
+              "maxLength": 256,
+              "type": "string"
+            },
+            "maxItems": 64,
+            "minItems": 0,
+            "type": "array"
+          },
+          "op": {
+            "const": "submit"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "tasks": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "access": {
+                  "enum": [
+                    "read_only",
+                    "worktree_write"
+                  ],
+                  "type": "string"
+                },
+                "account": {
+                  "anyOf": [
+                    {
+                      "maxLength": 64,
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "base": {
+                  "anyOf": [
+                    {
+                      "maxLength": 1024,
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "deliver": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "branch": {
+                          "maxLength": 1024,
+                          "type": "string"
+                        },
+                        "open_pr": {
+                          "type": "boolean"
+                        },
+                        "remote": {
+                          "maxLength": 64,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "branch",
+                        "remote"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "delivery_id": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Id"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "prompt": {
+                  "maxLength": 65536,
+                  "type": "string"
+                },
+                "route": {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "effort": {
+                          "anyOf": [
+                            {
+                              "maxLength": 128,
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "kind": {
+                          "const": "model"
+                        },
+                        "model": {
+                          "maxLength": 128,
+                          "type": "string"
+                        },
+                        "provider": {
+                          "maxLength": 128,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "model",
+                        "provider"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "effort": {
+                          "anyOf": [
+                            {
+                              "maxLength": 128,
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "kind": {
+                          "const": "named"
+                        },
+                        "name": {
+                          "maxLength": 128,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "name"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "timeout_seconds": {
+                  "maximum": 14400,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "worktree": {
+                  "anyOf": [
+                    {
+                      "maxLength": 4096,
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "prompt",
+                "route",
+                "timeout_seconds"
+              ],
+              "type": "object"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "type": "array"
+          },
+          "wait_seconds": {
+            "maximum": 55,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "op",
+          "tasks"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "condition": {
+            "enum": [
+              "any",
+              "all"
+            ],
+            "type": "string"
+          },
+          "detail": {
+            "type": "boolean"
+          },
+          "op": {
+            "const": "wait"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/$defs/AttemptTarget"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "wait_seconds": {
+            "maximum": 55,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "condition",
+          "op",
+          "targets",
+          "wait_seconds"
+        ],
+        "type": "object"
+      }
+    ],
+    "type": "object"
+  },
+  "name": "fabric_run"
+}
+```
+
+## `fabric_output`
+
+```json
+{
+  "_meta": {
+    "io.provenant/schemaVersion": 2
+  },
+  "description": "Read bounded output or fetch a manifest artefact.",
+  "inputSchema": {
+    "$defs": {
+      "AttemptTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "$ref": "#/$defs/Id"
+          },
+          "host": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Id"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "attempt"
+        ],
+        "type": "object"
+      },
+      "Id": {
+        "pattern": "^[0-9a-f]{32}$",
+        "type": "string"
+      }
+    },
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "artifact": {
+            "additionalProperties": false,
+            "properties": {
+              "digest": {
+                "anyOf": [
+                  {
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "path": {
+                "additionalProperties": false,
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8",
+                      "native_bytes"
+                    ],
+                    "type": "string"
+                  },
+                  "path": {
+                    "maxLength": 4096,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "path"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "digest",
+              "path"
+            ],
+            "type": "object"
+          },
+          "max_bytes": {
+            "maximum": 131072,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "fetch"
+          },
+          "target": {
+            "$ref": "#/$defs/AttemptTarget"
+          }
+        },
+        "required": [
+          "artifact",
+          "max_bytes",
+          "op",
+          "target"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "max_bytes": {
+            "maximum": 65536,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "op": {
+            "const": "read"
+          },
+          "part": {
+            "enum": [
+              "prompt",
+              "result",
+              "stderr",
+              "events"
+            ],
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/$defs/AttemptTarget"
+          }
+        },
+        "required": [
+          "op",
+          "target"
+        ],
+        "type": "object"
+      }
+    ],
+    "type": "object"
+  },
+  "name": "fabric_output"
+}
+```
+
+## `fabric_discover`
+
+```json
+{
+  "_meta": {
+    "io.provenant/schemaVersion": 2
+  },
+  "description": "Discover advanced Fabric tools and their input schemas. Call a discovered tool by its name.",
+  "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+      "op": {
+        "const": "discover"
+      }
+    },
+    "required": [],
+    "type": "object"
+  },
+  "name": "fabric_discover"
+}
+```
+
+## Discoverable tools
+
+### `fabric_task`
 
 ```json
 {
@@ -654,7 +1234,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json`.
 }
 ```
 
-## `fabric_events`
+### `fabric_events`
 
 ```json
 {
@@ -745,7 +1325,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json`.
 }
 ```
 
-## `fabric_lease`
+### `fabric_lease`
 
 ```json
 {
@@ -1120,405 +1700,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json`.
 }
 ```
 
-## `fabric_run`
-
-```json
-{
-  "_meta": {
-    "io.provenant/schemaVersion": 2
-  },
-  "description": "Submit, list, inspect, wait for, cancel or resume runs. List returns compact attempt summaries newest queued first; pass next_after as after to continue towards older attempts. Status returns the full attempt record.",
-  "inputSchema": {
-    "$defs": {
-      "AttemptTarget": {
-        "additionalProperties": false,
-        "properties": {
-          "attempt": {
-            "$ref": "#/$defs/Id"
-          },
-          "host": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/Id"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "required": [
-          "attempt"
-        ],
-        "type": "object"
-      },
-      "Id": {
-        "pattern": "^[0-9a-f]{32}$",
-        "type": "string"
-      },
-      "OperationId": {
-        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
-        "type": "string"
-      }
-    },
-    "oneOf": [
-      {
-        "additionalProperties": false,
-        "properties": {
-          "op": {
-            "const": "cancel"
-          },
-          "operation_id": {
-            "$ref": "#/$defs/OperationId"
-          },
-          "target": {
-            "$ref": "#/$defs/AttemptTarget"
-          }
-        },
-        "required": [
-          "op",
-          "operation_id",
-          "target"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
-          "after": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/AttemptTarget"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "limit": {
-            "maximum": 100,
-            "minimum": 1,
-            "type": "integer"
-          },
-          "op": {
-            "const": "list"
-          }
-        },
-        "required": [
-          "limit",
-          "op"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
-          "expected_generation": {
-            "maximum": 18446744073709551615,
-            "minimum": 0,
-            "type": "integer"
-          },
-          "no_fallback": {
-            "type": "boolean"
-          },
-          "op": {
-            "const": "resume"
-          },
-          "operation_id": {
-            "$ref": "#/$defs/OperationId"
-          },
-          "prompt": {
-            "maxLength": 65536,
-            "type": "string"
-          },
-          "target": {
-            "$ref": "#/$defs/AttemptTarget"
-          }
-        },
-        "required": [
-          "expected_generation",
-          "op",
-          "operation_id",
-          "prompt",
-          "target"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
-          "op": {
-            "const": "status"
-          },
-          "target": {
-            "$ref": "#/$defs/AttemptTarget"
-          }
-        },
-        "required": [
-          "op",
-          "target"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
-          "concurrency": {
-            "anyOf": [
-              {
-                "maximum": 16,
-                "minimum": 1,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "host": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/Id"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "knobs": {
-            "items": {
-              "maxLength": 256,
-              "type": "string"
-            },
-            "maxItems": 64,
-            "minItems": 0,
-            "type": "array"
-          },
-          "op": {
-            "const": "submit"
-          },
-          "operation_id": {
-            "$ref": "#/$defs/OperationId"
-          },
-          "tasks": {
-            "items": {
-              "additionalProperties": false,
-              "properties": {
-                "access": {
-                  "enum": [
-                    "read_only",
-                    "worktree_write"
-                  ],
-                  "type": "string"
-                },
-                "account": {
-                  "anyOf": [
-                    {
-                      "maxLength": 64,
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "base": {
-                  "anyOf": [
-                    {
-                      "maxLength": 1024,
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "deliver": {
-                  "anyOf": [
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "branch": {
-                          "maxLength": 1024,
-                          "type": "string"
-                        },
-                        "open_pr": {
-                          "type": "boolean"
-                        },
-                        "remote": {
-                          "maxLength": 64,
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "branch",
-                        "remote"
-                      ],
-                      "type": "object"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "delivery_id": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/$defs/Id"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "prompt": {
-                  "maxLength": 65536,
-                  "type": "string"
-                },
-                "route": {
-                  "oneOf": [
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "effort": {
-                          "anyOf": [
-                            {
-                              "maxLength": 128,
-                              "type": "string"
-                            },
-                            {
-                              "type": "null"
-                            }
-                          ]
-                        },
-                        "kind": {
-                          "const": "model"
-                        },
-                        "model": {
-                          "maxLength": 128,
-                          "type": "string"
-                        },
-                        "provider": {
-                          "maxLength": 128,
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "kind",
-                        "model",
-                        "provider"
-                      ],
-                      "type": "object"
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "effort": {
-                          "anyOf": [
-                            {
-                              "maxLength": 128,
-                              "type": "string"
-                            },
-                            {
-                              "type": "null"
-                            }
-                          ]
-                        },
-                        "kind": {
-                          "const": "named"
-                        },
-                        "name": {
-                          "maxLength": 128,
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "kind",
-                        "name"
-                      ],
-                      "type": "object"
-                    }
-                  ]
-                },
-                "timeout_seconds": {
-                  "maximum": 14400,
-                  "minimum": 1,
-                  "type": "integer"
-                },
-                "worktree": {
-                  "anyOf": [
-                    {
-                      "maxLength": 4096,
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                }
-              },
-              "required": [
-                "prompt",
-                "route",
-                "timeout_seconds"
-              ],
-              "type": "object"
-            },
-            "maxItems": 64,
-            "minItems": 1,
-            "type": "array"
-          }
-        },
-        "required": [
-          "op",
-          "operation_id",
-          "tasks"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
-          "condition": {
-            "enum": [
-              "any",
-              "all"
-            ],
-            "type": "string"
-          },
-          "op": {
-            "const": "wait"
-          },
-          "targets": {
-            "items": {
-              "$ref": "#/$defs/AttemptTarget"
-            },
-            "maxItems": 100,
-            "minItems": 1,
-            "type": "array"
-          },
-          "wait_seconds": {
-            "maximum": 55,
-            "minimum": 1,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "condition",
-          "op",
-          "targets",
-          "wait_seconds"
-        ],
-        "type": "object"
-      }
-    ],
-    "type": "object"
-  },
-  "name": "fabric_run"
-}
-```
-
-## `fabric_graph`
+### `fabric_graph`
 
 ```json
 {
@@ -1600,153 +1782,5 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json`.
     "type": "object"
   },
   "name": "fabric_graph"
-}
-```
-
-## `fabric_output`
-
-```json
-{
-  "_meta": {
-    "io.provenant/schemaVersion": 2
-  },
-  "description": "Read bounded output or fetch a manifest artefact.",
-  "inputSchema": {
-    "$defs": {
-      "AttemptTarget": {
-        "additionalProperties": false,
-        "properties": {
-          "attempt": {
-            "$ref": "#/$defs/Id"
-          },
-          "host": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/Id"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "required": [
-          "attempt"
-        ],
-        "type": "object"
-      },
-      "Id": {
-        "pattern": "^[0-9a-f]{32}$",
-        "type": "string"
-      }
-    },
-    "oneOf": [
-      {
-        "additionalProperties": false,
-        "properties": {
-          "artifact": {
-            "additionalProperties": false,
-            "properties": {
-              "digest": {
-                "anyOf": [
-                  {
-                    "pattern": "^sha256:[0-9a-f]{64}$",
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "path": {
-                "additionalProperties": false,
-                "properties": {
-                  "encoding": {
-                    "enum": [
-                      "utf8",
-                      "native_bytes"
-                    ],
-                    "type": "string"
-                  },
-                  "path": {
-                    "maxLength": 4096,
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "encoding",
-                  "path"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "digest",
-              "path"
-            ],
-            "type": "object"
-          },
-          "max_bytes": {
-            "maximum": 131072,
-            "minimum": 1,
-            "type": "integer"
-          },
-          "op": {
-            "const": "fetch"
-          },
-          "target": {
-            "$ref": "#/$defs/AttemptTarget"
-          }
-        },
-        "required": [
-          "artifact",
-          "max_bytes",
-          "op",
-          "target"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
-          "max_bytes": {
-            "maximum": 65536,
-            "minimum": 1,
-            "type": "integer"
-          },
-          "offset": {
-            "maximum": 18446744073709551615,
-            "minimum": 0,
-            "type": "integer"
-          },
-          "op": {
-            "const": "read"
-          },
-          "part": {
-            "enum": [
-              "prompt",
-              "result",
-              "stderr",
-              "events"
-            ],
-            "type": "string"
-          },
-          "target": {
-            "$ref": "#/$defs/AttemptTarget"
-          }
-        },
-        "required": [
-          "max_bytes",
-          "offset",
-          "op",
-          "part",
-          "target"
-        ],
-        "type": "object"
-      }
-    ],
-    "type": "object"
-  },
-  "name": "fabric_output"
 }
 ```

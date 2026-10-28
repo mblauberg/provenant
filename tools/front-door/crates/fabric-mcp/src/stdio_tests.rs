@@ -245,6 +245,54 @@ fn schema_tools_report_errors_in_text_in_both_protocol_eras() {
 }
 
 #[test]
+fn generated_submit_id_survives_facade_error() {
+    let gate = Arc::new(Gate::default());
+    gate.release();
+    gate.state.lock().unwrap().submit_error = Some(FacadeError::NotFound);
+    let server = Server::start(FakeFactory::new(gate), false);
+    server.send(&initialize());
+    server.send(&notification("notifications/initialized", json!({})));
+    server.send(&tool_call("submit", "fabric_run", json!({"op":"submit", "tasks":[{"prompt":"work", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]})));
+    let frames = server.wait_for_frames(2, TEST_WAIT).unwrap();
+    let result = &frames[1]["result"];
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["structuredContent"]["operation_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("mcp-")
+    );
+    assert!(matches!(server.finish(), Ok(())));
+}
+
+#[test]
+fn discovery_and_hidden_tool_are_callable() {
+    let server = Server::start(FakeFactory::new(Arc::new(Gate::default())), false);
+    server.send(&initialize());
+    server.send(&notification("notifications/initialized", json!({})));
+    server.send(&tool_call("discover", "fabric_discover", json!({})));
+    let frames = server.wait_for_frames(2, TEST_WAIT).unwrap();
+    assert!(
+        frames[1]["result"]["structuredContent"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "fabric_task")
+    );
+    server.send(&tool_call(
+        "task",
+        "fabric_task",
+        json!({"op":"create", "objective":"discovered"}),
+    ));
+    let frames = server.wait_for_frames(3, TEST_WAIT).unwrap();
+    assert_eq!(
+        frames[2]["result"]["structuredContent"]["task"]["objective"],
+        "discovered"
+    );
+    assert!(matches!(server.finish(), Ok(())));
+}
+
+#[test]
 fn unknown_tool_is_a_protocol_error_and_lifecycle_errors_stay_ordered() {
     let server = Server::start(FakeFactory::new(Arc::new(Gate::default())), false);
     server.send(&json!({"jsonrpc":"2.0","id":"early","method":"tools/list"}));

@@ -12,6 +12,12 @@ fn generated_schema_snapshot_is_checked_in() {
         "/tests/fixtures/tool-schemas.json"
     ));
     assert_eq!(actual, expected);
+    let actual = serde_json::to_string_pretty(&all_catalogue()).expect("catalogue serialises");
+    let expected = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/all-tool-schemas.json"
+    ));
+    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -19,6 +25,9 @@ fn generated_schema_snapshot_is_checked_in() {
 fn update_schema_snapshot() {
     let actual = serde_json::to_string_pretty(catalogue()).expect("catalogue serialises");
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tool-schemas.json");
+    fs::write(path, actual).expect("write schema snapshot");
+    let actual = serde_json::to_string_pretty(&all_catalogue()).expect("catalogue serialises");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/all-tool-schemas.json");
     fs::write(path, actual).expect("write schema snapshot");
 }
 
@@ -434,7 +443,7 @@ fn compare(
         "unexpected generated case at {tool} {path}: {value}"
     );
     if valid {
-        let wire = &catalogue()
+        let wire = &all_catalogue()
             .iter()
             .find(|wire| wire["name"] == tool)
             .expect("wire tool")["inputSchema"];
@@ -639,7 +648,7 @@ fn wire_schema_has_no_dangling_or_single_use_defs() {
             _ => {}
         }
     }
-    for tool in catalogue() {
+    for tool in all_catalogue() {
         let root = &tool["inputSchema"];
         let mut counts = std::collections::BTreeMap::new();
         refs(root, root, &mut counts);
@@ -681,7 +690,7 @@ fn wire_strings_carry_only_type_and_max_length() {
             _ => {}
         }
     }
-    for tool in catalogue() {
+    for tool in all_catalogue() {
         check(tool);
     }
 }
@@ -692,12 +701,9 @@ fn tool_schema_size_is_bounded() {
     let bounds = [
         ("fabric_context", 2_103),
         ("fabric_mail", 2_800),
-        ("fabric_task", 2_500),
-        ("fabric_events", 1_000),
-        ("fabric_lease", 4_407),
-        ("fabric_run", 4_400),
-        ("fabric_graph", 1_000),
+        ("fabric_run", 5_000),
         ("fabric_output", 1_600),
+        ("fabric_discover", 1_000),
     ];
     assert_eq!(catalogue().len(), bounds.len());
     let mut total = 0;
@@ -706,15 +712,15 @@ fn tool_schema_size_is_bounded() {
         assert_eq!(tool["_meta"]["io.provenant/schemaVersion"], 2);
         let size = serde_json::to_vec(tool).unwrap().len();
         assert!(size <= bound, "{name}: {size} bytes exceeds {bound}");
-        assert!(size <= 4_608, "{name}: {size} bytes exceeds hard cap");
+        assert!(size <= 5_000, "{name}: {size} bytes exceeds hard cap");
         total += size;
     }
-    assert!(total <= 18 * 1024, "catalogue: {total} bytes");
+    assert!(total <= 12 * 1024, "catalogue: {total} bytes");
 }
 
 #[test]
 fn relaxed_wire_text_still_reports_strict_invalid_paths() {
-    let wire = &catalogue()
+    let wire = &all_catalogue()
         .iter()
         .find(|tool| tool["name"] == "fabric_events")
         .unwrap()["inputSchema"];
@@ -738,30 +744,47 @@ fn relaxed_wire_text_still_reports_strict_invalid_paths() {
 }
 
 #[test]
+fn rejected_values_describe_expected_constraints() {
+    let input = json!({"op":"read", "target":{"attempt":"bad"}, "part":"other"});
+    assert!(expected("fabric_output", &input, "arguments.part").contains("result"));
+    assert!(expected("fabric_output", &input, "arguments.target.attempt").contains("[0-9a-f]"));
+    let input = json!({"op":"wat"});
+    assert!(expected("fabric_run", &input, "arguments.op").contains("submit"));
+}
+
+#[test]
 fn schema_catalogue_is_fixed_order_and_has_no_legacy_aliases() {
     let expected = [
         "fabric_context",
         "fabric_mail",
-        "fabric_task",
-        "fabric_events",
-        "fabric_lease",
         "fabric_run",
-        "fabric_graph",
         "fabric_output",
+        "fabric_discover",
     ];
     let names: Vec<_> = catalogue()
         .iter()
         .filter_map(|v| v["name"].as_str())
         .collect();
     assert_eq!(names, expected);
-    let serialised = serde_json::to_string(catalogue()).expect("catalogue serialises");
-    assert!(!serialised.contains("\"detail\""));
+    let advanced: Vec<_> = advanced_catalogue()
+        .iter()
+        .map(|v| v["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        advanced,
+        [
+            "fabric_task",
+            "fabric_events",
+            "fabric_lease",
+            "fabric_graph"
+        ]
+    );
     assert!(ToolCall::parse("fabric_not_a_tool", json!({"op":"inspect"})).is_err());
 }
 
 #[test]
 fn output_schema_lists_only_supported_parts() {
-    let output = catalogue()
+    let output = all_catalogue()
         .iter()
         .find(|tool| tool["name"] == "fabric_output")
         .expect("output tool");
@@ -776,7 +799,7 @@ fn output_schema_lists_only_supported_parts() {
         read["properties"]["part"]["enum"],
         json!(["prompt", "result", "stderr", "events"])
     );
-    for tool in catalogue() {
+    for tool in all_catalogue() {
         let supported = matches!(tool["name"].as_str(), Some("fabric_context"));
         assert_eq!(tool.get("outputSchema").is_some(), supported);
         if supported {
@@ -804,7 +827,7 @@ fn published_output_schemas_accept_real_runtime_records() {
         federation: None,
     };
     let output_schema = |name| {
-        &catalogue()
+        &all_catalogue()
             .iter()
             .find(|tool| tool["name"] == name)
             .unwrap()["outputSchema"]
@@ -834,7 +857,7 @@ fn published_output_schemas_accept_real_runtime_records() {
 fn submit_accepts_optional_bounded_git_base() {
     use provenant_fabric_runtime::coordination::facade::SubmitInput;
 
-    let schema = &catalogue()
+    let schema = &all_catalogue()
         .iter()
         .find(|tool| tool["name"] == "fabric_run")
         .unwrap()["inputSchema"];
@@ -856,7 +879,7 @@ fn submit_accepts_optional_bounded_git_base() {
 fn peer_worktree_requests_are_not_mcp_submit_inputs() {
     use provenant_fabric_runtime::coordination::facade::SubmitInput;
 
-    let schema = &catalogue()
+    let schema = &all_catalogue()
         .iter()
         .find(|tool| tool["name"] == "fabric_run")
         .unwrap()["inputSchema"];

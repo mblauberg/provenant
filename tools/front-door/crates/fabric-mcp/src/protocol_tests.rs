@@ -136,7 +136,7 @@ fn modern_tools_list_publishes_only_supported_output_schemas() {
         panic!("expected tool catalogue")
     };
     let tools = reply["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 8);
+    assert_eq!(tools.len(), 5);
     for tool in tools {
         let supported = matches!(tool["name"].as_str(), Some("fabric_context"));
         assert_eq!(tool.get("outputSchema").is_some(), supported);
@@ -162,7 +162,7 @@ fn legacy_tools_list_omits_modern_output_schemas() {
         panic!("expected legacy tool catalogue")
     };
     let tools = reply["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 8);
+    assert_eq!(tools.len(), 5);
     assert!(tools.iter().all(|tool| tool.get("outputSchema").is_none()));
 }
 
@@ -297,6 +297,22 @@ fn invalid_first_tool_calls_do_not_commit_the_protocol_era() {
         };
         assert_eq!(reply["result"]["protocolVersion"], LEGACY);
     }
+}
+
+#[test]
+fn invalid_arguments_explain_the_expected_value_and_recovery() {
+    let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+        "_meta":{VERSION:MODERN,CAPABILITIES:{}},"name":"fabric_output",
+        "arguments":{"op":"read","target":{"attempt":"00000000000000000000000000000001"},"part":"wrong"}
+    }});
+    let Action::Reply(reply) = Protocol::default().receive(&serde_json::to_vec(&request).unwrap())
+    else {
+        panic!()
+    };
+    let error = &reply["result"]["structuredContent"];
+    assert_eq!(error["path"], "arguments.part");
+    assert!(error["message"].as_str().unwrap().contains("result"));
+    assert!(error["hint"].as_str().unwrap().contains("retry"));
 }
 
 #[test]

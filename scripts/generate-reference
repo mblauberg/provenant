@@ -14,6 +14,7 @@ import tempfile
 COMMAND = "scripts/generate-reference"
 WORKSPACE = Path("tools/front-door")
 SCHEMAS = WORKSPACE / "crates/fabric-mcp/tests/fixtures/tool-schemas.json"
+ALL_SCHEMAS = WORKSPACE / "crates/fabric-mcp/tests/fixtures/all-tool-schemas.json"
 KNOBS = Path("config/harness-knobs.json")
 SNAPSHOTS = WORKSPACE / "crates/providers/tests/snapshots/seatbelt"
 
@@ -84,10 +85,15 @@ def cli_reference(data):
     return text.rstrip() + "\n"
 
 
-def mcp_reference(data):
-    text = header("MCP tool reference", SCHEMAS.as_posix())
+def mcp_reference(data, all_tools):
+    text = header("MCP tool reference", f"{SCHEMAS.as_posix()} and {ALL_SCHEMAS.as_posix()}")
     for tool in data:
         text += f"## `{tool['name']}`\n\n" + fenced(tool) + "\n"
+    names = {tool["name"] for tool in data}
+    text += "## Discoverable tools\n\n"
+    for tool in all_tools:
+        if tool["name"] not in names:
+            text += f"### `{tool['name']}`\n\n" + fenced(tool) + "\n"
     return text.rstrip() + "\n"
 
 
@@ -120,7 +126,6 @@ def generate(root, binary=None):
     else:
         gap("cli.md", f"{WORKSPACE}/Cargo.toml is missing; CLI catalogue unavailable")
     for source, name, render in [
-        (SCHEMAS, "mcp-tools.md", mcp_reference),
         (KNOBS, "config-keys.md", config_reference),
     ]:
         if (root / source).is_file():
@@ -130,6 +135,15 @@ def generate(root, binary=None):
                 gap(name, f"{source} has no supported machine-readable schema")
         else:
             gap(name, f"{source} is missing")
+
+    missing = next((source for source in (SCHEMAS, ALL_SCHEMAS) if not (root / source).is_file()), None)
+    if missing:
+        gap("mcp-tools.md", f"{missing} is missing")
+    else:
+        try:
+            files["mcp-tools.md"] = mcp_reference(json.loads((root / SCHEMAS).read_text()), json.loads((root / ALL_SCHEMAS).read_text()))
+        except (ValueError, KeyError, TypeError, AttributeError):
+            gap("mcp-tools.md", f"{SCHEMAS} or {ALL_SCHEMAS} has no supported machine-readable schema")
 
     if (root / SNAPSHOTS).is_dir():
         # The goldens are verified by the rust job's provider tests; copy only.

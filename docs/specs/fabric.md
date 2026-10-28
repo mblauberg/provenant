@@ -86,6 +86,15 @@ The tool catalogue is generated reference in
 [`docs/reference/mcp-tools.md`](../reference/mcp-tools.md); CLI leaves are in
 the [CLI reference](../reference/cli.md).
 
+The default MCP catalogue exposes run and output operations, messaging and
+identity, plus `fabric_discover`. Discovery returns the schemas for graph,
+lease, task and event operations, which remain callable by their tool names.
+Run submission can wait for a result in the same bounded call; a timeout
+returns a receipt and continuation instructions. Run listings are bounded and
+newest first, and compact status, wait and cancel responses can request detail.
+Run operation IDs are generated when omitted and returned for retries;
+explicit IDs preserve planned retry identity.
+
 ### Strict tool input
 
 Each tool takes a tagged `op` enum that rejects unknown fields, with no
@@ -101,12 +110,15 @@ text with the field path, before side effects. MCP submission rejects
 ### Lossless, bounded output
 
 Output is UTF-8 when valid, otherwise padded base64; neither is lossy, and
-a page never splits a character. Oversized observations fail with `result_too_large`, but committed mutation receipts keep the transport
+a page never splits a character. Output reads default to the result part at
+offset zero with a bounded size. Paged observations fit the byte budget before
+issuing a continuation cursor; committed mutation receipts keep the transport
 ceiling. `fetch` copies only run-exported regular files, refuses symlinks and
 path traversal, and verifies a manifest digest before atomic publication.
 - Why: agents must read every byte, never lose a receipt and never import a
   peer's link.
 - Test: `crates/fabric-mcp/src/tools_tests.rs::result_limit_preserves_mutation_receipts_and_rejects_oversized_observations`;
+  `::run_page_shrinks_before_cursor_is_issued`;
   `crates/fabric-runtime/src/fetch.rs::refuses_traversal_digest_mismatch_and_non_contiguous_chunks_before_publish`
 - Owner: `crates/fabric-mcp/src/`, `crates/fabric-runtime/src/fetch.rs`
 
@@ -125,8 +137,9 @@ launched run; on EOF accepted work drains for at most 55 s.
 ### One error meaning at both edges
 
 The CLI and MCP render one typed category per run error, and peer replies
-keep their error code over the wire. Uncertain mutations carry their
-`operation_id`.
+keep their error code over the wire. MCP errors include a message and recovery
+hint, and validation identifies the expected value. Uncertain mutations carry
+their `operation_id`.
 - Why: people and agents act on the code.
 - Test: `crates/cli/src/fabric.rs::upgrade_and_peer_version_refusals_match_on_both_edges`;
   `src/fabric.rs::peer_run_errors_stay_typed_through_cli_rendering`

@@ -426,7 +426,22 @@ fn rust_mcp_negotiates_lists_tools_and_persists_mail_without_interpreters() -> R
         "2025-11-25"
     );
     let list = &replies.iter().find(|r| r["id"] == 2).ok_or("catalogue")?["result"]["tools"];
-    assert_eq!(list.as_array().ok_or("tools")?.len(), 8);
+    let names: Vec<_> = list
+        .as_array()
+        .ok_or("tools")?
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "fabric_context",
+            "fabric_mail",
+            "fabric_run",
+            "fabric_output",
+            "fabric_discover"
+        ]
+    );
     let identity =
         &replies.iter().find(|r| r["id"] == 3).ok_or("identity")?["result"]["structuredContent"];
     assert_eq!(identity["client"], "codex");
@@ -1376,11 +1391,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         )?;
         let result = &replies.iter().find(|r| r["id"] == 1).ok_or("error")?["result"];
         assert_eq!(result["structuredContent"]["code"], expected, "{result}");
-        if expected == "launch_unknown" {
-            assert_eq!(result["structuredContent"]["operation_id"], "local-stop");
-        } else {
-            assert!(result["structuredContent"]["operation_id"].is_null());
-        }
+        assert_eq!(result["structuredContent"]["operation_id"], "local-stop");
     }
 
     // A well-formed run reply must also match the requested operation and target.
@@ -1920,7 +1931,7 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
             json!({"jsonrpc":"2.0","id":106,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"resume","target":{"attempt":parent},"operation_id":"lane-default-resume","prompt":"continue","expected_generation":0}}}),
         ]);
         if depth.is_some() && child_store {
-            frames.push(json!({"jsonrpc":"2.0","id":101,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"submit","operation_id":"lane-child","tasks":[{"prompt":"read only","route":{"kind":"model","provider":"codex","model":"gpt-6.1-sol"},"timeout_seconds":1}],"concurrency":1}}}));
+            frames.push(json!({"jsonrpc":"2.0","id":101,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"submit","operation_id":"lane-child","wait_seconds":1,"tasks":[{"prompt":"read only","route":{"kind":"model","provider":"codex","model":"gpt-6.1-sol"},"timeout_seconds":1}],"concurrency":1}}}));
         }
         let replies = mcp(&rig, &frames)?;
         for id in 1..=calls.len() {
@@ -2153,7 +2164,7 @@ fn submitted_policy(
     route: Value,
 ) -> Result<(provenant_records::run::CanonicalRequest, Value)> {
     let task = json!({"prompt":"fixture", "route":route,"timeout_seconds":60});
-    let mut arguments = json!({"op":"submit","operation_id":operation,"tasks":[task.clone(),task.clone(),task.clone(),task],"knobs":knobs});
+    let mut arguments = json!({"op":"submit","operation_id":operation,"wait_seconds":1,"tasks":[task.clone(),task.clone(),task.clone(),task],"knobs":knobs});
     if let Some(n) = concurrency {
         arguments["concurrency"] = n.into();
     }
@@ -2165,11 +2176,11 @@ fn submitted_policy(
     )?;
     let result = &replies.iter().find(|r| r["id"] == 1).ok_or("submission")?["result"];
     assert_ne!(result["isError"], true, "{result}");
-    let target = result["structuredContent"]["targets"][0].clone();
+    let target = result["structuredContent"]["receipt"]["targets"][0].clone();
     let replies = mcp(
         rig,
         &[
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"status","target":target}}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"status","target":target,"detail":true}}}),
         ],
     )?;
     let attempt = replies.iter().find(|r| r["id"] == 2).ok_or("status")?["result"]["structuredContent"]["attempt"].clone();
@@ -3623,7 +3634,7 @@ fn mcp_submission_places_read_only_work_on_a_named_peer() -> Result {
     )?;
     let placed = &replies.iter().find(|r| r["id"] == 1).ok_or("submission")?["result"];
     assert_ne!(placed["isError"], true, "{placed}");
-    let target = placed["structuredContent"]["targets"][0].clone();
+    let target = placed["structuredContent"]["receipt"]["targets"][0].clone();
     assert_eq!(target["host"], peer.to_string(), "{placed}");
     // The run lives only in the peer's store.
     assert!(!rig.state.join("runs").exists());

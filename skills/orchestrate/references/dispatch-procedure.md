@@ -5,10 +5,12 @@ keeps the coordination rules; this reference carries the mechanics.
 
 ## Submit and recover
 
-One surface per action. Fabric MCP tools cover submit, graph, status, resume,
-cancel, claim, landing leases and bounded prompt, result, stderr or events reads
-(`fabric_output`). Mail, identity and activity events use `fabric_mail`,
-`fabric_context` (`op: inspect`) and `fabric_events`. CLI only: `provenant
+One surface per action. The default Fabric MCP tools include `fabric_run`,
+`fabric_output`, `fabric_mail` and `fabric_context`. Call `fabric_discover` with
+`{}` to inspect the schemas for `fabric_graph`, `fabric_lease`, `fabric_task` and
+`fabric_events`, then call those tools by name. Mail, identity and activity
+events use `fabric_mail`, `fabric_context` (`op: inspect`) and `fabric_events`.
+CLI only: `provenant
 lanes` (list and wait), `provenant route list`, `provenant output` (`--part
 events|result|prompt|stderr`, `--tail`), `provenant reconcile` and `provenant
 fabric landing push|reconcile`. A terminal without MCP cancels with `provenant
@@ -20,8 +22,10 @@ cancel ATTEMPT`. The full RUN/TASK/ATTEMPT form is also accepted.
    non-Claude chairs. Use Fabric for other providers, detached work and
    sandboxed worktree writers.
 2. Call `fabric_run` with its `submit` operation; each task has one route
-   choice. Use `provenant route list --adapter <id>` to inspect model ids and
-   pool membership.
+   choice. Supply `wait_seconds` to submit and wait in the same bounded call
+   when the result is needed immediately. On timeout, retain the receipt and follow its continuation
+   instructions. Use `provenant route list --adapter <id>` to inspect model ids
+   and pool membership.
 3. For a graph workflow, use `fabric_graph` with `op: run|status|cancel|resume`;
    pass the project-local graph document path to `run` and `resume`, and its
    `id` to `status` and `cancel`. Settlement advances dependants automatically.
@@ -52,15 +56,17 @@ cancel ATTEMPT`. The full RUN/TASK/ATTEMPT form is also accepted.
    in `prompt`, targeting `target: { attempt: ATTEMPT }` and providing
    `expected_generation: 0` (it counts earlier continuations, not the attempt
    record's `generation`) and `operation_id`. On `Conflict`, read the target's
-   `fabric_run` `status`. If its `state` is not `terminal`, wait and retry. If
+   `fabric_run` `status` with `detail: true`. If its `state` is not `terminal`, wait and retry. If
    you are retrying your own resume, repeat it with the same `operation_id`,
    prompt and target; the replay returns the existing continuation, including on
-   a peer. Otherwise use `fabric_run` `list` (local host only) and target the
-   attempt whose `retry_of` is the target. Use a fresh `operation_id` only when
+   a peer. Otherwise page through `fabric_run` `list` (local host only), then
+   inspect candidates with `status` and `detail: true` to find the attempt
+   whose `retry_of` is the target. Use a fresh `operation_id` only when
    the ID was reused with a different prompt.
-8. Use `fabric_run`'s `cancel` operation with an explicit target and operation
-   ID to stop a run; use `fabric_output`'s `read` operation with a target, part,
-   offset and byte limit for a bounded slice.
+8. Use `fabric_run`'s `cancel` operation with an explicit target to stop a run;
+   use `fabric_output`'s `read` operation for a bounded slice. Output reads
+   default to the result part and offset zero. Run operation IDs can be generated
+   when omitted; retain the returned ID and supply it again for a planned retry.
 
 ## Dispatch details
 
