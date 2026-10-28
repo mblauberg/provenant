@@ -19,6 +19,7 @@ pub struct OverviewItem {
     pub id: String,
     pub project_id: String,
     pub title: String,
+    pub chair_session_id: Option<String>,
 }
 
 pub struct OverviewBatch {
@@ -62,6 +63,7 @@ pub fn overview(
                 id: item.id,
                 project_id: item.project_id,
                 title: item.title,
+                chair_session_id: item.chair_session_id,
             })
             .collect(),
         truncated: page.truncated,

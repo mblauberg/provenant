@@ -38,7 +38,7 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
             remaining_bytes -= page.bytes_read;
             for item in page.items {
                 if let Some(label) = labels.get(&item.project_id) {
-                    needs_you.push(json!({"id":item.id,"project_id":item.project_id,"project_label":label,"title":item.title,"task_label":null}));
+                    needs_you.push(json!({"id":item.id,"project_id":item.project_id,"project_label":label,"title":item.title,"task_label":null,"chair_session_id":item.chair_session_id}));
                 }
             }
             if page.truncated {
