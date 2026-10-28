@@ -659,7 +659,7 @@ fn graph_settlement_advances_writer_and_account_routed_review() -> Result {
         OpenOptions::new()
             .append(true)
             .open(rig.state.join("config.toml"))?,
-        "\n[domains.routing.pools]\ngraph-test = [{{ model = 'claude/claude-sonnet-5-5', effort = 'medium' }}]"
+        "\n[domains.routing.pools]\ngraph-test = [{{ model = 'claude/claude-sonnet-5-5' }}]"
     )?;
     let git = std::env::var_os("PROVENANT_GIT")
         .map(PathBuf::from)
