@@ -118,6 +118,66 @@ mod reboot_tests {
     use super::*;
 
     #[test]
+    fn reboot_settlement_error_propagates() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use provenant_supervisor::census::{
+            Census, CensusError, ProcessObservation, ProcessObserver,
+        };
+        struct Reboot;
+        impl ProcessObserver for Reboot {
+            fn boot_identity(&self) -> std::result::Result<String, CensusError> {
+                Ok("darwin:11111111-1111-1111-1111-111111111111".into())
+            }
+            fn observe(&self, _: i64) -> ProcessObservation {
+                unreachable!()
+            }
+            fn census(&self, _: usize) -> std::result::Result<Census, CensusError> {
+                unreachable!()
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let record = store.record(id, &call)?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let scope = RunStore::scope(&record);
+        attempt.atomic_write(std::ffi::OsStr::new("process.json"), ".checkpoint-", &serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1, "scope": scope,
+            "guardian": { "boot": "darwin:00000000-0000-0000-0000-000000000000", "pid": 100, "native_start": 1, "group_id": 100, "session_id": 100 },
+            "provider": { "boot": "darwin:00000000-0000-0000-0000-000000000000", "pid": 101, "native_start": 2, "group_id": 101, "session_id": 100 }
+        }))?, provenant_os::fs::PublishMode::Replace)?;
+        let mut next = record.clone();
+        next.generation += 1;
+        next.revision += 1;
+        store.write(&call, |tx| {
+            crate::admission::update_attempt(tx, &record, &next)
+        })?;
+        let result = store.settle_rebooted(&record, &call, &Reboot);
+        assert!(
+            matches!(
+                result,
+                Err(RunError::Validation("process observation scope"))
+            ),
+            "{result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn unreadable_exit_is_not_reboot_proof() -> std::result::Result<(), Box<dyn std::error::Error>>
     {
         unavailable_reboot_evidence(false)
@@ -643,32 +703,15 @@ impl RunStore {
         &self,
         record: &AttemptRecord,
         call: &Request<'_>,
-        _observer: &dyn ProcessObserver,
+        observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
         if record.state == AttemptState::Queued {
             return Ok(None);
         }
-        if !matches!(record.state, AttemptState::Terminal { .. })
-            || matches!(
-                record.state,
-                AttemptState::Terminal {
-                    outcome: Outcome::Lost,
-                    exit_code: None,
-                    ..
-                }
-            ) && record.exit_evidence.is_none()
+        if Self::needs_lost_settlement(record)
+            && let Some(result) = self.settle_unreserved_loss(record, call, observer, true)?
         {
-            match self.settle_unreserved_loss(record, call, _observer) {
-                Ok(Some(result)) => return Ok(Some(result)),
-                Ok(None) => {}
-                Err(error) => {
-                    return Ok(Some(Reconciled::uncertain(
-                        UncertainReason::ReconcileFailed {
-                            error: format!("reboot proof unavailable: {error}"),
-                        },
-                    )));
-                }
-            }
+            return Ok(Some(result));
         }
         // Collection failures are uncertain; settlement errors still propagate.
         let collect = || -> Result<_> {
@@ -711,7 +754,7 @@ impl RunStore {
                 recovery,
                 &attempt,
                 Self::scope(record),
-                _observer,
+                observer,
             );
             #[cfg(not(test))]
             let proof = recovery.after_reboot(&attempt, Self::scope(record));
@@ -730,19 +773,10 @@ impl RunStore {
                 )));
             }
         };
-        if matches!(record.state, AttemptState::Terminal { .. })
-            && !(matches!(
-                record.state,
-                AttemptState::Terminal {
-                    outcome: Outcome::Lost,
-                    exit_code: None,
-                    ..
-                }
-            ) && record.exit_evidence.is_none())
-        {
+        if !Self::needs_lost_settlement(record) {
             self.settle_recovered(&attempt, proof.into_recovery())?;
             // Recheck custody after release before removing lock-named payloads.
-            let cleanup = self.reconcile_terminal_temporary(record, call, _observer);
+            let cleanup = self.reconcile_terminal_temporary(record, call, observer);
             #[cfg(test)]
             REBOOT_TEMPORARY_CLEANUP.with(|result| {
                 *result.borrow_mut() = Some(cleanup.as_ref().cloned().map_err(ToString::to_string));
@@ -758,11 +792,7 @@ impl RunStore {
                 .and_then(|task| task.writer.as_ref())
                 .is_some_and(crate::writer::worktree_removed);
             if missing_worktree {
-                self.commit_lost(
-                    proof.scope(),
-                    "machine rebooted before settlement and the writer worktree was removed",
-                    call,
-                )?;
+                self.commit_lost(proof.scope(), Self::removed_worktree_lost_reason(), call)?;
             } else {
                 self.commit_reboot_lost(&proof, call)?;
             }
@@ -783,6 +813,22 @@ impl RunStore {
         }
         Ok(Some(Reconciled::Finished))
     }
+    fn needs_lost_settlement(record: &AttemptRecord) -> bool {
+        !matches!(record.state, AttemptState::Terminal { .. })
+            || (matches!(
+                record.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::Lost,
+                    exit_code: None,
+                    ..
+                }
+            ) && record.exit_evidence.is_none())
+    }
+
+    fn removed_worktree_lost_reason() -> &'static str {
+        "machine rebooted before settlement and the writer worktree was removed"
+    }
+
     /// Writer exclusion for an attempt, taken without waiting: failure means a
     /// guardian (or an inheritor of its lease) still holds custody.
     fn orphan_recovery(
@@ -815,81 +861,89 @@ impl RunStore {
         record: &AttemptRecord,
         call: &Request<'_>,
         observer: &dyn ProcessObserver,
+        proof_errors_uncertain: bool,
     ) -> Result<Option<Reconciled>> {
-        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
-        // The slot is named from the worktree path, so it needs no Git access.
-        let request = self.request(record.run_id, call)?;
-        let writer = request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == record.task_id)
-            .and_then(|task| task.writer.as_ref());
-        let custody = match writer {
-            Some(writer) => {
-                let slot = self
-                    .writer_registry
-                    .join("worktrees")
-                    .join(self.context.project_id.to_string())
-                    .join(provenant_confinement::worktrees::state_dir_name(
-                        &writer.worktree,
-                    ));
-                match provenant_os::fs::Directory::open_anchor(&slot) {
-                    Ok(directory) => directory,
-                    Err(error) if error.is_not_found() => return Ok(None),
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            None => attempt.try_clone()?,
-        };
-        let _lease = match custody.try_lock(
-            std::ffi::OsStr::new("writer.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        ) {
-            Ok(lease) => lease,
-            Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        let stale = match custody.metadata_at(std::ffi::OsStr::new("reservation.json"), false) {
-            Err(error) if error.is_not_found() => false,
-            Ok(_) => {
-                let Some(writer) = writer else {
-                    return Ok(None);
-                };
-                let path = self
-                    .writer_registry
+        let collect = || -> Result<_> {
+            let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+            // The slot is named from the worktree path, so it needs no Git access.
+            let request = self.request(record.run_id, call)?;
+            let writer = request
+                .tasks
+                .iter()
+                .find(|task| task.task_id == record.task_id)
+                .and_then(|task| task.writer.as_ref());
+            let slot = writer.map(|writer| {
+                self.writer_registry
                     .join("worktrees")
                     .join(self.context.project_id.to_string())
                     .join(provenant_confinement::worktrees::state_dir_name(
                         &writer.worktree,
                     ))
-                    .join("reservation.json");
-                let scope = Self::scope(record);
-                if !self.writer_fences()?.iter().any(|fence| {
-                    fence.reservation == path
-                        && fence.scope.run == scope.run
-                        && fence.scope.attempt == scope.attempt
-                        && fence.scope.generation < scope.generation
-                }) {
-                    return Ok(None);
+            });
+            let custody = match &slot {
+                Some(slot) => match provenant_os::fs::Directory::open_anchor(slot) {
+                    Ok(directory) => directory,
+                    Err(error) if error.is_not_found() => return Ok(None),
+                    Err(error) => return Err(error.into()),
+                },
+                None => attempt.try_clone()?,
+            };
+            let _lease = match custody.try_lock(
+                std::ffi::OsStr::new("writer.lock"),
+                provenant_os::fs::LockMode::Exclusive,
+            ) {
+                Ok(lease) => lease,
+                Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            let stale = match custody.metadata_at(std::ffi::OsStr::new("reservation.json"), false) {
+                Err(error) if error.is_not_found() => false,
+                Ok(_) => {
+                    let Some(slot) = &slot else {
+                        return Ok(None);
+                    };
+                    let path = slot.join("reservation.json");
+                    let scope = Self::scope(record);
+                    if !self.writer_fences()?.iter().any(|fence| {
+                        fence.reservation == path
+                            && fence.scope.run == scope.run
+                            && fence.scope.attempt == scope.attempt
+                            && fence.scope.generation < scope.generation
+                    }) {
+                        return Ok(None);
+                    }
+                    true
                 }
-                true
+                Err(error) => return Err(error.into()),
+            };
+            if !stale && matches!(record.state, AttemptState::Terminal { .. }) {
+                return Ok(None);
             }
-            Err(error) => return Err(error.into()),
+            if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some() {
+                return Ok(None);
+            }
+            if !custody::checkpoint_before_reboot(&attempt, Self::scope(record), observer) {
+                return Ok(None);
+            }
+            let missing_worktree = writer.is_some_and(crate::writer::worktree_removed);
+            Ok(Some((custody, _lease, stale, missing_worktree)))
         };
-        if !stale && matches!(record.state, AttemptState::Terminal { .. }) {
-            return Ok(None);
-        }
-        if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some() {
-            return Ok(None);
-        }
-        if !custody::checkpoint_before_reboot(&attempt, Self::scope(record), observer) {
-            return Ok(None);
-        }
-        let missing_worktree = writer.is_some_and(crate::writer::worktree_removed);
+        let (custody, _lease, stale, missing_worktree) = match collect() {
+            Ok(Some(proof)) => proof,
+            Ok(None) => return Ok(None),
+            Err(error) if proof_errors_uncertain => {
+                return Ok(Some(Reconciled::uncertain(
+                    UncertainReason::ReconcileFailed {
+                        error: format!("reboot proof unavailable: {error}"),
+                    },
+                )));
+            }
+            Err(error) => return Err(error),
+        };
         self.commit_lost(
             Self::scope(record),
             if missing_worktree {
-                "writer worktree was removed and the recorded process tree predates this boot"
+                Self::removed_worktree_lost_reason()
             } else {
                 "writer reservation was gone or stale and the recorded process tree predates this boot"
             },
@@ -1066,7 +1120,7 @@ impl RunStore {
             match custody::reattach(dir, Self::scope(&record)) {
                 Ok(handle) => {
                     if let Some(Reconciled::Finished) =
-                        self.settle_unreserved_loss(&record, call, observer)?
+                        self.settle_unreserved_loss(&record, call, observer, false)?
                     {
                         return Ok(CancelReceipt::AlreadyTerminal);
                     }
@@ -1781,7 +1835,7 @@ impl RunStore {
                     }
                     Ok(Observation::Live | Observation::PublicationPending) => Ok(Reconciled::Held),
                     Ok(Observation::Unknown) => Ok(self
-                        .settle_unreserved_loss(record, call, observer)?
+                        .settle_unreserved_loss(record, call, observer, false)?
                         .unwrap_or_else(|| {
                             Reconciled::uncertain(UncertainReason::GuardianNotObservable)
                         })),

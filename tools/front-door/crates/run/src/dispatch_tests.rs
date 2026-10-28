@@ -4988,28 +4988,92 @@ fn unreserved_recorded_process_tree_before_reboot_is_lost() -> TestResult {
 }
 
 fn placed_writer_without_reservation(cancel_run: bool, evidence: u8) -> TestResult {
-    placed_writer_with_missing_or_stale_reservation(cancel_run, evidence, false, false)
+    placed_writer_with_missing_or_stale_reservation(RecoveryCase {
+        cancel_run,
+        evidence,
+        reservation: ReservationCase::Missing,
+        removed: false,
+    })
 }
 
 #[test]
 fn stale_reservation_before_reboot_is_reclaimed() -> TestResult {
-    placed_writer_with_missing_or_stale_reservation(true, 2, true, false)?;
-    placed_writer_with_missing_or_stale_reservation(false, 2, true, false)
+    for cancel_run in [true, false] {
+        placed_writer_with_missing_or_stale_reservation(RecoveryCase {
+            cancel_run,
+            evidence: 2,
+            reservation: ReservationCase::Stale,
+            removed: false,
+        })?;
+    }
+    Ok(())
 }
 
 #[test]
 fn removed_worktree_before_reboot_is_lost() -> TestResult {
-    placed_writer_with_missing_or_stale_reservation(true, 2, false, true)?;
-    placed_writer_with_missing_or_stale_reservation(false, 2, false, true)?;
+    for cancel_run in [true, false] {
+        placed_writer_with_missing_or_stale_reservation(RecoveryCase {
+            cancel_run,
+            evidence: 2,
+            reservation: ReservationCase::Missing,
+            removed: true,
+        })?;
+    }
     recover_rebooted_writer_removed_worktree()
 }
 
-fn placed_writer_with_missing_or_stale_reservation(
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReservationCase {
+    Missing,
+    Stale,
+    Newer,
+    DifferentAttempt,
+}
+
+struct RecoveryCase {
     cancel_run: bool,
     evidence: u8,
-    stale: bool,
+    reservation: ReservationCase,
     removed: bool,
-) -> TestResult {
+}
+
+#[test]
+fn stale_reservation_with_current_boot_process_is_retained() -> TestResult {
+    placed_writer_with_missing_or_stale_reservation(RecoveryCase {
+        cancel_run: false,
+        evidence: 1,
+        reservation: ReservationCase::Stale,
+        removed: false,
+    })
+}
+
+#[test]
+fn newer_generation_reservation_is_retained() -> TestResult {
+    placed_writer_with_missing_or_stale_reservation(RecoveryCase {
+        cancel_run: false,
+        evidence: 2,
+        reservation: ReservationCase::Newer,
+        removed: false,
+    })
+}
+
+#[test]
+fn different_attempt_reservation_is_retained() -> TestResult {
+    placed_writer_with_missing_or_stale_reservation(RecoveryCase {
+        cancel_run: false,
+        evidence: 2,
+        reservation: ReservationCase::DifferentAttempt,
+        removed: false,
+    })
+}
+
+fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestResult {
+    let RecoveryCase {
+        cancel_run,
+        evidence,
+        reservation: reservation_case,
+        removed,
+    } = case;
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -5035,7 +5099,7 @@ fn placed_writer_with_missing_or_stale_reservation(
     store
         .claim(id, &at_micros(100), &call)?
         .ok_or("not admitted")?;
-    if stale {
+    if reservation_case == ReservationCase::Stale {
         let old = store.record(id, &call)?;
         let mut next = old.clone();
         next.generation += 1;
@@ -5112,9 +5176,16 @@ fn placed_writer_with_missing_or_stale_reservation(
     }
     // A launch summary alone does not prove the provider was never spawned.
     let reservation = custody.join("reservation.json");
-    if stale {
+    if reservation_case != ReservationCase::Missing {
         let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
-        value["scope"]["generation"] = (scope.generation - 1).into();
+        match reservation_case {
+            ReservationCase::Stale => value["scope"]["generation"] = (scope.generation - 1).into(),
+            ReservationCase::Newer => value["scope"]["generation"] = (scope.generation + 1).into(),
+            ReservationCase::DifferentAttempt => {
+                value["scope"]["attempt"] = serde_json::to_value(AttemptId::from_bytes([9; 16]))?
+            }
+            ReservationCase::Missing => unreachable!(),
+        }
         std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
     } else {
         std::fs::remove_file(&reservation)?;
@@ -5126,31 +5197,37 @@ fn placed_writer_with_missing_or_stale_reservation(
     let reboot = RebootObserver(NEW_BOOT);
     let observer: &dyn provenant_supervisor::census::ProcessObserver =
         if evidence == 2 { &reboot } else { &system };
+    let should_settle = evidence == 2
+        && matches!(
+            reservation_case,
+            ReservationCase::Missing | ReservationCase::Stale
+        );
     if cancel_run {
         assert_eq!(
             store.cancel_with_observer(id, "stop", &call, observer)?,
-            if evidence == 2 {
+            if should_settle {
                 CancelReceipt::AlreadyTerminal
             } else {
                 CancelReceipt::Requested
             }
         );
     } else {
-        assert_eq!(
-            store.reconcile_with_observer(run.run_id, &Fake::default(), &call, observer)?,
-            vec![(
-                id,
-                match evidence {
-                    1 => Reconciled::Held,
-                    2 => Reconciled::Finished,
-                    _ => Reconciled::Uncertain {
-                        reason: UncertainReason::GuardianNotObservable
-                    },
-                }
-            )]
+        assert!(
+            store
+                .reconcile_with_observer(run.run_id, &Fake::default(), &call, observer)?
+                .contains(&(
+                    id,
+                    match evidence {
+                        1 => Reconciled::Held,
+                        2 if should_settle => Reconciled::Finished,
+                        _ => Reconciled::Uncertain {
+                            reason: UncertainReason::GuardianNotObservable
+                        },
+                    }
+                ))
         );
     }
-    if evidence == 2 {
+    if should_settle {
         assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
         assert!(!reservation.exists());
         if removed {
@@ -5163,6 +5240,9 @@ fn placed_writer_with_missing_or_stale_reservation(
             store.record(id, &call)?.state,
             AttemptState::Terminal { .. }
         ));
+        if reservation_case != ReservationCase::Missing {
+            assert!(reservation.exists());
+        }
     }
     Ok(())
 }
