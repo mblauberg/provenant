@@ -344,6 +344,8 @@ enum EdgeError {
     Quota(#[from] provenant_quota::QuotaError),
     #[error("{0}")]
     Pacing(&'static str),
+    #[error("{0}")]
+    GoAllowance(String),
 }
 impl From<provenant_config::ConfigError> for EdgeError {
     fn from(error: provenant_config::ConfigError) -> Self {
@@ -530,9 +532,6 @@ pub(crate) fn resolve_dispatch(
                 &excluded_members,
             )?;
             loop {
-                if !matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
-                    break;
-                }
                 let model = ModelId::parse(&format!("{}/{}", resolved.adapter, resolved.model))?;
                 let pools = free_pools(&resolved.adapter, || {
                     context.catalogue.is_free_model(&model)
@@ -545,12 +544,25 @@ pub(crate) fn resolve_dispatch(
                     records,
                     pools: &pools,
                 };
-                if let Err(error) = admission.check(&resolved) {
+                let gate = provenant_routing::check_go_allowance(
+                    &model,
+                    context.config,
+                    context.catalogue,
+                )
+                .map_err(EdgeError::GoAllowance)
+                .and_then(|()| {
+                    if matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
+                        admission.check(&resolved).map_err(EdgeError::from)
+                    } else {
+                        Ok(())
+                    }
+                });
+                if let Err(error) = gate {
                     if !matches!(&request.choice, RouteChoice::NamedRoute(_))
                         || resolved.pool_selection.is_none()
                         || excluded_members.contains(&model)
                     {
-                        return Err(error.into());
+                        return Err(error);
                     }
                     let reason = error.to_string();
                     excluded_members.push(model);
@@ -568,12 +580,12 @@ pub(crate) fn resolve_dispatch(
                             {
                                 route
                             }
-                            Ok(_) | Err(_) => return Err(error.into()),
+                            Ok(_) | Err(_) => return Err(error),
                         };
                     if replacement.adapter == resolved.adapter
                         && replacement.model == resolved.model
                     {
-                        return Err(error.into());
+                        return Err(error);
                     }
                     record_pool_redraw(&resolved, &mut replacement, &reason)?;
                     resolved = replacement;
@@ -664,14 +676,14 @@ pub(crate) fn check_dispatch_candidate(
     let catalogue = Catalogue::bundled().map_err(|e| e.to_string())?;
     let model =
         ModelId::parse(&format!("{}/{}", route.adapter, route.model)).map_err(|e| e.to_string())?;
+    let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        .map_err(|e| e.to_string())?
+        .domains;
+    provenant_routing::check_go_allowance(&model, &domains.routing, &catalogue)?;
     let pools = free_pools(&route.adapter, || catalogue.is_free_model(&model));
     let now = jiff::Timestamp::now().as_second();
     let mut records = crate::quota::read_cache(roots).map_err(|e| e.to_string())?;
-    provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-        .map_err(|e| e.to_string())?
-        .domains
-        .quota
-        .apply_calibration(&mut records, now);
+    domains.quota.apply_calibration(&mut records, now);
     provenant_quota::Admission {
         policies: &provenant_providers::quota_policies(REGISTRY),
         now_unix_seconds: now,
@@ -1296,6 +1308,109 @@ mod route_tests {
         assert_eq!(super::free_pools("opencode", || true), ["opencode-free"]);
         assert!(super::free_pools("opencode", || false).is_empty());
         assert!(super::free_pools("codex", || true).is_empty());
+    }
+
+    #[test]
+    fn go_floor_gates_explicit_pool_and_fallback_dispatch() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(
+                &self,
+                path: &std::path::Path,
+            ) -> std::io::Result<std::path::PathBuf> {
+                Ok(path.into())
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&Resolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        std::fs::set_permissions(
+            roots.state.as_path(),
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        let path = roots.state.as_path().join("config.toml");
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/claude-haiku-5-5',weight=1},{model='opencode/opencode-go/glm-5.3-flash',weight=0}]\n",
+        )?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let catalogue = super::Catalogue::bundled()?;
+        let now = jiff::Timestamp::now().as_second();
+        let availability = [provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "opencode".into(),
+            executable: "/fixture/opencode".into(),
+            version: "fixture".into(),
+            fixture_ref: "fixture".into(),
+            catalogue_revision: catalogue.revision().into(),
+            account_key: Some("go".into()),
+            observed_models: vec![
+                "opencode-go/claude-haiku-5-5".into(),
+                "opencode-go/glm-5.3-flash".into(),
+            ],
+            observed_unix_seconds: now,
+            expires_unix_seconds: now + 300,
+        }];
+        let access = [provenant_routing::AccessContext {
+            adapter: "opencode",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        }];
+        let request = |model: Option<&str>, route: Option<&str>| {
+            super::RouteRequest {
+                model: model.map(|m| super::Model(m.into())),
+                route: route.map(str::to_owned),
+                effort: None,
+                confidential: false,
+                allow_free: false,
+                fallback: vec![],
+            }
+            .to_domain()
+        };
+        let resolve = |request: &provenant_routing::RouteRequest| {
+            super::resolve_dispatch(
+                request,
+                &roots,
+                None,
+                ("fixture", 0),
+                &availability,
+                &access,
+                "fixture",
+            )
+        };
+        let error = resolve(&request(
+            Some("opencode/opencode-go/claude-haiku-5-5"),
+            None,
+        )?)
+        .unwrap_err();
+        assert!(error.contains("claude-haiku-5-5") && error.contains("$15"));
+        let error = resolve(&request(Some("opencode/opencode-go/unlisted"), None)?).unwrap_err();
+        assert!(error.contains("opencode-go/unlisted") && error.contains("unknown"));
+        let selected = resolve(&request(None, Some("test"))?)?;
+        assert_eq!(selected.model, "opencode-go/glm-5.3-flash");
+        assert!(
+            selected.pool_selection.as_ref().unwrap().redraws[0]
+                .reason
+                .contains("$15")
+        );
+        let mut candidate = selected.clone();
+        candidate.model = "opencode-go/unlisted".into();
+        assert!(
+            super::check_dispatch_candidate(&roots, &candidate)
+                .unwrap_err()
+                .contains("unknown")
+        );
+        candidate.model = "opencode-go/claude-haiku-5-5".into();
+        assert!(
+            super::check_dispatch_candidate(&roots, &candidate)
+                .unwrap_err()
+                .contains("$15")
+        );
+        Ok(())
     }
 
     #[test]

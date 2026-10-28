@@ -42,6 +42,21 @@ process and mutate nothing.
   `tests/route.rs::help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates`
 - Owner: `crates/routing/src/`
 
+### Go monthly allowance floor
+
+Every OpenCode Go candidate, including an explicit or uncatalogued exact ID,
+must have a recorded monthly allowance at least equal to
+`domains.routing.opencode_go.min_monthly_allowance_usd`. The default is $60;
+zero disables the check. Unknown allowances are refused when the floor is set.
+Refusals identify the model, allowance or unknown status, and the setting.
+Zen is a separate account and is unaffected. The floor is independent of
+quota calibration and pacing.
+- Why: protect the shared Go plan from low-allowance models regardless of
+  selection path.
+- Tests: `crates/routing/src/catalog.rs::pacing_profile_tests::go_allowance_floor_handles_limits_unknown_and_zen`,
+  `crates/cli/src/route.rs::route_tests::go_floor_gates_explicit_pool_and_fallback_dispatch`
+- Owner: `crates/routing/src/`
+
 ### Go pool quota coverage
 
 OpenCode Go local ledger usage is labelled `source: local-ledger` and
