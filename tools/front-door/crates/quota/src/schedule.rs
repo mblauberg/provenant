@@ -66,14 +66,14 @@ pub fn next_due(
     let Some(ttl) = interval(policies, &record.account.adapter, trigger, power) else {
         return Ok(None);
     };
-    let manual_auth_retry =
-        trigger == Trigger::Manual && record.last_error == Some(ProbeFailure::Auth);
+    let event_auth_retry = record.auth_retry_pending
+        || (trigger == Trigger::Manual && record.last_error == Some(ProbeFailure::Auth));
     let mut due = match record.last_attempt_unix_seconds {
-        Some(at) if !manual_auth_retry => add(at, ttl)?,
+        Some(at) if !event_auth_retry => add(at, ttl)?,
         _ => i64::MIN,
     };
     if let Some(backoff) = record.backoff_until_unix_seconds
-        && !manual_auth_retry
+        && !event_auth_retry
     {
         due = due.max(backoff);
     }
@@ -134,6 +134,7 @@ pub fn reserve(
         deadline_unix_seconds: add(now, TICK_BUDGET_SECONDS as u64)?,
     });
     record.backoff_until_unix_seconds = None;
+    record.auth_retry_pending = false;
     record.last_attempt_unix_seconds = Some(now);
     record.validate()?;
     Ok(UpdateIntent {
@@ -309,7 +310,8 @@ pub fn plan_tick_with_settings(
                 && !(d.status == QuotaStatus::AuthRequired
                     && d.accounts.as_ref().is_some_and(|a| a.len() == 1)
                     && !records.iter().any(|record| {
-                        (record.last_error == Some(ProbeFailure::Auth)
+                        (record.auth_retry_pending
+                            || record.last_error == Some(ProbeFailure::Auth)
                             || record.auth_verified_unix_seconds.is_some())
                                 && d.accounts.as_ref().is_some_and(|accounts| {
                                     accounts.iter().any(|account| {
@@ -621,6 +623,71 @@ mod tests {
         );
     }
     #[test]
+    fn credential_event_retries_auth_once_and_keeps_active_claim() {
+        let mut record = AccountRecord::empty(account());
+        record.last_attempt_unix_seconds = Some(100);
+        record.last_error = Some(ProbeFailure::Auth);
+        record.failures = 1;
+        record.backoff_until_unix_seconds = Some(1000);
+        record.auth_retry_pending = true;
+        let detection = Detection {
+            adapter: "claude".into(),
+            accounts: Some(vec![record.account.clone()]),
+            status: QuotaStatus::AuthRequired,
+        };
+        for trigger in [Trigger::Panel, Trigger::Wake] {
+            let tick = QuotaTick {
+                adapter: None,
+                trigger,
+                power: Power::Ac,
+            };
+            let plan = plan_tick(
+                crate::source::TEST_POLICIES,
+                &[record.clone()],
+                std::slice::from_ref(&detection),
+                &tick,
+                110,
+            )
+            .unwrap();
+            assert_eq!(plan.batches, vec![vec![record.account.clone()]]);
+            let reserved = reserve(
+                crate::source::TEST_POLICIES,
+                Some(&record),
+                &record.account,
+                110,
+                "claim",
+                trigger,
+                Power::Ac,
+            )
+            .unwrap()
+            .replacement
+            .unwrap();
+            assert!(!reserved.auth_retry_pending);
+            let mut live = reserved.clone();
+            live.auth_retry_pending = true;
+            assert!(
+                reserve(
+                    crate::source::TEST_POLICIES,
+                    Some(&live),
+                    &record.account,
+                    111,
+                    "second",
+                    trigger,
+                    Power::Ac
+                )
+                .is_err()
+            );
+            let failed = complete(&reserved, "claim", 112, Err(ProbeFailure::Auth), None)
+                .unwrap()
+                .replacement
+                .unwrap();
+            assert_eq!(
+                next_due(crate::source::TEST_POLICIES, &failed, trigger, Power::Ac).unwrap(),
+                Some(1012)
+            );
+        }
+    }
+    #[test]
     fn single_account_auth_failure_gets_a_paced_fallback_retry() {
         let mut record = AccountRecord::empty(account());
         record.last_attempt_unix_seconds = Some(100);
@@ -640,7 +707,7 @@ mod tests {
         let before = plan_tick(
             crate::source::TEST_POLICIES,
             &[record.clone()],
-            &[detection.clone()],
+            std::slice::from_ref(&detection),
             &tick,
             999,
         )
@@ -669,7 +736,7 @@ mod tests {
         let recent = report(
             crate::source::TEST_POLICIES,
             &[record.clone()],
-            &[detection.clone()],
+            std::slice::from_ref(&detection),
             &query,
             101,
             "/report".into(),

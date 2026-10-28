@@ -405,6 +405,7 @@ impl ReaperFixture {
                 cwd: root,
                 input: false,
                 secret_input: None,
+                inherited_lease: None,
                 capture_stdout: false,
                 capture_stderr: false,
             },

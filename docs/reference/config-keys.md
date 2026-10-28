@@ -4,6 +4,32 @@
 
 Source: `config/harness-knobs.json`.
 
+## Provider updates
+
+```json
+{
+  "path": "providers.<id>",
+  "provider_ids": [
+    "claude",
+    "codex",
+    "cursor",
+    "agy",
+    "opencode"
+  ],
+  "update": {
+    "default": true,
+    "effect": "Run the detected native updater between lanes. false opts out; a non-empty string overrides the updater command through /bin/sh -c.",
+    "type": "bool_or_string"
+  },
+  "update_interval_seconds": {
+    "default": 86400,
+    "effect": "Minimum time between update attempts, checked on existing housekeeping events. A failed attempt waits the same interval.",
+    "min": 1,
+    "type": "int"
+  }
+}
+```
+
 ## `chair.auto_switch`
 
 | Field | Value |

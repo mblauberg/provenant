@@ -982,6 +982,7 @@ fn availability() -> AvailabilityRecord {
         adapter: "codex".into(),
         executable: "/fixture/codex".into(),
         version: "fixture".into(),
+        last_update: None,
         fixture_ref: "test".into(),
         catalogue_revision: "route-pools-20261027-v2".into(),
         account_key: Some("opaque-account".into()),

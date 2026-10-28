@@ -1,6 +1,56 @@
 use super::*;
 use std::sync::Mutex;
 struct Decoder(Mutex<Vec<Vec<u8>>>);
+
+#[test]
+fn inherited_update_lease_survives_the_callers_handle() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::fs::LockMode;
+    let temp = tempfile::tempdir()?;
+    let lease = crate::provider_fence::acquire(temp.path(), "codex", LockMode::Exclusive)?;
+    let reaper = Reaper::new(1)?;
+    let permit = reaper.reserve().ok_or("missing executor permit")?;
+    let argv = [
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        OsString::from("read reply"),
+    ];
+    let mut child = RawChild::spawn(
+        permit,
+        crate::sys::raw_exec::SpawnSpec {
+            argv: &argv,
+            env: None,
+            cwd: temp.path(),
+            input: true,
+            secret_input: None,
+            inherited_lease: Some(&lease),
+            capture_stdout: false,
+            capture_stderr: false,
+        },
+    )?;
+    drop(lease);
+    assert!(matches!(
+        crate::provider_fence::acquire(temp.path(), "codex", LockMode::Shared),
+        Err(crate::fs::FsError::LockTimeout { .. })
+    ));
+    child
+        .stdin
+        .take()
+        .ok_or("missing child stdin")?
+        .write_all(b"finish\n")?;
+    // The OS lock boundary provides a bounded wait, including scheduler delay.
+    let clock = crate::clock::SystemClock::new();
+    use provenant_core::Clock;
+    let _available = crate::provider_fence::wait(
+        temp.path(),
+        "codex",
+        LockMode::Shared,
+        provenant_core::WaitBudget::cli(clock.mono_now(), 5)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+    let _ = child.observe()?;
+    Ok(())
+}
 impl FrameSink for Decoder {
     fn try_frame(&self, bytes: &[u8]) -> Result<(), QueueLoss> {
         self.0.lock().unwrap().push(bytes.to_vec());
@@ -67,6 +117,7 @@ fn post_spawn_setup_failure_kills_child_and_releases_unknown_wait_slot() {
             cwd: Path::new("/"),
             input: false,
             secret_input: None,
+            inherited_lease: None,
             capture_stdout: false,
             capture_stderr: false,
         },

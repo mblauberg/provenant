@@ -99,12 +99,16 @@ def mcp_reference(data, all_tools):
 
 def config_reference(data):
     text = header("Configuration keys", KNOBS.as_posix())
+    provider_updates = data.get("provider_updates")
+    if provider_updates:
+        text += "## Provider updates\n\n" + fenced(provider_updates) + "\n"
     for name, contract in sorted(data["knobs"].items()):
         text += f"## `{name}`\n\n| Field | Value |\n|---|---|\n"
         for key, value in sorted(contract.items()):
             text += f"| `{key}` | {cell(value)} |\n"
         text += "\n"
-    remainder = {key: value for key, value in data.items() if key != "knobs"}
+    remainder = {key: value for key, value in data.items()
+                 if key not in {"knobs", "provider_updates"}}
     if remainder:
         text += "## Registry and profiles\n\n" + fenced(remainder)
     return text.rstrip() + "\n"

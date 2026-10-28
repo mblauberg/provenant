@@ -274,6 +274,7 @@ fn spawn_identified(
     boot: &str,
     permit: Permit,
     secret: Option<&child::SecretPipe>,
+    provider_lease: Option<&provenant_os::fs::LockGuard>,
 ) -> io::Result<(Child, ProcessIdentity, Permit)> {
     let observer =
         super::census::NativeProcessObserver::for_boot(boot).map_err(io::Error::other)?;
@@ -287,6 +288,9 @@ fn spawn_identified(
         command.pre_exec(move || identity_gate(channel.as_raw_fd()));
     }
     let mut pass = vec![lease.handoff_file().as_fd()];
+    if let Some(lease) = provider_lease {
+        pass.push(lease.handoff_file().as_fd());
+    }
     if let Some(pipe) = secret {
         pass.push(pipe.fd());
     }
@@ -430,8 +434,15 @@ impl ProviderGroup {
             } else {
                 Stdio::null()
             });
-        let (child, identity, permit) =
-            spawn_identified(command, lease, &env, boot, permit, secret.as_ref())?;
+        let (child, identity, permit) = spawn_identified(
+            command,
+            lease,
+            &env,
+            boot,
+            permit,
+            secret.as_ref(),
+            spec.inherited_lease,
+        )?;
         drop(secret);
         let pid = match i32::try_from(child.id()) {
             Ok(pid) if pid > 0 => pid,
@@ -1063,6 +1074,7 @@ mod tests {
                 cwd: root.path(),
                 input: false,
                 secret_input: None,
+                inherited_lease: None,
                 capture_stdout: true,
                 capture_stderr: false,
             },

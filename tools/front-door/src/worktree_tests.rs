@@ -814,6 +814,13 @@ fn writer_production_plan_denies_outside_writes() -> Result {
 /// Crash only this fixture guardian after durable exit, before Run publication.
 struct FixtureHolder<'a>(&'a dyn provenant_supervisor::Holder);
 impl provenant_supervisor::Holder for FixtureHolder<'_> {
+    fn provider_lease(
+        &self,
+        context: &[u8],
+        resolved_route: &str,
+    ) -> provenant_supervisor::custody::Result<Option<provenant_os::fs::LockGuard>> {
+        self.0.provider_lease(context, resolved_route)
+    }
     fn admit(
         &self,
         context: &[u8],
@@ -1123,6 +1130,7 @@ impl provenant_run::Providers for WriterProvider {
         };
         let route = fixture_route();
         Ok(provenant_run::PreparedLaunch {
+            provider_lease: None,
             skipped_routes: Vec::new(),
             argv,
             environment: Vec::new(),

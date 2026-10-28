@@ -43,7 +43,7 @@ The app resolves `provenant` from the user's login shell and caches its executab
 
 At launch, the app runs `provenant quota show --json` to load the current report. It then runs `provenant quota tick --trigger <why> --power ac|battery|low --json` when the report is due, on ⌘R, after wake once the network is reachable, or when the power state changes. It watches the report file named by `report_path` and reloads it when a tick publishes a new report. Tick triggers are `timer`, `panel`, `manual`, `wake` and `power`.
 
-A successful lane clears an authentication error for its account and publishes the changed report. The menu continues to use its paced retry and manual refresh for sign-in changes.
+A successful lane clears an authentication error for its account and publishes the changed report. On menu-open, wake and manual-refresh ticks, the CLI compares metadata for each registered provider's credential files and profile directory. A changed file or selected profile makes an authentication retry due immediately. On macOS, Claude also checks the default login Keychain file's metadata. Change detection never opens credential files or reads their contents, and adds no polling loop. Unchanged signed-out accounts retain the 15-minute authentication backoff; manual refresh can retry sooner.
 
 The CLI command response is a versioned envelope containing the report. The watched file contains the raw report. The state root is `$PROVENANT_STATE_DIR`, defaulting to `~/.local/share/provenant/v1`; quota state and `report.json` live in its `quota` directory.
 

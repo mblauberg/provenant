@@ -43,6 +43,7 @@ fn start(root: &Path, name: &str, scenario: &str) -> Result<(CustodyLease, Custo
         &clock,
     )?;
     let command = ProviderCommand {
+        provider_lease: None,
         requester: provenant_core::ActorId::from_bytes([4; 16]),
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),

@@ -18,6 +18,8 @@ mod loader;
 mod managed;
 pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
 mod presets;
+mod providers;
+pub use providers::{ProviderSettings, ProviderUpdate};
 mod project_binding;
 mod release;
 mod retention;
@@ -162,6 +164,7 @@ pub struct ResolvedConfig<D = NoDomains> {
     pub install: InstallSettings,
     pub gc: GcSettings,
     pub retention: RetentionSettings,
+    pub providers: BTreeMap<String, ProviderSettings>,
     /// Effective knobs with the layer that set each; not part of `origins`.
     pub knobs: BTreeMap<String, KnobValue>,
     pub origins: BTreeMap<String, Origin>,

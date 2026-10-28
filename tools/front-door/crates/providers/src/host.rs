@@ -233,6 +233,7 @@ impl Executor for HostProbeExecutor<'_> {
             cwd: scratch.path(),
             stdin: options.stdin,
             secret_input: options.secret_input,
+            inherited_lease: options.inherited_lease,
             stdout: options.stdout,
             stderr: options.stderr,
             stdout_decoder: options.stdout_decoder,

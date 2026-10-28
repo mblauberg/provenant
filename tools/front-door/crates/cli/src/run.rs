@@ -31,7 +31,7 @@ mod remote;
 mod targets;
 mod watch;
 pub use children::HostHolder;
-pub(crate) use provider::resolve_executable as provider_executable;
+pub(crate) use provider::find_executable as provider_executable;
 #[cfg(feature = "fixture")]
 pub use provider::{prepare_fixture, writer_fixture_plan};
 
@@ -2241,24 +2241,42 @@ fn launch_on_host(
 ) -> Result<Vec<run::Started>, Fail> {
     let host = match host {
         Some(host) => host.clone(),
-        None => run::HostLaunchContext {
-            configuration_root: edge.roots.state.as_path().into(),
-            cwd: edge.cwd.into(),
-            executables: REGISTRY
-                .iter()
-                .map(|entry| entry.adapter.id())
-                .filter_map(|name| {
-                    provider::resolve_executable(name)
-                        .ok()
-                        .map(|path| (name.into(), path))
-                })
-                .collect(),
-            git: provenant_os::git::git_executable()
-                .ok_or_else(|| Fail::new(Status::Refused, ErrorKind::Git, "Git unavailable"))?,
-            codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
-            #[cfg(feature = "fixture")]
-            fixture_state_write: false,
-        },
+        None => {
+            let mut executables = std::collections::BTreeMap::new();
+            for registration in REGISTRY {
+                let name = registration.adapter.id();
+                let budget = WaitBudget::cli(call.clock.mono_now(), 30)
+                    .map_err(|e| Fail::new(Status::Error, ErrorKind::Invalid, e.to_string()))?;
+                let _lease = provenant_os::provider_fence::wait(
+                    edge.roots.state.as_path(),
+                    name,
+                    provenant_os::fs::LockMode::Shared,
+                    budget,
+                    call.cancel,
+                    call.clock,
+                )
+                .map_err(|e| {
+                    Fail::new(
+                        Status::Refused,
+                        ErrorKind::Invalid,
+                        format!("provider {name} update busy: {e}; retry the lane"),
+                    )
+                })?;
+                if let Ok(path) = provider::find_executable(name) {
+                    executables.insert(name.into(), path);
+                }
+            }
+            run::HostLaunchContext {
+                configuration_root: edge.roots.state.as_path().into(),
+                cwd: edge.cwd.into(),
+                executables,
+                git: provenant_os::git::git_executable()
+                    .ok_or_else(|| Fail::new(Status::Refused, ErrorKind::Git, "Git unavailable"))?,
+                codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+                #[cfg(feature = "fixture")]
+                fixture_state_write: false,
+            }
+        }
     };
     let read;
     let request = match validated {

@@ -101,6 +101,23 @@ pub struct RefreshClaim {
     pub token: String,
     pub deadline_unix_seconds: i64,
 }
+/// Metadata only. Change detection never opens credential or profile files.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialMetadata {
+    pub path: std::path::PathBuf,
+    pub stat: Option<CredentialStat>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialStat {
+    pub device: u64,
+    pub inode: u64,
+    pub mode: u32,
+    pub uid: u32,
+    pub size: u64,
+    pub modified_ns: i128,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountRecord {
@@ -116,6 +133,10 @@ pub struct AccountRecord {
     /// A successful lane is newer account-scoped evidence than ambient detection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_verified_unix_seconds: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_metadata: Vec<CredentialMetadata>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auth_retry_pending: bool,
     pub refusals: Vec<crate::Refusal>,
 }
 impl AccountRecord {
@@ -131,6 +152,8 @@ impl AccountRecord {
             failures: 0,
             last_error: None,
             auth_verified_unix_seconds: None,
+            credential_metadata: Vec::new(),
+            auth_retry_pending: false,
             refusals: Vec::new(),
         }
     }
@@ -161,6 +184,14 @@ impl AccountRecord {
             if backoff <= started || backoff > maximum {
                 return Err(QuotaError::Invalid("backoff deadline"));
             }
+        }
+        if self.credential_metadata.len() > 8
+            || self
+                .credential_metadata
+                .iter()
+                .any(|metadata| !metadata.path.is_absolute())
+        {
+            return Err(QuotaError::Invalid("credential metadata bounds"));
         }
         if self.refusals.len() > MAX_WINDOWS
             || self.refusals.iter().any(|r| {

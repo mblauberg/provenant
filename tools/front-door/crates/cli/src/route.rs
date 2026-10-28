@@ -1040,6 +1040,7 @@ mod route_tests {
             adapter: "opencode".into(),
             executable: "opencode".into(),
             version: "fixture".into(),
+            last_update: None,
             fixture_ref: "fixture".into(),
             catalogue_revision: "fixture".into(),
             account_key: Some("go".into()),

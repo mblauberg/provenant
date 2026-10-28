@@ -379,6 +379,7 @@ pub(crate) fn persist_provider_success(
         }
     };
     next.auth_verified_unix_seconds = Some(now);
+    next.auth_retry_pending = false;
     // A probe started before this lane may not overwrite newer evidence.
     next.claim = None;
     if next.last_error == Some(ProbeFailure::Auth) {
@@ -586,6 +587,135 @@ fn add_configured(records: &mut Vec<AccountRecord>, configured: &[AccountScope])
         }
     }
 }
+
+/// Observe metadata only: neither credentials nor profile contents are opened.
+fn credential_metadata(
+    registration: &provenant_providers::accounts::Registration,
+    home: Option<&Path>,
+) -> Option<Vec<CredentialMetadata>> {
+    let directory = &registration.directory;
+    let names: &[&str] = match registration.adapter.as_str() {
+        "claude" => &[".credentials.json", "settings.json"],
+        "codex" => &["auth.json", "config.toml"],
+        "cursor" => &["state.vscdb", "state.vscdb-wal", "cli-config.json"],
+        "agy" => &["state.vscdb", "state.vscdb-wal"],
+        "opencode" => &[
+            "auth.json",
+            "opencode.db",
+            "opencode.db-wal",
+            "opencode.json",
+        ],
+        _ => &[],
+    };
+    let mut paths = vec![directory.clone()];
+    paths.extend(names.iter().map(|name| directory.join(name)));
+    if registration.adapter == "claude" {
+        paths.push(directory.with_extension("json"));
+        if cfg!(target_os = "macos")
+            && let Some(home) = home
+        {
+            paths.push(home.join("Library/Keychains/login.keychain-db"));
+        }
+    }
+    paths
+        .into_iter()
+        .map(|path| {
+            let stat = match std::fs::metadata(&path) {
+                Ok(metadata) => {
+                    let metadata = provenant_os::fs::Metadata::from_std(metadata);
+                    Some(CredentialStat {
+                        device: metadata.device,
+                        inode: metadata.inode,
+                        mode: metadata.mode,
+                        uid: metadata.uid,
+                        size: metadata.size,
+                        modified_ns: metadata.modified_ns,
+                    })
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                // An inaccessible path is not a credential change.
+                Err(_) => return None,
+            };
+            Some(CredentialMetadata { path, stat })
+        })
+        .collect()
+}
+
+fn refresh_auth_metadata(
+    dir: &Directory,
+    records: &mut Vec<AccountRecord>,
+    entries: &provenant_providers::accounts::Settings,
+    detected: &[Detection],
+    tick: &QuotaTick,
+    home: Option<&Path>,
+) -> Result<(), EdgeError> {
+    if !matches!(
+        tick.trigger,
+        schedule::Trigger::Panel | schedule::Trigger::Wake | schedule::Trigger::Manual
+    ) {
+        return Ok(());
+    }
+    for registration in entries
+        .entries
+        .values()
+        .filter(|entry| tick.adapter.as_ref().is_none_or(|id| id == &entry.adapter))
+    {
+        let Some(metadata) = credential_metadata(registration, home) else {
+            continue;
+        };
+        let account = AccountScope {
+            adapter: registration.adapter.clone(),
+            account_key: registration.key.clone(),
+            label: registration.label.clone(),
+        };
+        let current = records
+            .iter()
+            .find(|record| {
+                record.account.adapter == account.adapter
+                    && record.account.account_key == account.account_key
+            })
+            .cloned();
+        let mut next = current
+            .clone()
+            .unwrap_or_else(|| AccountRecord::empty(account));
+        if next.credential_metadata == metadata {
+            continue;
+        }
+        let ambient_auth = detected.iter().any(|detection| {
+            detection.adapter == next.account.adapter
+                && detection.status == QuotaStatus::AuthRequired
+                && detection.accounts.as_ref().is_some_and(|accounts| {
+                    accounts.len() == 1 && accounts[0].account_key == next.account.account_key
+                })
+        });
+        if next.last_error == Some(ProbeFailure::Auth)
+            || next
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.status == QuotaStatus::AuthRequired)
+            || ambient_auth
+        {
+            // Consumed by reserve. A probe already in flight keeps its claim;
+            // completion preserves this pending event for the next tick.
+            next.auth_retry_pending = true;
+        }
+        next.credential_metadata = metadata;
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(QuotaError::NumberOutOfRange)?;
+        write_intent(
+            dir,
+            &UpdateIntent {
+                account: next.account.clone(),
+                expected: current,
+                replacement: Some(next),
+            },
+            records,
+        )?;
+    }
+    Ok(())
+}
 /// Attaches menu bar choices from config; hidden and order are applied by the app.
 fn decorate(
     report: &mut QuotaReport,
@@ -694,6 +824,15 @@ fn execute(
     let plan = {
         let _lock = lock()?;
         let mut records = read_records(&dir)?;
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        refresh_auth_metadata(
+            &dir,
+            &mut records,
+            &entries,
+            &detected,
+            &tick,
+            home.as_deref(),
+        )?;
         let plan = schedule::plan_tick_with_settings(
             &policies, &records, &detected, &tick, now, &settings,
         )?;
@@ -1074,6 +1213,136 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_change_on_panel_or_wake_retries_once_without_reading_contents()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let root = private(temp.path())?;
+        let dir = child(&root, OsStr::new("quota"))?;
+        let profile = temp.path().join("codex-profile");
+        std::fs::create_dir(&profile)?;
+        let registration = serde_json::from_value(serde_json::json!({
+            "adapter": "codex", "label": "work", "key": "work", "directory": profile,
+        }))?;
+        let mut entries = provenant_providers::accounts::Settings {
+            entries: [("codex-work".into(), registration)].into(),
+        };
+        let account = AccountScope {
+            adapter: "codex".into(),
+            account_key: "work".into(),
+            label: "work".into(),
+        };
+        let policies = [QuotaPolicy {
+            adapter: "codex",
+            timer_seconds: 300,
+            panel_seconds: 120,
+            probe_seconds: 10,
+            low_power: true,
+            solo: false,
+        }];
+        let mut record = AccountRecord::empty(account.clone());
+        record.revision = 1;
+        record.last_attempt_unix_seconds = Some(100);
+        record.last_error = Some(ProbeFailure::Auth);
+        record.failures = 1;
+        record.backoff_until_unix_seconds = Some(1000);
+        record.credential_metadata =
+            credential_metadata(&entries.entries["codex-work"], None).unwrap();
+        let mut records = Vec::new();
+        write_intent(
+            &dir,
+            &UpdateIntent {
+                account: account.clone(),
+                expected: None,
+                replacement: Some(record),
+            },
+            &mut records,
+        )?;
+        let detected = [Detection {
+            adapter: "codex".into(),
+            accounts: Some(vec![account.clone()]),
+            status: QuotaStatus::Available,
+        }];
+        let tick = QuotaTick {
+            adapter: None,
+            trigger: schedule::Trigger::Panel,
+            power: schedule::Power::Ac,
+        };
+        refresh_auth_metadata(&dir, &mut records, &entries, &detected, &tick, None)?;
+        assert!(
+            schedule::plan_tick(&policies, &records, &detected, &tick, 110)?
+                .batches
+                .is_empty()
+        );
+
+        // This is deliberately invalid credential data, unreadable by a normal
+        // user. Stat observes creation without parsing or opening the file.
+        let credential = profile.join("auth.json");
+        std::fs::write(&credential, b"fake credential contents are never parsed")?;
+        std::fs::set_permissions(&credential, std::fs::Permissions::from_mode(0o000))?;
+        refresh_auth_metadata(&dir, &mut records, &entries, &detected, &tick, None)?;
+        assert_eq!(
+            schedule::plan_tick(&policies, &records, &detected, &tick, 110)?.batches,
+            vec![vec![account.clone()]]
+        );
+        assert!(read_records(&dir)?[0].auth_retry_pending);
+        let reserved = schedule::reserve(
+            &policies,
+            Some(&records[0]),
+            &account,
+            110,
+            "fake",
+            tick.trigger,
+            tick.power,
+        )?
+        .replacement
+        .unwrap();
+        write_intent(
+            &dir,
+            &UpdateIntent {
+                account: account.clone(),
+                expected: Some(records[0].clone()),
+                replacement: Some(reserved.clone()),
+            },
+            &mut records,
+        )?;
+        let failed = schedule::complete(&reserved, "fake", 112, Err(ProbeFailure::Auth), None)?
+            .replacement
+            .unwrap();
+        write_intent(
+            &dir,
+            &UpdateIntent {
+                account: account.clone(),
+                expected: Some(records[0].clone()),
+                replacement: Some(failed),
+            },
+            &mut records,
+        )?;
+        refresh_auth_metadata(&dir, &mut records, &entries, &detected, &tick, None)?;
+        assert!(
+            schedule::plan_tick(&policies, &records, &detected, &tick, 113)?
+                .batches
+                .is_empty()
+        );
+
+        // Profile selection changes also bypass auth backoff on wake.
+        let second_profile = temp.path().join("second-profile");
+        std::fs::create_dir(&second_profile)?;
+        entries.entries.get_mut("codex-work").unwrap().directory = second_profile;
+        let wake = QuotaTick {
+            trigger: schedule::Trigger::Wake,
+            ..tick
+        };
+        refresh_auth_metadata(&dir, &mut records, &entries, &detected, &wake, None)?;
+        assert_eq!(
+            schedule::plan_tick(&policies, &records, &detected, &wake, 114)?.batches,
+            vec![vec![account]]
+        );
+        Ok(())
+    }
 
     #[test]
     fn successful_lane_clears_only_its_auth_and_supersedes_a_probe()

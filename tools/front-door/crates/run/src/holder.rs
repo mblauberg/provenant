@@ -179,6 +179,33 @@ fn custody_error(error: RunError) -> CustodyError {
     }
 }
 impl provenant_supervisor::Holder for RunHolder<'_> {
+    fn provider_lease(
+        &self,
+        raw: &[u8],
+        resolved_route: &str,
+    ) -> custody::Result<Option<provenant_os::fs::LockGuard>> {
+        let context: HolderContext = crate::db::decode(raw).map_err(custody_error)?;
+        let provider = resolved_route
+            .split_once('/')
+            .map(|(provider, _)| provider)
+            .filter(|provider| !provider.is_empty())
+            .ok_or(CustodyError::InvalidRecord)?;
+        let clock = SystemClock::new();
+        let state = context
+            .launch
+            .as_ref()
+            .map_or(context.roots.state_root.as_path(), |launch| {
+                launch.configuration_root.as_path()
+            });
+        Ok(Some(provenant_os::provider_fence::wait(
+            state,
+            provider,
+            provenant_os::fs::LockMode::Shared,
+            WaitBudget::cli(clock.mono_now(), 5).map_err(|_| CustodyError::InvalidRecord)?,
+            &CancelToken::new(),
+            &clock,
+        )?))
+    }
     fn admit(&self, context: &[u8], attempt: &Directory) -> custody::Result<()> {
         let (context, store) = HolderContext::open(context).map_err(custody_error)?;
         store

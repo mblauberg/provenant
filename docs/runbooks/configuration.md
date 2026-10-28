@@ -76,6 +76,47 @@ see each knob's value and source. Preview install registrations with
 `provenant install --source /absolute/path/to/release --harness claude --dry-run`
 before applying an authorised install.
 
+## Provider updates
+
+Provider updates are enabled by default and checked on existing housekeeping
+events, with at least 24 hours between attempts. Updates run outside lanes
+when the provider is idle; lanes keep self-update disabled. Configure each
+provider in the same `config.toml`:
+
+```toml
+[providers.claude]
+update_interval_seconds = 86400
+
+[providers.codex]
+update = false
+
+[providers.opencode]
+update = "opencode upgrade"
+```
+
+`update = false` opts out, `true` selects the detected native updater, and a
+non-empty command string overrides it through `/bin/sh -c`. The interval is a
+positive number of seconds and applies to failures too. Supported provider
+IDs are `claude`, `codex`, `cursor`, `agy` and `opencode`; providers without a
+known native update method need a command override.
+
+Quota ticks are the housekeeping events. Each tick attempts at most one native
+update, bounded to 20 seconds, so the existing menu refresh stays bounded.
+Claude uses `claude update`, OpenCode uses `opencode upgrade`, and Codex uses
+Homebrew or npm when its resolved executable identifies that installation.
+An unknown installation produces one activity note until its method becomes
+known or a command override is configured.
+
+Lanes hold shared leases from provider preparation through completion; updates
+need an exclusive lease. A lane waits up to 30 seconds for an update before
+reporting that it needs retrying. Native children inherit the lease, so it
+survives an interrupted caller. The kernel releases dead owners automatically;
+the next idle check removes their stale PID/start-time marker. Stable `.lock`
+files remain in `<state>/provider-updates/` to avoid inode replacement races.
+Update failures are recorded once per interval, with updater output discarded.
+Activity records the old and new versions. Each lane's `availability.json`
+also includes its observed version and the latest update result.
+
 ## Lane cache collection
 
 GC also applies [terminal provider-state retention](gc.md). The separate

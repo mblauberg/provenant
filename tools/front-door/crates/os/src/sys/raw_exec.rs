@@ -4,7 +4,7 @@ use crate::exec::Termination;
 use crate::identity::Signal;
 use std::ffi::OsString;
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
@@ -45,6 +45,7 @@ pub struct SpawnSpec<'a> {
     pub cwd: &'a Path,
     pub input: bool,
     pub secret_input: Option<&'a crate::exec::SecretInput>,
+    pub inherited_lease: Option<&'a crate::fs::LockGuard>,
     pub capture_stdout: bool,
     pub capture_stderr: bool,
 }
@@ -117,6 +118,9 @@ impl OwnedPid {
             .map(<[_]>::to_vec)
             .unwrap_or_else(|| std::env::vars_os().collect());
         let mut pass = Vec::new();
+        if let Some(lease) = spec.inherited_lease {
+            pass.push(lease.handoff_file().as_fd());
+        }
         if let (Some(pipe), Some(input)) = (&secret, spec.secret_input) {
             environment = pipe.environment(input, &environment);
             pass.push(pipe.fd());

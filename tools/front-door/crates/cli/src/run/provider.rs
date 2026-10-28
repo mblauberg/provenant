@@ -33,7 +33,8 @@ pub(super) fn prepare(
                 .executables
                 .get(name)
                 .cloned()
-                .ok_or_else(|| format!("{name} executable is unavailable on the host")),
+                .ok_or_else(|| format!("{name} executable is unavailable on the host"))
+                .and_then(|path| canonical(&path)),
             None => resolve_executable(name),
         },
         None,
@@ -127,6 +128,25 @@ fn prepare_with(
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
     let eligible = provenant_routing::probe_adapters(&request, &catalogue, &config.domains.routing)
         .map_err(|e| e.to_string())?;
+    // Resolve and probe only while updates are excluded. Keep the selected
+    // lease through handoff, including for fallback and prepared continuations.
+    let clock = provenant_os::clock::SystemClock::new();
+    let mut provider_leases = std::collections::BTreeMap::new();
+    for spec in &eligible {
+        use provenant_core::Clock;
+        let budget =
+            provenant_core::WaitBudget::cli(clock.mono_now(), 30).map_err(|e| e.to_string())?;
+        let lease = provenant_os::provider_fence::wait(
+            roots.state.as_path(),
+            spec.name,
+            provenant_os::fs::LockMode::Shared,
+            budget,
+            &provenant_core::CancelToken::new(),
+            &clock,
+        )
+        .map_err(|e| format!("provider {} update busy: {e}; retry the lane", spec.name))?;
+        provider_leases.insert(spec.name.to_owned(), lease);
+    }
     let eligible = |name: &str| eligible.iter().any(|spec| spec.name == name);
     let settings = config.domains.accounts;
     let host_writes = config.domains.run;
@@ -212,6 +232,18 @@ fn prepare_with(
             )),
         }
     }
+    let attempt_dir =
+        Directory::open_anchor(paths.scratch.parent().ok_or("attempt path unavailable")?)
+            .map_err(|e| e.to_string())?;
+    attempt_dir
+        .atomic_write(
+            std::ffi::OsStr::new("availability.json"),
+            "availability",
+            &serde_json::to_vec(&availability).map_err(|e| e.to_string())?,
+            PublishMode::Replace,
+        )
+        .and_then(|p| p.require_durable())
+        .map_err(|e| e.to_string())?;
     let digest = task.authority_digest.to_string();
     let mut access = Vec::new();
     let mut plan_errors = std::collections::BTreeMap::new();
@@ -602,6 +634,7 @@ fn prepare_with(
             Stdin::Null => Vec::new(),
         };
         return Ok(run::PreparedLaunch {
+            provider_lease: provider_leases.remove(adapter.id()),
             skipped_routes: reasons,
             argv: spec.argv,
             environment: spec.env,
@@ -1266,6 +1299,9 @@ fn observe_account(
         adapter: entry.adapter.clone(),
         executable: executable.to_string_lossy().into_owned(),
         version,
+        last_update: roots.and_then(|roots| {
+            provenant_providers::update::latest(roots.state.as_path(), &entry.adapter)
+        }),
         fixture_ref: format!("installed/{}/version", entry.adapter),
         catalogue_revision: catalogue_revision.into(),
         account_key: Some(entry.key.clone()),
@@ -1644,12 +1680,16 @@ fn publishing_executable(
 }
 
 pub(crate) fn resolve_executable(name: &str) -> Result<PathBuf, String> {
+    canonical(&find_executable(name)?)
+}
+
+pub(crate) fn find_executable(name: &str) -> Result<PathBuf, String> {
     let name = AdapterSpec::get(name).map_or(name, |spec| spec.binary);
     let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
     for directory in std::env::split_paths(&path).filter(|directory| directory.is_absolute()) {
         let candidate = directory.join(name);
         if candidate.is_file() && provenant_os::sys::is_executable(&candidate) {
-            return canonical(&candidate);
+            return Ok(candidate);
         }
     }
     Err(format!("{name} executable was not found on PATH"))
@@ -1926,6 +1966,24 @@ mod tests {
         }
         let temp = tempfile::tempdir()?;
         let root = canonical(temp.path())?;
+        for path in ["home", "project", "state/provider-updates"] {
+            std::fs::create_dir_all(root.join(path))?;
+        }
+        let roots = provenant_core::RootInputs {
+            state_dir: Some(root.join("state")),
+            ..provenant_core::RootInputs::new(root.join("home"), root.join("project"))
+        }
+        .resolve(&provenant_os::fs::SystemPathResolver)?;
+        let last_update = provenant_providers::update::UpdateRecord {
+            checked_unix_seconds: 99,
+            old_version: Some("opencode v2.0.31".into()),
+            new_version: Some("opencode v2.0.32".into()),
+            outcome: "updated".into(),
+        };
+        std::fs::write(
+            root.join("state/provider-updates/opencode.json"),
+            serde_json::to_vec(&last_update)?,
+        )?;
         let entry = serde_json::from_value(serde_json::json!({
             "adapter": "opencode", "label": "go", "key": "fixture", "directory": root,
         }))?;
@@ -1990,7 +2048,7 @@ mod tests {
             });
             let executor = provenant_providers::host::HostProbeExecutor::new(&executor, &root)?;
             let probe = Probe {
-                roots: None,
+                roots: Some(&roots),
                 executor: &executor,
                 home: &root,
                 user: "fixture".as_ref(),
@@ -2010,7 +2068,11 @@ mod tests {
                     assert!(error.contains(detail), "{error}");
                     assert!(!error.contains("private output"));
                 }
-                None => assert_eq!(result?.version, "opencode v2.0.32"),
+                None => {
+                    let record = result?;
+                    assert_eq!(record.version, "opencode v2.0.32");
+                    assert_eq!(record.last_update, Some(last_update.clone()));
+                }
             }
         }
         Ok(())

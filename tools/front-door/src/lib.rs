@@ -582,14 +582,25 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             }));
             match roots::resolve(globals, Workspace::Project, Product::Required) {
                 Ok(resolved) => match live_quota(&resolved) {
-                    Ok(effects) => provenant_cli::quota::run(
-                        cmd,
-                        globals,
-                        &resolved.roots,
-                        provenant_providers::REGISTRY,
-                        &effects,
-                        |result| crate::overflow::publish(result, globals),
-                    ),
+                    Ok(effects) => {
+                        let housekeeping = matches!(cmd, provenant_cli::Quota::Tick { .. });
+                        let result = provenant_cli::quota::run(
+                            cmd,
+                            globals,
+                            &resolved.roots,
+                            provenant_providers::REGISTRY,
+                            &effects,
+                            |result| crate::overflow::publish(result, globals),
+                        );
+                        if housekeeping {
+                            let _ = provenant_cli::provider_updates::housekeep(
+                                &resolved.roots,
+                                &resolved.home,
+                                &resolved.project,
+                            );
+                        }
+                        result
+                    }
                     Err(_) => fail(
                         &inv.leaf,
                         Outcome::Invalid,

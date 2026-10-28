@@ -375,6 +375,7 @@ fn start_with_custody_identity(
     )?;
     let identity = publication.custody_metadata()?;
     let command = ProviderCommand {
+        provider_lease: None,
         requester: provenant_core::ActorId::from_bytes([4; 16]),
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
@@ -963,6 +964,7 @@ fn never_spawned_cancel_is_published_and_the_fence_can_advance(root: &Path) -> R
         &clock,
     )?;
     let command = ProviderCommand {
+        provider_lease: None,
         requester: provenant_core::ActorId::from_bytes([4; 16]),
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
@@ -1027,6 +1029,7 @@ fn terminal_frame_closes_provider_stdin(root: &Path) -> Result<()> {
         &clock,
     )?;
     let command = ProviderCommand {
+        provider_lease: None,
         requester: provenant_core::ActorId::from_bytes([4; 16]),
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),

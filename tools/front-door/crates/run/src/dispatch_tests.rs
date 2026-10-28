@@ -1129,6 +1129,7 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
 
 /// Prepares a plan; no guardian ever runs it.
 struct Ready;
+
 impl Providers for Ready {
     fn prepare(
         &self,
@@ -1138,6 +1139,7 @@ impl Providers for Ready {
         _: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String> {
         Ok(PreparedLaunch {
+            provider_lease: None,
             argv: vec!["fixture".into()],
             environment: Vec::new(),
             stdin: Vec::new(),
