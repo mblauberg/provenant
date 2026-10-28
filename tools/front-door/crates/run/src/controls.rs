@@ -1356,6 +1356,7 @@ impl RunStore {
                     build_heavy: task.build_heavy,
                     title: None,
                     base: task.base.clone(),
+                    head: task.head.clone(),
                     base_ref: task.base_ref.clone(),
                     profile: task.profile.clone(),
                     task_id: prior.task_id,

@@ -51,6 +51,7 @@ pub(super) fn input() -> PreparedRun {
                 build_heavy: false,
                 title: None,
                 base: None,
+                head: None,
                 base_ref: None,
                 writer: None,
                 profile: HarnessProfile::default(),

@@ -249,6 +249,8 @@ generated MCP entry; the user's hook and MCP configuration is excluded.
 Each lane's provider environment and MCP entry pin
 `PROVENANT_LANE_DEPTH`, `PROVENANT_PARENT_ATTEMPT_ID`,
 `PROVENANT_RUN_STATE_DIR` and `PROVENANT_AGENT_LABEL=lane-<AttemptId>`.
+Review lanes dispatched with a head also receive `PROVENANT_LANE_HEAD` and
+`PROVENANT_LANE_BASE`, containing the resolved commit SHAs.
 In that environment Fabric refuses coordination mutations
 (`lane_coordination_refused`) and local resume (`continuation_unsupported`);
 reads, and submit, cancel and output on the child store, remain.

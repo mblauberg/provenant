@@ -351,6 +351,9 @@ pub struct Dispatch {
     /// Create or reuse a clean local writer worktree owned by this lane
     #[arg(long, conflicts_with_all = ["worktree", "branch", "host", "manifest"])]
     pub worktree_branch: Option<String>,
+    /// Chair-verified full commit SHA to review (must exist on the executing host)
+    #[arg(long)]
+    pub head: Option<String>,
     /// Git base for attempt history and a new writer branch
     #[arg(long)]
     pub base: Option<String>,
@@ -686,6 +689,9 @@ pub struct Trace {
 }
 #[derive(Debug, Args)]
 pub struct Stats {
+    /// Report native Claude subagents from one session's subagents directory instead of supervised attempts
+    #[arg(long, conflicts_with_all = ["usage", "since", "until", "run_id"])]
+    pub claude_subagents: Option<PathBuf>,
     /// Count local CLI verbs and MCP tools, including unused installed units.
     #[arg(long)]
     pub usage: bool,

@@ -1041,6 +1041,7 @@ fn writer_run(
                 build_heavy: false,
                 title: None,
                 base: None,
+                head: None,
                 base_ref: None,
                 account: None,
                 profile: provenant_run::HarnessProfile::default(),

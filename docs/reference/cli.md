@@ -1960,6 +1960,7 @@ bounds are null. Positional arguments have no long flag.
 | `--knob` | `{"name": "knobs", "repeatable": true}` |
 | `--host` | `{"name": "host"}` |
 | `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "name": "worktree_branch"}` |
+| `--head` | `{"name": "head"}` |
 | `--base` | `{"name": "base"}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
@@ -2133,6 +2134,7 @@ bounds are null. Positional arguments have no long flag.
 | `--host` | `{"name": "host"}` |
 | `--branch` | `{"name": "branch"}` |
 | `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "name": "worktree_branch"}` |
+| `--head` | `{"name": "head"}` |
 | `--base` | `{"name": "base"}` |
 | `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
@@ -2452,6 +2454,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `--claude-subagents` | `{"conflicts": ["usage", "since", "until", "run_id"], "name": "claude_subagents"}` |
 | `--usage` | `{"defaults": ["false"], "name": "usage", "values": ["true", "false"]}` |
 | `--since` | `{"name": "since"}` |
 | `--until` | `{"name": "until"}` |
@@ -2472,6 +2475,7 @@ bounds are null. Positional arguments have no long flag.
   "groups": [
     {
       "arguments": [
+        "claude_subagents",
         "usage",
         "since",
         "until",

@@ -113,6 +113,17 @@ may be marked blocking; assumptions still require existing authority.
   `tests/inbox.rs::inbox_cli_posts_lists_and_resolves_all_kinds_without_apps`
 - Owner: `crates/fabric-runtime/src/inbox.rs`
 
+Delivery offers must resolve the registered chair, validate the local owner and
+lane before opening the store, and match host, project, session and actor.
+Bounded offers repeat until explicit acknowledgement; oversized answers are
+refused at submission and smaller batches skip entries that do not fit.
+- Why: a failed delivery must not transfer an answer or stall other answers.
+- Test: `crates/fabric-runtime/src/inbox/tests.rs::offer_until_ack_repeats_after_restart_stops_after_ack_and_preserves_overflow`;
+  `crates/fabric-runtime/src/inbox/tests.rs::oversized_answer_is_refused_and_small_budget_skips_large_answers`;
+  `crates/fabric-runtime/src/inbox/tests.rs::concurrent_offer_and_ack_never_resurrects_delivery`;
+  `crates/fabric-runtime/src/inbox/tests.rs::offer_until_ack_rejects_unregistered_and_wrong_targets_without_mutation`
+- Owner: `crates/fabric-runtime/src/inbox.rs`, `crates/fabric-store/src/human_inbox.rs`
+
 The inbox must refuse a configured remote home rather than opening a local
 mirror. Reads disclose local-only coverage and create no session records.
 Paging binds project, host, session, state, page size and request snapshot;

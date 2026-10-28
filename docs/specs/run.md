@@ -344,10 +344,22 @@ other ignored files retain the tree. Other worktrees keep the existing
 GC/removal policy. A host lifecycle receipt records intent before removal,
 then pruning or the retention reason in `worktree-settlement.json` beside the
 attempt result. An interrupted intent whose checkout is gone replays as pruned.
+At settlement the host best-effort refreshes the exact `origin` tracking ref
+for every writer with a branch, including explicit and adopted worktrees,
+before any prune upstream pin. The bounded fetch runs outside the collection
+lock and does not affect the lane outcome. A missing `origin` or remote branch
+is silently skipped. Other failures may add a fixed, redacted
+`tracking_ref_warning` to a lane-owned settlement receipt; they never create
+or change an adopted worktree's receipt. Concurrent refreshes of the same
+branch may race and produce a warning.
 - Why: a lane may reclaim only work it owns and commits proven retained elsewhere.
 - Test: `crates/confinement/src/worktrees.rs::adopted_owner_proves_membership_and_enables_custody`;
   `::owned_cleanup_refuses_dirty_unmerged_and_adopted_trees`;
-  `tests/dispatch_provider.rs::owned_dispatch_creates_and_replays_after_pruning`.
+  `tests/dispatch_provider.rs::owned_dispatch_creates_and_replays_after_pruning`;
+  `tools/front-door/src/gc_support.rs::writer_tracking_refresh_handles_remote_branch_absence_and_failure`;
+  `tools/front-door/src/fabric.rs::settlement_records_tracking_ref_failure_without_failing_lane`;
+  `tools/front-door/src/fabric.rs::explicit_writer_refreshes_tracking_ref_while_collection_is_busy`;
+  `tools/front-door/src/fabric.rs::adopted_writer_refresh_failure_does_not_change_receipt`.
 - Owner: `crates/confinement/src/worktrees/owner.rs`, `crates/cli/src/run.rs`, `src/fabric.rs`
 
 ## Delivery modes and settled pickup

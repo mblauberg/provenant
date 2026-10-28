@@ -99,7 +99,7 @@ fit.
 | **Usage meter** | `provenant quota` and an optional macOS menu bar app show every account's windows, reset times, credits and staleness in one place. |
 | **Your harnesses** | One install wires Fabric MCP, skills and instructions into Claude Code, Codex, Cursor, Agy and OpenCode. Claude Code also gets managed hooks and automatic account switching. |
 | **Routing** | Named pools (`utility`, `junior`, `senior`, `principal`, `writing`, `design`) choose among models by weight, scaled by each provider's pacing. |
-| **Confined lanes** | Each lane runs `read-only` or `worktree-write` under a macOS sandbox profile. Writers get one registered worktree and no Git credentials. |
+| **Confined lanes** | Each lane runs `read-only` or `worktree-write` under a macOS sandbox profile. Writers get one registered worktree; network-open profiles can read the existing gh login. |
 | **Host-side delivery** | The host verifies a writer's final commit, pushes it to the branch you name and can open a pull request. |
 | **Fabric** | Messages, shared tasks, claims and activity between sessions and agents, plus dispatch to configured peer hosts over SSH. |
 | **Records and history** | Every run, task and attempt is stored with its route, account, knobs and output. Lanes can be listed, read, resumed or cancelled later. |
@@ -204,7 +204,8 @@ flowchart LR
    registered account with headroom.
 2. **Run.** The lane starts under a sandbox profile built from its access mode.
    Read-only lanes cannot write; writers write only to their worktree and any
-   write roots you grant, and hold no Git credentials. Output, exit state,
+   write roots you grant. Network-open profiles can read the existing gh login;
+   profiles deny access to SSH keys. Output, exit state,
    tokens and cost go into the run record.
 3. **Deliver.** For a writer, the host fetches before launch and, afterwards,
    verifies the final commit and pushes it with its own Git authority.

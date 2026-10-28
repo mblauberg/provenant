@@ -78,6 +78,9 @@ pub struct TaskRequest {
     pub profile: HarnessProfile,
     pub task_id: TaskId,
     pub prompt_digest: FileDigest,
+    /// Chair-verified review head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
     /// Git base for host-written attempt context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
@@ -698,6 +701,7 @@ mod tests {
                 task_id: TaskId::from_bytes([3; 16]),
                 prompt_digest: CanonicalV1::file_digest(b"prompt"),
                 base: None,
+                head: None,
                 base_ref: None,
                 route: RequestedRoute::Named {
                     name: "senior".into(),

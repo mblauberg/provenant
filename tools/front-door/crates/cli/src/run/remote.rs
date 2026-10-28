@@ -47,6 +47,7 @@ pub(super) struct Task {
     pub(super) build_heavy: bool,
     pub(super) title: Option<String>,
     pub(super) base: Option<String>,
+    pub(super) head: Option<String>,
     pub(super) prompt: String,
     pub(super) route: run::RequestedRoute,
     pub(super) account: Option<String>,
@@ -733,11 +734,12 @@ fn submitted_task(
         build_heavy: task.build_heavy,
         title: task.title,
         // A writer's base belongs to its new worktree request.
-        base: if new_worktree.is_none() {
+        base: if new_worktree.is_none() || task.head.is_some() {
             task.base
         } else {
             None
         },
+        head: task.head,
         account: task.account,
         access: if new_worktree.is_some() {
             AccessMode::WorktreeWrite
@@ -1569,6 +1571,7 @@ mod tests {
                 build_heavy: true,
                 title: Some("Make the change".into()),
                 base: Some("main".into()),
+                head: None,
                 prompt: "write the change".into(),
                 route: route.clone(),
                 account: None,
@@ -1616,6 +1619,7 @@ mod tests {
                 build_heavy: false,
                 title: None,
                 base: Some("main".into()),
+                head: None,
                 prompt: "review".into(),
                 route: run::RequestedRoute::Named {
                     name: "utility".into(),

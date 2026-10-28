@@ -800,6 +800,7 @@ mod tests {
                     build_heavy: false,
                     title: None,
                     base: None,
+                    head: None,
                     base_ref: None,
                     task_id,
                     prompt_digest: CanonicalV1::file_digest(b"child"),

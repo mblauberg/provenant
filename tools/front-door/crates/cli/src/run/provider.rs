@@ -144,7 +144,10 @@ fn prepare_with(
     let git_context = task
         .base
         .as_deref()
-        .map(|base| run::GitContext::capture(&git, &cwd, base))
+        .map(|base| match task.head.as_deref() {
+            Some(head) => run::GitContext::capture_at(&git, &cwd, base, head),
+            None => run::GitContext::capture(&git, &cwd, base),
+        })
         .transpose()
         .map_err(|error| error.to_string())?;
     let user = provenant_os::sys::account(provenant_os::sys::Account::Current)
@@ -628,6 +631,12 @@ fn prepare_with(
                 continue;
             }
         };
+        if let Some(head) = &task.head {
+            spec.env.push(("PROVENANT_LANE_HEAD".into(), head.into()));
+            if let Some(base) = &task.base {
+                spec.env.push(("PROVENANT_LANE_BASE".into(), base.into()));
+            }
+        }
         if let Some(gh) = publishing_gh.as_ref() {
             let publishing = spec
                 .configure_publishing(scratch, &git, gh, &home)
@@ -2312,6 +2321,7 @@ mod tests {
                 build_heavy: false,
                 title: None,
                 base: None,
+                head: None,
                 base_ref: None,
                 task_id: provenant_core::TaskId::from_bytes([3; 16]),
                 profile: Default::default(),
@@ -2668,10 +2678,12 @@ mod tests {
                 .create(path)?;
         }
         let prompt = "é".repeat(75_000);
+        let review_oid = run::resolve_git_base(&git, &project, "HEAD")?;
         let task = run::TaskRequest {
             build_heavy: false,
             title: None,
-            base: Some("HEAD".into()),
+            base: Some(review_oid.clone()),
+            head: Some(review_oid.clone()),
             base_ref: None,
             task_id: TaskId::from_bytes([3; 16]),
             profile: provenant_records::run::HarnessProfile {
@@ -2788,6 +2800,18 @@ mod tests {
             },
             None,
         )?;
+        assert!(
+            launch
+                .environment
+                .iter()
+                .any(|(key, value)| key == "PROVENANT_LANE_HEAD" && value == review_oid.as_str())
+        );
+        assert!(
+            launch
+                .environment
+                .iter()
+                .any(|(key, value)| key == "PROVENANT_LANE_BASE" && value == review_oid.as_str())
+        );
         // The preferred provider is updating, so preparation must select the
         // explicit fallback rather than just omit an unrelated busy adapter.
         let mut fallback_task = task.clone();
@@ -2838,6 +2862,42 @@ mod tests {
         assert_eq!(
             fallback_launch.route.model.as_deref(),
             Some("cursor/gpt-5.3-codex-low")
+        );
+        let mut review_task = task.clone();
+        review_task.writer = None;
+        let review_paths = run::LaunchPaths {
+            scratch: attempt.join("review-scratch"),
+            provider_state: attempt.join("review-provider-state"),
+            temporary: attempt.join("review-tmp"),
+            ..fallback_paths
+        };
+        for path in [
+            &review_paths.scratch,
+            &review_paths.provider_state,
+            &review_paths.temporary,
+        ] {
+            std::fs::DirBuilder::new().mode(0o700).create(path)?;
+        }
+        let review = prepare_with(
+            &registry,
+            &review_task,
+            "short review",
+            &review_paths,
+            None,
+            |_| Ok(executable.clone()),
+            None,
+        )?;
+        assert!(
+            review
+                .environment
+                .iter()
+                .any(|(key, value)| key == "PROVENANT_LANE_HEAD" && value == review_oid.as_str())
+        );
+        assert!(
+            review
+                .environment
+                .iter()
+                .any(|(key, value)| key == "PROVENANT_LANE_BASE" && value == review_oid.as_str())
         );
         let executed = executor.execute(ExecOptions::new(
             &launch.argv,

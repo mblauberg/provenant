@@ -306,7 +306,14 @@ all its peer reads (one per host and per 100 lanes, plus the lookup of lanes
 that left the newest page). Each read is bounded by the time the earlier reads
 left, as well as by `limits.peer_seconds`, and no read after the first starts
 at or after the deadline; the poll then fails as a transient peer error, which
-the wait retries until its own budget ends. The time a read has left covers
+the wait retries until its own budget ends.
+Local run-store contention is also retried between polls until the wait's
+deadline. Each local store operation makes an immediate attempt without
+waiting on contention, so a successful poll still observes settlement;
+persistent contention ends the wait or watch as a timeout. Optional wait
+details in the final reply use the same nonblocking reads. If peer reads
+remain unavailable at the deadline, the last failure is reported.
+The time a peer read has left covers
 the whole SSH child, including its termination and reap, so a hung `ssh` that
 ignores `TERM` is killed by the deadline. Only the first read of `--wait 0`
 keeps a one-second minimum, with a further half second of termination and reap
