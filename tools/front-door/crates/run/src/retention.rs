@@ -1475,6 +1475,29 @@ mod tests {
     }
 
     #[test]
+    fn gc_preserves_tmp_for_lost_attempt_without_exit_evidence() -> TestResult {
+        use provenant_core::Clock;
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let record = store.record(input.attempts[0].attempt_id, &call)?;
+        store.commit_lost(RunStore::scope(&record), "fixture", &call)?;
+        let temporary = attempt.join("tmp");
+        fs::DirBuilder::new().mode(0o700).create(&temporary)?;
+        fs::write(temporary.join("payload"), b"scratch")?;
+        let report = store.gc_provider_state(
+            &Directory::open_anchor(context.state_root.as_path())?,
+            7,
+            WallTime::from_micros(clock.wall_now()?.as_micros() + DAY_MICROS)?,
+            false,
+            &call,
+        )?;
+        assert!(report.attempt_tmp.is_empty());
+        assert!(temporary.exists());
+        Ok(())
+    }
+
+    #[test]
     fn gc_reclaims_only_old_terminal_tmp_and_previews_paths_and_bytes() -> TestResult {
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
