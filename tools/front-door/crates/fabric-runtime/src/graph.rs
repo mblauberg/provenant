@@ -1563,10 +1563,10 @@ fn dependency_state(
             NodeState::Succeeded => {}
         }
     }
-    if skipped {
-        Some(NodeState::Skipped)
-    } else if waiting {
+    if waiting {
         Some(NodeState::Pending)
+    } else if skipped {
+        Some(NodeState::Skipped)
     } else {
         None
     }
@@ -3003,6 +3003,32 @@ mod tests {
                 Err(GraphError::BadCheckpoint)
             ));
         }
+    }
+
+    #[test]
+    fn gate_inactive_path_waits_for_other_parents_before_settling() {
+        let (mut document, mut owner) = verdict_fixture(VerdictThreshold::All, &[Some("PASS")]);
+        document.nodes[1].on_fail = Some("recovery".into());
+        let mut recovery = node("recovery", route("fixture"));
+        recovery.depends_on = vec!["gate".into(), "slow".into()];
+        document
+            .nodes
+            .extend([node("slow", route("fixture")), recovery]);
+        owner.observations.extend([
+            AttemptObservation::Pending { attempt_ref: None },
+            terminal(AttemptOutcome::TaskFailed),
+        ]);
+        let mut journal = MemoryJournal::default();
+        let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(waiting.checkpoint.nodes[3].state, NodeState::Pending);
+        let settled = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(settled.checkpoint.nodes[3].state, NodeState::Blocked);
+        assert_eq!(
+            advance(&document, &mut owner, &mut journal)
+                .unwrap()
+                .checkpoint,
+            settled.checkpoint
+        );
     }
 
     #[test]

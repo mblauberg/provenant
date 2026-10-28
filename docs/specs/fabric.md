@@ -244,6 +244,7 @@ recorded in the final PR body.
   `::gate_threshold_fixtures_count_missing_verdicts_and_strict_majorities`;
   `::gate_budget_fixtures_fail_closed_and_preserve_the_decision_on_resume`;
   `::gate_on_fail_routes_only_the_active_path_and_delivers_after_recovery`;
+  `::gate_inactive_path_waits_for_other_parents_before_settling`;
   `::gate_checkpoint_rejects_attempts_inconsistent_results_and_forged_skips`;
   `::gate_validation_rejects_agent_fields_bad_thresholds_and_failure_cycles`.
 - Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`
