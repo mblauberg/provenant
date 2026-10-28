@@ -1040,6 +1040,7 @@ fn writer_run(
             tasks: vec![provenant_run::TaskRequest {
                 title: None,
                 base: None,
+                head: None,
                 base_ref: None,
                 account: None,
                 profile: provenant_run::HarnessProfile::default(),

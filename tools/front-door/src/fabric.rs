@@ -1609,6 +1609,7 @@ impl BinaryRunOwner<'_> {
             .map_err(fail_error)?;
             submitted.push(Submitted {
                 base: task.base,
+                head: task.head,
                 task_id: derived_task(&operation_id, index).map_err(fail_error)?,
                 prompt: task.prompt,
                 title: task.title,
@@ -2946,6 +2947,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 operation_id,
                 tasks: vec![SubmittedTask {
                     base: None,
+                    head: None,
                     account: route.account.clone(),
                     access,
                     worktree: worktree.map(str::to_owned),
@@ -3962,6 +3964,7 @@ mod peer_tests {
                         task_id: TaskId::from_bytes([3; 16]),
                         prompt: "reply OK".into(),
                         base: Some(info.head.to_string()),
+                        head: None,
                         profile: Default::default(),
                         route: provenant_run::RequestedRoute::Model {
                             provider: "fixture".into(),

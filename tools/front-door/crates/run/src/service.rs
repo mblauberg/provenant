@@ -112,6 +112,28 @@ impl<'a> Service<'a> {
                     Ok::<_, RunError>(writer)
                 })
                 .transpose()?;
+            if let Some(head) = &task.head {
+                let validate = |sha: &str| -> Result<()> {
+                    provenant_core::GitOid::parse(sha).map_err(|_| {
+                        input_error(ErrorKind::Invalid, "head and base must be full Git SHAs")
+                    })?;
+                    let git = provenant_os::git::git_executable()
+                        .ok_or_else(|| input_error(ErrorKind::Git, "Git unavailable"))?;
+                    let resolved = resolve_git_base(
+                        &git,
+                        writer.as_ref().map_or(cwd, |writer| &writer.worktree),
+                        sha,
+                    )?;
+                    if resolved != sha.to_lowercase() {
+                        return Err(input_error(ErrorKind::Invalid, "SHA must name a commit"));
+                    }
+                    Ok(())
+                };
+                validate(head)?;
+                if let Some(base) = &task.base {
+                    validate(base)?;
+                }
+            }
             let base_ref = task.base.clone();
             let previous_base = previous.as_ref().and_then(|request| {
                 request.tasks.iter().find(|prior| {
@@ -166,6 +188,7 @@ impl<'a> Service<'a> {
                 prompt_digest: CanonicalV1::file_digest(task.prompt.as_bytes()),
                 base_ref,
                 base,
+                head: task.head,
                 route: task.route,
                 account: task.account,
                 fallback: task.fallback,
@@ -442,6 +465,7 @@ pub struct DispatchTask {
     pub task_id: provenant_core::TaskId,
     pub prompt: String,
     pub base: Option<String>,
+    pub head: Option<String>,
     pub route: RequestedRoute,
     pub account: Option<String>,
     pub fallback: Vec<RouteRecord>,
