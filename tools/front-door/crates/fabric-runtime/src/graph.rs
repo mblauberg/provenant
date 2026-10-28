@@ -2278,25 +2278,27 @@ fn validate_plan_with_limits(
 
     // Dependencies are conjunctive. Reject nodes that require mutually
     // exclusive branches, including through transitive dependencies.
-    let mut requirements = vec![std::collections::BTreeMap::new(); nodes.len()];
-    for index in &order {
-        let mut required = std::collections::BTreeMap::new();
-        for parent in &nodes[*index].depends_on {
-            let parent = positions[parent];
-            let mut inherited = requirements[parent].clone();
-            if let Some(target) = &nodes[parent].on_fail {
-                inherited.insert(parent, target != &nodes[*index].id);
-            }
-            for (gate, outcome) in inherited {
-                if required
-                    .insert(gate, outcome)
-                    .is_some_and(|prior| prior != outcome)
-                {
+    // Analyse one gate at a time so over-limit plans can pause without
+    // materialising a quadratic ancestry table first.
+    for (gate, node) in nodes.iter().enumerate() {
+        let Some(target) = &node.on_fail else {
+            continue;
+        };
+        let mut required = vec![None; nodes.len()];
+        let mut pending: std::collections::VecDeque<_> = children[gate]
+            .iter()
+            .map(|child| (*child, target != &nodes[*child].id))
+            .collect();
+        while let Some((index, outcome)) = pending.pop_front() {
+            if let Some(prior) = required[index] {
+                if prior != outcome {
                     return Err("node requires both gate outcomes");
                 }
+                continue;
             }
+            required[index] = Some(outcome);
+            pending.extend(children[index].iter().map(|child| (*child, outcome)));
         }
-        requirements[*index] = required;
     }
 
     let topological_nodes: Vec<PlannedNode> =
