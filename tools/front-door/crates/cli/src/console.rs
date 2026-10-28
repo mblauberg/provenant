@@ -7,8 +7,12 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::os::unix::ffi::OsStrExt;
 
+mod overview;
+
 #[derive(Debug, Subcommand)]
 pub enum Console {
+    /// Summarise local attention and running work
+    Overview,
     /// List registered local projects
     Projects,
     /// List explicitly registered local chair sessions
@@ -77,6 +81,7 @@ fn read_with_budget(
 ) -> Result<Value, Error> {
     let projects = projects(roots, selected)?;
     let (session, limit, cursor) = match command {
+        Console::Overview => return overview::read(roots, &projects),
         Console::Projects => {
             return Ok(json!({"projects":projects, "coverage":{"scope":"local"}}));
         }

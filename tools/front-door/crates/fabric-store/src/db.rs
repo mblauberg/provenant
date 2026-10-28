@@ -152,11 +152,11 @@ impl Store {
     /// callers needing a hard bound must run this off-thread with a timeout.
     #[allow(clippy::disallowed_methods)]
     pub fn open_read_only(root: &StateRoot, deadline: std::time::Instant) -> Result<Option<Self>> {
-        Self::open_existing(root, deadline, false)
+        Self::open_local_delivery(root, deadline, false)
     }
 
     #[allow(clippy::disallowed_methods)]
-    pub(crate) fn open_existing(
+    pub(crate) fn open_local_delivery(
         root: &StateRoot,
         deadline: std::time::Instant,
         writable: bool,
@@ -191,7 +191,7 @@ impl Store {
                 check()?.ok_or(Error::Busy)
             },
             Into::into,
-            |name| Error::UnsafePath(path.join(name)),
+            |name, _| Error::UnsafePath(path.join(name)),
         )?;
         let path = path.join("fabric.sqlite3");
         let db = if writable {
@@ -219,6 +219,51 @@ impl Store {
         }
         crate::local_delivery::before(deadline)?;
         Ok(Some(store))
+    }
+
+    /// Open existing owner state without creating directories, databases or migrations.
+    /// SQLite may create its own WAL companions for an existing database.
+    pub fn open_existing(root: &StateRoot, request: &Request<'_>) -> Result<Self> {
+        request.check()?;
+        let mut directory = Directory::root(true)?;
+        for part in root.as_path().components() {
+            if let Component::Normal(name) = part {
+                match directory.metadata_at(name, false) {
+                    Err(error) if error.is_not_found() => return Err(Error::NotFound),
+                    Err(error) => return Err(error.into()),
+                    Ok(_) => {}
+                }
+                directory = checked_directory(&directory, name, None)?;
+            }
+        }
+        private(&directory, root.as_path())?;
+        let directory = directory.into_anchor()?;
+        let name = OsStr::new("fabric");
+        match directory.metadata_at(name, false) {
+            Err(error) if error.is_not_found() => return Err(Error::NotFound),
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+        let fabric = checked_directory(&directory, name, Some(directory.metadata()?.device))?;
+        let path = root.as_path().join("fabric");
+        private(&fabric, &path)?;
+        match fabric.metadata_at(OsStr::new("fabric.sqlite3"), false) {
+            Err(error) if error.is_not_found() => return Err(Error::NotFound),
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+        companions(&fabric, &path, "fabric.sqlite3", request)?;
+        let db = provenant_sqlite::open_connection(&path.join("fabric.sqlite3"), true)?;
+        let version = request.retry(|| schema_version(&db))?;
+        companions(&fabric, &path, "fabric.sqlite3", request)?;
+        if version != MIGRATIONS.len() {
+            return Err(Error::SchemaVersion(version as i64));
+        }
+        Ok(Self {
+            db,
+            locks: None,
+            _owner: PhantomData,
+        })
     }
 
     pub fn open(root: &StateRoot, request: &Request<'_>) -> Result<Self> {
@@ -372,7 +417,7 @@ fn companions(
         &names,
         |check| request.wait(check),
         Into::into,
-        |name| Error::UnsafePath(path.join(name)),
+        |name, _| Error::UnsafePath(path.join(name)),
     )
 }
 #[cfg(test)]
@@ -385,7 +430,7 @@ fn companion(
         &mut metadata,
         |check| request.wait(check),
         Into::into,
-        || Error::UnsafePath(path.clone()),
+        |_| Error::UnsafePath(path.clone()),
     )
 }
 

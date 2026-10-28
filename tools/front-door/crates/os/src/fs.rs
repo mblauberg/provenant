@@ -412,6 +412,8 @@ pub struct Directory {
     anchorable: bool,
     // Diagnostic only; never used to resolve an operation. Relative to anchor.
     path: PathBuf,
+    // Leading components of `path` that precede the nearest `into_anchor` boundary.
+    anchor_depth: usize,
 }
 impl Directory {
     /// Bounded no-follow read that refuses changed metadata or name identity.
@@ -492,7 +494,13 @@ impl Directory {
             device,
             anchorable,
             path,
+            anchor_depth: 0,
         })
+    }
+    /// Diagnostic path of this directory below its nearest established anchor.
+    /// Never used to resolve an operation.
+    pub fn anchored_path(&self) -> PathBuf {
+        self.path.components().skip(self.anchor_depth).collect()
     }
     /// Establish this held directory as a new filesystem-device boundary.
     /// Call only after the caller has validated the configured root. Unlike
@@ -508,7 +516,10 @@ impl Directory {
                 source: io::Error::from_raw_os_error(errno::ELOOP),
             });
         }
-        Self::from_file(self.file, self.path, true)
+        let depth = self.path.components().count();
+        let mut anchor = Self::from_file(self.file, self.path, true)?;
+        anchor.anchor_depth = depth;
+        Ok(anchor)
     }
     pub fn metadata(&self) -> Result<Metadata> {
         self.file
@@ -536,6 +547,7 @@ impl Directory {
             self.anchorable && !follow,
         )?;
         child.device = self.device;
+        child.anchor_depth = self.anchor_depth;
         Ok(child)
     }
     /// Refuse observed identity differences across stat/open/stat and traversal
