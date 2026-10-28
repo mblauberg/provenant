@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use std::{
     io::Read,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 mod children;
@@ -2837,7 +2837,13 @@ fn candidates<'a>(
     move |_| {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
-        let call = request(&clock, &cancel)?;
+        // The outer wait owns the deadline and retries contention between polls.
+        // Do not let an individual store read spend a separate 30-second budget.
+        let call = run::Request {
+            clock: &clock,
+            budget: WaitBudget::nonblocking(clock.mono_now()),
+            cancel: &cancel,
+        };
         let ids = match picks.since {
             Some(since) if picks.targets.is_empty() => {
                 select_since(session, picks.owner, since, &call)?
@@ -2911,35 +2917,66 @@ fn wait_lanes(
 /// `lanes --wait`: settlements after the wait starts, or after `--since`. Exact
 /// attempt IDs count whenever they settled. Without named lanes, a session's
 /// wait resumes after the settlements it last acknowledged.
+#[allow(clippy::disallowed_methods)]
 fn wait_command(
     session: &Session,
     picks: &Picks<'_>,
     condition: Condition,
-    seconds: u64,
+    deadline: Instant,
+    entered: WallTime,
     edge: &Edge<'_>,
 ) -> Result<(Value, String, bool), Fail> {
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let entry = request(&clock, &cancel)?;
     let key = selection_key(picks.label);
     let cursor = picks.targets.is_empty() && picks.since.is_none();
-    let seen = cursor
-        .then(|| session.store.seen_cursor(&key, true, &entry))
-        .transpose()?;
+    let mut seen = None;
     let waited = watch::wait(
-        candidates(session, picks, seen),
-        picks.scope()?,
+        |remaining| {
+            let cursor_value = if cursor {
+                if seen.is_none() {
+                    let clock = SystemClock::new();
+                    let cancel = CancelToken::new();
+                    let call = run::Request {
+                        clock: &clock,
+                        budget: WaitBudget::nonblocking(clock.mono_now()),
+                        cancel: &cancel,
+                    };
+                    seen = Some(session.store.seen_cursor(&key, true, &call)?);
+                }
+                seen
+            } else {
+                None
+            };
+            candidates(session, picks, cursor_value)(remaining)
+        },
+        watch::Scope {
+            entered,
+            ..picks.scope()?
+        },
         condition,
-        Duration::from_secs(seconds),
+        deadline.saturating_duration_since(Instant::now()),
         LOCAL_POLL,
     )?;
+    let mut waited = waited;
     if cursor && waited.met {
-        let mut latest = 0;
-        for lane in waited.lanes.iter().filter(|l| settled(&l.state).0) {
-            latest = latest.max(session.store.last_event_sequence(lane.attempt_id, &entry)?);
-        }
-        if latest > 0 {
-            open(edge, &entry)?.store.ack_seen(&key, latest, &entry)?;
+        let acknowledged = watch::retry_contention(deadline, LOCAL_POLL, || {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let entry = run::Request {
+                clock: &clock,
+                budget: WaitBudget::nonblocking(clock.mono_now()),
+                cancel: &cancel,
+            };
+            let mut latest = 0;
+            for lane in waited.lanes.iter().filter(|l| settled(&l.state).0) {
+                latest = latest.max(session.store.last_event_sequence(lane.attempt_id, &entry)?);
+            }
+            if latest > 0 {
+                open(edge, &entry)?.store.ack_seen(&key, latest, &entry)?;
+            }
+            Ok(())
+        })?;
+        if !acknowledged {
+            waited.met = false;
         }
     }
     waited_reply(session, waited)
@@ -3024,19 +3061,56 @@ pub fn lanes_streaming(
     json: bool,
     out: &mut dyn FnMut(&str) -> Result<(), Fail>,
 ) -> Reply {
-    reply_waited("lanes", lanes_inner(&command, edge, json, out))
+    let result = if let Some(seconds) = command.wait {
+        lanes_wait_entry(&command, edge, json, out, seconds)
+    } else {
+        lanes_inner(&command, edge, json, out, None)
+    };
+    reply_waited("lanes", result)
+}
+#[allow(clippy::disallowed_methods)]
+fn lanes_wait_entry(
+    command: &Lanes,
+    edge: &Edge<'_>,
+    json: bool,
+    emit: Emit<'_>,
+    seconds: u64,
+) -> Result<(Value, String, bool), Fail> {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    let entered = watch::entered()?;
+    loop {
+        match lanes_inner(command, edge, json, &mut *emit, Some((deadline, entered))) {
+            Err(fail) if fail.kind == ErrorKind::Contention => {
+                if Instant::now() >= deadline {
+                    let (mut data, human) =
+                        render_lanes(&[], &[], None, edge.roots.state.as_path());
+                    data["condition_met"] = json!(false);
+                    return Ok((data, human, true));
+                }
+                watch::pause(LOCAL_POLL, deadline);
+                if Instant::now() >= deadline {
+                    let (mut data, human) =
+                        render_lanes(&[], &[], None, edge.roots.state.as_path());
+                    data["condition_met"] = json!(false);
+                    return Ok((data, human, true));
+                }
+            }
+            result => return result,
+        }
+    }
 }
 fn lanes_inner(
     command: &Lanes,
     edge: &Edge<'_>,
     json: bool,
     emit: Emit<'_>,
+    wait_entry: Option<(Instant, WallTime)>,
 ) -> Result<(Value, String, bool), Fail> {
     let mut normalised = command.clone();
     let mut projects = std::collections::BTreeSet::new();
     let mut first = None;
     for target in &mut normalised.id {
-        let candidate = targets::resolve(edge, target, true)?;
+        let candidate = targets::resolve_with_budget(edge, target, true, wait_entry.is_some())?;
         if let Some(project) = candidate.project {
             projects.insert(project);
         }
@@ -3063,7 +3137,15 @@ fn lanes_inner(
     }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let call = request(&clock, &cancel)?;
+    let call = if wait_entry.is_some() {
+        run::Request {
+            clock: &clock,
+            budget: WaitBudget::nonblocking(clock.mono_now()),
+            cancel: &cancel,
+        }
+    } else {
+        request(&clock, &cancel)?
+    };
     let (context, store) = if let Some(candidate) = first {
         let (session, _) = targets::read_resolved(edge, candidate, &call)?;
         (session.context, Some(session.store))
@@ -3103,8 +3185,8 @@ fn lanes_inner(
     if let Some(seconds) = command.watch {
         return watch_command(&session, &picks, seconds, json, emit);
     }
-    if let Some(seconds) = command.wait {
-        return wait_command(&session, &picks, command.condition, seconds, edge);
+    if let Some((deadline, entered)) = wait_entry {
+        return wait_command(&session, &picks, command.condition, deadline, entered, edge);
     }
     let after = match &command.cursor {
         Some(cursor) => cursor
