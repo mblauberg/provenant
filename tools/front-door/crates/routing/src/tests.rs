@@ -315,6 +315,40 @@ fn named_routes_reject_unlisted_models_even_when_provider_observed()
 }
 
 #[test]
+fn model_default_effort_uses_agreeing_configured_routes() -> Result<(), Box<dyn std::error::Error>>
+{
+    let catalogue = Catalogue::bundled()?;
+    let model = ModelId::parse("codex/gpt-6.1-terra")?;
+    let mut config = RoutingConfig::default();
+    config.routes.insert(
+        "writer".into(),
+        NamedRoute {
+            model: model.clone(),
+            effort: Some("high".into()),
+        },
+    );
+    let effort = catalogue.model_default_effort(&config, &model);
+    assert_eq!(effort.as_deref(), Some("high"));
+    let mut query = request("codex/gpt-6.1-terra")?;
+    query.effort = effort;
+    assert_eq!(
+        resolve(&query, &context(&catalogue, &config, now()?))?
+            .effort
+            .as_deref(),
+        Some("high")
+    );
+    config.routes.insert(
+        "other".into(),
+        NamedRoute {
+            model: model.clone(),
+            effort: Some("low".into()),
+        },
+    );
+    assert_eq!(catalogue.model_default_effort(&config, &model), None);
+    Ok(())
+}
+
+#[test]
 fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;

@@ -1336,6 +1336,29 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
             command.access.worktree = None;
         }
     }
+    if command.route.effort.is_none()
+        && let Some(model) = command.route.model.as_ref()
+        && !model.0.contains('@')
+        && let Ok(id) = ModelId::parse(&model.0)
+    {
+        let config =
+            match provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS) {
+                Ok(config) => config,
+                Err(error) => {
+                    return reply(
+                        "run",
+                        Err(Fail::new(
+                            Status::Error,
+                            ErrorKind::Config,
+                            error.to_string(),
+                        )),
+                    );
+                }
+            };
+        if let Ok(catalogue) = provenant_routing::Catalogue::bundled() {
+            command.route.effort = catalogue.model_default_effort(&config.domains.routing, &id);
+        }
+    }
     render_run(dispatch(command, edge), edge)
 }
 
@@ -1371,11 +1394,19 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
         };
         let state = row["state"].as_str().unwrap_or("unknown");
         human.push_str(&format!(
-            "{} {state} {}\n",
+            "{} {state} {} (effort: {}, network: {})\n",
             &id[..id.len().min(8)],
             row["applied_route"]["model"]
                 .as_str()
-                .unwrap_or("unresolved")
+                .unwrap_or("unresolved"),
+            row["applied_route"]["effort"].as_str().unwrap_or(
+                if row["applied_route"].is_object() {
+                    "provider default"
+                } else {
+                    "unresolved"
+                }
+            ),
+            row["network"].as_str().unwrap_or("unknown")
         ));
         if let Some(reason) = row["reason"].as_str() {
             human.push_str(&format!("{}\n", plain_text(reason, usize::MAX)));
@@ -2839,6 +2870,18 @@ fn report(
             (data, human, false)
         }
     };
+    let canonical = session.store.request(record.run_id, call)?;
+    if let Some(rows) = data["lanes"].as_array_mut() {
+        for row in rows {
+            if let Some(task) = canonical
+                .tasks
+                .iter()
+                .find(|task| row["task_id"] == task.task_id.to_string())
+            {
+                row["network"] = json!(task.access.network(task.writer.is_some()));
+            }
+        }
+    }
     data["run_id"] = json!(record.run_id);
     data["operation_id"] = json!(record.operation_id);
     let unknown = launch_unknown(started);
@@ -5692,7 +5735,7 @@ mod tests {
                 serde_json::json!({
                     "operation_id": "timeout",
                     "lanes": [
-                        {"attempt_id":"01010101010101010101010101010101", "state":"running"},
+                        {"attempt_id":"01010101010101010101010101010101", "state":"running", "applied_route":{"model":"codex/test", "effort":"high"}, "network":"open"},
                         {"attempt_id":"02020202020202020202020202020202", "state":"succeeded"},
                         {"attempt_id":"03030303030303030303030303030303", "state":"input_required"}
                     ]
@@ -5702,6 +5745,11 @@ mod tests {
             )),
         );
         let report = super::render_run(result, &edge);
+        assert!(
+            report
+                .human
+                .contains("codex/test (effort: high, network: open)")
+        );
         assert_eq!(report.result.status, Status::Timeout);
         assert_eq!(
             report.human.matches("keep waiting:").count(),
