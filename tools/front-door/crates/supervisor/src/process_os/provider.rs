@@ -386,36 +386,83 @@ pub(crate) struct ProviderGroup {
     spared_descendants: BTreeSet<ProcessIdentity>,
     last_adopted_signal: BTreeMap<ProcessIdentity, i32>,
     ownership_uncertain: bool,
+    pub(crate) priority: Option<i32>,
+    pub(crate) priority_error: Option<i32>,
     pub(crate) stdin: Option<ChildStdin>,
     pub(crate) stdout: Option<ChildStdout>,
     pub(crate) stderr: Option<ChildStderr>,
 }
 // Set priority before the confined executable starts; descendants inherit it.
-fn configure_priority(command: &mut Command, priority: u8) -> io::Result<()> {
+fn configure_priority(command: &mut Command, priority: u8, fd: Option<i32>) -> io::Result<()> {
     if priority > 19 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "invalid lane priority",
         ));
     }
+    let hook = move || {
+        let (actual, error) = apply_priority(priority);
+        let evidence = [actual.unwrap_or(i32::MIN), error.unwrap_or(0)];
+        if let Some(fd) = fd {
+            // SAFETY: fd remains open through spawn and evidence is valid stack storage.
+            unsafe {
+                libc::write(
+                    fd,
+                    evidence.as_ptr().cast(),
+                    std::mem::size_of_val(&evidence),
+                );
+            }
+        }
+        Ok(())
+    };
     // SAFETY: the hook only invokes async-signal-safe syscalls in the child.
-    unsafe {
-        command.pre_exec(move || apply_priority(priority));
-    }
+    unsafe { command.pre_exec(hook) };
     Ok(())
 }
 
-fn apply_priority(priority: u8) -> io::Result<()> {
-    // SAFETY: queries only the calling process.
-    let inherited = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
-    if inherited >= i32::from(priority) {
-        return Ok(());
-    }
-    // SAFETY: changes only the calling process.
-    if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, i32::from(priority)) } == 0 {
-        Ok(())
+fn apply_priority(priority: u8) -> (Option<i32>, Option<i32>) {
+    let get = || {
+        // SAFETY: errno points to thread-local storage.
+        let errno = unsafe { libc::__error() };
+        // SAFETY: errno points to writable thread-local storage.
+        unsafe { *errno = 0 };
+        // SAFETY: getpriority observes this process.
+        let value = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+        // SAFETY: errno points to readable thread-local storage.
+        let error = unsafe { *errno };
+        if error == 0 { Ok(value) } else { Err(error) }
+    };
+    let set = |value| {
+        // SAFETY: setpriority changes only this process.
+        if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, value) } == 0 {
+            Ok(())
+        } else {
+            // SAFETY: errno points to readable thread-local storage.
+            let errno = unsafe { libc::__error() };
+            // SAFETY: errno points to readable thread-local storage.
+            Err(unsafe { *errno })
+        }
+    };
+    priority_with_ops(priority, get, set)
+}
+
+fn priority_with_ops(
+    priority: u8,
+    mut get: impl FnMut() -> Result<i32, i32>,
+    mut set: impl FnMut(i32) -> Result<(), i32>,
+) -> (Option<i32>, Option<i32>) {
+    let inherited = match get() {
+        Ok(value) => value,
+        Err(error) => return (None, Some(error)),
+    };
+    let error = if inherited < i32::from(priority) {
+        set(i32::from(priority)).err()
     } else {
-        Err(io::Error::last_os_error())
+        None
+    };
+    match get() {
+        Ok(actual) => (Some(actual), error),
+        Err(read_error) => (None, error.or(Some(read_error))),
     }
 }
 impl ProviderGroup {
@@ -442,7 +489,15 @@ impl ProviderGroup {
             env = pipe.environment(input, &env);
         }
         let mut command = Command::new(program);
-        configure_priority(&mut command, priority)?;
+        let (mut priority_reader, priority_writer) = match UnixStream::pair() {
+            Ok((reader, writer)) => (Some(reader), Some(writer)),
+            Err(_) => (None, None),
+        };
+        configure_priority(
+            &mut command,
+            priority,
+            priority_writer.as_ref().map(AsRawFd::as_raw_fd),
+        )?;
         command
             .args(args)
             .env_clear()
@@ -474,6 +529,21 @@ impl ProviderGroup {
             spec.inherited_lease,
         )?;
         drop(secret);
+        drop(priority_writer);
+        let mut evidence = [0_u8; 8];
+        let (priority, priority_error) = if priority_reader
+            .as_mut()
+            .is_some_and(|reader| reader.read_exact(&mut evidence).is_ok())
+        {
+            let actual = i32::from_ne_bytes([evidence[0], evidence[1], evidence[2], evidence[3]]);
+            let error = i32::from_ne_bytes([evidence[4], evidence[5], evidence[6], evidence[7]]);
+            (
+                (actual != i32::MIN).then_some(actual),
+                (error != 0).then_some(error),
+            )
+        } else {
+            (None, None)
+        };
         let pid = match i32::try_from(child.id()) {
             Ok(pid) if pid > 0 => pid,
             _ => {
@@ -498,6 +568,8 @@ impl ProviderGroup {
             spared_descendants: BTreeSet::new(),
             last_adopted_signal: BTreeMap::new(),
             ownership_uncertain: false,
+            priority,
+            priority_error,
             stdin: None,
             stdout: None,
             stderr: None,
@@ -1135,6 +1207,26 @@ mod tests {
     }
 
     #[test]
+    fn priority_failures_degrade_and_preserve_evidence() {
+        assert_eq!(
+            priority_with_ops(10, || Ok(5), |_| Err(libc::EPERM)),
+            (Some(5), Some(libc::EPERM))
+        );
+        assert_eq!(
+            priority_with_ops(10, || Ok(15), |_| panic!("must not raise priority")),
+            (Some(15), None)
+        );
+        assert_eq!(
+            priority_with_ops(10, || Err(libc::EACCES), |_| panic!("unknown priority")),
+            (None, Some(libc::EACCES))
+        );
+        assert_eq!(
+            priority_with_ops(5, || Ok(-1), |_| Err(libc::EPERM)),
+            (Some(-1), Some(libc::EPERM))
+        );
+    }
+
+    #[test]
     fn provider_and_descendant_inherit_priority() {
         let root = tempfile::tempdir().unwrap();
         let directory = provenant_os::fs::Directory::open_anchor(root.path()).unwrap();
@@ -1184,7 +1276,10 @@ mod tests {
             .map(|value| value.parse().unwrap())
             .collect();
         assert_eq!(values.len(), 2);
-        assert!(values[0] >= 10);
+        assert_eq!(Some(values[0]), group.priority);
+        if group.priority_error.is_none() {
+            assert!(values[0] >= 10);
+        }
         assert_eq!(values[0], values[1]);
     }
 }

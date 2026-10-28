@@ -133,6 +133,23 @@ action simply shows none.
   `crates/run/src/tests.rs::full_database_retains_admission_and_recovers_original_terminal_intent`
 - Owner: `crates/run/src/admission.rs`, `crates/run/src/ledger.rs`, `crates/os/src/sys/clock.rs`
 
+## Lane priority
+
+The host selects a configured nice value for each lane: 10 for writers, 5 for
+read-only lanes and 15 for build-heavy lanes by default. The guardian applies
+it to the provider before confinement; the provider's descendants inherit it.
+An inherited higher nice value is preserved. Failure to read or change priority
+must never refuse a lane: launch proceeds and the reason is recorded. Launch
+evidence reports the applied value when known and the requested value when it
+differs.
+- Why: lanes should yield CPU without requiring new privileges or preventing
+  nested work from starting.
+- Test: `crates/supervisor/src/process_os/provider.rs::provider_and_descendant_inherit_priority`;
+  `::priority_failures_degrade_and_preserve_evidence`;
+  `crates/run/src/tests.rs::lanes_read_last_output_time_from_supervisor_checkpoint`;
+  `crates/cli/src/run.rs::render_lanes_removes_peer_terminal_controls`
+- Owner: `crates/supervisor/src/process_os/provider.rs`, `crates/run/src/launch.rs`
+
 ## Immutable attempts, no writer replay
 
 Terminal attempts are immutable; a retry or continued turn is a new attempt

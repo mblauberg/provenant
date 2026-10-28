@@ -563,9 +563,12 @@ pub struct AttemptRecord {
     pub session: Option<String>,
     pub queued_at: WallTime,
     pub started_at: Option<WallTime>,
-    /// Scheduling priority selected for the provider process at launch.
+    /// Observed nice value of the provider process, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub priority: Option<u8>,
+    pub priority: Option<i32>,
+    /// Scheduling priority requested for the provider process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_priority: Option<u8>,
     /// Most recent supervisor-observed stdout/stderr activity while running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_at: Option<WallTime>,

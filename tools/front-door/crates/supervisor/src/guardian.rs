@@ -568,6 +568,19 @@ impl Driver<'_> {
                 });
             }
         };
+        if let Some(error) = child.priority_error {
+            warn(
+                &mut warnings,
+                &mut omitted_warnings,
+                &format!("provider priority unavailable or unchanged: OS error {error}"),
+            );
+        } else if child.priority.is_none() {
+            warn(
+                &mut warnings,
+                &mut omitted_warnings,
+                "provider priority evidence unavailable",
+            );
+        }
         self.reservation.launch_state = LaunchState::Spawned;
         self.reservation.provider = child.identity().cloned();
         if write_record(
@@ -956,6 +969,7 @@ impl Driver<'_> {
                     scope: Scope,
                     guardian: &'a ProcessIdentity,
                     provider: Option<&'a ProcessIdentity>,
+                    priority: Option<i32>,
                     phase: Phase,
                     stdout_bytes: u64,
                     stderr_bytes: u64,
@@ -973,6 +987,7 @@ impl Driver<'_> {
                     scope: self.reservation.scope,
                     guardian: &self.guardian,
                     provider: self.reservation.provider.as_ref(),
+                    priority: child.priority,
                     phase: state.phase(),
                     stdout_bytes: out.outcome().total_bytes,
                     stderr_bytes: err.outcome().total_bytes,
@@ -1087,6 +1102,7 @@ impl Driver<'_> {
             scope: self.reservation.scope,
             termination: exit,
             never_spawned: false,
+            priority: child.priority,
             stop_reason,
             delivered_signals: self.delivered_signals.clone(),
             reaped: self.reaped.clone(),
@@ -1413,6 +1429,7 @@ impl Driver<'_> {
                 schema_version: u64,
                 scope: Scope,
                 publication_pending: bool,
+                priority: Option<i32>,
             }
             let _ = write_record(
                 &self.attempt,
@@ -1421,6 +1438,7 @@ impl Driver<'_> {
                     schema_version: 1,
                     scope: self.reservation.scope,
                     publication_pending: true,
+                    priority: record.priority,
                 },
                 PublishMode::Replace,
             );

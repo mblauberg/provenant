@@ -305,7 +305,8 @@ impl RunStore {
             next.write_grants = write_grants.grants.clone();
             next.git_grants_digest = write_grants.git_grants_digest;
             next.head = head;
-            next.priority = priority;
+            next.requested_priority = priority;
+            next.priority = None;
             next.resolved_route = Some(route.clone());
             next.applied_route = Some(route.clone());
             next.admission_deadline = Some(ticket.admission_deadline);

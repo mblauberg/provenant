@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-pub const PROTOCOL: u64 = 5;
+pub const PROTOCOL: u64 = 6;
 pub const MAX_FRAME: usize = 1_048_576;
 
 pub fn discover_ssh_executable(
@@ -800,6 +800,37 @@ mod tests {
         assert!(matches!(
             decode_recorded_response(&serde_json::to_vec(&response).unwrap()),
             Err(PeerError::Version)
+        ));
+    }
+
+    #[test]
+    fn protocol_fence_precedes_action_decoding() {
+        let request = PeerRequest {
+            version: 1,
+            protocol: 5,
+            target_host: HostId::from_bytes([3; 16]),
+            source_host: HostId::from_bytes([4; 16]),
+            agent: "fixture".into(),
+            project: ProjectLocator {
+                key: CrossHostProjectKey::from_home(
+                    Path::new("/home/a"),
+                    Path::new("/home/a/repo/.git"),
+                )
+                .unwrap(),
+                common_dir: "repo/.git".into(),
+            },
+            action: serde_json::json!({"action": "future_action", "build_heavy": true}),
+            trace: Trace::default(),
+        };
+        let bytes = serde_json::to_vec(&request).unwrap();
+        assert!(decode_request(&bytes).is_err());
+        let response = protocol_refusal(&bytes).unwrap().unwrap();
+        assert_eq!(response.protocol, PROTOCOL);
+        assert!(matches!(
+            response.result,
+            PeerResult::Error {
+                error: facade::FacadeError::PeerVersion
+            }
         ));
     }
 

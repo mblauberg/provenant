@@ -26,6 +26,7 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
         session_id: i64::MAX,
     };
     let exit = ProcessExit {
+        priority: None,
         schema_version: 1,
         scope: scope(),
         termination: Some(Termination::Exit(0)),

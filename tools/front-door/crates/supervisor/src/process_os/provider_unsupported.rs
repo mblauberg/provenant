@@ -48,6 +48,8 @@ pub(crate) struct AdoptedCleanup {
 }
 
 pub(crate) struct ProviderGroup {
+    pub(crate) priority: Option<i32>,
+    pub(crate) priority_error: Option<i32>,
     pub(crate) stdin: Option<ChildStdin>,
     pub(crate) stdout: Option<ChildStdout>,
     pub(crate) stderr: Option<ChildStderr>,

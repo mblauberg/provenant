@@ -737,6 +737,7 @@ fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
             "schema_version": 1,
             "scope": {"run": input.run_id, "attempt": input.attempts[0].attempt_id, "generation": 0},
             "last_output_at": expected,
+            "priority": 15,
             "publication_pending": false
         }))?,
         RECORD_LIMIT,
@@ -746,6 +747,10 @@ fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
             .record(input.attempts[0].attempt_id, &call)?
             .last_output_at,
         Some(expected)
+    );
+    assert_eq!(
+        store.record(input.attempts[0].attempt_id, &call)?.priority,
+        Some(15)
     );
     Ok(())
 }

@@ -914,6 +914,8 @@ pub enum SettlementEvidence {
 /// Bounded, immutable OS facts. No field certifies its own publication durability.
 #[derive(Clone, Debug, Serialize)]
 pub struct ProcessExit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
     pub schema_version: u64,
     pub scope: Scope,
     pub termination: Option<Termination>,
@@ -946,6 +948,7 @@ impl ProcessExit {
         warnings: Vec<String>,
     ) -> Self {
         Self {
+            priority: None,
             schema_version: 1,
             scope,
             termination: None,

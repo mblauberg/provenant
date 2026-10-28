@@ -2746,6 +2746,11 @@ fn render_lanes(
             if let Some(title) = &lane.title {
                 row["title"] = json!(title);
             }
+            if lane.requested_priority.map(i32::from) != lane.priority
+                && let Some(priority) = lane.requested_priority
+            {
+                row["requested_priority"] = json!(priority);
+            }
             row
         })
         .collect();
@@ -5990,6 +5995,13 @@ mod tests {
         assert!(!human.contains('\u{202e}'));
         assert_eq!(data["lanes"][0]["title"], "Review\nchanges");
         assert_eq!(data["lanes"][0]["priority"], 10);
+        assert!(data["lanes"][0].get("requested_priority").is_none());
+        lane.requested_priority = Some(10);
+        lane.priority = Some(15);
+        let (different, _) =
+            render_lanes(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
+        assert_eq!(different["lanes"][0]["priority"], 15);
+        assert_eq!(different["lanes"][0]["requested_priority"], 10);
         assert_eq!(data["lanes"][0]["reason"], json!(reason));
         assert_eq!(data["lanes"][0]["write_grants"][0]["source"], "write_root");
         assert_eq!(data["lanes"][0]["write_grants"][0]["scope"], "subtree");
