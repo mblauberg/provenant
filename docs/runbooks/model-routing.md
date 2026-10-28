@@ -57,7 +57,10 @@ dispatch, so inspect the resolved route recorded for the attempt.
 
 Account profiles layer over provider pacing. An active temporary override takes
 precedence, followed by the account profile, provider default and bundled
-default. A profile can choose `spend`, `pace`, `max` or `off`; `off` prevents
+default. This holds for free models too: the selected account's profile (and
+any override) governs them, so an account set to `off` cannot serve a free
+model. The `pacing.free.<provider>` profile is the provider default for free
+models, used when the account has no profile or no policy. A profile can choose `spend`, `pace`, `max` or `off`; `off` prevents
 routing. For `pace`, choose the windows to include, or omit `windows` to use
 all known windows. The lowest factor governs. Missing or unobservable windows
 are neutral and can begin to affect pacing when they become observable.
@@ -70,6 +73,7 @@ snapshot windows as follows:
 | `seven_day` | A duration of 604,800 seconds, `seven_day`, or a weekly pool. This includes Claude and OpenCode `seven_day`, Codex `secondary`, and Agy pools such as `claude.weekly`. |
 | `monthly` | `monthly`, `thirty_day` (OpenCode), or `billing_cycle` (Cursor). |
 | `rolling` | OpenCode's `five_hour` or `rolling` pool. Its five-hour ledger is a rolling window. |
+| `daily` | A duration of 86,400 seconds or a `daily` pool. No provider reports one yet, so it stays neutral until a daily window is observable. |
 
 Numeric duplicate-name suffixes such as `:2` are ignored when matching names.
 Names and durations come from the provider decoders in
@@ -84,9 +88,13 @@ Omit `deadline` to pace to each window's own reset. A deadline can instead be:
 - `{ reset_of = "anese" }`, optionally with `window = "seven_day"`, to use
   another account's observed reset. The default reference window is seven-day.
   If the reference reset is unknown or stale, pacing falls back to the paced
-  window's own reset and `route resolve` reports the fallback.
+  window's own reset and `route resolve` reports the fallback. The reference
+  account's newest fresh snapshot is authoritative: if it reports an unknown
+  status, an older snapshot's reset is not used and the report names the status.
 - `"thu 00:00"` or `"day 25"` for a weekly or monthly point in the host's local
-  time zone.
+  time zone. A monthly day beyond a shorter month's end, such as `"day 31"` in
+  February, falls on that month's last day, and `route resolve` states the
+  clamping.
 - `"2026-11-02T09:00"` for a one-off absolute time in the host's local time zone.
 
 A reset reference stays within the paced window's current cycle: when the

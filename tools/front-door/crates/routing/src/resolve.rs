@@ -342,11 +342,15 @@ fn effective_profile<'a>(
     &'static str,
     Option<i64>,
 ) {
-    let profile = if context.catalogue.is_free_model(model) {
-        context.config.pacing.free.get(model.adapter())
-    } else {
-        account.and_then(|a| context.config.pacing.accounts.get(a))
-    };
+    let account_profile = account.and_then(|a| context.config.pacing.accounts.get(a));
+    let free_profile = context
+        .catalogue
+        .is_free_model(model)
+        .then(|| context.config.pacing.free.get(model.adapter()))
+        .flatten();
+    // The account profile governs free models too; the free profile is the
+    // provider-level default beneath it.
+    let profile = account_profile.or(free_profile);
     let active = context.config.pacing_overrides.iter().rev().find(|o| {
         o.expires_unix_seconds > context.now_seconds()
             && o.account.as_deref().is_none_or(|a| Some(a) == account)
@@ -355,8 +359,11 @@ fn effective_profile<'a>(
     if let Some(o) = active {
         return (o.policy, profile, "override", Some(o.expires_unix_seconds));
     }
-    if let Some(policy) = profile.and_then(|p| p.policy) {
+    if let Some(policy) = account_profile.and_then(|p| p.policy) {
         return (policy, profile, "account", None);
+    }
+    if let Some(policy) = free_profile.and_then(|p| p.policy) {
+        return (policy, profile, "free", None);
     }
     let source = if profile.is_some() {
         "account"
@@ -395,6 +402,7 @@ fn window_matches(
                 || name.ends_with("thirty_day")
                 || name.ends_with("billing_cycle")
         }
+        PacingWindow::Daily => window.window_seconds == Some(86_400) || name.ends_with("daily"),
         PacingWindow::Rolling => {
             adapter == "opencode" && (name.ends_with("five_hour") || name.ends_with("rolling"))
         }
@@ -413,14 +421,19 @@ fn selected_window(
                 .any(|kind| window_matches(window, *kind, adapter))
         })
 }
-fn window_deadline(deadline: &FixedDeadline, window: &provenant_quota::QuotaWindow) -> Option<i64> {
+/// Returns the instant and, when a monthly day was clamped to a shorter month,
+/// the requested and the actual day.
+fn window_deadline(
+    deadline: &FixedDeadline,
+    window: &provenant_quota::QuotaWindow,
+) -> Option<(i64, Option<(i8, i8)>)> {
     let zone = jiff::tz::TimeZone::system();
     if let FixedDeadline::Absolute(datetime) = deadline {
         return zone
             .to_ambiguous_zoned(*datetime)
             .compatible()
             .ok()
-            .map(|z| z.timestamp().as_second());
+            .map(|z| (z.timestamp().as_second(), None));
     }
     let reset = window.resets_unix_seconds?;
     let duration = i64::try_from(window.window_seconds?).ok()?;
@@ -429,8 +442,16 @@ fn window_deadline(deadline: &FixedDeadline, window: &provenant_quota::QuotaWind
         .to_zoned(zone.clone())
         .date();
     for _ in 0..=62 {
+        let mut clamped = None;
         let (matches, hour, minute) = match deadline {
-            FixedDeadline::Monthly { day } => (date.day() == *day, 0, 0),
+            FixedDeadline::Monthly { day } => {
+                // A day beyond the month's end falls on its last day.
+                let last = date.days_in_month();
+                if *day > last {
+                    clamped = Some((*day, last));
+                }
+                (date.day() == (*day).min(last), 0, 0)
+            }
             FixedDeadline::Weekly {
                 weekday,
                 hour,
@@ -450,7 +471,7 @@ fn window_deadline(deadline: &FixedDeadline, window: &provenant_quota::QuotaWind
                 .timestamp()
                 .as_second();
             if instant <= reset && instant > reset.saturating_sub(duration) {
-                return Some(instant);
+                return Some((instant, clamped));
             }
         }
         date = date.yesterday().ok()?;
@@ -458,12 +479,13 @@ fn window_deadline(deadline: &FixedDeadline, window: &provenant_quota::QuotaWind
     None
 }
 /// A reference is evidence about another account, not a recursive profile lookup.
-fn reference_deadline(
+fn reference_observation<'a>(
     deadline: &ResetDeadline,
-    window: Option<&provenant_quota::QuotaWindow>,
-    context: &RoutingContext<'_>,
-) -> Option<i64> {
-    let observation = context
+    context: &'a RoutingContext<'_>,
+) -> Option<&'a QuotaObservation> {
+    // The latest fresh snapshot wins whatever its status: a newer unknown
+    // snapshot supersedes any older reset.
+    context
         .quota
         .iter()
         .filter(|o| {
@@ -472,12 +494,31 @@ fn reference_deadline(
                 && o.snapshot.observed_unix_seconds <= context.now_seconds()
                 && o.snapshot.observed_unix_seconds < o.expires_unix_seconds
                 && o.expires_unix_seconds > context.now_seconds()
-                && matches!(
-                    o.snapshot.status,
-                    QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
-                )
         })
-        .max_by_key(|o| (o.snapshot.observed_unix_seconds, o.snapshot.revision))?;
+        .max_by_key(|o| (o.snapshot.observed_unix_seconds, o.snapshot.revision))
+}
+fn fallback_reason(deadline: &ResetDeadline, context: &RoutingContext<'_>) -> String {
+    match reference_observation(deadline, context) {
+        Some(o) if !reference_status_usable(o.snapshot.status) => format!(
+            "reset_of={} latest snapshot is {:?}",
+            deadline.reset_of, o.snapshot.status
+        ),
+        _ => format!("reset_of={} unknown or stale", deadline.reset_of),
+    }
+}
+fn reference_status_usable(status: QuotaStatus) -> bool {
+    matches!(
+        status,
+        QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
+    )
+}
+fn reference_deadline(
+    deadline: &ResetDeadline,
+    window: Option<&provenant_quota::QuotaWindow>,
+    context: &RoutingContext<'_>,
+) -> Option<i64> {
+    let observation = reference_observation(deadline, context)
+        .filter(|o| reference_status_usable(o.snapshot.status))?;
     observation
         .snapshot
         .windows
@@ -525,14 +566,14 @@ fn pace_snapshot_factor(
                 return None;
             }
             let configured = profile.and_then(|p| p.deadline.as_ref());
-            let deadline = configured
-                .and_then(|d| match d {
-                    PacingDeadline::ResetOf(reference) => {
-                        reference_deadline(reference, Some(window), context)
-                    }
-                    PacingDeadline::Fixed(fixed) => window_deadline(fixed, window),
-                })
-                .map(|d| d.min(reset));
+            let resolved = configured.and_then(|d| match d {
+                PacingDeadline::ResetOf(reference) => {
+                    reference_deadline(reference, Some(window), context).map(|d| (d, None))
+                }
+                PacingDeadline::Fixed(fixed) => window_deadline(fixed, window),
+            });
+            let clamped = resolved.and_then(|(_, clamped)| clamped);
+            let deadline = resolved.map(|(d, _)| d.min(reset));
             let fallback =
                 matches!(configured, Some(PacingDeadline::ResetOf(_))) && deadline.is_none();
             let passed = deadline.is_some_and(|d| d <= now);
@@ -553,15 +594,20 @@ fn pace_snapshot_factor(
             Some((
                 factor,
                 format!(
-                    "window={} deadline={}{}{}",
+                    "window={} deadline={}{}{}{}",
                     window.pool,
                     deadline.unwrap_or(reset),
                     if standby { " standby" } else { "" },
-                    if fallback {
-                        " reset_of unknown or stale; falling back to window reset".to_owned()
-                    } else {
-                        String::new()
-                    }
+                    match (fallback, configured) {
+                        (true, Some(PacingDeadline::ResetOf(reference))) => format!(
+                            " {}; falling back to window reset",
+                            fallback_reason(reference, context)
+                        ),
+                        _ => String::new(),
+                    },
+                    clamped.map_or_else(String::new, |(day, last)| format!(
+                        " day {day} clamped to the month's last day ({last})"
+                    )),
                 ),
                 standby,
             ))
@@ -643,8 +689,8 @@ fn pacing_factor_basis_points(
             if reference_deadline(reference, None, context).is_none() =>
         {
             format!(
-                "{detail} reset_of={} unknown or stale; falling back to window reset; unobserved windows neutral",
-                reference.reset_of
+                "{detail} {}; falling back to window reset; unobserved windows neutral",
+                fallback_reason(reference, context)
             )
         }
         _ => format!("{detail} unobserved windows neutral"),
@@ -717,6 +763,7 @@ fn pacing_reserve_window(
                 PacingWindow::Rolling,
                 PacingWindow::FiveHour,
                 PacingWindow::SevenDay,
+                PacingWindow::Daily,
                 PacingWindow::Monthly,
             ]
             .into_iter()

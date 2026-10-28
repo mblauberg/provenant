@@ -39,6 +39,7 @@ pub enum PacingWindow {
     SevenDay,
     Monthly,
     Rolling,
+    Daily,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -504,11 +505,17 @@ mod pacing_profile_tests {
                 toml_edit::de::from_str(&format!("deadline={deadline}")).unwrap();
             assert!(profile.deadline.is_some());
         }
+        let profile: PacingProfile =
+            toml_edit::de::from_str("windows=['daily', 'five_hour']").unwrap();
+        assert_eq!(
+            profile.windows,
+            Some(vec![PacingWindow::Daily, PacingWindow::FiveHour])
+        );
+        assert!(toml_edit::de::from_str::<PacingProfile>("windows=['hourly']").is_err());
         for invalid in [
             "deadline='thu 25:00'",
             "deadline='day 32'",
             "deadline={reset_of='anese',when='weekly'}",
-            "windows=['daily']",
             "policy='unlimited'",
             "after_deadline='stop'",
             "window=['five_hour']",
