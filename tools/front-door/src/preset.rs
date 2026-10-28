@@ -129,13 +129,14 @@ impl Layers {
     }
 
     pub fn resolve(&self, name: &str) -> Result<(Value, BTreeMap<String, String>), String> {
-        self.resolve_inner(name, &mut Vec::new())
+        self.resolve_inner(name, &mut Vec::new(), &mut Vec::new())
     }
 
     fn resolve_inner(
         &self,
         name: &str,
         stack: &mut Vec<String>,
+        repo_files: &mut Vec<String>,
     ) -> Result<(Value, BTreeMap<String, String>), String> {
         if stack.iter().any(|v| v == name) {
             return Err(format!(
@@ -165,11 +166,15 @@ impl Layers {
                         format!("preset {name}: extends ({origin}): must be a preset name")
                     })?,
                     stack,
+                    repo_files,
                 )
                 .map_err(|error| format!("preset {name}: extends ({origin}): {error}"))?,
             None => (json!({}), BTreeMap::new()),
         };
         for (origin, layer) in entries {
+            if self.repo_files.contains(origin) && !repo_files.contains(origin) {
+                repo_files.push(origin.clone());
+            }
             let mut layer = layer.clone();
             layer
                 .as_object_mut()
@@ -342,7 +347,8 @@ pub fn expand(
     prompt: &str,
     overrides: &[String],
 ) -> Result<Expansion, String> {
-    let (mut config, mut origins) = layers.resolve(name)?;
+    let mut repo_files = Vec::new();
+    let (mut config, mut origins) = layers.resolve_inner(name, &mut Vec::new(), &mut repo_files)?;
     for item in overrides {
         let (path, raw) = item
             .split_once('=')
@@ -373,6 +379,7 @@ pub fn expand(
         &mut Vec::new(),
         &mut nodes,
         &mut origins,
+        &mut repo_files,
     )?;
     let digest = provenant_records::CanonicalV1::file_digest(
         &serde_json::to_vec(&nodes).map_err(|e| e.to_string())?,
@@ -387,13 +394,6 @@ pub fn expand(
     {
         return Err("expanded graph exceeds the 8 MiB graph document limit".into());
     }
-    let repo_files = origins
-        .values()
-        .filter(|origin| layers.repo_files.contains(*origin))
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
     Ok(Expansion {
         document,
         origins,
@@ -415,6 +415,7 @@ fn build(
     stack: &mut Vec<String>,
     nodes: &mut Vec<Value>,
     origins: &mut BTreeMap<String, String>,
+    repo_files: &mut Vec<String>,
 ) -> Result<Vec<String>, String> {
     if stack.iter().any(|v| v == name) {
         return Err(format!("preset cycle: {} -> {name}", stack.join(" -> ")));
@@ -575,7 +576,8 @@ fn build(
                     origins,
                 )
             })?;
-            let (mut child_config, mut child_origins) = layers.resolve(child)?;
+            let (mut child_config, mut child_origins) =
+                layers.resolve_inner(child, &mut Vec::new(), repo_files)?;
             if let Some(parameters) = config_slot.get("parameters") {
                 for (key, value) in parameters.as_object().ok_or_else(|| {
                     invalid_config(
@@ -630,6 +632,7 @@ fn build(
                 stack,
                 nodes,
                 origins,
+                repo_files,
             )?
         } else {
             if config_slot.contains_key("parameters") {
