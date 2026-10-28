@@ -896,7 +896,14 @@ impl Driver<'_> {
                             .chain(self.protected.iter())
                             .cloned()
                             .collect();
-                        child.pause_builds(&census, provider, &spared);
+                        child.pause_builds(
+                            &census,
+                            provider,
+                            &spared,
+                            &self.attempt,
+                            self.reservation.scope,
+                            &self.guardian,
+                        );
                     }
                 } else if !census_warning_active {
                     warn(
@@ -940,7 +947,7 @@ impl Driver<'_> {
                     last_output_at,
                     last_progress_ms: state.last_progress_ms(),
                     silent: plan.silent(now, state.last_progress_ms()),
-                    disk_paused,
+                    disk_paused: disk_paused && exit.is_none() && stop_reason.is_none(),
                     provider_cpu_micros,
                     last_cpu_progress_ms,
                     publication_pending: false,

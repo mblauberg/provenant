@@ -1,54 +1,20 @@
 //! Lane-scoped disk policy, composed into the running guardian only.
 use provenant_supervisor::DiskPressure;
-use std::{cell::RefCell, io, path::PathBuf};
+use std::io;
 
 #[derive(Default)]
-pub(crate) struct LaneDisk {
-    policy: RefCell<Option<Policy>>,
-}
-struct Policy {
-    floor: u64,
-    volumes: [PathBuf; 3],
-}
+pub(crate) struct LaneDisk {}
 impl DiskPressure for LaneDisk {
     fn below_floor(&self, raw: &[u8]) -> io::Result<bool> {
-        let mut policy = self.policy.borrow_mut();
-        if policy.is_none() {
-            let context: provenant_run::HolderContext =
-                serde_json::from_slice(raw).map_err(io::Error::other)?;
-            let state = context
-                .launch
-                .as_ref()
-                .map_or(&context.roots.state_root, |launch| {
-                    &launch.configuration_root
-                });
-            let cwd = context
-                .launch
-                .as_ref()
-                .map_or(&context.roots.checkout, |launch| &launch.cwd);
-            let floor = provenant_config::GcSettings::read(state)?.free_floor_bytes(state)?;
-            *policy = Some(Policy {
-                floor,
-                volumes: [
-                    state.clone(),
-                    cwd.clone(),
-                    context
-                        .roots
-                        .home
-                        .join("Library/Caches/provenant-lane-cargo"),
-                ],
-            });
-        }
-        let policy = policy
-            .as_ref()
-            .ok_or_else(|| io::Error::other("missing disk policy"))?;
-        let mut free = u64::MAX;
-        for volume in &policy.volumes {
-            free = free.min(provenant_confinement::disk::available_bytes_at_existing(
-                volume,
-            )?);
-        }
-        Ok(free < policy.floor)
+        let context: provenant_run::HolderContext =
+            serde_json::from_slice(raw).map_err(io::Error::other)?;
+        let (state, cwd) = context.disk_roots();
+        // Live policy: changes take effect on the next admission, guardian or
+        // settlement observation, including percentage floor recalculation.
+        let floor = provenant_config::GcSettings::read(state)?.free_floor_bytes(state)?;
+        let free =
+            provenant_confinement::disk::lane_available_bytes(state, &context.roots.home, cwd)?;
+        Ok(free < floor)
     }
 }
 
@@ -73,12 +39,7 @@ fn collect_if_low(
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     let settings = provenant_config::GcSettings::read(state)?;
     let floor = settings.free_floor_bytes(state)?;
-    let cache = home.join("Library/Caches/provenant-lane-cargo");
-    let mut low = false;
-    for volume in [state, cwd, cache.as_path()] {
-        low |= provenant_confinement::disk::available_bytes_at_existing(volume)? < floor;
-    }
-    if !low {
+    if provenant_confinement::disk::lane_available_bytes(state, home, cwd)? >= floor {
         return Ok(());
     }
     let argv = vec![
@@ -116,6 +77,36 @@ fn collect_if_low(
 mod tests {
     #[allow(unused_imports)] // Also included by the harness=false worktree driver.
     use super::*;
+    #[test]
+    fn lane_pause_rereads_the_floor_each_observation() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let context = provenant_run::HolderContext {
+            schema_version: 1,
+            roots: provenant_run::RootSeed {
+                home: temp.path().into(),
+                checkout: temp.path().into(),
+                state_root: temp.path().into(),
+            },
+            project_id: provenant_core::ProjectId::from_bytes([1; 16]),
+            actor_id: provenant_core::ActorId::from_bytes([2; 16]),
+            run_id: provenant_core::RunId::from_bytes([3; 16]),
+            attempt_id: provenant_core::AttemptId::from_bytes([4; 16]),
+            host_delivery: None,
+            launch: None,
+            sealed: None,
+        };
+        let raw = context.encode()?;
+        let disk = LaneDisk::default();
+        let config = temp.path().join("config.toml");
+        std::fs::write(&config, "[gc]\nfree_floor='1B'\n")?;
+        assert!(!disk.below_floor(&raw)?);
+        std::fs::write(&config, "[gc]\nfree_floor='18446744073709551615B'\n")?;
+        assert!(disk.below_floor(&raw)?);
+        std::fs::write(&config, "[gc]\nfree_floor='1B'\n")?;
+        assert!(!disk.below_floor(&raw)?);
+        Ok(())
+    }
+
     #[test]
     fn settlement_collects_below_the_shared_floor_only() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;

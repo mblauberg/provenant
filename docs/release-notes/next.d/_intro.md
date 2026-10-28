@@ -1,7 +1,7 @@
 This patch release fixes problems found while upgrading hosts to 1.2.0:
 - The peer LaunchAgent restarts on the new binary after an upgrade.
 - Writer attempts orphaned before a reboot can be settled instead of staying `running`.
-- `lanes` shows when the disk guard has paused builds.
+- `lanes` shows when a lane's guardian has paused builds for disk pressure.
 
 ## Stability
 

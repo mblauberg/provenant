@@ -68,6 +68,11 @@ pub use provenant_records::run::LaneWait;
 pub trait Resources {
     fn memory(&self) -> std::io::Result<MemorySample>;
     fn disk(&self, attempt: &Directory) -> std::io::Result<u64>;
+    /// Host admission observes the same output volumes as the running guardian.
+    /// Test probes may retain their synthetic attempt-level observation.
+    fn lane_disk(&self, attempt: &Directory, _: &HolderContext) -> std::io::Result<u64> {
+        self.disk(attempt)
+    }
 }
 pub struct SystemResources;
 impl Resources for SystemResources {
@@ -76,6 +81,10 @@ impl Resources for SystemResources {
     }
     fn disk(&self, attempt: &Directory) -> std::io::Result<u64> {
         attempt.available_bytes()
+    }
+    fn lane_disk(&self, _: &Directory, context: &HolderContext) -> std::io::Result<u64> {
+        let (state, cwd) = context.disk_roots();
+        provenant_confinement::disk::lane_available_bytes(state, &context.roots.home, cwd)
     }
 }
 
@@ -189,10 +198,25 @@ impl RunStore {
     /// The running guardian publishes this lane's pause in its checkpoint.
     fn disk_pause_wait(&self, lane: &AttemptRecord) -> Option<String> {
         let attempt = self.attempt_dir(lane.run_id, lane.attempt_id, false).ok()?;
+        // The periodic checkpoint may predate provider exit while a living
+        // guardian retains unresolved cleanup. Exit publication ends pausing.
+        match attempt.metadata_at("process-exit.json".as_ref(), false) {
+            Err(error) if error.is_not_found() => {}
+            _ => return None,
+        }
         let raw = attempt
             .read_stable("process.json".as_ref(), RECORD_LIMIT)
             .ok()?;
         let state: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+        let guardian: provenant_supervisor::census::ProcessIdentity =
+            serde_json::from_value(state.get("guardian")?.clone()).ok()?;
+        if !matches!(
+            provenant_supervisor::census::SystemProcessObserver.observe(guardian.pid),
+            provenant_supervisor::census::ProcessObservation::Present(fact)
+                if fact.identity == guardian && !fact.zombie
+        ) {
+            return None;
+        }
         state["disk_paused"].as_bool()?.then(|| {
             "disk pressure paused builds below gc.free_floor; run `provenant gc --apply`".to_owned()
         })
@@ -319,10 +343,7 @@ impl RunStore {
                 .map_err(|_| RunError::Validation("wall clock"))?;
             if now >= ticket.admission_deadline {
                 return Err(match disk_refusal {
-                    Some(free) => RunError::DiskFloor {
-                        free,
-                        floor: ticket.disk_floor_bytes,
-                    },
+                    Some((free, floor)) => RunError::DiskFloor { free, floor },
                     None => RunError::Refused,
                 });
             }
@@ -330,16 +351,28 @@ impl RunStore {
             if crate::artifacts::read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some() {
                 return Err(RunError::Cancelled);
             }
-            let fits = match (resources.memory(), resources.disk(attempt)) {
-                (Ok(memory), Ok(disk)) => {
-                    disk_refusal = (disk < ticket.disk_floor_bytes).then_some(disk);
+            // Disk policy is live configuration, shared with the guardian and
+            // settlement. An unreadable current floor queues rather than
+            // admitting with the ticket's submission-time observation.
+            let disk_floor_bytes = provenant_config::GcSettings::read(&self.writer_registry)
+                .and_then(|settings| settings.free_floor_bytes(&self.writer_registry));
+            let fits = match (
+                resources.memory(),
+                resources.disk(attempt),
+                disk_floor_bytes,
+            ) {
+                (Ok(memory), Ok(disk), Ok(floor)) => {
+                    disk_refusal = (disk < floor).then_some((disk, floor));
                     memory.total_bytes > 0
                         && u128::from(memory.available_bytes) * 10_000
                             >= u128::from(memory.total_bytes)
                                 * u128::from(ticket.memory_floor_basis_points)
-                        && disk >= ticket.disk_floor_bytes
+                        && disk >= floor
                 }
-                _ => false,
+                _ => {
+                    disk_refusal = None;
+                    false
+                }
             };
             if fits {
                 match self.claim(id, clock, &call) {

@@ -5875,13 +5875,44 @@ fn lane_waits_report_only_the_running_lanes_own_disk_pause() -> TestResult {
         .join("attempts")
         .join(id.to_string())
         .join("process.json");
-    std::fs::write(marker, br#"{"disk_paused":true}"#)?;
-    let waits = store.lane_waits(&[running, other], &call);
+    let guardian = match provenant_supervisor::census::SystemProcessObserver
+        .observe(i64::from(std::process::id()))
+    {
+        provenant_supervisor::census::ProcessObservation::Present(fact) => fact.identity,
+        _ => return Err("test guardian identity unavailable".into()),
+    };
+    std::fs::write(
+        &marker,
+        serde_json::to_vec(&serde_json::json!({
+            "disk_paused": true, "guardian": guardian,
+        }))?,
+    )?;
+    let records = [running, other];
+    let waits = store.lane_waits(&records, &call);
     assert_eq!(waits.len(), 1);
     assert_eq!(waits[0].attempt_id, id);
     assert_eq!(
         waits[0].waiting_for,
         "disk pressure paused builds below gc.free_floor; run `provenant gc --apply`"
+    );
+    let exit_path = marker.with_file_name("process-exit.json");
+    std::fs::write(&exit_path, br#"{"unresolved_cleanup":true}"#)?;
+    assert!(
+        store.lane_waits(&records, &call).is_empty(),
+        "an exited provider cannot remain disk-paused while its guardian settles cleanup"
+    );
+    std::fs::remove_file(exit_path)?;
+    let mut dead_guardian = guardian;
+    dead_guardian.native_start = dead_guardian.native_start.saturating_add(1);
+    std::fs::write(
+        &marker,
+        serde_json::to_vec(&serde_json::json!({
+            "disk_paused": true, "guardian": dead_guardian,
+        }))?,
+    )?;
+    assert!(
+        store.lane_waits(&records, &call).is_empty(),
+        "a dead guardian's checkpoint must not report a current disk pause"
     );
     Ok(())
 }
@@ -5969,5 +6000,105 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
             assert!(message.contains("provenant gc --apply"), "{message}");
         }
     }
+    Ok(())
+}
+
+#[test]
+fn admission_rereads_gc_floor_after_submission_and_while_waiting() -> TestResult {
+    struct Disk<'a> {
+        config: &'a std::path::Path,
+        samples: Cell<u64>,
+    }
+    impl Resources for Disk<'_> {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            Ok(MemorySample {
+                total_bytes: 100,
+                available_bytes: 100,
+            })
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            self.samples.set(self.samples.get() + 1);
+            std::fs::write(self.config, "[gc]\nfree_floor='100B'\n")?;
+            Ok(100)
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let mut store = RunStore::open(&context, &call)?;
+    let config = context.state_root.as_path().join("config.toml");
+    std::fs::write(&config, "[gc]\nfree_floor='1B'\n")?;
+    store.set_admission_policy(AdmissionPolicy {
+        admission_seconds: 1,
+        ..Default::default()
+    });
+    let run = lane(99, true);
+    let id = starting(&store, &run, &call)?;
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    std::fs::write(&config, "[gc]\nfree_floor='101B'\n")?;
+    let disk = Disk {
+        config: &config,
+        samples: Cell::new(0),
+    };
+    assert_eq!(
+        store.admit(id, &attempt, &disk, &clock, &cancel)?.state,
+        AttemptState::Running
+    );
+    assert_eq!(
+        disk.samples.get(),
+        2,
+        "the changed floor must hold admission for one observation"
+    );
+    Ok(())
+}
+
+#[test]
+fn admission_waits_for_a_readable_current_gc_floor() -> TestResult {
+    struct Disk<'a> {
+        config: &'a std::path::Path,
+        samples: Cell<u64>,
+    }
+    impl Resources for Disk<'_> {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            Ok(MemorySample {
+                total_bytes: 100,
+                available_bytes: 100,
+            })
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            self.samples.set(self.samples.get() + 1);
+            std::fs::write(self.config, "[gc]\nfree_floor='100B'\n")?;
+            Ok(100)
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let mut store = RunStore::open(&context, &call)?;
+    let config = context.state_root.as_path().join("config.toml");
+    std::fs::write(&config, "[gc]\nfree_floor='1B'\n")?;
+    store.set_admission_policy(AdmissionPolicy {
+        admission_seconds: 1,
+        ..Default::default()
+    });
+    let run = lane(100, true);
+    let id = starting(&store, &run, &call)?;
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    std::fs::write(&config, "[gc]\nfree_floor='")?;
+    let disk = Disk {
+        config: &config,
+        samples: Cell::new(0),
+    };
+    assert_eq!(
+        store.admit(id, &attempt, &disk, &clock, &cancel)?.state,
+        AttemptState::Running
+    );
+    assert_eq!(
+        disk.samples.get(),
+        2,
+        "an unreadable current floor must queue until the next valid observation"
+    );
     Ok(())
 }

@@ -9,6 +9,99 @@
 //! that cannot be proven is left alone and named in the settled exit.
 use super::*;
 
+/// Resume a dead guardian's durable pause journal even when ancestry and the
+/// exit record were lost. Custody exclusion prevents racing a live pause loop.
+pub fn resume_orphaned_builds(attempt: &Directory, scope: Scope) -> Result<()> {
+    resume_orphaned_builds_with(attempt, scope, &SystemProcessObserver)
+}
+
+pub(crate) fn resume_orphaned_builds_with(
+    attempt: &Directory,
+    scope: Scope,
+    observer: &dyn ProcessObserver,
+) -> Result<()> {
+    let _custody = match attempt.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive) {
+        Ok(lock) => lock,
+        Err(FsError::LockTimeout { .. }) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    resume_paused_with(attempt, scope, observer)
+}
+
+// Caller holds custody exclusion, or writer exclusion with an absent guardian.
+pub(super) fn resume_paused_with(
+    attempt: &Directory,
+    scope: Scope,
+    observer: &dyn ProcessObserver,
+) -> Result<()> {
+    use crate::build_pause::{PAUSE_FILE, PauseJournal};
+    let journal: PauseJournal = match read_record(attempt, PAUSE_FILE, RECORD_LIMIT) {
+        Ok(record) => record,
+        Err(CustodyError::Filesystem(error)) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if journal.schema_version != 1
+        || journal.scope != scope
+        || journal.guardian.validate().is_err()
+        || journal
+            .identities
+            .iter()
+            .any(|identity| identity.validate().is_err() || identity.boot != journal.guardian.boot)
+    {
+        return Err(CustodyError::InvalidRecord);
+    }
+    let same_boot =
+        observer.boot_identity().map_err(|_| CustodyError::Fenced)? == journal.guardian.boot;
+    if same_boot {
+        match observer.observe(journal.guardian.pid) {
+            ProcessObservation::Present(fact)
+                if fact.identity == journal.guardian && !fact.zombie =>
+            {
+                return Err(CustodyError::Fenced);
+            }
+            ProcessObservation::Unknown(_) => return Err(CustodyError::Fenced),
+            _ => {}
+        }
+        for identity in &journal.identities {
+            match observer.observe(identity.pid) {
+                ProcessObservation::Present(fact) if fact.identity == *identity && !fact.zombie => {
+                    crate::process_os::provider::signal_build(identity, libc::SIGCONT)?;
+                }
+                ProcessObservation::Unknown(_) => return Err(CustodyError::Fenced),
+                _ => {}
+            }
+        }
+    }
+    // Clear the checkpoint before the journal. An interrupted recovery can
+    // safely replay CONT, and never leaves a recovered pause visible.
+    match attempt.read_bounded(OsStr::new("process.json"), RECORD_LIMIT) {
+        Ok(raw) => {
+            let mut checkpoint: serde_json::Value =
+                serde_json::from_slice(&raw).map_err(|_| CustodyError::InvalidRecord)?;
+            if checkpoint.get("scope")
+                == Some(&serde_json::to_value(scope).map_err(|_| CustodyError::InvalidRecord)?)
+            {
+                checkpoint["disk_paused"] = false.into();
+                let bytes =
+                    serde_json::to_vec(&checkpoint).map_err(|_| CustodyError::InvalidRecord)?;
+                attempt
+                    .atomic_write(
+                        OsStr::new("process.json"),
+                        ".resume-",
+                        &bytes,
+                        PublishMode::Replace,
+                    )?
+                    .require_durable()?;
+            }
+        }
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error.into()),
+    }
+    attempt.unlink(OsStr::new(PAUSE_FILE))?;
+    attempt.sync()?;
+    Ok(())
+}
+
 /// What recovery did with each process the unresolved exit named.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OrphanReport {
@@ -76,6 +169,31 @@ fn alive(observer: &dyn ProcessObserver, identity: &ProcessIdentity) -> bool {
 }
 
 impl Recovery {
+    /// Resume persisted pauses after guardian death, before cleanup or release.
+    pub fn resume_paused_builds(&self, attempt: &Directory) -> Result<()> {
+        self.resume_paused_builds_with(attempt, &SystemProcessObserver)
+    }
+
+    pub(crate) fn resume_paused_builds_with(
+        &self,
+        attempt: &Directory,
+        observer: &dyn ProcessObserver,
+    ) -> Result<()> {
+        self.reservation.validate()?;
+        let metadata = attempt.metadata()?;
+        if self.reservation.attempt_device != Some(metadata.device)
+            || self.reservation.attempt_inode != Some(metadata.inode)
+        {
+            return Err(CustodyError::InvalidRecord);
+        }
+        if observer.boot_identity().map_err(|_| CustodyError::Fenced)? == self.reservation.boot
+            && self.guardian_present(observer)?
+        {
+            return Err(CustodyError::Fenced);
+        }
+        resume_paused_with(attempt, self.scope(), observer)
+    }
+
     /// With the guardian gone, end the descendants its unresolved exit named and
     /// settle that exit. Needs writer exclusion (held by `self`) and the
     /// attempt directory holding `process-exit.json`.
@@ -102,6 +220,7 @@ impl Recovery {
         if same_boot && self.guardian_present(observer)? {
             return Err(CustodyError::Fenced);
         }
+        resume_paused_with(attempt, self.scope(), observer)?;
         let bytes = attempt.read_bounded(OsStr::new("process-exit.json"), EXIT_LIMIT)?;
         let mut document: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|_| CustodyError::InvalidRecord)?;
@@ -426,6 +545,106 @@ mod tests {
         assert_eq!(report, OrphanReport::default());
         assert!(world.signals.borrow().is_empty());
         assert_eq!(settled(&f)?["settlement_evidence"], "orphans_ended");
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_consumes_paused_identities_without_signalling_a_reused_pid() -> TestResult {
+        let mut f = fixture(&[], &[])?;
+        let old = identity(84322, 7);
+        let world = World::default();
+        world
+            .live
+            .borrow_mut()
+            .insert(old.pid, identity(old.pid, 99));
+        let journal = crate::build_pause::PauseJournal {
+            schema_version: 1,
+            scope: f.recovery.scope(),
+            guardian: identity(100, 1),
+            identities: [old].into_iter().collect(),
+        };
+        std::fs::write(
+            f.path.join(crate::build_pause::PAUSE_FILE),
+            serde_json::to_vec(&journal)?,
+        )?;
+        std::fs::write(
+            f.path.join("process.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "scope": f.recovery.scope(), "disk_paused": true,
+            }))?,
+        )?;
+        run(&mut f, &world)?;
+        assert!(world.signals.borrow().is_empty());
+        assert!(!f.path.join(crate::build_pause::PAUSE_FILE).exists());
+        let checkpoint: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(f.path.join("process.json"))?)?;
+        assert_eq!(checkpoint["disk_paused"], false);
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    #[allow(clippy::disallowed_methods)] // Real stopped child with bounded wall time.
+    fn recovery_resumes_a_real_stopped_build_without_exit_or_ancestry() -> TestResult {
+        use std::io::Write;
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let root = tempfile::tempdir()?;
+        let ready = root.path().join("ready");
+        let resumed = root.path().join("resumed");
+        let mut child = Child(
+            std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "printf ready > \"$1\"; read value; printf resumed > \"$2\"",
+                    "build",
+                ])
+                .arg(&ready)
+                .arg(&resumed)
+                .stdin(std::process::Stdio::piped())
+                .spawn()?,
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !ready.exists() {
+            assert!(Instant::now() < deadline, "child never became ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let ProcessObservation::Present(fact) =
+            SystemProcessObserver.observe(i64::from(child.0.id()))
+        else {
+            return Err("child identity unavailable".into());
+        };
+        let mut guardian = fact.identity.clone();
+        guardian.pid = i64::from(i32::MAX);
+        let journal = crate::build_pause::PauseJournal {
+            schema_version: 1,
+            scope: scope(),
+            guardian,
+            identities: [fact.identity.clone()].into_iter().collect(),
+        };
+        std::fs::write(
+            root.path().join(crate::build_pause::PAUSE_FILE),
+            serde_json::to_vec(&journal)?,
+        )?;
+        assert!(crate::process_os::provider::signal_build(
+            &fact.identity,
+            libc::SIGSTOP
+        )?);
+        writeln!(child.0.stdin.as_mut().ok_or("child stdin")?, "continue")?;
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!resumed.exists(), "build should still be stopped");
+        resume_orphaned_builds(&Directory::open_anchor(root.path())?, scope())?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !resumed.exists() {
+            assert!(Instant::now() < deadline, "recovery left a stopped build");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!root.path().join(crate::build_pause::PAUSE_FILE).exists());
         Ok(())
     }
 

@@ -657,7 +657,13 @@ impl ProviderGroup {
         census: &Census,
         provider: &ProcessIdentity,
         spared: &BTreeSet<ProcessIdentity>,
+        attempt: &provenant_os::fs::Directory,
+        scope: crate::custody::Scope,
+        guardian: &ProcessIdentity,
     ) {
+        if self.paused_builds.bind(attempt, scope, guardian).is_err() {
+            return;
+        }
         self.paused_builds
             .pause(census, provider, spared, signal_build);
     }
@@ -862,6 +868,9 @@ fn kill_failure(error: &io::Error) -> DeliveryFailure {
 /// start time). Returns whether a signal was delivered; an absent, replaced or
 /// zombie process is left alone, so a recycled PID is never targeted.
 pub(crate) fn signal_identity(identity: &ProcessIdentity, escalation: bool) -> bool {
+    if !escalation && signal_build(identity, libc::SIGCONT).is_err() {
+        return false;
+    }
     signal_build(
         identity,
         if escalation {
@@ -873,7 +882,7 @@ pub(crate) fn signal_identity(identity: &ProcessIdentity, escalation: bool) -> b
     .unwrap_or(false)
 }
 
-fn signal_build(identity: &ProcessIdentity, signal: i32) -> io::Result<bool> {
+pub(crate) fn signal_build(identity: &ProcessIdentity, signal: i32) -> io::Result<bool> {
     let pid = native_pid(identity.pid)?;
     match super::census::observe_with_boot(identity.pid, &identity.boot) {
         ProcessObservation::Present(fact) if fact.identity == *identity && !fact.zombie => {}
@@ -980,6 +989,56 @@ fn wait_exit(pid: i32, nowait: bool) -> io::Result<Option<Termination>> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn orphan_term_resumes_a_stopped_process_before_terminating_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::process::ExitStatusExt;
+        struct OwnedChild(Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let root = tempfile::tempdir()?;
+        let ready = root.path().join("ready");
+        let mut child = OwnedChild(
+            Command::new("/bin/sh")
+                .args(["-c", "printf ready > \"$1\"; read value", "orphan"])
+                .arg(&ready)
+                .stdin(Stdio::piped())
+                .spawn()?,
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !ready.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "orphan never became ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let ProcessObservation::Present(fact) =
+            super::super::census::SystemProcessObserver.observe(i64::from(child.0.id()))
+        else {
+            return Err("orphan identity unavailable".into());
+        };
+        assert!(signal_build(&fact.identity, libc::SIGSTOP)?);
+        assert!(signal_identity(&fact.identity, false));
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = child.0.try_wait()? {
+                assert_eq!(status.signal(), Some(libc::SIGTERM));
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "TERM remained pending on a stopped orphan"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
 
     #[test]
     fn provider_creates_private_state_regardless_of_parent_umask() {

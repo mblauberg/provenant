@@ -92,6 +92,9 @@ impl ProviderGroup {
         _census: &Census,
         _provider: &ProcessIdentity,
         _spared: &BTreeSet<ProcessIdentity>,
+        _attempt: &provenant_os::fs::Directory,
+        _scope: crate::custody::Scope,
+        _guardian: &ProcessIdentity,
     ) {
         match self.never {}
     }
@@ -123,6 +126,10 @@ impl ProviderGroup {
 
 pub(crate) fn signal_identity(_identity: &ProcessIdentity, _escalation: bool) -> bool {
     false
+}
+
+pub(crate) fn signal_build(_identity: &ProcessIdentity, _signal: i32) -> io::Result<bool> {
+    Err(unsupported())
 }
 
 pub(crate) fn any_pid_alive(pids: &[i64]) -> bool {
