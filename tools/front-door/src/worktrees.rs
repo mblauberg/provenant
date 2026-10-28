@@ -1009,7 +1009,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         }
     } else {
         let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
-        let runtime = UtilityRuntime::read_only(canonicalize(&git)?)?;
+        let runtime = UtilityRuntime::read_only(&git)?;
         let executor = SystemExecutor::new(1)?;
         let repo = runtime.open_repo(
             &executor,
@@ -1350,10 +1350,7 @@ fn with_context_mode<T>(
         child(&state, "utility-home")?
     };
     let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
-    let runtime = UtilityRuntime::new(
-        canonicalize(&git)?,
-        roots.state.as_path().join("utility-home"),
-    )?;
+    let runtime = UtilityRuntime::new(git, roots.state.as_path().join("utility-home"))?;
     let executor = SystemExecutor::new(1)?;
     let cancel = CancelToken::new();
     let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
