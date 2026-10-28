@@ -1,4 +1,4 @@
-//! Provenant-only lane customisation; no user configuration is loaded.
+//! Provenant-only provider customisation and bounded writer publishing setup.
 use crate::launch::{exact, subtree};
 use crate::{ProviderError, SetupStep};
 use provenant_confinement::permissions::ProviderProfileSpec;
@@ -144,7 +144,7 @@ fn publishing_hook(git: &str, gh: &str, branch: &str) -> String {
 set -eu
 refuse() {{ echo 'lane push refused: only an unprotected lane branch on origin may advance' >&2; exit 1; }}
 [ "$1" = origin ] || refuse
-# Read the immutable repository config, without push command-line overrides.
+# Check repository config without push command-line overrides.
 unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
 branch={branch}
 case "$branch" in main|master) refuse ;; esac

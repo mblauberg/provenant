@@ -28,6 +28,8 @@ Writer lanes with open network can also publish during the attempt. They get
 read-only access to the existing gh configuration, with Git credentials supplied
 by the pinned `gh auth git-credential` helper. Setup never reads or copies the
 token. Provider-only and local network lanes retain the gh credential deny.
+The helper selects the host's `~/.config/gh`; custom gh configuration paths and
+keychain-only logins are not mirrored into the lane.
 
 The lane's Git pre-push hook permits only its checked-out branch on `origin`.
 It refuses default and protected branches, tags, deletions and updates that
@@ -36,7 +38,8 @@ lookups must succeed before a push proceeds. The hook checks active rules even
 when the branch has not been created on GitHub yet.
 
 This hook governs ordinary lane Git pushes. A lane with the full gh login can
-bypass it with `--no-verify`, change its scratch files or use the GitHub API.
+bypass it with `--no-verify`, another Git directory, changed scratch files or
+the GitHub API.
 Repository rulesets remain the server-side boundary for those actions.
 
 Use `gh pr create`, `gh pr comment`, `gh pr view` and `gh pr checks` to manage
