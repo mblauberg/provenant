@@ -1723,8 +1723,13 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `provider` | `{"name": "provider", "positional": true, "required": true}` |
-| `policy` | `{"name": "policy", "positional": true, "required": true, "values": ["pace", "spend", "max"]}` |
+| `target` | `{"name": "target", "positional": true, "required": true}` |
+| `value` | `{"name": "value", "positional": true}` |
+| `--account` | `{"conflicts": ["provider", "all"], "name": "account"}` |
+| `--provider` | `{"conflicts": ["account", "all"], "name": "provider"}` |
+| `--all` | `{"conflicts": ["account", "provider"], "defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
+| `--policy` | `{"name": "policy", "values": ["pace", "spend", "max", "off"]}` |
+| `--until` | `{"name": "until"}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -1736,8 +1741,13 @@ bounds are null. Positional arguments have no long flag.
   "groups": [
     {
       "arguments": [
+        "target",
+        "value",
+        "account",
         "provider",
-        "policy"
+        "all",
+        "policy",
+        "until"
       ],
       "multiple": true,
       "name": "RoutePacing",

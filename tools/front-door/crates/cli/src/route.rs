@@ -24,7 +24,7 @@ pub enum Route {
     Remove(RouteRemove),
     /// Restore one bundled pool and clear its override.
     Reset(RouteReset),
-    /// Set one provider's routing pacing policy.
+    /// Set a provider policy or manage a temporary pacing override.
     Pacing(RoutePacing),
 }
 #[derive(Debug, Args)]
@@ -69,6 +69,7 @@ pub enum PacingChoice {
     Pace,
     Spend,
     Max,
+    Off,
 }
 impl From<PacingChoice> for PacingPolicy {
     fn from(value: PacingChoice) -> Self {
@@ -76,15 +77,31 @@ impl From<PacingChoice> for PacingPolicy {
             PacingChoice::Pace => Self::Pace,
             PacingChoice::Spend => Self::Spend,
             PacingChoice::Max => Self::Max,
+            PacingChoice::Off => Self::Off,
         }
     }
 }
 #[derive(Debug, Args)]
 pub struct RoutePacing {
-    /// Registered provider ID.
-    pub provider: String,
-    /// Provider pacing policy.
-    pub policy: PacingChoice,
+    /// Registered provider ID, or `override` to manage an override.
+    pub target: String,
+    /// Provider policy, or `clear` after `override`.
+    pub value: Option<String>,
+    /// Apply an override to this account key.
+    #[arg(long, conflicts_with_all = ["provider", "all"])]
+    pub account: Option<String>,
+    /// Apply an override to this provider.
+    #[arg(long, conflicts_with_all = ["account", "all"])]
+    pub provider: Option<String>,
+    /// Apply an override to all accounts.
+    #[arg(long, conflicts_with_all = ["account", "provider"])]
+    pub all: bool,
+    /// Override policy.
+    #[arg(long)]
+    pub policy: Option<PacingChoice>,
+    /// Override expiry as an RFC 3339 timestamp or duration (e.g. 2h, 1d).
+    #[arg(long)]
+    pub until: Option<String>,
 }
 #[derive(Debug, Args)]
 pub struct RouteResolve {
@@ -310,7 +327,11 @@ enum EdgeError {
         example_model: Option<String>,
     },
     #[error(transparent)]
-    Config(#[from] provenant_config::ConfigError),
+    Config(provenant_config::ConfigError),
+    #[error(
+        "{0}; valid pacing keys: accounts, free or a registered provider; profile keys: policy, windows, reserve, deadline, after_deadline; policies: spend, pace, max, off; windows: five_hour, seven_day, monthly, rolling; deadline table keys: reset_of, window; after_deadline: standby, continue"
+    )]
+    PacingConfig(#[source] provenant_config::ConfigError),
     #[error(transparent)]
     Routing(#[from] RoutingError),
     #[error(transparent)]
@@ -321,19 +342,38 @@ enum EdgeError {
     QuotaCache(#[from] crate::quota::EdgeError),
     #[error(transparent)]
     Quota(#[from] provenant_quota::QuotaError),
+    #[error("{0}")]
+    Pacing(&'static str),
+}
+impl From<provenant_config::ConfigError> for EdgeError {
+    fn from(error: provenant_config::ConfigError) -> Self {
+        let is_pacing = match &error {
+            provenant_config::ConfigError::Schema { location, .. }
+            | provenant_config::ConfigError::Domain { location, .. } => {
+                location.key_path.starts_with("domains.routing.pacing")
+            }
+            _ => false,
+        };
+        if is_pacing {
+            Self::PacingConfig(error)
+        } else {
+            Self::Config(error)
+        }
+    }
 }
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum Data {
-    List(provenant_routing::RouteList),
-    Resolved(Box<ResolvedPreview>),
+    List(Box<provenant_routing::RouteList>),
+    Resolved(Box<RoutePreview>),
 }
 #[derive(Serialize)]
-pub struct ResolvedPreview {
+pub struct RoutePreview {
     #[serde(flatten)]
-    route: provenant_records::ResolvedRoute,
+    pub route: provenant_records::ResolvedRoute,
+    pub pacing: Vec<provenant_routing::PacingPreview>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    quota: Option<provenant_quota::QuotaSnapshot>,
+    pub quota: Option<provenant_quota::QuotaSnapshot>,
 }
 /// The OpenCode snapshot reports the Go plan's pools, which only govern models
 /// served by the `opencode-go` provider. Free (Zen) and other configured
@@ -357,21 +397,14 @@ fn quota_observations(
 ) -> Result<Vec<QuotaObservation>, EdgeError> {
     let policies = provenant_providers::quota_policies(REGISTRY);
     let mut observations = Vec::new();
-    for available in availability {
-        let Some(account_key) = available.account_key.as_deref() else {
-            continue;
-        };
-        let Some(record) = records.iter().find(|record| {
-            record.account.adapter == available.adapter && record.account.account_key == account_key
-        }) else {
-            continue;
-        };
+    for record in records {
+        let adapter = record.account.adapter.as_str();
         let Some(snapshot) = record.snapshot.as_ref() else {
             continue;
         };
         let Some(ttl) = provenant_quota::schedule::interval(
             &policies,
-            &available.adapter,
+            adapter,
             provenant_quota::schedule::Trigger::Timer,
             provenant_quota::schedule::Power::Ac,
         ) else {
@@ -384,22 +417,26 @@ fn quota_observations(
         let mut models: BTreeSet<ModelId> = catalogue
             .models()
             .iter()
-            .filter(|entry| entry.model.adapter() == available.adapter)
+            .filter(|entry| entry.model.adapter() == adapter)
             .map(|entry| entry.model.clone())
             .collect();
-        for observed_model in &available.observed_models {
-            models.insert(ModelId::parse(&format!(
-                "{}/{}",
-                available.adapter, observed_model
-            ))?);
+        for observed_model in availability
+            .iter()
+            .filter(|a| {
+                a.adapter == adapter
+                    && a.account_key.as_deref() == Some(record.account.account_key.as_str())
+            })
+            .flat_map(|a| &a.observed_models)
+        {
+            models.insert(ModelId::parse(&format!("{}/{}", adapter, observed_model))?);
         }
         models.extend(
             requested_models
                 .iter()
-                .filter(|model| model.adapter() == available.adapter)
+                .filter(|model| model.adapter() == adapter)
                 .cloned(),
         );
-        models.retain(|model| snapshot_governs(&available.adapter, account_key, model));
+        models.retain(|model| snapshot_governs(adapter, &record.account.account_key, model));
         if observations.len().saturating_add(models.len()) > 256 {
             return Err(provenant_quota::QuotaError::Invalid("quota observation bound").into());
         }
@@ -436,6 +473,8 @@ fn with_context<T>(
         }
         Err(error) => return Err(error.into()),
     };
+    // Cached accounts also supply reset_of references outside the probed route.
+    // Quota facts never grant executable or account readiness.
     let timestamp = jiff::Timestamp::now();
     domains
         .quota
@@ -646,15 +685,15 @@ pub(crate) fn check_dispatch_candidate(
 fn list_data(
     roots: &Roots,
     query: &RouteListRequest,
-) -> Result<provenant_routing::RouteList, EdgeError> {
+) -> Result<Box<provenant_routing::RouteList>, EdgeError> {
     with_context(roots, &[], &[], "local-preview", &[], |context, _| {
-        Ok(provenant_routing::list(
+        Ok(Box::new(provenant_routing::list(
             &provenant_routing::RouteListQuery {
                 adapter: query.adapter.clone(),
                 pool: query.pool.clone(),
             },
             context,
-        )?)
+        )?))
     })
 }
 
@@ -822,9 +861,33 @@ fn reset_pool(roots: &Roots, request: &RouteReset) -> Result<(), EdgeError> {
 }
 
 fn set_pacing(roots: &Roots, request: &RoutePacing) -> Result<(), EdgeError> {
+    if request.target == "override" {
+        return set_pacing_override(roots, request);
+    }
+    if request.account.is_some()
+        || request.provider.is_some()
+        || request.all
+        || request.policy.is_some()
+        || request.until.is_some()
+    {
+        return Err(EdgeError::Pacing(
+            "override options require `route pacing override`",
+        ));
+    }
+    let policy = match request.value.as_deref() {
+        Some("pace") => "pace",
+        Some("spend") => "spend",
+        Some("max") => "max",
+        Some("off") => "off",
+        _ => {
+            return Err(EdgeError::Pacing(
+                "expected a pacing policy: pace, spend, max or off",
+            ));
+        }
+    };
     if !REGISTRY
         .iter()
-        .any(|provider| provider.adapter.id() == request.provider)
+        .any(|provider| provider.adapter.id() == request.target)
     {
         return Err(RoutingError::UnknownAdapter.into());
     }
@@ -834,13 +897,107 @@ fn set_pacing(roots: &Roots, request: &RoutePacing) -> Result<(), EdgeError> {
             .entry("pacing")
             .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
         let pacing = config_table(pacing).ok_or("domains.routing.pacing must be a table")?;
-        pacing.insert(
-            &request.provider,
-            toml_edit::value(match request.policy {
-                PacingChoice::Pace => "pace",
-                PacingChoice::Spend => "spend",
-                PacingChoice::Max => "max",
-            }),
+        pacing.insert(&request.target, toml_edit::value(policy));
+        Ok(())
+    })
+}
+
+fn override_expiry(value: &str) -> Option<i64> {
+    if let Ok(timestamp) = value.parse::<jiff::Timestamp>() {
+        return Some(timestamp.as_second());
+    }
+    let (digits, multiplier) = match value.as_bytes().last()? {
+        b's' => (&value[..value.len() - 1], 1),
+        b'm' => (&value[..value.len() - 1], 60),
+        b'h' => (&value[..value.len() - 1], 3600),
+        b'd' => (&value[..value.len() - 1], 86_400),
+        _ => return None,
+    };
+    let seconds = digits.parse::<i64>().ok()?.checked_mul(multiplier)?;
+    (seconds > 0)
+        .then(|| jiff::Timestamp::now().as_second().checked_add(seconds))
+        .flatten()
+}
+
+fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<(), EdgeError> {
+    if request.value.as_deref() == Some("clear") {
+        if request.account.is_some()
+            || request.provider.is_some()
+            || request.all
+            || request.policy.is_some()
+            || request.until.is_some()
+        {
+            return Err(EdgeError::Pacing("override clear takes no options"));
+        }
+        return edit_config(roots, |document| {
+            routing_table(document)?.remove("pacing_overrides");
+            Ok(())
+        });
+    }
+    if request.value.is_some()
+        || usize::from(request.account.is_some())
+            + usize::from(request.provider.is_some())
+            + usize::from(request.all)
+            != 1
+    {
+        return Err(EdgeError::Pacing(
+            "select exactly one of --account, --provider or --all",
+        ));
+    }
+    let policy = match request
+        .policy
+        .ok_or(EdgeError::Pacing("override requires --policy"))?
+    {
+        PacingChoice::Pace => "pace",
+        PacingChoice::Spend => "spend",
+        PacingChoice::Max => "max",
+        PacingChoice::Off => "off",
+    };
+    let expiry = request
+        .until
+        .as_deref()
+        .and_then(override_expiry)
+        .filter(|expiry| *expiry > jiff::Timestamp::now().as_second())
+        .ok_or(EdgeError::Pacing(
+            "--until must be a future RFC 3339 timestamp or positive duration",
+        ))?;
+    edit_config(roots, |document| {
+        let routing = routing_table(document)?;
+        let mut values = match routing.remove("pacing_overrides") {
+            None => toml_edit::Array::new(),
+            Some(toml_edit::Item::Value(toml_edit::Value::Array(values))) => values,
+            Some(toml_edit::Item::ArrayOfTables(tables)) => {
+                let mut values = toml_edit::Array::new();
+                for table in tables.iter() {
+                    values.push(toml_edit::Value::InlineTable(
+                        table.clone().into_inline_table(),
+                    ));
+                }
+                values
+            }
+            _ => return Err("domains.routing.pacing_overrides must be an array of tables"),
+        };
+        values.retain(|value| {
+            let Some(row) = value.as_inline_table() else {
+                return true;
+            };
+            row.get("account").and_then(toml_edit::Value::as_str) != request.account.as_deref()
+                || row.get("provider").and_then(toml_edit::Value::as_str)
+                    != request.provider.as_deref()
+        });
+        let mut row = toml_edit::InlineTable::new();
+        if let Some(account) = &request.account {
+            row.insert("account", toml_edit::Value::from(account.as_str()));
+        }
+        if let Some(provider) = &request.provider {
+            row.insert("provider", toml_edit::Value::from(provider.as_str()));
+        }
+        row.insert("policy", toml_edit::Value::from(policy));
+        row.insert("expires_unix_seconds", toml_edit::Value::from(expiry));
+        values.push(toml_edit::Value::InlineTable(row));
+        routing.insert(
+            "pacing_overrides",
+            toml_edit::Item::Value(toml_edit::Value::Array(values)),
         );
         Ok(())
     })
@@ -868,7 +1025,12 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
                                     )))
                     })
                     .and_then(|r| r.snapshot.clone());
-                Ok(Data::Resolved(Box::new(ResolvedPreview { route, quota })))
+                let pacing = provenant_routing::pacing_preview(&model, context);
+                Ok(Data::Resolved(Box::new(RoutePreview {
+                    route,
+                    pacing,
+                    quota,
+                })))
             })
         }
         Route::Set(request) => {
@@ -937,10 +1099,10 @@ pub fn run(
                 EdgeError::QuotaCache(crate::quota::EdgeError::Quota(_)) | EdgeError::Quota(_) => {
                     (Outcome::Invalid, "QUOTA")
                 }
-                EdgeError::Routing(_) | EdgeError::Unresolved { .. } => {
+                EdgeError::Routing(_) | EdgeError::Unresolved { .. } | EdgeError::Pacing(_) => {
                     (Outcome::Invalid, "INVALID")
                 }
-                EdgeError::Config(_) => (Outcome::Invalid, "CONFIG"),
+                EdgeError::Config(_) | EdgeError::PacingConfig(_) => (Outcome::Invalid, "CONFIG"),
                 _ => (Outcome::Error, "IO"),
             };
             let mut result = CommandResult::new(name, status, None);
@@ -969,6 +1131,28 @@ pub fn run(
                         .iter()
                         .map(|(name, r)| format!("route {name} = {}", r.model.as_str())),
                 );
+                lines.extend(list.account_pacing.iter().map(|entry| {
+                    format!(
+                        "account {}/{} pacing={:?} source={} profile={:?} expires={:?}",
+                        entry.adapter,
+                        entry.account,
+                        entry.policy,
+                        entry.source,
+                        entry.profile,
+                        entry.expires_unix_seconds,
+                    )
+                }));
+                lines.extend(list.configured_accounts.iter().map(|(account, profile)| {
+                    format!("account {account} pacing profile={profile:?}")
+                }));
+                lines.extend(list.configured_free.iter().map(|(provider, profile)| {
+                    format!("free {provider} pacing profile={profile:?}")
+                }));
+                lines.extend(
+                    list.active_overrides
+                        .iter()
+                        .map(|override_| format!("pacing override {override_:?}")),
+                );
                 lines.extend(list.pools.iter().map(|(name, members)| {
                     let models = members
                         .iter()
@@ -992,8 +1176,21 @@ pub fn run(
             }
             Some(Data::Resolved(preview)) => {
                 let route = &preview.route;
+                let diagnostics = preview
+                    .pacing
+                    .iter()
+                    .map(|p| {
+                        format!(
+                            "\n  account={} policy={:?} factor={} {}",
+                            p.account.as_deref().unwrap_or("unknown"),
+                            p.policy,
+                            p.factor_basis_points,
+                            p.detail
+                        )
+                    })
+                    .collect::<String>();
                 let mut text = format!(
-                    "{}/{} effort={} {:?}{}\n",
+                    "{}/{} effort={} {:?}{}{}\n",
                     route.adapter,
                     route.model,
                     route.effort.as_deref().unwrap_or("unspecified"),
@@ -1001,10 +1198,23 @@ pub fn run(
                     route
                         .pool_selection
                         .as_ref()
-                        .map_or_else(String::new, |receipt| format!(
-                            " pool={} roll={} pick={}",
-                            receipt.pool, receipt.roll, receipt.pick
-                        ))
+                        .map_or_else(String::new, |receipt| {
+                            let details = receipt
+                                .candidates
+                                .iter()
+                                .filter_map(|candidate| {
+                                    candidate
+                                        .pacing_detail
+                                        .as_ref()
+                                        .map(|detail| format!("\n  {}: {detail}", candidate.model))
+                                })
+                                .collect::<String>();
+                            format!(
+                                " pool={} roll={} pick={}{}",
+                                receipt.pool, receipt.roll, receipt.pick, details
+                            )
+                        }),
+                    diagnostics
                 );
                 if let Some(details) = preview.quota.as_ref().and_then(|q| q.details.as_ref())
                     && let (Some(source), Some(coverage)) = (&details.source, &details.coverage)
@@ -1281,6 +1491,7 @@ mod route_tests {
             pool_selection: Some(RouteSelectionReceipt {
                 pool: "junior".into(),
                 candidates: vec![RouteSelectionCandidate {
+                    pacing_detail: None,
                     model: format!("{adapter}/{model}"),
                     weight: 1,
                     factor_basis_points: 10_000,
@@ -1309,6 +1520,7 @@ mod route_tests {
             .ok_or("third receipt")?
             .candidates
             .push(RouteSelectionCandidate {
+                pacing_detail: None,
                 model: "codex/paid".into(),
                 weight: 1,
                 factor_basis_points: 10_000,

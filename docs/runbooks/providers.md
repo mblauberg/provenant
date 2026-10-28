@@ -22,7 +22,9 @@ and web access according to the access mode. The adapter sets
 
 The Console's free models use the derived `zen` account, separate from the
 `go` subscription account. Lanes and telemetry use this identity, and routing
-paces Zen from its own quota observations rather than Go's. The existing free
+paces Zen from its own quota observations rather than Go's. A
+`[domains.routing.pacing.accounts.go]` profile applies only to Go lanes; Zen
+uses the `zen` profile or the free-provider default. The existing free
 pool and free-model opt-in remain unchanged. Quota lists both accounts when an
 OpenCode account is configured; Zen reports only observed free-limit refusals.
 Its allowance and daily reset remain unknown until a provider refusal supplies
