@@ -1,4 +1,4 @@
-//! Provenant-only lane customisation; no user configuration is loaded.
+//! Provenant-only provider customisation and writer publishing setup.
 use crate::launch::{exact, subtree};
 use crate::{ProviderError, SetupStep};
 use provenant_confinement::permissions::ProviderProfileSpec;
@@ -6,6 +6,116 @@ use provenant_core::{AttemptId, RUN_STATE_DIRECTORY_ENV};
 use provenant_records::Harness;
 use serde_json::Value;
 use std::{ffi::OsString, path::Path};
+
+impl crate::LaunchSpec {
+    /// Configure shell Git after adapter preparation, including shells that
+    /// scrub Git environment variables. No credential is read during setup.
+    pub fn configure_publishing(
+        &mut self,
+        scratch: &Path,
+        git: &Path,
+        gh: &Path,
+        home: &Path,
+    ) -> Result<(), ProviderError> {
+        let text = |path: &Path| -> Result<String, ProviderError> {
+            if !path.is_absolute() {
+                return Err(ProviderError::InvalidPath);
+            }
+            let value = path.to_str().ok_or(ProviderError::InvalidPath)?;
+            if value.chars().any(char::is_control) {
+                return Err(ProviderError::InvalidPath);
+            }
+            Ok(value.to_owned())
+        };
+        let git_path = text(git)?;
+        let git = shell_quote(&git_path);
+        let gh_path = text(gh)?;
+        let gh_config = shell_quote(&text(&home.join(".config/gh"))?);
+        let gh = format!("GH_CONFIG_DIR={gh_config} {}", shell_quote(&gh_path));
+        let config = scratch.join("publishing.gitconfig");
+        let config_text = format!(
+            "[credential]\n\thelper =\n\thelper = {}\n\tinteractive = false\n",
+            serde_json::to_string(&format!("!{gh} auth git-credential"))
+                .map_err(|_| ProviderError::Malformed)?,
+        );
+        let include = shell_quote(&format!("include.path={}", text(&config)?));
+        let wrapper = format!(
+            "#!/bin/sh\nGIT_CONFIG_GLOBAL=/dev/null\nGIT_CONFIG_NOSYSTEM=1\n\
+             export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM\nexec {git} -c {include} \"$@\"\n"
+        );
+        let wrapper_path = scratch.join("bin/git");
+        let step = self.setup.iter_mut().find(|step| match step {
+            SetupStep::Symlink { link, .. } => link == &wrapper_path,
+            SetupStep::WriteExecutable { path, .. } => path == &wrapper_path,
+            _ => false,
+        });
+        let wrapper = SetupStep::WriteExecutable {
+            path: wrapper_path,
+            bytes: wrapper.into_bytes(),
+        };
+        if let Some(step) = step {
+            *step = wrapper;
+        } else {
+            self.setup.push(SetupStep::CreateDir(scratch.join("bin")));
+            self.setup.push(wrapper);
+        }
+        let (_, path) = self
+            .env
+            .iter_mut()
+            .find(|(key, _)| key == "PATH")
+            .ok_or(ProviderError::InvalidPath)?;
+        *path = std::env::join_paths(
+            std::iter::once(scratch.join("bin")).chain(std::env::split_paths(path)),
+        )
+        .map_err(|_| ProviderError::InvalidPath)?;
+        self.setup.extend([
+            SetupStep::WriteFile {
+                path: config,
+                bytes: config_text.into_bytes(),
+            },
+            SetupStep::WriteExecutable {
+                path: scratch.join("bin/gh"),
+                bytes: format!(
+                    "#!/bin/sh\nGH_CONFIG_DIR={gh_config}\nexport GH_CONFIG_DIR\nexec {} \"$@\"\n",
+                    shell_quote(&gh_path)
+                )
+                .into_bytes(),
+            },
+        ]);
+        // Cursor and Agy do not use LaneRuntime::grant for Git.
+        self.profile
+            .spec
+            .process_executables
+            .push(exact(git_path.as_str()));
+        self.profile.spec.runtime_reads.extend(
+            std::iter::once(exact(git_path.as_str())).chain(
+                crate::dylib::linked_libraries(Path::new(&git_path))
+                    .into_iter()
+                    .map(exact),
+            ),
+        );
+        if let Some(prefix) = Path::new(&git_path).parent().and_then(Path::parent) {
+            let core = prefix.join("libexec/git-core");
+            if core.is_dir() {
+                self.profile.spec.runtime_reads.push(subtree(&core));
+                self.profile.spec.tool_exec_roots.push(subtree(core));
+            }
+        }
+        self.profile
+            .spec
+            .process_executables
+            .push(exact(Path::new(&gh_path)));
+        self.profile
+            .spec
+            .runtime_reads
+            .push(exact(Path::new(&gh_path)));
+        Ok(())
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
 
 /// Canonical runtime paths supplied by the composition edge.
 pub struct LaneRuntime<'a> {
@@ -229,6 +339,196 @@ impl LaneRuntime<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publishing_setup_supports_every_writer_adapter() -> Result<(), ProviderError> {
+        let prompt = crate::Prompt::new("fixture".into());
+        let token = crate::tests::fixture_token();
+        for entry in crate::REGISTRY {
+            let id = entry.adapter.id();
+            let mut route = crate::tests::route(id, "fixture-model");
+            route.account_key = None;
+            let plan = crate::tests::fixture_access_plan(
+                crate::Access::WorktreeWrite,
+                provenant_records::AdapterSpec::get(id).and_then(|spec| spec.authentication),
+                false,
+            );
+            let mut spec = entry.adapter.prepare(crate::tests::fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                (id == "claude").then_some(&token),
+            ))?;
+            let result = spec.configure_publishing(
+                &plan.permissions().scratch.path,
+                Path::new("/fixture/git"),
+                Path::new("/fixture/gh"),
+                Path::new("/fixture/home"),
+            );
+            assert!(result.is_ok(), "publishing setup for {id}: {result:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn writer_publishing_redacts_credentials() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{Access, Adapter, Prompt, codex::Codex};
+        use provenant_confinement::redact::Redactor;
+        use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let home = root.join("home fixture's directory");
+        let attempt = root.join("attempt");
+        let scratch = attempt.join("scratch fixture's directory");
+        for path in [&home, &scratch] {
+            fs::create_dir_all(path)?;
+        }
+        fs::create_dir_all(home.join(".config/gh"))?;
+        // This synthetic login stays outside the run files, like the real one.
+        let token = format!("ghp_{}", "f".repeat(36));
+        fs::write(
+            home.join(".config/gh/hosts.yml"),
+            format!("username=fixture\npassword={token}\n"),
+        )?;
+        let gh = root.join("gh fixture's executable");
+        fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\n[ \"$GH_CONFIG_DIR\" = {} ] || exit 1\ncase \"$*\" in\n    'auth git-credential get') cat \"$GH_CONFIG_DIR/hosts.yml\" ;;\n    'pr create'|'pr comment'|'pr view'|'pr checks') printf 'fixture pr\\n' ;;\n    *) exit 1 ;;\nesac\n",
+                shell_quote(home.join(".config/gh").to_str().ok_or("home path")?),
+            ),
+        )?;
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o700))?;
+        let git = root.join("git fixture's executable");
+        std::os::unix::fs::symlink(
+            provenant_os::git::git_executable()
+                .ok_or("Git unavailable")?
+                .canonicalize()?,
+            &git,
+        )?;
+        let executor = SystemExecutor::new(1)?;
+        let mut env = vec![
+            ("HOME".into(), home.as_os_str().to_owned()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ("GIT_CONFIG_COUNT".into(), "0".into()),
+            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+        ];
+        let run = |tool: &Path,
+                   args: &[&str],
+                   cwd: &Path,
+                   env: &[(OsString, OsString)],
+                   stdin: Option<&[u8]>| {
+            let argv: Vec<_> = std::iter::once(tool.as_os_str().to_owned())
+                .chain(args.iter().map(OsString::from))
+                .collect();
+            let mut stdout = Redactor::new([])?;
+            let mut stderr = Redactor::new([])?;
+            let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(5));
+            options.env = Some(env);
+            options.stdin = stdin;
+            options.stdout_filter = Some(&mut stdout);
+            options.stderr_filter = Some(&mut stderr);
+            Ok::<_, Box<dyn std::error::Error>>(executor.execute(options)?)
+        };
+        let base = crate::tests::fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+        let mut permissions = base.permissions().clone();
+        permissions.scratch.path = scratch.clone();
+        if let Some(private) = &mut permissions.private_state {
+            private.path = attempt.join("provider-state");
+        }
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: base.scope(),
+            permissions,
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+        })?;
+        let mut route = crate::tests::route("codex", "fixture-model");
+        route.account_key = None;
+        let prompt = Prompt::new("fixture prompt".into());
+        let mut spec = Codex.prepare(crate::tests::fixture_input(
+            &route, &plan, &prompt, &root, None,
+        ))?;
+        spec.configure_publishing(&scratch, &git, &gh, &home)?;
+        // Apply only the generated publishing setup; adapter-specific auth
+        // setup belongs to the existing provider tests.
+        fs::create_dir_all(scratch.join("bin"))?;
+        for step in &spec.setup {
+            match step {
+                SetupStep::CreateDir(path) if path.starts_with(&scratch) => {
+                    fs::create_dir_all(path)?
+                }
+                SetupStep::WriteFile { path, bytes } if path.starts_with(&scratch) => {
+                    fs::write(path, bytes)?
+                }
+                SetupStep::WriteExecutable { path, bytes } if path.starts_with(&scratch) => {
+                    fs::write(path, bytes)?;
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+                }
+                SetupStep::Symlink { link, target } if link.starts_with(&scratch) => {
+                    std::os::unix::fs::symlink(target, link)?
+                }
+                _ => {}
+            }
+        }
+        env[1].1 = format!("{}:/usr/bin:/bin", scratch.join("bin").display()).into();
+        let lane_git = scratch.join("bin/git");
+        // The wrapper must carry the config even when the shell scrubs env.
+        let mut private_env = env.clone();
+        private_env[0].1 = root.join("private-home").into();
+        let credential = run(
+            &lane_git,
+            &["credential", "fill"],
+            &root,
+            &private_env,
+            Some(b"protocol=https\nhost=github.com\n\n"),
+        )?;
+        assert_eq!(credential.termination, Termination::Exit(0));
+        assert!(
+            credential
+                .stdout
+                .bytes
+                .windows(b"password=[REDACTED]".len())
+                .any(|window| window == b"password=[REDACTED]")
+        );
+        fs::write(attempt.join("stdout.log"), &credential.stdout.bytes)?;
+        fs::write(attempt.join("stderr.log"), &credential.stderr.bytes)?;
+        fs::write(
+            attempt.join("launch.json"),
+            serde_json::to_vec(&serde_json::json!({"argv": spec.argv, "env": env}))?,
+        )?;
+        fs::write(attempt.join("result.md"), &credential.stdout.bytes)?;
+        for verb in ["create", "comment", "view", "checks"] {
+            assert_eq!(
+                run(&scratch.join("bin/gh"), &["pr", verb], &root, &env, None)?.termination,
+                Termination::Exit(0)
+            );
+        }
+        let mut pending = vec![attempt];
+        while let Some(path) = pending.pop() {
+            for entry in fs::read_dir(path)? {
+                let entry = entry?;
+                let kind = entry.file_type()?;
+                if kind.is_dir() {
+                    pending.push(entry.path());
+                } else if kind.is_file() {
+                    assert!(
+                        !fs::read(entry.path())?
+                            .windows(token.len())
+                            .any(|window| window == token.as_bytes()),
+                        "fixture credential leaked to a run file"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn lane_mcp_entries_have_attempt_unique_agent_labels() -> Result<(), ProviderError> {

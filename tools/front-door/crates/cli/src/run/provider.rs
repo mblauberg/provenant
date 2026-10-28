@@ -1,7 +1,7 @@
 //! Provider preparation at the CLI composition edge.
 use super::{Registry, route_request};
 use provenant_confinement::permissions::{
-    AccessMode, PathGrant, PathScope, PlanPermissions, WorktreeWriteAuthority,
+    AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions, WorktreeWriteAuthority,
 };
 use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
 use provenant_core::{ProjectId, WorkScope};
@@ -28,6 +28,7 @@ pub(super) fn prepare(
         paths,
         resume,
         |name| match registry.host {
+            _ if name == "gh" => resolve_executable(name),
             Some(host) => host
                 .executables
                 .get(name)
@@ -85,6 +86,18 @@ fn prepare_with(
         Some(writer) => writer.worktree.path().to_owned(),
         None => canonical(registry.cwd.ok_or("working directory is unavailable")?)?,
     };
+    // Publishing is optional. Missing gh tools or configuration leave the
+    // writer able to do local work without publishing credential access.
+    let publishing_gh = (writer.is_some()
+        && task.access.network(true) == NetworkAccess::Open
+        && task
+            .profile
+            .knobs
+            .get("lanes.publish")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true))
+    .then(|| publishing_executable(&home, &locate))
+    .flatten();
     let git_context = task
         .base
         .as_deref()
@@ -217,6 +230,7 @@ fn prepare_with(
             &task.access,
             &host_writes,
             adapter,
+            publishing_gh.is_some(),
         )
         .and_then(|request| ConfinedPlan::new(request).map_err(|error| error.to_string()))
         {
@@ -419,6 +433,7 @@ fn prepare_with(
             &task.access,
             &host_writes,
             adapter.id(),
+            publishing_gh.is_some(),
         )
         .and_then(|request| match writer.as_ref() {
             Some(_) => ConfinedPlan::new(request)
@@ -512,6 +527,15 @@ fn prepare_with(
                 continue;
             }
         };
+        if let Some(gh) = publishing_gh.as_ref() {
+            let publishing = spec
+                .configure_publishing(scratch, &git, gh, &home)
+                .map_err(|error| error.to_string());
+            if let Err(error) = publishing {
+                reasons.push(skip(&label, SkipKind::Setup, error));
+                continue;
+            }
+        }
         if git_context.is_some() && adapter.id() == "claude" {
             // Scratch is already granted by the outer profile. Claude's file
             // tools also need it in their working directories to read context.
@@ -1411,12 +1435,16 @@ fn confinement_request(
     access: &run::LaneAccess,
     host_writes: &provenant_confinement::run_config::RunConfig,
     adapter: &str,
+    publishing: bool,
 ) -> Result<PlanRequest, String> {
     let mode = match writer {
-        Some(writer) => AccessMode::WorktreeWrite(Box::new(
-            WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, roots.home)
-                .map_err(|error| error.to_string())?,
-        )),
+        Some(writer) => {
+            let mut authority =
+                WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, roots.home)
+                    .map_err(|error| error.to_string())?;
+            authority.set_publishing(publishing);
+            AccessMode::WorktreeWrite(Box::new(authority))
+        }
         None => AccessMode::ReadOnly,
     };
     let grant = |path: &Path| PathGrant {
@@ -1539,6 +1567,18 @@ fn read_only_plan(
             .map(|plan| (plan, None))
             .map_err(|error| error.to_string()),
     }
+}
+
+fn publishing_executable(
+    home: &Path,
+    locate: &impl Fn(&str) -> Result<PathBuf, String>,
+) -> Option<PathBuf> {
+    if !home.join(".config/gh").is_dir() {
+        return None;
+    }
+    // Resolve links before adding exact executable grants or writing wrappers.
+    let executable = canonical(&locate("gh").ok()?).ok()?;
+    (executable.is_file() && provenant_os::sys::is_executable(&executable)).then_some(executable)
 }
 
 pub(crate) fn resolve_executable(name: &str) -> Result<PathBuf, String> {
@@ -1726,12 +1766,14 @@ pub fn writer_fixture_plan(
         &run::LaneAccess::default(),
         &Default::default(),
         "codex",
+        true,
     )?;
     ConfinedPlan::new(request).map_err(|error| error.to_string())
 }
 
 /// Exercise production preparation against a fake external provider executable.
 /// A supplied Claude token stands in for the host authority and refresh path.
+/// Optional publishing uses only a fixture gh beside the supplied executable.
 #[cfg(feature = "fixture")]
 pub fn prepare_fixture(
     registry: &Registry<'_>,
@@ -1747,7 +1789,13 @@ pub fn prepare_fixture(
         prompt,
         paths,
         None,
-        |_| canonical(executable),
+        |name| {
+            if name == "gh" {
+                canonical(&executable.with_file_name("gh"))
+            } else {
+                canonical(executable)
+            }
+        },
         token,
     )
 }
@@ -1755,6 +1803,41 @@ pub fn prepare_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publishing_is_optional_without_gh_configuration() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        let executable = std::env::current_exe()?.canonicalize()?;
+        assert_eq!(
+            publishing_executable(&home, &|_| Ok(executable.clone())),
+            None
+        );
+        assert!(!home.join(".config/gh").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn publishing_canonicalises_symlinked_gh_and_ignores_missing_tools()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        std::fs::create_dir_all(home.join(".config/gh"))?;
+        let executable = std::env::current_exe()?.canonicalize()?;
+        let gh = home.join("gh");
+        std::os::unix::fs::symlink(&executable, &gh)?;
+        assert_eq!(
+            publishing_executable(&home, &|_| Ok(gh.clone())),
+            Some(executable)
+        );
+        assert_eq!(
+            publishing_executable(&home, &|_| Err("not installed".into())),
+            None
+        );
+        std::fs::remove_file(&gh)?;
+        assert_eq!(publishing_executable(&home, &|_| Ok(gh.clone())), None);
+        Ok(())
+    }
 
     #[test]
     fn version_probe_reports_outcomes_without_disclosing_output()
@@ -2230,7 +2313,10 @@ mod tests {
             base: Some("HEAD".into()),
             base_ref: None,
             task_id: TaskId::from_bytes([3; 16]),
-            profile: Default::default(),
+            profile: provenant_records::run::HarnessProfile {
+                knobs: [("lanes.publish".into(), serde_json::json!(false))].into(),
+                ..Default::default()
+            },
             prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
             route: run::RequestedRoute::Model {
                 provider: "cursor".into(),
@@ -2351,6 +2437,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(attempt.join("prompt.txt"))?, prompt);
         let confinement = launch.confinement.ok_or("writer confinement missing")?;
         assert!(confinement.writer.is_some());
+        assert!(!confinement.plan.permissions().writer_publishing());
+        assert!(!scratch.join("publishing.gitconfig").exists());
         assert!(
             confinement
                 .plan
@@ -2757,6 +2845,7 @@ mod tests {
                     &Default::default(),
                     &Default::default(),
                     "codex",
+                    true,
                 )?)?;
                 use provenant_providers::{Adapter, ProviderEvent, codex::Codex};
                 let prompt = Prompt::new("continue".into());
@@ -3333,6 +3422,7 @@ mod tests {
                 &run::LaneAccess::default(),
                 &Default::default(),
                 entry.adapter.id(),
+                true,
             )?;
             assert!(request.permissions.read_roots.contains(&PathGrant {
                 path: assets.to_owned(),

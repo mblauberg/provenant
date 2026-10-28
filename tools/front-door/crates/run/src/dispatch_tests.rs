@@ -1185,6 +1185,7 @@ impl Providers for Confined {
         let mode = if self.writer {
             let authority: WorktreeWriteAuthority = serde_json::from_value(serde_json::json!({
                 "git_grants_digest": vec![7; 32],
+                "publishing": true,
                 "cargo_cache": {"path": "/fixture/cache", "scope": "subtree"}
             }))
             .map_err(|e| e.to_string())?;

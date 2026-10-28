@@ -54,6 +54,12 @@
       "effect": "Maximum nested lane depth, including the first dispatched lane.",
       "trade_off": "Lower limits delegation chains; higher permits deeper nested work."
     },
+    "lanes.publish": {
+      "type": "bool", "default": true, "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/run/provider.rs",
+      "effect": "Let worktree-write lanes with open network read gh configuration, push branches and open pull requests.",
+      "trade_off": "Off keeps publishing with the chair; on exposes the existing gh login read-only to the writer lane."
+    },
     "review.extra_reviewers": {
       "project": "strengthen",
       "type": "int", "min": 0, "max": 2, "default": 0, "status": "wired",

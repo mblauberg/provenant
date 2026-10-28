@@ -2552,6 +2552,8 @@ fn lane_prepare_isolates_nested_state() -> Result {
     let executable = rig.root.join("provider/bin/codex");
     fs::create_dir_all(executable.parent().ok_or("provider parent")?)?;
     rig.copy_executable(&std::env::current_exe()?, &executable)?;
+    // Publishing must never depend on gh or login state from the host PATH.
+    std::os::unix::fs::symlink(&executable, executable.with_file_name("gh"))?;
     // Production preparation needs registered, freshly observed accounts.
     let home = fs::canonicalize(&home)?;
     let executor = provenant_os::exec::SystemExecutor::new(1)?;
@@ -2585,23 +2587,23 @@ fn lane_prepare_isolates_nested_state() -> Result {
         )
     };
     fs::write(rig.state.join("config.toml"), config(1))?;
-    for (adapter, writer) in [
-        ("codex", false),
-        ("codex", true),
-        ("claude", false),
-        ("claude", true),
+    for (adapter, writer, publishing, seed) in [
+        ("codex", false, false, 91),
+        ("codex", true, false, 92),
+        ("claude", false, false, 93),
+        ("claude", true, false, 94),
+        ("codex", true, true, 95),
+        ("claude", true, true, 96),
     ] {
+        if publishing {
+            fs::create_dir_all(home.join(".config/gh"))?;
+        }
         let request =
             provenant_run::resolve_writer(roots.state.as_path(), &rig.project, &worktree)?;
         let mut prepared = writer_run(
             request,
-            &format!("lane-prepare-{adapter}-{writer}"),
-            match (adapter, writer) {
-                ("codex", false) => 91,
-                ("codex", true) => 92,
-                ("claude", false) => 93,
-                _ => 94,
-            },
+            &format!("lane-prepare-{adapter}-{writer}-{publishing}"),
+            seed,
             "fixture prompt",
         )?;
         let task = &mut prepared.request.tasks[0];
@@ -2713,18 +2715,28 @@ fn lane_prepare_isolates_nested_state() -> Result {
                 .any(|(key, value)| key == provenant_run::LANE_DEPTH_ENV && value == "1")
         );
         let confinement = launch.confinement.as_ref().ok_or("confinement")?;
+        assert_eq!(
+            confinement.plan.permissions().writer_publishing(),
+            publishing
+        );
         let selected_git =
             fs::canonicalize(provenant_os::git::git_executable().ok_or("host Git")?)?;
         let scratch_git = confinement.plan.permissions().scratch.path.join("bin/git");
-        if adapter == "claude" {
-            // Claude's env scrub drops GIT_CONFIG_GLOBAL, so scratch git wraps
-            // the selected Git and sets it itself, for writers and readers.
+        if adapter == "claude" || publishing {
+            // Claude's env scrub and publishing both need a Git wrapper.
             let wrapper = fs::read_to_string(&scratch_git)?;
             assert!(wrapper.contains("GIT_CONFIG_GLOBAL=/dev/null"));
             assert!(wrapper.contains(&format!("exec '{}'", selected_git.display())));
             assert!(!fs::symlink_metadata(&scratch_git)?.file_type().is_symlink());
         } else {
             assert_eq!(fs::read_link(&scratch_git)?, selected_git);
+        }
+        let scratch = &confinement.plan.permissions().scratch.path;
+        assert_eq!(scratch.join("publishing.gitconfig").exists(), publishing);
+        assert_eq!(scratch.join("bin/gh").exists(), publishing);
+        if publishing {
+            let gh_wrapper = fs::read_to_string(scratch.join("bin/gh"))?;
+            assert!(gh_wrapper.contains(&format!("exec '{}'", executable.display())));
         }
         assert!(
             launch
