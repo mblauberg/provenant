@@ -90,10 +90,10 @@ pub struct PriceIdentity {
 #[derive(Clone, Debug)]
 pub struct PriceTable {
     pub(crate) identity: PriceIdentity,
-    models: BTreeMap<(String, String), Rates>,
+    models: BTreeMap<(String, String), (Rates, BillingKind)>,
 }
 impl PriceTable {
-    pub(crate) fn get(&self, provider: &str, model: &str) -> Option<&Rates> {
+    pub(crate) fn get(&self, provider: &str, model: &str) -> Option<&(Rates, BillingKind)> {
         self.models.get(&(provider.to_owned(), model.to_owned()))
     }
 }
@@ -143,7 +143,10 @@ pub fn validate_prices(config: &ConfiguredPrices) -> Result<PriceTable, PriceErr
             ));
         }
         let key = (model.provider.clone(), model.model.clone());
-        if models.insert(key, model.rates.clone()).is_some() {
+        if models
+            .insert(key, (model.rates.clone(), model.billing))
+            .is_some()
+        {
             return Err(PriceError::Invalid("duplicate provider/model"));
         }
     }

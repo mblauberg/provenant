@@ -1229,6 +1229,20 @@ mod tests {
         assert!(resume.no_fallback);
     }
     #[test]
+    fn native_claude_import_requires_unfiltered_stats() {
+        valid(&["telemetry", "stats", "--claude-subagents", "subagents"]);
+        for filter in [
+            vec!["--usage"],
+            vec!["--since", "2026-10-24"],
+            vec!["--until", "2026-10-24"],
+            vec!["--run-id", "11111111111111111111111111111111"],
+        ] {
+            let mut args = vec!["telemetry", "stats", "--claude-subagents", "subagents"];
+            args.extend(filter);
+            invalid(&args);
+        }
+    }
+    #[test]
     fn paging_recovery_and_removal_require_explicit_scopes() {
         invalid(&["lanes", "--condition", "all"]);
         invalid(&["lanes", "--wait", "1", "--cursor", "next"]);

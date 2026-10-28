@@ -683,6 +683,9 @@ pub struct Trace {
 }
 #[derive(Debug, Args)]
 pub struct Stats {
+    /// Report native Claude subagents from one session's subagents directory instead of supervised attempts
+    #[arg(long, conflicts_with_all = ["usage", "since", "until", "run_id"])]
+    pub claude_subagents: Option<PathBuf>,
     /// Count local CLI verbs and MCP tools, including unused installed units.
     #[arg(long)]
     pub usage: bool,

@@ -675,6 +675,7 @@ name = "provenant-telemetry"
 version = "1.2.1"
 dependencies = [
  "jiff",
+ "libc",
  "provenant-core",
  "provenant-os",
  "provenant-records",

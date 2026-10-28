@@ -4475,6 +4475,45 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
             provenant_telemetry::validate_prices(&config).map_err(|error| error.to_string())
         })
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error))?;
+    if let Some(path) = command.claude_subagents.as_deref() {
+        let native =
+            provenant_telemetry::claude_subagents(path, &prices).map_err(|error| match error {
+                provenant_telemetry::NativeError::Input(message) => {
+                    Fail::new(Status::Invalid, ErrorKind::Invalid, message)
+                }
+                provenant_telemetry::NativeError::Io(message) => {
+                    Fail::new(Status::Error, ErrorKind::Io, message)
+                }
+            })?;
+        let mut human = format!("{} native Claude subagents\n", native.agents);
+        if native.skipped_incomplete_lines > 0 {
+            human.push_str(&format!(
+                "{} incomplete final lines skipped\n",
+                native.skipped_incomplete_lines
+            ));
+        }
+        for row in &native.models {
+            let cost = row.cost_usd.as_ref().map_or_else(
+                || "unknown".to_owned(),
+                |cost| format!("est. API-equivalent ${}", cost.usd),
+            );
+            let billing = match row.price_table_billing {
+                Some(provenant_telemetry::BillingKind::Subscription) => {
+                    " (price-table subscription model)"
+                }
+                _ => "",
+            };
+            human.push_str(&format!(
+                "  {}: {} agents, {} messages, cost {}{}\n",
+                plain_text(&row.model, usize::MAX),
+                row.agents,
+                row.messages,
+                cost,
+                billing
+            ));
+        }
+        return Ok((json!({ "native_claude_subagents": native }), human));
+    }
     let instant = |time: Option<jiff::Timestamp>| {
         time.map(|t| WallTime::from_micros(t.as_microsecond()))
             .transpose()
@@ -4520,10 +4559,10 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
 fn stats_summary(totals: &provenant_telemetry::Totals) -> String {
     let cost = &totals.cost;
     let human = if let Some(money) = &cost.complete {
-        format!("${}", money.usd)
+        format!("est. API-equivalent ${}", money.usd)
     } else if let Some(money) = &cost.known_lower_bound {
         format!(
-            "at least ${} ({} of {} attempts priced)",
+            "est. API-equivalent at least ${} ({} of {} attempts priced)",
             money.usd, cost.priced_attempts, totals.attempts
         )
     } else {
@@ -4888,6 +4927,8 @@ mod tests {
             attempts: 3,
             usage: Default::default(),
             cost: CostTotal {
+                cost_basis: "api_equivalent_estimate",
+                subscription_attempts: 0,
                 complete: None,
                 known_lower_bound: None,
                 priced_attempts: 0,
@@ -4907,10 +4948,13 @@ mod tests {
         totals.cost.missing_attempts = 2;
         assert_eq!(
             stats_summary(&totals),
-            "3 attempts, at least $2.000000 (1 of 3 attempts priced)\n"
+            "3 attempts, est. API-equivalent at least $2.000000 (1 of 3 attempts priced)\n"
         );
         totals.cost.complete = totals.cost.known_lower_bound.clone();
-        assert_eq!(stats_summary(&totals), "3 attempts, $2.000000\n");
+        assert_eq!(
+            stats_summary(&totals),
+            "3 attempts, est. API-equivalent $2.000000\n"
+        );
     }
 
     #[test]
