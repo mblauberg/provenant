@@ -62,6 +62,25 @@ fn effort_errors_report_recorded_controls_and_nearest_models()
     Ok(())
 }
 #[test]
+fn nearest_models_respect_namespace_and_distance() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let nearest = |id: &str| -> Result<Vec<String>, RoutingError> {
+        Ok(catalogue.nearest_models(&ModelId::parse(id)?))
+    };
+    assert_eq!(
+        nearest("opencode/openrouter/~anthropic/claude-haiku-latestt")?,
+        vec!["opencode/openrouter/~anthropic/claude-haiku-latest"]
+    );
+    assert!(nearest("opencode/openrouter/~openai/claude-haiku-latest")?.is_empty());
+    assert!(
+        nearest("opencode/opencode-go/claude-haiku-latest")?
+            .iter()
+            .all(|id| id.starts_with("opencode/opencode-go/"))
+    );
+    assert!(nearest("codex/completely-unrelated-model")?.is_empty());
+    Ok(())
+}
+#[test]
 fn opus_advisory_uses_the_applied_pool_tier() -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
@@ -2092,6 +2111,44 @@ fn probe_adapters_include_only_requested_routes_pools_and_fallbacks()
 }
 
 /// Exercise profile decisions through the public resolver and its receipt.
+#[test]
+fn qualified_pacing_and_reset_references_respect_adapter() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let model = "claude/claude-haiku-5-5";
+    let window = QuotaWindow {
+        pool: "seven_day".into(),
+        window_seconds: Some(604_800),
+        used_basis_points: 5_000,
+        resets_unix_seconds: Some(604_900),
+    };
+    let mut matching = quota(model, "shared", QuotaStatus::Available, 1, 80, 120)?;
+    matching.snapshot.account.adapter = "claude".into();
+    matching.snapshot.windows = vec![QuotaWindow {
+        resets_unix_seconds: Some(90),
+        ..window.clone()
+    }];
+    let mut other = quota(model, "shared", QuotaStatus::Available, 1, 90, 120)?;
+    other.snapshot.account.adapter = "codex".into();
+    other.snapshot.windows = vec![window.clone()];
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({"pacing":{"accounts":{
+        "claude/michael":{"policy":"pace", "windows":["seven_day"], "deadline":{"reset_of":"claude/shared", "window":"seven_day"}, "after_deadline":"standby"},
+        "codex/michael":{"policy":"off"}
+    }}}))?;
+    let route = profile_preview(
+        config,
+        model,
+        "michael",
+        vec![window],
+        vec![matching, other],
+    )?;
+    assert_eq!(
+        route.pool_selection.ok_or("receipt")?.candidates[0].factor_basis_points,
+        0
+    );
+    Ok(())
+}
+
 fn profile_preview(
     mut config: RoutingConfig,
     model: &str,

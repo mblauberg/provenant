@@ -469,20 +469,38 @@ fn resolve_pacing_accounts(
         .collect::<Vec<_>>()
         .join(", ");
     let resolve = |name: &str, field: &str| -> Result<String, EdgeError> {
-        if settings.entries.values().any(|entry| entry.key == name) {
-            return Ok(name.to_owned());
-        }
-        let id = crate::accounts::resolve(&settings, name).map_err(|error| {
-            EdgeError::AccountProfile(format!(
-                "{field}: {error}; valid account labels and keys: {}",
+        let matches = settings
+            .entries
+            .iter()
+            .filter(|(id, entry)| {
+                name == format!("{}/{}", entry.adapter, entry.key)
+                    || *id == name
+                    || entry.label == name
+                    || entry.key == name
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [(_, entry)] => Ok(format!("{}/{}", entry.adapter, entry.key)),
+            [] => Err(EdgeError::AccountProfile(format!(
+                "{field}: unknown account `{name}`; valid account labels and keys: {}",
                 if valid.is_empty() {
                     "(none registered)"
                 } else {
                     &valid
                 }
-            ))
-        })?;
-        Ok(settings.entries[&id].key.clone())
+            ))),
+            _ => Err(EdgeError::AccountProfile(format!(
+                "{field}: account `{name}` is ambiguous: {}; use adapter/key or a unique label",
+                matches
+                    .iter()
+                    .map(|(id, entry)| format!(
+                        "{}/{} (label: {}, entry: {})",
+                        entry.adapter, entry.key, entry.label, id
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+        }
     };
     let mut accounts = std::collections::BTreeMap::new();
     for (name, mut profile) in std::mem::take(&mut config.pacing.accounts) {
@@ -1374,6 +1392,44 @@ pub fn run(
 
 #[cfg(test)]
 mod route_tests {
+    #[test]
+    fn pacing_account_references_reject_collisions_and_keep_adapter() {
+        use provenant_providers::accounts::Settings;
+        use provenant_routing::RoutingConfig;
+        let settings: Settings = serde_json::from_value(serde_json::json!({"entries": {
+            "first": {"adapter":"claude", "label":"work", "key":"shared", "directory":"/tmp/a"},
+            "shared": {"adapter":"codex", "label":"shared", "key":"other", "directory":"/tmp/b"},
+            "third": {"adapter":"agy", "label":"personal", "key":"shared", "directory":"/tmp/c"}
+        }}))
+        .unwrap();
+        for config in [
+            serde_json::json!({"pacing":{"accounts":{"shared":{"policy":"pace"}}}}),
+            serde_json::json!({"pacing":{"free":{"codex":{"deadline":{"reset_of":"shared"}}}}}),
+        ] {
+            let mut config: RoutingConfig = serde_json::from_value(config).unwrap();
+            let error = super::resolve_pacing_accounts(&mut config, &settings)
+                .unwrap_err()
+                .to_string();
+            for expected in [
+                "ambiguous",
+                "claude/shared",
+                "codex/other",
+                "agy/shared",
+                "adapter/key",
+            ] {
+                assert!(error.contains(expected), "{error}");
+            }
+        }
+        let mut config: RoutingConfig = serde_json::from_value(serde_json::json!({"pacing":{
+            "accounts":{"work":{"deadline":{"reset_of":"agy/shared"}}}
+        }}))
+        .unwrap();
+        super::resolve_pacing_accounts(&mut config, &settings).unwrap();
+        let profile = &config.pacing.accounts["claude/shared"];
+        assert!(
+            matches!(&profile.deadline, Some(provenant_routing::PacingDeadline::ResetOf(r)) if r.reset_of == "agy/shared")
+        );
+    }
     use provenant_records::{
         ResolvedRoute, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
         RouteSelectionCandidate, RouteSelectionReceipt,

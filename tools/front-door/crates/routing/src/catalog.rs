@@ -410,7 +410,7 @@ impl DomainConfig for RoutingConfig {
             }
         }
         for (account, profile) in &self.pacing.accounts {
-            if !identifier(account) {
+            if !account_identifier(account) {
                 errors.push(SectionError {
                     field: format!("pacing.accounts.{account}"),
                     code: "selector",
@@ -466,6 +466,13 @@ impl DomainConfig for RoutingConfig {
         errors
     }
 }
+fn account_identifier(value: &str) -> bool {
+    value.split_once('/').map_or_else(
+        || identifier(value),
+        |(adapter, key)| identifier(adapter) && identifier(key),
+    )
+}
+
 fn validate_profile(field: &str, profile: &PacingProfile, errors: &mut Vec<SectionError>) {
     if profile.reserve.values().any(|percent| *percent > 100) {
         errors.push(SectionError {
@@ -476,7 +483,7 @@ fn validate_profile(field: &str, profile: &PacingProfile, errors: &mut Vec<Secti
     if profile
         .deadline
         .as_ref()
-        .is_some_and(|deadline| matches!(deadline, PacingDeadline::ResetOf(reset) if !identifier(&reset.reset_of)))
+        .is_some_and(|deadline| matches!(deadline, PacingDeadline::ResetOf(reset) if !account_identifier(&reset.reset_of)))
     {
         errors.push(SectionError {
             field: format!("{field}.deadline"),
@@ -738,7 +745,8 @@ impl Catalogue {
     pub fn revision(&self) -> &str {
         &self.revision
     }
-    /// Nearest recorded model IDs for the same adapter, ordered by edit distance.
+    /// Similar recorded model IDs in the same adapter and OpenCode namespace.
+    /// Results are ordered by edit distance and exclude unrelated names.
     pub fn nearest_models(&self, model: &ModelId) -> Vec<String> {
         fn distance(a: &str, b: &str) -> usize {
             let b: Vec<char> = b.chars().collect();
@@ -756,15 +764,28 @@ impl Catalogue {
             }
             row[b.len()]
         }
+        // Every OpenCode path component before the model name is its namespace.
+        fn parts(id: &ModelId) -> (&str, &str) {
+            if id.adapter() == "opencode" {
+                id.model().rsplit_once('/').unwrap_or(("", id.model()))
+            } else {
+                ("", id.model())
+            }
+        }
+        let (namespace, name) = parts(model);
         let mut matches: Vec<_> = self
             .models
             .iter()
             .filter(|entry| entry.model.adapter() == model.adapter())
-            .map(|entry| {
-                (
-                    distance(model.model(), entry.model.model()),
-                    entry.model.as_str().to_owned(),
-                )
+            .filter_map(|entry| {
+                let (entry_namespace, entry_name) = parts(&entry.model);
+                if entry_namespace != namespace {
+                    return None;
+                }
+                let edits = distance(name, entry_name);
+                // Allow small typos, while limiting suggestions for long names.
+                let cutoff = (name.chars().count().max(entry_name.chars().count()) / 3).clamp(1, 3);
+                (edits <= cutoff).then(|| (edits, entry.model.as_str().to_owned()))
             })
             .collect();
         matches.sort();

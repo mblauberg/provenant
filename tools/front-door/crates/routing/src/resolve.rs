@@ -347,7 +347,14 @@ fn effective_profile<'a>(
     &'static str,
     Option<i64>,
 ) {
-    let account_profile = account.and_then(|a| context.config.pacing.accounts.get(a));
+    let account_profile = account.and_then(|a| {
+        context
+            .config
+            .pacing
+            .accounts
+            .get(&format!("{}/{a}", model.adapter()))
+            .or_else(|| context.config.pacing.accounts.get(a))
+    });
     let free_profile = context
         .catalogue
         .is_free_model(model)
@@ -494,8 +501,12 @@ fn reference_observation<'a>(
         .quota
         .iter()
         .filter(|o| {
-            o.snapshot.account.account_key == deadline.reset_of
-                && o.snapshot.schema_version == 1
+            deadline.reset_of.split_once('/').map_or_else(
+                || o.snapshot.account.account_key == deadline.reset_of,
+                |(adapter, key)| {
+                    o.snapshot.account.adapter == adapter && o.snapshot.account.account_key == key
+                },
+            ) && o.snapshot.schema_version == 1
                 && o.snapshot.observed_unix_seconds <= context.now_seconds()
                 && o.snapshot.observed_unix_seconds < o.expires_unix_seconds
                 && o.expires_unix_seconds > context.now_seconds()
