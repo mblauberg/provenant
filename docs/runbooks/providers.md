@@ -114,16 +114,16 @@ profile deny rules still restrict the listed allowances.
 Run refuses an attempt whose grant list exceeds 1,024 entries or 256 KiB
 encoded. The attempt ends Rejected before launch and its siblings still start.
 
-Writer lanes can update only their own `origin` tracking ref and reflog. Other
-tracking refs and shared config are read-only. The host refreshes origin before
-launch; a fetch that tries to update another tracking ref is denied. Dispatch
+Remote-tracking refs, their reflogs and shared config are read-only in writer
+lanes. The host refreshes origin before launch; a fetch that tries to update a
+tracking ref is denied. Dispatch
 with `--deliver-remote` and `--deliver-branch` to have run push the verified
 final commit after the lane finishes.
 
 Network-open profiles can read the existing `~/.config/gh` login and may use
 it to push; profiles deny access to `~/.ssh`. After a successful push,
-Git may report that it could not set an upstream with `-u`, because shared
-config is read-only. The host
+Git may report that it could not update its local tracking ref after a successful
+push, or set an upstream with `-u`, because shared Git state is read-only. The host
 best-effort refreshes the lane branch's `origin` tracking ref at settlement;
 shared upstream configuration remains read-only.
 

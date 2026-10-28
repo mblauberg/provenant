@@ -408,7 +408,7 @@ pub fn worktree_cargo_cache(
 /// also creates missing nested branch/ref-log parents without granting the
 /// child authority to create sibling refs. Call while holding writer custody,
 /// before collecting `required_anchors`. Shared config and packed refs remain
-/// immutable; origin tracking refs and their reflogs are prepared for fetch.
+/// immutable; tracking refs remain host-owned.
 pub fn prepare_writer_directories(
     worktree: &VerifiedWorktree,
     selected_ref: &GitRefName,
@@ -509,7 +509,6 @@ pub(crate) struct WorktreeWriteGrants {
     packed_refs_lock: PathGrant,
     head: [PathGrant; 14],
     objects: PathGrant,
-    origin_tracking: [PathGrant; 4],
     selected_ref: [PathGrant; 4],
 }
 
@@ -563,13 +562,6 @@ impl WorktreeWriteGrants {
             ]
             .map(|name| exact(private.join(name))),
             objects: subtree(common.join("objects")),
-            origin_tracking: [
-                format!("refs/remotes/origin/{branch}"),
-                format!("refs/remotes/origin/{branch}.lock"),
-                format!("logs/refs/remotes/origin/{branch}"),
-                format!("logs/refs/remotes/origin/{branch}.lock"),
-            ]
-            .map(|path| exact(common.join(path))),
             selected_ref: [
                 format!("refs/heads/{branch}"),
                 format!("refs/heads/{branch}.lock"),
@@ -589,7 +581,6 @@ impl WorktreeWriteGrants {
             .chain(self.fetch_heads.iter())
             .chain(self.head.iter())
             .chain(std::iter::once(&self.objects))
-            .chain(self.origin_tracking.iter())
             .chain(self.selected_ref.iter())
     }
 
@@ -613,184 +604,6 @@ impl WorktreeWriteGrants {
         for grant in self.iter().skip(1) {
             validate_noncredential_grant(grant)?;
         }
-        validate_origin_tracking(&self.common_git_dir.path, &self.origin_tracking[0].path)?;
-        Ok(())
-    }
-}
-
-// Compare components independently, including directory prefixes on case-folding
-// filesystems. An existing exact lane ref is allowed unless it is protected.
-fn tracking_paths_overlap(left: &str, right: &str) -> bool {
-    let mut left = left.split('/');
-    let mut right = right.split('/');
-    loop {
-        match (left.next(), right.next()) {
-            (Some(a), Some(b)) if a.eq_ignore_ascii_case(b) => {}
-            (Some(_), Some(_)) => return false,
-            _ => return true,
-        }
-    }
-}
-
-fn validate_origin_tracking(common: &Path, tracking: &Path) -> Result<(), PermissionError> {
-    let denied = || PermissionError::GitWriteAuthorityMissing;
-    let origin = common.join("refs/remotes/origin");
-    let branch = tracking
-        .strip_prefix(&origin)
-        .map_err(|_| denied())?
-        .to_str()
-        .ok_or_else(denied)?;
-    let mut protected = vec![
-        "HEAD".to_owned(),
-        "main".to_owned(),
-        "master".to_owned(),
-        "trunk".to_owned(),
-    ];
-    let mut refs = Vec::<(String, String)>::new();
-
-    fn read_loose(
-        dir: &Path,
-        prefix: &str,
-        refs: &mut Vec<(String, String)>,
-    ) -> std::io::Result<()> {
-        match std::fs::symlink_metadata(dir) {
-            Ok(metadata) if metadata.file_type().is_dir() => {}
-            Ok(_) => return Err(std::io::Error::other("invalid origin ref directory")),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error),
-        }
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        for entry in entries {
-            let entry = entry?;
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| std::io::Error::other("non-UTF-8 ref"))?;
-            let name = if prefix.is_empty() {
-                name
-            } else {
-                format!("{prefix}/{name}")
-            };
-            let kind = entry.file_type()?;
-            if kind.is_dir() {
-                read_loose(&entry.path(), &name, refs)?;
-            } else if kind.is_file() {
-                refs.push((
-                    name,
-                    std::fs::read_to_string(entry.path())?.trim().to_owned(),
-                ));
-            } else {
-                return Err(std::io::Error::other("invalid origin ref"));
-            }
-        }
-        Ok(())
-    }
-    read_loose(&origin, "", &mut refs).map_err(|_| denied())?;
-    let loose_head = refs
-        .iter()
-        .find(|(name, _)| name == "HEAD")
-        .map(|(_, value)| value.clone());
-    match std::fs::read_to_string(common.join("packed-refs")) {
-        Ok(packed) => {
-            for line in packed
-                .lines()
-                .filter(|line| !line.is_empty() && !line.starts_with(['#', '^']))
-            {
-                let (value, name) = line.split_once(' ').ok_or_else(denied)?;
-                if let Some(name) = name.strip_prefix("refs/remotes/origin/") {
-                    // Loose refs override packed refs of the same name.
-                    if !refs.iter().any(|(existing, _)| existing == name) {
-                        refs.push((name.to_owned(), value.to_owned()));
-                    }
-                }
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(denied()),
-    }
-    let head = loose_head.or_else(|| {
-        refs.iter()
-            .find(|(name, _)| name == "HEAD")
-            .map(|(_, value)| value.clone())
-    });
-    if let Some(head) = head {
-        if let Some(target) = head.strip_prefix("ref: refs/remotes/origin/") {
-            protected.push(target.to_owned());
-        } else {
-            // A packed direct HEAD has no symbolic target. Protect every origin
-            // ref resolving to the same object.
-            protected.extend(
-                refs.iter()
-                    .filter(|(_, value)| value == &head)
-                    .map(|(name, _)| name.clone()),
-            );
-        }
-    }
-    if protected
-        .iter()
-        .any(|name| tracking_paths_overlap(branch, name))
-        || refs
-            .iter()
-            .any(|(name, _)| name != branch && tracking_paths_overlap(branch, name))
-    {
-        return Err(denied());
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod protected_tracking_tests {
-    use super::WorktreeWriteGrants;
-
-    #[test]
-    fn protected_origin_tracking_refs_cannot_be_granted() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let temp = tempfile::tempdir()?;
-        let common = temp.path().join("git");
-        let origin = common.join("refs/remotes/origin");
-        std::fs::create_dir_all(&origin)?;
-        std::fs::write(origin.join("HEAD"), "ref: refs/remotes/origin/trunk\n")?;
-        for branch in ["HEAD", "head", "Main", "MAIN", "master", "trunk"] {
-            let grants = WorktreeWriteGrants::from_paths(temp.path(), &common, &common, branch);
-            assert!(grants.validate().is_err(), "protected branch {branch}");
-        }
-        let grants = WorktreeWriteGrants::from_paths(temp.path(), &common, &common, "lane/test");
-        grants.validate()?;
-        Ok(())
-    }
-
-    #[test]
-    fn origin_ref_collisions_include_prefixes_and_packed_head()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let common = temp.path().join("git");
-        let origin = common.join("refs/remotes/origin");
-        std::fs::create_dir_all(origin.join("feature"))?;
-        std::fs::write(origin.join("feature/topic"), "1234\n")?;
-        std::fs::write(
-            common.join("packed-refs"),
-            "# pack-refs with: sorted\n1234 refs/remotes/origin/HEAD\n1234 refs/remotes/origin/default\n5678 refs/remotes/origin/packed/nested\n",
-        )?;
-        for branch in [
-            "FEATURE",
-            "feature/Topic",
-            "packed",
-            "PACKED/nested/child",
-            "default",
-        ] {
-            let grants = WorktreeWriteGrants::from_paths(temp.path(), &common, &common, branch);
-            assert!(grants.validate().is_err(), "collision {branch}");
-        }
-        let grants =
-            WorktreeWriteGrants::from_paths(temp.path(), &common, &common, "feature/topic");
-        // A packed direct HEAD has the same object, so it is host protected.
-        assert!(grants.validate().is_err());
-        std::fs::write(origin.join("feature/topic"), "9999\n")?;
-        grants.validate()?;
         Ok(())
     }
 }
@@ -2357,9 +2170,6 @@ fn push_worktree_rule(
     {
         push_rule(source, "allow", "file-write*", &grant.path, grant.scope)?;
     }
-    for grant in &grants.origin_tracking {
-        push_rule(source, "allow", "file-write*", &grant.path, grant.scope)?;
-    }
     // Anchored to the private git directory: one path component, digits only.
     let private = sbpl_regex_path(&grants.private_git_dir.path)?;
     source.push_str(&format!(
@@ -3163,7 +2973,6 @@ mod tests {
             packed_refs_lock: exact("packed-refs.lock"),
             head: std::array::from_fn(|i| exact(&format!("head-{i}"))),
             objects: subtree("/fixture/git/objects"),
-            origin_tracking: std::array::from_fn(|i| exact(&format!("origin-{i}"))),
             selected_ref: std::array::from_fn(|i| exact(&format!("ref-{i}"))),
         }
     }
@@ -4226,8 +4035,6 @@ mod tests {
             private_logs.clone(),
             common_heads,
             common_logs,
-            common.join("refs/remotes/origin/s3"),
-            common.join("logs/refs/remotes/origin/s3"),
         ];
 
         let directories = anchor_paths
@@ -4239,14 +4046,6 @@ mod tests {
             directories: &directories,
             worktree: Some((&linked, &selected_ref)),
         };
-        // A pre-existing alias to config must not be writable through an origin grant.
-        let alias = grants.origin_tracking[0].path.clone();
-        std::fs::hard_link(common.join("config"), &alias)?;
-        assert!(matches!(
-            anchors.verify_single_link_grant(&grants.origin_tracking[0]),
-            Err(PermissionError::AnchorMismatch)
-        ));
-        std::fs::remove_file(alias)?;
         assert!(missing_parent.is_dir());
         let wrong_home = Anchors {
             home: Path::new("/different/home"),
@@ -4282,7 +4081,7 @@ mod tests {
             "(regex #\"^{private_pattern}/next-index-[0-9]+\\.lock$\")"
         )));
         assert!(!source.contains(&format!("^{}/next-index", sbpl_regex_path(&common)?)));
-        // Fetch can record its result and update origin tracking refs.
+        // Fetch can record its result in the private git directory.
         {
             let directory = &private;
             assert!(source.contains(&format!(
@@ -4306,25 +4105,18 @@ mod tests {
             "packed-refs",
             "refs/heads/main",
             "refs/remotes",
+            "refs/remotes/origin/s3/authority",
+            "refs/remotes/origin/s3/authority.lock",
             "refs/remotes/upstream",
             "logs/refs/remotes",
+            "logs/refs/remotes/origin/s3/authority",
+            "logs/refs/remotes/origin/s3/authority.lock",
             "hooks",
         ] {
             assert!(
                 !source.contains(&format!("\"{}\"", common.join(relative).display())),
                 "{relative}"
             );
-        }
-        for relative in [
-            "refs/remotes/origin/s3/authority",
-            "refs/remotes/origin/s3/authority.lock",
-            "logs/refs/remotes/origin/s3/authority",
-            "logs/refs/remotes/origin/s3/authority.lock",
-        ] {
-            assert!(source.contains(&format!(
-                "(allow file-write* (literal \"{}\"))",
-                common.join(relative).display()
-            )));
         }
 
         let other_ref = GitRefName::branch("s3/other")?;
@@ -4655,8 +4447,6 @@ mod tests {
             private_logs,
             common_heads,
             common_logs,
-            common.join("refs/remotes/origin/s3"),
-            common.join("logs/refs/remotes/origin/s3"),
         ];
         let executable_directories = executables
             .iter()

@@ -3369,89 +3369,6 @@ fn settle_attempt(
     Ok(store.worktree_settlement(id, &call)?)
 }
 
-// Grant records are immutable launch evidence; the checkout HEAD can move after
-// the confinement profile has already bound its tracking ref.
-fn graph_tracking_target_conflicts(target: &str, grant: &str) -> bool {
-    let branch = target.strip_prefix("origin/").unwrap_or(target);
-    format!("refs/remotes/origin/{branch}").eq_ignore_ascii_case(grant)
-}
-
-#[cfg(test)]
-mod graph_tracking_target_tests {
-    #[test]
-    fn compares_the_recorded_tracking_path_with_ascii_case_folding() {
-        assert!(super::graph_tracking_target_conflicts(
-            "origin/Feature/Topic",
-            "refs/remotes/origin/feature/topic"
-        ));
-        assert!(super::graph_tracking_target_conflicts(
-            "FEATURE/topic",
-            "refs/remotes/origin/feature/topic"
-        ));
-        assert!(!super::graph_tracking_target_conflicts(
-            "origin/feature/other",
-            "refs/remotes/origin/feature/topic"
-        ));
-    }
-}
-
-fn check_graph_tracking_grants(
-    factory: &Factory,
-    budget: WaitBudget,
-    cancel: &CancelToken,
-    target: &str,
-    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
-) -> Result<(), FacadeError> {
-    let owner = BinaryRunOwner {
-        factory,
-        allow_remote: false,
-        actor: None,
-        chair: None,
-    };
-    let session = owner.session(budget, cancel)?;
-    let call = owner.call(budget, cancel);
-    for node in &checkpoint.nodes {
-        for attempt in &node.attempts {
-            let Some(reference) = attempt.attempt_ref.as_deref() else {
-                if attempt.launched {
-                    return Err(FacadeError::StateCorrupt);
-                }
-                continue;
-            };
-            let (host, id) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
-            if host != factory.context.identity.host.to_string() {
-                return Err(FacadeError::ConfinementRefused);
-            }
-            let id = id.parse().map_err(|_| FacadeError::StateCorrupt)?;
-            let record = session.service().status(id, &call).map_err(run_error)?;
-            if let Some(grant) = &record.granted_tracking_ref {
-                if graph_tracking_target_conflicts(target, grant) {
-                    return Err(FacadeError::ConfinementRefused);
-                }
-            } else if record.git_grants_digest.is_some()
-                || (attempt.launched && {
-                    let request = session
-                        .store
-                        .request(record.run_id, &call)
-                        .map_err(run_error)?;
-                    request
-                        .tasks
-                        .iter()
-                        .find(|task| task.task_id == record.task_id)
-                        .ok_or(FacadeError::StateCorrupt)?
-                        .writer
-                        .is_some()
-                })
-            {
-                // Old writer records do not contain enough evidence to make a
-                // safe decision. Never substitute the worktree's current HEAD.
-                return Err(FacadeError::ConfinementRefused);
-            }
-        }
-    }
-    Ok(())
-}
-
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     type Error = FacadeError;
     fn actor(&self) -> String {
@@ -3460,7 +3377,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     fn validate_expansion(
         &mut self,
         document: &provenant_fabric_runtime::graph::GraphDocument,
-        checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+        _checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
     ) -> Result<(), Self::Error> {
         for node in &document.nodes {
             if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &node.delivery {
@@ -3469,13 +3386,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     target,
                 )
                 .map_err(run_error)?;
-                check_graph_tracking_grants(
-                    self.factory,
-                    self.budget,
-                    self.cancel,
-                    target,
-                    checkpoint,
-                )?;
             }
         }
         Ok(())
@@ -3512,7 +3422,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .integration_branch
             .as_deref()
             .ok_or(FacadeError::InvalidInput)?;
-        check_graph_tracking_grants(self.factory, self.budget, self.cancel, branch, checkpoint)?;
         let session = BinaryRunOwner {
             factory: self.factory,
             allow_remote: false,
@@ -3865,18 +3774,6 @@ impl Factory {
                     &document.graph_id,
                 )
                 .map_err(graph_journal_error)?;
-                if let Some(checkpoint) = &checkpoint {
-                    if let Some(branch) = &document.integration_branch {
-                        check_graph_tracking_grants(self, budget, cancel, branch, checkpoint)?;
-                    }
-                    for node in &document.nodes {
-                        if let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
-                            &node.delivery
-                        {
-                            check_graph_tracking_grants(self, budget, cancel, target, checkpoint)?;
-                        }
-                    }
-                }
                 let admitted = checkpoint.is_some();
                 for node in &document.nodes {
                     if let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
@@ -5061,10 +4958,6 @@ mod peer_tests {
 
     impl SettlementFixture {
         fn resumed() -> Result<Self, Box<dyn std::error::Error>> {
-            Self::resumed_with_grant(None)
-        }
-
-        fn resumed_with_grant(grant: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
             use provenant_confinement::worktrees::{
                 self, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
             };
@@ -5196,16 +5089,7 @@ mod peer_tests {
                 created_at: clock.wall_now()?,
             };
             store.resume_fresh(&resume, "fixture", &call)?;
-            let mut record = store.record(resume.attempt_id, &call)?;
-            if let Some(grant) = grant {
-                record.git_grants_digest = Some(provenant_core::Digest::from_bytes([7; 32]));
-                record.granted_tracking_ref = Some(grant.to_owned());
-                let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
-                db.execute(
-                    "UPDATE attempts SET record=?1 WHERE id=?2",
-                    rusqlite::params![serde_json::to_vec(&record)?, record.attempt_id.to_string()],
-                )?;
-            }
+            let record = store.record(resume.attempt_id, &call)?;
             publish_success(&rig, &store, &record, info.head, &call)?;
             let settled = provenant_run::HolderContext {
                 schema_version: 1,
@@ -5230,117 +5114,6 @@ mod peer_tests {
                 worktree: info.path,
             })
         }
-    }
-
-    #[test]
-    fn graph_load_and_final_delivery_refuse_recorded_writer_grants_after_head_moves()
-    -> Result<(), Box<dyn std::error::Error>> {
-        if host_test(
-            "fabric::peer_tests::graph_load_and_final_delivery_refuse_recorded_writer_grants_after_head_moves",
-        )? {
-            return Ok(());
-        }
-        use provenant_fabric_runtime::graph::{
-            AttemptOwner, FileJournal, GraphDocument, GraphExecution, GraphJournal,
-        };
-        for grant in [Some("refs/remotes/origin/resumed-lane"), None] {
-            let fixture = SettlementFixture::resumed_with_grant(grant)
-                .map_err(|error| format!("settlement fixture: {error}"))?;
-            let cancel = CancelToken::new();
-            let clock = SystemClock;
-            let budget = WaitBudget::cli(clock.mono_now(), 30)?;
-            let call = provenant_run::Request {
-                clock: &clock,
-                budget,
-                cancel: &cancel,
-            };
-            let record = fixture.store.record(fixture.settled.attempt_id, &call)?;
-            let gitfile = std::fs::read_to_string(fixture.worktree.join(".git"))?;
-            let gitdir = gitfile
-                .trim()
-                .strip_prefix("gitdir: ")
-                .ok_or("worktree gitdir")?;
-            std::fs::write(
-                Path::new(gitdir).join("HEAD"),
-                "ref: refs/heads/moved-lane\n",
-            )?;
-            let factory = Factory {
-                context: Context::open(
-                    fixture.roots.clone(),
-                    &fixture.rig.home,
-                    &fixture.rig.project,
-                )?,
-                project_attribution: false,
-                clock: SystemClock,
-                backoff: ThreadWait,
-                executor: SystemExecutor::new(1)?,
-                home: fixture.rig.home.clone(),
-                cwd: fixture.rig.project.clone(),
-                assets: fixture.rig.project.clone(),
-                host_launch: None,
-                workers: &FreeWorkers,
-            };
-            let doc_wire = serde_json::json!({"schema_version":1,"graph_id":"grant-test", "integration_branch":"origin/RESUMED-LANE", "delivery":"pr", "nodes":[{"id":"one","prompt":"reply OK","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]});
-            let document: GraphDocument = serde_json::from_value(doc_wire.clone())?;
-            let doc_path = fixture.rig.project.join("grant-test.json");
-            std::fs::write(&doc_path, serde_json::to_vec(&doc_wire)?)?;
-            let checkpoint = serde_json::from_value(serde_json::json!({
-                "schema_version":1,"graph_id":"grant-test","plan_digest":"fixture",
-                "nodes":[{"id":"one","worktree":fixture.worktree,"state":"succeeded", "attempts":[{
-                    "launched":true,"key":{"graph_id":"grant-test","node_id":"one","route_index":0},
-                    "route":{"adapter":"fixture","model":"fixture/model"},"state":"terminal",
-                    "attempt_ref":format!("{}/{}", factory.context.identity.host, record.attempt_id),
-                    "outcome":"succeeded","launch_actor":"fixture"
-                }]}]
-            }))?;
-            let mut journal = FileJournal::open(
-                &fixture.roots.state,
-                factory.context.identity.project,
-                "grant-test",
-                budget,
-                &cancel,
-                &clock,
-            )?;
-            journal.bind(GraphExecution {
-                integration_base: None,
-                directory: fixture.rig.project.clone(),
-                document: document.clone(),
-            })?;
-            journal.save(&checkpoint)?;
-            drop(journal);
-            assert!(matches!(
-                factory.graph(
-                    GraphInput::Resume {
-                        document: doc_path.clone(),
-                        extend: vec![]
-                    },
-                    budget,
-                    &cancel
-                ),
-                Err(FacadeError::ConfinementRefused)
-            ));
-            let mut owner = BoundGraphOwner {
-                factory: &factory,
-                integration_base: None,
-                budget,
-                cancel: &cancel,
-                prices: None,
-            };
-            assert!(matches!(
-                owner.deliver_graph(&document, &checkpoint),
-                Err(FacadeError::ConfinementRefused)
-            ));
-            let mut fragment_document = document.clone();
-            fragment_document.integration_branch = None;
-            fragment_document.nodes[0].delivery = Some(
-                provenant_records::run::DeliveryMode::Integrate("origin/RESUMED-LANE".into()),
-            );
-            assert!(matches!(
-                owner.validate_expansion(&fragment_document, &checkpoint),
-                Err(FacadeError::ConfinementRefused)
-            ));
-        }
-        Ok(())
     }
 
     #[test]

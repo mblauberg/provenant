@@ -83,43 +83,7 @@ impl HostDeliveryContext {
     /// Integration authority never includes the default or primary checkout ref.
     pub fn validate_integration_target(project: &Path, target: &str) -> Result<()> {
         let branch = target.strip_prefix("origin/").unwrap_or(target);
-        Self::check_delivery_branch(project, branch)?;
-        let writer = WriterRequest {
-            project: project.into(),
-            worktree: project.into(),
-        };
-        let mut host = Self::capture();
-        host.host_environment(&writer)?;
-        host.tools = Some(HostTools {
-            git: host.executable("git", &writer)?,
-            gh: None,
-        });
-        host.refuse_checked_out_tracking_target(&writer, branch)?;
-        Ok(())
-    }
-
-    fn refuse_checked_out_tracking_target(
-        &self,
-        writer: &WriterRequest,
-        target: &str,
-    ) -> Result<()> {
-        let trees = self.command(
-            &writer.worktree,
-            "git",
-            &["worktree", "list", "--porcelain"],
-            Stage::Prepare,
-        )?;
-        if trees
-            .lines()
-            .filter_map(|line| line.strip_prefix("branch refs/heads/"))
-            .any(|branch| branch.eq_ignore_ascii_case(target))
-        {
-            return Err(prepare_error(
-                "integration target",
-                "integration target belongs to a checked-out worktree branch",
-            ));
-        }
-        Ok(())
+        Self::check_delivery_branch(project, branch)
     }
     /// A publication ref is distinct from a PR's base, which may be protected.
     pub fn check_delivery_branch(project: &Path, target: &str) -> Result<()> {
@@ -507,22 +471,6 @@ impl HostDeliveryContext {
             None
         };
         self.tools = Some(HostTools { git, gh });
-        if matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
-            // Bind this check to the lane's branch before the provider can
-            // change HEAD. Its tracking-ref grant remains for the whole run.
-            let lane_branch = self.command(
-                &writer.worktree,
-                "git",
-                &["symbolic-ref", "--quiet", "--short", "HEAD"],
-                stage,
-            )?;
-            if lane_branch.eq_ignore_ascii_case(&request.branch) {
-                return Err(prepare_error(
-                    "integration target",
-                    "integration target matches the lane branch",
-                ));
-            }
-        }
         self.refuse_protected_target(writer, &request.branch)?;
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) && request.remote.is_empty() {
             let branch = self.command(
@@ -711,8 +659,7 @@ impl HostDeliveryContext {
         Ok(())
     }
 
-    /// Refresh under setup custody and use the remote's advertised object ID,
-    /// not a tracking file that a running lane may change after the fetch.
+    /// Refresh under setup custody and use the verified remote-advertised object ID.
     fn refresh_target_and_resolve(
         &self,
         writer: &WriterRequest,
@@ -1606,7 +1553,7 @@ pub(super) fn cap_pr_body(mut body: String) -> String {
 
 // Git may include remote URLs in diagnostics. Usernames alone can be access
 // tokens, so remove all URL userinfo, including passwordless userinfo.
-fn redact_url_userinfo(detail: &str, truncated: bool) -> String {
+fn redact_url_userinfo(detail: &str, _truncated: bool) -> String {
     let mut result = String::with_capacity(detail.len());
     let mut rest = detail;
     while let Some(scheme_end) = rest.find("://") {
@@ -1622,16 +1569,30 @@ fn redact_url_userinfo(detail: &str, truncated: bool) -> String {
         if let Some(at) = authority.rfind('@') {
             result.push_str("[REDACTED]");
             result.push_str(&authority[at..]);
-        } else if truncated && authority_end == rest.len() {
-            // A capture limit can cut off the '@' that identifies userinfo.
-            result.push_str("[REDACTED]");
         } else {
-            result.push_str(authority);
+            // A malformed or truncated authority may have lost its '@'.
+            result.push_str("[REDACTED]");
         }
         rest = &rest[authority_end..];
     }
     result.push_str(rest);
-    result
+    // Git also accepts scp-style remotes such as user@host:path. The user
+    // can itself be a credential, so redact it even without a URL scheme.
+    let mut safe = String::with_capacity(result.len());
+    for token in result.split_inclusive(|c: char| {
+        c.is_whitespace() || matches!(c, '\'' | '"' | '<' | '>' | '(' | ')')
+    }) {
+        if let Some(at) = token.find('@')
+            && token[at + 1..].contains(':')
+            && !token[..at].contains('/')
+        {
+            safe.push_str("[REDACTED]");
+            safe.push_str(&token[at..]);
+        } else {
+            safe.push_str(token);
+        }
+    }
+    safe
 }
 
 fn prepare_error(step: &'static str, detail: impl std::fmt::Display) -> RunError {

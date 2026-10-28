@@ -21,7 +21,6 @@ use std::time::Duration;
 pub(crate) struct AppliedWriteGrants {
     pub grants: Vec<WriteGrantRecord>,
     pub git_grants_digest: Option<provenant_core::Digest>,
-    pub granted_tracking_ref: Option<String>,
 }
 
 /// Hard host limits, independent of batch concurrency.
@@ -305,7 +304,6 @@ impl RunStore {
             next.read_only_writable = writable.to_vec();
             next.write_grants = write_grants.grants.clone();
             next.git_grants_digest = write_grants.git_grants_digest;
-            next.granted_tracking_ref = write_grants.granted_tracking_ref.clone();
             next.head = head;
             next.requested_priority = priority;
             next.priority = None;

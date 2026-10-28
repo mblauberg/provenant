@@ -90,18 +90,14 @@ Claude creates a native agent's worktree with `provenant worktree create
 claude/NAME` and removes it with `provenant worktree remove`, so it has an owner
 from the start. See the [Claude hooks runbook](runbooks/claude-hooks.md).
 
-Confined writer lanes can update their selected branch, Git objects and the
-exact `refs/remotes/origin/<lane-branch>` tracking ref and its reflog, including
-their lock files. Fetch records `FETCH_HEAD` in the linked worktree's private
-Git directory. Other tracking refs, including `origin/HEAD` and `origin/main`,
-shared Git config and `packed-refs` remain read-only. The host refreshes origin
-tracking refs and prepares the lane branch and upstream before launch. A lane
-can use `git fetch --refmap= origin main` to update `FETCH_HEAD` without trying
-to update `origin/main` if the remote advances during the run. A lane is
-refused when its tracking ref would collide, under ASCII case folding, with
-`HEAD`, `main`, `master`, `trunk`, the origin default branch, another existing
-origin tracking ref or a path prefix of one. An exact existing ref for the
-lane is allowed unless it is protected.
+Confined writer lanes can update their selected branch and Git objects. All
+remote-tracking refs and reflogs, shared Git config and `packed-refs` remain
+read-only. Before launch, the host refreshes origin and prepares a loose lane
+branch and its upstream. A lane can commit on its branch and run
+`git push origin HEAD:<branch>`; Git may report that it could not update the
+local tracking ref after the remote push succeeds. That local denial is expected.
+To pick up upstream changes, run `git fetch --refmap= origin main` and use
+`FETCH_HEAD` in the linked worktree's private Git directory.
 
 Fabric sets `CARGO_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR` and `CARGO_HOME` for
 each lane. Do not override them: confinement may deny other paths. Confined writers use

@@ -330,9 +330,8 @@ directory, so a lane can undo it (an accepted residual risk).
 Git is resolved once on the host, canonicalised and pinned in provider and
 MCP environments as the only Git lanes may execute. Writer-only grants come
 from confinement's writer profile, and each attempt records its write
-allowances and Git grants digest. Only the selected lane's origin tracking ref
-and reflog are writable; other remote-tracking refs and shared config stay
-read-only.
+allowances and Git grants digest. Remote-tracking refs, their reflogs and shared
+config stay read-only.
 - Why: a lane-chosen Git or helper would run with host authority.
 - Test: `crates/os/src/git.rs::override_wins_and_invalid_override_does_not_fall_back`;
   `crates/cli/src/run/provider.rs::host_write_paths_reach_writers_only`

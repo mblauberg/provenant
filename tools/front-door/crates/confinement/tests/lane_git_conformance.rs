@@ -253,6 +253,8 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
         &["-c", "protocol.file.allow=always", "fetch", "origin"],
     ));
     fs::create_dir_all(repo_git.join("refs/remotes/upstream"))?;
+    fs::create_dir_all(repo_git.join("refs/remotes/origin/lane"))?;
+    fs::create_dir_all(repo_git.join("logs/refs/remotes/origin/lane"))?;
     let executor = SystemExecutor::new(2)?;
     let cancel = CancelToken::new();
     let runtime = UtilityRuntime::new(&git_path, &home)?;
@@ -347,6 +349,7 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
     let run = |args: &[&str]| {
         Command::new("/usr/bin/sandbox-exec")
             .args(["-p", sbpl])
+            .current_dir(&lane)
             .arg(&git_path)
             .args(args)
             .env("GIT_DIR", private)
@@ -366,13 +369,6 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
         &home,
         &["rev-parse", "refs/remotes/origin/main"],
     ));
-    ok(run(&[
-        "-c",
-        "protocol.file.allow=always",
-        "fetch",
-        "origin",
-        "main",
-    ]));
     ok(git(
         &git_path,
         &source_git,
@@ -410,10 +406,15 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
             .status
             .success()
     );
-    for reference in ["refs/remotes/origin/HEAD", "refs/remotes/origin/main"] {
-        assert!(!run(&["update-ref", reference, "HEAD"]).status.success());
+    for reference in [
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+        "refs/remotes/origin/lane/test",
+        "logs/refs/remotes/origin/lane/test",
+    ] {
         let output = Command::new("/usr/bin/sandbox-exec")
             .args(["-p", sbpl, "/usr/bin/touch"])
+            .current_dir(&lane)
             .arg(repo_git.join(reference))
             .output()?;
         assert!(
@@ -421,15 +422,18 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
             "sandbox permitted writing {reference}"
         );
     }
-    ok(run(&[
-        "update-ref",
+    for reference in [
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
         "refs/remotes/origin/lane/test",
-        "HEAD",
-    ]));
+    ] {
+        assert!(!run(&["update-ref", reference, "HEAD"]).status.success());
+    }
     let link_path = repo_git.join("refs/remotes/origin/lane/test.lock");
     let control_link = scratch.join("link-control");
     let control = Command::new("/usr/bin/sandbox-exec")
         .args(["-p", sbpl, "/bin/ln", "-s"])
+        .current_dir(&lane)
         .arg(repo_git.join("config"))
         .arg(&control_link)
         .output()?;
@@ -439,13 +443,14 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
         String::from_utf8_lossy(&control.stderr)
     );
     let output = Command::new("/usr/bin/sandbox-exec")
-        .args(["-p", sbpl, "/bin/ln"])
+        .args(["-p", sbpl, "/bin/ln", "-s"])
+        .current_dir(&lane)
         .arg(repo_git.join("config"))
         .arg(&link_path)
         .output()?;
     assert!(
         !output.status.success(),
-        "sandbox permitted a hard link to Git config"
+        "sandbox permitted a link to Git config"
     );
     assert!(private.join("FETCH_HEAD").is_file());
     assert_eq!(
