@@ -195,7 +195,7 @@ fn build_strict() -> Vec<Value> {
             }),
         ),
         (
-            "Submit, list, inspect, wait for, cancel or resume runs.",
+            "Submit, list, inspect, wait for, cancel or resume runs. List returns compact attempt summaries newest queued first; pass next_after as after to continue towards older attempts. Status returns the full attempt record.",
             json!({
                 "submit":{"operation_id":reference("OperationId"),"tasks":array(object(json!({"prompt":text(MAX_TEXT_BYTES),"base?":nullable(text(1024)),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_seconds":integer(1,14_400),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,64),"concurrency?":nullable(integer(1,16)),"knobs?":array(text(256),0,64),"host?":nullable(reference("Id"))},
                 "list":{"after?":nullable(reference("AttemptTarget")),"limit":page},"status":{"target":reference("AttemptTarget")},

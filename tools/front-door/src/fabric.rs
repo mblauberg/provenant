@@ -2149,7 +2149,7 @@ impl BinaryRunOwner<'_> {
                             all: true,
                             limit: u64::from(limit),
                             after: after_sequence,
-                            newest_first: false,
+                            newest_first: true,
                             owner: None,
                             unseen_after: None,
                         },
@@ -2167,7 +2167,7 @@ impl BinaryRunOwner<'_> {
                 };
                 Ok(RunResult::List {
                     page: AttemptPage {
-                        items: page.lanes,
+                        items: page.lanes.into_iter().map(Into::into).collect(),
                         next_after,
                         truncated,
                     },
@@ -4104,6 +4104,34 @@ mod peer_tests {
         let status = serde_json::to_value(status)?;
         assert!(status["attempt"].get("usage").is_some());
         assert!(status["attempt"].get("prompt").is_some());
+        // Pool routing carries an audit receipt in full records. It must not
+        // enlarge the compact route returned by list.
+        let mut record = status["attempt"].clone();
+        record
+            .as_object_mut()
+            .ok_or("record")?
+            .remove("provider_seconds");
+        record["provider_ms"] = serde_json::Value::Null;
+        record["applied_route"] = serde_json::json!({
+            "provider":"fixture", "model":"fixture/model", "effort":"high",
+            "account_label":"fixture", "account_key":"private-key", "source":"pool",
+            "pool_selection": {
+                "pool":"senior", "candidates":[], "roll":0, "total_weight":1,
+                "pick":"fixture/model"
+            }
+        });
+        let summary =
+            provenant_fabric_runtime::runs::AttemptSummary::from(serde_json::from_value::<
+                provenant_records::run::AttemptRecord,
+            >(record)?);
+        let summary = serde_json::to_value(summary)?;
+        assert_eq!(
+            summary["applied_route"],
+            serde_json::json!({
+                "provider":"fixture", "model":"fixture/model", "effort":"high",
+                "account_label":"fixture"
+            })
+        );
         Ok(())
     }
 
