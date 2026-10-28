@@ -395,10 +395,6 @@ impl UtilityRuntime {
         })
     }
 
-    pub fn git_program_path(&self) -> &Path {
-        &self.git.path
-    }
-
     fn revalidate(&self) -> Result<(), UtilityError> {
         self.home.verify()?;
         Ok(())
@@ -1915,7 +1911,6 @@ pub(crate) mod tests {
             fixture.repo.root_path(),
             provenant_os::fs::canonicalize(&fixture.root)?
         );
-        assert_eq!(fixture.runtime.git_program_path(), fixture.git.as_path());
         assert!(fixture.home.is_dir());
         let tiny_capture = UtilityBudget::new(
             Duration::from_secs(2),

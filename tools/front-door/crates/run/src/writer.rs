@@ -62,7 +62,7 @@ fn runtime(state: &Path) -> Result<UtilityRuntime> {
     }
     let git = provenant_os::git::git_executable()
         .ok_or(RunError::Validation("Git executable unavailable"))?;
-    UtilityRuntime::new(canonicalize(&git)?, home.clone())
+    UtilityRuntime::new(&git, home.clone())
         .map_err(error("initialise writer Git runtime", Some(&home)))
 }
 fn budget() -> Result<UtilityBudget> {

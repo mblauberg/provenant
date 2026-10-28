@@ -280,14 +280,14 @@ marker stops the push repeating.
 
 ### Disclosure and redaction
 
-Disclosure scanning is bounded (10,000 files, 64 MiB) and refuses when the
-budget runs out. One streaming redactor masks known secrets, credential URLs
+A prompt snapshot is scanned for secret patterns before it is sealed and is
+refused on a match. One streaming redactor masks known secrets, credential URLs
 and token patterns across chunk boundaries before anything reaches disk; a
 redactor failure discards that output. The inherited environment is never
 persisted.
 - Why: lane output is stored and shared with other models.
 - Test: `crates/confinement/src/redact.rs::known_secret_split_across_chunks_is_never_emitted`;
-  `crates/confinement/src/disclosure.rs::bounded_scan_refuses_secret_patterns_without_returning_content`
+  `crates/confinement/src/disclosure.rs::snapshot_refuses_known_secrets_without_returning_content`
 - Owner: `crates/confinement/src/redact.rs`, `crates/confinement/src/disclosure.rs`
 
 ### Quarantine
@@ -308,11 +308,13 @@ bytes, never followed.
 
 Evidence uses a pinned Git, typed operations, literal pathspecs and a
 sanitised environment with hooks, fsmonitor, textconv, external diff, pager
-and lazy fetch off. Copied gitfiles and alternates cannot vouch for
+and lazy fetch off. Repository-configured filter drivers (including ones reached
+through config includes) are disabled per driver, and `info/attributes` is
+tolerated rather than refused. Copied gitfiles and alternates cannot vouch for
 protected history, and a timeout, truncation or moved HEAD refuses complete
 evidence. `run_utility` offers only a closed set of Git and `gh` reads.
 - Why: repository content is attacker-controlled input to the host.
-- Test: `crates/confinement/src/utility.rs::filter_config_is_refused_and_empty_tree_source_suppresses_worktree_attributes`;
+- Test: `crates/confinement/src/utility.rs::filters_are_disabled_not_refused_and_empty_tree_source_suppresses_worktree_attributes`;
   `crates/confinement/src/repo.rs::git_revision_accepts_frozen_base_refs_and_refuses_option_injection`
 - Owner: `crates/confinement/src/utility.rs`
 

@@ -1,5 +1,5 @@
 ## Fixes
 
-- Refuse case-folding and Unicode-normalisation collisions in origin refreshes and new worktree branches. Pin remote worktree bases to the exact advertised commit.
-- Skip unsupported advertised branch names during refresh, warn about stale refused tracking refs, and detect collisions between branch path prefixes. Remote bases require a reachable remote.
-- Refuse remote revision aliases that cannot be verified as an exact branch, and use the advertised default branch for pre-push checks instead of the local tracking HEAD.
+- Refuse new worktree branches that differ from an existing local or remote-tracking branch only by case, including non-ASCII case, or by a path prefix.
+- Origin refresh leaves out advertised branches whose names collide, with a warning, and fails only if the remote default branch collides.
+- Pin remote worktree bases and git-context bases to the commit the remote advertises, applying revision operators such as `~1` to that commit. Pre-push uses the advertised default branch.

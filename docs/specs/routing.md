@@ -346,7 +346,10 @@ directory, so a lane can undo it (an accepted residual risk).
 ### Host-pinned Git and writer grants
 
 Git is resolved once on the host, canonicalised and pinned in provider and
-MCP environments as the only Git lanes may execute. Writer-only grants come
+MCP environments as the only Git lanes may execute. It must be a regular
+file owned by the current user or root, not world-writable and not in a
+world-writable directory; it is not re-verified per call, so replacing it
+(`brew upgrade git`) does not break a long-lived process. Writer-only grants come
 from confinement's writer profile, and each attempt records its write
 allowances and Git grants digest. Remote-tracking refs, their reflogs and shared
 config stay read-only.

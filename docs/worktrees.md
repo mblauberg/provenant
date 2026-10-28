@@ -30,19 +30,21 @@ such submissions with `worktree_unregistered` and the worktree path. Create
 a writer at the branch's tip with
 `provenant worktree create <new-branch> --base <branch>`.
 
-New branch names must not case-fold or Unicode-normalise to an existing local
-or remote-tracking branch name. A remote base such as `origin/main` is pinned
-to the exact advertised commit, rather than trusting the tracking ref. Remote
-revision expressions rooted in tracking refs are not accepted as bases; use the
-exact `origin/branch` or `refs/remotes/origin/branch` form, or a local commit ID.
-Host origin refresh refuses advertised branch names that collide under these
-comparisons and fails if the remote default branch is among them.
-Origin refresh skips branch names outside the supported ASCII branch-name
-grammar, including non-ASCII names. Refused tracking refs may remain stale.
-Remote bases require a reachable remote; an offline or missing remote base
-fails instead of trusting a stale tracking ref.
-The pre-push policy also reads the remote's advertised default branch instead
-of the local tracking HEAD. If the default cannot be advertised, push is refused.
+New branch names must not differ from an existing local or remote-tracking
+branch name only by case (including non-ASCII case) or by a branch-path
+prefix. Names are not Unicode-normalised. Branch names follow Git's own ref
+format, so `feat/a+b` is accepted.
+
+A remote base such as `origin/main` is pinned to the commit the remote
+advertises, rather than the tracking ref, and revision operators apply to that
+commit (`origin/main~1`). Remote bases require a reachable remote; an offline
+or missing remote base fails instead of trusting a stale tracking ref.
+
+Host origin refresh leaves out advertised branches whose names collide with
+another advertised name, with a warning; their tracking refs may remain
+stale. It fails only if the remote's default branch is among them. The
+pre-push policy reads the remote's advertised default branch instead of the
+local tracking HEAD, and refuses the push if none is advertised.
 
 `remove NAME` deletes the clean worktree and then its branch when every commit
 on the branch is contained in the fetched upstream default branch. Without
