@@ -37,8 +37,8 @@ pub use knobs::{KnobEdit, KnobSource, KnobValue, edit_config};
 pub use loader::{config_show, inspect_config, load, load_with_domains, read, read_with_domains};
 pub use presets::Profile;
 pub use project_binding::{
-    GcProjectSelection, ProjectBinding, ProjectLocation, bind_host, bind_project, lookup_project,
-    registered_gc_project_selection, registered_gc_projects, registered_projects,
+    GcProjectSelection, ProjectBinding, ProjectLocation, bind_host, bind_project, lookup_host,
+    lookup_project, registered_gc_project_selection, registered_gc_projects, registered_projects,
     transient_location,
 };
 pub use provenant_records::Finding;

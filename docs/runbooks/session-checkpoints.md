@@ -84,8 +84,21 @@ A stale
 revision is refused with `SUMMARY_STALE` and `data.current_revision`; reread
 and reapply the intended change. Check the returned checkpoint warnings: if
 discovery publication failed, reread the current checkpoint and save that
-Markdown to repair it. Retrying the old summary revision is stale. Summary
-history comparisons and stale `needs_you` reconciliation are not yet available.
+Markdown to repair it. Retrying the old summary revision is stale.
+
+`provenant chair summary diff SESSION --from N --to N --json` compares fields
+in two summary revisions found in retained checkpoint history. These are
+summary revision numbers, not checkpoint revision numbers. The result lists
+unavailable revisions when history has been pruned; it does not treat them as
+unchanged. Repeated identical summaries across checkpoint saves are allowed.
+
+Summary show also compares `needs_you` with the bounded local inbox. It reports
+stale references and open requests missing from the summary for the same host,
+project and chair. Coverage is `partial` when the scan is truncated or a
+matching request has unknown host identity; in that case stale references
+cannot be established. Missing local host identity reports `host_unavailable`.
+Unavailable or incompatible inbox data is reported in coverage. The comparison
+does not contact peers or change inbox state.
 
 ## Chair log
 

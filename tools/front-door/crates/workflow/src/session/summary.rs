@@ -30,7 +30,79 @@ pub struct SummaryPatch {
     pub risk: Option<String>,
 }
 
+/// A changed field, with its values in the requested order.
+#[derive(Debug, Serialize)]
+pub struct SummaryChange<T> {
+    pub from: T,
+    pub to: T,
+}
+
+/// Comparison of retained summary revisions. Missing revisions are listed so a
+/// pruned baseline cannot be mistaken for an unchanged summary.
+#[derive(Debug, Serialize)]
+pub struct SummaryDiff {
+    pub from: u64,
+    pub to: u64,
+    pub unavailable: Vec<u64>,
+    pub now: Option<SummaryChange<String>>,
+    pub next: Option<SummaryChange<String>>,
+    pub needs_you: Option<SummaryChange<Vec<String>>>,
+    pub risk: Option<SummaryChange<String>>,
+}
+
+fn changed<T: PartialEq + Clone>(from: &T, to: &T) -> Option<SummaryChange<T>> {
+    (from != to).then(|| SummaryChange {
+        from: from.clone(),
+        to: to.clone(),
+    })
+}
+
 impl super::SessionStore {
+    /// Compare summary revision IDs found in the bounded retained checkpoint
+    /// history. Repeated identical summaries from ordinary saves are allowed.
+    pub fn summary_diff(&self, from: u64, to: u64) -> Result<SummaryDiff, super::SessionError> {
+        let mut left: Option<Summary> = None;
+        let mut right: Option<Summary> = None;
+        for revision in self.revisions()? {
+            let Some(text) = self.read_revision(revision.revision)? else {
+                continue;
+            };
+            let Some(summary) = parse_summary(&text.markdown)? else {
+                continue;
+            };
+            for (wanted, slot) in [(from, &mut left), (to, &mut right)] {
+                if summary.revision == wanted {
+                    if slot.as_ref().is_some_and(|previous| previous != &summary) {
+                        return Err(super::SessionError::History);
+                    }
+                    *slot = Some(summary.clone());
+                }
+            }
+        }
+        let mut unavailable = Vec::new();
+        if left.is_none() {
+            unavailable.push(from);
+        }
+        if right.is_none() && to != from {
+            unavailable.push(to);
+        }
+        let mut result = SummaryDiff {
+            from,
+            to,
+            unavailable,
+            now: None,
+            next: None,
+            needs_you: None,
+            risk: None,
+        };
+        if let (Some(left), Some(right)) = (left, right) {
+            result.now = changed(&left.now, &right.now);
+            result.next = changed(&left.next, &right.next);
+            result.needs_you = changed(&left.needs_you, &right.needs_you);
+            result.risk = changed(&left.risk, &right.risk);
+        }
+        Ok(result)
+    }
     /// Update only as the explicitly bound chair; discovery identity is checked
     /// again under the checkpoint lock before the summary is read or changed.
     pub fn update_summary(

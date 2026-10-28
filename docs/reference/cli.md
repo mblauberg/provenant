@@ -2776,6 +2776,36 @@ bounds are null. Positional arguments have no long flag.
 }
 ```
 
+## `provenant chair summary diff`
+
+| Argument | Contract |
+|---|---|
+| `session` | `{"name": "session", "positional": true, "required": true}` |
+| `--from` | `{"name": "from", "required": true}` |
+| `--to` | `{"name": "to", "required": true}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "session",
+        "from",
+        "to"
+      ],
+      "multiple": true,
+      "name": "Diff",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant chair summary update`
 
 | Argument | Contract |

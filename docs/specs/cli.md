@@ -30,6 +30,11 @@ allocating identity. `chair summary update SESSION --file PATCH.json
 --expect-revision N` applies selected fields under the checkpoint save lock.
 Revision 0 creates a summary; stale edits return `SUMMARY_STALE` with the
 current summary revision. The returned checkpoint includes publication warnings.
+`chair summary diff SESSION --from N --to N` compares retained summary revision
+numbers, reporting unavailable revisions if pruned. Summary show includes a
+bounded inbox comparison for the local host, project and chair. Coverage marks
+incomplete scans and unavailable host identity; stale references are reported
+only when the comparison is complete.
 
 `console overview` combines local pending request titles and recent lane
 attention in one bounded read. Project labels use the registered Git common

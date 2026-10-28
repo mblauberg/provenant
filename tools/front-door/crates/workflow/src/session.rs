@@ -1080,6 +1080,41 @@ mod tests {
         );
     }
     #[test]
+    fn retained_summary_diff_compares_fields_and_reports_missing() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "chair").with_revisions(3);
+        let header = |revision, now, needs| {
+            format!(
+                "---\nprovenant_summary:\n  schema_version: 1\n  revision: {revision}\n  updated_at: \"2026-10-28T03:00:00Z\"\n  now: \"{now}\"\n  next: \"Next\"\n  needs_you: {needs}\n  risk: \"None\"\n---\nBody\n"
+            )
+        };
+        let first = header(1, "First", "[]");
+        saved(&selected, &first);
+        saved(&selected, &first.replace("Body", "Other body"));
+        saved(&selected, &header(2, "Second", "[\"request\"]"));
+        let diff = serde_json::to_value(selected.summary_diff(1, 2).unwrap()).unwrap();
+        assert_eq!(diff["unavailable"], serde_json::json!([]));
+        assert_eq!(
+            diff["now"],
+            serde_json::json!({"from":"First","to":"Second"})
+        );
+        assert_eq!(
+            diff["needs_you"],
+            serde_json::json!({"from":[],"to":["request"]})
+        );
+        assert!(diff["next"].is_null());
+        saved(&selected, &header(3, "Third", "[]"));
+        saved(&selected, &header(4, "Fourth", "[]"));
+        let diff = selected.summary_diff(1, 4).unwrap();
+        assert_eq!(diff.unavailable, vec![1]);
+        assert!(diff.now.is_none());
+        saved(&selected, &header(4, "Conflicting", "[]"));
+        assert!(matches!(
+            selected.summary_diff(4, 4),
+            Err(SessionError::History)
+        ));
+    }
+    #[test]
     fn field_update_publishes_revision_and_discovery() {
         use provenant_core::{ActorId, HostId};
         let (_temp, root, project) = setup();
