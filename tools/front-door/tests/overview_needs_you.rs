@@ -62,8 +62,27 @@ fn overview_needs_you() -> Result {
     assert_eq!(rows[0]["project_label"], "project");
     assert!(rows[0]["project_id"].is_string());
     assert!(rows[0]["task_label"].is_null());
+    assert_eq!(rows[0]["chair_session_id"], "chair-a");
     assert_eq!(data["counts"]["needs_you"], 1);
     assert!(!overview.to_string().contains("PRIVATE BODY MARKER"));
+
+    let fabric_db = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
+    let original: Vec<u8> =
+        fabric_db.query_row("SELECT record FROM human_requests", [], |row| row.get(0))?;
+    let mut legacy: Value = serde_json::from_slice(&original)?;
+    legacy
+        .as_object_mut()
+        .ok_or("request object")?
+        .remove("chair_session_id");
+    fabric_db.execute(
+        "UPDATE human_requests SET record=?1",
+        [serde_json::to_vec(&legacy)?],
+    )?;
+    let legacy_overview = call(&rig, &["console", "overview"])?;
+    assert!(legacy_overview["data"]["needs_you"][0]["chair_session_id"].is_null());
+    assert_eq!(legacy_overview["data"]["counts"]["needs_you"], 1);
+    assert_eq!(legacy_overview["data"]["coverage"]["inbox"], "complete");
+    fabric_db.execute("UPDATE human_requests SET record=?1", [&original])?;
 
     // Submit a queued lane through its owner, without starting a provider.
     use provenant_core::{ActorId, CancelToken, Clock, OperationId, ProjectId, TaskId, WaitBudget};
@@ -128,12 +147,9 @@ fn overview_needs_you() -> Result {
     assert!(!with_lane.to_string().contains("PRIVATE PROMPT MARKER"));
 
     // The inbox and run scans share one budget, including unprojected bodies.
-    let fabric_db = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
     let run_db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
     let run_len: u32 =
         run_db.query_row("SELECT length(record) FROM attempts", [], |row| row.get(0))?;
-    let original: Vec<u8> =
-        fabric_db.query_row("SELECT record FROM human_requests", [], |row| row.get(0))?;
     let target = 1_048_576 - run_len as usize + 1;
     let mut added_ids = Vec::new();
     let project_id = project.to_string();

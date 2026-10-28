@@ -28,8 +28,10 @@ in-progress binding stages are skipped.
 `console overview` combines local pending request titles and recent lane
 attention in one bounded read. Project labels use the registered Git common
 directory's parent name; unavailable labels and task titles are null. Inbox
-requests have no task association, so their task label is always null. Bodies,
-prompts and results are excluded. The inbox scan returns at most 100 requests;
+requests have no task association, so their task label is always null. Each
+request includes its `chair_session_id`, or null for a legacy record without
+one. Such records still count towards inbox coverage and the needs-you count.
+Bodies, prompts and results are excluded. The inbox scan returns at most 100 requests;
 the run scan examines at most 128 recent attempts, deduplicating retries. Both
 scans share a 1 MiB budget for stored record bytes, with inbox records first;
 reaching the budget marks the affected source partial.
