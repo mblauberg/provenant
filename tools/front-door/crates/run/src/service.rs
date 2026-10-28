@@ -220,6 +220,9 @@ impl<'a> Service<'a> {
             run_id: fresh(RunId::from_bytes)?,
             operation_id: input.operation_id,
             request: CanonicalRequest {
+                chair: previous
+                    .as_ref()
+                    .map_or(input.chair, |request| request.chair.clone()),
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: requests,
@@ -489,6 +492,7 @@ pub struct DispatchTask {
     pub access: LaneAccess,
 }
 pub struct DispatchRequest {
+    pub chair: Option<ChairBinding>,
     pub operation_id: OperationId,
     pub tasks: Vec<DispatchTask>,
     pub concurrency: u64,

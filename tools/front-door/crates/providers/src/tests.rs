@@ -1509,6 +1509,7 @@ fn claude_network_on_without_complete_rust_keeps_public_system_tools()
 #[cfg(target_os = "macos")]
 #[test]
 #[allow(clippy::disallowed_methods)]
+#[allow(clippy::print_stderr)] // Test-only sandbox skip diagnostic.
 fn claude_network_on_native_tls_files_are_readable() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::permissions::{NetworkAccess, snapshot::render};
     let prompt = Prompt::new("fixture".into());
@@ -4220,6 +4221,23 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
                 .unwrap()
                 .adapter
                 .prepare(input)?;
+
+            // Provider runtime grants must exclude the host association
+            // database and every SQLite companion.
+            let grants = &spec.profile.spec.state_writes;
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                let host_index =
+                    Path::new("/fixture/state/fabric").join(format!("host.sqlite3{suffix}"));
+                assert!(
+                    grants.iter().all(|grant| match grant.scope {
+                        provenant_records::run::PathScope::Exact => grant.path != host_index,
+                        provenant_records::run::PathScope::Subtree =>
+                            !host_index.starts_with(&grant.path),
+                    }),
+                    "{adapter} can write {}",
+                    host_index.display()
+                );
+            }
 
             if adapter == "claude" {
                 let mut unattributed_route = route.clone();

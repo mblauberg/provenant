@@ -936,6 +936,7 @@ pub struct Submitted {
     pub access: run::LaneAccess,
 }
 pub struct Submission {
+    pub chair: Option<run::ChairBinding>,
     pub operation_id: OperationId,
     pub tasks: Vec<Submitted>,
     pub concurrency: Option<u64>,
@@ -1144,8 +1145,13 @@ pub fn submit_with_host(
             })
         })
         .collect::<Result<Vec<_>, Fail>>()?;
+    let chair = parent_attempt
+        .is_none()
+        .then_some(submission.chair)
+        .flatten();
     let record = run::Service::new(&session.store).dispatch(
         run::DispatchRequest {
+            chair,
             operation_id: submission.operation_id,
             tasks,
             concurrency,
@@ -1157,6 +1163,9 @@ pub fn submit_with_host(
     )?;
     if parent_attempt.is_none() {
         let canonical = session.store.request(record.run_id, call)?;
+        with_chair_index(edge.roots, call, |index, call| {
+            index.submit(session.context.project_id, record.run_id, &canonical, call)
+        })?;
         let pending = session.store.pending_attempts(record.run_id, call)?;
         for task in &canonical.tasks {
             if let Some(writer) = &task.writer {
@@ -2009,6 +2018,19 @@ fn dispatch_inner(
         &session,
         edge,
         Submission {
+            chair: if crate::fabric::in_lane() {
+                None
+            } else {
+                let context = crate::fabric::Context::open(edge.roots.clone(), edge.home, edge.cwd)
+                    .map_err(|error| {
+                        Fail::new(Status::Error, ErrorKind::Identity, error.to_string())
+                    })?;
+                Some(run::ChairBinding {
+                    host: context.identity.inbox.host,
+                    actor: crate::workflow::session_actor(&context, None)
+                        .map_err(|error| Fail::new(Status::Error, ErrorKind::Identity, error))?,
+                })
+            },
             operation_id: command.operation_id,
             tasks,
             concurrency,
@@ -2350,6 +2372,44 @@ impl run::Providers for PreparedProvider<'_> {
         self.fallback.failure_diagnostic(route, stderr)
     }
 }
+fn with_chair_index<T>(
+    roots: &Roots,
+    call: &run::Request<'_>,
+    action: impl FnOnce(
+        &provenant_fabric_runtime::chairs::ChairIndex,
+        &provenant_fabric_runtime::chairs::Request<'_>,
+    ) -> Result<T, provenant_fabric_runtime::chairs::Error>,
+) -> Result<T, Fail> {
+    use provenant_fabric_runtime::chairs::{ChairIndex, Request, ThreadWait};
+    let index_call = Request {
+        clock: call.clock,
+        budget: call.budget,
+        cancel: call.cancel,
+        backoff: &ThreadWait,
+    };
+    ChairIndex::open(&roots.state, &index_call)
+        .and_then(|index| action(&index, &index_call))
+        .map_err(|error| {
+            Fail::new(
+                match &error {
+                    provenant_fabric_runtime::chairs::Error::Conflict
+                    | provenant_fabric_runtime::chairs::Error::NotFound
+                    | provenant_fabric_runtime::chairs::Error::Invalid(_) => Status::Refused,
+                    _ => Status::Error,
+                },
+                match &error {
+                    provenant_fabric_runtime::chairs::Error::Conflict => ErrorKind::Conflict,
+                    provenant_fabric_runtime::chairs::Error::NotFound => ErrorKind::NotFound,
+                    provenant_fabric_runtime::chairs::Error::Invalid(_) => ErrorKind::Refused,
+                    provenant_fabric_runtime::chairs::Error::Busy => ErrorKind::Contention,
+                    provenant_fabric_runtime::chairs::Error::Cancelled => ErrorKind::Cancelled,
+                    _ => ErrorKind::Fabric,
+                },
+                format!("chair association: {error}"),
+            )
+        })
+}
+
 /// A child carries the request `validate_child` returned, which is the only
 /// copy launched from. The store carries its parent's sealed requester.
 fn launch_on_host(
@@ -2391,6 +2451,40 @@ fn launch_on_host(
         }
     };
     let request_digest = request.digest().map_err(run::RunError::from)?;
+    if validated.is_none() {
+        with_chair_index(edge.roots, call, |index, index_call| {
+            if let Some(prior) = request.parent {
+                let parent = session.store.record(prior, call).map_err(|_| {
+                    provenant_fabric_runtime::chairs::Error::Invalid("continuation parent")
+                })?;
+                let original = session.store.request(parent.run_id, call).map_err(|_| {
+                    provenant_fabric_runtime::chairs::Error::Invalid("continuation request")
+                })?;
+                index.inherit(
+                    session.context.project_id,
+                    (parent.run_id, original.digest()?),
+                    run,
+                    request,
+                    index_call,
+                )
+            } else {
+                match index.read(session.context.project_id, run, index_call)? {
+                    Some(value) if value.request_digest != request_digest => {
+                        Err(provenant_fabric_runtime::chairs::Error::Conflict)
+                    }
+                    // Only the host root's immutable request may repair an
+                    // interrupted submission, including owned-worktree replay.
+                    None if session.context.state_root == edge.roots.state => {
+                        index.submit(session.context.project_id, run, request, index_call)
+                    }
+                    None if request.chair.is_some() => {
+                        Err(provenant_fabric_runtime::chairs::Error::NotFound)
+                    }
+                    _ => Ok(()),
+                }
+            }
+        })?;
+    }
     let seed = run::RootSeed {
         home: edge.home.into(),
         checkout: edge.assets.into(),
@@ -5726,7 +5820,12 @@ mod tests {
             assets: &cwd,
             cwd: &cwd,
         };
+        let chair = Some(run::ChairBinding {
+            host: provenant_core::HostId::from_bytes([4; 16]),
+            actor: ActorId::from_bytes([5; 16]),
+        });
         let submission = |base: &str| Submission {
+            chair: chair.clone(),
             operation_id: OperationId::parse("context-ref-replay").unwrap(),
             tasks: vec![Submitted {
                 build_heavy: false,
@@ -5753,6 +5852,61 @@ mod tests {
         };
         let (first, _) =
             submit(&session, &edge, submission("context-base"), &call).map_err(|f| f.message)?;
+        with_chair_index(&roots, &call, |index, index_call| {
+            let binding = index
+                .read(session.context.project_id, first.run_id, index_call)?
+                .unwrap();
+            assert_eq!(binding.chair, chair);
+            assert_eq!(
+                binding.request_digest,
+                session
+                    .store
+                    .request(first.run_id, &call)
+                    .unwrap()
+                    .digest()
+                    .unwrap()
+            );
+            Ok(())
+        })
+        .map_err(|f| f.message)?;
+        std::fs::rename(
+            roots.state.as_path().join("fabric/host.sqlite3"),
+            roots.state.as_path().join("fabric/interrupted.sqlite3"),
+        )?;
+        let mut forged = session.store.request(first.run_id, &call)?;
+        forged.concurrency = 2;
+        with_chair_index(&roots, &call, |index, c| {
+            index.submit(session.context.project_id, first.run_id, &forged, c)
+        })
+        .map_err(|f| f.message)?;
+        assert_eq!(
+            launch(&session, first.run_id, &edge, &call)
+                .unwrap_err()
+                .status,
+            Status::Refused
+        );
+        std::fs::rename(
+            roots.state.as_path().join("fabric/host.sqlite3"),
+            roots.state.as_path().join("fabric/forged.sqlite3"),
+        )?;
+        launch(&session, first.run_id, &edge, &call).map_err(|f| f.message)?;
+        let expired = run::Request {
+            budget: WaitBudget::nonblocking(clock.mono_now()),
+            ..call
+        };
+        let failure = with_chair_index(&roots, &expired, |_, _| Ok(())).unwrap_err();
+        assert_eq!(failure.status, Status::Error);
+        with_chair_index(&roots, &call, |index, call| {
+            assert_eq!(
+                index
+                    .read(session.context.project_id, first.run_id, call)?
+                    .unwrap()
+                    .chair,
+                chair
+            );
+            Ok(())
+        })
+        .map_err(|f| f.message)?;
         command(&["commit", "--allow-empty", "-qm", "moved"])?;
         command(&["branch", "-f", "context-base", "HEAD"])?;
         for deleted in [false, true] {
@@ -5786,6 +5940,7 @@ mod tests {
             operation_id: OperationId::parse(&format!("trace-{n}"))?,
             created_at,
             request: run::CanonicalRequest {
+                chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {

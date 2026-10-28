@@ -4164,6 +4164,10 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut run = input();
+    run.request.chair = Some(ChairBinding {
+        host: provenant_core::HostId::from_bytes([30; 16]),
+        actor: provenant_core::ActorId::from_bytes([31; 16]),
+    });
     let outer_parent = AttemptId::from_bytes([19; 16]);
     run.request.lane_depth = Some(1);
     run.request.parent_attempt = Some(outer_parent);
@@ -4195,6 +4199,10 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
 
     let continued = store.resume(&resume("r1", 0, 20)?, &call)?;
     assert_eq!(continued.parent, Some(prior));
+    assert_eq!(
+        store.request(continued.run_id, &call)?.chair,
+        run.request.chair
+    );
     assert_eq!(
         store.request(continued.run_id, &call)?.tasks[0]
             .account
@@ -4300,7 +4308,11 @@ fn fresh_resume_preserves_lineage_and_authority_without_provider_state() -> Test
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let original = input();
+    let mut original = input();
+    original.request.chair = Some(ChairBinding {
+        host: provenant_core::HostId::from_bytes([32; 16]),
+        actor: provenant_core::ActorId::from_bytes([33; 16]),
+    });
     store.create(&original, &call)?;
     let fake = Fake {
         refuse: true,
@@ -4324,6 +4336,7 @@ fn fresh_resume_preserves_lineage_and_authority_without_provider_state() -> Test
     );
     let request = store.request(run.run_id, &call)?;
     assert_eq!(request.parent, Some(prior));
+    assert_eq!(request.chair, original.request.chair);
     assert_eq!(
         request.tasks[0].authority_digest,
         original.request.tasks[0].authority_digest

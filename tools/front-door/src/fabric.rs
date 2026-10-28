@@ -193,6 +193,10 @@ impl F3Facade for BoundFacade<'_> {
             factory: self.factory,
             allow_remote: true,
             actor: None,
+            chair: Some(provenant_run::ChairBinding {
+                host: self.factory.context.identity.inbox.host,
+                actor: self.factory.context.identity.inbox.actor,
+            }),
         }
         .submit(input, budget, cancel)
     }
@@ -206,6 +210,7 @@ impl F3Facade for BoundFacade<'_> {
             factory: self.factory,
             allow_remote: true,
             actor: None,
+            chair: None,
         }
         .run(input, budget, cancel)
     }
@@ -227,6 +232,7 @@ impl F3Facade for BoundFacade<'_> {
             factory: self.factory,
             allow_remote: true,
             actor: None,
+            chair: None,
         }
         .output(input, budget, cancel)
     }
@@ -279,6 +285,7 @@ impl F3Facade for BoundFacade<'_> {
                             factory: self.factory,
                             allow_remote: true,
                             actor: None,
+                            chair: None,
                         }
                         .capabilities()
                         .submit,
@@ -639,6 +646,7 @@ pub fn peer(
             factory: &peer_factory,
             allow_remote: false,
             actor: None,
+            chair: None,
         };
         let result = match &request.action {
             PeerAction::RunStatuses { targets } => {
@@ -1199,6 +1207,8 @@ struct BinaryRunOwner<'a> {
     allow_remote: bool,
     /// Replay submissions under this actor instead of the process's own.
     actor: Option<provenant_core::ActorId>,
+    /// Only the direct chair entry point supplies a verified origin.
+    chair: Option<provenant_run::ChairBinding>,
 }
 fn peer_result<T>(
     result: Result<T, FacadeError>,
@@ -1632,6 +1642,7 @@ impl BinaryRunOwner<'_> {
                 &session,
                 edge,
                 Submission {
+                    chair: self.chair.clone(),
                     operation_id: operation_id.clone(),
                     tasks: submitted,
                     concurrency: concurrency.map(u64::from),
@@ -2916,6 +2927,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             factory: self.factory,
             allow_remote: false,
             actor: None,
+            chair: None,
         }
         .session(self.budget, self.cancel)?;
         let call = provenant_run::Request {
@@ -2962,6 +2974,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             factory: self.factory,
             allow_remote: true,
             actor: None,
+            chair: None,
         };
         let (target, reference) = if let Some(reference) = replay.stored_ref {
             // An accepted attempt is observed by reference: operation replay is
@@ -3366,6 +3379,7 @@ impl Factory {
                 factory: self,
                 allow_remote: true,
                 actor: None,
+                chair: None,
             };
             // One unresolvable target must not strand the others; report the first failure last.
             let mut first_error = None;
@@ -3584,6 +3598,7 @@ impl Factory {
             factory: self,
             allow_remote: true,
             actor: None,
+            chair: None,
         };
         let mut hosts = std::collections::BTreeSet::new();
         hosts.insert(ctx.identity.host);
@@ -4025,6 +4040,7 @@ mod peer_tests {
             )?;
             let run = provenant_run::Service::new(&store).dispatch(
                 provenant_run::DispatchRequest {
+                    chair: None,
                     operation_id: "settlement-original".parse()?,
                     concurrency: 1,
                     lane_depth: 1,
@@ -4158,6 +4174,7 @@ mod peer_tests {
             factory: &factory,
             allow_remote: false,
             actor: None,
+            chair: None,
         };
         let first = owner.run(
             RunInput::List {
@@ -4613,6 +4630,37 @@ mod peer_tests {
             provenant_fabric_runtime::graph::NodeState::Failed
         );
         assert!(!run.checkpoint.nodes[0].attempts[0].launched);
+        let owner = BinaryRunOwner {
+            factory: &factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store(budget, &cancel)?;
+        let operation = graph_operation(
+            "graph-attempt-operation",
+            &run.checkpoint.nodes[0].attempts[0].key,
+        )?;
+        let operation = store
+            .operation(&operation, &owner.call(budget, &cancel))?
+            .ok_or("graph run not admitted")?;
+        let index_call = provenant_fabric_runtime::chairs::Request {
+            clock: &factory.clock,
+            budget,
+            cancel: &cancel,
+            backoff: &ThreadWait,
+        };
+        let binding = provenant_fabric_runtime::chairs::ChairIndex::open(
+            &factory.context.roots.state,
+            &index_call,
+        )?
+        .read(
+            factory.context.identity.project,
+            operation.run_id,
+            &index_call,
+        )?
+        .ok_or("graph index missing")?;
+        assert!(binding.chair.is_none(), "graph created a chair association");
         let base = {
             let journal = FileJournal::open(
                 &fixture.roots.state,

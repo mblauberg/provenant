@@ -415,7 +415,7 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
     };
     let run_git = |args: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
         let argv = std::iter::once(git.as_os_str())
-            .chain(args.iter().map(|arg| std::ffi::OsStr::new(arg)))
+            .chain(args.iter().map(std::ffi::OsStr::new))
             .map(Into::into)
             .collect::<Vec<_>>();
         let output = executor.execute(ExecOptions::new(&argv, &repo, Duration::from_secs(10)))?;

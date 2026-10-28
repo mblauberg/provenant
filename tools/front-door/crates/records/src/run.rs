@@ -1,7 +1,8 @@
 //! Strict run-store records. Facts are constructed only after store validation.
 use crate::{CanonicalError, CanonicalV1, FileDigest, PathWire};
 use provenant_core::{
-    ActorId, AttemptId, DeliveryId, Digest, GitOid, OperationId, ProjectId, RunId, TaskId, WallTime,
+    ActorId, AttemptId, DeliveryId, Digest, GitOid, HostId, OperationId, ProjectId, RunId, TaskId,
+    WallTime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -12,9 +13,20 @@ pub const RESULT_LIMIT: u64 = 4 * 1024 * 1024;
 pub const CAPTURE_LIMIT: u64 = 64 * 1024 * 1024;
 pub const OUTPUT_LIMIT: u64 = 65536;
 
+/// Explicit submitting chair identity, separate from a worker provider session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChairBinding {
+    pub host: HostId,
+    pub actor: ActorId,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalRequest {
+    /// Submission proposal only. Readers trust the host-owned Fabric index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chair: Option<ChairBinding>,
     /// A fresh continuation retains the parent for lineage and admission, but
     /// starts the provider without its previous session. The reason is sealed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -698,6 +710,7 @@ mod tests {
     fn request_with_a_removed_task_class_retains_its_sealed_digest()
     -> Result<(), Box<dyn std::error::Error>> {
         let request = CanonicalRequest {
+            chair: None,
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {

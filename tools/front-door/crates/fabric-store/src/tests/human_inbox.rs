@@ -162,9 +162,9 @@ fn human_inbox_migration_preserves_existing_mail_and_refuses_old_binary_version(
         .db
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, crate::db::MIGRATIONS.len() as i64);
     assert!(matches!(
         provenant_sqlite::read_version(&store.db, 7),
-        Err(provenant_sqlite::VersionError::Unsupported(8))
+        Err(provenant_sqlite::VersionError::Unsupported(found)) if found == version
     ));
 }

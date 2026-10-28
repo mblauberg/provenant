@@ -171,14 +171,22 @@ impl Store {
             key.strip_prefix("sha256:")
                 .ok_or(Error::Invalid("lock digest"))?
         );
-        let lock = self.locks.lock(
+        let locks = self
+            .locks
+            .as_ref()
+            .ok_or(Error::Invalid("landing lock store"))?;
+        let lock = locks.lock(
             OsStr::new(&name),
             LockMode::Exclusive,
             request.budget,
             request.cancel,
             request.clock,
         )?;
-        let metadata = self.locks.metadata()?;
+        let metadata = self
+            .locks
+            .as_ref()
+            .ok_or(Error::Invalid("landing lock store"))?
+            .metadata()?;
         Ok(LandingGuard {
             _lock: lock,
             project,
@@ -187,7 +195,11 @@ impl Store {
         })
     }
     fn check_guard(&self, guard: &LandingGuard) -> Result<()> {
-        let metadata = self.locks.metadata()?;
+        let metadata = self
+            .locks
+            .as_ref()
+            .ok_or(Error::Invalid("landing lock store"))?
+            .metadata()?;
         if guard.directory != (metadata.device, metadata.inode) {
             return Err(Error::Invalid("landing lock store"));
         }

@@ -26,8 +26,17 @@ Human requests retain their opening revision, their optional resolution and
 their optional closure, with one immutable answer and one outbox record.
 `coordination_operation` commits the revision comparison, answer, history,
 outbox, addressed response message and receipt together. Migration 8 adds these
-tables without changing existing mail or tasks. Previous binaries refuse schema
-8, so rollback requires restoring a pre-upgrade store backup or a forward repair;
+tables without changing existing mail or tasks. Migration 9 adds the immutable
+`run_chairs` association table. The runtime opens it only through `HostStore::open`
+at `<StateRoot>/fabric/host.sqlite3`, with the same safe opening, companion checks
+and migrations, without opening the lane-writable `fabric/locks` directory.
+Only the typed host handle exposes chair reads and writes; ordinary `Store`
+handles cannot access those APIs. Warm opens skip migration write transactions.
+Lanes can write the coordination database and child run stores;
+their exact grants exclude `host.sqlite3` and its companions. The authoritative
+index seals project/run, request digest and optional chair. Readers ignore any
+association rows in lane-writable databases.
+Previous binaries refuse schema 9, so rollback requires restoring a pre-upgrade store backup or a forward repair;
 do not change `user_version` by hand or delete pending answers.
 
 Requests retain history without automatic pruning, up to 10,000 items per
