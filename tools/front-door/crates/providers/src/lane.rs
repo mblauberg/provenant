@@ -405,7 +405,8 @@ mod tests {
 
     #[test]
     fn github_policy_guards_labels_and_verb_prefixes() -> Result<(), Box<dyn std::error::Error>> {
-        use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
         let temp = tempfile::tempdir()?;
         let shim = temp.path().join("gh");
         let real_gh = temp.path().join("real-gh");
@@ -420,6 +421,13 @@ mod tests {
             gh_wrapper(real_gh.to_str().unwrap(), "'/tmp'", &policy),
         )?;
         fs::set_permissions(&shim, fs::Permissions::from_mode(0o700))?;
+        let executor = SystemExecutor::new(1)?;
+        let run = |args: &[&str]| {
+            let argv: Vec<_> = std::iter::once(shim.as_os_str().to_owned())
+                .chain(args.iter().map(OsString::from))
+                .collect();
+            executor.execute(ExecOptions::new(&argv, temp.path(), Duration::from_secs(5)))
+        };
         for args in [
             vec!["pr", "edit", "42", "--add-label", "ci"],
             vec!["pr", "create", "--label=docs,ci"],
@@ -431,35 +439,21 @@ mod tests {
             vec!["issue", "edit", "42", "--add-label", "docs, ci"],
             vec!["pr", "create", "--label", "docs, needs review "],
         ] {
-            let output = Command::new(&shim).args(args).output()?;
-            assert_eq!(output.status.code(), Some(1));
-            assert_eq!(output.stderr, b"github.deny_labels\n");
+            let output = run(&args)?;
+            assert_eq!(output.termination, Termination::Exit(1));
+            assert_eq!(output.stderr.bytes, b"github.deny_labels\n");
         }
-        let output = Command::new(&shim)
-            .args(["release", "create", "v1"])
-            .output()?;
-        assert_eq!(output.status.code(), Some(1));
-        assert_eq!(output.stderr, b"github.deny_verbs\n");
-        let output = Command::new(&shim)
-            .args(["pr", "create", "--title", "hello world", "-l", "docs"])
-            .output()?;
-        assert!(output.status.success());
+        let output = run(&["release", "create", "v1"])?;
+        assert_eq!(output.termination, Termination::Exit(1));
+        assert_eq!(output.stderr.bytes, b"github.deny_verbs\n");
+        let output = run(&["pr", "create", "--title", "hello world", "-l", "docs"])?;
+        assert_eq!(output.termination, Termination::Exit(0));
         assert_eq!(
-            output.stdout,
+            output.stdout.bytes,
             b"<pr>\n<create>\n<--title>\n<hello world>\n<-l>\n<docs>\n"
         );
-        assert!(
-            Command::new(&shim)
-                .args(["pr", "create", "--title", "docs"])
-                .status()?
-                .success()
-        );
-        assert!(
-            Command::new(&shim)
-                .args(["release", "view"])
-                .status()?
-                .success()
-        );
+        assert!(run(&["pr", "create", "--title", "docs"])?.termination == Termination::Exit(0));
+        assert!(run(&["release", "view"])?.termination == Termination::Exit(0));
         Ok(())
     }
 

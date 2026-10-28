@@ -2923,16 +2923,30 @@ mod tests {
             None,
         )?;
         let shim = publishing_paths.temporary.join("candidate-0/bin/gh");
-        let denied = std::process::Command::new(&shim)
-            .args(["pr", "create", "-l", "ci"])
-            .output()?;
-        assert!(!denied.status.success());
-        assert_eq!(denied.stderr, b"github.deny_labels\n");
-        let allowed = std::process::Command::new(&shim)
-            .args(["pr", "create", "-l", "docs"])
-            .output()?;
-        assert!(allowed.status.success());
-        assert_eq!(allowed.stdout, b"forwarded\n");
+        let run_shim = |label: &str| {
+            use provenant_os::exec::{ExecOptions, Executor};
+            let argv = [
+                shim.as_os_str().to_owned(),
+                "pr".into(),
+                "create".into(),
+                "-l".into(),
+                label.into(),
+            ];
+            executor.execute(ExecOptions::new(
+                &argv,
+                &attempt,
+                std::time::Duration::from_secs(5),
+            ))
+        };
+        let denied = run_shim("ci")?;
+        assert_eq!(denied.termination, provenant_os::exec::Termination::Exit(1));
+        assert_eq!(denied.stderr.bytes, b"github.deny_labels\n");
+        let allowed = run_shim("docs")?;
+        assert_eq!(
+            allowed.termination,
+            provenant_os::exec::Termination::Exit(0)
+        );
+        assert_eq!(allowed.stdout.bytes, b"forwarded\n");
         // The preferred provider is updating, so preparation must select the
         // explicit fallback rather than just omit an unrelated busy adapter.
         let mut fallback_task = task.clone();
