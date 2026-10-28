@@ -792,6 +792,8 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
         verb.as_str(),
         "workflow session show"
             | "workflow session diff"
+            | "chair summary show"
+            | "chair summary diff"
             | "console projects"
             | "console sessions"
             | "console overview"
