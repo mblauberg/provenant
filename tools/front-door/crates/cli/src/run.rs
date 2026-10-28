@@ -161,6 +161,7 @@ pub struct Registry<'a> {
     pub state_root: Option<&'a Path>,
     pub project_id: Option<provenant_core::ProjectId>,
     pub host: Option<&'a run::HostLaunchContext>,
+    pub cancel: Option<&'a CancelToken>,
 }
 impl Registry<'_> {
     /// Each adapter supports resume; the attempt must carry a session handle.
@@ -2285,6 +2286,13 @@ fn launch_on_host(
             configuration_root: edge.roots.state.as_path().into(),
             cwd: edge.cwd.into(),
             executables: std::collections::BTreeMap::new(),
+            executable_search_path: std::env::var_os("PATH")
+                .map(|path| {
+                    std::env::split_paths(&path)
+                        .filter(|path| path.is_absolute())
+                        .collect()
+                })
+                .unwrap_or_default(),
             git: provenant_os::git::git_executable()
                 .ok_or_else(|| Fail::new(Status::Refused, ErrorKind::Git, "Git unavailable"))?,
             codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
@@ -2379,6 +2387,7 @@ fn launch_on_host(
         // Top-level discovery runs in prepare under its lease. Child launches
         // continue to use their sealed host executable authority.
         host: inherited_host.then_some(&host),
+        cancel: Some(call.cancel),
     };
     let providers = PreparedProvider {
         fallback: &registry,
@@ -3631,6 +3640,7 @@ fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                     state_root: Some(session.context.state_root.as_path()),
                     project_id: Some(session.context.project_id),
                     host: None,
+                    cancel: Some(&cancel),
                 };
                 let recovered = request(&clock, &cancel).and_then(|call| {
                     Ok(session
@@ -4000,6 +4010,7 @@ pub fn continue_attempt_mode(
                 state_root: Some(session.context.state_root.as_path()),
                 project_id: Some(session.context.project_id),
                 host: None,
+                cancel: Some(call.cancel),
             };
             session
                 .store
@@ -4345,6 +4356,7 @@ fn reconcile_inner(
             state_root: Some(session.context.state_root.as_path()),
             project_id: Some(session.context.project_id),
             host: None,
+            cancel: Some(&cancel),
         };
         // Each step gets a fresh budget; recovery waits on custody locks.
         let found = match request(&clock, &cancel)
@@ -6348,6 +6360,7 @@ mod tests {
             state_root: None,
             project_id: None,
             host: None,
+            cancel: None,
         };
         for (message, expected) in [
             (
@@ -6550,6 +6563,7 @@ mod tests {
             state_root: None,
             project_id: None,
             host: None,
+            cancel: None,
         };
         let stream = [
             json!({"type":"thread.started","thread_id":"01234567-89ab-cdef-0123-456789abcdef"}),

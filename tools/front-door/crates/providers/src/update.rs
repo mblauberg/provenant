@@ -21,8 +21,33 @@ fn record_name(provider: &str) -> OsString {
 
 pub fn latest(state: &Path, provider: &str) -> Option<UpdateRecord> {
     let dir = Directory::open_anchor(&state.join("provider-updates")).ok()?;
-    let bytes = dir.read_stable(&record_name(provider), 4096).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let read = |name: &std::ffi::OsStr| -> Option<UpdateRecord> {
+        serde_json::from_slice(&dir.read_stable(name, 4096).ok()?).ok()
+    };
+    let result = read(&record_name(provider));
+    let attempt = read(&attempt_name(provider));
+    match (result, attempt) {
+        (Some(result), Some(attempt))
+            if attempt.checked_unix_seconds > result.checked_unix_seconds =>
+        {
+            Some(attempt)
+        }
+        (Some(result), _) => Some(result),
+        (None, attempt) => attempt,
+    }
+}
+
+fn attempt_name(provider: &str) -> OsString {
+    format!("{provider}.attempt.json").into()
+}
+
+/// A read-only hint for quota events. The worker rechecks under the lease.
+pub fn due(state: &Path, provider: &str, settings: &ProviderSettings, now: i64) -> bool {
+    !matches!(settings.update, ProviderUpdate::Enabled(false))
+        && latest(state, provider).is_none_or(|record| {
+            now.saturating_sub(record.checked_unix_seconds)
+                >= i64::try_from(settings.update_interval_seconds).unwrap_or(i64::MAX)
+        })
 }
 
 fn save(dir: &Directory, name: &std::ffi::OsStr, value: &impl Serialize) -> Result<(), String> {
@@ -99,14 +124,52 @@ pub fn check(
     executor: &dyn Executor,
     now: i64,
 ) -> Result<Option<UpdateRecord>, String> {
-    if matches!(settings.update, ProviderUpdate::Enabled(false)) {
+    // Also honour error backoff when the fence itself cannot be opened.
+    if !due(state, provider, settings, now) {
         return Ok(None);
     }
-    let _lease = match provenant_os::provider_fence::acquire(state, provider, LockMode::Exclusive) {
-        Ok(lease) => lease,
+    let lease = provenant_os::provider_fence::acquire(state, provider, LockMode::Exclusive);
+    let result = match &lease {
+        Ok(lease) => check_inner(state, provider, executable, settings, executor, now, lease),
         Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(None),
-        Err(error) => return Err(error.to_string()),
+        Err(error) => Err(error.to_string()),
     };
+    if let Err(error) = &result {
+        // Complement the attempt record: early failures (including a broken
+        // attempt destination or lock file) can still publish to the result.
+        // If both destinations are unwritable, durable backoff is impossible.
+        if let Ok(dir) = Directory::open_anchor(&state.join("provider-updates")) {
+            let latest = latest(state, provider);
+            if latest
+                .as_ref()
+                .is_some_and(|record| record.checked_unix_seconds > now)
+            {
+                return result;
+            }
+            let mut record = latest
+                .filter(|record| record.checked_unix_seconds == now)
+                .unwrap_or(UpdateRecord {
+                    checked_unix_seconds: now,
+                    old_version: None,
+                    new_version: None,
+                    outcome: String::new(),
+                });
+            record.outcome = format!("failed: {error}");
+            let _ = save(&dir, &record_name(provider), &record);
+        }
+    }
+    result
+}
+
+fn check_inner(
+    state: &Path,
+    provider: &str,
+    executable: &Path,
+    settings: &ProviderSettings,
+    executor: &dyn Executor,
+    now: i64,
+    lease: &provenant_os::fs::LockGuard,
+) -> Result<Option<UpdateRecord>, String> {
     let dir = Directory::open_anchor(&state.join("provider-updates")).map_err(|e| e.to_string())?;
     let previous = latest(state, provider);
     let argv = command(provider, executable, &settings.update);
@@ -117,6 +180,15 @@ pub fn check(
     }) {
         return Ok(None);
     }
+    // Reserve the interval independently of result publication. If that
+    // destination is broken, subsequent events still back off on the error.
+    let mut record = UpdateRecord {
+        checked_unix_seconds: now,
+        old_version: None,
+        new_version: None,
+        outcome: "failed (interrupted)".into(),
+    };
+    save(&dir, &attempt_name(provider), &record)?;
     let Some(argv) = argv else {
         let record = UpdateRecord {
             checked_unix_seconds: now,
@@ -128,14 +200,9 @@ pub fn check(
         return Ok(Some(record));
     };
     let old_version = version(executor, executable, state);
-    // Save the check before launching so interruption also observes the backoff.
-    let mut record = UpdateRecord {
-        checked_unix_seconds: now,
-        old_version: old_version.clone(),
-        new_version: old_version,
-        outcome: "failed (interrupted)".into(),
-    };
-    save(&dir, &record_name(provider), &record)?;
+    record.old_version = old_version.clone();
+    record.new_version = old_version;
+    save(&dir, &attempt_name(provider), &record)?;
     let mut options = ExecOptions::new(
         &argv,
         state,
@@ -143,8 +210,9 @@ pub fn check(
     );
     options.stdout = StreamPolicy::Discard;
     options.stderr = StreamPolicy::Discard;
-    // Only housekeeping owns the exclusive lease. Updater descendants must
-    // never retain it after timeout; the executor kills their private group.
+    // Inheritance keeps the fence intact if housekeeping is killed. A child
+    // that daemonises out of this group also keeps the lease until it exits.
+    options.inherited_lease = Some(lease);
     options.process_group = true;
     let result = executor.execute(options);
     let succeeded =
@@ -178,7 +246,7 @@ mod tests {
             if !version {
                 assert_eq!(options.argv[1], "update");
                 assert_eq!(options.timeout, Duration::from_secs(300));
-                assert!(options.inherited_lease.is_none());
+                assert!(options.inherited_lease.is_some());
                 assert!(options.process_group);
                 assert!(matches!(
                     provenant_os::provider_fence::acquire(self.state, "claude", LockMode::Shared),
@@ -210,6 +278,173 @@ mod tests {
                 elapsed_micros: 1,
             })
         }
+    }
+
+    #[test]
+    fn result_write_error_backs_off() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let fake = Fake {
+            state: temp.path(),
+            updated: AtomicBool::new(false),
+            calls: AtomicUsize::new(0),
+            fail: false,
+        };
+        let settings = ProviderSettings::default();
+        // A broken result destination must not cause an attempt on every tick.
+        std::fs::create_dir_all(temp.path().join("provider-updates/claude.json"))?;
+        assert!(
+            check(
+                temp.path(),
+                "claude",
+                Path::new("/fake/claude"),
+                &settings,
+                &fake,
+                100
+            )
+            .is_err()
+        );
+        let calls = fake.calls.load(Ordering::Relaxed);
+        assert!(
+            check(
+                temp.path(),
+                "claude",
+                Path::new("/fake/claude"),
+                &settings,
+                &fake,
+                101
+            )?
+            .is_none()
+        );
+        assert_eq!(fake.calls.load(Ordering::Relaxed), calls);
+        assert!(
+            check(
+                temp.path(),
+                "claude",
+                Path::new("/fake/claude"),
+                &settings,
+                &fake,
+                100 + settings.update_interval_seconds as i64
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn early_check_errors_back_off() -> Result<(), Box<dyn std::error::Error>> {
+        for blocked in ["claude.attempt.json", "claude.lock"] {
+            let temp = tempfile::tempdir()?;
+            std::fs::create_dir_all(temp.path().join("provider-updates").join(blocked))?;
+            let fake = Fake {
+                state: temp.path(),
+                updated: AtomicBool::new(false),
+                calls: AtomicUsize::new(0),
+                fail: false,
+            };
+            let settings = ProviderSettings::default();
+            assert!(
+                check(
+                    temp.path(),
+                    "claude",
+                    Path::new("/fake/claude"),
+                    &settings,
+                    &fake,
+                    100
+                )
+                .is_err()
+            );
+            assert!(
+                latest(temp.path(), "claude")
+                    .ok_or("missing failure backoff")?
+                    .outcome
+                    .starts_with("failed:")
+            );
+            assert!(
+                check(
+                    temp.path(),
+                    "claude",
+                    Path::new("/fake/claude"),
+                    &settings,
+                    &fake,
+                    101
+                )?
+                .is_none()
+            );
+            assert_eq!(fake.calls.load(Ordering::Relaxed), 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn updater_runner_fixture() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(state) = std::env::var_os("PROVENANT_TEST_UPDATER_STATE") else {
+            return Ok(());
+        };
+        let state = Path::new(&state);
+        let settings = ProviderSettings {
+            update: ProviderUpdate::Command {
+                command: vec![state.join("provider").to_string_lossy().into_owned()],
+            },
+            ..Default::default()
+        };
+        check(
+            state,
+            "claude",
+            &state.join("provider"),
+            &settings,
+            &provenant_os::exec::SystemExecutor::new(1)?,
+            100,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // A separate runner must be killed without unwinding.
+    fn killed_runner_keeps_exclusive_lease_until_updater_group_exits()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
+        let temp = tempfile::tempdir()?;
+        let executable = temp.path().join("provider");
+        std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n(while [ ! -e release ]; do /bin/sleep 0.05; done) &\necho ready > ready\nwait\n")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        let mut runner = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "update::tests::updater_runner_fixture",
+                "--nocapture",
+            ])
+            .env("PROVENANT_TEST_UPDATER_STATE", temp.path())
+            .spawn()?;
+        let clock = provenant_os::clock::SystemClock::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+        while !temp.path().join("ready").exists()
+            && budget.remaining(clock.mono_now()).as_micros() != 0
+        {
+            clock.wait_until(
+                clock
+                    .mono_now()
+                    .checked_add(DurationMicros::from_micros(10_000))?,
+            )?;
+        }
+        runner.kill()?;
+        runner.wait()?;
+        let busy = provenant_os::provider_fence::acquire(temp.path(), "claude", LockMode::Shared);
+        // Always release the fixture even if the regression assertion fails.
+        std::fs::write(temp.path().join("release"), b"exit")?;
+        assert!(temp.path().join("ready").exists(), "updater did not start");
+        assert!(matches!(
+            busy,
+            Err(provenant_os::fs::FsError::LockTimeout { .. })
+        ));
+        let _lane = provenant_os::provider_fence::wait(
+            temp.path(),
+            "claude",
+            LockMode::Shared,
+            WaitBudget::cli(clock.mono_now(), 5)?,
+            &CancelToken::new(),
+            &clock,
+        )?;
+        Ok(())
     }
 
     #[test]
@@ -339,7 +574,7 @@ mod tests {
                 let bytes = if options.argv.get(1).is_some_and(|arg| arg == "--version") {
                     std::fs::read(&options.argv[0]).unwrap()
                 } else {
-                    assert!(options.inherited_lease.is_none());
+                    assert!(options.inherited_lease.is_some());
                     assert!(options.process_group);
                     std::fs::remove_file(self.alias).unwrap();
                     std::os::unix::fs::symlink(self.new, self.alias).unwrap();

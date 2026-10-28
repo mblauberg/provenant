@@ -413,6 +413,31 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Internal(provenant_cli::Internal::Supervise { descriptors }) => {
             supervise(&descriptors, globals, process)
         }
+        Command::Internal(provenant_cli::Internal::ProviderUpdates) => {
+            match roots::resolve(globals, Workspace::Project, Product::Required) {
+                Ok(resolved) => match provenant_cli::provider_updates::housekeep(
+                    &resolved.roots,
+                    &resolved.home,
+                    &resolved.project,
+                ) {
+                    Ok(()) => 0,
+                    Err(error) => fail(
+                        &inv.leaf,
+                        Outcome::Error,
+                        "PROVIDER_UPDATE",
+                        &error,
+                        globals,
+                    ),
+                },
+                Err(error) => fail(
+                    &inv.leaf,
+                    Outcome::Error,
+                    "ROOT",
+                    &error.to_string(),
+                    globals,
+                ),
+            }
+        }
         Command::Help { .. } => fail(
             "help",
             Outcome::Invalid,
@@ -593,9 +618,8 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                             |result| crate::overflow::publish(result, globals),
                         );
                         if housekeeping {
-                            let _ = provenant_cli::provider_updates::housekeep(
+                            let _ = provenant_cli::provider_updates::schedule(
                                 &resolved.roots,
-                                &resolved.home,
                                 &resolved.project,
                             );
                         }

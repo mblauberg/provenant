@@ -2650,6 +2650,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
             state_root: Some(roots.state.as_path()),
             project_id: Some(context.project_id),
             host: None,
+            cancel: None,
         };
         // Simulate a partially written first candidate. Fallback must have
         // independent setup paths rather than failing on the same auth entry.
@@ -2940,6 +2941,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
                 configuration_root: rig.state.clone(),
                 cwd: launch.cwd.clone(),
                 executables: [("codex".into(), executable.clone())].into(),
+                executable_search_path: Vec::new(),
                 git: selected_git.clone(),
                 codex_home: None,
                 fixture_state_write: true,

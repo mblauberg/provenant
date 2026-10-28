@@ -6,19 +6,19 @@
     "update": {
       "type": "bool_or_command_argv",
       "default": true,
-      "effect": "Run the detected native updater between lanes. false opts out; {command: [program, argument, ...]} overrides the updater directly without a shell."
+      "effect": "Run the detected native updater between lanes in a detached one-shot worker scheduled by quota events. false opts out; {command: [program, argument, ...]} overrides the updater directly without a shell."
     },
     "update_timeout_seconds": {
       "type": "int",
       "min": 1,
       "default": 300,
-      "effect": "Maximum native updater duration in housekeeping. Timeout kills the updater process group, records failure and retries after the interval."
+      "effect": "Maximum native updater duration in the detached worker. Timeout kills the updater process group and records failure. Updater descendants retain the exclusive lease until exit, including descendants that leave the group."
     },
     "update_interval_seconds": {
       "type": "int",
       "min": 1,
       "default": 86400,
-      "effect": "Minimum time between update attempts, checked on existing housekeeping events. Failed and interrupted attempts wait the same interval."
+      "effect": "Minimum time between update attempts, checked on existing housekeeping events. Failed and interrupted attempts and result-write errors wait the same interval."
     }
   },
   "knobs": {

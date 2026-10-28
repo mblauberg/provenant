@@ -3,6 +3,33 @@ use std::sync::Mutex;
 struct Decoder(Mutex<Vec<Vec<u8>>>);
 
 #[test]
+fn detached_worker_returns_before_its_work_finishes() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{Clock, DurationMicros, WaitBudget};
+    let temp = tempfile::tempdir()?;
+    let argv = [
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        OsString::from("while [ ! -e release ]; do /bin/sleep 0.05; done; echo finished > done"),
+    ];
+    spawn_detached(&argv, temp.path())?;
+    // The caller must regain control before the worker can finish.
+    assert!(!temp.path().join("done").exists());
+    std::fs::write(temp.path().join("release"), b"continue")?;
+    let clock = crate::clock::SystemClock::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+    while !temp.path().join("done").exists() && budget.remaining(clock.mono_now()).as_micros() != 0
+    {
+        clock.wait_until(
+            clock
+                .mono_now()
+                .checked_add(DurationMicros::from_micros(10_000))?,
+        )?;
+    }
+    assert!(temp.path().join("done").exists());
+    Ok(())
+}
+
+#[test]
 fn inherited_lane_lease_survives_the_callers_handle() -> Result<(), Box<dyn std::error::Error>> {
     use crate::fs::LockMode;
     let temp = tempfile::tempdir()?;

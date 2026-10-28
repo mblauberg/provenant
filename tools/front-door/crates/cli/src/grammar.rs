@@ -830,6 +830,7 @@ pub enum GitHook {
 }
 #[derive(Debug, Subcommand)]
 pub enum Internal {
+    ProviderUpdates,
     Supervise {
         /// Private S2 handoff values, validated and adopted only by supervisor.
         #[arg(hide = true, num_args = 5..=6, value_parser = clap::value_parser!(u64).range(3..=2147483647))]

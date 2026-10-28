@@ -6,6 +6,37 @@ use provenant_fabric_runtime::coordination::{
 use provenant_os::{clock::SystemClock, exec::SystemExecutor};
 use std::path::Path;
 
+/// Quota events only schedule work; the detached command owns its lifetime.
+pub fn schedule(roots: &Roots, cwd: &Path) -> Result<(), String> {
+    if crate::fabric::in_lane() {
+        return Ok(());
+    }
+    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        .map_err(|e| e.to_string())?;
+    let now = SystemClock::new()
+        .wall_now()
+        .map_err(|e| e.to_string())?
+        .as_timestamp()
+        .as_second();
+    if !config.providers.iter().any(|(provider, settings)| {
+        provenant_providers::update::due(roots.state.as_path(), provider, settings, now)
+    }) {
+        return Ok(());
+    }
+    let argv = [
+        std::env::current_exe()
+            .map_err(|e| e.to_string())?
+            .into_os_string(),
+        "--state-dir".into(),
+        roots.state.as_path().as_os_str().to_owned(),
+        "--project".into(),
+        cwd.as_os_str().to_owned(),
+        "internal".into(),
+        "provider-updates".into(),
+    ];
+    provenant_os::exec::spawn_detached(&argv, cwd).map_err(|e| e.to_string())
+}
+
 pub fn housekeep(roots: &Roots, home: &Path, cwd: &Path) -> Result<(), String> {
     if crate::fabric::in_lane() {
         return Ok(());

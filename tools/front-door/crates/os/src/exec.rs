@@ -147,7 +147,7 @@ pub struct ExecOptions<'a> {
     pub cwd: &'a Path,
     pub stdin: Option<&'a [u8]>,
     pub secret_input: Option<&'a SecretInput>,
-    /// Explicitly pass a shared lane lease through exec. Updaters must not use this.
+    /// Pass a lane or updater lease through exec, including to descendants.
     pub inherited_lease: Option<&'a crate::fs::LockGuard>,
     /// Run in a private session and kill the whole group immediately on timeout.
     pub process_group: bool,
@@ -235,6 +235,32 @@ impl SystemExecutor {
         })
     }
 }
+
+/// Start a one-shot worker in its own session with no terminal or pipe handles.
+/// The process reaper owns its eventual exit while the caller remains alive.
+pub fn spawn_detached(argv: &[OsString], cwd: &Path) -> Result<(), ExecError> {
+    crate::sys::raw_exec::verify_child_wait_policy().map_err(ExecError::ChildWaitPolicy)?;
+    let reaper = Reaper::new(1).map_err(io_error("start reaper"))?;
+    let permit = reaper.reserve().ok_or(ExecError::Busy)?;
+    let child = RawChild::spawn(
+        permit,
+        crate::sys::raw_exec::SpawnSpec {
+            argv,
+            env: None,
+            cwd,
+            input: false,
+            secret_input: None,
+            inherited_lease: None,
+            process_group: true,
+            capture_stdout: false,
+            capture_stderr: false,
+        },
+    )
+    .map_err(io_error("spawn detached worker"))?;
+    drop(child); // Transfer custody without waiting or signalling the worker.
+    Ok(())
+}
+
 impl Executor for SystemExecutor {
     fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
         run(&self.reaper, options)

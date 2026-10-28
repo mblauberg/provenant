@@ -102,11 +102,12 @@ program name. The interval and timeout are positive numbers of seconds.
 Supported provider IDs are `claude`, `codex`, `cursor`, `agy` and `opencode`;
 providers without a known native update method need a command override.
 
-Quota ticks are the housekeeping events. Each tick stops after one completed
+Quota ticks are the housekeeping events. A tick schedules due work in a
+detached, one-shot process and returns without waiting for an updater. The
+worker takes exclusive leases without waiting and stops after one completed
 native update attempt. An error checking one provider is recorded without
 preventing checks of the remaining providers. Updates default to a 300-second
-timeout, configurable per provider with `update_timeout_seconds`; this time
-runs in housekeeping outside the lane path.
+timeout, configurable per provider with `update_timeout_seconds`.
 Claude uses `claude update`, OpenCode uses `opencode upgrade`, and Codex uses
 Homebrew or npm when its resolved executable identifies that installation.
 An unknown installation produces one activity note until its method becomes
@@ -116,17 +117,23 @@ Lanes hold shared leases from provider preparation through completion; updates
 need an exclusive lease. Busy providers are excluded from a lane's candidates
 without delaying other providers. Only when every candidate is busy does
 preparation wait, for up to 30 seconds total, before asking for a retry.
+Cancellation interrupts this wait. Nested launches retry missing executable
+discovery under the lease using the host's sealed search directories.
 Provider children inherit their shared lease: a long-lived background process
 keeps it and defers updates until it exits.
 
-Housekeeping holds the exclusive updater lease without passing it to updater
-children. On timeout it kills the updater's whole process group and releases
-the lease. Kernel lock release covers crashes; stable `.lock` files remain in
+The updater inherits the exclusive lease, keeping it held if the worker is
+killed. On timeout the worker kills the updater's whole process group. The
+lease remains held until the last inheriting process exits. A descendant that
+leaves the group with `setsid` or daemonises also keeps the lease until it exits;
+the group timeout cannot terminate it. Kernel lock release covers crashes;
+stable `.lock` files remain in
 `<state>/provider-updates/` to avoid inode replacement races. An interrupted
 update is recorded as failed and retried after the configured interval, as are
 other failed attempts. Interruption can leave a partially replaced installation;
 the next attempt uses the same native updater to repair it. Update failures
-are recorded once per interval, with updater output discarded.
+are recorded once per interval, with updater output discarded. An independent
+attempt record preserves backoff if publishing the result record fails.
 Activity records the old and new versions. Each lane's `availability.json`
 also includes its observed version and the latest update result.
 

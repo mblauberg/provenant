@@ -29,12 +29,7 @@ pub(super) fn prepare(
         resume,
         |name| match registry.host {
             _ if name == "gh" => resolve_executable(name),
-            Some(host) => host
-                .executables
-                .get(name)
-                .cloned()
-                .ok_or_else(|| format!("{name} executable is unavailable on the host"))
-                .and_then(|path| canonical(&path)),
+            Some(host) => host_executable(host, name),
             None => resolve_executable(name),
         },
         None,
@@ -48,8 +43,12 @@ fn available_provider_leases(
     providers: &[&str],
     budget: provenant_core::WaitBudget,
     clock: &dyn provenant_core::Clock,
+    cancel: &provenant_core::CancelToken,
 ) -> Result<std::collections::BTreeMap<String, provenant_os::fs::LockGuard>, String> {
     loop {
+        if cancel.is_cancelled() {
+            return Err("provider lease wait cancelled".into());
+        }
         let mut leases = std::collections::BTreeMap::new();
         for provider in providers {
             match provenant_os::provider_fence::acquire(
@@ -63,6 +62,9 @@ fn available_provider_leases(
                 Err(FsError::LockTimeout { .. }) => {}
                 Err(error) => return Err(error.to_string()),
             }
+        }
+        if cancel.is_cancelled() {
+            return Err("provider lease wait cancelled".into());
         }
         if !leases.is_empty() || providers.is_empty() {
             return Ok(leases);
@@ -172,11 +174,14 @@ fn prepare_with(
     // lease through handoff, including for fallback and prepared continuations.
     let clock = provenant_os::clock::SystemClock::new();
     use provenant_core::Clock;
+    let fallback_cancel = provenant_core::CancelToken::new();
+    let cancel = registry.cancel.unwrap_or(&fallback_cancel);
     let mut provider_leases = available_provider_leases(
         roots.state.as_path(),
         &eligible.iter().map(|spec| spec.name).collect::<Vec<_>>(),
         provenant_core::WaitBudget::cli(clock.mono_now(), 30).map_err(|e| e.to_string())?,
         &clock,
+        cancel,
     )?;
     let eligible = |name: &str| provider_leases.contains_key(name);
     let settings = config.domains.accounts;
@@ -1718,10 +1723,27 @@ pub(crate) fn resolve_executable(name: &str) -> Result<PathBuf, String> {
     canonical(&find_executable(name)?)
 }
 
+fn host_executable(host: &run::HostLaunchContext, name: &str) -> Result<PathBuf, String> {
+    // The caller holds this provider's lease. Retry only an omitted entry,
+    // using host-sealed directories rather than the guardian's environment.
+    let path = match host.executables.get(name) {
+        Some(path) => path.clone(),
+        None => find_executable_on_path(name, &host.executable_search_path)?,
+    };
+    canonical(&path)
+}
+
 pub(crate) fn find_executable(name: &str) -> Result<PathBuf, String> {
-    let name = AdapterSpec::get(name).map_or(name, |spec| spec.binary);
     let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
-    for directory in std::env::split_paths(&path).filter(|directory| directory.is_absolute()) {
+    find_executable_on_path(name, &std::env::split_paths(&path).collect::<Vec<_>>())
+}
+
+fn find_executable_on_path(name: &str, search_path: &[PathBuf]) -> Result<PathBuf, String> {
+    let name = AdapterSpec::get(name).map_or(name, |spec| spec.binary);
+    for directory in search_path
+        .iter()
+        .filter(|directory| directory.is_absolute())
+    {
         let candidate = directory.join(name);
         if candidate.is_file() && provenant_os::sys::is_executable(&candidate) {
             return Ok(candidate);
@@ -2357,6 +2379,7 @@ mod tests {
             &["codex", "cursor"],
             WaitBudget::cli(clock.mono_now(), 30)?,
             &clock,
+            &provenant_core::CancelToken::new(),
         )?;
         assert!(leases.contains_key("cursor"));
         assert!(!leases.contains_key("codex"));
@@ -2368,6 +2391,7 @@ mod tests {
             &["codex", "cursor"],
             WaitBudget::cli(clock.mono_now(), 30)?,
             &clock,
+            &provenant_core::CancelToken::new(),
         )
         .err()
         .ok_or("busy providers admitted")?;
@@ -2377,12 +2401,81 @@ mod tests {
     }
 
     #[test]
+    fn candidate_lease_wait_honours_cancellation() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::{
+            CancelToken, Clock, MonoTime, TestClock, TimeError, WaitBudget, WallTime,
+        };
+        use provenant_os::fs::LockMode;
+        struct CancelOnWait<'a> {
+            clock: TestClock,
+            cancel: &'a CancelToken,
+        }
+        impl Clock for CancelOnWait<'_> {
+            fn wall_now(&self) -> Result<WallTime, TimeError> {
+                self.clock.wall_now()
+            }
+            fn mono_now(&self) -> MonoTime {
+                self.clock.mono_now()
+            }
+            fn wait_until(&self, deadline: MonoTime) -> Result<(), TimeError> {
+                self.clock.wait_until(deadline)?;
+                self.cancel.cancel();
+                Ok(())
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let updating =
+            provenant_os::provider_fence::acquire(temp.path(), "codex", LockMode::Exclusive)?;
+        let cancel = CancelToken::new();
+        let clock = CancelOnWait {
+            clock: TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0)),
+            cancel: &cancel,
+        };
+        let error = available_provider_leases(
+            temp.path(),
+            &["codex"],
+            WaitBudget::cli(clock.mono_now(), 30)?,
+            &clock,
+            &cancel,
+        )
+        .err()
+        .ok_or("cancelled lease wait admitted")?;
+        assert!(error.contains("cancelled"));
+        assert_eq!(clock.mono_now().as_micros(), 50_000);
+        // Cancellation is also checked when the provider becomes available.
+        drop(updating);
+        assert!(
+            available_provider_leases(
+                temp.path(),
+                &["codex"],
+                WaitBudget::cli(clock.mono_now(), 30)?,
+                &clock,
+                &cancel,
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn executable_discovery_after_wait_observes_the_completed_update()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_core::{Clock, DurationMicros, WaitBudget};
         use provenant_os::fs::LockMode;
+        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir()?;
-        let executable = temp.path().join("cursor");
+        let executable = temp.path().join("cursor-agent");
+        let host = run::HostLaunchContext {
+            configuration_root: temp.path().into(),
+            cwd: temp.path().into(),
+            executables: Default::default(),
+            executable_search_path: vec![temp.path().into()],
+            git: "/usr/bin/git".into(),
+            codex_home: None,
+            #[cfg(feature = "fixture")]
+            fixture_state_write: false,
+        };
+        assert!(host_executable(&host, "cursor").is_err());
         let updating =
             provenant_os::provider_fence::acquire(temp.path(), "cursor", LockMode::Exclusive)?;
         let clock = provenant_os::clock::SystemClock::new();
@@ -2399,6 +2492,8 @@ mod tests {
                     )
                     .map_err(|e| e.to_string())?;
                 std::fs::write(executable, "new provider").map_err(|e| e.to_string())?;
+                std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|e| e.to_string())?;
                 drop(updating);
                 Ok(())
             });
@@ -2407,9 +2502,13 @@ mod tests {
                 &["cursor"],
                 WaitBudget::cli(clock.mono_now(), 2)?,
                 clock,
+                &provenant_core::CancelToken::new(),
             )?;
             assert!(leases.contains_key("cursor"));
-            assert_eq!(canonical(executable)?, executable.canonicalize()?);
+            assert_eq!(
+                host_executable(&host, "cursor")?,
+                executable.canonicalize()?
+            );
             assert_eq!(std::fs::read_to_string(executable)?, "new provider");
             update.join().expect("update thread")?;
             Ok(())
@@ -2581,6 +2680,7 @@ mod tests {
             state_root: Some(&state),
             project_id: Some(binding.project_id()),
             host: None,
+            cancel: Some(&cancel),
         };
         let call = run::Request {
             clock: &clock,
@@ -2660,6 +2760,57 @@ mod tests {
             },
             None,
         )?;
+        // The preferred provider is updating, so preparation must select the
+        // explicit fallback rather than just omit an unrelated busy adapter.
+        let mut fallback_task = task.clone();
+        let fallback_prompt = "Busy preferred provider fallback";
+        fallback_task.prompt_digest =
+            provenant_records::CanonicalV1::file_digest(fallback_prompt.as_bytes());
+        fallback_task.route = run::RequestedRoute::Model {
+            provider: "codex".into(),
+            model: "codex/gpt-5.3-codex".into(),
+            effort: None,
+        };
+        fallback_task.fallback = vec![run::RouteRecord {
+            provider: Some("cursor".into()),
+            model: Some("cursor/gpt-5.3-codex-low".into()),
+            ..Default::default()
+        }];
+        let fallback_paths = run::LaunchPaths {
+            attempt_id: paths.attempt_id,
+            operation_id: paths.operation_id.clone(),
+            task_index: paths.task_index,
+            lane_depth: paths.lane_depth,
+            run_id: paths.run_id,
+            deadline_unix_ms: paths.deadline_unix_ms,
+            scratch: attempt.join("fallback-scratch"),
+            provider_state: attempt.join("fallback-provider-state"),
+            temporary: attempt.join("fallback-tmp"),
+        };
+        for path in [
+            &fallback_paths.scratch,
+            &fallback_paths.provider_state,
+            &fallback_paths.temporary,
+        ] {
+            std::fs::DirBuilder::new().mode(0o700).create(path)?;
+        }
+        let fallback_launch = prepare_with(
+            &registry,
+            &fallback_task,
+            fallback_prompt,
+            &fallback_paths,
+            None,
+            |adapter| {
+                assert_eq!(adapter, "cursor", "busy preferred provider was probed");
+                Ok(executable.clone())
+            },
+            None,
+        )?;
+        assert_eq!(fallback_launch.route.provider.as_deref(), Some("cursor"));
+        assert_eq!(
+            fallback_launch.route.model.as_deref(),
+            Some("cursor/gpt-5.3-codex-low")
+        );
         let executed = executor.execute(ExecOptions::new(
             &launch.argv,
             &project,

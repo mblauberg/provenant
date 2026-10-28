@@ -29,6 +29,9 @@ pub struct HostLaunchContext {
     pub configuration_root: PathBuf,
     pub cwd: PathBuf,
     pub executables: std::collections::BTreeMap<String, PathBuf>,
+    /// Original host search directories for providers unavailable during handoff.
+    #[serde(default)]
+    pub executable_search_path: Vec<PathBuf>,
     pub git: PathBuf,
     pub codex_home: Option<PathBuf>,
     /// Synthetic fake-provider evidence; absent from installed builds.
@@ -745,6 +748,7 @@ mod disk_admission_tests {
                 configuration_root: temp.path().into(),
                 cwd: temp.path().into(),
                 executables: Default::default(),
+                executable_search_path: Vec::new(),
                 git: "/usr/bin/git".into(),
                 codex_home: None,
                 #[cfg(feature = "fixture")]
