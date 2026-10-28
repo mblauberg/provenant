@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 pub enum InboxInput {
     Ask {
         session: String,
-        request: RequestDraft,
+        request: Box<RequestDraft>,
         operation_id: Option<OperationId>,
     },
     List {
@@ -296,6 +296,13 @@ impl InboxInput {
                     })
                 {
                     return Err(InboxError::Invalid("work.repository"));
+                }
+                if request
+                    .supersedes
+                    .as_ref()
+                    .is_some_and(|replacement| replacement.expect_revision == 0)
+                {
+                    return Err(InboxError::Invalid("supersedes.expect_revision"));
                 }
                 bounded(&request.title, 256, "title")?;
                 bounded(&request.body, REQUEST_BODY_BYTES, "body")?;
@@ -697,7 +704,7 @@ impl<'a> InboxService<'a> {
                     owner_host: self.identity.host,
                     chair_session_id: session.clone(),
                     chair_actor: self.identity.inbox.actor,
-                    request: draft.clone(),
+                    request: draft.as_ref().clone(),
                     work_coverage,
                     state: RequestState::Open,
                     answer_id: None,
@@ -851,7 +858,7 @@ impl<'a> InboxService<'a> {
                 operation_id: operation.clone(),
                 request_id: value.id,
                 revision: value.revision,
-                state: value.state,
+                state: value.state_at(at),
                 answer_id: value.answer_id,
                 delivery,
             },

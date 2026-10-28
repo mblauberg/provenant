@@ -162,6 +162,8 @@ fn build_strict() -> Vec<Value> {
     let mut inbox_session = pattern(r"^[a-z0-9]([a-z0-9_-]|\.[a-z0-9_-])*\.?$");
     inbox_session["maxLength"] = json!(128);
     let inbox_request = object(json!({
+        "supersedes?":nullable(object(json!({"id":reference("Id"),"expect_revision":integer(1,u64::MAX)}))),
+        "deadline?":nullable(pattern(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$")),
         "work?":nullable(object(json!({
             "run_id":reference("Id"),"task_id?":nullable(reference("Id")),
             "attempt_id?":nullable(reference("Id")),"repository?":nullable(object(json!({"relative_to_root":object(json!({

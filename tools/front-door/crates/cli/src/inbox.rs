@@ -71,7 +71,7 @@ pub fn resolve_work(
 
 #[derive(Debug, Args)]
 pub struct Ask {
-    /// JSON request content, including optional work links; ownership comes from Fabric
+    /// JSON request content, including work links, replacement and deadline; ownership comes from Fabric
     #[arg(long)]
     pub file: PathBuf,
     /// Explicit originating chair session; never inferred from the agent label

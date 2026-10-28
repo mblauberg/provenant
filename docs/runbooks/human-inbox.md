@@ -60,8 +60,14 @@ and takes no option or text. Record `chat`, `console`, `phone_remote`, `cli` or
 Every successful mutation returns an operation ID. Preserve the ID, input and
 viewed revision when retrying after an uncertain reply. A changed operation or
 actor conflicts. For a new answer after a conflict, inspect the item first.
-An item cannot be edited into a new choice; close it as superseded, then post a
-new request. Historical answers remain visible. See generated
+To replace a viewed item, add `"supersedes":{"id":"REQUEST_ID","expect_revision":N}`
+to the new request JSON. Posting creates the replacement and supersedes that
+revision in one transaction, including the operation receipt. Host, project,
+chair actor and chair session must match. Stale revisions and already closed
+items conflict. Concurrent replacements have one winner. Saved answers, their
+delivery state and historical request revisions remain visible; supersession
+does not retract an answer already queued or consumed. The old item's closure
+reason names the replacement; the new request retains the backward link. See generated
 [CLI](../reference/cli.md) and [MCP](../reference/mcp-tools.md) references for syntax.
 
 ## Work links
@@ -145,7 +151,19 @@ stay closed; there is no background polling or provider launch.
 
 Use `inbox close` with a reason and expected revision to withdraw, supersede or
 expire an item. Closure grants no approval and does not discard its answer or
-pending delivery. Expiry is an explicit operation; no timer infers it.
+pending delivery. A request may also carry `"deadline":"2033-05-18T03:33:20.000000Z"` in CLI or
+MCP request JSON. This is explicit UTC with six fractional digits. At or after
+the deadline an unresolved item reads as `expired`, disappears from the open
+list and refuses new answers. Use `inbox REQUEST_ID` or `inbox --state all` to
+see it. Answered, confirmed, overridden and closed items retain their state,
+answer and delivery, even after the deadline. Expiry does not infer approval.
+
+No timer or background write runs: expiry is a projection of the saved deadline
+at read time. It does not change revisions, history, update timestamps or
+operation receipts; replay returns the original receipt. History retains the
+saved state. Refresh explicitly to observe elapsed deadlines. Manual closure
+remains available, and a replacement can supersede an unresolved item whose
+deadline has elapsed. Requests without deadlines behave as before.
 
 ## Limits and recovery
 

@@ -534,6 +534,7 @@ dependencies = [
  "provenant-fabric-store",
  "provenant-os",
  "provenant-records",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

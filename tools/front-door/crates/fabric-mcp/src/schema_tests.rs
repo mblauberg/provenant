@@ -185,6 +185,7 @@ fn strings() -> Vec<String> {
         "a".into(),
         "0".into(),
         "a=1".into(),
+        "2033-05-18T03:33:20.000000Z".into(),
         "0".repeat(32),
         "0".repeat(40),
         "0".repeat(64),

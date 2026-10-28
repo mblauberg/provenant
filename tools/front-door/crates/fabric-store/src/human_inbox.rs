@@ -129,7 +129,12 @@ impl Store {
         id: HumanRequestId,
         request: &Request<'_>,
     ) -> Result<HumanRequest> {
-        request.retry(|| load(&self.db, project, id))
+        request.retry(|| {
+            Ok(view(
+                load(&self.db, project, id)?,
+                request.clock.wall_now()?,
+            ))
+        })
     }
 
     pub fn human_item(
@@ -141,7 +146,8 @@ impl Store {
         request.retry(|| {
             // One SQLite snapshot for the request, answer, outbox and history.
             let tx = self.db.unchecked_transaction()?;
-            let item = item(&tx, project, id)?;
+            let mut item = item(&tx, project, id)?;
+            item.request = view(item.request, request.clock.wall_now()?);
             tx.commit()?;
             Ok(item)
         })
@@ -158,8 +164,11 @@ impl Store {
     ) -> Result<Page<HumanRequest>> {
         let rows_limit = page(0, limit)?;
         request.retry(|| {
-            let mut statement = self.db.prepare("SELECT substr(record,1,?6) FROM human_requests WHERE project=?1 AND (?2 IS NULL OR session=?2) AND (?3 OR state='open') AND (?4 IS NULL OR id>?4) ORDER BY id LIMIT ?5")?;
-            let mut rows = statement.query(params![project.to_string(),session,all,after.map(|id|id.to_string()),rows_limit + 1,MAX_RECORD_READ_BYTES])?;
+            let at = request.clock.wall_now()?;
+            // Canonical UTC timestamps sort chronologically. Filter before LIMIT
+            // so expired rows cannot hide a later open item or break pagination.
+            let mut statement = self.db.prepare("SELECT substr(record,1,?6) FROM human_requests WHERE project=?1 AND (?2 IS NULL OR session=?2) AND (?3 OR (state='open' AND (json_extract(CAST(record AS TEXT),'$.request.deadline') IS NULL OR json_extract(CAST(record AS TEXT),'$.request.deadline') > ?7))) AND (?4 IS NULL OR id>?4) ORDER BY id LIMIT ?5")?;
+            let mut rows = statement.query(params![project.to_string(),session,all,after.map(|id|id.to_string()),rows_limit + 1,MAX_RECORD_READ_BYTES,at.to_string()])?;
             let mut items = Vec::new();
             let mut bytes = 0;
             let mut truncated = false;
@@ -172,7 +181,7 @@ impl Store {
                 let value: HumanRequest = decode(&record)?;
                 if value.project_id != project { return Err(Error::Invalid("stored request identity")); }
                 bytes += record.len();
-                items.push(value);
+                items.push(view(value, at));
             }
             Ok(Page { items, truncated })
         })
@@ -188,6 +197,27 @@ impl Store {
             )?;
             if count >= MAX_HUMAN_REQUESTS {
                 return Err(Error::Invalid("human request retention limit"));
+            }
+            if let Some(replacement) = &value.request.supersedes {
+                let mut prior = load(tx, value.project_id, replacement.id)?;
+                if replacement.expect_revision == 0
+                    || prior.id == value.id
+                    || prior.revision != replacement.expect_revision
+                    || prior.chair_actor != value.chair_actor
+                    || prior.chair_session_id != value.chair_session_id
+                    || prior.owner_host != value.owner_host
+                    || matches!(
+                        prior.state,
+                        RequestState::Withdrawn | RequestState::Superseded | RequestState::Expired
+                    )
+                {
+                    return Err(Error::Conflict);
+                }
+                prior.state = RequestState::Superseded;
+                prior.revision += 1;
+                prior.updated_at = value.created_at;
+                prior.closure_reason = Some(format!("superseded by {}", value.id));
+                update(tx, &prior)?;
             }
             tx.execute(
                 "INSERT INTO human_requests VALUES(?1,?2,?3,?4,?5,?6)",
@@ -214,7 +244,9 @@ impl Store {
     ) -> Result<HumanRequest> {
         self.write(request, |tx| {
             let mut value = load(tx, message.project, answer.request_id)?;
-            if value.revision != answer.request_revision || value.state != RequestState::Open {
+            if value.revision != answer.request_revision
+                || value.state_at(request.clock.wall_now()?) != RequestState::Open
+            {
                 return Err(Error::Conflict);
             }
             value.revision += 1;
@@ -426,4 +458,9 @@ fn update(tx: &rusqlite::Connection, value: &HumanRequest) -> Result<()> {
 }
 fn revision(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| Error::Invalid("revision"))
+}
+
+fn view(mut value: HumanRequest, at: WallTime) -> HumanRequest {
+    value.state = value.state_at(at);
+    value
 }
