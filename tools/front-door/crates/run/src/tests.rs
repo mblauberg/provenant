@@ -48,6 +48,7 @@ pub(super) fn input() -> PreparedRun {
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                title: None,
                 base: None,
                 base_ref: None,
                 writer: None,

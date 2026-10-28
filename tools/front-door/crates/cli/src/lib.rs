@@ -1027,6 +1027,31 @@ mod tests {
         invalid(&["disk", "report", "--dry-run"]);
     }
     #[test]
+    fn task_title_flags_are_optional_and_per_task() {
+        for verb in ["run", "dispatch"] {
+            let invocation = valid(&[
+                verb,
+                "--prompt-stdin",
+                "--model",
+                "codex/id",
+                "--title",
+                "Review changes",
+            ]);
+            let request = match invocation.command {
+                Command::Run(request) | Command::Dispatch(request) => request,
+                _ => panic!("submission"),
+            };
+            assert_eq!(request.title.as_deref(), Some("Review changes"));
+            invalid(&[
+                verb,
+                "--manifest",
+                "tasks.json",
+                "--title",
+                "Review changes",
+            ]);
+        }
+    }
+    #[test]
     fn dispatch_base_is_optional_without_a_peer_branch() {
         for input in [
             vec!["--prompt-stdin", "--model", "codex/id"],

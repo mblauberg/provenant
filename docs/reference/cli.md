@@ -1936,6 +1936,7 @@ bounds are null. Positional arguments have no long flag.
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
 | `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
+| `--title` | `{"conflicts": ["manifest"], "name": "title"}` |
 | `--task-id` | `{"name": "task_id"}` |
 | `--delivery-id` | `{"name": "delivery_id"}` |
 | `--deliver` | `{"conflicts": ["deliver_remote", "deliver_branch", "open_pr"], "name": "deliver"}` |
@@ -2105,6 +2106,7 @@ bounds are null. Positional arguments have no long flag.
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
 | `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
+| `--title` | `{"conflicts": ["manifest"], "name": "title"}` |
 | `--task-id` | `{"name": "task_id"}` |
 | `--delivery-id` | `{"name": "delivery_id"}` |
 | `--deliver` | `{"conflicts": ["deliver_remote", "deliver_branch", "open_pr"], "name": "deliver"}` |

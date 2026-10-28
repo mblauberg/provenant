@@ -4,13 +4,26 @@ use super::{
 };
 use provenant_core::WaitTransport;
 use provenant_records::run::RequestedRoute;
-use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("invalid input field `{path}`")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputError {
     pub path: String,
 }
+
+impl std::fmt::Display for InputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid input field `{}`", self.path)?;
+        if self.path.starts_with("tasks[") && self.path.ends_with("].title") {
+            write!(
+                f,
+                ": task title must be 1 to 256 bytes and contain no control characters"
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for InputError {}
 
 impl InputError {
     pub(crate) fn new(path: impl Into<String>) -> Self {
@@ -382,6 +395,10 @@ impl ValidateInput for SubmitInput {
                         WaitTransport::Mcp => MAX_TEXT_BYTES,
                     };
                     bounded_text(&task.prompt, &format!("{path}.prompt"), prompt_limit)?;
+                    if let Some(title) = &task.title {
+                        provenant_core::validate_task_title(title)
+                            .map_err(|_| field(&format!("{path}.title")))?;
+                    }
                     optional_text(
                         task.base.as_deref(),
                         &format!("{path}.base"),
@@ -486,6 +503,20 @@ mod tests {
             "tasks":[{"prompt":"do work","route":{"kind":"named","name":"utility"},"timeout_seconds":1}]
         }))
         .is_ok_and(|input| input.validate_input(provenant_core::WaitTransport::Cli).is_ok())
+    }
+
+    #[test]
+    fn submit_rejects_control_characters_in_titles() {
+        for title in ["line\nbreak", "tab\there", "escape\u{1b}", "unicode\u{85}"] {
+            let error = serde_json::from_value::<SubmitInput>(json!({
+                "op":"submit", "operation_id":"work-1",
+                "tasks":[{"prompt":"do work", "title":title, "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]
+            })).unwrap_err().to_string();
+            assert!(
+                error.contains("tasks[0].title") && error.contains("control characters"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

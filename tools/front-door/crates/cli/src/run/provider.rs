@@ -2181,6 +2181,7 @@ mod tests {
         for entry in REGISTRY {
             let adapter = entry.adapter.id();
             let requested = run::TaskRequest {
+                title: None,
                 base: None,
                 base_ref: None,
                 task_id: provenant_core::TaskId::from_bytes([3; 16]),
@@ -2387,6 +2388,7 @@ mod tests {
         }
         let prompt = "é".repeat(75_000);
         let task = run::TaskRequest {
+            title: None,
             base: Some("HEAD".into()),
             base_ref: None,
             task_id: TaskId::from_bytes([3; 16]),

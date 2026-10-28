@@ -1031,6 +1031,7 @@ fn writer_run(
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![provenant_run::TaskRequest {
+                title: None,
                 base: None,
                 base_ref: None,
                 account: None,

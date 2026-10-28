@@ -878,6 +878,32 @@ fn submit_accepts_optional_bounded_git_base() {
 }
 
 #[test]
+fn submit_accepts_optional_task_title() {
+    use provenant_fabric_runtime::coordination::facade::SubmitInput;
+
+    let schema = &all_catalogue()
+        .iter()
+        .find(|tool| tool["name"] == "fabric_run")
+        .unwrap()["inputSchema"];
+    let mut input = json!({
+        "op":"submit", "operation_id":"titled-task", "tasks":[{
+            "prompt":"review", "title":"Review the change",
+            "route":{"kind":"named","name":"utility"}, "timeout_seconds":1
+        }]
+    });
+    assert!(accepts(schema, schema, &input));
+    assert!(ToolCall::parse("fabric_run", input.clone()).is_ok());
+    let SubmitInput::Submit { tasks, .. } = serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(tasks[0].title.as_deref(), Some("Review the change"));
+    input["tasks"][0].as_object_mut().unwrap().remove("title");
+    let SubmitInput::Submit { tasks, .. } = serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(tasks[0].title, None);
+    assert!(accepts(schema, schema, &input));
+    input["tasks"][0]["title"] = json!("");
+    assert!(ToolCall::parse("fabric_run", input).is_err());
+}
+
+#[test]
 fn peer_worktree_requests_are_not_mcp_submit_inputs() {
     use provenant_fabric_runtime::coordination::facade::SubmitInput;
 
