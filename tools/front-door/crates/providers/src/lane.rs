@@ -39,9 +39,11 @@ impl crate::LaunchSpec {
                 .map_err(|_| ProviderError::Malformed)?,
         );
         let include = shell_quote(&format!("include.path={}", text(&config)?));
+        // Claude scrubs subprocess variables, so the wrapper restores identity.
+        let identity = identity_exports(&self.env)?;
         let wrapper = format!(
             "#!/bin/sh\nGIT_CONFIG_GLOBAL=/dev/null\nGIT_CONFIG_NOSYSTEM=1\n\
-             export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM\nexec {git} -c {include} \"$@\"\n"
+             export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM\n{identity}exec {git} -c {include} \"$@\"\n"
         );
         let wrapper_path = scratch.join("bin/git");
         let step = self.setup.iter_mut().find(|step| match step {
@@ -238,7 +240,7 @@ impl LaneRuntime<'_> {
         setup.push(if scrubbed_git_config {
             SetupStep::WriteExecutable {
                 path: bin.join("git"),
-                bytes: self.git_wrapper()?,
+                bytes: self.git_wrapper(env)?,
             }
         } else {
             SetupStep::Symlink {
@@ -263,14 +265,15 @@ impl LaneRuntime<'_> {
         Ok(())
     }
 
-    fn git_wrapper(&self) -> Result<Vec<u8>, ProviderError> {
+    fn git_wrapper(&self, env: &[(OsString, OsString)]) -> Result<Vec<u8>, ProviderError> {
         let git = self.git.to_str().ok_or(ProviderError::InvalidPath)?;
         if git.contains(['\'', '\n']) {
             return Err(ProviderError::InvalidPath);
         }
+        let identity = identity_exports(env)?;
         Ok(format!(
             "#!/bin/sh\nGIT_CONFIG_GLOBAL=/dev/null\nGIT_CONFIG_NOSYSTEM=1\n\
-             export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM\nexec '{git}' \"$@\"\n"
+             export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM\n{identity}exec '{git}' \"$@\"\n"
         )
         .into_bytes())
     }
@@ -336,6 +339,30 @@ impl LaneRuntime<'_> {
     }
 }
 
+/// Shell exports that carry the host's git identity past an environment scrub.
+fn identity_exports(env: &[(OsString, OsString)]) -> Result<String, ProviderError> {
+    let mut identity = String::new();
+    for (key, value) in env {
+        if [
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ]
+        .iter()
+        .any(|candidate| key == candidate)
+        {
+            let value = value.to_str().ok_or(ProviderError::InvalidPath)?;
+            identity.push_str(&format!(
+                "export {}='{}'\n",
+                key.to_string_lossy(),
+                value.replace('\'', "'\\''")
+            ));
+        }
+    }
+    Ok(identity)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +387,8 @@ mod tests {
                 Path::new("/fixture/repo"),
                 (id == "claude").then_some(&token),
             ))?;
+            spec.env
+                .push(("GIT_AUTHOR_NAME".into(), "Fixture Author".into()));
             let result = spec.configure_publishing(
                 &plan.permissions().scratch.path,
                 Path::new("/fixture/git"),
@@ -367,6 +396,20 @@ mod tests {
                 Path::new("/fixture/home"),
             );
             assert!(result.is_ok(), "publishing setup for {id}: {result:?}");
+            let wrapper = plan.permissions().scratch.path.join("bin/git");
+            let bytes = spec
+                .setup
+                .iter()
+                .find_map(|step| match step {
+                    SetupStep::WriteExecutable { path, bytes } if path == &wrapper => Some(bytes),
+                    _ => None,
+                })
+                .ok_or(ProviderError::InvalidPath)?;
+            // The publishing wrapper replaces the lane's, so it keeps the identity.
+            assert!(
+                String::from_utf8_lossy(bytes).contains("export GIT_AUTHOR_NAME='Fixture Author'"),
+                "{id} publishing wrapper drops the git identity"
+            );
         }
         Ok(())
     }
@@ -528,6 +571,43 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn wrapper_restores_identity_after_scrub() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let git = dir.path().join("git");
+        std::fs::write(&git, "#!/bin/sh\nprintf '%s\\n' \"$GIT_AUTHOR_NAME\" \"$GIT_COMMITTER_EMAIL\" \"$GIT_CONFIG_GLOBAL\"\n").unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let lane = LaneRuntime {
+            executable: Path::new("/fixture/provenant"),
+            git: &git,
+            state: Path::new("/fixture/state"),
+            child_state: Path::new("/fixture/children"),
+            home: Path::new("/fixture/home"),
+            depth: 1,
+            attempt: AttemptId::from_bytes([1; 16]),
+            assets: Path::new("/fixture/assets"),
+        };
+        let wrapper = dir.path().join("wrapper");
+        std::fs::write(
+            &wrapper,
+            lane.git_wrapper(&[
+                ("GIT_AUTHOR_NAME".into(), "O'Brien".into()),
+                ("GIT_COMMITTER_EMAIL".into(), "lane@example.org".into()),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = std::process::Command::new(wrapper)
+            .env_clear()
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"O'Brien\nlane@example.org\n/dev/null\n");
     }
 
     #[test]

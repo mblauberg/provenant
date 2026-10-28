@@ -68,9 +68,14 @@ fn prepare(
         authentication.push(subtree(config));
     }
     let chats = input.home.join(".cursor/chats");
+    let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
+    env.extend([
+        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+    ]);
     Ok(LaunchSpec {
         argv,
-        env: base_env(input, &plan.scratch.path, "/usr/bin:/bin"),
+        env,
         stdin: Stdin::Null,
         secret_input: None,
         cwd: input.cwd.to_owned(),
