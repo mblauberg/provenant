@@ -228,20 +228,24 @@ fn guard_reply(
         };
         let commands = CommandPrefix::new(selected.state_dir.as_deref(), &cwd);
         let at = SystemClock::new().wall_now()?;
+        let mut oversized = Vec::new();
         let page = {
             let Some(store) = Store::open_read_only(&resolved.roots.state, deadline)? else {
                 return Ok(None);
             };
             select_answers(
-                &resolved.roots.state,
                 &store,
                 &target,
                 at,
                 &event_name,
                 &commands,
                 deadline,
+                &mut oversized,
             )?
         };
+        // SQLite shares WAL memory within a process. Close the read-only
+        // snapshot before opening a writer, which otherwise inherits it read-only.
+        mark_oversized_answers(&resolved.roots.state, &target, &oversized, deadline)?;
         if page.items.is_empty() {
             return Ok(None);
         }
@@ -349,13 +353,13 @@ fn answer_exceeds_any_hook_envelope(item: &AnswerOffer) -> Result<bool, Error> {
 }
 
 fn select_answers(
-    root: &provenant_core::StateRoot,
     store: &Store,
     target: &AnswerTarget,
     at: provenant_core::WallTime,
     event_name: &str,
     commands: &CommandPrefix,
     deadline: Instant,
+    pending_marks: &mut Vec<(String, bool)>,
 ) -> Result<Page<AnswerOffer>, Error> {
     let mut truncated = false;
     for state in [AnswerDeliveryState::Queued, AnswerDeliveryState::Offered] {
@@ -370,13 +374,11 @@ fn select_answers(
                 }
             }
             if !oversized.is_empty() {
-                for id in Store::mark_hook_undeliverable_once(root, target, &oversized, deadline)? {
-                    if !page_oversized.contains(&id) {
-                        diagnostic(&format!(
-                            "answer delivery: answer {id} exceeds escaped hook budget; retained for Fabric mail"
-                        ));
-                    }
-                }
+                pending_marks.extend(
+                    oversized
+                        .iter()
+                        .map(|id| (id.clone(), !page_oversized.contains(id))),
+                );
                 page.items
                     .retain(|item| !oversized.contains(&item.answer.id.to_string()));
                 page.truncated = true;
@@ -395,6 +397,29 @@ fn select_answers(
         items: vec![],
         truncated,
     })
+}
+
+fn mark_oversized_answers(
+    root: &provenant_core::StateRoot,
+    target: &AnswerTarget,
+    pending: &[(String, bool)],
+    deadline: Instant,
+) -> Result<(), Error> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<_> = pending.iter().map(|(id, _)| id.clone()).collect();
+    for id in Store::mark_hook_undeliverable_once(root, target, &ids, deadline)? {
+        if pending
+            .iter()
+            .any(|(candidate, escaped)| *escaped && *candidate == id)
+        {
+            diagnostic(&format!(
+                "answer delivery: answer {id} exceeds escaped hook budget; retained for Fabric mail"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn prepare_answers(
@@ -1131,14 +1156,15 @@ mod answer_delivery_tests {
             deadline,
         )?;
         assert_eq!(offered.items, vec![retry.clone()]);
+        let mut pending_marks = Vec::new();
         let selected = select_answers(
-            &root,
             &store,
             &target,
             clock.wall_now()?,
             "PreToolUse",
             &CommandPrefix::default(),
             deadline,
+            &mut pending_marks,
         )?;
         assert_eq!(selected.items, vec![retry]);
         assert!(selected.truncated);
@@ -1150,18 +1176,25 @@ mod answer_delivery_tests {
         insert(&offer(&"\"".repeat(3500), 1))?;
         let small = offer("small", 2);
         insert(&small)?;
+        pending_marks.clear();
         let selected = select_answers(
-            &root,
             &store,
             &target,
             clock.wall_now()?,
             "PreToolUse",
             &CommandPrefix::default(),
             Instant::now() + LOCAL_BUDGET,
+            &mut pending_marks,
         )?;
         assert_eq!(selected.items.len(), 1);
         assert_eq!(selected.items[0].answer, small.answer);
         assert!(selected.truncated);
+        mark_oversized_answers(
+            &root,
+            &target,
+            &pending_marks,
+            Instant::now() + LOCAL_BUDGET,
+        )?;
         let (remaining, _, _) = store.read_hook_answer_page(
             &target,
             AnswerDeliveryState::Queued,
@@ -1268,18 +1301,28 @@ mod answer_delivery_tests {
         drop(store);
         let deadline = Instant::now() + std::time::Duration::from_secs(30);
         let reader = Store::open_read_only(&root, deadline)?.ok_or("missing test store")?;
+        let mut pending_marks = Vec::new();
         let selected = select_answers(
-            &root,
             &reader,
             &target,
             clock.wall_now()?,
             "PreToolUse",
             &CommandPrefix::default(),
             deadline,
+            &mut pending_marks,
         )?;
         assert_eq!(selected.items.len(), 1);
         assert_eq!(selected.items[0].answer, small.answer);
+        assert_eq!(pending_marks.len(), 1);
+        assert!(
+            reader.read_queued_human_answers(&target, deadline)?.items[0]
+                .delivery
+                .error
+                .is_none()
+        );
         drop(reader);
+        mark_oversized_answers(&root, &target, &pending_marks, deadline)?;
+        pending_marks.clear();
         // A new hook invocation sees the committed marker, while mail readers
         // retain the answer in its original delivery state.
         let reader = Store::open_read_only(&root, deadline)?.ok_or("missing test store")?;
@@ -1291,13 +1334,13 @@ mod answer_delivery_tests {
         assert_eq!(queued.items.len(), 2);
         assert_eq!(queued.items[0].delivery.state, AnswerDeliveryState::Queued);
         let selected_again = select_answers(
-            &root,
             &reader,
             &target,
             clock.wall_now()?,
             "PreToolUse",
             &CommandPrefix::default(),
             deadline,
+            &mut pending_marks,
         )?;
         assert_eq!(selected_again.items.len(), 1);
         assert_eq!(selected_again.items[0].answer, small.answer);
@@ -1350,20 +1393,28 @@ mod answer_delivery_tests {
         )?;
         let reader = Store::open_read_only(&root, deadline)?.ok_or("missing test store")?;
         assert!(
-            select_answers(&root, &reader, &target, at, "PreToolUse", &long, deadline)?
-                .items
-                .is_empty()
+            select_answers(
+                &reader,
+                &target,
+                at,
+                "PreToolUse",
+                &long,
+                deadline,
+                &mut pending_marks
+            )?
+            .items
+            .is_empty()
         );
         drop(reader);
         let reader = Store::open_read_only(&root, deadline)?.ok_or("missing test store")?;
         let later = select_answers(
-            &root,
             &reader,
             &target,
             at,
             "PreToolUse",
             &CommandPrefix::default(),
             deadline,
+            &mut pending_marks,
         )?;
         assert_eq!(later.items.len(), 1);
         assert_eq!(later.items[0].answer, borderline.answer);
