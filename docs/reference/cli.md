@@ -2668,6 +2668,56 @@ bounds are null. Positional arguments have no long flag.
 }
 ```
 
+## `provenant console`
+
+| Argument | Contract |
+|---|---|
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant console projects`
+
+| Argument | Contract |
+|---|---|
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant console sessions`
+
+| Argument | Contract |
+|---|---|
+| `session` | `{"name": "session", "positional": true}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
+| `--cursor` | `{"name": "cursor"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "session",
+        "limit",
+        "cursor"
+      ],
+      "multiple": true,
+      "name": "Sessions",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant chair`
 
 | Argument | Contract |

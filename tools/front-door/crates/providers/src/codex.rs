@@ -180,7 +180,7 @@ enum Event {
     #[serde(rename = "error")]
     Error { message: String },
     #[serde(rename = "turn.failed")]
-    Failed,
+    Failed { error: Option<serde_json::Value> },
     #[serde(other)]
     Other,
 }
@@ -222,7 +222,19 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                 E::Error
             }]
         }
-        Event::Failed => vec![E::Error],
+        Event::Failed { error } => {
+            let capacity = error.as_ref().and_then(|error| {
+                if error.get("codex_error_info")?.as_str()? == "server_overloaded" {
+                    error.get("message")?.as_str().map(str::to_owned)
+                } else {
+                    None
+                }
+            });
+            capacity.map_or_else(
+                || vec![E::Error],
+                |message| vec![E::ModelOverloaded { message }],
+            )
+        }
         _ => vec![],
     })
 }
