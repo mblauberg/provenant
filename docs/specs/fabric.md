@@ -506,6 +506,10 @@ extension can retry admission without rerunning the planner. Namespaced IDs
 must fit within 64 bytes; refusals name the source and child to shorten.
 Consumers must wait for all added work. Plans within loop rounds must retain
 their round membership and the loop's shared writer checkout after persistence.
+Within one scheduler advance, each validated addition updates the in-memory
+graph and checkpoint before scheduling continues. The caller must hold exclusive
+access to the journal for the whole advance. The journal is not reloaded for
+each addition.
 
 Disjoint scoped writers in separate registered checkouts may run concurrently.
 Planner-emitted overlapping scopes, including transitive overlaps and identical
@@ -542,6 +546,7 @@ edge and continuation slots, including when every current attempt has settled.
   `::plan_disjoint_writers_are_admitted_while_a_peer_is_running`;
   `::honest_stop_continues_once_on_same_checkout_with_handoff_and_verdict_contract`;
   `::continuation_budget_pauses_then_extends_without_duplicating_prior_work`;
+  `::expansion_at_node_budget_reads_journal_once`;
   `::plan_inside_loop_keeps_round_membership_after_checkpoint_serialisation`;
   `src/fabric.rs::graph_status_handles_pause_left_after_terminal_checkpoint`.
 - Owner: `crates/fabric-runtime/src/graph/plans.rs`, `src/fabric.rs`

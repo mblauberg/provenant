@@ -1,0 +1,300 @@
+{
+  "expansions": [
+    {
+      "source": "plan",
+      "continuation": false,
+      "nodes": [
+        {
+          "plan": {
+            "kinds": [
+              "task"
+            ],
+            "max_nodes": 1
+          },
+          "write_scope": [
+            "src"
+          ],
+          "acceptance_checks": [
+            "Verify the slice"
+          ],
+          "kind": "plan",
+          "access": "read_only",
+          "id": "plan--nested",
+          "prompt": "Do a slice\n\nWrite scope: src\nAcceptance checks:\nVerify the slice",
+          "depends_on": [
+            "plan"
+          ],
+          "route": {
+            "alias": "senior"
+          }
+        }
+      ]
+    },
+    {
+      "source": "plan--nested",
+      "continuation": false,
+      "nodes": [
+        {
+          "write_scope": [
+            "src"
+          ],
+          "acceptance_checks": [
+            "Verify the slice"
+          ],
+          "access": "read_only",
+          "id": "plan--nested--inner",
+          "prompt": "Do a slice\n\nWrite scope: src\nAcceptance checks:\nVerify the slice",
+          "depends_on": [
+            "plan--nested"
+          ],
+          "route": {
+            "alias": "senior"
+          }
+        }
+      ]
+    }
+  ],
+  "remaining": {
+    "nodes": 508,
+    "edges": 4091,
+    "continuations": 2
+  },
+  "cancelled": false,
+  "unknown_usage": [
+    "node plan route 0: tokens usage unknown",
+    "node plan route 0: cost_usd usage unknown",
+    "node plan route 0: wall_time_seconds usage unknown",
+    "node plan--nested route 0: tokens usage unknown",
+    "node plan--nested route 0: cost_usd usage unknown",
+    "node plan--nested route 0: wall_time_seconds usage unknown",
+    "node plan--nested--inner route 0: tokens usage unknown",
+    "node plan--nested--inner route 0: cost_usd usage unknown",
+    "node plan--nested--inner route 0: wall_time_seconds usage unknown",
+    "node after route 0: tokens usage unknown",
+    "node after route 0: cost_usd usage unknown",
+    "node after route 0: wall_time_seconds usage unknown"
+  ],
+  "usage_events": [
+    {
+      "node_id": "plan",
+      "route_index": 0,
+      "metric": "tokens"
+    },
+    {
+      "node_id": "plan",
+      "route_index": 0,
+      "metric": "cost_usd"
+    },
+    {
+      "node_id": "plan",
+      "route_index": 0,
+      "metric": "wall_time_seconds"
+    },
+    {
+      "node_id": "plan--nested",
+      "route_index": 0,
+      "metric": "tokens"
+    },
+    {
+      "node_id": "plan--nested",
+      "route_index": 0,
+      "metric": "cost_usd"
+    },
+    {
+      "node_id": "plan--nested",
+      "route_index": 0,
+      "metric": "wall_time_seconds"
+    },
+    {
+      "node_id": "plan--nested--inner",
+      "route_index": 0,
+      "metric": "tokens"
+    },
+    {
+      "node_id": "plan--nested--inner",
+      "route_index": 0,
+      "metric": "cost_usd"
+    },
+    {
+      "node_id": "plan--nested--inner",
+      "route_index": 0,
+      "metric": "wall_time_seconds"
+    },
+    {
+      "node_id": "after",
+      "route_index": 0,
+      "metric": "tokens"
+    },
+    {
+      "node_id": "after",
+      "route_index": 0,
+      "metric": "cost_usd"
+    },
+    {
+      "node_id": "after",
+      "route_index": 0,
+      "metric": "wall_time_seconds"
+    }
+  ],
+  "schema_version": 1,
+  "graph_id": "planned",
+  "plan_digest": "sha256:1f77b019bcaafa14e3be7a463c8ffa665131411f334c8fbfe5cd96936c7c537b",
+  "nodes": [
+    {
+      "title": "plan",
+      "worktree": null,
+      "id": "plan",
+      "state": "succeeded",
+      "outputs": {
+        "schema_version": 2,
+        "result": {
+          "digest": "sha256:39d3f33387183e4c2f40b5ac3d52a28280fe509d5ec7f62055a65f286b18b607",
+          "excerpt": "```fragment\n{\"nodes\":[{\"acceptance_checks\":[\"Verify the slice\"],\"access\":\"read_only\",\"goal\":\"Do a slice\",\"id\":\"nested\",\"kind\":\"plan\",\"plan\":{\"kinds\":[\"task\"],\"max_nodes\":1},\"write_scope\":[\"src\"]}],\"schema_version\":1}\n```",
+          "truncated": false,
+          "path": null
+        },
+        "verdict": null,
+        "findings": [],
+        "branch": null,
+        "commit": null,
+        "warnings": [
+          "findings block missing or invalid"
+        ]
+      },
+      "attempts": [
+        {
+          "launched": true,
+          "key": {
+            "graph_id": "planned",
+            "node_id": "plan",
+            "route_index": 0
+          },
+          "route": {
+            "alias": "senior"
+          },
+          "state": "terminal",
+          "attempt_ref": null,
+          "outcome": "succeeded",
+          "launch_actor": ""
+        }
+      ]
+    },
+    {
+      "title": "plan--nested",
+      "worktree": null,
+      "id": "plan--nested",
+      "state": "succeeded",
+      "outputs": {
+        "schema_version": 2,
+        "result": {
+          "digest": "sha256:73940d06c095eb2991bb4f31c1398f647ed1c244813cae7b5e37ce6f2712ced8",
+          "excerpt": "```fragment\n{\"nodes\":[{\"acceptance_checks\":[\"Verify the slice\"],\"access\":\"read_only\",\"goal\":\"Do a slice\",\"id\":\"inner\",\"write_scope\":[\"src\"]}],\"schema_version\":1}\n```",
+          "truncated": false,
+          "path": null
+        },
+        "verdict": null,
+        "findings": [],
+        "branch": null,
+        "commit": null,
+        "warnings": [
+          "findings block missing or invalid"
+        ]
+      },
+      "attempts": [
+        {
+          "launched": true,
+          "key": {
+            "graph_id": "planned",
+            "node_id": "plan--nested",
+            "route_index": 0
+          },
+          "route": {
+            "alias": "senior"
+          },
+          "state": "terminal",
+          "attempt_ref": null,
+          "outcome": "succeeded",
+          "launch_actor": ""
+        }
+      ]
+    },
+    {
+      "title": "plan--nested--inner",
+      "worktree": null,
+      "id": "plan--nested--inner",
+      "state": "succeeded",
+      "outputs": {
+        "schema_version": 2,
+        "result": {
+          "digest": "sha256:a4c3ed04a95a3da14a9d235c83d868bed7c0f45cf7f3faa751ee8f50598d2211",
+          "excerpt": "done",
+          "truncated": false,
+          "path": null
+        },
+        "verdict": null,
+        "findings": [],
+        "branch": null,
+        "commit": null,
+        "warnings": [
+          "findings block missing or invalid"
+        ]
+      },
+      "attempts": [
+        {
+          "launched": true,
+          "key": {
+            "graph_id": "planned",
+            "node_id": "plan--nested--inner",
+            "route_index": 0
+          },
+          "route": {
+            "alias": "senior"
+          },
+          "state": "terminal",
+          "attempt_ref": null,
+          "outcome": "succeeded",
+          "launch_actor": ""
+        }
+      ]
+    },
+    {
+      "title": "after",
+      "worktree": null,
+      "id": "after",
+      "state": "succeeded",
+      "outputs": {
+        "schema_version": 2,
+        "result": {
+          "digest": "sha256:e61a3d78c65133c7260c43e719d97c46e16bd50c64ee7800536cf14c6407a617",
+          "excerpt": "checked",
+          "truncated": false,
+          "path": null
+        },
+        "verdict": null,
+        "findings": [],
+        "branch": null,
+        "commit": null,
+        "warnings": [
+          "findings block missing or invalid"
+        ]
+      },
+      "attempts": [
+        {
+          "launched": true,
+          "key": {
+            "graph_id": "planned",
+            "node_id": "after",
+            "route_index": 0
+          },
+          "route": {
+            "alias": "senior"
+          },
+          "state": "terminal",
+          "attempt_ref": null,
+          "outcome": "succeeded",
+          "launch_actor": ""
+        }
+      ]
+    }
+  ]
+}

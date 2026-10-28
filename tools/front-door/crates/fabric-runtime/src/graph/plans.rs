@@ -513,17 +513,18 @@ pub(super) fn settle(
     checkpoint: &mut GraphCheckpoint,
     capture: Option<&crate::result_capture::CapturedResult>,
     limits: &crate::config::GraphLimits,
-) -> bool {
+) -> Option<(
+    GraphDocument,
+    PlannedGraph,
+    std::collections::BTreeMap<String, usize>,
+)> {
     if checkpoint.expansions.iter().any(|e| e.source == node.id) {
-        return false;
+        return None;
     }
-    let Some(index) = checkpoint
+    let index = checkpoint
         .nodes
         .iter()
-        .position(|n| n.id == node.id && n.state == NodeState::Succeeded)
-    else {
-        return false;
-    };
+        .position(|n| n.id == node.id && n.state == NodeState::Succeeded)?;
     let addition = if node.plan.is_some() {
         let json = if let Some(capture) = capture {
             block(capture, "fragment")
@@ -548,7 +549,7 @@ pub(super) fn settle(
                 checkpoint.nodes[index].handoff = Some(note.clone());
                 continuation(node, document, checkpoint, &note, limits)
             }
-            Ok(None) => return false,
+            Ok(None) => return None,
             Err(reason) => {
                 if let Some(outputs) = &mut checkpoint.nodes[index].outputs {
                     outputs.warnings.push(bounded(
@@ -556,11 +557,11 @@ pub(super) fn settle(
                         MAX_ADVANCE_ERROR_BYTES,
                     ));
                 }
-                return false;
+                return None;
             }
         }
     } else {
-        return false;
+        return None;
     };
     let result = addition.and_then(|addition| {
         let mut preview = document.clone();
@@ -578,16 +579,16 @@ pub(super) fn settle(
                 return Err("loop writers must share one worktree".into());
             }
         }
-        let (plan, _) = validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
+        let (plan, positions) = validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
         if let Some(reason) =
             structural_limit_reason(&preview, &plan, limits, &checkpoint.extensions)
         {
             return Err(reason);
         }
-        Ok((addition, plan, preview))
+        Ok((addition, plan, positions, preview))
     });
     match result {
-        Ok((addition, plan, preview)) => {
+        Ok((addition, plan, positions, preview)) => {
             checkpoint.nodes[index].fragment = None;
             checkpoint.nodes[index].expansion_pause = None;
             if checkpoint
@@ -603,7 +604,7 @@ pub(super) fn settle(
             checkpoint.expansions.push(addition);
             loops::reconcile(checkpoint, &plan);
             remaining(checkpoint, &preview, limits);
-            true
+            Some((preview, plan, positions))
         }
         Err(reason) => {
             let reason = bounded(
@@ -612,7 +613,7 @@ pub(super) fn settle(
             );
             checkpoint.nodes[index].expansion_pause = Some(reason.clone());
             checkpoint.pause_reason = Some(reason);
-            false
+            None
         }
     }
 }
