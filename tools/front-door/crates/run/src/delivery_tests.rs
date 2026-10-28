@@ -14,6 +14,84 @@ struct PrepareFixture {
 }
 
 #[test]
+fn integration_refreshes_forged_tracking_ref_and_fails_closed()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.git(&["push", "origin", "HEAD:refs/heads/integration"])?;
+    fixture.request = HostDeliveryContext::destination(
+        DeliveryMode::Integrate("origin/integration".into()),
+        "lane",
+    )?
+    .ok_or("destination")?;
+    let host = fixture.prepare()?;
+    fixture.commit(&fixture.writer.worktree, "lane change")?;
+    let head = host.head(&fixture.writer)?;
+    fixture.git(&[
+        "update-ref",
+        "refs/remotes/origin/integration",
+        &head.to_string(),
+    ])?;
+    host.integrate(&fixture.writer, &fixture.request, head)?;
+    let remote = host.command(
+        &fixture.writer.worktree,
+        "git",
+        &[
+            "ls-remote",
+            "--exit-code",
+            "origin",
+            "refs/heads/integration",
+        ],
+        WriterDeliveryStage::Integrate,
+    )?;
+    assert!(remote.starts_with(&head.to_string()));
+
+    fixture.commit(&fixture.writer.worktree, "another lane change")?;
+    let next = host.head(&fixture.writer)?;
+    fixture.git(&["push", "origin", &format!("{next}:refs/heads/integration")])?;
+    // Restore the stale local value so fetch must update the locked ref.
+    fixture.git(&[
+        "update-ref",
+        "refs/remotes/origin/integration",
+        &head.to_string(),
+    ])?;
+    let remote = host.command(
+        &fixture.writer.worktree,
+        "git",
+        &[
+            "ls-remote",
+            "--exit-code",
+            "origin",
+            "refs/heads/integration",
+        ],
+        WriterDeliveryStage::Integrate,
+    )?;
+    let lock = fixture
+        .writer
+        .project
+        .join(".git/refs/remotes/origin/integration.lock");
+    std::fs::write(lock, "stale lock")?;
+    assert!(
+        host.integrate(&fixture.writer, &fixture.request, next)
+            .is_err()
+    );
+    assert_eq!(
+        remote,
+        host.command(
+            &fixture.writer.worktree,
+            "git",
+            &[
+                "ls-remote",
+                "--exit-code",
+                "origin",
+                "refs/heads/integration"
+            ],
+            WriterDeliveryStage::Integrate
+        )?
+    );
+    Ok(())
+}
+
+#[test]
 #[allow(clippy::disallowed_methods)]
 fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -570,6 +648,72 @@ fn graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes()
             && !body.contains("Unrelated primary checkout")
             && !body.contains("Initial"),
         "{body}"
+    );
+    Ok(())
+}
+
+#[test]
+fn graph_pr_refreshes_forged_target_and_refuses_failed_fetch()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    let base = fixture.prepare()?.head(&fixture.writer)?;
+    fixture.commit(&fixture.writer.worktree, "Graph work")?;
+    fixture.git(&["push", "origin", "lane:refs/heads/integration"])?;
+    fixture.git(&[
+        "update-ref",
+        "refs/remotes/origin/integration",
+        &base.to_string(),
+    ])?;
+    fixture.git(&[
+        "config",
+        &format!(
+            "url.{}.insteadOf",
+            fixture.root.join("remote.git").display()
+        ),
+        "https://github.com/fixture/repo.git",
+    ])?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let wrapper = fixture.root.join("git-wrapper");
+    fixture.executable(&wrapper, &format!("#!/bin/sh\nif [ \"$5\" = remote ] && [ \"$6\" = get-url ]; then printf 'https://github.com/fixture/repo.git\\n'; exit 0; fi\nexec '{}' \"$@\"\n", git.display()))?;
+    let gh = fixture.root.join("gh");
+    fixture.executable(&gh, "#!/bin/sh\nif [ \"$2\" = view ]; then exit 1; fi\ncd \"$(dirname \"$0\")\" || exit 1\ncat > graph-body\nprintf 'https://github.com/fixture/repo/pull/1\\n'\n")?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    fixture.environment.retain(|(key, _)| key != "PATH");
+    fixture.environment.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", fixture.root.display()).into(),
+    ));
+    HostDeliveryContext::new(fixture.environment.clone()).deliver_graph_pr(
+        &fixture.writer.project,
+        "origin/integration",
+        base,
+        "Graph fixture",
+    )?;
+    assert!(std::fs::read_to_string(fixture.root.join("graph-body"))?.contains("Graph work"));
+
+    fixture.git(&[
+        "update-ref",
+        "refs/remotes/origin/integration",
+        &base.to_string(),
+    ])?;
+    std::fs::write(
+        fixture
+            .writer
+            .project
+            .join(".git/refs/remotes/origin/integration.lock"),
+        "stale lock",
+    )?;
+    assert!(
+        HostDeliveryContext::new(fixture.environment.clone())
+            .deliver_graph_pr(
+                &fixture.writer.project,
+                "origin/integration",
+                base,
+                "Graph fixture",
+            )
+            .is_err()
     );
     Ok(())
 }

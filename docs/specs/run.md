@@ -585,7 +585,9 @@ directory. It fast-forwards when possible, otherwise uses `merge-tree` and
 or configured custom merge driver refuses before publishing a ref. A local
 integration branch checked out in any worktree is refused. Publication uses
 expected-old ref comparison locally or an explicit remote lease after an
-ancestry proof. Remote delivery refreshes and verifies its tracking ref.
+ancestry proof. Before resolving an origin integration target, the host refreshes
+the exact remote branch under the repository setup lock and refuses delivery if
+the refresh fails. Final graph PR delivery follows the same rule.
 
 `lane deliver ATTEMPT [--deliver MODE]` uses the recorded destination, or
 origin push when the settled lane recorded none. It requires a succeeded

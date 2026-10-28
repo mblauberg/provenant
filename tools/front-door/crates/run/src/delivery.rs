@@ -239,17 +239,21 @@ impl HostDeliveryContext {
             project: project.into(),
             worktree: project.into(),
         };
-        let host = self.prepare(&writer, &request)?;
+        let host = self.prepare_with_fetch(&writer, &request, false)?;
         let bound = host
             .bound
             .as_ref()
             .ok_or(RunError::Delivery(Stage::Prepare))?;
-        let head = host.command(
-            project,
-            "git",
-            &["rev-parse", "--verify", &source],
-            Stage::Head,
-        )?;
+        let head = if local {
+            host.command(
+                project,
+                "git",
+                &["rev-parse", "--verify", &source],
+                Stage::Head,
+            )?
+        } else {
+            host.refresh_target_and_resolve(&writer, branch, Stage::Head)?
+        };
         let head = GitOid::parse(&head).map_err(|_| RunError::Delivery(Stage::Head))?;
         // A local integration ref may belong to a human. Publish a separate
         // graph-owned ref; never push that existing local branch by name.
@@ -480,9 +484,18 @@ impl HostDeliveryContext {
     /// Under writer custody, before the provider launches. Bind the single
     /// push destination and refresh shared refs with the host's Git authority.
     pub(crate) fn prepare(
+        self,
+        writer: &WriterRequest,
+        request: &WriterDeliveryRequest,
+    ) -> Result<Self> {
+        self.prepare_with_fetch(writer, request, true)
+    }
+
+    fn prepare_with_fetch(
         mut self,
         writer: &WriterRequest,
         request: &WriterDeliveryRequest,
+        fetch: bool,
     ) -> Result<Self> {
         validate(request)?;
         self.host_environment(writer)?;
@@ -614,17 +627,19 @@ impl HostDeliveryContext {
             destination: request.clone(),
         });
         self.validate_transport_helpers(writer)?;
-        self.command(
-            &writer.worktree,
-            "git",
-            &[
-                "fetch",
-                "--no-tags",
-                "--no-recurse-submodules",
-                &request.remote,
-            ],
-            stage,
-        )?;
+        if fetch && !matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
+            self.command(
+                &writer.worktree,
+                "git",
+                &[
+                    "fetch",
+                    "--no-tags",
+                    "--no-recurse-submodules",
+                    &request.remote,
+                ],
+                stage,
+            )?;
+        }
         Ok(self)
     }
     /// Refresh origin under writer custody with delivery's host credential and
@@ -694,6 +709,128 @@ impl HostDeliveryContext {
             Stage::Prepare,
         )?;
         Ok(())
+    }
+
+    /// Refresh under setup custody and use the remote's advertised object ID,
+    /// not a tracking file that a running lane may change after the fetch.
+    fn refresh_target_and_resolve(
+        &self,
+        writer: &WriterRequest,
+        branch: &str,
+        stage: Stage,
+    ) -> Result<String> {
+        use provenant_core::{CancelToken, Clock, WaitBudget};
+        use provenant_os::{clock::SystemClock, fs::LockMode};
+        let branch_ref = GitRefName::branch(branch).map_err(|_| RunError::Delivery(stage))?;
+        let common = self.command(
+            &writer.worktree,
+            "git",
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            stage,
+        )?;
+        let directory = Directory::open_anchor(Path::new(&common))?;
+        let name = OsStr::new("provenant-lane-setup.lock");
+        match directory.create_new(name) {
+            Ok(file) => {
+                file.sync()?;
+                directory.sync()?;
+            }
+            Err(failure) if failure.is_exists() => {}
+            Err(failure) => return Err(failure.into()),
+        }
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let _lock = directory.lock(
+            name,
+            LockMode::Exclusive,
+            WaitBudget::cli(clock.mono_now(), 120).map_err(|_| RunError::Delivery(stage))?,
+            &cancel,
+            &clock,
+        )?;
+        crate::writer::verify_writer_git_paths(Path::new(&common), &branch_ref)?;
+        self.validate_transport_helpers(writer)?;
+        let source = format!("refs/heads/{branch}");
+        // Read and fetch the same sealed destination used for the later push.
+        // A configured origin may have different fetch and push URLs.
+        let remote = &self
+            .bound
+            .as_ref()
+            .ok_or(RunError::Delivery(stage))?
+            .push_url;
+        let query = || {
+            self.command(
+                &writer.worktree,
+                "git",
+                &[
+                    "-c",
+                    "protocol.allow=never",
+                    "-c",
+                    "protocol.ssh.allow=always",
+                    "-c",
+                    "protocol.https.allow=always",
+                    "-c",
+                    "protocol.http.allow=always",
+                    "-c",
+                    "protocol.file.allow=always",
+                    "-c",
+                    "remote.origin.uploadpack=git-upload-pack",
+                    "ls-remote",
+                    "--exit-code",
+                    "--",
+                    remote,
+                    &source,
+                ],
+                stage,
+            )
+        };
+        let advertised = query()?;
+        let (oid, reference) = advertised
+            .split_once('\t')
+            .ok_or(RunError::Delivery(stage))?;
+        if reference != source || GitOid::parse(oid).is_err() {
+            return Err(RunError::Delivery(stage));
+        }
+        let tracking = format!("refs/remotes/origin/{branch}");
+        let refspec = format!("+{source}:{tracking}");
+        self.command(
+            &writer.worktree,
+            "git",
+            &[
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "protocol.ssh.allow=always",
+                "-c",
+                "protocol.https.allow=always",
+                "-c",
+                "protocol.http.allow=always",
+                "-c",
+                "protocol.file.allow=always",
+                "-c",
+                "remote.origin.uploadpack=git-upload-pack",
+                "-c",
+                "core.logAllRefUpdates=false",
+                "fetch",
+                "--no-auto-maintenance",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--refmap=",
+                "--",
+                remote,
+                &refspec,
+            ],
+            stage,
+        )?;
+        if query()? != advertised {
+            return Err(RunError::Delivery(stage));
+        }
+        self.command(
+            &writer.worktree,
+            "git",
+            &["cat-file", "-e", &format!("{oid}^{{commit}}")],
+            stage,
+        )?;
+        Ok(oid.to_owned())
     }
 
     fn validate_transport_helpers(&self, writer: &WriterRequest) -> Result<()> {
@@ -1097,29 +1234,35 @@ impl HostDeliveryContext {
         let remote = !request.remote.is_empty();
         let target = if remote {
             let tracking = format!("refs/remotes/{}/{}", request.remote, request.branch);
-            self.command(
-                &writer.worktree,
-                "git",
-                &[
-                    "fetch",
-                    "--no-tags",
-                    "--no-recurse-submodules",
-                    "--",
-                    &bound.push_url,
-                    &format!("+{destination}:{tracking}"),
-                ],
-                stage,
-            )?;
+            if request.remote != "origin" {
+                self.command(
+                    &writer.worktree,
+                    "git",
+                    &[
+                        "fetch",
+                        "--no-tags",
+                        "--no-recurse-submodules",
+                        "--",
+                        &bound.push_url,
+                        &format!("+{destination}:{tracking}"),
+                    ],
+                    stage,
+                )?;
+            }
             tracking
         } else {
             destination.clone()
         };
-        let expected = self.command(
-            &writer.worktree,
-            "git",
-            &["rev-parse", "--verify", &target],
-            stage,
-        )?;
+        let expected = if remote && request.remote == "origin" {
+            self.refresh_target_and_resolve(writer, &request.branch, stage)?
+        } else {
+            self.command(
+                &writer.worktree,
+                "git",
+                &["rev-parse", "--verify", &target],
+                stage,
+            )?
+        };
         let expected_oid = GitOid::parse(&expected).map_err(|_| RunError::Delivery(stage))?;
         if self
             .command(
@@ -1223,26 +1366,30 @@ impl HostDeliveryContext {
                 ],
                 stage,
             )?;
-            self.command(
-                &writer.worktree,
-                "git",
-                &[
-                    "fetch",
-                    "--no-tags",
-                    "--no-recurse-submodules",
-                    "--",
-                    &bound.push_url,
-                    &format!("+{destination}:{target}"),
-                ],
-                Stage::Verify,
-            )?;
-            if self.command(
-                &writer.worktree,
-                "git",
-                &["rev-parse", "--verify", &target],
-                Stage::Verify,
-            )? != candidate.to_string()
-            {
+            let verified = if request.remote == "origin" {
+                self.refresh_target_and_resolve(writer, &request.branch, Stage::Verify)?
+            } else {
+                self.command(
+                    &writer.worktree,
+                    "git",
+                    &[
+                        "fetch",
+                        "--no-tags",
+                        "--no-recurse-submodules",
+                        "--",
+                        &bound.push_url,
+                        &format!("+{destination}:{target}"),
+                    ],
+                    Stage::Verify,
+                )?;
+                self.command(
+                    &writer.worktree,
+                    "git",
+                    &["rev-parse", "--verify", &target],
+                    Stage::Verify,
+                )?
+            };
+            if verified != candidate.to_string() {
                 return Err(RunError::Delivery(Stage::Verify));
             }
         } else {

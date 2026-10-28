@@ -3457,6 +3457,29 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     fn actor(&self) -> String {
         self.factory.context.identity.inbox.actor.to_string()
     }
+    fn validate_expansion(
+        &mut self,
+        document: &provenant_fabric_runtime::graph::GraphDocument,
+        checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    ) -> Result<(), Self::Error> {
+        for node in &document.nodes {
+            if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &node.delivery {
+                provenant_run::HostDeliveryContext::validate_integration_target(
+                    &self.factory.cwd,
+                    target,
+                )
+                .map_err(run_error)?;
+                check_graph_tracking_grants(
+                    self.factory,
+                    self.budget,
+                    self.cancel,
+                    target,
+                    checkpoint,
+                )?;
+            }
+        }
+        Ok(())
+    }
     fn loop_decision(
         &mut self,
         scope: provenant_fabric_runtime::graph::LoopScope<'_>,
@@ -5305,6 +5328,15 @@ mod peer_tests {
             };
             assert!(matches!(
                 owner.deliver_graph(&document, &checkpoint),
+                Err(FacadeError::ConfinementRefused)
+            ));
+            let mut fragment_document = document.clone();
+            fragment_document.integration_branch = None;
+            fragment_document.nodes[0].delivery = Some(
+                provenant_records::run::DeliveryMode::Integrate("origin/RESUMED-LANE".into()),
+            );
+            assert!(matches!(
+                owner.validate_expansion(&fragment_document, &checkpoint),
                 Err(FacadeError::ConfinementRefused)
             ));
         }

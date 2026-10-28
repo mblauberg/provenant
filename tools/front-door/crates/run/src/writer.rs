@@ -567,7 +567,7 @@ fn prepare_writer_git(
 
 // These exact paths are writable by the lane. Check them before host Git can
 // follow a planted link, including during fetch and reflog updates.
-fn verify_writer_git_paths(common: &Path, branch: &GitRefName) -> Result<()> {
+pub(super) fn verify_writer_git_paths(common: &Path, branch: &GitRefName) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     let suffix = branch
         .as_str()
