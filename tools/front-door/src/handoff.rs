@@ -307,11 +307,43 @@ fn checkpoint_store(
         .with_revisions(provenant_cli::workflow::session_revisions(roots))
 }
 
-fn checkpoint_identity(store: &SessionStore) -> Result<(), Refusal> {
+fn checkpoint_repair(
+    globals: &Globals,
+    cwd: &Path,
+    session: &HostSessionId,
+    client: Option<provenant_records::Harness>,
+) -> String {
+    let client = client
+        .map(|harness| format!(" --client {}", harness.spec().name))
+        .unwrap_or_default();
+    let rest = format!(
+        "workflow session save {}{client} --rebind",
+        session.as_str()
+    );
+    let commands =
+        provenant_workflow::session::CommandPrefix::new(globals.state_dir.as_deref(), cwd);
+    let project = if globals.project.is_some() {
+        cwd.to_str()
+            .map(|path| format!("--project '{}' ", path.replace('\'', "'\\''")))
+    } else {
+        Some(String::new())
+    };
+    match project.and_then(|project| commands.runnable(&format!("{project}{rest}"))) {
+        Some(command) => format!("{command} --file <checkpoint.md>"),
+        None => format!(
+            "{rest} --file <checkpoint.md> with this handoff's --project and --state-dir options (a path cannot be shown safely)"
+        ),
+    }
+}
+
+fn checkpoint_identity(store: &SessionStore, repair: &str) -> Result<(), Refusal> {
     store.validate_chair().map_err(|error| match error {
-        provenant_workflow::session::SessionError::DiscoveryIdentity => {
-            Refusal::refused("IDENTITY", error.to_string())
-        }
+        provenant_workflow::session::SessionError::DiscoveryIdentity => Refusal::refused(
+            "IDENTITY",
+            format!(
+                "session discovery identity does not match the registered chair; first run {repair}"
+            ),
+        ),
         error => error.into(),
     })
 }
@@ -374,7 +406,11 @@ fn execute(
     if args.model.as_deref().is_some_and(|m| !valid_model(m)) {
         return Err(Refusal::invalid("invalid --model"));
     }
-    let src = open_source(globals)?;
+    let mut src = open_source(globals)?;
+    src.context.identity.inbox = src
+        .context
+        .inbox_address(args.client)
+        .map_err(|error| Refusal::invalid(error.to_string()))?;
     let context = &src.context;
     let local = context.identity.host;
     let peers: Vec<&str> = context.config.peers.keys().map(String::as_str).collect();
@@ -423,13 +459,15 @@ fn execute(
         .map(|(_, lanes)| lanes)
         .map_err(|fail| fail.message);
     let project = context.identity.project;
-    let actor = provenant_cli::workflow::session_actor(context, args.client)
-        .map_err(|e| Refusal::invalid(e.to_string()))?;
+    let actor = context.identity.inbox.actor;
     let store = session.as_ref().filter(|_| !args.no_checkpoint).map(|id| {
         checkpoint_store(&src.roots, project, id.clone()).with_chair(context.identity.host, actor)
     });
-    if let Some(store) = &store {
-        checkpoint_identity(store)?;
+    if let (Some(store), Some(session)) = (&store, &session) {
+        checkpoint_identity(
+            store,
+            &checkpoint_repair(globals, &src.cwd, session, args.client),
+        )?;
     }
     let checkpoint = store
         .as_ref()
@@ -1224,7 +1262,17 @@ mod tests {
             .map(|revision| revision.revision)
             .collect();
         assert_eq!(kept, [3, 4], "[retention] session_revisions applies");
-        assert!(checkpoint_identity(&store).is_ok());
+        let repair = checkpoint_repair(
+            &Globals {
+                state_dir: Some(PathBuf::from("/custom state")),
+                project: Some(PathBuf::from("/selected project")),
+                ..Default::default()
+            },
+            Path::new("/selected project"),
+            &HostSessionId::parse("handoff-session").unwrap(),
+            Some(provenant_records::Harness::Codex),
+        );
+        assert!(checkpoint_identity(&store, &repair).is_ok());
         let other = checkpoint_store(
             &roots,
             ProjectId::from_bytes([3; 16]),
@@ -1234,10 +1282,9 @@ mod tests {
             provenant_core::HostId::from_bytes([4; 16]),
             provenant_core::ActorId::from_bytes([6; 16]),
         );
-        let refusal = checkpoint_identity(&other).err().unwrap();
+        let refusal = checkpoint_identity(&other, &repair).err().unwrap();
         assert_eq!(refusal.code, "IDENTITY");
-        assert!(refusal.message.contains("workflow session save"));
-        assert!(refusal.message.contains("--rebind"));
+        assert!(refusal.message.contains("provenant --state-dir '/custom state' --project '/selected project' workflow session save handoff-session --client codex --rebind --file <checkpoint.md>"));
     }
 
     #[test]

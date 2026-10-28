@@ -205,9 +205,10 @@ files return an error. A crash on the first save can leave a readable checkpoint
 without registration, which remains unknown until an explicit save succeeds.
 Unreadable discovery metadata blocks a save before replacing checkpoint or
 history. An explicit host/actor mismatch is refused as `IDENTITY`, with an error
-naming `workflow session save <id> --file <checkpoint.md> --rebind` (also for
-handoff refusals). To recover an older binding under `agent` or deliberately
-change labels, run
+instructing callers to repeat `workflow session save <id>` with the same options
+and add `--rebind`. Handoff refusals provide a save command with the actual
+session ID, explicit client, project and state directory. To recover an older
+binding under `agent` or deliberately change labels, run
 `provenant workflow session save SESSION --file FILE --client HARNESS --rebind`.
 This records the previous identity and change time under the checkpoint lock.
 Human and JSON saves report discovery warnings. If publication warns, repeat

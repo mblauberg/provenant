@@ -20,13 +20,20 @@ Configuration directory variables are not active harness markers.
 Unlabelled Claude and Codex chairs on one host have different inbox actors.
 Lanes cannot save or register chairs (`IN_LANE`).
 
+Upgrading also changes the default actor of ordinary CLI Fabric and lane
+commands for unlabelled chairs from `agent` to their harness client. Settle
+in-flight lanes and release claims before upgrading when possible. To recover
+existing lanes, claims or human requests after upgrading, run their commands
+with `PROVENANT_AGENT_LABEL=agent`; lane selection also accepts explicit lane
+IDs or `--session agent`. New submissions should use the new harness actor.
+
 An old binding under `agent` or a changed label can return `IDENTITY`.
 Before retrying handoff, or to recover a save, run
 `provenant workflow session save SESSION --file FILE --client HARNESS --rebind`;
 the record keeps the last 8 previous host/actor bindings and change times.
 Legacy single-hop audit records upgrade to a list on the next save.
-Corrupt discovery JSON
-returns `HISTORY`; unreadable discovery files return `IO`. Restore a readable
+Corrupt discovery JSON returns `HISTORY`; unreadable discovery files return
+`IO`. Restore a readable
 discovery record from backup before retrying those errors.
 
 Discovery is advisory and scoped to the host's state directory. If publication

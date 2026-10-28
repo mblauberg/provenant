@@ -12,7 +12,11 @@ they differ, restart the Fabric MCP server, for example by restarting the agent
 session, before relying on its output.
 
 `PROVENANT_AGENT_LABEL` selects the inbox, then Fabric's `agent_label`, then
-`client_label`. Use distinct labels for independent consumers. A shared label
+the harness client (`--client`, the installing hook, or an unambiguous active
+harness marker), then `client_label`. See the
+[checkpoint runbook](../../../docs/runbooks/session-checkpoints.md) for markers
+and recovery of pre-upgrade work owned by `agent`.
+Use distinct labels for independent consumers. A shared label
 shares one read cursor. Labels never establish a provider or model route.
 
 Cross-host project keys derive from the canonical home-relative location.

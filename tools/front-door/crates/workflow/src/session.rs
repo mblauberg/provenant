@@ -212,7 +212,7 @@ pub enum SessionError {
     #[error("session revision history is unreadable or does not match its recorded hash")]
     History,
     #[error(
-        "session discovery identity does not match the registered chair; first run workflow session save <id> --file <checkpoint.md> --rebind to explicitly replace the binding"
+        "session discovery identity does not match the registered chair; repeat workflow session save <id> with the same options and add --rebind to explicitly replace the binding"
     )]
     DiscoveryIdentity,
 }
