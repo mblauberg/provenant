@@ -215,8 +215,11 @@ pub enum ChairLog {
         #[arg(long)]
         file: String,
         /// Stable retry key; generated when omitted
-        #[arg(long, default_value = "", value_parser = operation_id, hide_default_value = true)]
-        operation_id: OperationId,
+        #[arg(long, requires = "issued_at", value_parser = explicit_operation_id)]
+        operation_id: Option<OperationId>,
+        /// Original operation creation time in UTC Unix seconds; reuse for retries
+        #[arg(long, requires = "operation_id")]
+        issued_at: Option<i64>,
     },
     /// List a bounded page of updates in sequence order.
     List {
@@ -978,6 +981,10 @@ mod target_tests {
             assert!(invalid.parse::<Target>().is_err(), "{invalid}");
         }
     }
+}
+
+fn explicit_operation_id(value: &str) -> Result<OperationId, String> {
+    OperationId::parse(value).map_err(|error| error.to_string())
 }
 
 /// Generate at parse time so help remains deterministic.

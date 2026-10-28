@@ -320,17 +320,28 @@ following it reaches the store the hook used; one that cannot is not printed.
 
 ## Chair logs
 
-Chair updates are scoped to a project and session. An append with the same
-operation ID and payload must return the original sequence, including after
-payload pruning; a different payload with that ID must be refused. Entries
-are returned in sequence order with bounded pagination. Retention removes
-oldest payloads under the configured age, count and byte limits. A correction
-is a new entry referencing an earlier sequence, which may have been pruned.
-Lanes must not append chair updates. Listing must not create state or require
-write access.
+Chair updates are scoped to a project and session. Each operation has an opaque
+operation ID and caller-supplied `issued_at` time, fixed when it is created and
+reused on retry. While the operation remains inside the configured horizon
+and the persisted expiry boundary, the same ID and payload return the original
+sequence, including after payload pruning; a different payload with that ID must
+be refused. Appends older than the replay horizon
+return an explicit expired result, and timestamps more than five minutes in the
+future are refused. Receipts expire after the replay horizon; no lifetime
+operation limit may prevent appends. Persisted expiry boundaries must not move
+backwards when the clock or configuration changes.
+
+Entries are returned in sequence order with bounded pagination. Retention
+removes oldest payloads under the configured age, count and byte limits. A
+correction is a new entry referencing an earlier sequence, which may have been
+pruned. Lanes must not append chair updates. Listing must not create state or
+require write access. The cost of append and list must depend on retained data
+and the replay horizon, not the session's lifetime history.
 - Why: retries must not duplicate updates, and inactive or long-lived sessions
   must remain bounded without preventing read-only use.
 - Test: `crates/workflow/src/log.rs::log_operation_replay_pagination_correction_pruning_and_restart`;
+  `::replay_horizon_expires_receipts_and_survives_clock_and_config_changes`;
+  `::replay_store_has_no_lifetime_receipt_cap`;
   `tests/workflow.rs::chair_log_cli_replay_and_pages`;
   `::chair_log_cli_retention_replay_and_lane_refusal`
 - Owner: `crates/workflow/src/log.rs`, `src/chair.rs`

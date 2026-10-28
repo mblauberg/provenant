@@ -83,6 +83,12 @@ fn chair_log_cli_replay_and_pages() -> Result {
         "log.json",
         json!({"kind":"progress", "markdown":"First update", "channel":"chat"}),
     )?;
+    use provenant_core::Clock;
+    let issued_at = provenant_os::clock::SystemClock::new()
+        .wall_now()?
+        .as_timestamp()
+        .as_second()
+        .to_string();
     let append = |file: &str, operation: &str| {
         call(
             &rig,
@@ -96,10 +102,48 @@ fn chair_log_cli_replay_and_pages() -> Result {
                 file,
                 "--operation-id",
                 operation,
+                "--issued-at",
+                &issued_at,
             ],
             0,
         )
     };
+    // Planned retries require the caller to keep both identity and issue time.
+    let missing_time = rig.command(&[
+        "chair",
+        "log",
+        "append",
+        "--session",
+        "chair",
+        "--file",
+        &first,
+        "--operation-id",
+        "missing-time",
+    ])?;
+    assert_ne!(code(&missing_time), 0);
+    let old = call(
+        &rig,
+        &[
+            "chair",
+            "log",
+            "append",
+            "--session",
+            "chair",
+            "--file",
+            &first,
+            "--operation-id",
+            "old",
+            "--issued-at",
+            "1",
+        ],
+        1,
+    )?;
+    assert!(
+        old["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("expired")
+    );
     let original = append(&first, "first")?;
     assert_eq!(append(&first, "first")?["data"], original["data"]);
     let correction = request(
@@ -120,6 +164,8 @@ fn chair_log_cli_replay_and_pages() -> Result {
             &correction,
             "--operation-id",
             "first",
+            "--issued-at",
+            &issued_at,
         ],
         1,
     )?;
@@ -157,6 +203,12 @@ fn chair_log_cli_retention_replay_and_lane_refusal() -> Result {
         "second.json",
         json!({"kind":"progress", "markdown":"Second", "channel":"chat"}),
     )?;
+    use provenant_core::Clock;
+    let issued_at = provenant_os::clock::SystemClock::new()
+        .wall_now()?
+        .as_timestamp()
+        .as_second()
+        .to_string();
     let append = |rig: &TestRig, file: &str, operation: &str, expected| {
         call(
             rig,
@@ -170,6 +222,8 @@ fn chair_log_cli_retention_replay_and_lane_refusal() -> Result {
                 file,
                 "--operation-id",
                 operation,
+                "--issued-at",
+                &issued_at,
             ],
             expected,
         )

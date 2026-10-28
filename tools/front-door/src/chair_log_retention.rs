@@ -107,6 +107,7 @@ mod tests {
         let root = StateRoot::resolve(&inputs, &SystemPathResolver)?;
         let retention = Retention {
             max_age_seconds: 10,
+            replay_horizon_seconds: 10,
             max_entries: 100,
             max_bytes: 65536,
         };
@@ -119,6 +120,7 @@ mod tests {
             store.append(
                 Append {
                     operation_id: OperationId::parse("one")?,
+                    issued_at: 1,
                     host: "host".into(),
                     kind: "update".into(),
                     markdown: "old".into(),

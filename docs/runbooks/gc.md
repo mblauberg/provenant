@@ -15,7 +15,8 @@ Provider-state retention covers indexed terminal attempts in the resolved
 host run store and its child stores. It does not depend on the selected
 project's cache idle threshold or free-space floor.
 
-Full GC also expires chair log payloads older than `retention.chair_log_days`
+Full GC also prunes chair log replay receipts beyond the replay horizon and
+expires payloads older than `retention.chair_log_days`
 across all project sessions, including abandoned sessions. The JSON report's
 `chair_logs.expired` counts affected entries and `chair_logs.errors` names
 failures. A dry run counts eligible entries without changing them. Pressure

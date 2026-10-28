@@ -553,7 +553,20 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 session,
                 file,
                 operation_id,
+                issued_at,
             } => {
+                let created_at = now();
+                let operation_id = match operation_id {
+                    Some(id) => id,
+                    None => {
+                        let bytes = provenant_os::fs::entropy_128()?;
+                        provenant_core::OperationId::parse(&format!(
+                            "cli-{}",
+                            provenant_core::AttemptId::from_bytes(bytes)
+                        ))?
+                    }
+                };
+                let issued_at = issued_at.unwrap_or(created_at);
                 let context = provenant_cli::fabric::Context::open(
                     resolved.roots,
                     &resolved.home,
@@ -570,6 +583,7 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 let settings = config.retention;
                 let retention = Retention {
                     max_age_seconds: settings.chair_log_days * 86400,
+                    replay_horizon_seconds: settings.chair_log_replay_seconds(),
                     max_entries: settings.chair_log_entries,
                     max_bytes: settings.chair_log_bytes,
                 };
@@ -581,6 +595,7 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 .append(
                     Append {
                         operation_id,
+                        issued_at,
                         host: context.identity.host.to_string(),
                         kind: input.kind,
                         markdown: input.markdown,
@@ -592,7 +607,7 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                         correction_of: input.correction_of,
                     },
                     retention,
-                    now(),
+                    created_at,
                 )?;
                 Ok(serde_json::to_value(entry)?)
             }
@@ -623,6 +638,7 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 .retention;
                 let retention = Retention {
                     max_age_seconds: settings.chair_log_days * 86400,
+                    replay_horizon_seconds: settings.chair_log_replay_seconds(),
                     max_entries: settings.chair_log_entries,
                     max_bytes: settings.chair_log_bytes,
                 };
@@ -646,13 +662,14 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 read_only,
             )
         }
-        Err(error) => crate::fail(
-            path,
-            Outcome::Refused,
-            "CHAIR_LOG",
-            &error.to_string(),
-            globals,
-        ),
+        Err(error) => {
+            let code = match error.downcast_ref::<provenant_workflow::log::Error>() {
+                Some(provenant_workflow::log::Error::Expired) => "CHAIR_LOG_EXPIRED",
+                Some(provenant_workflow::log::Error::Future) => "CHAIR_LOG_FUTURE",
+                _ => "CHAIR_LOG",
+            };
+            crate::fail(path, Outcome::Refused, code, &error.to_string(), globals)
+        }
     }
 }
 

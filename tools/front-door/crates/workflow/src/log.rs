@@ -1,20 +1,22 @@
 //! Durable per-session chair updates.
 use crate::{persistence, session::HostSessionId};
 use provenant_core::{CancelToken, Clock, OperationId, ProjectId, StateRoot, WaitBudget};
-use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
+use provenant_os::fs::{Directory, FileKind, FsError, LockGuard, LockMode};
 use provenant_records::{CanonicalV1, Limits, decode_v1};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::ffi::OsStr;
+use std::{ffi::OsStr, path::PathBuf};
 
 pub const ENTRY_LIMIT: usize = 16 * 1024;
 pub const PAGE_LIMIT: usize = 100;
-const MANIFEST_LIMIT: u64 = 32 * 1024 * 1024;
-const RECEIPT_LIMIT: usize = 100_000;
+pub const FUTURE_SKEW_SECONDS: i64 = 300;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Append {
     pub operation_id: OperationId,
+    /// Unix seconds, fixed by the caller when the operation is first created.
+    pub issued_at: i64,
     pub host: String,
     pub kind: String,
     pub markdown: String,
@@ -37,7 +39,6 @@ pub struct LogEntry {
     pub sequence: u64,
     pub project_id: ProjectId,
     pub session_id: HostSessionId,
-    /// Seconds since the Unix epoch (UTC).
     pub created_at: i64,
     #[serde(flatten)]
     pub update: Append,
@@ -47,6 +48,7 @@ pub struct Retention {
     pub max_age_seconds: u64,
     pub max_entries: u64,
     pub max_bytes: u64,
+    pub replay_horizon_seconds: u64,
 }
 impl Default for Retention {
     fn default() -> Self {
@@ -54,6 +56,7 @@ impl Default for Retention {
             max_age_seconds: 30 * 86400,
             max_entries: 10_000,
             max_bytes: 16 * 1024 * 1024,
+            replay_horizon_seconds: 30 * 86400,
         }
     }
 }
@@ -71,33 +74,24 @@ pub enum Error {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
-    Decode(#[from] provenant_records::DecodeError),
+    Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Canonical(#[from] provenant_records::CanonicalError),
     #[error("chair log entry {sequence} could not be read: {source}")]
-    Entry { sequence: u64, source: Box<Error> },
+    Entry {
+        sequence: u64,
+        source: provenant_records::DecodeError,
+    },
     #[error("{0}")]
     Invalid(&'static str),
     #[error("operation ID was already used for a different update")]
     Conflict,
+    #[error("chair log operation has expired")]
+    Expired,
+    #[error("chair log operation issued_at is too far in the future")]
+    Future,
 }
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Receipt {
-    operation_id: OperationId,
-    digest: String,
-    sequence: u64,
-    created_at: i64,
-    bytes: u64,
-    retained: bool,
-}
-#[derive(Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Manifest {
-    schema_version: u64,
-    receipts: Vec<Receipt>,
-    total_pruned: u64,
-}
+
 pub struct LogStore {
     root: StateRoot,
     project: ProjectId,
@@ -120,120 +114,195 @@ impl LogStore {
             create,
         )
     }
-    fn load(dir: &Directory) -> Result<Manifest, Error> {
-        match dir.read_bounded(OsStr::new("manifest.json"), MANIFEST_LIMIT) {
-            Ok(bytes) => {
-                let manifest: Manifest = decode_v1(
-                    bytes.as_slice(),
-                    Limits {
-                        max_bytes: MANIFEST_LIMIT,
-                        max_depth: 64,
-                        max_members: 1_000_000,
-                    },
-                )?;
-                if manifest.schema_version != 1 || manifest.receipts.len() > RECEIPT_LIMIT {
-                    return Err(Error::Invalid("invalid chair log manifest"));
-                }
-                Ok(manifest)
-            }
-            Err(e) if e.is_not_found() => Ok(Manifest {
-                schema_version: 1,
-                ..Manifest::default()
-            }),
-            Err(e) => Err(e.into()),
-        }
+    fn path(&self) -> PathBuf {
+        self.root
+            .as_path()
+            .join("workflow/projects")
+            .join(self.project.to_string())
+            .join("chair-logs")
+            .join(self.session.as_str())
+            .join("log.sqlite3")
     }
-    fn publish(dir: &Directory, name: &str, bytes: &[u8]) -> Result<(), Error> {
-        dir.atomic_write(OsStr::new(name), ".log-", bytes, PublishMode::Replace)?
-            .require_durable()?;
-        Ok(())
-    }
-    fn filename(sequence: u64) -> String {
-        format!("entry-{sequence:020}.json")
-    }
-    fn read(dir: &Directory, sequence: u64) -> Result<LogEntry, Error> {
-        let read = || -> Result<LogEntry, Error> {
-            Ok(serde_json::from_slice(&dir.read_bounded(
-                OsStr::new(&Self::filename(sequence)),
-                (ENTRY_LIMIT * 2) as u64,
-            )?)?)
-        };
-        read().map_err(|source| Error::Entry {
-            sequence,
-            source: Box::new(source),
-        })
-    }
-    fn lock(dir: &Directory) -> Result<provenant_os::fs::LockGuard, Error> {
+    fn lock(dir: &Directory, write: bool) -> Result<Option<LockGuard>, Error> {
         let clock = provenant_os::clock::SystemClock::new();
         let budget = WaitBudget::cli(clock.mono_now(), 5)
             .map_err(|_| Error::Invalid("invalid lock budget"))?;
-        Ok(dir.lock(
-            OsStr::new("log.lock"),
-            LockMode::Exclusive,
-            budget,
-            &CancelToken::new(),
-            &clock,
-        )?)
-    }
-    fn read_lock(dir: &Directory) -> Result<Option<provenant_os::fs::LockGuard>, Error> {
-        let clock = provenant_os::clock::SystemClock::new();
-        let budget = WaitBudget::cli(clock.mono_now(), 5)
-            .map_err(|_| Error::Invalid("invalid lock budget"))?;
-        match dir.lock_existing(
-            OsStr::new("log.lock"),
-            LockMode::Shared,
-            budget,
-            &CancelToken::new(),
-            &clock,
-        ) {
-            Ok(lock) => Ok(Some(lock)),
-            Err(e) if e.is_not_found() => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-    fn expired(receipt: &Receipt, retention: Retention, now: i64) -> bool {
-        now.saturating_sub(receipt.created_at)
-            > retention.max_age_seconds.min(i64::MAX as u64) as i64
-    }
-    /// Apply age retention, returning the number of payloads that would be pruned.
-    pub fn gc(&self, retention: Retention, now: i64, dry_run: bool) -> Result<u64, Error> {
-        let dir = match self.dir(false) {
-            Ok(dir) => dir,
-            Err(e) if e.is_not_found() => return Ok(0),
-            Err(e) => return Err(e.into()),
-        };
-        let _lock = if dry_run {
-            Self::read_lock(&dir)?
+        if write {
+            Ok(Some(dir.lock(
+                OsStr::new("log.lock"),
+                LockMode::Exclusive,
+                budget,
+                &CancelToken::new(),
+                &clock,
+            )?))
         } else {
-            Some(Self::lock(&dir)?)
-        };
-        let mut manifest = Self::load(&dir)?;
-        let mut count = 0;
-        for receipt in &mut manifest.receipts {
-            if receipt.retained && Self::expired(receipt, retention, now) {
-                receipt.retained = false;
-                count += 1;
+            match dir.lock_existing(
+                OsStr::new("log.lock"),
+                LockMode::Shared,
+                budget,
+                &CancelToken::new(),
+                &clock,
+            ) {
+                Ok(lock) => Ok(Some(lock)),
+                Err(e) if e.is_not_found() => Ok(None),
+                Err(e) => Err(e.into()),
             }
         }
-        if !dry_run {
-            manifest.total_pruned += count;
-            if count > 0 {
-                Self::publish(&dir, "manifest.json", &serde_json::to_vec(&manifest)?)?;
-            }
-            Self::cleanup(&dir, &manifest)?;
-            dir.sync()?;
-        }
-        Ok(count)
     }
-    fn cleanup(dir: &Directory, manifest: &Manifest) -> Result<(), Error> {
-        for old in manifest.receipts.iter().filter(|r| !r.retained) {
-            match dir.unlink(OsStr::new(&Self::filename(old.sequence))) {
-                Ok(()) => {}
+    fn check_files(dir: &Directory) -> Result<(), Error> {
+        for name in [
+            "log.sqlite3",
+            "log.sqlite3-journal",
+            "log.sqlite3-wal",
+            "log.sqlite3-shm",
+        ] {
+            match dir.metadata_at(OsStr::new(name), false) {
+                Ok(m)
+                    if m.kind == FileKind::Regular
+                        && m.uid == provenant_os::fs::effective_uid()
+                        && m.links == 1
+                        && m.mode & 0o077 == 0 => {}
+                Ok(_) => {
+                    return Err(Error::Invalid(
+                        "unsafe chair log database or companion file",
+                    ));
+                }
                 Err(e) if e.is_not_found() => {}
                 Err(e) => return Err(e.into()),
             }
         }
         Ok(())
+    }
+    fn open(&self, dir: &Directory, write: bool) -> Result<Option<Connection>, Error> {
+        if write {
+            match dir.create_new(OsStr::new("log.sqlite3")) {
+                Ok(file) => {
+                    file.sync()?;
+                    dir.sync()?;
+                }
+                Err(e) if e.is_exists() => {}
+                Err(e) => return Err(e.into()),
+            }
+        } else {
+            match dir.metadata_at(OsStr::new("log.sqlite3"), false) {
+                Ok(_) => {}
+                Err(e) if e.is_not_found() => return Ok(None),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Self::check_files(dir)?;
+        let db = provenant_sqlite::open_connection(&self.path(), !write)?;
+        let version = match provenant_sqlite::read_version(&db, 1) {
+            Ok(version) => version,
+            Err(provenant_sqlite::VersionError::Sqlite(error)) => return Err(error.into()),
+            Err(_) => {
+                return Err(Error::Invalid(
+                    "invalid or unsupported chair log database version",
+                ));
+            }
+        };
+        if write && version == 0 {
+            db.execute_batch("PRAGMA auto_vacuum=FULL; PRAGMA synchronous=FULL; BEGIN IMMEDIATE;
+                CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY CHECK(id=1), total_appended INTEGER NOT NULL, total_pruned INTEGER NOT NULL, expiry_cutoff INTEGER NOT NULL);
+                INSERT OR IGNORE INTO meta VALUES (1, 0, 0, -9223372036854775808);
+                CREATE TABLE IF NOT EXISTS entries (sequence INTEGER PRIMARY KEY, created_at INTEGER NOT NULL, bytes INTEGER NOT NULL, payload BLOB NOT NULL);
+                CREATE INDEX IF NOT EXISTS entries_age ON entries(created_at);
+                CREATE TABLE IF NOT EXISTS receipts (operation_id TEXT PRIMARY KEY, issued_at INTEGER NOT NULL, digest TEXT NOT NULL, sequence INTEGER NOT NULL, created_at INTEGER NOT NULL);
+                CREATE INDEX IF NOT EXISTS receipts_age ON receipts(issued_at);
+                PRAGMA user_version=1; COMMIT;")?;
+        } else if !write && version == 0 {
+            return Ok(None);
+        }
+        if write {
+            db.execute_batch("PRAGMA synchronous=FULL;")?;
+        }
+        Self::check_files(dir)?;
+        Ok(Some(db))
+    }
+    fn decode_entry(sequence: u64, payload: &[u8]) -> Result<LogEntry, Error> {
+        let entry: LogEntry = decode_v1(
+            payload,
+            Limits {
+                max_bytes: (ENTRY_LIMIT * 2) as u64,
+                ..Limits::default()
+            },
+        )
+        .map_err(|source| Error::Entry { sequence, source })?;
+        if entry.sequence != sequence {
+            return Err(Error::Invalid("chair log entry sequence mismatch"));
+        }
+        Ok(entry)
+    }
+    fn cutoff(now: i64, seconds: u64) -> i64 {
+        now.saturating_sub(seconds.min(i64::MAX as u64) as i64)
+    }
+    fn positive(value: i64) -> Result<u64, Error> {
+        u64::try_from(value).map_err(|_| Error::Invalid("invalid chair log database counter"))
+    }
+    fn empty_page() -> Page {
+        Page {
+            entries: vec![],
+            next_cursor: None,
+            total_appended: 0,
+            total_pruned: 0,
+        }
+    }
+    fn check_retention(retention: Retention) -> Result<(), Error> {
+        if retention.max_entries == 0
+            || retention.max_bytes < (ENTRY_LIMIT * 2) as u64
+            || retention.max_age_seconds == 0
+            || retention.replay_horizon_seconds == 0
+            || retention.max_entries > i64::MAX as u64
+            || retention.max_bytes > i64::MAX as u64
+        {
+            return Err(Error::Invalid("invalid chair log retention"));
+        }
+        Ok(())
+    }
+    fn prune(db: &Connection, retention: Retention, now: i64) -> Result<u64, Error> {
+        let cutoff = Self::cutoff(now, retention.replay_horizon_seconds);
+        db.execute(
+            "UPDATE meta SET expiry_cutoff=max(expiry_cutoff, ?1) WHERE id=1",
+            [cutoff],
+        )?;
+        db.execute(
+            "DELETE FROM receipts WHERE issued_at < (SELECT expiry_cutoff FROM meta WHERE id=1)",
+            [],
+        )?;
+        let removed = db.execute(
+            "DELETE FROM entries WHERE created_at < ?1",
+            [Self::cutoff(now, retention.max_age_seconds)],
+        )?;
+        db.execute(
+            "UPDATE meta SET total_pruned=total_pruned+?1 WHERE id=1",
+            [removed as i64],
+        )?;
+        Ok(removed as u64)
+    }
+    /// Prune expired receipts and payloads. Dry-run does not write or create files.
+    pub fn gc(&self, retention: Retention, now: i64, dry_run: bool) -> Result<u64, Error> {
+        Self::check_retention(retention)?;
+        let dir = match self.dir(false) {
+            Ok(dir) => dir,
+            Err(e) if e.is_not_found() => return Ok(0),
+            Err(e) => return Err(e.into()),
+        };
+        let _lock = Self::lock(&dir, !dry_run)?;
+        let Some(mut db) = self.open(&dir, !dry_run)? else {
+            return Ok(0);
+        };
+        if dry_run {
+            let count: i64 = db.query_row(
+                "SELECT count(*) FROM entries WHERE created_at < ?1",
+                [Self::cutoff(now, retention.max_age_seconds)],
+                |r| r.get(0),
+            )?;
+            return Self::positive(count);
+        }
+        let tx = db.transaction()?;
+        let count = Self::prune(&tx, retention, now)?;
+        tx.commit()?;
+        Ok(count)
     }
     pub fn append(&self, input: Append, retention: Retention, now: i64) -> Result<LogEntry, Error> {
         let encoded = serde_json::to_vec(&input)?;
@@ -247,18 +316,16 @@ impl LogStore {
                 "chair log update must contain host, kind, channel and markdown, and fit in 16 KiB",
             ));
         }
-        if retention.max_entries == 0
-            || retention.max_bytes < (ENTRY_LIMIT * 2) as u64
-            || retention.max_age_seconds == 0
-        {
-            return Err(Error::Invalid("invalid chair log retention"));
+        Self::check_retention(retention)?;
+        if input.issued_at > now.saturating_add(FUTURE_SKEW_SECONDS) {
+            return Err(Error::Future);
         }
-        let dir = self.dir(true)?;
-        let _lock = Self::lock(&dir)?;
-        let mut manifest = Self::load(&dir)?;
-        Self::cleanup(&dir, &manifest)?;
+        if input.issued_at < Self::cutoff(now, retention.replay_horizon_seconds) {
+            return Err(Error::Expired);
+        }
         #[derive(Serialize)]
         struct Payload<'a> {
+            issued_at: i64,
             kind: &'a str,
             markdown: &'a str,
             request_ids: &'a [String],
@@ -272,6 +339,7 @@ impl LogStore {
             "chair-log-append",
             1,
             &Payload {
+                issued_at: input.issued_at,
                 kind: &input.kind,
                 markdown: &input.markdown,
                 request_ids: &input.request_ids,
@@ -283,90 +351,105 @@ impl LogStore {
             },
         )?
         .to_string();
-        if let Some(old) = manifest
-            .receipts
-            .iter()
-            .find(|r| r.operation_id == input.operation_id)
-        {
-            // Receipts written by the original chair-log format used a raw
-            // digest of the whole input, including host. Preserve same-host
-            // retries of those receipts while new receipts use the canonical payload.
-            if old.digest != digest && old.digest != CanonicalV1::file_digest(&encoded).to_string()
-            {
+        let dir = self.dir(true)?;
+        let _lock = Self::lock(&dir, true)?;
+        let mut db = self
+            .open(&dir, true)?
+            .ok_or(Error::Invalid("missing chair log database"))?;
+        let tx = db.transaction()?;
+        let (total, floor): (i64, i64) = tx.query_row(
+            "SELECT total_appended, expiry_cutoff FROM meta WHERE id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if input.issued_at < floor {
+            return Err(Error::Expired);
+        }
+        let old: Option<(String, i64, i64)> = tx
+            .query_row(
+                "SELECT digest,sequence,created_at FROM receipts WHERE operation_id=?1",
+                [input.operation_id.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if let Some((old_digest, sequence, created_at)) = old {
+            if old_digest != digest {
                 return Err(Error::Conflict);
             }
-            return if old.retained {
-                Self::read(&dir, old.sequence)
+            let sequence = Self::positive(sequence)?;
+            let payload: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT payload FROM entries WHERE sequence=?1",
+                    [sequence as i64],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            return if let Some(payload) = payload {
+                Self::decode_entry(sequence, &payload)
             } else {
-                // The caller supplied the original payload, proven by its digest.
-                // Reconstruct the response without retaining pruned content.
                 Ok(LogEntry {
                     schema_version: 1,
-                    id: format!("{}-{}", self.session.as_str(), old.sequence),
-                    sequence: old.sequence,
+                    id: format!("{}-{sequence}", self.session.as_str()),
+                    sequence,
                     project_id: self.project,
                     session_id: self.session.clone(),
-                    created_at: old.created_at,
+                    created_at,
                     update: input,
                 })
             };
         }
-        if manifest.receipts.len() >= RECEIPT_LIMIT {
-            return Err(Error::Invalid("chair log operation receipt limit reached"));
-        }
-        let sequence = manifest.receipts.len() as u64 + 1;
+        let sequence = total
+            .checked_add(1)
+            .ok_or(Error::Invalid("chair log sequence exhausted"))?;
         if input
             .correction_of
-            .is_some_and(|id| id == 0 || id >= sequence)
+            .is_some_and(|id| id == 0 || id >= sequence as u64)
         {
             return Err(Error::Invalid("correction must refer to an earlier entry"));
         }
         let entry = LogEntry {
             schema_version: 1,
             id: format!("{}-{sequence}", self.session.as_str()),
-            sequence,
+            sequence: sequence as u64,
             project_id: self.project,
             session_id: self.session.clone(),
             created_at: now,
             update: input,
         };
         let payload = serde_json::to_vec(&entry)?;
-        Self::publish(&dir, &Self::filename(sequence), &payload)?;
-        manifest.receipts.push(Receipt {
-            operation_id: entry.update.operation_id.clone(),
-            digest,
-            sequence,
-            created_at: now,
-            bytes: payload.len() as u64,
-            retained: true,
-        });
-        let mut count = manifest.receipts.iter().filter(|r| r.retained).count() as u64;
-        let mut bytes: u64 = manifest
-            .receipts
-            .iter()
-            .filter(|r| r.retained)
-            .map(|r| r.bytes)
-            .sum();
-        for receipt in &mut manifest.receipts {
-            if receipt.retained
-                && (now.saturating_sub(receipt.created_at)
-                    > retention.max_age_seconds.min(i64::MAX as u64) as i64
-                    || count > retention.max_entries
-                    || bytes > retention.max_bytes)
-            {
-                receipt.retained = false;
-                count -= 1;
-                bytes -= receipt.bytes;
-                manifest.total_pruned += 1;
-            }
+        tx.execute(
+            "INSERT INTO entries VALUES (?1,?2,?3,?4)",
+            params![sequence, now, payload.len() as i64, payload],
+        )?;
+        tx.execute(
+            "INSERT INTO receipts VALUES (?1,?2,?3,?4,?5)",
+            params![
+                entry.update.operation_id.as_str(),
+                entry.update.issued_at,
+                digest,
+                sequence,
+                now
+            ],
+        )?;
+        tx.execute("UPDATE meta SET total_appended=?1 WHERE id=1", [sequence])?;
+        Self::prune(&tx, retention, now)?;
+        let (mut count, mut bytes): (i64, i64) = tx.query_row(
+            "SELECT count(*),coalesce(sum(bytes),0) FROM entries",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        while count > retention.max_entries as i64 || bytes > retention.max_bytes as i64 {
+            let (seq, size): (i64, i64) = tx.query_row(
+                "SELECT sequence,bytes FROM entries ORDER BY sequence LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            tx.execute("DELETE FROM entries WHERE sequence=?1", [seq])?;
+            tx.execute("UPDATE meta SET total_pruned=total_pruned+1 WHERE id=1", [])?;
+            count -= 1;
+            bytes -= size;
         }
-        let encoded_manifest = serde_json::to_vec(&manifest)?;
-        if encoded_manifest.len() as u64 > MANIFEST_LIMIT {
-            return Err(Error::Invalid("chair log receipt storage limit reached"));
-        }
-        Self::publish(&dir, "manifest.json", &encoded_manifest)?;
-        Self::cleanup(&dir, &manifest)?;
-        dir.sync()?;
+        tx.commit()?;
         Ok(entry)
     }
     pub fn page(
@@ -379,52 +462,58 @@ impl LogStore {
         if limit == 0 || limit > PAGE_LIMIT {
             return Err(Error::Invalid("chair log page limit must be 1-100"));
         }
+        Self::check_retention(retention)?;
         let dir = match self.dir(false) {
             Ok(dir) => dir,
-            Err(e) if e.is_not_found() => {
-                return Ok(Page {
-                    entries: Vec::new(),
-                    next_cursor: None,
-                    total_appended: 0,
-                    total_pruned: 0,
-                });
-            }
+            Err(e) if e.is_not_found() => return Ok(Self::empty_page()),
             Err(e) => return Err(e.into()),
         };
-        let _lock = Self::read_lock(&dir)?;
-        let manifest = Self::load(&dir)?;
-        let mut selected = manifest
-            .receipts
-            .iter()
-            .filter(|r| {
-                r.retained && !Self::expired(r, retention, now) && r.sequence > after.unwrap_or(0)
-            })
-            .peekable();
-        let mut entries = Vec::new();
-        let mut bytes = 0;
-        while let Some(receipt) = selected.peek() {
-            if entries.len() == limit || bytes + receipt.bytes > 64 * 1024 {
+        let _lock = Self::lock(&dir, false)?;
+        let Some(db) = self.open(&dir, false)? else {
+            return Ok(Self::empty_page());
+        };
+        let (total, pruned, expired): (i64,i64,i64) = db.query_row("SELECT total_appended,total_pruned,(SELECT count(*) FROM entries WHERE created_at < ?1) FROM meta WHERE id=1", [Self::cutoff(now, retention.max_age_seconds)], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        let cursor = after.unwrap_or(0).min(i64::MAX as u64) as i64;
+        let mut stmt = db.prepare("SELECT sequence,bytes,payload FROM entries WHERE sequence>?1 AND created_at>=?2 ORDER BY sequence LIMIT ?3")?;
+        let mut rows = stmt.query(params![
+            cursor,
+            Self::cutoff(now, retention.max_age_seconds),
+            (limit + 1) as i64
+        ])?;
+        let mut entries: Vec<LogEntry> = Vec::new();
+        let mut bytes = 0usize;
+        let mut more = false;
+        while let Some(row) = rows.next()? {
+            let sequence = Self::positive(row.get(0)?)?;
+            let size = usize::try_from(row.get::<_, i64>(1)?)
+                .map_err(|_| Error::Invalid("invalid chair log entry size"))?;
+            if size > ENTRY_LIMIT * 2 {
+                return Err(Error::Invalid("chair log entry exceeds size limit"));
+            }
+            if entries.len() == limit || bytes + size > 64 * 1024 {
+                more = true;
                 break;
             }
-            bytes += receipt.bytes;
-            entries.push(Self::read(&dir, receipt.sequence)?);
-            selected.next();
+            let payload: Vec<u8> = row.get(2)?;
+            if payload.len() != size {
+                return Err(Error::Invalid("invalid chair log entry size"));
+            }
+            entries.push(Self::decode_entry(sequence, &payload)?);
+            bytes += size;
         }
-        let next_cursor = if selected.peek().is_some() {
-            entries.last().map(|e| e.sequence)
-        } else {
-            None
-        };
         Ok(Page {
+            next_cursor: if more {
+                entries.last().map(|entry| entry.sequence)
+            } else {
+                None
+            },
             entries,
-            next_cursor,
-            total_appended: manifest.receipts.len() as u64,
-            total_pruned: manifest.total_pruned
-                + manifest
-                    .receipts
-                    .iter()
-                    .filter(|r| r.retained && Self::expired(r, retention, now))
-                    .count() as u64,
+            total_appended: Self::positive(total)?,
+            total_pruned: Self::positive(
+                pruned
+                    .checked_add(expired)
+                    .ok_or(Error::Invalid("invalid chair log counter"))?,
+            )?,
         })
     }
 }
@@ -441,9 +530,25 @@ mod tests {
             Ok(path.into())
         }
     }
-    fn update(op: &str, text: &str) -> Append {
+    fn fixture() -> (tempfile::TempDir, LogStore) {
+        let tmp = crate::test_support::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let state = base.join("state");
+        std::fs::create_dir(&state).unwrap();
+        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+        inputs.state_dir = Some(state);
+        let root = StateRoot::resolve(&inputs, &Resolver).unwrap();
+        let store = LogStore::new(
+            root,
+            ProjectId::from_bytes([1; 16]),
+            HostSessionId::parse("chair").unwrap(),
+        );
+        (tmp, store)
+    }
+    fn update(op: &str, issued_at: i64, text: &str) -> Append {
         Append {
             operation_id: OperationId::parse(op).unwrap(),
+            issued_at,
             host: "host".into(),
             kind: "update".into(),
             markdown: text.into(),
@@ -455,24 +560,19 @@ mod tests {
             correction_of: None,
         }
     }
-    #[test]
-    fn log_operation_replay_pagination_correction_pruning_and_restart() {
-        let tmp = crate::test_support::tempdir().unwrap();
-        let base = tmp.path().canonicalize().unwrap();
-        let state = base.join("state");
-        std::fs::create_dir(&state).unwrap();
-        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
-        inputs.state_dir = Some(state);
-        let root = StateRoot::resolve(&inputs, &Resolver).unwrap();
-        let project = ProjectId::from_bytes([1; 16]);
-        let session = HostSessionId::parse("chair").unwrap();
-        let store = LogStore::new(root.clone(), project, session.clone());
-        let retention = Retention {
+    fn retention() -> Retention {
+        Retention {
             max_age_seconds: 100,
             max_entries: 2,
             max_bytes: 65536,
-        };
-        let first = update("op-1", "first");
+            replay_horizon_seconds: 10,
+        }
+    }
+    #[test]
+    fn log_operation_replay_pagination_correction_pruning_and_restart() {
+        let (_tmp, store) = fixture();
+        let retention = retention();
+        let first = update("op-1", 1, "first");
         assert_eq!(
             store.append(first.clone(), retention, 1).unwrap().sequence,
             1
@@ -482,48 +582,20 @@ mod tests {
             1
         );
         assert!(matches!(
-            store.append(update("op-1", "different"), retention, 2),
+            store.append(update("op-1", 1, "changed"), retention, 2),
             Err(Error::Conflict)
         ));
-        let dir = store.dir(false).unwrap();
-        let mut manifest = LogStore::load(&dir).unwrap();
-        let current_digest = manifest.receipts[0].digest.clone();
-        manifest.receipts[0].digest =
-            CanonicalV1::file_digest(&serde_json::to_vec(&first).unwrap()).to_string();
-        LogStore::publish(
-            &dir,
-            "manifest.json",
-            &serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            store.append(first.clone(), retention, 2).unwrap().sequence,
-            1
-        );
-        manifest.receipts[0].digest = current_digest;
-        LogStore::publish(
-            &dir,
-            "manifest.json",
-            &serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
+        assert!(matches!(
+            store.append(update("op-1", 2, "first"), retention, 2),
+            Err(Error::Conflict)
+        ));
         let mut handoff = first.clone();
         handoff.host = "other-host".into();
         assert_eq!(store.append(handoff, retention, 2).unwrap().sequence, 1);
-        let expired_view = store.page(None, 100, retention, 102).unwrap();
-        assert!(expired_view.entries.is_empty());
-        assert_eq!(expired_view.total_pruned, 1);
-        assert_eq!(store.gc(retention, 102, true).unwrap(), 1);
-        assert_eq!(
-            store.page(None, 100, retention, 2).unwrap().entries.len(),
-            1
-        );
-
-        let mut correction = update("op-2", "correction");
+        let mut correction = update("op-2", 3, "correction");
         correction.correction_of = Some(1);
         store.append(correction, retention, 3).unwrap();
         let page = store.page(None, 1, retention, 3).unwrap();
-        assert_eq!(page.entries[0].sequence, 1);
         assert_eq!(page.next_cursor, Some(1));
         assert_eq!(
             store
@@ -534,59 +606,215 @@ mod tests {
                 .correction_of,
             Some(1)
         );
-        store.append(update("op-3", "third"), retention, 4).unwrap();
-        let restarted = LogStore::new(root, project, session);
-        let page = restarted.page(None, 100, retention, 4).unwrap();
+        store
+            .append(update("op-3", 4, "third"), retention, 4)
+            .unwrap();
+        let page = store.page(None, 100, retention, 4).unwrap();
         assert_eq!(
             page.entries.iter().map(|e| e.sequence).collect::<Vec<_>>(),
             vec![2, 3]
         );
         assert_eq!((page.total_appended, page.total_pruned), (3, 1));
+        let restarted = LogStore::new(store.root.clone(), store.project, store.session.clone());
         assert_eq!(restarted.append(first, retention, 5).unwrap().sequence, 1);
-        restarted
-            .append(update("op-4", "later"), retention, 200)
-            .unwrap();
-        let page = restarted.page(None, 100, retention, 200).unwrap();
-        assert_eq!(page.entries.len(), 1);
-        assert_eq!(page.total_pruned, 3);
-        assert!(restarted.page(None, 0, retention, 200).is_err());
-        assert!(
-            restarted
-                .append(update("large", &"x".repeat(ENTRY_LIMIT)), retention, 201)
-                .is_err()
+        assert_eq!(store.gc(retention, 105, true).unwrap(), 2);
+        assert_eq!(store.gc(retention, 105, false).unwrap(), 2);
+        let page = store.page(None, 100, retention, 105).unwrap();
+        assert!(page.entries.is_empty());
+        assert_eq!((page.total_appended, page.total_pruned), (3, 3));
+    }
+    #[test]
+    fn replay_horizon_expires_receipts_and_survives_clock_and_config_changes() {
+        let (_tmp, store) = fixture();
+        let mut retention = retention();
+        retention.max_entries = 100;
+        let original = update("old", 100, "payload");
+        store.append(original.clone(), retention, 100).unwrap();
+        assert_eq!(
+            store
+                .append(original.clone(), retention, 110)
+                .unwrap()
+                .sequence,
+            1
         );
-        let size_retention = Retention {
-            max_age_seconds: 1000,
-            max_entries: 100,
-            max_bytes: 32768,
-        };
-        for n in 0..4 {
-            restarted
-                .append(
-                    update(&format!("s-{n}"), &"x".repeat(9000)),
-                    size_retention,
-                    202,
-                )
+        assert!(matches!(
+            store.append(original.clone(), retention, 111),
+            Err(Error::Expired)
+        ));
+        store
+            .append(update("new", 111, "new"), retention, 111)
+            .unwrap();
+        let dir = store.dir(false).unwrap();
+        let db = store.open(&dir, false).unwrap().unwrap();
+        let old_count: i64 = db
+            .query_row(
+                "SELECT count(*) FROM receipts WHERE operation_id='old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_count, 0);
+        assert_eq!(
+            store.page(None, 100, retention, 111).unwrap().entries.len(),
+            2
+        );
+        drop(db);
+        retention.replay_horizon_seconds = 1000;
+        assert!(matches!(
+            store.append(original.clone(), retention, 111),
+            Err(Error::Expired)
+        ));
+        assert!(matches!(
+            store.append(original, retention, 101),
+            Err(Error::Expired)
+        ));
+        assert!(matches!(
+            store.append(update("future", 412, "future"), retention, 111),
+            Err(Error::Future)
+        ));
+        assert_eq!(
+            store
+                .append(update("future", 411, "future"), retention, 111)
+                .unwrap()
+                .sequence,
+            3
+        );
+    }
+    #[test]
+    fn byte_retention_and_page_budget_remain_oldest_first() {
+        let (_tmp, store) = fixture();
+        let mut policy = retention();
+        policy.max_entries = 100;
+        policy.max_bytes = 100_000;
+        for n in 0..9 {
+            store
+                .append(update(&format!("op-{n}"), 1, &"x".repeat(9_000)), policy, 1)
                 .unwrap();
         }
-        let page = restarted.page(None, 100, size_retention, 202).unwrap();
-        assert_eq!(page.entries.len(), 3);
-        assert_eq!(page.total_pruned, 5);
-        assert_eq!(restarted.gc(size_retention, 1203, false).unwrap(), 3);
-        let page = restarted.page(None, 100, size_retention, 1203).unwrap();
-        assert!(page.entries.is_empty());
-        assert_eq!(page.total_pruned, 8);
-        let dir = restarted.dir(false).unwrap();
+        let first = store.page(None, 100, policy, 1).unwrap();
+        assert_eq!(first.entries.len(), 7);
+        assert_eq!(first.next_cursor, Some(7));
+        let second = store.page(first.next_cursor, 100, policy, 1).unwrap();
+        assert_eq!(second.entries.len(), 2);
+        assert_eq!(second.next_cursor, None);
+        policy.max_bytes = 32_768;
+        store
+            .append(update("last", 2, &"x".repeat(9_000)), policy, 2)
+            .unwrap();
+        let page = store.page(None, 100, policy, 2).unwrap();
+        assert_eq!(
+            page.entries.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+            vec![8, 9, 10]
+        );
+        assert_eq!(page.total_pruned, 7);
+    }
+    #[test]
+    fn failed_pruning_rolls_back_append_and_expiry_boundary() {
+        let (_tmp, store) = fixture();
+        let retention = retention();
+        let first = update("first", 1, "first");
+        store.append(first.clone(), retention, 1).unwrap();
+        let dir = store.dir(false).unwrap();
+        let db = store.open(&dir, true).unwrap().unwrap();
+        db.execute_batch("CREATE TRIGGER fail_prune BEFORE DELETE ON receipts BEGIN SELECT RAISE(ABORT, 'fixture'); END;").unwrap();
+        drop(db);
         assert!(matches!(
-            LogStore::read(&dir, 1),
-            Err(Error::Entry { sequence: 1, .. })
+            store.append(update("second", 20, "second"), retention, 20),
+            Err(Error::Sqlite(_))
         ));
-        LogStore::publish(
-            &dir,
-            "manifest.json",
-            br#"{"schema_version":1,"receipts":[],"total_pruned":0,"total_pruned":1}"#,
+        let page = store.page(None, 100, retention, 1).unwrap();
+        assert_eq!(
+            (page.total_appended, page.total_pruned, page.entries.len()),
+            (1, 0, 1)
+        );
+        assert_eq!(store.append(first, retention, 1).unwrap().sequence, 1);
+        let db = store.open(&dir, true).unwrap().unwrap();
+        db.execute_batch("DROP TRIGGER fail_prune;").unwrap();
+        drop(db);
+        assert_eq!(
+            store
+                .append(update("second", 20, "second"), retention, 20)
+                .unwrap()
+                .sequence,
+            2
+        );
+    }
+    #[test]
+    fn reads_create_nothing_and_reject_duplicate_record_fields() {
+        let (_tmp, store) = fixture();
+        let retention = retention();
+        assert!(
+            store
+                .page(None, 10, retention, 1)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        assert!(store.dir(false).unwrap_err().is_not_found());
+        store
+            .append(update("first", 1, "first"), retention, 1)
+            .unwrap();
+        let dir = store.dir(false).unwrap();
+        let db = store.open(&dir, true).unwrap().unwrap();
+        let corrupt = br#"{"schema_version":1,"schema_version":1}"#;
+        db.execute(
+            "UPDATE entries SET payload=?1, bytes=?2 WHERE sequence=1",
+            params![corrupt.as_slice(), corrupt.len() as i64],
         )
         .unwrap();
-        assert!(matches!(LogStore::load(&dir), Err(Error::Decode(_))));
+        drop(db);
+        assert!(matches!(
+            store.page(None, 10, retention, 1),
+            Err(Error::Entry {
+                sequence: 1,
+                source: provenant_records::DecodeError::DuplicateMember { .. }
+            })
+        ));
+    }
+    #[test]
+    fn replay_store_has_no_lifetime_receipt_cap() {
+        let (_tmp, store) = fixture();
+        let retention = retention();
+        store
+            .append(update("first", 1, "first"), retention, 1)
+            .unwrap();
+        let dir = store.dir(false).unwrap();
+        let mut db = store.open(&dir, true).unwrap().unwrap();
+        let tx = db.transaction().unwrap();
+        {
+            let mut insert = tx
+                .prepare("INSERT INTO receipts VALUES(?1,?2,'digest',?3,?2)")
+                .unwrap();
+            for n in 0..100_001 {
+                insert
+                    .execute(params![format!("synthetic-{n}"), 1, n + 2])
+                    .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        drop(db);
+        assert_eq!(
+            store
+                .append(update("next", 2, "next"), retention, 2)
+                .unwrap()
+                .sequence,
+            2
+        );
+        assert_eq!(
+            store.page(None, 100, retention, 2).unwrap().total_appended,
+            2
+        );
+        assert_eq!(
+            store
+                .append(update("later", 20, "later"), retention, 20)
+                .unwrap()
+                .sequence,
+            3
+        );
+        let db = store.open(&dir, false).unwrap().unwrap();
+        let count: i64 = db
+            .query_row("SELECT count(*) FROM receipts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }

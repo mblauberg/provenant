@@ -219,7 +219,9 @@ attempts are all terminal.
 Chair log retention is per session: `[retention] chair_log_days = 30` (1 to
 3650), `chair_log_entries = 10000` (1 to 100000), and `chair_log_bytes =
 16777216` (65536 to 1073741824). Appends apply all three limits; listing
-filters by age, and full `gc` removes expired payloads. See the
+filters by age, and full `gc` removes expired payloads. The optional
+`chair_log_replay_days` (7 to 3650) controls receipt retention and defaults to
+the larger of `chair_log_days` and 7 days. See the
 [chair log](session-checkpoints.md#chair-log) for replay and pruning behaviour.
 The last 64 KiB survives as `stdout.log.tail` or `stderr.log.tail`;
 results, exit evidence, recorded digests and small captures survive. The same

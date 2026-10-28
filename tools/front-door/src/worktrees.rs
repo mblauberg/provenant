@@ -1064,6 +1064,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             &roots.state,
             provenant_workflow::log::Retention {
                 max_age_seconds: config.retention.chair_log_days * 86_400,
+                replay_horizon_seconds: config.retention.chair_log_replay_seconds(),
                 max_entries: config.retention.chair_log_entries,
                 max_bytes: config.retention.chair_log_bytes,
             },
