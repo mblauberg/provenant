@@ -84,6 +84,7 @@ pub fn hook_context(
         Advice {
             digest: "",
             commands: &CommandPrefix::default(),
+            client: None,
         },
     )
 }
@@ -93,6 +94,7 @@ pub fn hook_context(
 pub struct Advice<'a> {
     pub digest: &'a str,
     pub commands: &'a CommandPrefix,
+    pub client: Option<provenant_records::Harness>,
 }
 
 /// As [`hook_context`], with a freshly derived `digest` of lane and pull
@@ -119,7 +121,11 @@ pub fn hook_context_with(
         .filter(|host| host.hook_event_name == event)
         .and_then(|host| host.session_id)
         .and_then(|id| HostSessionId::parse(&id).ok());
-    let Advice { digest, commands } = advice;
+    let Advice {
+        digest,
+        commands,
+        client,
+    } = advice;
     let Some(session) = parsed else {
         return render(event, None, CheckpointStatus::InvalidInput, digest,
             "Checkpoint unavailable: missing/invalid host session ID or hook input; no checkpoint loaded.".into(), None, "");
@@ -206,10 +212,13 @@ pub fn hook_context_with(
     // The save must reach the store this hook read. When the command cannot be
     // shown so that it round-trips, say so rather than show one that would
     // write into the default store.
+    let client = client
+        .map(|harness| format!(" --client {}", harness.spec().name))
+        .unwrap_or_default();
     let save = match commands.runnable(&format!("workflow session save {}", session.as_str())) {
-        Some(command) => format!("{command} --file <checkpoint.md>"),
+        Some(command) => format!("{command} --file <checkpoint.md>{client}"),
         None => format!(
-            "no runnable command is shown because this hook's --state-dir path cannot be shown safely; run workflow session save {} --file <checkpoint.md> with that --state-dir, since without it the save goes to the default store",
+            "no runnable command is shown because this hook's --state-dir path cannot be shown safely; run workflow session save {} --file <checkpoint.md>{client} with that --state-dir, since without it the save goes to the default store",
             session.as_str()
         ),
     };

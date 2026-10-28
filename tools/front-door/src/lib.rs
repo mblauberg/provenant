@@ -717,7 +717,16 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     };
     let verb = verb.to_owned();
     // No product installation, Git probe or provider access is needed to count.
-    let usage_roots = roots::resolve(globals, Workspace::Directory, Product::Optional).ok();
+    // Checkpoint observation must remain allocation-free through the whole CLI
+    // path, including demand telemetry, even on an otherwise empty state root.
+    let usage_roots = if matches!(
+        verb.as_str(),
+        "workflow session show" | "workflow session diff"
+    ) {
+        None
+    } else {
+        roots::resolve(globals, Workspace::Directory, Product::Optional).ok()
+    };
     let usage_project = usage_roots.as_ref().and_then(usage::project_id);
     let status = match parsed {
         ParseOutcome::Invocation(inv) => run(inv, process),

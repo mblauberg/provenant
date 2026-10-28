@@ -3193,6 +3193,8 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `session_id` | `{"name": "session_id", "positional": true, "required": true}` |
 | `--file` | `{"name": "file", "required": true}` |
+| `--client` | `{"name": "client", "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
+| `--rebind` | `{"defaults": ["false"], "name": "rebind", "values": ["true", "false"]}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -3205,7 +3207,9 @@ bounds are null. Positional arguments have no long flag.
     {
       "arguments": [
         "session_id",
-        "file"
+        "file",
+        "client",
+        "rebind"
       ],
       "multiple": true,
       "name": "Save",
@@ -3290,6 +3294,7 @@ bounds are null. Positional arguments have no long flag.
 | `--dry-run` | `{"defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
 | `--no-launch` | `{"defaults": ["false"], "name": "no_launch", "values": ["true", "false"]}` |
 | `--session-id` | `{"name": "session_id"}` |
+| `--client` | `{"name": "client", "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -3313,7 +3318,8 @@ bounds are null. Positional arguments have no long flag.
         "allow_dirty",
         "dry_run",
         "no_launch",
-        "session_id"
+        "session_id",
+        "client"
       ],
       "multiple": true,
       "name": "Handoff",

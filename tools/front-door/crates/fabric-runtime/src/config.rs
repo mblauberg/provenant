@@ -162,6 +162,35 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    #[test]
+    fn inbox_identity_uses_agent_then_harness_then_client_defaults() {
+        use crate::identity::{Address, inbox_address};
+        use std::ffi::OsStr;
+        let host = HostId::from_bytes([1; 16]);
+        let mut config = config();
+        config.agent_label = "configured-chair".into();
+        let address = |config: &FabricConfig, agent, client| {
+            inbox_address(host, config, agent, client).unwrap()
+        };
+        assert_eq!(
+            address(&config, Some(OsStr::new("explicit-chair")), Some("codex")),
+            Address::new(host, "explicit-chair").unwrap()
+        );
+        assert_eq!(
+            address(&config, Some(OsStr::new("")), Some("codex")),
+            Address::new(host, "configured-chair").unwrap()
+        );
+        config.agent_label.clear();
+        assert_eq!(
+            address(&config, None, Some("codex")),
+            Address::new(host, "codex").unwrap()
+        );
+        assert_eq!(
+            address(&config, None, None),
+            Address::new(host, "agent").unwrap()
+        );
+    }
+
     fn config() -> FabricConfig {
         let host = HostId::from_bytes([1; 16]);
         FabricConfig {

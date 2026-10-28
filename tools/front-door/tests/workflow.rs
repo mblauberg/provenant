@@ -39,6 +39,477 @@ fn receipt_request(critical: &str, decision: Value) -> Value {
 }
 const DELIVERY: &str = "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a";
 
+fn state_snapshot(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>> {
+    let mut snapshot = Vec::new();
+    if root.exists() {
+        for entry in std::fs::read_dir(root)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                snapshot.push((path.clone(), Vec::new()));
+                snapshot.extend(state_snapshot(&path)?);
+            } else {
+                snapshot.push((path.clone(), std::fs::read(path)?));
+            }
+        }
+    }
+    snapshot.sort();
+    Ok(snapshot)
+}
+
+#[test]
+fn session_reads_allocate_nothing() -> Result {
+    let rig = TestRig::new()?;
+    let before = state_snapshot(&rig.state)?;
+    for args in [
+        vec!["workflow", "session", "show", "absent"],
+        vec!["workflow", "session", "show", "absent", "--revisions"],
+        vec!["workflow", "session", "show", "absent", "--rev", "1"],
+        vec!["workflow", "session", "diff", "absent", "1"],
+    ] {
+        call(&rig, &args, 1)?;
+        assert_eq!(state_snapshot(&rig.state)?, before);
+    }
+    std::fs::remove_dir_all(&rig.state)?;
+    call(&rig, &["workflow", "session", "show", "absent"], 1)?;
+    assert!(!rig.state.exists());
+    Ok(())
+}
+
+#[test]
+fn session_show_honours_project_and_state_dir_without_allocating() -> Result {
+    let rig = TestRig::new()?;
+    let other = rig.root.join("other");
+    std::fs::create_dir(&other)?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    assert_eq!(
+        code(&rig.execute(&git, &["init", other.to_str().ok_or("project")?], None)?),
+        0
+    );
+    let file = rig.root.join("checkpoint.md");
+    std::fs::write(&file, "selected project\n")?;
+    call(
+        &rig,
+        &[
+            "--project",
+            &other.to_string_lossy(),
+            "workflow",
+            "session",
+            "save",
+            "selected",
+            "--file",
+            &file.to_string_lossy(),
+        ],
+        0,
+    )?;
+    let before = state_snapshot(&rig.state)?;
+    for mode in [vec![], vec!["--revisions"], vec!["--rev", "1"]] {
+        let mut args = vec![
+            "--project",
+            other.to_str().ok_or("project")?,
+            "workflow",
+            "session",
+            "show",
+            "selected",
+        ];
+        args.extend(mode);
+        let shown = call(&rig, &args, 0)?;
+        assert_eq!(shown["status"], "ok");
+        assert_eq!(state_snapshot(&rig.state)?, before);
+    }
+    // TestRig::command always supplies an explicit --state-dir. A different
+    // directory must not fall back to that store or allocate a new one.
+    let absent_state = rig.root.join("absent-state");
+    let output = rig.execute(
+        std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir",
+            absent_state.to_str().ok_or("state")?,
+            "--project",
+            other.to_str().ok_or("project")?,
+            "workflow",
+            "session",
+            "show",
+            "selected",
+            "--json",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&output), 1);
+    assert!(!absent_state.exists());
+    Ok(())
+}
+
+#[test]
+fn a_lane_cannot_register_or_overwrite_a_chair() -> Result {
+    let mut rig = TestRig::new()?;
+    let file = rig.root.join("checkpoint.md");
+    std::fs::write(&file, "chair\n")?;
+    call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "chair",
+            "--file",
+            &file.to_string_lossy(),
+        ],
+        0,
+    )?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
+    rig.env
+        .push(("PROVENANT_AGENT_LABEL".into(), "lane-attempt".into()));
+    rig.env.push(("PROVENANT_LANE_DEPTH".into(), "1".into()));
+    let before = state_snapshot(&rig.state.join("workflow"))?;
+    for session in ["chair", "lane"] {
+        let refused = call(
+            &rig,
+            &[
+                "workflow",
+                "session",
+                "save",
+                session,
+                "--file",
+                &file.to_string_lossy(),
+                "--rebind",
+            ],
+            1,
+        )?;
+        assert_eq!(refused["error"]["code"], "IN_LANE");
+        assert_eq!(state_snapshot(&rig.state.join("workflow"))?, before);
+    }
+    rig.env
+        .retain(|(key, _)| key != "PROVENANT_AGENT_LABEL" && key != "PROVENANT_LANE_DEPTH");
+    rig.env
+        .push(("PROVENANT_AGENT_LABEL".into(), "fixture".into()));
+    call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "chair",
+            "--file",
+            &file.to_string_lossy(),
+        ],
+        0,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn conflicting_markers_fall_back_to_the_configured_client() -> Result {
+    let mut rig = TestRig::new()?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nclient_label='terminal'\n",
+    )?;
+    let identity = call(&rig, &["fabric", "identity"], 0)?["data"].clone();
+    rig.env.push(("CODEX_THREAD_ID".into(), "nested".into()));
+    rig.env.push(("CLAUDECODE".into(), "1".into()));
+    let file = rig.root.join("checkpoint.md");
+    std::fs::write(&file, "notes\n")?;
+    call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "conflict",
+            "--file",
+            file.to_str().ok_or("file")?,
+        ],
+        0,
+    )?;
+    let project = identity["project"].as_str().ok_or("project")?;
+    let discovery: Value = serde_json::from_slice(&std::fs::read(rig.state.join(format!(
+        "workflow/projects/{project}/sessions/conflict/discovery.json"
+    )))?)?;
+    assert_eq!(discovery["chair_actor"], identity["inbox"]["actor"]);
+    let mut mcp = support::mcp::McpClient::default();
+    mcp.initialise("2025-11-25")?;
+    mcp.initialised()?;
+    let id = mcp.call("fabric_context", json!({"op":"inspect"}))?;
+    let replies = mcp.eof(
+        &rig,
+        std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &["fabric", "mcp"],
+    )?;
+    let mcp_identity = &replies.get(&id).ok_or("identity")?["result"]["structuredContent"];
+    assert_eq!(mcp_identity["inbox"], identity["inbox"]);
+    assert_eq!(mcp_identity["client"], "terminal");
+    Ok(())
+}
+
+#[test]
+fn session_save_discovery_restart() -> Result {
+    let mut rig = TestRig::new()?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
+    let mut actors = Vec::new();
+    for (client, marker, value) in [
+        ("codex", "CODEX_THREAD_ID", "chair-fixture"),
+        ("claude", "CLAUDECODE", "1"),
+    ] {
+        rig.env.retain(|(key, _)| {
+            key != "PROVENANT_AGENT_LABEL" && key != "CODEX_THREAD_ID" && key != "CLAUDECODE"
+        });
+        rig.env.push((marker.into(), value.into()));
+        // Explicit clients win even when nested harness markers conflict.
+        let other_marker = if client == "codex" {
+            "CLAUDECODE"
+        } else {
+            "CODEX_THREAD_ID"
+        };
+        rig.env.push((other_marker.into(), "1".into()));
+        let session = format!("{client}-chair");
+        let hook_session = format!("{client}-hook-first");
+        let mut mcp = support::mcp::McpClient::default();
+        mcp.initialise("2025-11-25")?;
+        mcp.initialised()?;
+        let id = mcp.call("fabric_context", json!({"op":"inspect"}))?;
+        let replies = mcp.eof(
+            &rig,
+            std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &["fabric", "mcp", "--client", client],
+        )?;
+        let identity = &replies.get(&id).ok_or("MCP identity")?["result"]["structuredContent"];
+        let file = rig.root.join("checkpoint.md");
+        std::fs::write(&file, "# Goal\nExact chair identity.\n")?;
+        call(
+            &rig,
+            &[
+                "workflow",
+                "session",
+                "save",
+                session.as_str(),
+                "--file",
+                &file.to_string_lossy(),
+                "--client",
+                client,
+            ],
+            0,
+        )?;
+        rig.env.retain(|(key, _)| key != other_marker);
+        let mut inferred = support::mcp::McpClient::default();
+        inferred.initialise("2025-11-25")?;
+        inferred.initialised()?;
+        let inferred_id = inferred.call("fabric_context", json!({"op":"inspect"}))?;
+        let inferred_replies = inferred.eof(
+            &rig,
+            std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &["fabric", "mcp"],
+        )?;
+        let inferred_identity = &inferred_replies
+            .get(&inferred_id)
+            .ok_or("inferred identity")?["result"]["structuredContent"];
+        assert_eq!(inferred_identity["inbox"], identity["inbox"]);
+        call(
+            &rig,
+            &[
+                "workflow",
+                "session",
+                "save",
+                session.as_str(),
+                "--file",
+                &file.to_string_lossy(),
+            ],
+            0,
+        )?;
+        call(
+            &rig,
+            &[
+                "workflow",
+                "session",
+                "save",
+                hook_session.as_str(),
+                "--file",
+                &file.to_string_lossy(),
+            ],
+            0,
+        )?;
+        call(
+            &rig,
+            &[
+                "workflow",
+                "session",
+                "save",
+                hook_session.as_str(),
+                "--file",
+                &file.to_string_lossy(),
+                "--client",
+                client,
+            ],
+            0,
+        )?;
+        let project = identity["project"].as_str().ok_or("project identity")?;
+        let manifest_path = rig.state.join(format!(
+            "workflow/projects/{project}/sessions/{session}/revisions.json"
+        ));
+        let manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+        let discovery_path = manifest_path.with_file_name("discovery.json");
+        let discovery: Value = serde_json::from_slice(&std::fs::read(&discovery_path)?)?;
+        assert!(manifest.get("discovery").is_none());
+        assert_eq!(discovery["schema_version"], 1);
+        assert_eq!(discovery["host"], identity["host"]);
+        assert_eq!(discovery["project_id"], identity["project"]);
+        assert_eq!(discovery["chair_actor"], identity["inbox"]["actor"]);
+        assert_eq!(discovery["host_session_id"], session.as_str());
+        assert_eq!(discovery["checkpoint"], manifest["revisions"][0]);
+        actors.push(discovery["chair_actor"].clone());
+        // Each CLI call is a fresh process. Reads leave every state file unchanged.
+        let before = state_snapshot(&rig.state)?;
+        let shown = call(&rig, &["workflow", "session", "show", session.as_str()], 0)?;
+        assert_eq!(shown["data"]["markdown"], "# Goal\nExact chair identity.\n");
+        call(
+            &rig,
+            &[
+                "workflow",
+                "session",
+                "show",
+                session.as_str(),
+                "--revisions",
+            ],
+            0,
+        )?;
+        call(
+            &rig,
+            &[
+                "workflow",
+                "session",
+                "show",
+                session.as_str(),
+                "--rev",
+                "1",
+            ],
+            0,
+        )?;
+        call(
+            &rig,
+            &["workflow", "session", "diff", session.as_str(), "1"],
+            0,
+        )?;
+        assert_eq!(state_snapshot(&rig.state)?, before);
+        rig.env
+            .push(("PROVENANT_AGENT_LABEL".into(), "changed-chair".into()));
+        let refused = call(
+            &rig,
+            &[
+                "workflow",
+                "session",
+                "save",
+                session.as_str(),
+                "--file",
+                &file.to_string_lossy(),
+                "--client",
+                "claude",
+            ],
+            1,
+        )?;
+        assert_eq!(refused["status"], "refused");
+        assert_eq!(refused["error"]["code"], "IDENTITY");
+        // Only the attempted write's demand telemetry may change on refusal.
+        let unchanged: Value = serde_json::from_slice(&std::fs::read(&discovery_path)?)?;
+        assert_eq!(unchanged, discovery);
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .ok_or("message")?
+                .contains("--rebind")
+        );
+        let rebound = call(
+            &rig,
+            &[
+                "workflow",
+                "session",
+                "save",
+                session.as_str(),
+                "--file",
+                &file.to_string_lossy(),
+                "--rebind",
+            ],
+            0,
+        )?;
+        assert_eq!(rebound["data"]["warnings"], json!([]));
+        let rebound: Value = serde_json::from_slice(&std::fs::read(&discovery_path)?)?;
+        assert_ne!(rebound["chair_actor"], discovery["chair_actor"]);
+        assert_eq!(
+            rebound["rebound_from"][0]["actor"],
+            discovery["chair_actor"]
+        );
+        assert_eq!(rebound["rebound_from"][0]["host"], discovery["host"]);
+        call(
+            &rig,
+            &[
+                "workflow",
+                "session",
+                "save",
+                session.as_str(),
+                "--file",
+                &file.to_string_lossy(),
+            ],
+            0,
+        )?;
+
+        // A legacy manifest has no registration; showing it must not register it.
+        std::fs::remove_file(discovery_path)?;
+        let before = state_snapshot(&rig.state)?;
+        call(&rig, &["workflow", "session", "show", session.as_str()], 0)?;
+        assert_eq!(state_snapshot(&rig.state)?, before);
+    }
+    assert_ne!(actors[0], actors[1]);
+    Ok(())
+}
+
+#[test]
+fn session_rebind_recovers_an_old_agent_binding() -> Result {
+    let mut rig = TestRig::new()?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
+    let file = rig.root.join("notes.md");
+    std::fs::write(&file, "notes")?;
+    let base = [
+        "workflow",
+        "session",
+        "save",
+        "old-agent",
+        "--file",
+        file.to_str().ok_or("file")?,
+    ];
+    call(&rig, &base, 0)?;
+    let mut client = base.to_vec();
+    client.extend(["--client", "codex"]);
+    let refused = call(&rig, &client, 1)?;
+    assert_eq!(refused["error"]["code"], "IDENTITY");
+    client.push("--rebind");
+    call(&rig, &client, 0)?;
+    let mut mcp = support::mcp::McpClient::default();
+    mcp.initialise("2025-11-25")?;
+    mcp.initialised()?;
+    let id = mcp.call("fabric_context", json!({"op":"inspect"}))?;
+    let replies = mcp.eof(
+        &rig,
+        std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &["fabric", "mcp", "--client", "codex"],
+    )?;
+    let identity = &replies.get(&id).ok_or("identity")?["result"]["structuredContent"];
+    let project = identity["project"].as_str().ok_or("project")?;
+    let discovery: Value = serde_json::from_slice(&std::fs::read(rig.state.join(format!(
+        "workflow/projects/{project}/sessions/old-agent/discovery.json"
+    )))?)?;
+    assert_eq!(discovery["chair_actor"], identity["inbox"]["actor"]);
+    assert_eq!(
+        discovery["rebound_from"][0]["actor"],
+        serde_json::to_value(
+            provenant_fabric_runtime::identity::Address::new(
+                serde_json::from_value(identity["host"].clone())?,
+                "agent"
+            )?
+            .actor
+        )?
+    );
+    Ok(())
+}
+
 #[test]
 fn long_checkpoints_save_up_to_the_documented_bound() -> Result {
     let rig = TestRig::new()?;

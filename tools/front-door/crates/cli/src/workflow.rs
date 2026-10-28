@@ -70,6 +70,12 @@ pub enum Session {
         /// Markdown checkpoint file, or `-` for standard input.
         #[arg(long)]
         file: String,
+        /// Chair harness client; falls back to active harness environment markers
+        #[arg(long, value_parser = crate::install::harness_parser())]
+        client: Option<provenant_records::Harness>,
+        /// Replace the registered chair binding and record its previous identity
+        #[arg(long)]
+        rebind: bool,
     },
     /// Show a session checkpoint, one of its retained revisions or their list
     Show {
@@ -150,6 +156,9 @@ pub struct Handoff {
     /// Source session ID; defaults to CLAUDE_CODE_SESSION_ID, then CLAUDE_SESSION_ID
     #[arg(long)]
     pub session_id: Option<String>,
+    /// Source chair harness client; falls back to active harness environment markers
+    #[arg(long, value_parser = crate::install::harness_parser())]
+    pub client: Option<provenant_records::Harness>,
 }
 impl Workflow {
     pub fn path(&self) -> &'static str {
@@ -397,8 +406,33 @@ fn execute(
     home: &Path,
     cwd: &Path,
 ) -> Result<Value, Error> {
-    let _ = globals;
-    let (roots, project, actor) = crate::fabric::identity(roots, home, cwd)?;
+    // Session reads resolve only an existing project binding. Fabric's writable
+    // context would allocate host/project identity and a utility home here.
+    if matches!(
+        cmd,
+        Workflow::Session(Session::Show { .. } | Session::Diff { .. })
+    ) {
+        let selected = globals.project.as_deref().unwrap_or(cwd);
+        let selected =
+            provenant_os::fs::canonicalize(selected).map_err(crate::fabric::EdgeError::from)?;
+        return read_session(cmd, &roots, &selected);
+    }
+    let context = crate::fabric::Context::open(roots, home, cwd)?;
+    if context.in_lane && matches!(cmd, Workflow::Session(Session::Save { .. })) {
+        return Err(Error::Refused {
+            code: "IN_LANE",
+            message: "a lane cannot register or save a chair session".into(),
+            data: Value::Null,
+        });
+    }
+    let actor = match &cmd {
+        Workflow::Session(Session::Save { client, .. }) => {
+            session_actor(&context, *client).map_err(|e| invalid(e.to_string()))?
+        }
+        _ => context.identity.inbox.actor,
+    };
+    let project = context.identity.project;
+    let roots = context.roots;
     let edge = Edge {
         roots,
         project,
@@ -432,11 +466,20 @@ fn execute(
             expected_revision,
             request(&input.request)?,
         ),
-        Workflow::Session(Session::Save { session_id, file }) => {
+        Workflow::Session(Session::Save {
+            session_id,
+            file,
+            rebind,
+            ..
+        }) => {
             let id = HostSessionId::parse(&session_id).map_err(|e| invalid(e.to_string()))?;
             let text = read_input(&file)?;
             let keep = session_revisions(&edge.roots);
+            let host = provenant_config::bind_host(&edge.roots)
+                .map_err(|error| invalid(error.to_string()))?;
             let saved = SessionStore::new(edge.roots.state.clone(), project, id)
+                .with_chair(host, actor)
+                .with_rebind(rebind)
                 .with_revisions(keep)
                 .save_revision(&text, edge.budget()?, &edge.cancel, &edge.clock)?;
             Ok(serde_json::json!({
@@ -447,15 +490,55 @@ fn execute(
                 "unchanged": saved.unchanged,
                 "retained": saved.retained,
                 "keep": keep,
+                "warnings": saved.warnings,
             }))
         }
+        Workflow::Session(Session::Show { .. } | Session::Diff { .. }) => unreachable_read(),
+        Workflow::Session(Session::Handoff(_)) => Err(invalid(
+            "workflow session handoff is composed by the provenant binary",
+        )),
+    }
+}
+
+fn unreachable_read() -> Result<Value, Error> {
+    Err(invalid("session reads require the read-only context"))
+}
+
+/// Use the same derivation as the chair's Fabric inbox.
+pub fn session_actor(
+    context: &crate::fabric::Context,
+    client: Option<provenant_records::Harness>,
+) -> Result<ActorId, String> {
+    context
+        .inbox_address(client)
+        .map(|address| address.actor)
+        .map_err(|e| e.to_string())
+}
+
+fn read_session(cmd: Workflow, roots: &Roots, cwd: &Path) -> Result<Value, Error> {
+    use provenant_confinement::{UtilityBudget, UtilityRuntime};
+    let git = provenant_os::git::git_executable().ok_or_else(|| invalid("Git unavailable"))?;
+    let runtime = UtilityRuntime::read_only(git).map_err(|e| invalid(e.to_string()))?;
+    let executor =
+        provenant_os::exec::SystemExecutor::new(1).map_err(|error| invalid(error.to_string()))?;
+    let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5))
+        .map_err(|e| invalid(e.to_string()))?;
+    let location = runtime
+        .project_location(&executor, cwd, budget, &CancelToken::new())
+        .map_err(|e| invalid(e.to_string()))?
+        .location;
+    let project = provenant_config::lookup_project(roots, &location)
+        .map_err(|e| invalid(e.to_string()))?
+        .ok_or(Error::Missing)?
+        .project_id();
+    match cmd {
         Workflow::Session(Session::Show {
             session_id,
             rev,
             revisions,
         }) => {
             let id = HostSessionId::parse(&session_id).map_err(|e| invalid(e.to_string()))?;
-            let store = SessionStore::new(edge.roots.state.clone(), project, id);
+            let store = SessionStore::new(roots.state.clone(), project, id);
             if revisions {
                 let chain = store.revisions()?;
                 if chain.is_empty() {
@@ -480,14 +563,12 @@ fn execute(
         }
         Workflow::Session(Session::Diff { session_id, rev }) => {
             let id = HostSessionId::parse(&session_id).map_err(|e| invalid(e.to_string()))?;
-            let diff = SessionStore::new(edge.roots.state.clone(), project, id)
+            let diff = SessionStore::new(roots.state.clone(), project, id)
                 .diff(rev)?
                 .ok_or(Error::Missing)?;
             serde_json::to_value(diff).map_err(|e| invalid(e.to_string()))
         }
-        Workflow::Session(Session::Handoff(_)) => Err(invalid(
-            "workflow session handoff is composed by the provenant binary",
-        )),
+        _ => unreachable_read(),
     }
 }
 fn save(
@@ -604,6 +685,9 @@ fn classify(error: &Error) -> (Outcome, &'static str) {
         Error::Session(provenant_workflow::session::SessionError::History) => {
             (Outcome::Failed, "HISTORY")
         }
+        Error::Session(provenant_workflow::session::SessionError::DiscoveryIdentity) => {
+            (Outcome::Refused, "IDENTITY")
+        }
         _ => (Outcome::Error, "IO"),
     }
 }
@@ -620,6 +704,18 @@ fn human_text(command: &str, data: &Value) -> String {
         }
     };
     match command {
+        "workflow session save" => {
+            let mut text = crate::terse(data);
+            for warning in data["warnings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                text.push_str(&format!("\nwarning: {warning}"));
+            }
+            with_newline(&text)
+        }
         "workflow session diff" => match data["text"].as_str() {
             Some("") => "no differences\n".to_owned(),
             Some(text) => with_newline(text),
@@ -717,6 +813,17 @@ pub fn run(cmd: Workflow, globals: &Globals, roots: &Roots, home: &Path, cwd: &P
 mod tests {
     use super::catalogue_family;
     use provenant_routing::Catalogue;
+
+    #[test]
+    fn human_save_output_includes_discovery_warnings() {
+        let text = super::human_text(
+            "workflow session save",
+            &serde_json::json!({
+                "saved_bytes": 5, "warnings": ["repeat the same command (including --rebind) to repair discovery"]
+            }),
+        );
+        assert!(text.contains("warning: repeat the same command (including --rebind)"));
+    }
 
     #[test]
     fn family_comes_from_the_catalogue_and_is_unknown_otherwise() {
