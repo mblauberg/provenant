@@ -10,6 +10,11 @@ use provenant_supervisor::{
 use rusqlite::params;
 use serde::Serialize;
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static REBOOT_TEMPORARY_CLEANUP: std::cell::RefCell<Option<std::result::Result<Option<Reconciled>, String>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// What a cancel request achieved. Requested does not prove exit.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -715,7 +720,12 @@ impl RunStore {
         {
             self.settle_recovered(&attempt, proof.into_recovery())?;
             // Recheck custody after release before removing lock-named payloads.
-            let _ = self.reconcile_terminal_temporary(record, call, _observer);
+            let cleanup = self.reconcile_terminal_temporary(record, call, _observer);
+            #[cfg(test)]
+            REBOOT_TEMPORARY_CLEANUP.with(|result| {
+                *result.borrow_mut() = Some(cleanup.as_ref().cloned().map_err(ToString::to_string));
+            });
+            let _ = cleanup;
         } else {
             // Lost without exit evidence deliberately preserves scratch.
             self.commit_reboot_lost(&proof, call)?;

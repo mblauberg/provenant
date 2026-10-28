@@ -4898,6 +4898,8 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
     value["attempt_inode"] = meta.inode.into();
     std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
     artifacts::subdir(&attempt, std::ffi::OsStr::new("scratch"), true)?;
+    // Recreate the private tmp root with production permissions, independent of umask.
+    artifacts::subdir(&attempt, std::ffi::OsStr::new("tmp"), true)?;
     let temporary = path.join("tmp/candidate-0");
     std::fs::create_dir_all(&temporary)?;
     std::fs::write(temporary.join("payload.lock"), b"build output")?;
@@ -4920,6 +4922,8 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
         store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?,
         vec![(id, Reconciled::Finished)]
     );
+    let cleanup = controls::REBOOT_TEMPORARY_CLEANUP.with(|result| result.borrow_mut().take());
+    assert_eq!(cleanup, Some(Ok(Some(Reconciled::TemporaryRemoved))));
     assert!(
         !path.join("scratch").exists(),
         "normal settlement removes empty launch staging"
