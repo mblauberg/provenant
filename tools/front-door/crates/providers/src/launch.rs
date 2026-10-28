@@ -322,7 +322,8 @@ pub(crate) fn rust_tools(
 
 /// Public TLS files and macOS developer tools, independent of whether Rust
 /// is installed. Keep these grants shared by Codex and Claude.
-#[allow(unused_variables)] // The grants are macOS-specific.
+// The non-macOS no-op keeps the append-capable macOS signature.
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables, clippy::ptr_arg))]
 pub(crate) fn system_tools(
     access: Access,
     runtime_reads: &mut Vec<PathGrant>,
