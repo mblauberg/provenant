@@ -316,7 +316,7 @@ impl SessionStore {
         if text.len() as u64 > CHECKPOINT_LIMIT {
             return Err(SessionError::TooLarge);
         }
-        let markdown = std::str::from_utf8(text)?;
+        std::str::from_utf8(text)?;
         let dir = self.directory(true)?;
         let _lock = dir.lock(
             OsStr::new("checkpoint.lock"),
@@ -331,20 +331,35 @@ impl SessionStore {
             }),
             WaitStop::Deadline => SessionError::Deadline,
         })?;
+        self.publish_revision_locked(&dir, text, clock, publish_discovery)
+    }
+
+    /// Publish a replacement while holding the checkpoint lock.
+    fn publish_revision_locked(
+        &self,
+        dir: &Directory,
+        text: &[u8],
+        clock: &dyn Clock,
+        publish_discovery: impl FnOnce(&Directory, &SessionDiscovery) -> Result<(), SessionError>,
+    ) -> Result<Saved, SessionError> {
+        if text.len() as u64 > CHECKPOINT_LIMIT {
+            return Err(SessionError::TooLarge);
+        }
+        let markdown = std::str::from_utf8(text)?;
         let now = clock.wall_now()?;
         // A checkpoint that cannot be read (a symlink, say) is replaced, not kept.
-        let existing = read_current(&dir).ok().flatten();
-        let discovery = self.load_discovery(&dir)?;
+        let existing = read_current(dir).ok().flatten();
+        let discovery = self.load_discovery(dir)?;
         self.check_discovery_identity(discovery.as_ref())?;
-        let mut manifest = load(&dir).unwrap_or_default();
-        let floor = highest_revision_file(&dir)?;
+        let mut manifest = load(dir).unwrap_or_default();
+        let floor = highest_revision_file(dir)?;
         let mut chain = reconcile(&manifest, existing.as_ref(), floor);
         let digest = provenant_records::CanonicalV1::file_digest(text);
         let unchanged = chain.last().is_some_and(|last| last.sha256 == digest);
         if !unchanged {
             // Keep the text being replaced before replacing it.
             if let (Some(last), Some((bytes, _))) = (chain.last(), existing.as_ref()) {
-                publish(&dir, &revision_file(last.revision), bytes)?;
+                publish(dir, &revision_file(last.revision), bytes)?;
             }
             let parent = chain.last().map(|last| last.revision);
             chain.push(Revision {
@@ -355,14 +370,14 @@ impl SessionStore {
                 saved_at: now,
             });
         }
-        publish(&dir, "checkpoint.md", text)?;
+        publish(dir, "checkpoint.md", text)?;
         let current = chain.last().cloned().ok_or(SessionError::History)?;
         let keep = usize::try_from(self.keep).unwrap_or(usize::MAX);
         let pruned: Vec<Revision> = chain.drain(..chain.len().saturating_sub(keep)).collect();
         manifest.schema_version = 1;
         manifest.revisions = chain;
         let manifest_bytes = serde_json::to_vec(&manifest).map_err(|_| SessionError::History)?;
-        publish(&dir, MANIFEST, &manifest_bytes)?;
+        publish(dir, MANIFEST, &manifest_bytes)?;
         let mut warnings = Vec::new();
         let summary = match parse_summary(markdown) {
             Ok(summary) => summary,
@@ -372,7 +387,7 @@ impl SessionStore {
             }
         };
         if let Some(record) = self.saved_discovery(discovery, &current, summary, now)
-            && let Err(error) = publish_discovery(&dir, &record)
+            && let Err(error) = publish_discovery(dir, &record)
         {
             let rebind = if self.rebind {
                 " (including --rebind)"
@@ -386,7 +401,7 @@ impl SessionStore {
         for old in &pruned {
             let _ = dir.unlink(OsStr::new(&revision_file(old.revision)));
         }
-        remove_orphans(&dir, &manifest);
+        remove_orphans(dir, &manifest);
         Ok(Saved {
             revision: current.revision,
             parent: current.parent,
@@ -547,7 +562,8 @@ impl SessionStore {
     /// concurrent `save` is never overwritten from a stale read. `edit` gets the
     /// current Markdown and returns the replacement, or `None` to leave the file
     /// alone. Directories are created only when `create` is set and the
-    /// checkpoint is missing; returns whether a replacement was written.
+    /// checkpoint is missing. Returns publication details when a replacement
+    /// was written, including any advisory discovery warning.
     pub fn update(
         &self,
         create: bool,
@@ -555,10 +571,10 @@ impl SessionStore {
         budget: WaitBudget,
         cancel: &CancelToken,
         clock: &dyn Clock,
-    ) -> Result<bool, SessionError> {
+    ) -> Result<Option<Saved>, SessionError> {
         let dir = match self.directory(create) {
             Ok(dir) => dir,
-            Err(error) if !create && error.is_not_found() => return Ok(false),
+            Err(error) if !create && error.is_not_found() => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         let _lock = dir.lock(
@@ -577,7 +593,7 @@ impl SessionStore {
             Err(error) => return Err(error.into()),
         };
         let Some(next) = edit(current.as_deref())? else {
-            return Ok(false);
+            return Ok(None);
         };
         if next.len() as u64 > CHECKPOINT_LIMIT {
             return Err(SessionError::TooLarge);
@@ -588,15 +604,10 @@ impl SessionStore {
             }),
             WaitStop::Deadline => SessionError::Deadline,
         })?;
-        dir.atomic_write(
-            OsStr::new("checkpoint.md"),
-            ".checkpoint.",
-            next.as_bytes(),
-            PublishMode::Replace,
-        )?
-        .require_durable()
-        .map_err(SessionError::Durability)?;
-        Ok(true)
+        let saved = self.publish_revision_locked(&dir, next.as_bytes(), clock, |dir, record| {
+            self.publish_discovery(dir, record)
+        })?;
+        Ok(Some(saved))
     }
 }
 #[cfg(test)]
@@ -1049,6 +1060,33 @@ mod tests {
         );
     }
     #[test]
+    fn field_update_publishes_revision_and_discovery() {
+        use provenant_core::{ActorId, HostId};
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "chair")
+            .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([4; 16]));
+        let first = "---\nprovenant_summary:\n  schema_version: 1\n  revision: 1\n  updated_at: \"2026-10-28T03:00:00Z\"\n  now: \"First\"\n  next: \"Next\"\n  needs_you: []\n  risk: \"None\"\n---\nBody\n";
+        saved(&selected, first);
+        let clock = clock(10);
+        let result = selected
+            .update(
+                false,
+                |current| Ok(Some(current.unwrap().replace("First", "Second"))),
+                WaitBudget::cli(clock.mono_now(), 1).unwrap(),
+                &CancelToken::new(),
+                &clock,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.revision, 2);
+        assert!(result.warnings.is_empty());
+        assert_eq!(selected.read_revision(1).unwrap().unwrap().markdown, first);
+        let discovery = selected.discovery().unwrap().unwrap();
+        assert_eq!(discovery.consistency, DiscoveryConsistency::Current);
+        assert_eq!(discovery.record.checkpoint.revision, 2);
+        assert_eq!(discovery.record.summary.unwrap().now, "Second");
+    }
+    #[test]
     fn enforces_utf8_and_byte_bounds_on_read_and_write() {
         let (_temp, root, project) = setup();
         let selected = store(&root, project, "host-1");
@@ -1445,7 +1483,7 @@ mod tests {
                 &clock,
             )
             .unwrap();
-        assert!(!wrote && !path(&root, project, "host-1").exists());
+        assert!(wrote.is_none() && !path(&root, project, "host-1").exists());
         let wrote = selected
             .update(
                 true,
@@ -1458,7 +1496,7 @@ mod tests {
                 &clock,
             )
             .unwrap();
-        assert!(wrote);
+        assert!(wrote.is_some());
         // A concurrent save cannot interleave: the lock is held while editing.
         let expired = TestClock::new(
             UtcMicros::from_micros(0).unwrap(),
@@ -1483,9 +1521,10 @@ mod tests {
         assert_eq!(selected.read().unwrap().unwrap().markdown, "second");
         // Declining, failing and oversize edits keep the previous bytes.
         assert!(
-            !selected
+            selected
                 .update(true, |_| Ok(None), budget, &cancel, &clock)
                 .unwrap()
+                .is_none()
         );
         assert!(
             selected

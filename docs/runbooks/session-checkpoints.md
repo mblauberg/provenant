@@ -58,6 +58,10 @@ without a header remain readable. Discovery is advisory: check its
 consistency before using the indexed summary, and repeat a save to repair an
 interrupted publication. Hooks do not generate summary prose.
 
+The session owner's guarded field edits use the same lock and publication
+sequence as a full save. Their result includes discovery warnings, so callers
+can report an interrupted index publication and retry it.
+
 ## Chair log
 
 Append a substantive update once using `provenant chair log append --session
