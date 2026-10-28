@@ -124,10 +124,6 @@ pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Resul
     // Separate state roots avoid the production host startup-spacing window.
     for configured in [false, true] {
         let rig = fixture()?;
-        fs::write(
-            rig.state.join("config.toml"),
-            "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
-        )?;
         let cleanup = provenant_supervisor::fixture::ProcessCleanupGuard::new(&rig.state);
         let (_, context) = writer_context(&rig)?;
         let policy = rig

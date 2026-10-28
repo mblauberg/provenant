@@ -359,6 +359,18 @@ fn gc_data_summary(data: &GcData) -> String {
         .sum();
     human.push_str(&format!("{trees} merged worktree(s), {outputs} output directory(s), {} attempt tmp directory(s), {} capture(s)\n",
         data.provider_state.attempt_tmp.len(), data.provider_state.attempt_logs.len()));
+    for temporary in &data.provider_state.attempt_tmp {
+        human.push_str(&format!(
+            "{} attempt tmp {} ({} bytes)\n",
+            if data.report.dry_run {
+                "would remove"
+            } else {
+                "removed"
+            },
+            temporary.path.display(),
+            temporary.bytes,
+        ));
+    }
     if data.provider_state.expired_events > 0 {
         human.push_str(&format!(
             "{} {} event rows\n",
@@ -758,7 +770,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     let mut unobserved_projects = Vec::new();
     let mut skipped_transient = Vec::new();
     let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
-    if command.scheduled && !config.gc.schedule {
+    if (command.scheduled || command.pressure) && !config.gc.schedule {
         return Ok(GcData {
             report: provenant_confinement::cache::CacheGcReport {
                 dry_run: command.dry_run,

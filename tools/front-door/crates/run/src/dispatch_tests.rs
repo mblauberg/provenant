@@ -5972,11 +5972,11 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
         let context = context(temp.path())?;
         let registry = temp.path().join("registry");
         std::fs::create_dir(&registry)?;
-        std::fs::write(registry.join("config.toml"), "[gc]\nfree_floor='1B'\n")?;
+        std::fs::write(registry.join("config.toml"), "[gc]\nfree_floor='100B'\n")?;
         let mut store = RunStore::open(&context, &call)?.with_writer_registry(&registry);
         std::fs::write(
             context.state_root.as_path().join("config.toml"),
-            "schema_version=1\n[gc]\nfree_floor='100B'\n",
+            "schema_version=1\n[gc]\nfree_floor='1B'\n",
         )?;
         store.set_admission_policy(AdmissionPolicy {
             admission_seconds: 1,
@@ -6001,6 +6001,51 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
             assert!(message.contains("99 bytes available"), "{message}");
             assert!(message.contains("gc.free_floor 100 bytes"), "{message}");
             assert!(message.contains("provenant gc --apply"), "{message}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn admission_missing_configuration_uses_the_default_host_floor() -> TestResult {
+    struct Disk(u64);
+    impl Resources for Disk {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            Host { available: 100 }.memory()
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            Ok(self.0)
+        }
+    }
+    for below in [true, false] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let context = context(temp.path())?;
+        let registry = temp.path().join("registry");
+        std::fs::create_dir(&registry)?;
+        let config = registry.join("config.toml");
+        std::fs::write(&config, "[gc]\nfree_floor='1B'\n")?;
+        let mut store = RunStore::open(&context, &call)?.with_writer_registry(&registry);
+        store.set_admission_policy(AdmissionPolicy {
+            admission_seconds: 1,
+            ..Default::default()
+        });
+        let run = lane(101, true);
+        let id = starting(&store, &run, &call)?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        std::fs::remove_file(config)?;
+        // A nested store's config must not replace the missing host config.
+        std::fs::write(context.state_root.as_path().join("config.toml"), "[gc")?;
+        let floor = provenant_config::GcSettings::default().free_floor_bytes(&registry)?;
+        let free = floor - u64::from(below);
+        let result = store.admit(id, &attempt, &Disk(free), &clock, &cancel);
+        if below {
+            assert!(
+                matches!(result, Err(RunError::DiskFloor { free: f, floor: p }) if f == free && p == floor)
+            );
+        } else {
+            assert_eq!(result?.state, AttemptState::Running);
         }
     }
     Ok(())

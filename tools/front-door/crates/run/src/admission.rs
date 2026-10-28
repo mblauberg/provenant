@@ -328,25 +328,6 @@ impl RunStore {
         clock: &dyn Clock,
         cancel: &CancelToken,
     ) -> Result<AttemptRecord> {
-        self.admit_with_floor(
-            id,
-            attempt,
-            resources,
-            clock,
-            cancel,
-            self.context.state_root.as_path(),
-        )
-    }
-
-    pub(crate) fn admit_with_floor(
-        &self,
-        id: AttemptId,
-        attempt: &Directory,
-        resources: &dyn Resources,
-        clock: &dyn Clock,
-        cancel: &CancelToken,
-        configuration_root: &std::path::Path,
-    ) -> Result<AttemptRecord> {
         let mut delay = Duration::from_millis(100);
         let mut disk_refusal = None;
         loop {
@@ -373,8 +354,8 @@ impl RunStore {
             // Disk policy is live configuration, shared with the guardian and
             // settlement. An unreadable current floor queues rather than
             // admitting with the ticket's submission-time observation.
-            let disk_floor_bytes = provenant_config::GcSettings::read(configuration_root)
-                .and_then(|settings| settings.free_floor_bytes(configuration_root));
+            let disk_floor_bytes = provenant_config::GcSettings::read(&self.writer_registry)
+                .and_then(|settings| settings.free_floor_bytes(&self.writer_registry));
             let fits = match (
                 resources.memory(),
                 resources.disk(attempt),
