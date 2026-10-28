@@ -20,6 +20,7 @@ mod hook_worktree;
 mod hooks;
 mod hosts;
 mod install;
+pub mod local_answers;
 mod overflow;
 mod pr;
 #[cfg(test)]

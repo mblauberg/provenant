@@ -185,6 +185,27 @@ pub fn open_connection(path: &Path, read_only: bool) -> rusqlite::Result<Connect
     Ok(db)
 }
 
+/// Unlike mode=ro alone, readonly_shm forbids opening WAL shared memory for
+/// writing or creating it. Keep WAL visibility; immutable=1 would ignore WAL.
+pub fn open_read_only_connection(path: &Path) -> rusqlite::Result<Connection> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut uri = String::from("file:");
+    for byte in path.as_os_str().as_bytes() {
+        use std::fmt::Write;
+        let _ = write!(uri, "%{byte:02X}");
+    }
+    uri.push_str("?mode=ro&readonly_shm=1");
+    let db = Connection::open_with_flags(
+        uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    db.busy_timeout(Duration::ZERO)?;
+    Ok(db)
+}
+
 #[derive(Debug)]
 pub enum WalError {
     Sqlite(rusqlite::Error),

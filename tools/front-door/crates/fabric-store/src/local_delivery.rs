@@ -1,0 +1,83 @@
+//! Deadline-aware observations. These do not record offers or acknowledge mail.
+use crate::*;
+use provenant_records::inbox::*;
+use std::time::Instant;
+
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn before(deadline: Instant) -> Result<()> {
+    if Instant::now() >= deadline {
+        Err(Error::Busy)
+    } else {
+        Ok(())
+    }
+}
+
+// INDEXED BY makes an absent index an error, never a fallback history scan.
+const PENDING: &str = "FROM human_answer_outbox o INDEXED BY human_local_delivery
+ WHERE json_extract(CAST(o.record AS TEXT),'$.target_host')=?1
+ AND json_extract(CAST(o.record AS TEXT),'$.target_session')=?2
+ AND json_extract(CAST(o.record AS TEXT),'$.target_actor')=?3
+ AND json_extract(CAST(o.record AS TEXT),'$.state') IN ('queued','offered') AND o.project=?4";
+
+impl Store {
+    /// Read at most limit+1 candidates. Oversized entries stay pending; this
+    /// observation never increments attempts or claims provider consumption.
+    pub fn read_human_answers(
+        &self,
+        target: &AnswerTarget,
+        limit: u64,
+        max_bytes: usize,
+        deadline: Instant,
+    ) -> Result<Page<AnswerOffer>> {
+        let rows_limit = page(0, limit)?;
+        if !(64..=MAX_OFFER_BYTES).contains(&max_bytes) {
+            return Err(Error::Invalid("offer byte limit"));
+        }
+        before(deadline)?;
+        let mut statement = self.db.prepare(&format!(
+            "SELECT o.answer,substr(o.record,1,?5),
+             (SELECT substr(a.record,1,?5) FROM human_answers a WHERE a.project=o.project AND a.id=o.answer)
+             {PENDING} ORDER BY o.answer LIMIT ?6"))?;
+        let mut rows = statement.query(params![
+            target.host.to_string(),
+            target.session,
+            target.actor.to_string(),
+            target.project.to_string(),
+            MAX_RECORD_READ_BYTES,
+            rows_limit + 1
+        ])?;
+        let mut batch = Page {
+            items: Vec::new(),
+            truncated: false,
+        };
+        let mut candidates = 0;
+        while let Some(row) = rows.next()? {
+            before(deadline)?;
+            candidates += 1;
+            if candidates > rows_limit {
+                batch.truncated = true;
+                break;
+            }
+            let key: String = row.get(0)?;
+            let delivery: AnswerDelivery = decode(&row.get::<_, Vec<u8>>(1)?)?;
+            let answer: HumanAnswer = decode(&row.get::<_, Vec<u8>>(2)?)?;
+            if delivery.schema_version != 1
+                || answer.schema_version != 1
+                || delivery.answer_id != answer.id
+                || key != answer.id.to_string()
+                || delivery.target_host != target.host
+                || delivery.target_actor != target.actor
+                || delivery.target_session != target.session
+            {
+                return Err(Error::Invalid("stored answer identity or version"));
+            }
+            batch.items.push(AnswerOffer { answer, delivery });
+            if encode(&batch)?.len() > max_bytes {
+                batch.items.pop();
+                batch.truncated = true;
+            }
+        }
+        before(deadline)?;
+        Ok(batch)
+    }
+}

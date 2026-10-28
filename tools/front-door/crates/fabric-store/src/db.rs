@@ -25,6 +25,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/007-remove-legacy-import.sql"),
     include_str!("migrations/008-human-inbox.sql"),
     include_str!("migrations/009-run-chairs.sql"),
+    include_str!("migrations/010-local-delivery.sql"),
 ];
 // Index of 007, which may drop only the always-null legacy members and the
 // traces of an import that brought nothing over. Anything the removed import
@@ -144,6 +145,61 @@ pub struct Store {
     _owner: PhantomData<Rc<()>>,
 }
 impl Store {
+    /// No creation, migration, journal changes or retries. WAL and shared memory
+    /// are opened read-only too; an unavailable WAL index fails closed.
+    #[allow(clippy::disallowed_methods)]
+    pub fn open_read_only(root: &StateRoot, deadline: std::time::Instant) -> Result<Option<Self>> {
+        crate::local_delivery::before(deadline)?;
+        let open = || -> Result<Directory> {
+            let state = Directory::open_anchor(root.as_path())?;
+            private(&state, root.as_path())?;
+            let fabric = state.open_verified_directory(OsStr::new("fabric"))?;
+            private(&fabric, &root.as_path().join("fabric"))?;
+            fabric.open_read(OsStr::new("fabric.sqlite3"))?;
+            Ok(fabric)
+        };
+        let fabric = match open() {
+            Ok(fabric) => fabric,
+            Err(Error::Filesystem(error)) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let path = root.as_path().join("fabric");
+        let names = [
+            "fabric.sqlite3",
+            "fabric.sqlite3-wal",
+            "fabric.sqlite3-shm",
+            "fabric.sqlite3-journal",
+        ]
+        .map(OsString::from);
+        provenant_sqlite::check_companions(
+            &fabric,
+            &names,
+            |check| {
+                crate::local_delivery::before(deadline)?;
+                check()?.ok_or(Error::Busy)
+            },
+            Into::into,
+            |name| Error::UnsafePath(path.join(name)),
+        )?;
+        let db = provenant_sqlite::open_read_only_connection(&path.join("fabric.sqlite3"))?;
+        db.progress_handler(100, Some(move || std::time::Instant::now() >= deadline))?;
+        // Pin one read snapshot across target lookup, discovery validation and
+        // answer reads, including concurrent acknowledgements and new answers.
+        db.execute_batch("BEGIN")?;
+        let store = Self {
+            db,
+            locks: None,
+            _owner: PhantomData,
+        };
+        if schema_version(&store.db)? != MIGRATIONS.len() {
+            return Err(Error::Invalid(
+                "local delivery index unavailable; upgrade through a normal inbox command",
+            ));
+        }
+        crate::local_delivery::before(deadline)?;
+        Ok(Some(store))
+    }
+
     pub fn open(root: &StateRoot, request: &Request<'_>) -> Result<Self> {
         Self::open_database(root, request, "fabric.sqlite3", Some("locks"))
     }
