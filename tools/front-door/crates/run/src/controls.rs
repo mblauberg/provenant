@@ -648,6 +648,28 @@ impl RunStore {
         if record.state == AttemptState::Queued {
             return Ok(None);
         }
+        if !matches!(record.state, AttemptState::Terminal { .. })
+            || matches!(
+                record.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::Lost,
+                    exit_code: None,
+                    ..
+                }
+            ) && record.exit_evidence.is_none()
+        {
+            match self.settle_unreserved_loss(record, call, _observer) {
+                Ok(Some(result)) => return Ok(Some(result)),
+                Ok(None) => {}
+                Err(error) => {
+                    return Ok(Some(Reconciled::uncertain(
+                        UncertainReason::ReconcileFailed {
+                            error: format!("reboot proof unavailable: {error}"),
+                        },
+                    )));
+                }
+            }
+        }
         // Collection failures are uncertain; settlement errors still propagate.
         let collect = || -> Result<_> {
             let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
@@ -728,7 +750,22 @@ impl RunStore {
             let _ = cleanup;
         } else {
             // Lost without exit evidence deliberately preserves scratch.
-            self.commit_reboot_lost(&proof, call)?;
+            let request = self.request(record.run_id, call)?;
+            let missing_worktree = request
+                .tasks
+                .iter()
+                .find(|task| task.task_id == record.task_id)
+                .and_then(|task| task.writer.as_ref())
+                .is_some_and(crate::writer::worktree_removed);
+            if missing_worktree {
+                self.commit_lost(
+                    proof.scope(),
+                    "machine rebooted before settlement and the writer worktree was removed",
+                    call,
+                )?;
+            } else {
+                self.commit_reboot_lost(&proof, call)?;
+            }
             proof
                 .release()
                 .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
@@ -812,10 +849,35 @@ impl RunStore {
             Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        match custody.metadata_at(std::ffi::OsStr::new("reservation.json"), false) {
-            Err(error) if error.is_not_found() => {}
-            Ok(_) => return Ok(None),
+        let stale = match custody.metadata_at(std::ffi::OsStr::new("reservation.json"), false) {
+            Err(error) if error.is_not_found() => false,
+            Ok(_) => {
+                let Some(writer) = writer else {
+                    return Ok(None);
+                };
+                let path = self
+                    .writer_registry
+                    .join("worktrees")
+                    .join(self.context.project_id.to_string())
+                    .join(provenant_confinement::worktrees::state_dir_name(
+                        &writer.worktree,
+                    ))
+                    .join("reservation.json");
+                let scope = Self::scope(record);
+                if !self.writer_fences()?.iter().any(|fence| {
+                    fence.reservation == path
+                        && fence.scope.run == scope.run
+                        && fence.scope.attempt == scope.attempt
+                        && fence.scope.generation < scope.generation
+                }) {
+                    return Ok(None);
+                }
+                true
+            }
             Err(error) => return Err(error.into()),
+        };
+        if !stale && matches!(record.state, AttemptState::Terminal { .. }) {
+            return Ok(None);
         }
         if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some() {
             return Ok(None);
@@ -823,11 +885,20 @@ impl RunStore {
         if !custody::checkpoint_before_reboot(&attempt, Self::scope(record), observer) {
             return Ok(None);
         }
+        let missing_worktree = writer.is_some_and(crate::writer::worktree_removed);
         self.commit_lost(
             Self::scope(record),
-            "writer reservation was gone and the recorded process tree predates this boot",
+            if missing_worktree {
+                "writer worktree was removed and the recorded process tree predates this boot"
+            } else {
+                "writer reservation was gone or stale and the recorded process tree predates this boot"
+            },
             call,
         )?;
+        if stale {
+            custody.unlink(std::ffi::OsStr::new("reservation.json"))?;
+            custody.sync()?;
+        }
         self.set_temporary_retained(record.attempt_id, false, call)?;
         Ok(Some(Reconciled::Finished))
     }
