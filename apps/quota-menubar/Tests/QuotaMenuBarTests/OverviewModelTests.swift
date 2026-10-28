@@ -64,10 +64,10 @@ final class OverviewModelTests: XCTestCase {
         let model = QuotaModel(overviewReader: { _, completion in reads.append(completion) },
                                schedule: { scheduled.append(($0, $1)) }, uptime: { uptime })
         model.observeOverviewRoot()
-        XCTAssertNotEqual(model.observedRoot, root.standardized)
+        XCTAssertNotEqual(model.observedRoot?.standardized.path, root.standardized.path)
         model.refreshLanes(force: true)
         model.show(report)
-        XCTAssertEqual(model.observedRoot, root.standardized)
+        XCTAssertEqual(model.observedRoot?.standardized.path, root.standardized.path)
         XCTAssertEqual(reads.count, 1)
         reads.removeFirst()((nil, .failure(CLI.Failure(message: "old root"))))
         XCTAssertEqual(scheduled.count, 1)
