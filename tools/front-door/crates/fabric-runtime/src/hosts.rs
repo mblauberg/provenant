@@ -16,6 +16,7 @@ use std::{
 
 pub const PROTOCOL: u64 = 6;
 pub const CONSOLE_PROTOCOL: u64 = 7;
+pub const INBOX_PROTOCOL: u64 = 8;
 pub const MAX_FRAME: usize = 1_048_576;
 
 pub fn discover_ssh_executable(
@@ -205,6 +206,9 @@ impl From<MutationResult> for CoordinationResult {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PeerAction {
     Health,
+    Inbox {
+        input: crate::inbox::InboxInput,
+    },
     ConsoleBoard {
         all: bool,
         limit: u64,
@@ -289,7 +293,9 @@ impl PeerRequest {
     ) -> Self {
         let mut request = Self {
             version: 1,
-            protocol: if matches!(
+            protocol: if matches!(action, PeerAction::Inbox { .. }) {
+                INBOX_PROTOCOL
+            } else if matches!(
                 action,
                 PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. }
             ) {
@@ -314,6 +320,7 @@ impl PeerRequest {
     }
     pub fn operation(&self) -> Option<OperationId> {
         match &self.action {
+            PeerAction::Inbox { input } => input.operation_id().cloned(),
             PeerAction::Coordination { operation_id, .. } => operation_id.clone(),
             PeerAction::LandingPush { operation_id, .. } => Some(operation_id.clone()),
             PeerAction::SessionHandoff { input, .. } => Some(input.operation_id.clone()),
@@ -389,6 +396,7 @@ pub struct PeerHealth {
     deny_unknown_fields
 )]
 pub enum PeerResult {
+    Inbox(crate::inbox::InboxReply),
     Run(Box<crate::runs::RunResult>),
     RunStatuses(
         #[serde(with = "crate::runs::attempts_wire")] Vec<provenant_records::run::AttemptRecord>,
@@ -428,7 +436,13 @@ pub fn protocol_refusal(bytes: &[u8]) -> Result<Option<PeerResponse>, PeerError>
         request.action["action"].as_str(),
         Some("console_board" | "console_tree")
     );
-    let expected = if console { CONSOLE_PROTOCOL } else { PROTOCOL };
+    let expected = if request.action["action"] == "inbox" {
+        INBOX_PROTOCOL
+    } else if console {
+        CONSOLE_PROTOCOL
+    } else {
+        PROTOCOL
+    };
     Ok((request.protocol != expected).then_some(PeerResponse {
         version: 1,
         protocol: expected,
@@ -642,7 +656,9 @@ impl SshTransport<'_> {
                 let line = stderr_line(&outcome.stderr.bytes);
                 if matches!(
                     request.action,
-                    PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. }
+                    PeerAction::ConsoleBoard { .. }
+                        | PeerAction::ConsoleTree { .. }
+                        | PeerAction::Inbox { .. }
                 ) && stderr_has_line(
                     &outcome.stderr.bytes,
                     "provenant: fabric peer: invalid peer frame",
@@ -666,7 +682,9 @@ impl SshTransport<'_> {
                 if code == 3
                     && !matches!(
                         request.action,
-                        PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. }
+                        PeerAction::ConsoleBoard { .. }
+                            | PeerAction::ConsoleTree { .. }
+                            | PeerAction::Inbox { .. }
                     )
                     && String::from_utf8_lossy(&outcome.stderr.bytes)
                         .lines()

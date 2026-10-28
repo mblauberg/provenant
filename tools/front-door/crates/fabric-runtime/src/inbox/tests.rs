@@ -800,7 +800,7 @@ fn inbox_paging_binds_filters_snapshot_and_limits() {
 }
 
 #[test]
-fn inbox_remote_owner_and_worker_mutations_are_refused_without_opening_store() {
+fn inbox_worker_mutations_are_refused_without_opening_store() {
     let mut f = Fixture::new();
     let mut config = config();
     let key = crate::identity::CrossHostProjectKey::from_home(
@@ -819,39 +819,6 @@ fn inbox_remote_owner_and_worker_mutations_are_refused_without_opening_store() {
         &f.root,
         &f.identity,
         &config,
-        false,
-        &f.clock,
-        ask(RequestKind::Decision, "create"),
-        f.budget(),
-        &f.cancel,
-        &|_, _| panic!("lookup must not run"),
-    );
-    assert_eq!(result.unwrap_err().code(), "unsupported_owner");
-    assert!(!f.root.as_path().join("fabric").exists());
-    for (lane, code) in [
-        (false, "unsupported_owner"),
-        (true, "lane_coordination_refused"),
-    ] {
-        let result = offer_until_ack(
-            &f.root,
-            &f.identity,
-            &config,
-            lane,
-            &f.clock,
-            "session-a",
-            1,
-            MAX_OFFER_BYTES,
-            f.budget(),
-            &f.cancel,
-            || panic!("resolver must not run"),
-        );
-        assert_eq!(result.unwrap_err().code(), code);
-        assert!(!f.root.as_path().join("fabric").exists());
-    }
-    let result = execute(
-        &f.root,
-        &f.identity,
-        &config,
         true,
         &f.clock,
         ask(RequestKind::Decision, "create"),
@@ -861,6 +828,12 @@ fn inbox_remote_owner_and_worker_mutations_are_refused_without_opening_store() {
     );
     assert_eq!(result.unwrap_err().code(), "lane_coordination_refused");
     assert!(!f.root.as_path().join("fabric").exists());
+    let result = execute(
+        &f.root, &f.identity, &config, false, &f.clock,
+        ask(RequestKind::Decision, "create"), f.budget(), &f.cancel,
+        &|_, _| panic!("lookup must not run"),
+    );
+    assert!(result.is_ok());
 }
 
 #[test]

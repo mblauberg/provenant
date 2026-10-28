@@ -173,15 +173,20 @@ refused at submission and smaller batches skip entries that do not fit.
   `crates/fabric-runtime/src/inbox/tests.rs::offer_until_ack_rejects_unregistered_and_wrong_targets_without_mutation`
 - Owner: `crates/fabric-runtime/src/inbox.rs`, `crates/fabric-store/src/human_inbox.rs`
 
-The inbox must refuse a configured remote home rather than opening a local
-mirror. Reads disclose local-only coverage and create no session records.
+Inbox ownership is host-local, independent of the configured project home.
+CLI list, show and answer may address a configured peer by host label or ID;
+a request ID may be qualified as `host:request`. The owner executes answers
+with the normal revision and operation-ID replay rules. It records the source
+host and peer actor with the answer; the answering host keeps no authoritative
+copy. Close and acknowledgement are owner-local chair operations, retaining
+exact chair and delivery target checks. Remote attempts return
+`owner_local_only` before a write and direct the caller to the owner. An
+unavailable owner is reported rather than replaced with a local mirror.
 Paging binds project, host, session, state, page size and request snapshot;
-changed filters or snapshots require an explicit restart. New observations
-invoke no model, provider probe, polling loop or background process.
-- Why: unknown peer/session coverage must remain unknown.
-- Test: `crates/fabric-runtime/src/inbox/tests.rs::inbox_remote_owner_and_worker_mutations_are_refused_without_opening_store`;
+changed filters or snapshots require an explicit restart.
+- Test: `tests/fabric_transport.rs::remote_inbox_owner`;
   `crates/fabric-runtime/src/inbox/tests.rs::inbox_paging_binds_filters_snapshot_and_limits`
-- Owner: `crates/fabric-runtime/src/inbox.rs`
+- Owner: `crates/fabric-runtime/src/inbox.rs`, `crates/cli/src/inbox.rs`
 
 ## CLI and MCP surfaces
 

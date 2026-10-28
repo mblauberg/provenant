@@ -693,6 +693,7 @@ fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
         option_id: None,
         text: Some("Ship it".into()),
         actor: actor(3),
+        source_host: None,
         channel: InteractionChannel::Cli,
         answered_at: f.now(),
         operation_id: operation.clone(),

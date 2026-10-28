@@ -5,7 +5,7 @@ Anchor: `tests/inbox.rs`, `crates/fabric-runtime/src/inbox/tests.rs`
 
 Use the inbox from a chair or a human-controlled session, with both apps closed.
 The records use the same project binding as Fabric. Worker lanes cannot mutate
-the inbox. The current surface supports local owners and local Fabric mail.
+the inbox. List, show and answer also support configured peer owners; delivery uses the owner’s local Fabric mail.
 The complete console specification and remaining delivery scope live in
 [#1968](https://github.com/mblauberg/provenant/issues/1968).
 
@@ -34,6 +34,11 @@ provenant inbox REQUEST_ID --json
 provenant answer REQUEST_ID --action choose --option repair \
   --expect-revision 1 --channel cli --operation-id answer-1 --json
 ```
+
+For a peer owner, use `--host HOST` for list, show or answer, or qualify a
+request ID as `HOST_ID:REQUEST_ID`. Preserve the operation ID for retries.
+Close and acknowledgement must run on the owner host or in the owning chair
+session; remote attempts return `owner_local_only`.
 
 Use the explicit originating session ID. It is a declared delivery target;
 posting does not discover, register or authenticate a live provider session.

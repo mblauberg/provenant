@@ -623,7 +623,7 @@ pub fn peer(
         let read_only = matches!(
             request.action,
             PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. }
-        );
+        ) || matches!(&request.action, PeerAction::Inbox { input } if !matches!(input, provenant_fabric_runtime::inbox::InboxInput::Answer { .. }));
         let mut context = if read_only {
             Context::open_read_only(resolved.roots, &home, &cwd)?
         } else {
@@ -667,6 +667,59 @@ pub fn peer(
             chair: None,
         };
         let result = match &request.action {
+            PeerAction::Inbox { input } => {
+                use provenant_fabric_runtime::inbox::{InboxInput, InboxReply};
+                if matches!(
+                    input,
+                    InboxInput::Close { .. } | InboxInput::Acknowledge { .. }
+                ) {
+                    PeerResult::Inbox(InboxReply::Error {
+                        code: "owner_local_only".into(),
+                        message: format!(
+                            "inbox owner {}: run this operation on the owner host or from the owning chair session",
+                            context.identity.host
+                        ),
+                    })
+                } else {
+                    let result = if matches!(input, InboxInput::Ask { .. })
+                        || (input.is_mutation() && input.operation_id().is_none())
+                    {
+                        Err(provenant_fabric_runtime::inbox::InboxError::Invalid(
+                            "peer operation",
+                        ))
+                    } else {
+                        provenant_fabric_runtime::inbox::execute(
+                            &context.roots.state,
+                            &context.identity,
+                            &context.config,
+                            false,
+                            &clock,
+                            input.clone(),
+                            budget,
+                            &cancel,
+                            &|work, call| {
+                                provenant_cli::inbox::resolve_work(
+                                    &context.roots.state,
+                                    context.identity.project,
+                                    work,
+                                    call.clock,
+                                    call.budget,
+                                    call.cancel,
+                                )
+                            },
+                        )
+                    };
+                    PeerResult::Inbox(match result {
+                        Ok(result) => InboxReply::Ok {
+                            result: Box::new(result),
+                        },
+                        Err(error) => InboxReply::Error {
+                            code: error.code().into(),
+                            message: error.to_string(),
+                        },
+                    })
+                }
+            }
             PeerAction::ConsoleBoard {
                 all,
                 limit,
@@ -4711,6 +4764,7 @@ mod graph_loop_inbox_tests {
                 option_id: None,
                 text: Some(text.into()),
                 actor: provenant_core::ActorId::from_bytes([3; 16]),
+                source_host: None,
                 channel: InteractionChannel::Cli,
                 answered_at: provenant_core::WallTime::from_micros(1)?,
                 operation_id: provenant_core::OperationId::parse("answer")?,
