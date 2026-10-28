@@ -1,0 +1,1 @@
+- Writer lanes use the host’s configured Git name and email for commits while keeping global Git configuration isolated.

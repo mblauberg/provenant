@@ -152,13 +152,64 @@ pub(crate) fn base_env(
     scratch: &Path,
     path: &str,
 ) -> Vec<(OsString, OsString)> {
-    vec![
+    let mut env = vec![
         ("HOME".into(), input.home.into()),
         ("USER".into(), input.user.into()),
         ("PATH".into(), path.into()),
         ("TMPDIR".into(), scratch.into()),
         ("LANG".into(), "en_US.UTF-8".into()),
-    ]
+    ];
+    env.extend(provenant_os::sys::git_identity(
+        input.provenant.git,
+        input.cwd,
+    ));
+    env
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod git_identity_tests {
+    use super::*;
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn reads_effective_identity_and_omits_missing_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Path::new("/usr/bin/git");
+        assert!(
+            std::process::Command::new(git)
+                .args(["init", "-q"])
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        for (key, value) in [
+            ("user.name", "Lane O'Brien"),
+            ("user.email", "lane@example.org"),
+        ] {
+            assert!(
+                std::process::Command::new(git)
+                    .args(["config", "--local", key, value])
+                    .current_dir(dir.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let env = provenant_os::sys::git_identity(git, dir.path());
+        for (key, value) in [
+            ("GIT_AUTHOR_NAME", "Lane O'Brien"),
+            ("GIT_COMMITTER_NAME", "Lane O'Brien"),
+            ("GIT_AUTHOR_EMAIL", "lane@example.org"),
+            ("GIT_COMMITTER_EMAIL", "lane@example.org"),
+        ] {
+            assert!(env.iter().any(|(k, v)| k == key && v == value));
+        }
+        assert!(
+            provenant_os::sys::git_identity(Path::new("/nonexistent/git"), dir.path()).is_empty()
+        );
+    }
 }
 
 /// The lane's private, writable cache root: the writer's lane cache
