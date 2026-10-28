@@ -10,9 +10,11 @@ mod diff;
 mod discovery;
 mod hooks;
 mod state;
+mod summary;
 pub use discovery::*;
 pub use hooks::*;
 pub use state::*;
+pub use summary::*;
 
 /// The most a checkpoint may hold: the size of the largest workflow input the CLI
 /// reads, so a saved file never fits the reader but not the store. Readers that
@@ -314,7 +316,7 @@ impl SessionStore {
         if text.len() as u64 > CHECKPOINT_LIMIT {
             return Err(SessionError::TooLarge);
         }
-        std::str::from_utf8(text)?;
+        let markdown = std::str::from_utf8(text)?;
         let dir = self.directory(true)?;
         let _lock = dir.lock(
             OsStr::new("checkpoint.lock"),
@@ -362,7 +364,14 @@ impl SessionStore {
         let manifest_bytes = serde_json::to_vec(&manifest).map_err(|_| SessionError::History)?;
         publish(&dir, MANIFEST, &manifest_bytes)?;
         let mut warnings = Vec::new();
-        if let Some(record) = self.saved_discovery(discovery, &current, now)
+        let summary = match parse_summary(markdown) {
+            Ok(summary) => summary,
+            Err(error) => {
+                warnings.push(format!("checkpoint saved; summary unavailable: {error}"));
+                None
+            }
+        };
+        if let Some(record) = self.saved_discovery(discovery, &current, summary, now)
             && let Err(error) = publish_discovery(&dir, &record)
         {
             let rebind = if self.rebind {
@@ -977,6 +986,67 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn summary_index_recovers_after_interrupted_publication() {
+        use provenant_core::{ActorId, HostId};
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "chair")
+            .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([4; 16]));
+        let header = |revision, now| {
+            format!(
+                "---\nprovenant_summary:\n  schema_version: 1\n  revision: {revision}\n  updated_at: \"2026-10-28T03:00:00Z\"\n  now: \"{now}\"\n  next: \"Next\"\n  needs_you: []\n  risk: \"None\"\n---\nBody\n"
+            )
+        };
+        let first = header(1, "First");
+        let second = header(2, "Second");
+        saved(&selected, &first);
+        assert_eq!(
+            selected
+                .discovery()
+                .unwrap()
+                .unwrap()
+                .record
+                .summary
+                .unwrap()
+                .now,
+            "First"
+        );
+        let clock = clock(10);
+        let result = selected
+            .save_revision_with(
+                second.as_bytes(),
+                WaitBudget::cli(clock.mono_now(), 1).unwrap(),
+                &CancelToken::new(),
+                &clock,
+                |dir, record| {
+                    assert_eq!(
+                        load(dir).unwrap().revisions.last(),
+                        Some(&record.checkpoint)
+                    );
+                    assert_eq!(record.summary.as_ref().unwrap().now, "Second");
+                    Err(SessionError::Deadline)
+                },
+            )
+            .unwrap();
+        assert_eq!(result.warnings.len(), 1);
+        let stale = selected.discovery().unwrap().unwrap();
+        assert_eq!(stale.consistency, DiscoveryConsistency::CheckpointChanged);
+        assert_eq!(stale.record.summary.unwrap().now, "First");
+        assert!(saved(&selected, &second).unchanged);
+        let repaired = selected.discovery().unwrap().unwrap();
+        assert_eq!(repaired.consistency, DiscoveryConsistency::Current);
+        assert_eq!(repaired.record.summary.unwrap().now, "Second");
+        saved(&selected, "legacy checkpoint");
+        assert!(
+            selected
+                .discovery()
+                .unwrap()
+                .unwrap()
+                .record
+                .summary
+                .is_none()
+        );
     }
     #[test]
     fn enforces_utf8_and_byte_bounds_on_read_and_write() {
