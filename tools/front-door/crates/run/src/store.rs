@@ -728,7 +728,9 @@ impl RunStore {
             #[cfg(test)]
             crate::tests::crash_at("transaction");
             Ok(())
-        })
+        })?;
+        self.contribution_diagnostic(next.run_id, self.retain_contribution_route(next, call));
+        Ok(())
     }
 
     pub(crate) fn set_temporary_retained(

@@ -70,6 +70,9 @@ def cli_reference(data):
     )
     for command in data["commands"]:
         text += f"## `{command['command']}`\n\n"
+        if command["command"] == "provenant pr contributions":
+            text += ("Response fields, nullability, coverage values and capture roles: "
+                     "[PR contributions JSON reference](../specs/run.md#pr-contributions-json-reference).\n\n")
         if command["arguments"]:
             text += "| Argument | Contract |\n|---|---|\n"
             for argument in command["arguments"]:

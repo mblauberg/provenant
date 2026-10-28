@@ -10,6 +10,7 @@ use provenant_records::{CommandResult, Outcome};
 use serde::Deserialize;
 use std::{ffi::OsString, path::Path, time::Duration};
 
+mod contributions;
 mod git;
 pub(crate) mod land;
 mod open;
@@ -159,6 +160,7 @@ pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 
         Pr::Watch { number } => ("pr watch", number),
         Pr::Open(command) => return open::run(*command, globals),
         Pr::Status { numbers } => return status::run(numbers, globals),
+        Pr::Contributions { number, bind } => return contributions::run(number, bind, globals),
     };
     let mut captured = None;
     let result = (|| -> Result<()> {

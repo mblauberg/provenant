@@ -71,6 +71,7 @@ impl<'a> Service<'a> {
         };
         let mut requests = Vec::new();
         let mut attempts = Vec::new();
+        let mut contribution_branches = std::collections::BTreeMap::new();
         for mut task in input.tasks {
             task.route = Self::route(task.route)?;
             Self::scan(&task.prompt)?;
@@ -103,16 +104,39 @@ impl<'a> Service<'a> {
                     } else {
                         resolve_writer(self.store.context.state_root.as_path(), cwd, path)?
                     };
-                    if input.parent_attempt.is_none() {
-                        prepare_writer(
-                            &writer,
-                            self.store.context.state_root.as_path(),
-                            self.store.context.project_id,
-                        )?;
-                    }
                     Ok::<_, RunError>(writer)
                 })
                 .transpose()?;
+            if input.parent_attempt.is_none() {
+                let branch = match &writer {
+                    Some(writer) => Some(
+                        prepare_writer(
+                            writer,
+                            self.store.writer_registry(),
+                            self.store.context.project_id,
+                        )?
+                        .branch,
+                    ),
+                    None => crate::pr_contribution::read_only_branch(
+                        self.store.writer_registry(),
+                        self.store.context.project_id,
+                        cwd,
+                    )?,
+                };
+                if let Some(branch) = branch {
+                    contribution_branches.insert(
+                        task.task_id,
+                        (
+                            branch.as_str().trim_start_matches("refs/heads/").to_owned(),
+                            if writer.is_some() {
+                                "worker"
+                            } else {
+                                "read_only"
+                            },
+                        ),
+                    );
+                }
+            }
             let base_ref = task.base.clone();
             let prior = previous.as_ref().and_then(|request| {
                 request.tasks.iter().find(|prior| {
@@ -273,6 +297,20 @@ impl<'a> Service<'a> {
             }
         }
         let record = self.store.create(&prepared, call)?;
+        if !contribution_branches.is_empty() {
+            let captured = (|| {
+                let db = Contributions::open(self.store.writer_registry(), call)?;
+                // Read the accepted run, including on operation replay. Newly
+                // generated candidate IDs are not authoritative after create.
+                for attempt in self.store.contribution_attempts(record.run_id, call)? {
+                    if let Some((branch, role)) = contribution_branches.get(&attempt.task_id) {
+                        db.capture(&attempt, branch, role, call)?;
+                    }
+                }
+                Ok(())
+            })();
+            self.store.contribution_diagnostic(record.run_id, captured);
+        }
         Ok(record)
     }
     /// Canonical model IDs carry the provider prefix in every stored request.

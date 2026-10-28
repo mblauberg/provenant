@@ -48,17 +48,17 @@ impl Step {
 }
 
 #[derive(Deserialize)]
-struct Pull {
-    state: String,
+pub(super) struct Pull {
+    pub(super) state: String,
     #[serde(rename = "baseRefName")]
     base: String,
     #[serde(rename = "headRefName")]
-    branch: String,
+    pub(super) branch: String,
     /// The head branch lives in another repository, such as a fork.
     #[serde(rename = "isCrossRepository")]
-    cross_repository: bool,
+    pub(super) cross_repository: bool,
 }
-fn pull(project: &Path, number: &str) -> Result<Pull> {
+pub(super) fn pull(project: &Path, number: &str) -> Result<Pull> {
     let bytes = successful(super::execute(
         project,
         &[
@@ -693,11 +693,43 @@ pub(crate) fn run(
         if expected.is_some_and(|expected| current != expected) {
             return Err(format!("pull request head moved to {current}").into());
         }
+        let view = pull(&project, &text)?;
+        let attribution = std::cell::OnceCell::new();
+        if !view.cross_repository {
+            let binding = (|| -> Result<()> {
+                let tracker = attribution
+                    .get_or_init(|| super::contributions::Tracker::resolve(globals))
+                    .as_ref()
+                    .map_err(|error| error.to_string())?;
+                let bound = tracker.bind(&view.branch, number, current);
+                let closed = if matches!(view.state.as_str(), "CLOSED" | "MERGED") {
+                    tracker.close(number)
+                } else {
+                    Ok(())
+                };
+                bound.and(closed)
+            })();
+            if let Err(error) = binding {
+                super::contributions::warn(Some(number), &error);
+            }
+        }
         checks(&project, &text, current, true)?;
         merge(&project, &text, current)?;
         let view = pull(&project, &text)?;
         state = view.state.clone();
         merged = view.state == "MERGED";
+        if matches!(view.state.as_str(), "CLOSED" | "MERGED") && !view.cross_repository {
+            let closed = (|| -> Result<()> {
+                let tracker = attribution
+                    .get_or_init(|| super::contributions::Tracker::resolve(globals))
+                    .as_ref()
+                    .map_err(|error| error.to_string())?;
+                tracker.close(number)
+            })();
+            if let Err(error) = closed {
+                super::contributions::warn(Some(number), &error);
+            }
+        }
         if merged {
             steps = follow_up(&project, &view, current, &mut output_globals, workers)?;
         }

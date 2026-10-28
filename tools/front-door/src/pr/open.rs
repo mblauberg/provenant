@@ -243,6 +243,19 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
             let number = url
                 .and_then(|url| url.trim().rsplit('/').next())
                 .and_then(|tail| tail.parse::<u64>().ok());
+            let captured = number
+                .ok_or_else(|| "opened PR but its number could not be read".to_owned())
+                .map_err(Into::into)
+                .and_then(|number| {
+                    super::contributions::Tracker::new(resolved)?.bind(
+                        &plan.branch,
+                        number,
+                        plan.head,
+                    )
+                });
+            if let Err(error) = captured {
+                super::contributions::warn(number, &error);
+            }
             data["url"] = json!(url.map(str::trim));
             data["number"] = json!(number);
             let line = match (number, url) {

@@ -10,6 +10,681 @@ use std::{
 
 const NUMBER: &str = "1668";
 
+/// Capture through dispatch, then retain through real land and gc.
+pub(crate) fn pr_contribution_roundtrip() -> Result {
+    use provenant_core::{CancelToken, Clock, OperationId, TaskId};
+    use provenant_run::{DispatchRequest, DispatchTask, Service};
+    let landing = landing()?;
+    let (_, context) = super::worktree_tests::writer_context(&landing.rig)?;
+    let store = super::worktree_tests::open_writer_store(&context)?;
+    let unbound = landing.rig.root.join("unbound");
+    fs::create_dir(&unbound)?;
+    git_in(&landing.rig, &unbound, &["init", "-q"])?;
+    let output = command(
+        &landing.rig,
+        &[
+            "--project",
+            unbound.to_str().ok_or("path")?,
+            "pr",
+            "contributions",
+            NUMBER,
+            "--json",
+        ],
+    )?;
+    assert_eq!(code(&output), 0);
+    assert_eq!(
+        json(&output)?["data"]["coverage"]["local_attempts"],
+        "unbound"
+    );
+    let retry_unbound = command(
+        &landing.rig,
+        &[
+            "--project",
+            unbound.to_str().ok_or("path")?,
+            "pr",
+            "contributions",
+            NUMBER,
+            "--bind",
+            "--json",
+        ],
+    )?;
+    assert_ne!(code(&retry_unbound), 0);
+    let failure = json(&retry_unbound)?;
+    assert!(
+        failure["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("project is unbound")),
+        "{failure}"
+    );
+    fs::write(
+        landing.rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[domains.fabric.peers.unreachable]\nhost='{}'\ndestination='unreachable.invalid'\n",
+            provenant_core::HostId::from_bytes([99; 16]),
+        ),
+    )?;
+    let wall = provenant_os::clock::SystemClock::new().wall_now()?;
+    let clock = provenant_core::TestClock::new(
+        provenant_core::WallTime::from_micros(wall.as_micros() - 31 * 86_400_000_000)?,
+        provenant_core::MonoTime::from_micros(0),
+    );
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
+        cancel: &cancel,
+    };
+    let mut ids = Vec::new();
+    for index in 0..4_u8 {
+        let submit = || -> Result<DispatchRequest> {
+            Ok(DispatchRequest {
+                chair: None,
+                operation_id: OperationId::parse(&format!("contribution-{index}"))?,
+                tasks: vec![DispatchTask {
+                    build_heavy: false,
+                    title: None,
+                    profile: Default::default(),
+                    task_id: TaskId::from_bytes([index + 1; 16]),
+                    prompt: "local work".into(),
+                    base: None,
+                    head: None,
+                    route: provenant_run::RequestedRoute::Named {
+                        name: "senior".into(),
+                        effort: None,
+                    },
+                    account: None,
+                    fallback: vec![],
+                    timeout_seconds: 60,
+                    delivery_id: None,
+                    deliver: None,
+                    worktree: (index < 3).then(|| landing.worktree.clone()),
+                    access: Default::default(),
+                }],
+                concurrency: 1,
+                lane_depth: 1,
+                parent_attempt: None,
+            })
+        };
+        let run = Service::new(&store).dispatch(submit()?, &landing.worktree, &call)?;
+        let attempt = store.pending_attempts(run.run_id, &call)?[0].attempt_id;
+        ids.push(attempt.to_string());
+        if index == 0 {
+            // An attribution conflict after create cannot turn accepted work
+            // into a failed dispatch. The host retains a diagnostic.
+            let db = rusqlite::Connection::open(
+                store.writer_registry().join("pr-contributions.sqlite3"),
+            )?;
+            db.execute(
+                "UPDATE branch_attempts SET role='read_only' WHERE attempt=?1",
+                [attempt.to_string()],
+            )?;
+            let replay = Service::new(&store).dispatch(submit()?, &landing.worktree, &call)?;
+            assert_eq!(replay.run_id, run.run_id);
+            let diagnostic = fs::read_to_string(context.state_root.as_path().join(format!(
+                "runs/{}/pr-contribution-diagnostic.txt",
+                run.run_id
+            )))?;
+            assert!(diagnostic.contains("PR contribution capture failed"));
+            db.execute(
+                "UPDATE branch_attempts SET role='worker' WHERE attempt=?1",
+                [attempt.to_string()],
+            )?;
+        }
+        assert_eq!(
+            Service::new(&store)
+                .dispatch(submit()?, &landing.worktree, &call)?
+                .run_id,
+            run.run_id
+        );
+        if index < 2 {
+            contribution_terminal(
+                &store,
+                &context,
+                attempt,
+                &landing.head,
+                if index == 0 {
+                    provenant_run::Outcome::Succeeded
+                } else {
+                    provenant_run::Outcome::Failed
+                },
+                &call,
+            )?;
+            continue;
+        }
+        store.withdraw(
+            attempt,
+            provenant_run::AttemptState::Queued,
+            provenant_run::Outcome::Cancelled,
+            "fixture ended",
+            clock.wall_now()?,
+            &call,
+        )?;
+        if index == 2 {
+            let resume = provenant_run::Resume {
+                prior: attempt,
+                expected_generation: 0,
+                operation_id: OperationId::parse("contribution-repair")?,
+                run_id: provenant_core::RunId::from_bytes([91; 16]),
+                attempt_id: provenant_core::AttemptId::from_bytes([92; 16]),
+                prompt: "repair".into(),
+                created_at: clock.wall_now()?,
+            };
+            let repaired = store.resume_fresh(&resume, "repair fixture", &call)?;
+            assert_eq!(
+                store.resume_fresh(&resume, "repair fixture", &call)?.run_id,
+                repaired.run_id
+            );
+            let id = store.pending_attempts(repaired.run_id, &call)?[0].attempt_id;
+            ids.push(id.to_string());
+            store.cancel(id, "repair cancelled", &call)?;
+        }
+    }
+    let read = || -> Result<serde_json::Value> {
+        let output = command(&landing.rig, &["pr", "contributions", NUMBER, "--json"])?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stdout.bytes)
+        );
+        Ok(json(&output)?["data"].clone())
+    };
+    assert!(read()?["attempts"].as_array().ok_or("attempts")?.is_empty());
+    assert_eq!(read()?["coverage"]["local_attempts"], "unbound");
+    git(&landing.rig, &["push", "-q", "origin", "feat"])?;
+    let template = landing.rig.project.join(".github/pull_request_template.md");
+    fs::write(
+        &template,
+        include_str!("../../../.github/pull_request_template.md"),
+    )?;
+    let summary = landing.rig.root.join("summary.md");
+    fs::write(
+        &summary,
+        "# Capture contributions\n\nRetain local attempts.\n",
+    )?;
+    let open_args = [
+        "pr",
+        "open",
+        "--from-attempt",
+        &ids[0],
+        "--branch",
+        "feat",
+        "--base",
+        "main",
+        "--summary-file",
+        summary.to_str().ok_or("path")?,
+        "--json",
+    ];
+    let mut dry = open_args.to_vec();
+    dry.push("--dry-run");
+    let preview = command(&landing.rig, &dry)?;
+    assert_eq!(
+        code(&preview),
+        0,
+        "{}",
+        String::from_utf8_lossy(&preview.stdout.bytes)
+    );
+    assert!(read()?["attempts"].as_array().ok_or("attempts")?.is_empty());
+    // PR creation succeeds even when its optional binding cannot be stored.
+    let contributions = store.writer_registry().join("pr-contributions.sqlite3");
+    let db = rusqlite::Connection::open(&contributions)?;
+    db.execute_batch("CREATE TRIGGER reject_binding BEFORE INSERT ON branch_prs BEGIN SELECT RAISE(ABORT, 'fixture binding failure'); END;")?;
+    let opened = command(&landing.rig, &open_args)?;
+    assert_eq!(
+        code(&opened),
+        0,
+        "{}",
+        String::from_utf8_lossy(&opened.stdout.bytes)
+    );
+    let warning = String::from_utf8(opened.stderr.bytes)?;
+    assert!(warning.contains("warning:"));
+    assert!(warning.contains("provenant pr contributions 1668 --bind"));
+    fs::write(landing.rig.project.join("checks-fail"), "")?;
+    let unbound_land = command(&landing.rig, &["land", NUMBER, "--json"])?;
+    assert_ne!(code(&unbound_land), 0);
+    assert!(
+        String::from_utf8_lossy(&unbound_land.stderr.bytes)
+            .contains("no open contribution binding")
+    );
+    fs::remove_file(landing.rig.project.join("checks-fail"))?;
+    db.execute_batch("DROP TRIGGER reject_binding;")?;
+    let retry = || -> Result {
+        let output = command(
+            &landing.rig,
+            &["pr", "contributions", NUMBER, "--bind", "--json"],
+        )?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        Ok(())
+    };
+    let merged_view = fs::read(landing.rig.project.join("view.json"))?;
+    let mut open_view: serde_json::Value = serde_json::from_slice(&merged_view)?;
+    open_view["state"] = serde_json::json!("OPEN");
+    fs::write(
+        landing.rig.project.join("view.json"),
+        serde_json::to_vec(&open_view)?,
+    )?;
+    retry()?;
+    retry()?;
+    let bound = read()?;
+    assert_eq!(bound["attempts"].as_array().ok_or("attempts")?.len(), 5);
+    fs::remove_file(&template)?;
+    fs::write(landing.rig.project.join("view.json"), merged_view)?;
+    db.execute_batch("CREATE TRIGGER reject_binding BEFORE INSERT ON branch_prs BEGIN SELECT RAISE(ABORT, 'fixture binding failure'); END;")?;
+    db.execute_batch("CREATE TRIGGER reject_binding_update BEFORE UPDATE OF head ON branch_prs BEGIN SELECT RAISE(ABORT, 'fixture head refresh failure'); END;")?;
+    // A failed bind/head refresh cannot prevent recording an observed closure,
+    // even when the separate CI gate refuses this land operation.
+    fs::write(landing.rig.project.join("checks-fail"), "")?;
+    let refused = command(&landing.rig, &["land", NUMBER, "--json"])?;
+    assert_ne!(code(&refused), 0);
+    assert_eq!(
+        db.query_row(
+            "SELECT min(closed) FROM branch_prs WHERE number=1668",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        1
+    );
+    fs::remove_file(landing.rig.project.join("checks-fail"))?;
+    let output = command(&landing.rig, &["land", NUMBER, "--json"])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stdout.bytes)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr.bytes).contains("no open contribution binding"));
+    let landed = json(&output)?;
+    db.execute_batch("DROP TRIGGER reject_binding; DROP TRIGGER reject_binding_update;")?;
+    assert_eq!(status(&landed, "worktree")?, "done", "{landed}");
+    assert!(!landing.worktree.exists());
+    let before = read()?;
+    let rows = before["attempts"].as_array().ok_or("attempts")?;
+    assert_eq!(rows.len(), 5, "{before}");
+    assert_eq!(before, bound);
+    for id in &ids {
+        let row = rows
+            .iter()
+            .find(|row| row["attempt"] == id.as_str())
+            .ok_or("missing attempt")?;
+        assert!(row["weight_millionths"].is_null());
+        assert!(row["run"].is_string());
+        assert!(row["queued_at"].is_string());
+        assert!(row["finished_at"].is_string());
+        assert!(row["outcome"].is_string());
+        assert_eq!(row["pr_count"], 1);
+        assert_eq!(row["ambiguous"], false);
+        if row["attempt"] == ids[0] || row["attempt"] == ids[1] {
+            assert_eq!(row["model"], "codex/fixture");
+            assert_eq!(row["account"], "fixture");
+        } else {
+            assert!(row["model"].is_null());
+            assert!(row["account"].is_null());
+        }
+        assert_eq!(row["head"], landing.head);
+    }
+    assert_eq!(
+        rows.iter().filter(|row| row["role"] == "read_only").count(),
+        1
+    );
+    assert_eq!(rows.iter().filter(|row| row["role"] == "repair").count(), 1);
+    assert_eq!(before["coverage"]["peer_attempts"], "unknown");
+    assert_eq!(
+        before["coverage"]["known_peer_hosts"],
+        serde_json::json!(["unreachable"])
+    );
+    let text = command(&landing.rig, &["pr", "contributions", NUMBER])?;
+    assert_eq!(code(&text), 0);
+    let text = String::from_utf8(text.stdout.bytes)?;
+    assert!(text.contains("role=repair model=unknown account=unknown weight=unknown"));
+    assert!(text.contains("peer_attempts: unknown (known hosts: unreachable)"));
+    let first = store.record(ids[0].parse()?, &call)?;
+    let log = context.state_root.as_path().join(format!(
+        "runs/{}/attempts/{}/stdout.log",
+        first.run_id, first.attempt_id
+    ));
+    fs::write(&log, vec![b'x'; 128 * 1024])?;
+    let gc = command(&landing.rig, &["gc", "--apply", "--json"])?;
+    assert_eq!(
+        code(&gc),
+        0,
+        "{}",
+        String::from_utf8_lossy(&gc.stdout.bytes)
+    );
+    assert!(!log.exists(), "expired capture was collected");
+    assert_eq!(
+        fs::metadata(log.with_file_name("stdout.log.tail"))?.len(),
+        64 * 1024
+    );
+    assert_eq!(read()?, before);
+    land(&landing)?;
+    assert_eq!(read()?, before);
+    // Recreate the branch after land. A new dispatch and new PR must share
+    // no attempts with the retained, merged PR, even after bind replay.
+    let recreated = command(&landing.rig, &["worktree", "create", "feat", "--json"])?;
+    assert_eq!(code(&recreated), 0);
+    let dispatch_reused = |operation: &str, task: u8| -> Result<provenant_core::AttemptId> {
+        let new_run = Service::new(&store).dispatch(
+            DispatchRequest {
+                chair: None,
+                operation_id: OperationId::parse(operation)?,
+                tasks: vec![DispatchTask {
+                    build_heavy: false,
+                    title: None,
+                    profile: Default::default(),
+                    task_id: TaskId::from_bytes([task; 16]),
+                    prompt: "new work".into(),
+                    base: None,
+                    head: None,
+                    route: provenant_run::RequestedRoute::Named {
+                        name: "senior".into(),
+                        effort: None,
+                    },
+                    account: None,
+                    fallback: vec![],
+                    timeout_seconds: 60,
+                    delivery_id: None,
+                    deliver: None,
+                    worktree: Some(landing.worktree.clone()),
+                    access: Default::default(),
+                }],
+                concurrency: 1,
+                lane_depth: 1,
+                parent_attempt: None,
+            },
+            &landing.worktree,
+            &call,
+        )?;
+        let new_attempt = store.pending_attempts(new_run.run_id, &call)?[0].attempt_id;
+        store.cancel(new_attempt, "fixture ended", &call)?;
+        Ok(new_attempt)
+    };
+    let new_attempt = dispatch_reused("reused-branch", 98)?;
+    assert_eq!(read()?, before);
+    let links = provenant_run::Contributions::open(store.writer_registry(), &call)?;
+    let new_pr = provenant_run::PullRequest {
+        repository: "owner/repo".into(),
+        number: 1669,
+    };
+    links.bind(
+        context.project_id,
+        "feat",
+        &new_pr,
+        provenant_core::GitOid::parse(&landing.head)?,
+        &call,
+    )?;
+    let new_rows = links.for_pr(&new_pr, &call)?;
+    assert_eq!(new_rows.len(), 1);
+    assert_eq!(new_rows[0].attempt, new_attempt);
+    retry()?;
+    assert_eq!(read()?, before);
+    let second_new_pr = provenant_run::PullRequest {
+        number: 1670,
+        ..new_pr.clone()
+    };
+    links.bind(
+        context.project_id,
+        "feat",
+        &second_new_pr,
+        provenant_core::GitOid::parse(&landing.head)?,
+        &call,
+    )?;
+    let output = command(&landing.rig, &["pr", "contributions", "1669", "--json"])?;
+    assert_eq!(code(&output), 0);
+    let data = json(&output)?["data"].clone();
+    assert_eq!(data["coverage"]["local_attempts"], "ambiguous");
+    assert_eq!(data["coverage"]["ambiguous"], true);
+    assert_eq!(data["attempts"][0]["pr_count"], 2);
+    // External closures are swept even when binding a closed target. Each
+    // candidate is checked once despite bindings spanning generations.
+    let previous = links.for_pr(&new_pr, &call)?;
+    fs::write(landing.rig.project.join("state-1669"), "MERGED")?;
+    fs::write(landing.rig.project.join("state-1670"), "CLOSED")?;
+    fs::write(landing.rig.project.join("state-1671"), "CLOSED")?;
+    let calls_before = fs::read_to_string(landing.rig.project.join("gh-calls"))?;
+    let bind_cli = |number: &str| -> Result<provenant_os::exec::ExecOutcome> {
+        let before = fs::read_to_string(landing.rig.project.join("gh-calls"))?;
+        let output = command(
+            &landing.rig,
+            &["pr", "contributions", number, "--bind", "--json"],
+        )?;
+        let after = fs::read_to_string(landing.rig.project.join("gh-calls"))?;
+        assert_eq!(
+            after[before.len()..]
+                .lines()
+                .filter(|line| *line == "repo view --json nameWithOwner")
+                .count(),
+            1
+        );
+        Ok(output)
+    };
+    let swept = bind_cli("1671")?;
+    assert_eq!(
+        code(&swept),
+        0,
+        "{}",
+        String::from_utf8_lossy(&swept.stderr.bytes)
+    );
+    assert!(
+        links
+            .open_bindings(context.project_id, "feat", &call)?
+            .is_empty()
+    );
+    let calls_after = fs::read_to_string(landing.rig.project.join("gh-calls"))?;
+    for number in [1669, 1670] {
+        let expected = format!("pr view {number} --repo owner/repo --json state");
+        assert_eq!(
+            calls_after[calls_before.len()..]
+                .lines()
+                .filter(|line| *line == expected)
+                .count(),
+            1
+        );
+    }
+    assert_eq!(links.for_pr(&new_pr, &call)?, previous);
+    let bound_new = bind_cli("1672")?;
+    assert_eq!(code(&bound_new), 0);
+    let calls_before = fs::read(landing.rig.project.join("gh-calls"))?;
+    let reused = dispatch_reused("externally-merged-branch", 99)?;
+    assert_eq!(
+        fs::read(landing.rig.project.join("gh-calls"))?,
+        calls_before,
+        "capture stays offline"
+    );
+    let latest = provenant_run::PullRequest {
+        number: 1672,
+        ..new_pr.clone()
+    };
+    let rows = links.for_pr(&latest, &call)?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].attempt, reused);
+    assert_eq!(rows[0].pr_count, 1);
+    assert_eq!(links.for_pr(&new_pr, &call)?, previous);
+    assert_eq!(read()?, before);
+    links.allocate(
+        reused,
+        &[(latest.clone(), provenant_run::WEIGHT_ONE)],
+        &call,
+    )?;
+    let skipped = bind_cli("1673")?;
+    assert_eq!(code(&skipped), 0);
+    let data = json(&skipped)?["data"].clone();
+    assert_eq!(data["coverage"]["local_attempts"], "skipped");
+    assert_eq!(data["coverage"]["skipped_sealed"], 1);
+    assert_eq!(data["attempts"].as_array().ok_or("attempts")?.len(), 0);
+    assert_eq!(
+        links.for_pr(&latest, &call)?[0].weight_millionths,
+        Some(provenant_run::WEIGHT_ONE)
+    );
+
+    // pr open uses the same sweep before binding its newly created PR.
+    fs::write(landing.rig.project.join("state-1672"), "MERGED")?;
+    fs::write(landing.rig.project.join("state-1673"), "CLOSED")?;
+    fs::write(landing.rig.project.join("create-number"), "1674")?;
+    fs::write(
+        &template,
+        include_str!("../../../.github/pull_request_template.md"),
+    )?;
+    let opened = command(&landing.rig, &open_args)?;
+    assert_eq!(
+        code(&opened),
+        0,
+        "{}",
+        String::from_utf8_lossy(&opened.stderr.bytes)
+    );
+    let active = links.open_bindings(context.project_id, "feat", &call)?;
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].number, 1674);
+    let after_open = dispatch_reused("swept-pr-open", 100)?;
+    let rows = links.for_pr(&active[0], &call)?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].attempt, after_open);
+    assert_eq!(rows[0].pr_count, 1);
+
+    // A failed gh sweep warns and retains the previous sharing behaviour.
+    let fallback = bind_cli("1675")?;
+    assert_eq!(code(&fallback), 0);
+    assert!(String::from_utf8_lossy(&fallback.stderr.bytes).contains("stale binding sweep failed"));
+    assert_eq!(
+        links
+            .open_bindings(context.project_id, "feat", &call)?
+            .len(),
+        2
+    );
+    assert_eq!(links.for_pr(&active[0], &call)?[0].pr_count, 2);
+
+    // Successful land must warn too when its bind failed and close has no row.
+    let unbound_landing = self::landing()?;
+    let (_, context) = super::worktree_tests::writer_context(&unbound_landing.rig)?;
+    let store = super::worktree_tests::open_writer_store(&context)?;
+    let _links = provenant_run::Contributions::open(store.writer_registry(), &call)?;
+    let db = rusqlite::Connection::open(store.writer_registry().join("pr-contributions.sqlite3"))?;
+    db.execute_batch("CREATE TRIGGER reject_binding BEFORE INSERT ON branch_prs BEGIN SELECT RAISE(ABORT, 'fixture binding failure'); END;")?;
+    let landed = command(&unbound_landing.rig, &["land", NUMBER, "--json"])?;
+    assert_eq!(
+        code(&landed),
+        0,
+        "{}",
+        String::from_utf8_lossy(&landed.stdout.bytes)
+    );
+    assert!(String::from_utf8_lossy(&landed.stderr.bytes).contains("no open contribution binding"));
+    let calls = fs::read_to_string(unbound_landing.rig.project.join("gh-calls"))?;
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| *line == "repo view --json nameWithOwner")
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+/// Provider exit seam shared with the landing fixtures; publication is real.
+fn contribution_terminal(
+    store: &provenant_run::RunStore,
+    context: &provenant_run::ExecutionContext,
+    id: provenant_core::AttemptId,
+    head: &str,
+    outcome: provenant_run::Outcome,
+    call: &provenant_run::Request<'_>,
+) -> Result {
+    use provenant_supervisor::custody::{
+        ExitObservation, PublicationState, Scope, SettlementEvidence,
+    };
+    use std::os::unix::fs::OpenOptionsExt;
+    let record = store.record(id, call)?;
+    let exit = ExitObservation {
+        publication: PublicationState::Durable,
+        scope: Scope {
+            run: record.run_id,
+            attempt: id,
+            generation: record.generation,
+        },
+        termination: Some(provenant_os::exec::Termination::Exit(
+            if outcome == provenant_run::Outcome::Succeeded {
+                0
+            } else {
+                1
+            },
+        )),
+        never_spawned: false,
+        stop_reason: None,
+        delivered_signals: vec![],
+        reaped: vec![],
+        omitted_reaped: 0,
+        spared: vec![],
+        omitted_spared: 0,
+        warnings: vec![],
+        omitted_warnings: 0,
+        terminal_observed: true,
+        unresolved_cleanup: false,
+        unresolved_pids: vec![],
+        settlement_evidence: SettlementEvidence::DarwinCensusAndCustodyLease,
+        stdout: Default::default(),
+        stderr: Default::default(),
+    };
+    let mut evidence = serde_json::to_value(&exit)?;
+    evidence
+        .as_object_mut()
+        .ok_or("exit fixture")?
+        .remove("publication");
+    evidence["schema_version"] = 1.into();
+    let directory = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}", record.run_id));
+    for (name, bytes) in [
+        ("process-exit.json", serde_json::to_vec(&evidence)?),
+        (
+            "writer-terminal.json",
+            serde_json::to_vec(
+                &serde_json::json!({"schema_version":1,"head":head,"protected_paths":[]}),
+            )?,
+        ),
+        ("custody.lock", vec![]),
+    ] {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(directory.join(name))?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+    }
+    let route = provenant_run::RouteRecord {
+        provider: Some("codex".into()),
+        model: Some("codex/fixture".into()),
+        account_label: Some("fixture".into()),
+        ..Default::default()
+    };
+    store.publish_terminal(
+        id,
+        record.revision,
+        &provenant_run::TerminalPublication {
+            outcome,
+            started_at: Some(record.queued_at),
+            finished_at: call.clock.wall_now()?,
+            provider_ms: Some(1),
+            reason: None,
+            result: "fixture output",
+            complete: true,
+            redacted: false,
+            resolved_route: Some(route.clone()),
+            applied_route: Some(route.clone()),
+            observed_route: Some(route),
+            usage: Default::default(),
+            session: None,
+        },
+        &exit,
+        call,
+    )?;
+    Ok(())
+}
+
 /// The fake `gh` the driver re-enters as: a passing, unchanged pull request.
 pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
     let call = args.join(" ");
@@ -24,11 +699,36 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
         "{call}"
     )?;
     match call.as_str() {
+        value if value.starts_with("pr create ") => {
+            std::io::copy(&mut io::stdin(), &mut io::sink())?;
+            let number = fs::read_to_string(dir.join("create-number")).unwrap_or("1668".into());
+            writeln!(io::stdout(), "https://github.com/owner/repo/pull/{number}")?;
+        }
+        "repo view --json nameWithOwner" => {
+            io::stdout().write_all(br#"{"nameWithOwner":"owner/repo"}"#)?;
+        }
         "pr view 1668 --json headRefOid" => {
             io::stdout().write_all(&fs::read(dir.join("head.json"))?)?
         }
         "pr view 1668 --json state,baseRefName,headRefName,isCrossRepository" => {
             io::stdout().write_all(&fs::read(dir.join("view.json"))?)?;
+        }
+        value if value.starts_with("pr view ") && value.ends_with(" --json state") => {
+            let number = args.get(2).ok_or("PR number")?;
+            let state = fs::read_to_string(dir.join(format!("state-{number}")))?;
+            io::stdout().write_all(&serde_json::to_vec(&serde_json::json!({"state":state}))?)?;
+        }
+        value if value.starts_with("pr view ") && value.ends_with(" --json headRefOid") => {
+            io::stdout().write_all(&fs::read(dir.join("head.json"))?)?;
+        }
+        value
+            if value.starts_with("pr view ")
+                && value.ends_with(" --json state,baseRefName,headRefName,isCrossRepository") =>
+        {
+            let number = args.get(2).ok_or("PR number")?;
+            let state =
+                fs::read_to_string(dir.join(format!("state-{number}"))).unwrap_or("OPEN".into());
+            io::stdout().write_all(&serde_json::to_vec(&serde_json::json!({"state":state,"baseRefName":"main","headRefName":"feat","isCrossRepository":false}))?)?;
         }
         "pr checks 1668 --watch" => {
             fs::write(dir.join("watched"), "")?;

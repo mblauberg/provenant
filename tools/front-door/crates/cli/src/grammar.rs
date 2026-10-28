@@ -182,6 +182,14 @@ pub struct Review {
 }
 #[derive(Debug, Subcommand)]
 pub enum Pr {
+    /// List retained local attempt contributions and missing peer coverage
+    Contributions {
+        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+        number: u64,
+        /// Retry host binding to the observed PR branch and head; close ended bindings
+        #[arg(long)]
+        bind: bool,
+    },
     /// Wait for CI and report pass or fail with the pull request head
     Watch {
         #[arg(value_parser = clap::value_parser!(u64).range(1..))]
