@@ -865,11 +865,8 @@ impl ServiceError {
     }
 }
 
-fn new_operation_id() -> Result<String, provenant_os::fs::FsError> {
-    Ok(format!(
-        "mcp-{}",
-        provenant_core::hex(&provenant_os::fs::entropy_128()?)
-    ))
+fn new_operation_id() -> Result<String, provenant_fabric_runtime::coordination::CoordinationError> {
+    provenant_fabric_runtime::coordination::generated_operation_id("mcp")
 }
 
 fn compact_run(value: &mut Value) -> Result<(), ServiceError> {

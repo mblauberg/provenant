@@ -517,7 +517,6 @@ dependencies = [
  "provenant-core",
  "provenant-fabric-runtime",
  "provenant-fabric-store",
- "provenant-os",
  "provenant-records",
  "regex",
  "serde",

@@ -1726,3 +1726,9 @@ mod tests {
         ));
     }
 }
+
+/// A fresh operation id, for callers that did not supply one.
+pub fn generated_operation_id(prefix: &str) -> Result<String, CoordinationError> {
+    let bytes = provenant_os::fs::entropy_128().map_err(CoordinationError::Entropy)?;
+    Ok(format!("{prefix}-{}", provenant_core::hex(&bytes)))
+}

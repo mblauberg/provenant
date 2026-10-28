@@ -8,7 +8,6 @@ publish = false
 
 [dependencies]
 provenant-core = { workspace = true }
-provenant-os = { workspace = true }
 provenant-records = { workspace = true }
 provenant-fabric-runtime = { workspace = true }
 serde = { workspace = true }
