@@ -3458,6 +3458,22 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     fn actor(&self) -> String {
         self.factory.context.identity.inbox.actor.to_string()
     }
+    fn validate_expansion(
+        &mut self,
+        document: &provenant_fabric_runtime::graph::GraphDocument,
+        _checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    ) -> Result<(), Self::Error> {
+        for node in &document.nodes {
+            if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &node.delivery {
+                provenant_run::HostDeliveryContext::validate_integration_target(
+                    &self.factory.cwd,
+                    target,
+                )
+                .map_err(run_error)?;
+            }
+        }
+        Ok(())
+    }
     fn loop_decision(
         &mut self,
         scope: provenant_fabric_runtime::graph::LoopScope<'_>,
@@ -3836,13 +3852,13 @@ impl Factory {
                     )
                     .map_err(run_error)?;
                 }
-                let admitted = FileJournal::read_checkpoint(
+                let checkpoint = FileJournal::read_checkpoint(
                     &self.context.roots.state,
                     self.context.identity.project,
                     &document.graph_id,
                 )
-                .map_err(graph_journal_error)?
-                .is_some();
+                .map_err(graph_journal_error)?;
+                let admitted = checkpoint.is_some();
                 for node in &document.nodes {
                     if let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
                         &node.delivery

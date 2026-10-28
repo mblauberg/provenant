@@ -683,6 +683,15 @@ pub trait AttemptOwner {
         Ok(None)
     }
 
+    /// Check newly expanded targets against host evidence before publishing them.
+    fn validate_expansion(
+        &mut self,
+        _document: &GraphDocument,
+        _checkpoint: &GraphCheckpoint,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     fn usage(&mut self, _attempt_ref: &str) -> Result<AttemptUsage, Self::Error> {
         Ok(AttemptUsage::default())
     }
@@ -1507,6 +1516,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 .any(|n| n.id == node.id && (n.handoff.is_some() || n.fragment.is_some()))
             && plans::settle(node, &expanded, &mut checkpoint, None, &effective_limits)
         {
+            let preview = plans::expand(document, &checkpoint.extensions, &checkpoint.expansions)
+                .map_err(GraphError::Invalid)?;
+            owner
+                .validate_expansion(&preview, &checkpoint)
+                .map_err(GraphError::Run)?;
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
             return advance_inner(
                 document,
@@ -1992,6 +2006,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             } else {
                 false
             };
+            if appended {
+                let preview =
+                    plans::expand(document, &checkpoint.extensions, &checkpoint.expansions)
+                        .map_err(GraphError::Invalid)?;
+                owner
+                    .validate_expansion(&preview, &checkpoint)
+                    .map_err(GraphError::Run)?;
+            }
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
             if appended {
                 return advance_inner(
@@ -3308,6 +3330,7 @@ mod tests {
         launch_actors: Vec<String>,
         usage: AttemptUsage,
         usage_fails: bool,
+        refuse_expansion_target: bool,
     }
 
     impl AttemptOwner for FakeOwner {
@@ -3315,6 +3338,23 @@ mod tests {
 
         fn actor(&self) -> String {
             self.actor.clone()
+        }
+        fn validate_expansion(
+            &mut self,
+            document: &GraphDocument,
+            _checkpoint: &GraphCheckpoint,
+        ) -> Result<(), Self::Error> {
+            if self.refuse_expansion_target
+                && document.nodes.iter().any(|node| {
+                    matches!(
+                        &node.delivery,
+                        Some(provenant_records::run::DeliveryMode::Integrate(_))
+                    )
+                })
+            {
+                return Err(NoObservation);
+            }
+            Ok(())
         }
         fn usage(&mut self, _attempt_ref: &str) -> Result<AttemptUsage, Self::Error> {
             if self.usage_fails {
@@ -3430,6 +3470,32 @@ mod tests {
         let replay = advance(&document, &mut owner, &mut journal).unwrap();
         assert_eq!(run.checkpoint, replay.checkpoint);
         assert_eq!(owner.calls.len(), 3);
+    }
+
+    #[test]
+    fn plan_fragment_target_is_checked_before_expansion_is_published() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "planned", "nodes": [{
+                "id": "planner", "kind": "plan", "access": "read_only", "prompt": "Plan",
+                "plan": {"kinds": ["task"], "max_nodes": 1}, "route": {"alias": "senior"}
+            }]
+        }))
+        .unwrap();
+        let fragment = r#"```fragment
+{"schema_version":1,"nodes":[{"id":"writer","goal":"Write","access":"worktree_write","worktree":"lane","write_scope":["src"],"acceptance_checks":["check"],"delivery":"integrate:target"}]}
+```"#;
+        let mut owner = FakeOwner {
+            observations: [terminal_with_result(AttemptOutcome::Succeeded, fragment)].into(),
+            refuse_expansion_target: true,
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        assert!(matches!(
+            advance(&document, &mut owner, &mut journal),
+            Err(GraphError::Run(_))
+        ));
+        assert!(journal.0.as_ref().unwrap().expansions.is_empty());
+        assert_eq!(owner.calls.len(), 1);
     }
 
     #[test]

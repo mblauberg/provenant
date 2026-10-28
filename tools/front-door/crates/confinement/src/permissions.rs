@@ -408,7 +408,7 @@ pub fn worktree_cargo_cache(
 /// also creates missing nested branch/ref-log parents without granting the
 /// child authority to create sibling refs. Call while holding writer custody,
 /// before collecting `required_anchors`. Shared config and packed refs remain
-/// immutable: the host fetches before launch and sets upstream after exit.
+/// immutable; tracking refs remain host-owned.
 pub fn prepare_writer_directories(
     worktree: &VerifiedWorktree,
     selected_ref: &GitRefName,
@@ -501,8 +501,8 @@ pub(crate) struct WorktreeWriteGrants {
     next_index: PathGrant,
     /// Git reads this shared exclude file during status and build fingerprinting.
     common_exclude: PathGrant,
-    /// Fetch may record its result without changing host-owned remote refs.
-    fetch_heads: [PathGrant; 2],
+    /// Fetch records its result in the linked worktree's private gitdir.
+    fetch_heads: [PathGrant; 1],
     /// Deleting any ref, even an unpacked pseudoref such as AUTO_MERGE, takes
     /// this lock. `packed-refs` itself stays read-only, so the lock can never be
     /// committed over it.
@@ -539,9 +539,7 @@ impl WorktreeWriteGrants {
             index: ["index", "index.lock"].map(|name| exact(private.join(name))),
             next_index: exact(private.join(NEXT_INDEX_SAMPLE)),
             common_exclude: exact(common.join("info/exclude")),
-            // Linked worktrees normally use their private FETCH_HEAD; also
-            // cover Git invocations that use the common directory directly.
-            fetch_heads: [private, common].map(|directory| exact(directory.join("FETCH_HEAD"))),
+            fetch_heads: [exact(private.join("FETCH_HEAD"))],
             packed_refs_lock: exact(common.join("packed-refs.lock")),
             // `git commit` writes its message buffer and clears AUTO_MERGE here;
             // a local `git merge` records its state and ORIG_HEAD here too.
@@ -2971,7 +2969,7 @@ mod tests {
             index: [exact("index"), exact("index.lock")],
             next_index: exact(NEXT_INDEX_SAMPLE),
             common_exclude: exact("info/exclude"),
-            fetch_heads: [exact("FETCH_HEAD"), exact("private/FETCH_HEAD")],
+            fetch_heads: [exact("private/FETCH_HEAD")],
             packed_refs_lock: exact("packed-refs.lock"),
             head: std::array::from_fn(|i| exact(&format!("head-{i}"))),
             objects: subtree("/fixture/git/objects"),
@@ -4083,8 +4081,9 @@ mod tests {
             "(regex #\"^{private_pattern}/next-index-[0-9]+\\.lock$\")"
         )));
         assert!(!source.contains(&format!("^{}/next-index", sbpl_regex_path(&common)?)));
-        // Fetch can record its result, without changing trusted remote refs.
-        for directory in [&private, &common] {
+        // Fetch can record its result in the private git directory.
+        {
+            let directory = &private;
             assert!(source.contains(&format!(
                 "(allow file-write* (literal \"{}\"))",
                 directory.join("FETCH_HEAD").display()
@@ -4094,6 +4093,7 @@ mod tests {
                 directory.join("FETCH_HEAD").display()
             )));
         }
+        assert!(!source.contains(&format!("\"{}\"", common.join("FETCH_HEAD").display())));
         // Ref deletion takes the packed-refs lock; packed-refs itself stays read-only.
         assert!(source.contains(&format!(
             "\"{}\"",
@@ -4105,9 +4105,12 @@ mod tests {
             "packed-refs",
             "refs/heads/main",
             "refs/remotes",
-            "refs/remotes/origin",
+            "refs/remotes/origin/s3/authority",
+            "refs/remotes/origin/s3/authority.lock",
             "refs/remotes/upstream",
             "logs/refs/remotes",
+            "logs/refs/remotes/origin/s3/authority",
+            "logs/refs/remotes/origin/s3/authority.lock",
             "hooks",
         ] {
             assert!(
@@ -4138,7 +4141,8 @@ mod tests {
         std::fs::remove_file(&hardlink_alias)?;
         std::fs::remove_file(&private_head_log)?;
 
-        for directory in [&private, &common] {
+        {
+            let directory = &private;
             let fetch_head = directory.join("FETCH_HEAD");
             std::fs::write(&fetch_head, b"fetch result\n")?;
             std::fs::hard_link(&fetch_head, &hardlink_alias)?;
@@ -4311,8 +4315,14 @@ mod tests {
         for directory in [&private_logs, &common_heads, &common_logs] {
             std::fs::create_dir_all(directory)?;
         }
-        // Probe existing remote files so a denial cannot be an absent parent.
-        for relative in ["refs/remotes/origin/HEAD", "logs/refs/remotes/origin/HEAD"] {
+        // Probe existing files so a denial cannot be an absent parent.
+        for relative in [
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+            "logs/refs/remotes/origin/HEAD",
+            "refs/remotes/upstream/HEAD",
+            "logs/refs/remotes/upstream/HEAD",
+        ] {
             let path = common.join(relative);
             std::fs::create_dir_all(path.parent().ok_or("remote ref parent")?)?;
             std::fs::write(path, b"ref: refs/remotes/origin/main\n")?;
@@ -4663,7 +4673,8 @@ mod tests {
             inside_outcome.termination,
             String::from_utf8_lossy(&inside_outcome.stderr.bytes)
         );
-        for directory in [&private, &common] {
+        {
+            let directory = &private;
             let fetch_head_outcome = run(&executables[0], &[&directory.join("FETCH_HEAD")]);
             assert!(
                 successful_probe(&fetch_head_outcome),
@@ -4672,6 +4683,16 @@ mod tests {
                 fetch_head_outcome.termination,
                 String::from_utf8_lossy(&fetch_head_outcome.stderr.bytes)
             );
+        }
+        for relative in [
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+            "logs/refs/remotes/origin/HEAD",
+        ] {
+            assert!(!successful_probe(&run(
+                &executables[0],
+                &[&common.join(relative)]
+            )));
         }
         // Package managers link into node_modules; a link grants nothing,
         // since the sandbox checks the resolved path.
@@ -4764,14 +4785,17 @@ mod tests {
                 run(&executables[0], &[&common.join("refs/heads/main")]),
             ),
             (
-                "remote ref write",
-                run(&executables[0], &[&common.join("refs/remotes/origin/HEAD")]),
-            ),
-            (
-                "remote reflog write",
+                "other remote ref write",
                 run(
                     &executables[0],
-                    &[&common.join("logs/refs/remotes/origin/HEAD")],
+                    &[&common.join("refs/remotes/upstream/HEAD")],
+                ),
+            ),
+            (
+                "other remote reflog write",
+                run(
+                    &executables[0],
+                    &[&common.join("logs/refs/remotes/upstream/HEAD")],
                 ),
             ),
             (

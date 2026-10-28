@@ -6555,7 +6555,7 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
         &[".agent-run/locks".into()],
         &admission::AppliedWriteGrants {
             grants: write_grants.clone(),
-            git_grants_digest: None,
+            git_grants_digest: Some(provenant_core::Digest::from_bytes([7; 32])),
         },
         Some(observed),
         &call,
@@ -6569,7 +6569,6 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
     assert!(store.record(second, &call)?.read_only_writable.is_empty());
     assert_eq!(store.record(first, &call)?.write_grants, write_grants);
     assert!(store.record(second, &call)?.write_grants.is_empty());
-    assert_eq!(store.record(first, &call)?.git_grants_digest, None);
     // The host-observed head of a read-only lane persists; unobserved stays absent.
     assert_eq!(store.record(first, &call)?.head, Some(observed));
     assert_eq!(store.record(second, &call)?.head, None);
@@ -6583,6 +6582,19 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
     assert!(old.read_only_writable.is_empty());
     assert!(old.write_grants.is_empty());
     assert_eq!(old.git_grants_digest, None);
+    // Development records containing the retired tracking grant remain readable,
+    // but the field is never written back or used as authority.
+    let mut legacy = serde_json::to_value(&old)?;
+    legacy.as_object_mut().ok_or("record object")?.insert(
+        "granted_tracking_ref".into(),
+        "refs/remotes/origin/feature/topic".into(),
+    );
+    let legacy = serde_json::from_value::<AttemptRecord>(legacy)?;
+    assert!(
+        serde_json::to_value(legacy)?
+            .get("granted_tracking_ref")
+            .is_none()
+    );
     Ok(())
 }
 

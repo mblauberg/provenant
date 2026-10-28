@@ -82,7 +82,8 @@ impl std::fmt::Debug for HostDeliveryContext {
 impl HostDeliveryContext {
     /// Integration authority never includes the default or primary checkout ref.
     pub fn validate_integration_target(project: &Path, target: &str) -> Result<()> {
-        Self::check_delivery_branch(project, target.strip_prefix("origin/").unwrap_or(target))
+        let branch = target.strip_prefix("origin/").unwrap_or(target);
+        Self::check_delivery_branch(project, branch)
     }
     /// A publication ref is distinct from a PR's base, which may be protected.
     pub fn check_delivery_branch(project: &Path, target: &str) -> Result<()> {
@@ -202,17 +203,21 @@ impl HostDeliveryContext {
             project: project.into(),
             worktree: project.into(),
         };
-        let host = self.prepare(&writer, &request)?;
+        let host = self.prepare_with_fetch(&writer, &request, false)?;
         let bound = host
             .bound
             .as_ref()
             .ok_or(RunError::Delivery(Stage::Prepare))?;
-        let head = host.command(
-            project,
-            "git",
-            &["rev-parse", "--verify", &source],
-            Stage::Head,
-        )?;
+        let head = if local {
+            host.command(
+                project,
+                "git",
+                &["rev-parse", "--verify", &source],
+                Stage::Head,
+            )?
+        } else {
+            host.refresh_target_and_resolve(&writer, branch, Stage::Head)?
+        };
         let head = GitOid::parse(&head).map_err(|_| RunError::Delivery(Stage::Head))?;
         // A local integration ref may belong to a human. Publish a separate
         // graph-owned ref; never push that existing local branch by name.
@@ -443,9 +448,18 @@ impl HostDeliveryContext {
     /// Under writer custody, before the provider launches. Bind the single
     /// push destination and refresh shared refs with the host's Git authority.
     pub(crate) fn prepare(
+        self,
+        writer: &WriterRequest,
+        request: &WriterDeliveryRequest,
+    ) -> Result<Self> {
+        self.prepare_with_fetch(writer, request, true)
+    }
+
+    fn prepare_with_fetch(
         mut self,
         writer: &WriterRequest,
         request: &WriterDeliveryRequest,
+        fetch: bool,
     ) -> Result<Self> {
         validate(request)?;
         self.host_environment(writer)?;
@@ -560,6 +574,234 @@ impl HostDeliveryContext {
             host_cwd: writer.project.clone(),
             destination: request.clone(),
         });
+        self.validate_transport_helpers(writer)?;
+        if fetch && !matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
+            let uploadpack = format!("remote.{}.uploadpack=git-upload-pack", request.remote);
+            let refspec = format!("+refs/heads/*:refs/remotes/{}/*", request.remote);
+            self.command(
+                &writer.worktree,
+                "git",
+                &[
+                    "-c",
+                    "protocol.allow=never",
+                    "-c",
+                    "protocol.ssh.allow=always",
+                    "-c",
+                    "protocol.https.allow=always",
+                    "-c",
+                    "protocol.http.allow=always",
+                    "-c",
+                    "protocol.file.allow=always",
+                    "-c",
+                    &uploadpack,
+                    "-c",
+                    "core.logAllRefUpdates=false",
+                    "fetch",
+                    "--no-auto-maintenance",
+                    "--no-tags",
+                    "--no-recurse-submodules",
+                    "--refmap=",
+                    "--",
+                    &request.remote,
+                    &refspec,
+                ],
+                stage,
+            )?;
+        }
+        Ok(self)
+    }
+    /// Refresh origin under writer custody with delivery's host credential and
+    /// executable checks, while constraining the refspec and transport helpers.
+    pub(crate) fn refresh_origin(writer: &WriterRequest, git_dir: &Path) -> Result<()> {
+        Self::capture().refresh_origin_with(writer, git_dir)
+    }
+    pub(super) fn refresh_origin_with(self, writer: &WriterRequest, git_dir: &Path) -> Result<()> {
+        let mut host = self;
+        host.host_environment(writer)?;
+        host.environment
+            .retain(|(key, _)| key != b"GIT_TERMINAL_PROMPT");
+        host.environment
+            .push((b"GIT_TERMINAL_PROMPT".to_vec(), b"0".to_vec()));
+        host.tools = Some(HostTools {
+            git: host.executable("git", writer)?,
+            gh: None,
+        });
+        let git_dir = git_dir
+            .to_str()
+            .ok_or_else(|| prepare_error("git dir", "path is not UTF-8"))?;
+        let worktree = writer
+            .worktree
+            .to_str()
+            .ok_or_else(|| prepare_error("worktree", "path is not UTF-8"))?;
+        let remotes = host.command(
+            &writer.worktree,
+            "git",
+            &["--git-dir", git_dir, "--work-tree", worktree, "remote"],
+            Stage::Prepare,
+        )?;
+        if !remotes.lines().any(|line| line == "origin") {
+            return Ok(());
+        }
+        host.validate_transport_helpers(writer)?;
+        host.command(
+            &writer.worktree,
+            "git",
+            &[
+                "--git-dir",
+                git_dir,
+                "--work-tree",
+                worktree,
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "protocol.ssh.allow=always",
+                "-c",
+                "protocol.https.allow=always",
+                "-c",
+                "protocol.http.allow=always",
+                "-c",
+                "protocol.file.allow=always",
+                "-c",
+                "remote.origin.uploadpack=git-upload-pack",
+                "-c",
+                "core.logAllRefUpdates=false",
+                "fetch",
+                "--no-auto-maintenance",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--refmap=",
+                "--",
+                "origin",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ],
+            Stage::Prepare,
+        )?;
+        Ok(())
+    }
+
+    /// Refresh under setup custody and use the verified remote-advertised object ID.
+    fn refresh_target_and_resolve(
+        &self,
+        writer: &WriterRequest,
+        branch: &str,
+        stage: Stage,
+    ) -> Result<String> {
+        use provenant_core::{CancelToken, Clock, WaitBudget};
+        use provenant_os::{clock::SystemClock, fs::LockMode};
+        let branch_ref = GitRefName::branch(branch).map_err(|_| RunError::Delivery(stage))?;
+        let common = self.command(
+            &writer.worktree,
+            "git",
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            stage,
+        )?;
+        let directory = Directory::open_anchor(Path::new(&common))?;
+        let name = OsStr::new("provenant-lane-setup.lock");
+        match directory.create_new(name) {
+            Ok(file) => {
+                file.sync()?;
+                directory.sync()?;
+            }
+            Err(failure) if failure.is_exists() => {}
+            Err(failure) => return Err(failure.into()),
+        }
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let _lock = directory.lock(
+            name,
+            LockMode::Exclusive,
+            WaitBudget::cli(clock.mono_now(), 120).map_err(|_| RunError::Delivery(stage))?,
+            &cancel,
+            &clock,
+        )?;
+        crate::writer::verify_writer_git_paths(Path::new(&common), &branch_ref)?;
+        self.validate_transport_helpers(writer)?;
+        let source = format!("refs/heads/{branch}");
+        // Read and fetch the same sealed destination used for the later push.
+        // A configured origin may have different fetch and push URLs.
+        let remote = &self
+            .bound
+            .as_ref()
+            .ok_or(RunError::Delivery(stage))?
+            .push_url;
+        let query = || {
+            self.command(
+                &writer.worktree,
+                "git",
+                &[
+                    "-c",
+                    "protocol.allow=never",
+                    "-c",
+                    "protocol.ssh.allow=always",
+                    "-c",
+                    "protocol.https.allow=always",
+                    "-c",
+                    "protocol.http.allow=always",
+                    "-c",
+                    "protocol.file.allow=always",
+                    "-c",
+                    "remote.origin.uploadpack=git-upload-pack",
+                    "ls-remote",
+                    "--exit-code",
+                    "--",
+                    remote,
+                    &source,
+                ],
+                stage,
+            )
+        };
+        let advertised = query()?;
+        let (oid, reference) = advertised
+            .split_once('\t')
+            .ok_or(RunError::Delivery(stage))?;
+        if reference != source || GitOid::parse(oid).is_err() {
+            return Err(RunError::Delivery(stage));
+        }
+        let tracking = format!("refs/remotes/origin/{branch}");
+        let refspec = format!("+{source}:{tracking}");
+        self.command(
+            &writer.worktree,
+            "git",
+            &[
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "protocol.ssh.allow=always",
+                "-c",
+                "protocol.https.allow=always",
+                "-c",
+                "protocol.http.allow=always",
+                "-c",
+                "protocol.file.allow=always",
+                "-c",
+                "remote.origin.uploadpack=git-upload-pack",
+                "-c",
+                "core.logAllRefUpdates=false",
+                "fetch",
+                "--no-auto-maintenance",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--refmap=",
+                "--",
+                remote,
+                &refspec,
+            ],
+            stage,
+        )?;
+        if query()? != advertised {
+            return Err(RunError::Delivery(stage));
+        }
+        self.command(
+            &writer.worktree,
+            "git",
+            &["cat-file", "-e", &format!("{oid}^{{commit}}")],
+            stage,
+        )?;
+        Ok(oid.to_owned())
+    }
+
+    fn validate_transport_helpers(&self, writer: &WriterRequest) -> Result<()> {
+        let stage = Stage::Prepare;
         // Free-form shell helpers can select writer code. Support normal
         // executable helpers and gh's standard helper, otherwise refuse early.
         let helpers = self.command(
@@ -623,18 +865,7 @@ impl HostDeliveryContext {
                 }
             }
         }
-        self.command(
-            &writer.worktree,
-            "git",
-            &[
-                "fetch",
-                "--no-tags",
-                "--no-recurse-submodules",
-                &request.remote,
-            ],
-            stage,
-        )?;
-        Ok(self)
+        Ok(())
     }
     fn host_environment(&mut self, writer: &WriterRequest) -> Result<()> {
         for (key, value) in &mut self.environment {
@@ -731,7 +962,7 @@ impl HostDeliveryContext {
                     Some("rev-parse") if args.contains(&"--absolute-git-dir") => "git dir",
                     Some("rev-parse") => "HEAD",
                     Some("config") => "credential helper",
-                    Some("fetch") => "fetch",
+                    _ if args.contains(&"fetch") => "fetch",
                     _ => "git executable",
                 };
                 prepare_error(step, reason)
@@ -834,7 +1065,7 @@ impl HostDeliveryContext {
             let stderr = if output.stderr.filter_failed {
                 "diagnostic redaction failed".into()
             } else {
-                String::from_utf8_lossy(&output.stderr.bytes).into_owned()
+                redact_url_userinfo(&String::from_utf8_lossy(&output.stderr.bytes))
             };
             return Err(failure(format!(
                 "{tool} {:?} (timed out: {}): {stderr}",
@@ -967,29 +1198,35 @@ impl HostDeliveryContext {
         let remote = !request.remote.is_empty();
         let target = if remote {
             let tracking = format!("refs/remotes/{}/{}", request.remote, request.branch);
-            self.command(
-                &writer.worktree,
-                "git",
-                &[
-                    "fetch",
-                    "--no-tags",
-                    "--no-recurse-submodules",
-                    "--",
-                    &bound.push_url,
-                    &format!("+{destination}:{tracking}"),
-                ],
-                stage,
-            )?;
+            if request.remote != "origin" {
+                self.command(
+                    &writer.worktree,
+                    "git",
+                    &[
+                        "fetch",
+                        "--no-tags",
+                        "--no-recurse-submodules",
+                        "--",
+                        &bound.push_url,
+                        &format!("+{destination}:{tracking}"),
+                    ],
+                    stage,
+                )?;
+            }
             tracking
         } else {
             destination.clone()
         };
-        let expected = self.command(
-            &writer.worktree,
-            "git",
-            &["rev-parse", "--verify", &target],
-            stage,
-        )?;
+        let expected = if remote && request.remote == "origin" {
+            self.refresh_target_and_resolve(writer, &request.branch, stage)?
+        } else {
+            self.command(
+                &writer.worktree,
+                "git",
+                &["rev-parse", "--verify", &target],
+                stage,
+            )?
+        };
         let expected_oid = GitOid::parse(&expected).map_err(|_| RunError::Delivery(stage))?;
         if self
             .command(
@@ -1093,26 +1330,30 @@ impl HostDeliveryContext {
                 ],
                 stage,
             )?;
-            self.command(
-                &writer.worktree,
-                "git",
-                &[
-                    "fetch",
-                    "--no-tags",
-                    "--no-recurse-submodules",
-                    "--",
-                    &bound.push_url,
-                    &format!("+{destination}:{target}"),
-                ],
-                Stage::Verify,
-            )?;
-            if self.command(
-                &writer.worktree,
-                "git",
-                &["rev-parse", "--verify", &target],
-                Stage::Verify,
-            )? != candidate.to_string()
-            {
+            let verified = if request.remote == "origin" {
+                self.refresh_target_and_resolve(writer, &request.branch, Stage::Verify)?
+            } else {
+                self.command(
+                    &writer.worktree,
+                    "git",
+                    &[
+                        "fetch",
+                        "--no-tags",
+                        "--no-recurse-submodules",
+                        "--",
+                        &bound.push_url,
+                        &format!("+{destination}:{target}"),
+                    ],
+                    Stage::Verify,
+                )?;
+                self.command(
+                    &writer.worktree,
+                    "git",
+                    &["rev-parse", "--verify", &target],
+                    Stage::Verify,
+                )?
+            };
+            if verified != candidate.to_string() {
                 return Err(RunError::Delivery(Stage::Verify));
             }
         } else {
@@ -1327,14 +1568,56 @@ pub(super) fn cap_pr_body(mut body: String) -> String {
     body
 }
 
-fn prepare_error(step: &'static str, detail: impl std::fmt::Display) -> RunError {
+// Git may include remote URLs in diagnostics. Usernames alone can be access
+// tokens, so remove all URL userinfo, including passwordless userinfo.
+pub(super) fn redact_url_userinfo(detail: &str) -> String {
+    let mut result = String::with_capacity(detail.len());
+    let mut rest = detail;
+    while let Some(scheme_end) = rest.find("://") {
+        let authority_start = scheme_end + 3;
+        result.push_str(&rest[..authority_start]);
+        rest = &rest[authority_start..];
+        let token_end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '<' | '>' | '(' | ')'))
+            .unwrap_or(rest.len());
+        let token = &rest[..token_end];
+        if let Some(at) = token.rfind('@') {
+            result.push_str("[REDACTED]");
+            result.push_str(&token[at..]);
+            rest = &rest[token_end..];
+        } else {
+            // A malformed or truncated authority may have lost its '@'.
+            result.push_str("[REDACTED]");
+            let authority_end = token.find(['/', '?', '#']).unwrap_or(token.len());
+            rest = &rest[authority_end..];
+        }
+    }
+    result.push_str(rest);
+    // Git also accepts scp-style remotes such as user@host:path. The user
+    // can itself be a credential, so redact it even without a URL scheme.
+    let mut safe = String::with_capacity(result.len());
+    for token in result.split_inclusive(|c: char| {
+        c.is_whitespace() || matches!(c, '\'' | '"' | '<' | '>' | '(' | ')')
+    }) {
+        if let Some(at) = token.rfind('@')
+            && token[at + 1..].contains(':')
+            && !token.contains("://")
+        {
+            safe.push_str("[REDACTED]");
+            safe.push_str(&token[at..]);
+        } else {
+            safe.push_str(token);
+        }
+    }
+    safe
+}
+
+pub(super) fn prepare_error(step: &'static str, detail: impl std::fmt::Display) -> RunError {
     let detail = detail.to_string();
     let safe = provenant_confinement::redact::known_shapes(detail.as_bytes())
         .unwrap_or_else(|_| b"diagnostic redaction failed".to_vec());
-    let mut reason = String::from_utf8_lossy(&safe)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let redacted = redact_url_userinfo(&String::from_utf8_lossy(&safe));
+    let mut reason = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
     if reason.len() > 1024 {
         reason.truncate(reason.floor_char_boundary(1024));
         reason.push_str("...");
