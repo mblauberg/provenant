@@ -1208,7 +1208,7 @@ impl provenant_run::Providers for WriterProvider {
                 writer: Some(writer),
                 home: self.home.clone(),
                 cargo_registry_seed: false,
-                state_root: std::path::PathBuf::from("/fixture/state"),
+                state_root: self.state.clone(),
             }),
             observed_head: None,
             repository: None,
