@@ -81,6 +81,12 @@ struct Checkout {
 
 /// NUL fields avoid Git's C quoting for paths containing tabs or quotes.
 fn checkouts(git: &Git, project: &Path) -> Result<Vec<Checkout>> {
+    discover_checkouts(git, project).map_err(|error| {
+        format!("worktree inventory cannot identify the primary checkout: {error}").into()
+    })
+}
+
+fn discover_checkouts(git: &Git, project: &Path) -> Result<Vec<Checkout>> {
     let listing = git
         .full(project, &["worktree", "list", "--porcelain", "-z"])?
         .ok_or("cannot list worktrees")?;
@@ -109,34 +115,57 @@ fn checkouts(git: &Git, project: &Path) -> Result<Vec<Checkout>> {
         )?
         .ok_or("cannot find the common Git directory")?;
     let common = fs::canonicalize(common.trim_end_matches('\n'))?;
-    // A separate Git directory can appear as Git's first inventory path.
-    // Managed lanes sit below their primary checkout; verify candidate roots
-    // by Git identity rather than inferring the root from the common directory.
-    for candidate in project
-        .ancestors()
-        .filter(|path| path.join(".git").exists())
-    {
+    let primary = &checkouts.first().ok_or("no primary checkout")?.path;
+    let valid = |candidate: &Path| -> Result<bool> {
+        if roots::selected_project(Some(candidate), true)
+            .ok()
+            .as_deref()
+            != Some(candidate)
+        {
+            return Ok(false);
+        }
         let Some(private) = git.full(candidate, &["rev-parse", "--absolute-git-dir"])? else {
+            return Ok(false);
+        };
+        Ok(fs::canonicalize(private.trim_end_matches('\n'))
+            .ok()
+            .as_deref()
+            == Some(&common))
+    };
+    if valid(primary)? {
+        return Ok(checkouts);
+    }
+
+    // Git may list the separate Git directory instead of the primary path.
+    // core.worktree, when configured, is relative to the Git directory.
+    if let Some(value) = git.full(project, &["config", "--path", "--get", "core.worktree"])?
+        && let Ok(candidate) = fs::canonicalize(common.join(value.trim_end_matches('\n')))
+        && valid(&candidate)?
+    {
+        checkouts[0].path = candidate;
+        return Ok(checkouts);
+    }
+
+    // Managed lanes can be below the primary checkout. Inspect gitfiles
+    // directly, without invoking Git at each ancestor.
+    for candidate in project.ancestors() {
+        let Ok(gitfile) = fs::read_to_string(candidate.join(".git")) else {
             continue;
         };
-        if fs::canonicalize(private.trim_end_matches('\n'))? == common
-            && roots::selected_project(Some(candidate), true)? == candidate
+        let Some(path) = gitfile
+            .trim_end_matches(['\r', '\n'])
+            .strip_prefix("gitdir: ")
+        else {
+            continue;
+        };
+        if fs::canonicalize(candidate.join(path)).ok().as_deref() == Some(&common)
+            && valid(candidate)?
         {
-            checkouts.first_mut().ok_or("no primary checkout")?.path = candidate.to_path_buf();
-            break;
+            checkouts[0].path = candidate.to_path_buf();
+            return Ok(checkouts);
         }
     }
-    let primary = &checkouts.first().ok_or("no primary checkout")?.path;
-    if roots::selected_project(Some(primary), true)? != *primary {
-        return Err("worktree inventory does not name the primary checkout root".into());
-    }
-    let private = git
-        .full(primary, &["rev-parse", "--absolute-git-dir"])?
-        .ok_or("cannot verify the primary checkout")?;
-    if fs::canonicalize(private.trim_end_matches('\n'))? != common {
-        return Err("worktree inventory does not name the primary checkout".into());
-    }
-    Ok(checkouts)
+    Err("Git did not provide a usable primary checkout path".into())
 }
 
 /// A landing census exempts only this invocation's callers. Other commands

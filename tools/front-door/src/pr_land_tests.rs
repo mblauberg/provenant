@@ -757,6 +757,68 @@ pub(crate) fn pr_land_primary_with_separate_git_directory() -> Result {
     Ok(())
 }
 
+pub(crate) fn pr_land_out_of_tree_with_separate_git_directory() -> Result {
+    for configured in [true, false] {
+        let mut landing = landing_with_git_dir(true)?;
+        let main = landing.rig.project.clone();
+        let lane = landing.rig.root.join("outside-feat");
+        git(
+            &landing.rig,
+            &[
+                "worktree",
+                "move",
+                landing.worktree.to_str().ok_or("path")?,
+                lane.to_str().ok_or("path")?,
+            ],
+        )?;
+        let adopted = command(
+            &landing.rig,
+            &["worktree", "adopt", lane.to_str().ok_or("path")?, "--json"],
+        )?;
+        assert_eq!(
+            code(&adopted),
+            0,
+            "{}",
+            String::from_utf8_lossy(&adopted.stdout.bytes)
+        );
+        if configured {
+            git(
+                &landing.rig,
+                &["config", "core.worktree", main.to_str().ok_or("path")?],
+            )?;
+        }
+        landing
+            .rig
+            .env
+            .push(("FIXTURE_GH_DIR".into(), main.clone().into_os_string()));
+        let output = command(
+            &landing.rig,
+            &[
+                "--project",
+                lane.to_str().ok_or("path")?,
+                "land",
+                NUMBER,
+                "--json",
+            ],
+        )?;
+        let value = json(&output)?;
+        assert_eq!(value["data"]["merged"], true, "{value}");
+        if configured {
+            assert_eq!(code(&output), 0, "{value}");
+            assert_eq!(status(&value, "worktree")?, "done", "{value}");
+            assert_eq!(status(&value, "branch")?, "done", "{value}");
+            assert!(!lane.exists());
+            assert!(!branch_exists(&landing.rig, "feat")?);
+        } else {
+            assert_ne!(code(&output), 0, "{value}");
+            assert!(value.to_string().contains("worktree inventory"), "{value}");
+            assert!(lane.exists());
+            assert!(branch_exists(&landing.rig, "feat")?);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn pr_land_refuses_each_unsafe_step_and_reports_the_rest() -> Result {
     // A checkout of the base with local changes is not fast-forwarded.
     let landing = landing()?;
