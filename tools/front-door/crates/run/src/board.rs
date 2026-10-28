@@ -54,7 +54,8 @@ impl RunStore {
             }
             let generation = format!("events:{event}");
             let mut statement = tx.prepare(
-                "SELECT a.sequence,a.id,a.project,a.run,a.task,a.record,r.record FROM attempts a \
+                "SELECT a.sequence,a.id,a.project,a.run,a.task,a.record,r.record,\
+                 a.number,a.revision,a.terminal FROM attempts a \
                  JOIN runs r ON r.id=a.run AND r.project=a.project \
                  WHERE (?1 IS NULL OR a.project=?1) AND (?2 OR a.terminal=0) \
                  AND (?3=0 OR a.sequence<?3) AND a.sequence<=?5 ORDER BY a.sequence DESC LIMIT ?4",
@@ -75,11 +76,18 @@ impl RunStore {
                     || attempt.project_id.to_string() != row.get::<_, String>(2)?
                     || attempt.run_id.to_string() != row.get::<_, String>(3)?
                     || attempt.task_id.to_string() != row.get::<_, String>(4)?
+                    || crate::db::sql_int(attempt.attempt_number)? != row.get::<_, i64>(7)?
+                    || crate::db::sql_int(attempt.revision)? != row.get::<_, i64>(8)?
+                    || matches!(attempt.state, AttemptState::Terminal { .. })
+                        != row.get::<_, bool>(9)?
                     || run.run_id != attempt.run_id
                     || run.project_id != attempt.project_id
+                    || run.operation_id != attempt.operation_id
+                    || !run.task_ids.contains(&attempt.task_id)
                 {
                     return Err(RunError::Validation("board index identity"));
                 }
+                crate::reader::validate_attempt(&attempt)?;
                 last = u64::try_from(row.get::<_, i64>(0)?)
                     .map_err(|_| RunError::Validation("board sequence"))?;
                 lanes.push(BoardLane { attempt, run });
@@ -145,6 +153,26 @@ mod tests {
         let updated = store.board_page(None, true, 100, 0, None, &call)?;
         assert_eq!(updated.lanes[0].attempt.usage, mixed.usage);
         assert_ne!(updated.generation, page.generation);
+        let mut corrupt = mixed.clone();
+        corrupt.usage.context_basis_points = Some(10_001);
+        for (record, revision) in [(&corrupt, mixed.revision), (&mixed, mixed.revision + 1)] {
+            store.db.execute(
+                "UPDATE attempts SET record=?1,revision=?2 WHERE id=?3",
+                params![
+                    serde_json::to_vec(record)?,
+                    revision as i64,
+                    mixed.attempt_id.to_string()
+                ],
+            )?;
+            assert!(matches!(
+                store.board_page(None, true, 100, 0, None, &call),
+                Err(RunError::Validation(_))
+            ));
+        }
+        store.db.execute(
+            "UPDATE attempts SET revision=?1 WHERE id=?2",
+            params![mixed.revision as i64, mixed.attempt_id.to_string()],
+        )?;
         store.withdraw(
             AttemptId::from_bytes([1; 16]),
             AttemptState::Queued,
@@ -153,12 +181,6 @@ mod tests {
             call.clock.wall_now()?,
             &call,
         )?;
-        assert_ne!(
-            store
-                .board_page(None, true, 100, 0, None, &call)?
-                .generation,
-            page.generation
-        );
         assert!(matches!(
             store.board_page(None, true, 101, 0, None, &call),
             Err(RunError::Validation("board page bounds"))
