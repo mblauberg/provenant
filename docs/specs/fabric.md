@@ -82,6 +82,17 @@ claim complete coverage.
 
 ## Human requests
 
+Viewer request presentation state is separate from resolution and blocking.
+Viewer names are caller-supplied labels, like agent labels: they are not an
+authentication boundary. A local caller that knows a label can change that
+viewer's state; the direct SQLite access residual above also applies.
+Quotas are per project and viewer, with a combined per-project cap. Writes
+reclaim closed or expired request rows. A new summary baseline is refused at
+capacity rather than evicting an existing one.
+- Why: viewing and snoozing do not authorise an answer or unblock work.
+- Test: `crates/fabric-store/src/tests/human_inbox.rs::viewer_isolation`
+- Owner: `crates/fabric-store/src/viewer.rs`
+
 Human requests, immutable answers, revision history and the delivery outbox
 belong to Fabric. CLI and MCP must use the same service. The service binds
 project, host and actor from Fabric identity; request JSON cannot supply them.
@@ -385,6 +396,67 @@ remain in use. Existing graph budget and limit extensions still apply.
   `::loop_writers_keep_one_worktree_and_never_deliver_between_rounds`;
   `::loop_body_failure_blocks_later_rounds_and_dependants`.
 - Owner: `crates/fabric-runtime/src/graph/loops.rs`, `src/fabric.rs`
+
+### Plan expansion and honest-stop continuation
+
+A read-only `plan` node must declare `plan.kinds` and a positive
+`plan.max_nodes` (at most 512). Its result must contain a complete fenced
+`fragment` JSON block, schema version 1, within 12 KiB. Agent children require
+a goal or brief, relative literal write scopes, dependencies and acceptance
+checks; omitted routes resolve through `senior`. Gates use their deterministic
+condition. Supported fragment kinds are `task`, `plan`, `synthesise` and `gate`.
+The kind allow-list is the extension point for future fragment capabilities;
+presets and review shapes are not interpreted here.
+
+The runtime must validate the entire prospective graph against effective
+limits and the host ceiling before saving any addition. Invalid, missing or
+over-bound fragments must pause with a node-specific reason and admit no
+consumers. Validated additions must retain the original plan digest, stable
+namespaced node IDs and existing attempt keys across checkpoint replay.
+The bounded fragment JSON must survive refusal in the checkpoint so a limit
+extension can retry admission without rerunning the planner. Namespaced IDs
+must fit within 64 bytes; refusals name the source and child to shorten.
+Consumers must wait for all added work. Plans within loop rounds must retain
+their round membership and the loop's shared writer checkout after persistence.
+
+Disjoint scoped writers in separate registered checkouts may run concurrently.
+Planner-emitted overlapping scopes, including transitive overlaps and identical
+checkouts, must share one checkout and serial admission. Such components require
+a graph integration branch; their writers use existing integrate delivery and the
+graph owns at most one final PR. Write scope is a scheduling declaration and
+part of the brief; existing worktree confinement remains the write boundary.
+The admission fence checks every writer, including original document nodes;
+an unspecified or noncanonical scope overlaps all scopes. Skipped or blocked
+writers do not constrain checkout selection for later fragments. Worktree
+custody excludes concurrent managed writers across graphs.
+
+A successful writer task may report a structured `handoff` block with schema
+version 1, status `stopped_early` and a non-empty note of at most 4096 bytes.
+This must create exactly one continuation per stopped node, in the same
+checkout, carrying the handoff and original completion contract. Consumers'
+selected outputs must follow the continuation. Prose alone must never trigger
+continuation. Provider or delivery failures remain failures. Graph writer
+checkouts must survive settlement for subsequent work.
+Malformed optional handoffs produce output warnings and preserve the writer's
+completion verdict contract; they must not pause a successful graph.
+
+The per-graph `continuations` limit defaults to 2; 0 disables admission of
+continuations. Exhaustion must pause before consumers or final delivery.
+Extensions use the existing limit and ceiling mechanism. Checkpoint status
+must expose validated expansions, handoffs, pause reasons and remaining node,
+edge and continuation slots, including when every current attempt has settled.
+
+- Why: bounded slicing and honest handoffs should advance through the same
+  scheduler, persistence and delivery path as static graphs and loops.
+- Test: `crates/fabric-runtime/src/graph.rs::plan_fixture_expands_and_replays_without_replanning`;
+  `crates/fabric-runtime/src/graph/plan_tests.rs::plan_validates_effective_limits_and_ceiling_before_saving`;
+  `::plan_overlapping_writers_share_one_worktree_integrate_and_deliver_once`;
+  `::plan_disjoint_writers_are_admitted_while_a_peer_is_running`;
+  `::honest_stop_continues_once_on_same_checkout_with_handoff_and_verdict_contract`;
+  `::continuation_budget_pauses_then_extends_without_duplicating_prior_work`;
+  `::plan_inside_loop_keeps_round_membership_after_checkpoint_serialisation`;
+  `src/fabric.rs::graph_status_handles_pause_left_after_terminal_checkpoint`.
+- Owner: `crates/fabric-runtime/src/graph/plans.rs`, `src/fabric.rs`
 
 ### Typed node outputs
 

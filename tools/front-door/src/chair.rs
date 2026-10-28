@@ -1,5 +1,5 @@
 //! Opt-in chair handoff composition. Hooks read cached quota, never probe it.
-use provenant_cli::{Chair, ChairLog, ChairSummary, Globals};
+use provenant_cli::{Chair, ChairLog, ChairSummary, ChairViewer, Globals};
 use provenant_core::{Clock, Roots};
 use provenant_os::{
     exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
@@ -26,6 +26,9 @@ use std::{
 };
 
 type Error = Box<dyn std::error::Error>;
+#[derive(Debug, thiserror::Error)]
+#[error("viewer state cannot be changed inside a lane")]
+struct ViewerLane;
 #[derive(Deserialize)]
 struct Input {
     hook_event_name: String,
@@ -438,6 +441,7 @@ pub fn run(chair: Chair, globals: &Globals) -> u8 {
     let chair = match chair {
         Chair::Log(log) => return log_run(log, globals),
         Chair::Summary(summary) => return summary_run(summary, globals),
+        Chair::Viewer(viewer) => return viewer_run(viewer, globals),
         chair => chair,
     };
     let Chair::Switch {
@@ -496,6 +500,231 @@ pub fn run(chair: Chair, globals: &Globals) -> u8 {
             &error.to_string(),
             globals,
         ),
+    }
+}
+fn viewer_run(command: ChairViewer, globals: &Globals) -> u8 {
+    use provenant_fabric_store::{Request, RequestView, Store, ThreadWait};
+    let path = "chair viewer";
+    let read_only = matches!(
+        command,
+        ChairViewer::Request { .. } | ChairViewer::Summary { .. }
+    );
+    let result = (|| -> Result<Value, Error> {
+        if !read_only && provenant_cli::fabric::in_lane() {
+            return Err(ViewerLane.into());
+        }
+        let resolved = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::Project,
+            crate::roots::Product::Required,
+        )?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+        let executor = SystemExecutor::new(1)?;
+        let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+        let location = runtime
+            .project_location(
+                &executor,
+                &resolved.project,
+                budget,
+                &provenant_core::CancelToken::new(),
+            )?
+            .location;
+        let project = provenant_config::lookup_project(&resolved.roots, &location)?
+            .ok_or("project not registered")?
+            .project_id();
+        let clock = provenant_os::clock::SystemClock;
+        let cancel = provenant_core::CancelToken::new();
+        let request = Request {
+            clock: &clock,
+            budget: provenant_core::WaitBudget::cli(clock.mono_now(), 5)?,
+            cancel: &cancel,
+            backoff: &ThreadWait,
+        };
+        let store = if read_only {
+            match Store::open_existing(&resolved.roots.state, &request) {
+                Ok(store) => Some(store),
+                Err(provenant_fabric_store::Error::NotFound) => None,
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            Some(Store::open(&resolved.roots.state, &request)?)
+        };
+        match command {
+            ChairViewer::Request { viewer, id } => {
+                let store = store
+                    .as_ref()
+                    .ok_or(provenant_fabric_store::Error::NotFound)?;
+                let item = store.human_request(project, id, &request)?;
+                Ok(
+                    json!({"request": item, "view": store.request_view(project, &viewer, id, &request)?}),
+                )
+            }
+            ChairViewer::SetRequest {
+                viewer,
+                id,
+                seen_revision,
+                snoozed_until,
+                dismissed,
+            } => {
+                let store = store
+                    .as_ref()
+                    .ok_or(provenant_fabric_store::Error::NotFound)?;
+                let value = RequestView {
+                    seen_revision,
+                    snoozed_until: snoozed_until
+                        .map(|s| provenant_core::WallTime::parse(&s))
+                        .transpose()?,
+                    dismissed,
+                };
+                store.set_request_view(project, &viewer, id, &value, &request)?;
+                Ok(json!({"view": store.request_view(project, &viewer, id, &request)?}))
+            }
+            ChairViewer::Summary {
+                viewer,
+                session,
+                to,
+            } => {
+                if viewer.is_empty() || viewer.len() > 128 || viewer.chars().any(char::is_control) {
+                    return Err(provenant_fabric_store::Error::Invalid("viewer").into());
+                }
+                let baseline = store
+                    .as_ref()
+                    .map(|s| s.summary_baseline(project, &viewer, &session, &request))
+                    .transpose()?
+                    .flatten();
+                let workflow = SessionStore::new(
+                    resolved.roots.state.clone(),
+                    project,
+                    HostSessionId::parse(&session)?,
+                );
+                if baseline.zip(to).is_some_and(|(from, to)| to < from) {
+                    return Err(provenant_fabric_store::Error::Conflict.into());
+                }
+                let current = workflow
+                    .read()?
+                    .map(|c| {
+                        provenant_workflow::session::parse_summary(&c.markdown)
+                            .map_err(provenant_workflow::session::SessionError::Summary)
+                    })
+                    .transpose()?;
+                let summary = current.flatten();
+                let Some(summary) = summary else {
+                    return Ok(
+                        json!({"baseline":baseline,"to":to,"summary":null,"coverage":"unavailable","diff":baseline.map(|n| json!({"from":n,"to":to,"unavailable":[n],"now":null,"next":null,"needs_you":null,"risk":null}))}),
+                    );
+                };
+                let to = to.unwrap_or(summary.revision);
+                if baseline.is_some_and(|from| to < from) {
+                    return Ok(
+                        json!({"baseline":baseline,"to":to,"summary":summary,"coverage":"baseline_ahead","diff":null}),
+                    );
+                }
+                if to > summary.revision {
+                    return Err(provenant_fabric_store::Error::Invalid("summary revision").into());
+                }
+                let (diff, coverage) = match workflow.viewer_summary_diff(baseline, Some(to)) {
+                    Ok(diff) => (serde_json::to_value(diff)?, "available"),
+                    Err(
+                        provenant_workflow::session::SessionError::MissingCheckpoint { .. }
+                        | provenant_workflow::session::SessionError::Summary(_),
+                    ) => (json!(baseline.map(|n| json!({"from":n,"to":to,"unavailable":[n],"now":null,"next":null,"needs_you":null,"risk":null}))), "unavailable"),
+                    Err(error) => return Err(error.into()),
+                };
+                let rendered = (to == summary.revision).then_some(&summary);
+                Ok(
+                    json!({"baseline": baseline, "to":to, "summary":rendered, "coverage":coverage, "diff":diff}),
+                )
+            }
+            ChairViewer::Rendered {
+                viewer,
+                session,
+                revision,
+            } => {
+                let store = store
+                    .as_ref()
+                    .ok_or(provenant_fabric_store::Error::NotFound)?;
+                let workflow = SessionStore::new(
+                    resolved.roots.state.clone(),
+                    project,
+                    HostSessionId::parse(&session)?,
+                );
+                let checkpoint = workflow.read()?.ok_or("checkpoint unavailable")?;
+                let summary = provenant_workflow::session::parse_summary(&checkpoint.markdown)?
+                    .ok_or("summary unavailable")?;
+                if revision == 0 || revision > summary.revision {
+                    return Err(provenant_fabric_store::Error::Invalid("summary revision").into());
+                }
+                store.set_summary_baseline(project, &viewer, &session, revision, &request)?;
+                Ok(json!({"baseline": revision}))
+            }
+            ChairViewer::Forget { viewer, session } => {
+                HostSessionId::parse(&session)?;
+                store
+                    .as_ref()
+                    .ok_or(provenant_fabric_store::Error::NotFound)?
+                    .forget_summary_baseline(project, &viewer, &session, &request)?;
+                Ok(json!({"baseline": null}))
+            }
+        }
+    })();
+    match result {
+        Ok(value) => {
+            let human = serde_json::to_string_pretty(&value).unwrap_or_default();
+            crate::emit(
+                &CommandResult::new(path, Outcome::Ok, value),
+                globals,
+                &human,
+                read_only,
+            )
+        }
+        Err(error) => {
+            use provenant_fabric_store::Error as E;
+            let (code, repair) = match error.downcast_ref::<E>() {
+                Some(E::SchemaVersion(_) | E::UnversionedDatabase) => (
+                    "VIEWER_INCOMPATIBLE",
+                    "Open the store with a normal inbox command using a compatible release, then retry.",
+                ),
+                Some(E::ViewerLimit) => (
+                    "VIEWER_LIMIT",
+                    "Forget an unused baseline with chair viewer forget VIEWER SESSION, or close requests and reclaim their viewer state, then retry.",
+                ),
+                Some(E::ViewerNotOpen) => {
+                    ("VIEWER_NOT_OPEN", "Refresh the request before retrying.")
+                }
+                Some(E::NotFound) => (
+                    "VIEWER_NOT_FOUND",
+                    "Inspect the request or session and retry.",
+                ),
+                Some(E::Conflict) => (
+                    "VIEWER_CONFLICT",
+                    "Use chair viewer forget VIEWER SESSION to reset the baseline, then retry.",
+                ),
+                Some(E::Busy | E::Cancelled) => ("VIEWER_RETRY", "Retry the operation."),
+                Some(E::Invalid(_)) => (
+                    "VIEWER_INVALID",
+                    "Correct the viewer name or revision and retry.",
+                ),
+                _ if error.is::<ViewerLane>() => {
+                    ("VIEWER_LANE", "Change viewer state outside the lane.")
+                }
+                _ if error.is::<provenant_workflow::session::HostSessionIdError>() => {
+                    ("VIEWER_INVALID", "Correct the session ID and retry.")
+                }
+                _ if error.is::<provenant_workflow::session::SessionError>() => {
+                    ("VIEWER_SESSION", "Inspect the session and retry.")
+                }
+                _ => ("VIEWER_UNAVAILABLE", "Inspect the session and retry."),
+            };
+            crate::fail_with_repair(
+                path,
+                Outcome::Refused,
+                code,
+                &error.to_string(),
+                Some(repair),
+                globals,
+            )
+        }
     }
 }
 #[derive(Deserialize)]

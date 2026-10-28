@@ -301,6 +301,13 @@ pub enum RequestedRoute {
         name: String,
         effort: Option<String>,
     },
+    /// Pool selection with families already used by this review group.
+    Review {
+        name: String,
+        effort: Option<String>,
+        excluded_families: Vec<String>,
+        distinct_families: bool,
+    },
 }
 impl RequestedRoute {
     pub fn projection(self) -> crate::RouteFact {
@@ -315,7 +322,7 @@ impl RequestedRoute {
                 effort,
                 account_label: None,
             },
-            Self::Named { effort, .. } => crate::RouteFact {
+            Self::Named { effort, .. } | Self::Review { effort, .. } => crate::RouteFact {
                 provider: None,
                 model: None,
                 effort,

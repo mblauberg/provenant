@@ -2043,6 +2043,44 @@ bounds are null. Positional arguments have no long flag.
 }
 ```
 
+## `provenant review`
+
+| Argument | Contract |
+|---|---|
+| `target` | `{"name": "target", "positional": true, "required": true}` |
+| `--brief-file` | `{"name": "brief_file", "required": true}` |
+| `--shape` | `{"name": "shape"}` |
+| `--risk` | `{"name": "risk"}` |
+| `--kind` | `{"name": "kind"}` |
+| `--range` | `{"name": "range"}` |
+| `--wait` | `{"bounds": [1, 14400], "defaults": ["3600"], "name": "wait"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "target",
+        "brief_file",
+        "shape",
+        "risk",
+        "kind",
+        "range",
+        "wait"
+      ],
+      "multiple": true,
+      "name": "Review",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant status`
 
 | Argument | Contract |
@@ -2769,6 +2807,166 @@ bounds are null. Positional arguments have no long flag.
 | `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
+
+## `provenant chair viewer`
+
+| Argument | Contract |
+|---|---|
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant chair viewer request`
+
+| Argument | Contract |
+|---|---|
+| `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
+| `id` | `{"name": "id", "positional": true, "required": true}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "viewer",
+        "id"
+      ],
+      "multiple": true,
+      "name": "Request",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant chair viewer set-request`
+
+| Argument | Contract |
+|---|---|
+| `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
+| `id` | `{"name": "id", "positional": true, "required": true}` |
+| `--seen-revision` | `{"name": "seen_revision"}` |
+| `--snoozed-until` | `{"name": "snoozed_until"}` |
+| `--dismissed` | `{"defaults": ["false"], "name": "dismissed", "values": ["true", "false"]}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "viewer",
+        "id",
+        "seen_revision",
+        "snoozed_until",
+        "dismissed"
+      ],
+      "multiple": true,
+      "name": "SetRequest",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant chair viewer summary`
+
+| Argument | Contract |
+|---|---|
+| `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
+| `session` | `{"name": "session", "positional": true, "required": true}` |
+| `--to` | `{"name": "to"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "viewer",
+        "session",
+        "to"
+      ],
+      "multiple": true,
+      "name": "Summary",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant chair viewer rendered`
+
+| Argument | Contract |
+|---|---|
+| `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
+| `session` | `{"name": "session", "positional": true, "required": true}` |
+| `--revision` | `{"name": "revision", "required": true}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "viewer",
+        "session",
+        "revision"
+      ],
+      "multiple": true,
+      "name": "Rendered",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant chair viewer forget`
+
+| Argument | Contract |
+|---|---|
+| `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
+| `session` | `{"name": "session", "positional": true, "required": true}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "viewer",
+        "session"
+      ],
+      "multiple": true,
+      "name": "Forget",
+      "required": false
+    }
+  ]
+}
+```
 
 ## `provenant chair summary`
 

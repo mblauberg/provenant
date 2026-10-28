@@ -190,7 +190,7 @@ fn route(route: &RequestedRoute, path: &str) -> Result<(), InputError> {
             bounded_text(model, &format!("{path}.model"), MAX_ROUTE_BYTES)?;
             effort
         }
-        RequestedRoute::Named { name, effort } => {
+        RequestedRoute::Named { name, effort } | RequestedRoute::Review { name, effort, .. } => {
             bounded_text(name, &format!("{path}.name"), MAX_ROUTE_BYTES)?;
             effort
         }

@@ -36,6 +36,232 @@ fn draft(rig: &TestRig, kind: &str) -> Result<String> {
 }
 
 #[test]
+fn viewer_cli_isolation_and_render_race() -> Result {
+    let mut rig = TestRig::new()?;
+    let file = draft(&rig, "decision")?;
+    let created = call(
+        &rig,
+        &[
+            "ask",
+            "--file",
+            &file,
+            "--session",
+            "chair-a",
+            "--operation-id",
+            "viewer-ask",
+        ],
+        None,
+        0,
+    )?;
+    let id = created["data"]["request_id"].as_str().ok_or("request ID")?;
+    let args = [
+        "chair",
+        "viewer",
+        "set-request",
+        "console",
+        id,
+        "--seen-revision",
+        "1",
+        "--snoozed-until",
+        "2033-05-18T03:33:20.000000Z",
+        "--dismissed",
+    ];
+    call(&rig, &args, None, 0)?;
+    let shown = call(
+        &rig,
+        &["chair", "viewer", "request", "console", id],
+        None,
+        0,
+    )?;
+    assert_eq!(shown["data"]["view"]["dismissed"], true);
+    assert_eq!(shown["data"]["request"]["state"], "open");
+    assert_eq!(shown["data"]["request"]["request"]["blocking"], true);
+    assert_eq!(
+        call(&rig, &["chair", "viewer", "request", "phone", id], None, 0)?["data"]["view"]["dismissed"],
+        false
+    );
+    rig.env.push((
+        "PROVENANT_RUN_STATE_DIR".into(),
+        rig.state.clone().into_os_string(),
+    ));
+    assert_eq!(call(&rig, &args, None, 1)?["error"]["code"], "VIEWER_LANE");
+    rig.env.pop();
+
+    let checkpoint = rig.root.join("viewer-checkpoint.md");
+    let path = checkpoint.to_str().ok_or("checkpoint path")?;
+    let save = |revision: u64, now: &str| -> Result {
+        std::fs::write(
+            &checkpoint,
+            format!(
+                "---\nprovenant_summary:\n  schema_version: 1\n  revision: {revision}\n  updated_at: \"2026-10-28T03:00:00Z\"\n  now: \"{now}\"\n  next: \"Next\"\n  needs_you: []\n  risk: \"None\"\n---\nBody\n"
+            ),
+        )?;
+        call(
+            &rig,
+            &["workflow", "session", "save", "chair-a", "--file", path],
+            None,
+            0,
+        )?;
+        Ok(())
+    };
+    save(1, "First")?;
+    let first = call(
+        &rig,
+        &["chair", "viewer", "summary", "console", "chair-a"],
+        None,
+        0,
+    )?;
+    assert_eq!(first["data"]["to"], 1);
+    assert_eq!(first["data"]["coverage"], "available");
+    assert_eq!(first["data"]["summary"]["now"], "First");
+    assert!(first["data"]["baseline"].is_null());
+    save(2, "Second")?;
+    call(
+        &rig,
+        &[
+            "chair",
+            "viewer",
+            "rendered",
+            "console",
+            "chair-a",
+            "--revision",
+            "1",
+        ],
+        None,
+        0,
+    )?;
+    let diff = call(
+        &rig,
+        &["chair", "viewer", "summary", "console", "chair-a"],
+        None,
+        0,
+    )?;
+    assert_eq!(diff["data"]["to"], 2);
+    assert_eq!(diff["data"]["diff"]["to"], 2);
+    assert_eq!(
+        diff["data"]["diff"]["now"],
+        json!({"from":"First","to":"Second"})
+    );
+    call(
+        &rig,
+        &[
+            "chair",
+            "viewer",
+            "rendered",
+            "console",
+            "chair-a",
+            "--revision",
+            "2",
+        ],
+        None,
+        0,
+    )?;
+    assert_eq!(
+        call(
+            &rig,
+            &[
+                "chair",
+                "viewer",
+                "rendered",
+                "console",
+                "chair-a",
+                "--revision",
+                "1"
+            ],
+            None,
+            1
+        )?["error"]["code"],
+        "VIEWER_CONFLICT"
+    );
+    assert_eq!(
+        call(
+            &rig,
+            &[
+                "chair", "viewer", "summary", "console", "chair-a", "--to", "1"
+            ],
+            None,
+            1
+        )?["error"]["code"],
+        "VIEWER_CONFLICT"
+    );
+    std::fs::write(&checkpoint, "No summary")?;
+    call(
+        &rig,
+        &["workflow", "session", "save", "chair-a", "--file", path],
+        None,
+        0,
+    )?;
+    let missing = call(
+        &rig,
+        &["chair", "viewer", "summary", "console", "chair-a"],
+        None,
+        0,
+    )?;
+    assert_eq!(missing["data"]["coverage"], "unavailable");
+    assert_eq!(missing["data"]["diff"]["unavailable"], json!([2]));
+    let missing_to = call(
+        &rig,
+        &[
+            "chair", "viewer", "summary", "console", "chair-a", "--to", "5",
+        ],
+        None,
+        0,
+    )?;
+    assert_eq!(missing_to["data"]["to"], 5);
+    assert_eq!(missing_to["data"]["diff"]["to"], 5);
+    let projects = rig.state.join("workflow/projects");
+    for entry in std::fs::read_dir(projects)? {
+        let session = entry?.path().join("sessions/chair-a");
+        if session.exists() {
+            std::fs::remove_dir_all(session)?;
+        }
+    }
+    let missing = call(
+        &rig,
+        &["chair", "viewer", "summary", "console", "chair-a"],
+        None,
+        0,
+    )?;
+    assert_eq!(missing["data"]["diff"]["unavailable"], json!([2]));
+    save(1, "Restarted")?;
+    let restarted = call(
+        &rig,
+        &["chair", "viewer", "summary", "console", "chair-a"],
+        None,
+        0,
+    )?;
+    assert_eq!(restarted["data"]["coverage"], "baseline_ahead");
+    assert_eq!(restarted["data"]["summary"]["now"], "Restarted");
+    assert_eq!(
+        call(
+            &rig,
+            &["chair", "viewer", "summary", "console", "bad id!"],
+            None,
+            1
+        )?["error"]["code"],
+        "VIEWER_INVALID"
+    );
+    let database = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
+    database.pragma_update(None, "user_version", 12)?;
+    let incompatible = call(
+        &rig,
+        &["chair", "viewer", "summary", "console", "chair-a"],
+        None,
+        1,
+    )?;
+    assert_eq!(incompatible["error"]["code"], "VIEWER_INCOMPATIBLE");
+    assert!(incompatible["error"]["repair"].is_string());
+    database.pragma_update(None, "user_version", 13)?;
+    call(
+        &rig,
+        &["chair", "viewer", "forget", "console", "chair-a"],
+        None,
+        0,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn inbox_cli_posts_lists_and_resolves_all_kinds_without_apps() -> Result {
     let rig = TestRig::new()?;
     for kind in ["decision", "assumption", "question"] {

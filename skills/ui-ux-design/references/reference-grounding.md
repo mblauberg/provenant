@@ -1,5 +1,3 @@
-<!-- Modified for Provenant. -->
-
 # Reference grounding
 
 Use this evidence order:

@@ -1,5 +1,3 @@
-<!-- Modified for Provenant. -->
-
 # Content and conversion
 
 Organise content around the user's next decision. Establish information

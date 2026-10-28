@@ -56,6 +56,5 @@ acceptance remain with the enclosing implementation lifecycle; design does not
 certify itself.
 
 Reference cases (not run by CI): [boundary](evals/boundary_cases.yaml),
-[craft quality](evals/craft_quality.yaml),
-[provenance ledger](evals/provenance_components.yaml), and
+[craft quality](evals/craft_quality.yaml), and
 [reference disposition](evals/reference_disposition.yaml).

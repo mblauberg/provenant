@@ -1,0 +1,25 @@
+suppress_opus_writer_warning = false
+capacity_cooldown_seconds = 600
+pacing_overrides = []
+[opencode_go]
+min_monthly_allowance_usd = 60
+[routes]
+[pools]
+[pacing]
+[pacing_reserve]
+[review.shapes.quick]
+reviewers = [{ pool = "junior", count = 1 }]
+[review.shapes.standard]
+reviewers = [{ pool = "junior", count = 2, distinct_families = true }]
+[review.shapes.deep]
+reviewers = [
+  { pool = "junior", count = 4, lenses = ["correctness", "security", "failure-isolation", "tests"], distinct_families = true },
+  { pool = "senior", count = 2, distinct_families = true },
+]
+[review.select]
+default = "standard"
+[review.select.by_risk]
+low = "quick"
+high = "deep"
+[review.select.by_kind]
+[review.select.by_paths]

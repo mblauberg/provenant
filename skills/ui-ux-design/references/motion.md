@@ -1,5 +1,3 @@
-<!-- Modified for Provenant. -->
-
 # Motion
 
 Before adding motion, name its purpose: feedback, continuity, spatial

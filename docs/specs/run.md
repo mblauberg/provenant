@@ -87,9 +87,15 @@ launch before membership capture, so rewriting a queued child ID cannot claim
 a sibling's membership or poison its launch. A lane cannot claim a historical
 run namespace by choosing its run ID and recomputing the public attempt hash.
 
+Nested continuations created by the host also use version 1, retaining the
+original parent-attempt namespace and including their continuation parent in
+the canonical digest. Replays retain the original scheme, including legacy
+prepared operations whose request was not yet published.
+
 This scheme avoids rekeying lane-published records and IDs already returned to
 callers. There is no migration of existing child records: an absent version
-marker preserves legacy launch behaviour and explicit `Unindexed` coverage.
+marker preserves explicit `Unindexed` coverage. Chair admission separately
+requires a retained host seal for legacy child launch, as described below.
 An unknown version refuses launch. Removing the marker only loses indexing;
 it never adopts a lane-proposed ID as trusted membership. Replays preserve the
 original version, including repair of legacy prepared operations. Calling the
@@ -136,7 +142,9 @@ keyed by project and run. This database and its companions are outside the exact
 coordination database write grants lanes receive. It seals the request digest
 and optional chair before launch. Each nested launch inherits from the host
 index using the parent's host-sealed request
-digest. A disagreeing child proposal is refused. Lane-local requests and even a
+digest. The index write uses the exact request returned by child validation;
+it never re-reads lane-writable request bytes to choose the digest to seal.
+A disagreeing child proposal is refused. Lane-local requests and even a
 lane-local Fabric database or the shared mail database cannot replace this
 association. A retry preserves the original proposal; continuations copy the
 original host index binding.
@@ -145,8 +153,36 @@ same operation ID: launch repairs its index from the immutable host request,
 including owned-worktree replay. Lane stores cannot repair it.
 Transient index errors leave queued children available for a later scan.
 
-Launch validation reads `fabric-runtime::chairs::ChairIndex`; missing records
-and older runs are unbound. `console board` reads existing host associations
+Admission audit (#2088):
+
+- New child associations require the version 1 derived run ID check used by
+  WorkIndex, before any index write. An unversioned request with a lane-chosen
+  run ID is refused, so it cannot bind a missing row or shadow another run.
+  Existing legacy host rows remain readable and replayable only with their
+  sealed request digest; lane stores cannot create or repair missing legacy
+  rows. Removing the version marker grants no chair association. A legacy
+  continuation whose host seal is lost is therefore refused permanently rather
+  than repaired from lane bytes.
+- New nested continuations never take a lane-supplied ID: resume derives and
+  overwrites their run and attempt IDs.
+- Host continuations given a reopened lane-local store check the replayed run ID
+  against the request and operation using the same derivation before copying
+  the chair binding. New inheritance also verifies the source run and attempt
+  derivations and requires the source's host seal. Copying another run's
+  request and operation while substituting the source attempt is refused.
+  A legacy source cannot prove attempt membership for new inheritance.
+  Retained continuation rows, including unversioned ones, replay their sealed
+  binding without copying a lane-proposed source. Forged continuation
+  operations cannot create a chair row under a lane-chosen ID, including the
+  host's early operation replay after reopening the lane store. The regression
+  also replays a retained legacy continuation through that entrypoint.
+- Root replay with the same operation ID and a different submitting chair
+  retains the original immutable request. Even repair of a missing host row
+  seals the original chair and digest; a conflicting row is refused.
+
+The chair row is sealed before handoff, so presence in the index does not imply
+that the run launched. Launch validation reads `fabric-runtime::chairs::ChairIndex`;
+for reads of existing runs, missing records and older runs are unbound. `console board` reads existing host associations
 without initialising the index. Provider handles and child requests are never fallbacks. Graph and
 peer executions remain unbound until they retain an originating chair separately
 from the actor owning operation replay. Board and tree rendering are separate.
@@ -157,7 +193,10 @@ Whole-run collection must delete its association in the same host-owned removal
 workflow. Lane-writable missing child records alone cannot authorise deletion.
 
 - Test: `crates/fabric-runtime/src/chairs.rs::nested_chair_binding`;
-  `crates/run/src/service_tests.rs::chair_binding_replays_the_original_submission`
+  `crates/run/src/service_tests.rs::chair_binding_replays_the_original_submission`;
+  `crates/cli/src/run/children.rs::tests::{legacy_child_cannot_claim_a_chair_under_a_lane_chosen_run_id, child_chair_seals_the_validated_request_despite_a_lane_rewrite, continuation_cannot_copy_a_chair_to_a_lane_chosen_replay_run, continuation_cannot_redirect_its_source_to_another_runs_chair}`;
+  `crates/cli/src/run.rs::tests::operation_replays_after_its_context_ref_moves_or_is_deleted`;
+  `crates/run/src/dispatch_tests.rs::{nested_continuation_uses_host_derived_ids, nested_continuation_preserves_legacy_replay_even_before_request_publication, nested_continuation_preflight_does_not_reuse_crashed_staging}`
 - Owner: `crates/fabric-runtime/src/chairs.rs`, `crates/fabric-store/src/chairs.rs`,
   `crates/cli/src/run.rs`, `crates/cli/src/run/children.rs`
 
@@ -596,7 +635,11 @@ launch safely.
 On the host, policy, provider preparation and write-grant validation run before
 recording the fallback operation or spending the continuation. A preparation
 refusal leaves no successor or staging, and the same operation can be retried
-after repairing the environment. Admission retains that exact prepared plan.
+after repairing the environment. Root fallback admission retains that exact
+prepared plan. Versioned nested fallbacks preflight in fresh per-call staging,
+discard that plan and prepare again at the derived final paths after admission.
+This preserves crash retry without reusing unrecorded staging; launch repeats
+policy and write-grant validation before handoff.
 Later custody or handoff failures are reported as execution outcomes of the
 accepted attempt, as for dispatch.
 Before admission and again under writer custody, continuations verify the

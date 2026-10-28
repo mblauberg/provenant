@@ -402,6 +402,9 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
         .iter()
         .map(|n| {
             prior.remove(&n.id).unwrap_or_else(|| NodeProgress {
+                fragment: None,
+                handoff: None,
+                expansion_pause: None,
                 loop_asks: Vec::new(),
                 loop_pause: None,
                 loop_inbox_error: None,
@@ -691,7 +694,8 @@ pub(super) fn prepare_decision_extension(
     }
     let mut extensions = checkpoint.extensions.clone();
     extensions.push(extension.to_owned());
-    let expanded = expand(document, &extensions).map_err(str::to_owned)?;
+    let expanded =
+        plans::expand(document, &extensions, &checkpoint.expansions).map_err(str::to_owned)?;
     let (plan, _) = validate_flat_plan(&expanded, limits).map_err(str::to_owned)?;
     if let Some(reason) = structural_limit_reason(&expanded, &plan, limits, &extensions) {
         return Err(reason);

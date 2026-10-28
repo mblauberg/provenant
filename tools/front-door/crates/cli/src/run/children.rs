@@ -280,16 +280,14 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
             &reason,
             &call,
             |id, validated| {
-                let stored = session.store.request(id, &call)?;
-                with_chair_index(&roots, &call, |index, index_call| {
-                    index.inherit(
-                        context.project_id,
-                        (context.run_id, sealed.request_digest),
-                        id,
-                        &stored,
-                        index_call,
-                    )
-                })?;
+                inherit_child_chair(
+                    &session,
+                    &roots,
+                    (context.run_id, sealed.request_digest),
+                    id,
+                    validated,
+                    &call,
+                )?;
                 launch_on_host(
                     &session,
                     id,
@@ -319,6 +317,26 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
         }
         std::thread::park_timeout(Duration::from_millis(100));
     }
+}
+
+fn inherit_child_chair(
+    session: &Session,
+    roots: &Roots,
+    parent: (RunId, provenant_core::Digest),
+    run: RunId,
+    validated: &run::CanonicalRequest,
+    call: &run::Request<'_>,
+) -> Result<(), Fail> {
+    check_chair_run_id(session, roots, run, validated, call)?;
+    with_chair_index(roots, call, |index, index_call| {
+        index.inherit(
+            session.context.project_id,
+            parent,
+            run,
+            validated,
+            index_call,
+        )
+    })
 }
 
 struct ChildAuthority<'a> {
@@ -480,6 +498,561 @@ mod tests {
     use super::*;
     use provenant_core::{ActorId, Digest, OperationId, ProjectId, RootInputs, RunId, TaskId};
     use provenant_records::CanonicalV1;
+
+    fn chair_fixture(
+        base: &Path,
+        call: &run::Request<'_>,
+    ) -> Result<(Roots, Session, run::PreparedRun, RunId), Box<dyn std::error::Error>> {
+        let (context, child) = child_fixture(base, &SystemClock::new())?;
+        let base = std::fs::canonicalize(base)?;
+        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+        inputs.state_dir = Some(base.join("host"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let session = Session {
+            store: run::RunStore::open(&context, call)?
+                .with_writer_registry(roots.state.as_path())
+                .with_sealed_requester(context.actor_id),
+            context,
+        };
+        let parent = RunId::from_bytes([77; 16]);
+        let mut original = child.request.clone();
+        original.parent_attempt = None;
+        original.lane_depth = Some(1);
+        original.chair = Some(run::ChairBinding {
+            host: provenant_core::HostId::from_bytes([78; 16]),
+            actor: ActorId::from_bytes([79; 16]),
+        });
+        with_chair_index(&roots, call, |index, c| {
+            index.submit(session.context.project_id, parent, &original, c)
+        })
+        .map_err(|f| f.message)?;
+        Ok((roots, session, child, parent))
+    }
+
+    fn parent_digest(
+        roots: &Roots,
+        project: ProjectId,
+        parent: RunId,
+        call: &run::Request<'_>,
+    ) -> Result<Digest, String> {
+        with_chair_index(roots, call, |index, c| {
+            Ok(index.read(project, parent, c)?.unwrap().request_digest)
+        })
+        .map_err(|f| f.message)
+    }
+
+    #[test]
+    fn legacy_child_cannot_claim_a_chair_under_a_lane_chosen_run_id()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|f| f.message)?;
+        let (roots, session, child, parent) = chair_fixture(temp.path(), &call)?;
+        session.store.create(&child, &call)?;
+        let digest = parent_digest(&roots, session.context.project_id, parent, &call)?;
+        let scan = scan_queued(
+            &session.store,
+            vec![child.run_id],
+            &ChildAuthority {
+                parent: child.request.parent_attempt.unwrap(),
+                task: &child.request.tasks[0],
+                depth: 1,
+                maximum: 2,
+            },
+            &Arc::new(Mutex::new(None)),
+            &call,
+            |id, validated| {
+                inherit_child_chair(&session, &roots, (parent, digest), id, validated, &call)?;
+                Ok(vec![])
+            },
+        )?;
+        assert!(scan.error.is_none(), "{:?}", scan.error);
+        with_chair_index(&roots, &call, |index, c| {
+            assert!(
+                index
+                    .read(session.context.project_id, child.run_id, c)?
+                    .is_none()
+            );
+            Ok(())
+        })
+        .map_err(|f| f.message)?;
+        assert!(matches!(
+            session.store.record(child.attempts[0].attempt_id, &call)?.state,
+            run::AttemptState::Terminal { outcome: run::Outcome::Rejected, reason: Some(reason), .. }
+                if reason.contains("host-derived")
+        ));
+        // Retained legacy host rows remain readable and replayable. A different
+        // request cannot shadow that row or repair it to another digest.
+        with_chair_index(&roots, &call, |index, c| {
+            index.inherit(
+                session.context.project_id,
+                (parent, digest),
+                child.run_id,
+                &child.request,
+                c,
+            )
+        })
+        .map_err(|f| f.message)?;
+        inherit_child_chair(
+            &session,
+            &roots,
+            (parent, digest),
+            child.run_id,
+            &child.request,
+            &call,
+        )
+        .map_err(|f| f.message)?;
+        let mut forged = child.request.clone();
+        forged.concurrency = 2;
+        let failure = inherit_child_chair(
+            &session,
+            &roots,
+            (parent, digest),
+            child.run_id,
+            &forged,
+            &call,
+        )
+        .unwrap_err();
+        assert_eq!(failure.kind, run::ErrorKind::Conflict);
+        with_chair_index(&roots, &call, |index, c| {
+            let binding = index
+                .read(session.context.project_id, child.run_id, c)?
+                .unwrap();
+            assert_eq!(binding.request_digest, child.request.digest()?);
+            assert_eq!(
+                binding.chair,
+                index
+                    .read(session.context.project_id, parent, c)?
+                    .unwrap()
+                    .chair
+            );
+            Ok(())
+        })
+        .map_err(|f| f.message)?;
+        Ok(())
+    }
+
+    fn queue_versioned_child(
+        session: &Session,
+        child: &run::PreparedRun,
+        cwd: &Path,
+        call: &run::Request<'_>,
+    ) -> Result<run::RunRecord, run::RunError> {
+        let task = &child.request.tasks[0];
+        session.service().dispatch(
+            run::DispatchRequest {
+                chair: None,
+                operation_id: child.operation_id.clone(),
+                concurrency: 1,
+                lane_depth: 2,
+                parent_attempt: child.request.parent_attempt,
+                tasks: vec![run::DispatchTask {
+                    build_heavy: false,
+                    title: None,
+                    task_id: task.task_id,
+                    prompt: "child".into(),
+                    base: None,
+                    head: None,
+                    route: task.route.clone(),
+                    account: None,
+                    fallback: vec![],
+                    profile: task.profile.clone(),
+                    timeout_seconds: 3600,
+                    delivery_id: None,
+                    deliver: None,
+                    worktree: None,
+                    access: Default::default(),
+                }],
+            },
+            cwd,
+            call,
+        )
+    }
+
+    #[test]
+    fn child_chair_seals_the_validated_request_despite_a_lane_rewrite()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|f| f.message)?;
+        let (roots, session, child, parent) = chair_fixture(temp.path(), &call)?;
+        let task = child.request.tasks[0].clone();
+        let admitted = queue_versioned_child(
+            &session,
+            &child,
+            &std::fs::canonicalize(temp.path())?.join("checkout"),
+            &call,
+        )?;
+        let validated = session.store.validate_child(
+            admitted.run_id,
+            child.request.parent_attempt.unwrap(),
+            &task,
+            1,
+            2,
+            &call,
+        )?;
+        // The lane replaces both the bytes and their lane-local digest after
+        // validation, before the host writes the association.
+        let mut forged = validated.clone();
+        forged.child_attempt_id_version = None;
+        forged.concurrency = 2;
+        std::fs::write(
+            session
+                .context
+                .state_root
+                .as_path()
+                .join(format!("runs/{}/request.json", admitted.run_id)),
+            serde_json::to_vec(&forged)?,
+        )?;
+        let mut record = admitted.clone();
+        record.request_digest = forged.digest()?;
+        let db =
+            rusqlite::Connection::open(session.context.state_root.as_path().join("run.sqlite3"))?;
+        db.execute(
+            "UPDATE runs SET record=?1 WHERE id=?2",
+            rusqlite::params![serde_json::to_vec(&record)?, admitted.run_id.to_string()],
+        )?;
+        assert_eq!(session.store.request(admitted.run_id, &call)?, forged);
+        let digest = parent_digest(&roots, session.context.project_id, parent, &call)?;
+        inherit_child_chair(
+            &session,
+            &roots,
+            (parent, digest),
+            admitted.run_id,
+            &validated,
+            &call,
+        )
+        .map_err(|f| f.message)?;
+        with_chair_index(&roots, &call, |index, c| {
+            assert_eq!(
+                index
+                    .read(session.context.project_id, admitted.run_id, c)?
+                    .unwrap()
+                    .request_digest,
+                validated.digest()?
+            );
+            Ok(())
+        })
+        .map_err(|f| f.message)?;
+        Ok(())
+    }
+
+    #[test]
+    fn continuation_cannot_redirect_its_source_to_another_runs_chair()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for versioned in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let base = std::fs::canonicalize(temp.path())?;
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|f| f.message)?;
+            let (roots, session, child, parent) = chair_fixture(temp.path(), &call)?;
+            let source = if versioned {
+                queue_versioned_child(&session, &child, &base.join("checkout"), &call)?
+            } else {
+                session.store.create(&child, &call)?
+            };
+            let canonical = session.store.request(source.run_id, &call)?;
+            let digest = parent_digest(&roots, session.context.project_id, parent, &call)?;
+            with_chair_index(&roots, &call, |index, c| {
+                index.inherit(
+                    session.context.project_id,
+                    (parent, digest),
+                    source.run_id,
+                    &canonical,
+                    c,
+                )
+            })
+            .map_err(|f| f.message)?;
+            session
+                .store
+                .refuse_queued(source.run_id, "completed source", &call)?;
+            let mut prior = session
+                .store
+                .lanes(
+                    &run::LaneQuery {
+                        targets: vec![],
+                        all: true,
+                        limit: 1,
+                        after: 0,
+                        newest_first: false,
+                        owner: None,
+                        unseen_after: None,
+                    },
+                    &call,
+                )?
+                .lanes
+                .remove(0);
+            let old = prior.attempt_id;
+            if versioned {
+                let honest = session.store.resume_fresh(
+                    &run::Resume {
+                        prior: old,
+                        expected_generation: 0,
+                        operation_id: "honest-continuation".parse()?,
+                        run_id: RunId::from_bytes([95; 16]),
+                        attempt_id: AttemptId::from_bytes([96; 16]),
+                        prompt: "answer".into(),
+                        created_at: clock.wall_now()?,
+                    },
+                    "fixture",
+                    &call,
+                )?;
+                let home = base.join("home");
+                let cwd = base.join("checkout");
+                let edge = Edge {
+                    roots: &roots,
+                    home: &home,
+                    assets: &cwd,
+                    cwd: &cwd,
+                };
+                launch_on_host(&session, honest.run_id, &edge, &call, None, None, None)
+                    .map_err(|f| f.message)?;
+                with_chair_index(&roots, &call, |index, c| {
+                    assert_eq!(
+                        index
+                            .read(session.context.project_id, honest.run_id, c)?
+                            .unwrap()
+                            .chair,
+                        index
+                            .read(session.context.project_id, source.run_id, c)?
+                            .unwrap()
+                            .chair
+                    );
+                    Ok(())
+                })
+                .map_err(|f| f.message)?;
+            }
+            // The lane substitutes the selected attempt while copying another
+            // run's canonical request, operation and valid run namespace.
+            prior.attempt_id = AttemptId::from_bytes([92; 16]);
+            prior.prompt.path = provenant_records::PathWire::from_relative(
+                &provenant_core::RelativePath::parse(format!(
+                    "attempts/{}/{}",
+                    prior.attempt_id,
+                    provenant_records::AttemptFile::Prompt.name()
+                ))?,
+            )?;
+            if let Some(result) = &mut prior.result {
+                result.path = provenant_records::PathWire::from_relative(
+                    &provenant_core::RelativePath::parse(format!(
+                        "attempts/{}/result.md",
+                        prior.attempt_id
+                    ))?,
+                )?;
+            }
+            let db = rusqlite::Connection::open(
+                session.context.state_root.as_path().join("run.sqlite3"),
+            )?;
+            db.execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER immutable_terminal_update")?;
+            db.execute(
+                "UPDATE attempts SET id=?1,record=?2 WHERE id=?3",
+                rusqlite::params![
+                    prior.attempt_id.to_string(),
+                    serde_json::to_vec(&prior)?,
+                    old.to_string()
+                ],
+            )?;
+            let continuation = session.store.resume_fresh(
+                &run::Resume {
+                    prior: prior.attempt_id,
+                    expected_generation: 0,
+                    operation_id: "redirected-continuation".parse()?,
+                    run_id: RunId::from_bytes([93; 16]),
+                    attempt_id: AttemptId::from_bytes([94; 16]),
+                    prompt: "answer".into(),
+                    created_at: clock.wall_now()?,
+                },
+                "fixture",
+                &call,
+            )?;
+            let home = base.join("home");
+            let cwd = base.join("checkout");
+            let edge = Edge {
+                roots: &roots,
+                home: &home,
+                assets: &cwd,
+                cwd: &cwd,
+            };
+            let result = launch_on_host(
+                &session,
+                continuation.run_id,
+                &edge,
+                &call,
+                None,
+                None,
+                None,
+            );
+            with_chair_index(&roots, &call, |index, c| {
+                assert!(
+                    index
+                        .read(session.context.project_id, continuation.run_id, c)?
+                        .is_none(),
+                    "versioned source: {versioned}"
+                );
+                Ok(())
+            })
+            .map_err(|f| f.message)?;
+            let failure = result.unwrap_err();
+            assert_eq!(failure.status, Status::Refused);
+            assert!(failure.message.contains("source identity"), "{failure:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn continuation_cannot_copy_a_chair_to_a_lane_chosen_replay_run()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Run the host entrypoint outside inherited lane submission mode,
+        // without changing the process environment shared by other tests.
+        if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
+            use provenant_os::exec::{
+                ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+            };
+            let argv = vec![
+                std::env::current_exe()?.into_os_string(),
+                "--exact".into(),
+                "run::children::tests::continuation_cannot_copy_a_chair_to_a_lane_chosen_replay_run".into(),
+                "--nocapture".into(),
+            ];
+            let env: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| key != provenant_core::RUN_STATE_DIRECTORY_ENV)
+                .collect();
+            let cwd = std::env::current_dir()?;
+            let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+            options.env = Some(&env);
+            options.stdout = StreamPolicy::Capture { limit: 65536 };
+            options.stderr = StreamPolicy::Capture { limit: 65536 };
+            let out = SystemExecutor::new(1)?.execute(options)?;
+            assert!(
+                out.termination == Termination::Exit(0) && !out.timed_out,
+                "{out:?}"
+            );
+            assert!(
+                String::from_utf8_lossy(&out.stdout.bytes).contains("test result: ok. 1 passed;"),
+                "host subprocess must execute the regression: {out:?}"
+            );
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|f| f.message)?;
+        let (roots, session, mut child, parent) = chair_fixture(temp.path(), &call)?;
+        session.store.create(&child, &call)?;
+        session
+            .store
+            .refuse_queued(child.run_id, "completed legacy child", &call)?;
+        let digest = parent_digest(&roots, session.context.project_id, parent, &call)?;
+        // A retained legacy source association is trusted host state. The lane
+        // can still forge a continuation operation in its own store.
+        with_chair_index(&roots, &call, |index, c| {
+            index.inherit(
+                session.context.project_id,
+                (parent, digest),
+                child.run_id,
+                &child.request,
+                c,
+            )
+        })
+        .map_err(|f| f.message)?;
+        let prior = child.attempts[0].attempt_id;
+        child.request.parent = Some(prior);
+        child.run_id = RunId::from_bytes([90; 16]);
+        child.operation_id = OperationId::parse("forged-continuation-replay")?;
+        child.attempts[0].attempt_id = AttemptId::from_bytes([91; 16]);
+        session.store.create(&child, &call)?;
+        // Defensively exercise a host continuation given a reopened lane
+        // store, without the scanner's in-memory sealed requester.
+        let session = Session {
+            store: run::RunStore::open(&session.context, &call)?
+                .with_writer_registry(roots.state.as_path()),
+            context: session.context,
+        };
+        let base = std::fs::canonicalize(temp.path())?;
+        let home = base.join("home");
+        let cwd = base.join("checkout");
+        let edge = Edge {
+            roots: &roots,
+            home: &home,
+            assets: &cwd,
+            cwd: &cwd,
+        };
+        // The host's early operation replay adopts the lane's stored run ID.
+        // Authenticate it before copying any chair association.
+        let result = continue_attempt(
+            &session,
+            &edge,
+            prior,
+            child.operation_id.clone(),
+            child.attempts[0].prompt.clone(),
+            0,
+            &call,
+        );
+        with_chair_index(&roots, &call, |index, c| {
+            assert!(
+                index
+                    .read(session.context.project_id, child.run_id, c)?
+                    .is_none()
+            );
+            Ok(())
+        })
+        .map_err(|f| f.message)?;
+        let failure = result.unwrap_err();
+        assert_eq!(failure.status, Status::Refused);
+        assert!(failure.message.contains("host-derived"), "{failure:?}");
+        assert_eq!(
+            session
+                .store
+                .operation(&child.operation_id, &call)?
+                .unwrap()
+                .run_id,
+            child.run_id,
+            "replay must authenticate the stored ID rather than silently rekey it"
+        );
+        // A retained legacy destination seal replays without trusting the
+        // lane-local source again. Old records remain readable as well.
+        with_chair_index(&roots, &call, |index, c| {
+            index.inherit(
+                session.context.project_id,
+                (parent, digest),
+                child.run_id,
+                &child.request,
+                c,
+            )
+        })
+        .map_err(|f| f.message)?;
+        let (replayed, _) = continue_attempt(
+            &session,
+            &edge,
+            prior,
+            child.operation_id.clone(),
+            child.attempts[0].prompt.clone(),
+            0,
+            &call,
+        )
+        .map_err(|f| f.message)?;
+        assert_eq!(replayed.run_id, child.run_id);
+        assert_eq!(session.store.request(child.run_id, &call)?, child.request);
+        with_chair_index(&roots, &call, |index, c| {
+            let binding = index
+                .read(session.context.project_id, child.run_id, c)?
+                .unwrap();
+            assert_eq!(binding.request_digest, child.request.digest()?);
+            assert_eq!(
+                binding.chair,
+                index
+                    .read(session.context.project_id, parent, c)?
+                    .unwrap()
+                    .chair
+            );
+            Ok(())
+        })
+        .map_err(|f| f.message)?;
+        Ok(())
+    }
 
     #[test]
     fn child_policy_refusal_settles_attempt_without_parent_launch_error()

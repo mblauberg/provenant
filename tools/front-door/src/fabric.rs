@@ -2824,7 +2824,7 @@ fn settle_owned_worktree(
                 Vec::new()
             }
         };
-        let mut loop_member = false;
+        let mut graph_member = false;
         for id in ids {
             let checkpoint = match provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
                 &roots.state,
@@ -2838,7 +2838,7 @@ fn settle_owned_worktree(
                     continue;
                 }
             };
-            for node in checkpoint.nodes.iter().filter(|node| node.round.is_some()) {
+            for node in &checkpoint.nodes {
                 for attempt in &node.attempts {
                     if attempt
                         .attempt_ref
@@ -2848,18 +2848,18 @@ fn settle_owned_worktree(
                         || graph_operation("graph-attempt-operation", &attempt.key)
                             .is_ok_and(|operation| operation == record.operation_id)
                     {
-                        loop_member = true;
+                        graph_member = true;
                     }
                 }
             }
-            if loop_member {
+            if graph_member {
                 break;
             }
         }
         // Unknown graph custody retains graph operations conservatively; unrelated lanes still settle.
-        if loop_member || ownership_unknown && record.operation_id.as_str().starts_with("graph-") {
-            let reason = if loop_member {
-                "graph loop writer worktree retained for later rounds and explicit delivery"
+        if graph_member || ownership_unknown && record.operation_id.as_str().starts_with("graph-") {
+            let reason = if graph_member {
+                "graph writer worktree retained for continuation, later rounds and explicit delivery"
             } else {
                 "graph custody could not be read; worktree retained for explicit delivery"
             };
@@ -3979,12 +3979,15 @@ fn graph_snapshot(
     mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint,
 ) -> provenant_fabric_runtime::graph::GraphRun {
     use provenant_fabric_runtime::graph::{GraphRun, GraphStatus, NodeState};
-    let unfinished =
-        (checkpoint.delivery_required && !checkpoint.delivered && checkpoint.successful())
-            || checkpoint
-                .nodes
-                .iter()
-                .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running));
+    let unfinished = checkpoint
+        .nodes
+        .iter()
+        .any(|node| node.expansion_pause.is_some())
+        || (checkpoint.delivery_required && !checkpoint.delivered && checkpoint.successful())
+        || checkpoint
+            .nodes
+            .iter()
+            .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running));
     let status = if checkpoint.cancelled {
         GraphStatus::Cancelled
     } else if !unfinished {
@@ -4685,6 +4688,12 @@ mod result_tests {
             GraphStatus::Paused
         );
         checkpoint.nodes[0].state = NodeState::Succeeded;
+        checkpoint.nodes[0].expansion_pause = Some("fragment exceeds node bound".into());
+        assert_eq!(
+            super::graph_snapshot(checkpoint.clone()).status,
+            GraphStatus::Paused
+        );
+        checkpoint.nodes[0].expansion_pause = None;
         checkpoint.delivery_required = true;
         assert_eq!(
             super::graph_snapshot(checkpoint.clone()).status,

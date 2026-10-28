@@ -48,6 +48,7 @@ impl<'de> Deserialize<'de> for GraphConfig {
             )+};
         }
         inherit!(
+            continuations,
             nodes,
             edges,
             routes_per_node,
@@ -70,6 +71,7 @@ impl<'de> Deserialize<'de> for GraphConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GraphLimits {
+    pub continuations: usize,
     pub nodes: usize,
     pub edges: usize,
     pub routes_per_node: usize,
@@ -98,6 +100,7 @@ where
 impl Default for GraphLimits {
     fn default() -> Self {
         Self {
+            continuations: 2,
             nodes: 512,
             edges: 4096,
             routes_per_node: 16,
@@ -318,6 +321,9 @@ impl DomainConfig for FabricConfig {
         }
         let limits = &self.graph.limits;
         let ceiling = &self.graph.limit_ceiling;
+        if limits.continuations > ceiling.continuations {
+            reject("graph.limits.continuations".into());
+        }
         for (name, value, maximum) in [
             ("nodes", limits.nodes, ceiling.nodes),
             ("edges", limits.edges, ceiling.edges),
@@ -567,6 +573,9 @@ mod tests {
     fn graph_policy_defaults_and_validation() {
         let mut config = config();
         assert_eq!(config.graph.limits.nodes, 512);
+        assert_eq!(config.graph.limits.continuations, 2);
+        config.graph.limits.continuations = 0;
+        assert!(config.validate().is_empty());
         assert_eq!(config.graph.limits.graph_prompt_bytes, 4 * 1024 * 1024);
         assert!(config.graph.budget.per_graph.tokens.is_none());
         config.graph.limits.nodes = 513;
@@ -637,6 +646,17 @@ mod tests {
             provenant_config::load_with_domains(&roots, Some(&text[..]), &sections).unwrap();
         assert_eq!(config.domains.fabric.graph.limit_ceiling.nodes, 10);
         assert_eq!(config.domains.fabric.graph.limit_ceiling.edges, 30);
+        let overrides = crate::graph::GraphLimitOverrides {
+            continuations: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            overrides
+                .resolve(&config.domains.fabric.graph)
+                .unwrap()
+                .continuations,
+            0
+        );
 
         let text = b"schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 11\n[domains.fabric.graph.limit_ceiling]\nnodes = 10\n";
         let error = provenant_config::load_with_domains(&roots, Some(&text[..]), &sections)

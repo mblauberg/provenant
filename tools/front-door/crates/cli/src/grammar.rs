@@ -80,6 +80,8 @@ pub enum Command {
     Route(crate::route::Route),
     /// Dispatch, wait and read the result
     Run(Box<Dispatch>),
+    /// Dispatch and collect a configured review shape
+    Review(Review),
     /// Show active and recent lanes, newest first
     Status(Status),
     /// Merge on green CI and prune the merged worktree
@@ -145,6 +147,29 @@ pub enum Command {
     #[command(subcommand, hide = true)]
     Internal(Internal),
 }
+#[derive(Debug, Args)]
+pub struct Review {
+    /// Git commit to review
+    pub target: String,
+    /// File containing the review brief
+    #[arg(long)]
+    pub brief_file: PathBuf,
+    /// Override the selected review shape
+    #[arg(long)]
+    pub shape: Option<String>,
+    /// Risk tier used to select a shape
+    #[arg(long)]
+    pub risk: Option<String>,
+    /// Task kind used to select a shape
+    #[arg(long)]
+    pub kind: Option<String>,
+    /// Git range whose changed paths select the shape
+    #[arg(long)]
+    pub range: Option<String>,
+    /// Overall wait limit (seconds or a duration such as 30m)
+    #[arg(long, default_value = "3600", value_parser = duration_seconds)]
+    pub wait: u64,
+}
 #[derive(Debug, Subcommand)]
 pub enum Pr {
     /// Wait for CI and report pass or fail with the pull request head
@@ -191,6 +216,9 @@ pub struct PrOpen {
 }
 #[derive(Debug, Subcommand)]
 pub enum Chair {
+    /// Read and update viewer-owned presentation state.
+    #[command(subcommand)]
+    Viewer(ChairViewer),
     /// Read and update a chair session's structured summary.
     #[command(subcommand)]
     Summary(ChairSummary),
@@ -209,6 +237,87 @@ pub enum Chair {
         #[arg(long)]
         session_id: Option<String>,
     },
+}
+#[derive(Debug, Subcommand)]
+pub enum ChairViewer {
+    /// Show presentation state for one request.
+    Request {
+        viewer: String,
+        id: provenant_core::HumanRequestId,
+    },
+    /// Set presentation state for one request; this never resolves it.
+    SetRequest {
+        viewer: String,
+        id: provenant_core::HumanRequestId,
+        /// Revision actually viewed, or omit for unread
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        seen_revision: Option<u64>,
+        /// Snooze until this UTC timestamp
+        #[arg(long)]
+        snoozed_until: Option<String>,
+        /// Hide this item for this viewer
+        #[arg(long)]
+        dismissed: bool,
+    },
+    /// Compare a viewer's last rendered summary with a chosen revision.
+    Summary {
+        viewer: String,
+        session: String,
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        to: Option<u64>,
+    },
+    /// Record the summary revision actually rendered by this viewer.
+    Rendered {
+        viewer: String,
+        session: String,
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        revision: u64,
+    },
+    /// Forget a viewer's summary baseline.
+    Forget { viewer: String, session: String },
+}
+
+#[cfg(test)]
+mod viewer_tests {
+    use super::*;
+
+    #[test]
+    fn viewer_revision_flags_reject_zero() {
+        for args in [
+            vec![
+                "provenant",
+                "chair",
+                "viewer",
+                "set-request",
+                "v",
+                "00000000000000000000000000000001",
+                "--seen-revision",
+                "0",
+            ],
+            vec![
+                "provenant",
+                "chair",
+                "viewer",
+                "summary",
+                "v",
+                "s",
+                "--to",
+                "0",
+            ],
+            vec![
+                "provenant",
+                "chair",
+                "viewer",
+                "rendered",
+                "v",
+                "s",
+                "--revision",
+                "0",
+            ],
+        ] {
+            assert!(RawInvocation::try_parse_from(args).is_err());
+        }
+    }
 }
 #[derive(Debug, Subcommand)]
 pub enum ChairSummary {

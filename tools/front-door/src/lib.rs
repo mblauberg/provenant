@@ -587,6 +587,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             }
             reply
         }),
+        Command::Review(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::review(cmd, edge)
+        }),
         Command::Status(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::status(cmd, globals.json, edge)
         }),

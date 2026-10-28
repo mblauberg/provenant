@@ -15,15 +15,7 @@ const PUBLIC: &[&str] = &[
     "docs/ARCHITECTURE.md",
     "docs/worktrees.md",
 ];
-const LEGAL: &[&str] = &[
-    "LICENSE",
-    "NOTICE",
-    "THIRD_PARTY_NOTICES.md",
-    "LICENSES/grill-me-pocock-MIT.txt",
-    "LICENSES/impeccable-APACHE-2.0.txt",
-    "LICENSES/skill-optimizer-MIT.txt",
-    "LICENSES/ui-ux-pro-max-MIT.txt",
-];
+const LEGAL: &[&str] = &["LICENSE"];
 
 pub(super) fn inspect(
     git: &GitContext<'_>,
