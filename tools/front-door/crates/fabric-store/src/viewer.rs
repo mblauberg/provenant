@@ -84,7 +84,7 @@ impl Store {
             if seen.is_some_and(|revision| revision > current) { return Err(Error::Invalid("seen revision")); }
             let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM viewer_requests WHERE project=?1 AND viewer=?2 AND request=?3)", params![project.to_string(), viewer, id.to_string()], |r| r.get(0))?;
             capacity(tx, "request", project, existing)?;
-            tx.execute("INSERT INTO viewer_requests VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(project,viewer,request) DO UPDATE SET seen_revision=excluded.seen_revision,snoozed_until=excluded.snoozed_until,dismissed=excluded.dismissed",
+            tx.execute("INSERT INTO viewer_requests(project,viewer,request,seen_revision,snoozed_until,dismissed) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(project,viewer,request) DO UPDATE SET seen_revision=excluded.seen_revision,snoozed_until=excluded.snoozed_until,dismissed=excluded.dismissed",
                 params![project.to_string(), viewer, id.to_string(), seen, value.snoozed_until.map(|t| t.to_string()), value.dismissed])?;
             Ok(())
         })
@@ -126,7 +126,7 @@ impl Store {
         self.write(request, |tx| {
             let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM viewer_summaries WHERE project=?1 AND viewer=?2 AND session=?3)", params![project.to_string(), viewer, session], |r| r.get(0))?;
             capacity(tx, "summary", project, existing)?;
-            tx.execute("INSERT INTO viewer_summaries VALUES(?1,?2,?3,?4) ON CONFLICT(project,viewer,session) DO UPDATE SET revision=excluded.revision", params![project.to_string(), viewer, session, revision])?;
+            tx.execute("INSERT INTO viewer_summaries(project,viewer,session,revision) VALUES(?1,?2,?3,?4) ON CONFLICT(project,viewer,session) DO UPDATE SET revision=excluded.revision", params![project.to_string(), viewer, session, revision])?;
             Ok(())
         })
     }

@@ -225,7 +225,7 @@ pub enum ChairViewer {
         viewer: String,
         id: provenant_core::HumanRequestId,
         /// Revision actually viewed, or omit for unread
-        #[arg(long)]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         seen_revision: Option<u64>,
         /// Snooze until this UTC timestamp
         #[arg(long)]
@@ -238,16 +238,59 @@ pub enum ChairViewer {
     Summary {
         viewer: String,
         session: String,
-        #[arg(long)]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         to: Option<u64>,
     },
     /// Record the summary revision actually rendered by this viewer.
     Rendered {
         viewer: String,
         session: String,
-        #[arg(long)]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         revision: u64,
     },
+}
+
+#[cfg(test)]
+mod viewer_tests {
+    use super::*;
+
+    #[test]
+    fn viewer_revision_flags_reject_zero() {
+        for args in [
+            vec![
+                "provenant",
+                "chair",
+                "viewer",
+                "set-request",
+                "v",
+                "00000000000000000000000000000001",
+                "--seen-revision",
+                "0",
+            ],
+            vec![
+                "provenant",
+                "chair",
+                "viewer",
+                "summary",
+                "v",
+                "s",
+                "--to",
+                "0",
+            ],
+            vec![
+                "provenant",
+                "chair",
+                "viewer",
+                "rendered",
+                "v",
+                "s",
+                "--revision",
+                "0",
+            ],
+        ] {
+            assert!(RawInvocation::try_parse_from(args).is_err());
+        }
+    }
 }
 #[derive(Debug, Subcommand)]
 pub enum ChairSummary {

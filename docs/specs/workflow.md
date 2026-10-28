@@ -143,6 +143,7 @@ revision guard. A bounded comparison of retained summary revisions reports
 unavailable history, scalar changes and added or removed request IDs. Inbox
 reconciliation compares the local host, project and chair; references observed
 elsewhere or unaccounted for by an incomplete scan are unknown, not stale.
+Viewer comparisons use the viewer's rendered revision as their baseline.
 - Why: concurrent saves and incomplete or differently scoped observations must
   not overwrite chair work or represent a live request as resolved.
 - Test: `crates/workflow/src/session.rs::retained_summary_diff_compares_fields_and_reports_missing`;

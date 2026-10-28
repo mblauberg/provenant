@@ -38,6 +38,14 @@ fn viewer_isolation() {
         closure_reason: None,
     };
     store.create_human_request(&original, &request).unwrap();
+    for sql in [
+        "INSERT INTO viewer_requests(project,viewer,request,seen_revision) VALUES('p','v','r',0)",
+        "INSERT INTO viewer_requests(project,viewer,request,dismissed) VALUES('p','v','r',2)",
+        "INSERT INTO viewer_summaries(project,viewer,session,revision) VALUES('p','v','s',0)",
+        "INSERT INTO viewer_summaries(project,viewer,session,revision) VALUES('p','','s',1)",
+    ] {
+        assert!(store.db.execute(sql, []).is_err(), "{sql}");
+    }
     let view = RequestView {
         seen_revision: Some(1),
         snoozed_until: Some(f.now()),

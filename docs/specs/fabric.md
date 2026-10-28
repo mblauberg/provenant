@@ -82,6 +82,14 @@ claim complete coverage.
 
 ## Human requests
 
+Viewer request presentation state is separate from resolution and blocking.
+Viewer names are caller-supplied labels, like agent labels: they are not an
+authentication boundary. A local caller that knows a label can change that
+viewer's state; the direct SQLite access residual above also applies.
+- Why: viewing and snoozing do not authorise an answer or unblock work.
+- Test: `crates/fabric-store/src/tests/human_inbox.rs::viewer_isolation`
+- Owner: `crates/fabric-store/src/viewer.rs`
+
 Human requests, immutable answers, revision history and the delivery outbox
 belong to Fabric. CLI and MCP must use the same service. The service binds
 project, host and actor from Fabric identity; request JSON cannot supply them.
