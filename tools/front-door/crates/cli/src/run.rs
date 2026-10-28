@@ -7400,22 +7400,31 @@ mod tests {
     #[test]
     fn capacity_store_failure_does_not_change_settlement() -> Result<(), Box<dyn std::error::Error>>
     {
-        struct Resolver;
-        impl provenant_core::PathResolver for Resolver {
-            fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
-                Ok(path.into())
-            }
-        }
+        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir()?;
-        let mut inputs =
-            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
-        inputs.state_dir = Some(temp.path().join("state"));
-        let roots = inputs.resolve(&Resolver)?;
-        std::fs::create_dir_all(roots.state.as_path())?;
-        let registry = Registry {
-            roots: Some(&roots),
-            state_root: Some(Path::new("/dev/null")),
-            ..Default::default()
+        let state = temp.path().join("state");
+        let account_dir = state.join("quota/key");
+        std::fs::create_dir_all(&account_dir)?;
+        for dir in [&state, &state.join("quota"), &account_dir] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let bad_record = account_dir.join("codex.json");
+        std::fs::write(&bad_record, b"invalid quota record")?;
+        std::fs::set_permissions(&bad_record, std::fs::Permissions::from_mode(0o600))?;
+        let context = run::HolderContext {
+            schema_version: 1,
+            roots: run::RootSeed {
+                home: temp.path().join("home"),
+                checkout: temp.path().join("checkout"),
+                state_root: state.clone(),
+            },
+            project_id: provenant_core::ProjectId::from_bytes([1; 16]),
+            actor_id: ActorId::from_bytes([2; 16]),
+            run_id: RunId::from_bytes([3; 16]),
+            attempt_id: AttemptId::from_bytes([4; 16]),
+            host_delivery: None,
+            launch: None,
+            sealed: None,
         };
         let route = run::RouteRecord {
             provider: Some("codex".into()),
@@ -7427,19 +7436,86 @@ mod tests {
         let stream = br#"{"type":"turn.failed","error":{"message":"at capacity","codex_error_info":"server_overloaded"}}"#;
         let mut exit = clean_exit();
         exit.termination = Some(provenant_os::exec::Termination::Exit(1));
-        // /dev/null cannot contain quota state.
-        assert!(
-            crate::quota::persist_capacity_cooldown(Path::new("/dev/null"), &route, 100, 600)
-                .is_err()
-        );
-        let decoded = registry
-            .decode_inner(&route, stream, &exit, Path::new("/nonexistent"), true)
-            .unwrap();
+        // The malformed on-disk record makes the store update fail after the
+        // settlement path creates the lock. The lock proves it attempted the write.
+        assert!(!state.join("quota/quota.lock").exists());
+        let decoded = Registry::default().decode_with_context(
+            &route,
+            stream,
+            &exit,
+            Path::new("/nonexistent"),
+            &context,
+        )?;
+        assert!(state.join("quota/quota.lock").is_file());
+        assert_eq!(std::fs::read(&bad_record)?, b"invalid quota record");
         assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
         assert_eq!(
             decoded.reason.as_deref(),
             Some("provider capacity: at capacity")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn nested_capacity_settlement_does_not_write_shared_cooldown()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::exec::{
+            ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+        };
+        use std::ffi::OsString;
+        const MARKER: &str = "PROVENANT_TEST_NESTED_CAPACITY_CHILD";
+        if std::env::var_os(MARKER).is_none() {
+            let argv = vec![
+                std::env::current_exe()?.into_os_string(),
+                "--exact".into(),
+                "run::tests::nested_capacity_settlement_does_not_write_shared_cooldown".into(),
+                "--nocapture".into(),
+            ];
+            let mut env: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| key != MARKER && key != provenant_core::RUN_STATE_DIRECTORY_ENV)
+                .collect();
+            env.push((OsString::from(MARKER), OsString::from("1")));
+            env.push((
+                OsString::from(provenant_core::RUN_STATE_DIRECTORY_ENV),
+                OsString::from("nested"),
+            ));
+            let cwd = std::env::current_dir()?;
+            let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+            options.env = Some(&env);
+            options.stdout = StreamPolicy::Capture { limit: 65_536 };
+            options.stderr = StreamPolicy::Capture { limit: 65_536 };
+            let out = SystemExecutor::new(1)?.execute(options)?;
+            assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+            assert!(!out.timed_out, "{out:?}");
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        let registry = Registry {
+            roots: Some(&roots),
+            ..Default::default()
+        };
+        let route = run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6.1-sol".into()),
+            account_key: Some("key".into()),
+            account_label: Some("label".into()),
+            ..Default::default()
+        };
+        let stream = br#"{"type":"turn.failed","error":{"message":"at capacity","codex_error_info":"server_overloaded"}}"#;
+        let mut exit = clean_exit();
+        exit.termination = Some(Termination::Exit(1));
+        let decoded = registry.decode(&route, stream, &exit, Path::new("/nonexistent"))?;
+        assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("provider capacity: at capacity")
+        );
+        assert!(!roots.state.as_path().join("quota").exists());
         Ok(())
     }
 
@@ -7503,6 +7579,29 @@ mod tests {
             state.join("quota/key/codex.json"),
         )?)?;
         assert_eq!(record.capacity_cooldowns.len(), 1);
+        let before = std::fs::read(state.join("quota/key/codex.json"))?;
+        let mut nested = context.clone();
+        nested.roots.state_root = state.join("children/child");
+        nested.launch = Some(run::HostLaunchContext {
+            configuration_root: state.clone(),
+            cwd: temp.path().join("checkout"),
+            executables: Default::default(),
+            executable_search_path: Vec::new(),
+            git: PathBuf::from("/usr/bin/git"),
+            codex_home: None,
+            #[cfg(feature = "fixture")]
+            fixture_state_write: false,
+        });
+        let nested_result = registry.decode_with_context(
+            &route,
+            stream,
+            &exit,
+            Path::new("/nonexistent"),
+            &nested,
+        )?;
+        assert_eq!(nested_result.outcome, run::Outcome::ModelUnavailable);
+        assert_eq!(std::fs::read(state.join("quota/key/codex.json"))?, before);
+        assert!(!nested.roots.state_root.join("quota").exists());
         Ok(())
     }
 

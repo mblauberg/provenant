@@ -125,6 +125,9 @@ pub fn reserve(
     for refusal in &mut record.refusals {
         refusal.account = account.clone();
     }
+    for cooldown in &mut record.capacity_cooldowns {
+        cooldown.account = account.clone();
+    }
     record.revision = record
         .revision
         .checked_add(1)
@@ -822,7 +825,10 @@ mod tests {
         let a = account();
         let mut renamed = a.clone();
         renamed.label = "renamed".into();
-        let r = AccountRecord::empty(a.clone());
+        let r = record_capacity_cooldown(None, &a, "claude/model", 100, 600)
+            .unwrap()
+            .replacement
+            .unwrap();
         let intent = reserve(
             crate::source::TEST_POLICIES,
             Some(&r),
@@ -836,6 +842,9 @@ mod tests {
         intent.check(Some(&r)).unwrap();
         let reserved = intent.replacement.unwrap();
         assert_eq!(reserved.account, renamed);
+        assert_eq!(reserved.capacity_cooldowns.len(), 1);
+        assert_eq!(reserved.capacity_cooldowns[0].account, renamed);
+        assert_eq!(reserved.capacity_cooldowns[0].expires_unix_seconds, 700);
         let done = complete(&reserved, "claim", 420, Err(ProbeFailure::Auth), None).unwrap();
         assert_eq!(done.replacement.unwrap().account, renamed);
     }

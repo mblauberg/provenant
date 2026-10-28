@@ -549,6 +549,46 @@ mod admission_tests {
         assert!(record_refusal(None, &account, &model, None, 1000, Some(1000)).is_err());
     }
     #[test]
+    fn capacity_evidence_does_not_refuse_admission_but_quota_refusal_does() {
+        let account = record(QuotaStatus::Available).account;
+        let mut route = route();
+        route.readiness = RouteReadiness::Ready {
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 99_999,
+        };
+        let model = format!("{}/{}", account.adapter, route.model);
+        let capacity = record_capacity_cooldown(None, &account, &model, 1000, 600)
+            .unwrap()
+            .replacement
+            .unwrap();
+        assert!(capacity.refusals.is_empty());
+        let admit = |record: &AccountRecord, now| {
+            Admission {
+                policies: crate::source::TEST_POLICIES,
+                now_unix_seconds: now,
+                records: std::slice::from_ref(record),
+                pools: &[],
+            }
+            .check(&route)
+        };
+        assert!(admit(&capacity, 1001).is_ok());
+        let both = record_refusal(Some(&capacity), &account, &model, None, 1000, Some(3000))
+            .unwrap()
+            .replacement
+            .unwrap();
+        assert_eq!(both.capacity_cooldowns.len(), 1);
+        assert_eq!(both.refusals.len(), 1);
+        assert!(matches!(
+            admit(&both, 1001),
+            Err(QuotaError::Refused("scoped provider refusal"))
+        ));
+        assert!(matches!(
+            admit(&both, 1600),
+            Err(QuotaError::Refused("scoped provider refusal"))
+        ));
+        assert!(admit(&both, 3000).is_ok());
+    }
+    #[test]
     fn lapsed_window_requires_headroom_to_clear_a_newer_refusal() {
         for (used, allowed) in [(9700, false), (9600, false), (9500, false), (9499, true)] {
             let mut record = record(QuotaStatus::Available);

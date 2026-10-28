@@ -98,7 +98,7 @@ fn fixture() -> Result {
             format!(
                 "{}\n{}\n{}\n",
                 json!({"type":"session_meta","payload":{"id":recorded_session}}),
-                json!({"type":"turn_context","payload":{"model":"gpt-6-luna","effort":"low"}}),
+                json!({"type":"turn_context","payload":{"model": if prompt.contains("fixture pool result") { "gpt-6.1-sol" } else { "gpt-6-luna" },"effort":"low"}}),
                 json!({"type":"response_item","payload":{"content":"must not be retained"}})
             ),
         )?;
@@ -436,6 +436,55 @@ fn capacity_holder_persists_and_explicit_and_resume_ignore_cooldown() -> Result 
         explicit["data"]["lanes"][0]["state"], "succeeded",
         "{explicit}"
     );
+    // Exercise the public senior and junior routes through the full CLI and
+    // host preparation path while the same account has a live cooldown.
+    let config_path = rig.state.join("config.toml");
+    let config = fs::read_to_string(&config_path)?;
+    fs::write(
+        &config_path,
+        format!(
+            "{config}\n[domains.routing.pools]\n\
+            junior = [{{ model = \"codex/gpt-6-luna\", weight = 100, effort = \"low\", efforts = [\"low\"] }}, {{ model = \"codex/gpt-6.1-sol\", weight = 1, effort = \"low\", efforts = [\"low\"] }}]\n\
+            senior = [{{ model = \"codex/gpt-6-luna\", weight = 100, effort = \"low\", efforts = [\"low\"] }}, {{ model = \"codex/gpt-6.1-sol\", weight = 1, effort = \"low\", efforts = [\"low\"] }}]\n"
+        ),
+    )?;
+    fs::write(&prompt, "fixture pool result")?;
+    for pool in ["senior", "junior"] {
+        let operation = format!("capacity-pool-{pool}");
+        let draw = rig.command(&[
+            "dispatch",
+            "--route",
+            pool,
+            "--operation-id",
+            &operation,
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--wait",
+            "5s",
+            "--json",
+        ])?;
+        assert_eq!(code(&draw), 0, "{draw:?}");
+        let draw: Value = serde_json::from_slice(&draw.stdout.bytes)?;
+        let run = draw["data"]["run_id"].as_str().ok_or("pool run")?;
+        let lanes = rig.command(&["lanes", "--id", run, "--json"])?;
+        let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+        let lane = &lanes["data"]["lanes"][0];
+        assert_eq!(lane["state"], "succeeded", "{lane}");
+        assert_eq!(
+            lane["applied_route"]["model"], "codex/gpt-6.1-sol",
+            "{lane}"
+        );
+        let receipt = &lane["applied_route"]["pool_selection"];
+        assert_eq!(receipt["pool"], pool, "{receipt}");
+        let excluded = receipt["candidates"]
+            .as_array()
+            .ok_or("pool candidates")?
+            .iter()
+            .find(|candidate| candidate["model"] == "codex/gpt-6-luna")
+            .ok_or("cooling candidate")?;
+        assert_eq!(excluded["exclusion"], "capacity cooldown", "{receipt}");
+    }
+    fs::write(&prompt, "reply OK")?;
     let resumed = rig.command(&[
         "resume",
         id,
