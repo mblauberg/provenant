@@ -9,7 +9,7 @@ const SECTION_LINES: usize = 8;
 /// Longest single field taken from a lane, PR or worktree record.
 const FIELD_LIMIT: usize = 160;
 /// Most PR numbers taken from the chair's own checkpoint text.
-pub const PR_REF_LIMIT: usize = 8;
+pub const PR_REF_LIMIT: usize = 16;
 pub const DIGEST_LIMIT: usize = 3 * 1024;
 pub const BLOCK_LIMIT: usize = 6 * 1024;
 /// Longest next-page command shown as a runnable command.
@@ -131,7 +131,8 @@ impl LaneLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrLine {
     pub number: u64,
-    pub status: String,
+    pub state: String,
+    pub summary: String,
 }
 /// A named PR whose status could not be read, and the command that reads it
 /// from the same store the collector used (or a plain note when none is safe).
@@ -211,19 +212,70 @@ impl SessionState {
         };
         if !self.unavailable.iter().any(|name| name == "lanes") {
             sections.push(lanes("Lanes in flight", &self.active, &self.active_more));
-            sections.push(lanes(
+            let mut settled = lanes(
                 "Lanes settled since the last chair save",
                 &self.settled,
                 &self.settled_more,
-            ));
+            );
+            let mut counts = std::collections::BTreeMap::new();
+            for lane in &self.settled {
+                *counts.entry(clean(&lane.state, 32)).or_insert(0usize) += 1;
+            }
+            let failures: Vec<_> = self
+                .settled
+                .iter()
+                .filter(|lane| lane.state != "succeeded")
+                .collect();
+            settled.lines = if counts.is_empty() {
+                vec![]
+            } else {
+                vec![
+                    counts
+                        .iter()
+                        .map(|(state, count)| format!("{state}: {count}"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ]
+            };
+            settled.lines.extend(
+                failures
+                    .iter()
+                    .take(SECTION_LINES)
+                    .map(|lane| lane.render()),
+            );
+            settled.more = failures.len().saturating_sub(SECTION_LINES);
+            sections.push(settled);
         }
         if !self.prs.is_empty() || !self.prs_unread.is_empty() {
             let mut lines: Vec<String> = self
                 .prs
                 .iter()
-                .take(PR_REF_LIMIT)
-                .map(|pr| format!("#{} {}", pr.number, clean(&pr.status, FIELD_LIMIT)))
+                .filter(|pr| pr.state.eq_ignore_ascii_case("open"))
+                .map(|pr| format!("#{} {}", pr.number, clean(&pr.summary, FIELD_LIMIT)))
                 .collect();
+            let merged = self
+                .prs
+                .iter()
+                .filter(|pr| pr.state.eq_ignore_ascii_case("merged"))
+                .count();
+            let closed = self
+                .prs
+                .iter()
+                .filter(|pr| pr.state.eq_ignore_ascii_case("closed"))
+                .count();
+            if merged + closed > 0 {
+                lines.push(format!("{merged} merged, {closed} closed"));
+            }
+            lines.extend(
+                self.prs
+                    .iter()
+                    .filter(|pr| {
+                        !["open", "merged", "closed"]
+                            .iter()
+                            .any(|s| pr.state.eq_ignore_ascii_case(s))
+                    })
+                    .map(|pr| format!("#{} status unavailable", pr.number)),
+            );
             lines.extend(self.prs_unread.iter().take(PR_REF_LIMIT).map(|pr| {
                 // Same rule as a lane paging command: code only if it
                 // survives rendering byte for byte.
@@ -472,6 +524,37 @@ mod tests {
     }
 
     #[test]
+    fn settled_successes_and_merged_prs_are_compact() {
+        let state = SessionState {
+            settled: (0..20)
+                .map(|n| LaneLine {
+                    state: "succeeded".into(),
+                    ..lane(&format!("success-{n}"))
+                })
+                .chain(std::iter::once(LaneLine {
+                    state: "failed".into(),
+                    ..lane("failure")
+                }))
+                .collect(),
+            prs: (1..=10)
+                .map(|number| PrLine {
+                    number,
+                    state: "MERGED".into(),
+                    summary: "irrelevant".into(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let digest = state.digest(DIGEST_LIMIT);
+        assert!(digest.len() < 2048, "{}", digest.len());
+        assert!(digest.contains("10 merged, 0 closed"));
+        assert!(digest.contains("succeeded: 20"));
+        assert!(digest.contains("failure failed"));
+        assert!(!digest.contains("success-"));
+        assert!(!digest.contains("#1 "));
+    }
+
+    #[test]
     fn hostile_fields_cannot_forge_markers_or_headings() {
         let state = SessionState {
             active: vec![LaneLine {
@@ -635,7 +718,7 @@ mod tests {
             Issue #99 is separate. Sprint 7 and prune 3 are not PRs. PR #12 again.";
         assert_eq!(pr_refs(text), vec![12, 34, 56, 78]);
         let many = (1..=12).map(|n| format!("PR #{n} ")).collect::<String>();
-        assert_eq!(pr_refs(&many), (5..=12).collect::<Vec<_>>());
+        assert_eq!(pr_refs(&many), (1..=12).collect::<Vec<_>>());
     }
 
     #[test]

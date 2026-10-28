@@ -280,7 +280,9 @@ must be at the attempt's head on the remote. Complete the gate rows marked
 attempt must be local and `succeeded` or `review_required`, with a recorded
 head; read-only reviews supply the reviewer rows. `provenant pr status 148 149`
 prints `#148 OPEN <head> checks=3/4 pending=1 merge=blocked review=none`, one
-line each, for polling without parsing `gh` output.
+line each, for polling without parsing `gh` output. If checks cannot be read,
+the line says `checks=unavailable` and the JSON check counts are null; an
+explicit empty checks result reports zero.
 
 ### Land a pull request
 

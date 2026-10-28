@@ -23,10 +23,9 @@ leads. Live run status belongs to run lanes and Fabric tasks.
 
 ## Checkpoint
 
-Before compaction, handoff, or a substantial interruption, save concise Markdown
+Before compaction, handoff, or a substantial interruption, rewrite the checkpoint as concise current-state Markdown
 with the goal, authority and evidence references, verified progress, next
-actions, blockers, and a resume trigger. Keep it within the 32 KiB checkpoint
-limit. Do not paste transcripts, credentials, or unverified worker claims.
+actions, blockers, and a resume trigger. Keep it near 2 KiB; the hard checkpoint limit is 256 KiB. Put history in PRs and issues rather than appending it to the checkpoint. Do not paste transcripts, credentials, or unverified worker claims.
 
 Use the host session ID and the bounded save command:
 

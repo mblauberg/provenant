@@ -173,7 +173,8 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
             match handle.join() {
                 Ok((number, Ok(data))) => state.prs.push(PrLine {
                     number,
-                    status: pr_status(&data),
+                    state: pr_status(&data).0,
+                    summary: pr_status(&data).1,
                 }),
                 Ok((number, Err(_))) => state.prs_unread.push(PrUnread {
                     number,
@@ -293,33 +294,31 @@ fn parse_worktrees(data: &Value) -> Vec<WorktreeLine> {
         })
         .collect()
 }
-/// A one-line summary of `pr status` data. It reads the scalar fields a PR
-/// summary is likely to carry and falls back to the data's own JSON, so a
-/// change to that command's fields degrades the line rather than the hook.
-fn pr_status(data: &Value) -> String {
-    let mut parts = Vec::new();
-    for key in [
-        "state",
-        "ci",
-        "checks",
-        "review",
-        "mergeable",
-        "draft",
-        "head",
-    ] {
-        let shown = match &data[key] {
-            Value::String(value) => Some(value.chars().take(40).collect::<String>()),
-            Value::Bool(value) => Some(value.to_string()),
-            _ => None,
-        };
-        if let Some(value) = shown {
-            parts.push(format!("{key}={value}"));
+/// Read the first line of the CLI's status array; unknown fields stay unknown.
+fn pr_status(data: &Value) -> (String, String) {
+    let data = data
+        .as_array()
+        .and_then(|lines| lines.first())
+        .unwrap_or(data);
+    let state = data["state"].as_str().unwrap_or("unknown").to_owned();
+    let head: String = data["head"]
+        .as_str()
+        .unwrap_or("unknown")
+        .chars()
+        .take(7)
+        .collect();
+    let checks = match (
+        data["checks_passed"].as_u64(),
+        data["checks_total"].as_u64(),
+        data["checks_failed"].as_u64(),
+        data["checks_pending"].as_u64(),
+    ) {
+        (Some(passed), Some(total), Some(failed), Some(pending)) => {
+            format!("checks={passed}/{total} failed={failed} pending={pending}")
         }
-    }
-    if parts.is_empty() {
-        return data.to_string().chars().take(120).collect();
-    }
-    parts.join(" ")
+        _ => "checks=unavailable".to_owned(),
+    };
+    (state, format!("{head} {checks}"))
 }
 
 #[cfg(test)]
@@ -470,13 +469,40 @@ mod tests {
     }
 
     #[test]
-    fn pr_status_reads_known_fields_or_falls_back_to_bounded_json() {
+    fn digest_reports_unavailable_checks_without_claiming_zero() {
         use super::*;
         use serde_json::json;
-        assert_eq!(
-            pr_status(&json!({"state":"open","ci":"passing","draft":false,"head":"abc"})),
-            "state=open ci=passing draft=false head=abc"
+        let (state, summary) = pr_status(
+            &json!([{"state":"OPEN", "head":"abcdef123456", "checks_passed":null, "checks_total":null, "checks_failed":null, "checks_pending":null}]),
         );
-        assert!(pr_status(&json!({"other": "x".repeat(500)})).len() <= 120);
+        let digest = SessionState {
+            prs: vec![PrLine {
+                number: 42,
+                state,
+                summary,
+            }],
+            ..Default::default()
+        }
+        .digest(provenant_workflow::session::DIGEST_LIMIT);
+        assert!(
+            digest.contains("#42 abcdef1 checks=unavailable"),
+            "{digest}"
+        );
+        assert!(!digest.contains("0/0"));
+        let (_, zero) = pr_status(
+            &json!([{"state":"OPEN", "head":"abcdef1", "checks_passed":0, "checks_total":0, "checks_failed":0, "checks_pending":0}]),
+        );
+        assert!(zero.contains("checks=0/0"));
+    }
+
+    #[test]
+    fn pr_status_reads_cli_array() {
+        use super::*;
+        use serde_json::json;
+        let (state, summary) = pr_status(
+            &json!([{"state":"OPEN", "head":"abcdef123456", "checks_passed":2, "checks_total":3, "checks_failed":0, "checks_pending":1}]),
+        );
+        assert_eq!(state, "OPEN");
+        assert_eq!(summary, "abcdef1 checks=2/3 failed=0 pending=1");
     }
 }
