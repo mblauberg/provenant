@@ -477,8 +477,12 @@ refuses symlinks and non-regular object files; it copies neither lane alternates
 nor pack indices. The host rebuilds indices with `index-pack --strict` and pins
 the shared store as the only alternate. `fsck --full --no-reflogs --no-dangling
 <head>` checks object contents and connectivity before any instruction recovery,
-diff or ancestry read of the branch. An explicit head avoids consulting another
-live lane's refs or the lane index. A non-commit head or any verification failure
+diff or ancestry read of the branch. Shared-store verification uses a fresh bare
+view with an empty primary object directory and the shared store as its sole
+alternate. This avoids inspecting another live lane's refs, index or unfinished
+operation markers, and prevents private objects from shadowing corrupt shared
+objects. Ref and unfinished-operation validation remain separate settlement
+checks. A non-commit head or any verification failure
 refuses settlement certification and delivery.
 
 Only a verified snapshot is published, without replacing existing shared files.

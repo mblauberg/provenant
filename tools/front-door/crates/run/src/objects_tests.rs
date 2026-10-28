@@ -478,6 +478,27 @@ fn forged_duplicate_object_cannot_replace_shared_content() -> TestResult {
 }
 
 #[test]
+fn object_verification_ignores_unrelated_unfinished_worktree_metadata() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    fs::write(
+        fixture
+            .worktree
+            .repo()
+            .private_git_dir()
+            .join("CHERRY_PICK_HEAD"),
+        "unfinished cherry-pick\n",
+    )?;
+    fixture.import()?;
+    verify_graph(
+        &fixture.git,
+        fixture.worktree.repo().private_git_dir(),
+        &fixture.lane,
+        fixture.head,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn hash_verification_refuses_a_corrupt_shared_blob_that_cat_file_accepts() -> TestResult {
     let fixture = Fixture::new("sha1")?;
     fixture.import()?;

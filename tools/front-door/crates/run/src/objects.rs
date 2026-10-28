@@ -140,7 +140,7 @@ fn verify(
     head: GitOid,
     alternate: Option<&Path>,
 ) -> Result<()> {
-    // Explicit head avoids consulting other live lanes' refs or the lane index.
+    // Callers supply a fresh bare view without lane refs or a lane index.
     // --full hashes loose contents and packed objects, including alternates.
     command(
         git,
@@ -180,11 +180,9 @@ pub(crate) fn verify_graph(git: &Path, git_dir: &Path, cwd: &Path, head: GitOid)
     use std::os::unix::ffi::OsStringExt;
     let common = common.strip_suffix(b"\n").ok_or_else(invalid)?;
     let common = OsString::from_vec(common.to_vec());
-    let _lock = object_lock(
-        &Directory::open_anchor(Path::new(&common))?,
-        LockMode::Shared,
-    )?;
-    verify(git, Path::new(&common), cwd, head, None)
+    let directory = Directory::open_anchor(Path::new(&common))?;
+    let _lock = object_lock(&directory, LockMode::Shared)?;
+    verify_shared(git, &directory, Path::new(&common), cwd, head)
 }
 
 fn object_lock(common: &Directory, mode: LockMode) -> Result<LockGuard> {
@@ -407,6 +405,68 @@ fn copy(source: &Directory, destination: &Directory, name: &OsStr, budget: &mut 
     Ok(())
 }
 
+fn initialise_view(
+    git: &Path,
+    common: &Directory,
+    cwd: &Path,
+    staging: &Directory,
+    staging_path: &Path,
+    head: GitOid,
+) -> Result<()> {
+    let format = if head.to_string().len() == 64 {
+        "sha256"
+    } else {
+        "sha1"
+    };
+    let mut init = args(&[
+        "init",
+        "--bare",
+        "--quiet",
+        "--template=",
+        &format!("--object-format={format}"),
+    ]);
+    init.push(staging_path.to_path_buf().into());
+    command(git, staging_path, cwd, &init, None)?;
+    // Preserve only the host's trusted shallow boundary. A lane cannot turn a
+    // missing parent into an accepted boundary through its private metadata.
+    match common.read_stable(OsStr::new("shallow"), 1024 * 1024) {
+        Ok(bytes) => staging
+            .atomic_write(
+                OsStr::new("shallow"),
+                ".objects-",
+                &bytes,
+                PublishMode::NoReplace,
+            )?
+            .require_durable()?,
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+/// Hash the shared store through an empty bare view. Git's reference database
+/// checks must not inspect another worktree's unfinished operation markers.
+/// The empty primary store also prevents private duplicates from shadowing
+/// corrupt shared objects. The caller holds the shared object-store lock.
+fn verify_shared(
+    git: &Path,
+    common: &Directory,
+    common_path: &Path,
+    cwd: &Path,
+    head: GitOid,
+) -> Result<()> {
+    let name = provenant_os::fs::temporary_name()?;
+    common.mkdir(&name, 0o700)?;
+    let view = common.open_verified_directory(&name)?;
+    let path = common_path.join(&name);
+    let result = initialise_view(git, common, cwd, &view, &path, head)
+        .and_then(|()| verify(git, &path, cwd, head, Some(&common_path.join("objects"))));
+    let cleanup = crate::artifacts::remove_entry_tree(common, &name);
+    result?;
+    cleanup?;
+    Ok(())
+}
+
 /// `source` belongs to an absent lane; `staging` is fresh, outside every lane's
 /// grants. Never follow its alternates, trust its indices or publish its inodes.
 fn import_objects(
@@ -421,37 +481,14 @@ fn import_objects(
     // A verified loose graph is published as several atomic creations. Keep
     // concurrent verifiers from observing an incompletely published graph.
     let _lock = object_lock(repo.common_dir(), LockMode::Exclusive)?;
-    let format = if head.to_string().len() == 64 {
-        "sha256"
-    } else {
-        "sha1"
-    };
-    let mut init = args(&[
-        "init",
-        "--bare",
-        "--quiet",
-        "--template=",
-        &format!("--object-format={format}"),
-    ]);
-    init.push(staging_path.to_path_buf().into());
-    command(git, staging_path, repo.root_path(), &init, None)?;
-    // Preserve only the host's trusted shallow boundary. A lane cannot turn a
-    // missing parent into an accepted boundary through its private metadata.
-    match repo
-        .common_dir()
-        .read_stable(OsStr::new("shallow"), 1024 * 1024)
-    {
-        Ok(bytes) => staging
-            .atomic_write(
-                OsStr::new("shallow"),
-                ".objects-",
-                &bytes,
-                PublishMode::NoReplace,
-            )?
-            .require_durable()?,
-        Err(error) if error.is_not_found() => {}
-        Err(error) => return Err(error.into()),
-    }
+    initialise_view(
+        git,
+        repo.common_dir(),
+        repo.root_path(),
+        staging,
+        staging_path,
+        head,
+    )?;
     let objects = staging.open_verified_directory(OsStr::new("objects"))?;
     let shared = repo.common_git_dir().join("objects");
     let mut bytes = MAX_BYTES;
@@ -535,7 +572,13 @@ fn import_objects(
         to.sync()?;
     }
     shared_dir.sync()?;
-    verify(git, repo.common_git_dir(), repo.root_path(), head, None)
+    verify_shared(
+        git,
+        repo.common_dir(),
+        repo.common_git_dir(),
+        repo.root_path(),
+        head,
+    )
 }
 
 /// Only the host's sealed launch binding chooses the source, never lane output.
