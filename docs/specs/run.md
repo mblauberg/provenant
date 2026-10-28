@@ -220,7 +220,11 @@ rebuild it if it is disposable output before retrying.
 ## Reconcile and temporary cleanup
 
 `reconcile` recovers queued and orphaned work idempotently and never replays
-an uncertain launch. A start with no summary, held lock or recorded provider
+an uncertain launch. If a writer guardian commits a terminal record and releases
+its reservation while recovery is preparing, recovery re-reads the canonical
+attempt and accepts absence only for that same attempt and generation. A
+missing reservation on a nonterminal attempt or unreadable retained custody
+still reports uncertainty. A start with no summary, held lock or recorded provider
 start settles as rejected; a held lock stays unobservable. Terminal `tmp/`
 removal runs only when no worktree reservation remains: reconcile checks
 reservations before taking the attempt's writer lock, and an unreadable
@@ -230,7 +234,8 @@ unreserved `tmp/`; owner locks such as `writer.lock`,
 `publication.lock` and the run store lock keep their inodes.
 - Why: unlinking an owner lock lets two owners lock different inodes, and
   deleting under a reservation destroys a writer's work.
-- Test: `crates/run/src/dispatch_tests.rs::reconcile_preserves_protected_locks_outside_temporary`;
+- Test: `crates/run/src/holder.rs::writer_recovery_accepts_only_matching_terminal_absence`;
+  `crates/run/src/dispatch_tests.rs::reconcile_preserves_protected_locks_outside_temporary`;
   `::reconcile_leaves_temporary_data_behind_a_writer_reservation`;
   `::reconcile_unreadable_reservation_only_retains_existing_temporary_data`;
   `::reconcile_temporary_removal_never_follows_symlinks`

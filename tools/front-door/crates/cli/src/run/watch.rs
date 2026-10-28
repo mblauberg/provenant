@@ -2,7 +2,8 @@
 //!
 //! A wait counts a lane only when it was unsettled as the wait started or has
 //! settled since then (or since `--since`). A lane named by its exact attempt
-//! ID always counts, whenever it settled. Both modes poll a `fetch` of the
+//! ID always counts, whenever it settled. A wholly settled named selection
+//! returns its terminal rows immediately. Both modes poll a `fetch` of the
 //! candidate lanes, so the local store and peers share one rule.
 use super::{Condition, ErrorKind, Fail, Status, condition_met, settled, state_name};
 use provenant_core::{AttemptId, Clock, HostId, WallTime};
@@ -214,7 +215,14 @@ fn arm(
             }
         }
     };
-    let armed = Armed::arm(scope, &first);
+    let mut armed = Armed::arm(scope, &first);
+    if armed.scope.explicit && !first.is_empty() && first.iter().all(|lane| settled(&lane.state).0)
+    {
+        armed.baseline.clear();
+        // A wholly settled named selection is an explicit result lookup,
+        // including when --since would otherwise exclude its terminal rows.
+        armed.scope.since = None;
+    }
     let counted = armed.counted(first);
     if armed.scope.explicit && counted.is_empty() {
         return Err(nothing_pending(armed.ignored()));
@@ -499,22 +507,29 @@ mod tests {
     }
 
     #[test]
-    fn nothing_pending_is_refused_for_named_lanes_only() {
-        let settled_only = |_| Ok(vec![done(1, 10)]);
-        let refused = wait(
-            settled_only,
-            scope(&[], None, true),
-            Condition::All,
-            Duration::from_secs(5),
-            POLL,
-        );
-        let message = refused.err().map(|fail| fail.message).unwrap_or_default();
-        assert!(
-            message.contains("1 settled before the wait started"),
-            "{message}"
-        );
+    fn already_settled_named_lanes_return_their_terminal_rows() {
+        for condition in [Condition::Any, Condition::All] {
+            for since in [None, Some(20)] {
+                let mut calls = 0;
+                let waited = wait(
+                    |_| {
+                        calls += 1;
+                        Ok(vec![done(1, 10), done(2, 12)])
+                    },
+                    scope(&[], since, true),
+                    condition,
+                    Duration::from_secs(5),
+                    POLL,
+                )
+                .unwrap();
+                assert!(waited.met);
+                assert_eq!(waited.lanes.len(), 2);
+                assert_eq!(waited.ignored, 0);
+                assert_eq!(calls, 1);
+            }
+        }
         let open = wait(
-            settled_only,
+            |_| Ok(vec![done(1, 10)]),
             scope(&[], None, false),
             Condition::All,
             Duration::from_secs(5),
@@ -742,8 +757,8 @@ mod tests {
         )
         .unwrap();
         assert!(waited.met);
-        assert_eq!(waited.ignored, 1, "only the settlement before entry");
-        assert_eq!(waited.lanes.len(), 1);
+        assert_eq!(waited.ignored, 0, "all named lanes have settled");
+        assert_eq!(waited.lanes.len(), 2);
         assert_eq!(waited.lanes[0].attempt_id, AttemptId::from_bytes([1; 16]));
     }
 

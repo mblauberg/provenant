@@ -28,8 +28,16 @@ The reducer accepts at most 100,000 attempts, 10,000 groups and 1 MiB of keys.
 It checks each limit before inserting and returns `TooLarge`, never partial
 totals.
 Sums add known values and count the rest as missing; `cost.complete` is null
-when any cost is unknown, with the known lower bound reported. An unpriced
-subscription is not free. The latest task outcome is the highest-numbered
+when any cost is unknown. Each `totals.cost` object (including route and detail
+groups) contains `complete` and `known_lower_bound`, each a money object
+(`microdollars`, integer, and `usd`, decimal string) or null, plus
+`priced_attempts` and `missing_attempts` counts. Their sum equals `totals.attempts`.
+`priced_attempts` counts attempts with complete cost data. If no attempt is
+priced and no partial cost contribution is known, `known_lower_bound` is null
+and the CLI prints `cost unknown (N attempts missing cost data)`. With partial
+coverage it prints `at least $X (N of M attempts priced)`. Known contributions
+from partially priced attempts remain in the lower bound. Measured zero and
+an empty report retain a numeric zero. An unpriced subscription is not free. The latest task outcome is the highest-numbered
 attempt.
 - Why: a partial or zero-filled total reads as a real one.
 - Test: `crates/telemetry/src/tests.rs::attempt_and_group_limits_are_enforced_before_insertion`;

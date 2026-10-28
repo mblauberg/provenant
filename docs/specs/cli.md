@@ -34,6 +34,15 @@ rejects conflicting task settings rather than silently choosing a source.
   `crates/cli/src/run.rs::manifest_rejects_flat_route_fields`
 - Owner: `crates/run/src/service.rs`, `crates/cli/src/run.rs`
 
+### Status targets
+
+`status` lists active lanes and the twenty most recent settled lanes. An optional
+run, qualified task or attempt target uses the shared ID resolver and includes
+older terminal records. `--all` includes full records and supports pagination;
+`lanes --all --id ID` is also valid.
+- Test: `tests/parser.rs::core_run_reports_generated_operation_and_status_is_newest_first`
+- Owner: `crates/cli/src/run.rs`
+
 ### Output references and bounded tails
 
 Output resolves the requested attempt on its owning host. Reads are bounded,
@@ -89,8 +98,10 @@ or settled since, so a settled older attempt never satisfies a wait on a newer
 one. The wait starts at command entry, not at the first answer, so a lane
 that settles while a peer is unreachable still counts when the peer returns.
 Time-filtered waits select by settlement time rather than queue order. An
-exactly named attempt counts whenever it settled; naming only lanes that
-already settled refuses with an explanation. Session selection narrows
+exactly named attempt counts whenever it settled. If every named lane has
+already settled, the wait returns their terminal rows immediately, including
+rows older than `--since`. Mixed pending and settled selections keep the
+pending-only rule. Session selection narrows
 listings and waits consistently, including on peers. An unqualified wait
 resumes after the calling session's last acknowledged settlements.
 
@@ -104,7 +115,7 @@ refuse rather than silently omitting lanes.
 - Test: `crates/cli/src/run/watch.rs::a_settled_older_attempt_never_satisfies_a_wait_on_a_newer_one`;
   `::a_named_attempt_counts_whenever_it_settled`;
   `::since_counts_settlements_before_arming`;
-  `::nothing_pending_is_refused_for_named_lanes_only`;
+  `::already_settled_named_lanes_return_their_terminal_rows`;
   `::a_fetch_gets_the_time_left_and_none_starts_after_the_deadline`;
   `::arming_stops_retrying_at_the_deadline_with_the_last_cause`;
   `::since_selects_by_settlement_time_not_queue_order`;
