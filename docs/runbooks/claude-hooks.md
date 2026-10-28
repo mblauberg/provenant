@@ -52,9 +52,10 @@ The digest is read-only and at most 3 KiB; the whole hook output stays under
   With no checkpoint, the last 24 hours.
 - **Pull requests named in the checkpoint:** the digest takes PR numbers from
   the chair's own text (`PR #12`, `pr/12`, `pull/12`, `pull request 12`; at
-  most the eight most recent) and runs `provenant pr status N` for each. Write
+  most the sixteen most recent) and runs `provenant pr status N` for each. Write
   the PRs you delivered into the checkpoint that way. When `pr status` is
   absent, slow or failing, the line says so and gives the command to run.
+  If only the checks lookup fails, an open PR line says `checks=unavailable`.
 
 Each lane listing reads one page of 100. When more exist, the count shows a
 `+` (for example `Lanes settled since the last chair save (3+)`) and the

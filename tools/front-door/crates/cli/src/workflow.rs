@@ -554,7 +554,7 @@ fn checkpoint_references(text: &str) -> Vec<u64> {
         if lower[..i]
             .chars()
             .next_back()
-            .is_some_and(char::is_alphanumeric)
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '#')
         {
             continue;
         }
@@ -572,9 +572,26 @@ fn checkpoint_references(text: &str) -> Vec<u64> {
         .find(|prefix| rest.starts_with(**prefix)) else {
             continue;
         };
-        let tail = rest[prefix.len()..].trim_start_matches([' ', '#', ':']);
+        let tail = if *prefix == "#" {
+            &rest[1..]
+        } else {
+            let remainder = &rest[prefix.len()..];
+            if remainder.starts_with('#') && prefix.ends_with(|c: char| c.is_alphanumeric()) {
+                continue;
+            }
+            let tail = remainder.trim_start_matches([' ', ':']);
+            tail.strip_prefix('#').unwrap_or(tail)
+        };
         let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+        let suffix = tail.get(digits..).unwrap_or_default();
         if (1..=6).contains(&digits)
+            && !suffix
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '-'))
+            && !suffix
+                .strip_prefix(['/', '.'])
+                .is_some_and(|s| s.starts_with(|c: char| c.is_ascii_digit()))
             && let Ok(number) = tail[..digits].parse::<u64>()
             && number > 0
             && !found.contains(&number)
@@ -962,6 +979,15 @@ mod tests {
             std::path::Path::new("/nonexistent-provenant-checkpoint-project"),
             12
         ));
+    }
+    #[test]
+    fn checkpoint_references_reject_headings_dates_and_partial_numbers() {
+        let text = "# 2026-10-29\n## 42 succeeded\n# 20 lanes\n#2026-10-29 #2026/10/29 #2026.10.29\nword#19 x_#20 pr#25 issue#26 #21suffix #22_foo #1234567\nPR # 23 issue #24-10\nOpen #31, PR #32; issue #33 and pull/34.";
+        assert_eq!(super::checkpoint_references(text), vec![31, 32, 33, 34]);
+        assert_eq!(
+            super::checkpoint_references("#1 (#2) issue #3 PR #4"),
+            vec![1, 2, 3, 4]
+        );
     }
     use super::catalogue_family;
     use provenant_routing::Catalogue;

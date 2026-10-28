@@ -307,17 +307,18 @@ fn pr_status(data: &Value) -> (String, String) {
         .chars()
         .take(7)
         .collect();
-    let count = |key: &str| data[key].as_u64().map_or("?".to_owned(), |n| n.to_string());
-    (
-        state,
-        format!(
-            "{head} checks={}/{} failed={} pending={}",
-            count("checks_passed"),
-            count("checks_total"),
-            count("checks_failed"),
-            count("checks_pending")
-        ),
-    )
+    let checks = match (
+        data["checks_passed"].as_u64(),
+        data["checks_total"].as_u64(),
+        data["checks_failed"].as_u64(),
+        data["checks_pending"].as_u64(),
+    ) {
+        (Some(passed), Some(total), Some(failed), Some(pending)) => {
+            format!("checks={passed}/{total} failed={failed} pending={pending}")
+        }
+        _ => "checks=unavailable".to_owned(),
+    };
+    (state, format!("{head} {checks}"))
 }
 
 #[cfg(test)]
@@ -465,6 +466,33 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].branch, "feat/a");
         assert_eq!(list[0].path, "/p/.worktrees/a");
+    }
+
+    #[test]
+    fn digest_reports_unavailable_checks_without_claiming_zero() {
+        use super::*;
+        use serde_json::json;
+        let (state, summary) = pr_status(
+            &json!([{"state":"OPEN", "head":"abcdef123456", "checks_passed":null, "checks_total":null, "checks_failed":null, "checks_pending":null}]),
+        );
+        let digest = SessionState {
+            prs: vec![PrLine {
+                number: 42,
+                state,
+                summary,
+            }],
+            ..Default::default()
+        }
+        .digest(provenant_workflow::session::DIGEST_LIMIT);
+        assert!(
+            digest.contains("#42 abcdef1 checks=unavailable"),
+            "{digest}"
+        );
+        assert!(!digest.contains("0/0"));
+        let (_, zero) = pr_status(
+            &json!([{"state":"OPEN", "head":"abcdef1", "checks_passed":0, "checks_total":0, "checks_failed":0, "checks_pending":0}]),
+        );
+        assert!(zero.contains("checks=0/0"));
     }
 
     #[test]
