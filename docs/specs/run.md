@@ -42,26 +42,29 @@ prompts.
 ## Work correlation lookup
 
 `run::WorkIndex` owns immutable membership in `<host-state>/work-index.sqlite3`.
-Run seals project, run, task and attempt together before the guardian handoff,
-from the host-accepted launch snapshot. Nested launches use the trusted host
-registry root, never their lane-writable store as lookup authority. Continuations
-receive their own membership through the same path. Capture failures refuse
-handoff; identical captures replay and disagreeing captures conflict.
+Only the trusted host store seals its minted attempt IDs, from root dispatch,
+resume or continuation, before marking them Starting. Nested attempts are never
+sealed: their IDs originate in a lane-writable store. Trusted nested membership
+requires host-owned child enrolment, which is a separate contract.
 
+The constructor is crate-private until a trusted reader path is implemented.
+Identical captures replay; disagreements and permanent capture errors refuse
+handoff. Contention or cancellation leaves the attempt queued for retry.
 Repository identity is the verified canonical Git common directory. Head is the
 host-observed launch HEAD for readers; writer heads and unavailable Git facts
-remain explicitly unproven. These facts identify accepted work, not a chair
-session, successful launch, answer or workflow authority.
+remain explicitly unproven. Membership proves neither chair-session ownership,
+successful launch nor workflow authority.
 
 `WorkSelector` requires project and run, with optional task, attempt, repository
-and head constraints. `validate` checks at most 64 candidates, reads at most
-64 KiB per record and returns `Verified`, `Unindexed`, `RepositoryUnavailable`,
-`HeadUnavailable`, `Mismatch` or `Limit`. Unknown, historical and unprepared work
-is unindexed. Reaching the bound never establishes absence. No lookup traverses
-child roots, reads provider sessions or accepts a caller-supplied store locator.
-The composition edge must open the trusted host root; lanes cannot write the
-index, its companions or lock through configured grants. Keep membership for
-as long as run metadata, including when lane-local records disappear.
+and head constraints. Reads check at most 64 candidates and 64 KiB per record,
+using the same byte bound as writes. `Verified` requires a task or attempt;
+run-only reads return `Partial` because there is no trusted complete member list.
+Missing nested, historical and unprepared work returns `Unindexed`. Contradictory
+facts return `Mismatch`, ahead of unavailable repository/head facts and unindexed
+coverage. `Limit` never proves absence. Lookups traverse no child roots and accept
+no caller-supplied store locator. Configured grants cannot expose the host index,
+its companions or lock. Membership survives lane-local record removal. Index
+growth is unbounded and is not counted towards the disk floor.
 
 - Test: `crates/run/src/correlation.rs::tests`; `crates/cli/src/run/provider.rs::configured_grants_cannot_expose_host_indexes`
 - Owner: `crates/run/src/correlation.rs`, `crates/run/src/launch.rs`

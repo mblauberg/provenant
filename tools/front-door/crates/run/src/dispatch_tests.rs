@@ -1462,7 +1462,6 @@ fn oversized_write_grants_reject_without_stalling_launch() -> TestResult {
     ));
     // The oversized attempt never reached handoff; its sibling did.
     assert_eq!(*held.borrow(), [sibling]);
-
     drop(store);
     let store = RunStore::open(&context, &call)?;
     let record = store.record(id, &call)?;

@@ -886,6 +886,8 @@ impl RunStore {
             if !plan.skipped_routes.is_empty() {
                 self.record_skipped_routes(id, &plan.skipped_routes, call)?;
             }
+            // Capture errors leave the claim available to this or another launcher.
+            self.seal_work(&record, &plan, call)?;
             let record = match self.mark_starting_with_priority(
                 &record,
                 &plan.route,
@@ -979,7 +981,6 @@ impl RunStore {
             self.attempt_dir(record.run_id, id, false)
                 .map_err(|e| local(&e))
         };
-        self.seal_work(record, &plan, call).map_err(|e| local(&e))?;
         let mut holder_context = context(record, requester).map_err(|e| local(&e))?;
         let reservation =
             PublicationReservation::prepare(directory()?, call.budget, call.cancel, call.clock)

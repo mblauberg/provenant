@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 pub const WORK_INDEX_FILE: &str = "work-index.sqlite3";
 const ROW_LIMIT: usize = 64;
+const MEMBER_BYTES: usize = 64 * 1024;
 /// Repository is the verified canonical Git common directory. Head is the
 /// host-observed launch HEAD. No selector accepts a nested store locator.
 #[derive(Debug, Clone)]
@@ -21,13 +22,16 @@ pub struct WorkSelector {
     pub repository: Option<AbsolutePath>,
     pub head: Option<GitOid>,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Order encodes the aggregation precedence; contradictions outrank missing facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WorkCoverage {
-    Verified,
     /// Includes unknown, historical and not yet prepared work.
     Unindexed,
-    RepositoryUnavailable,
+    Verified,
+    /// The index cannot prove a complete run roster.
+    Partial,
     HeadUnavailable,
+    RepositoryUnavailable,
     Mismatch,
     /// More candidates remain. Absence has not been established.
     Limit,
@@ -44,9 +48,15 @@ struct Membership {
 }
 /// Open only at the trusted host root. Consumers cannot insert membership.
 /// Reads perform no nested traversal, Git probes or provider I/O.
+/// ```compile_fail
+/// use provenant_run::{WorkIndex, Request};
+/// fn untrusted(path: &std::path::Path, call: &Request<'_>) {
+///     let _ = WorkIndex::open(path, call);
+/// }
+/// ```
 pub struct WorkIndex(Connection);
 impl WorkIndex {
-    pub fn open(host: &Path, call: &Request<'_>) -> Result<Self> {
+    pub(crate) fn open(host: &Path, call: &Request<'_>) -> Result<Self> {
         let (_, db, _lock) = open_database(host, WORK_INDEX_FILE, call)?;
         let version = call.retry(|| match provenant_sqlite::read_version(&db, 1) {
             Ok(version) => Ok(version),
@@ -88,9 +98,11 @@ impl WorkIndex {
                 "?4 IS NULL"
             };
             let mut query = self.0.prepare(&format!(
-                "SELECT substr(record,1,65537) FROM membership
+                "SELECT substr(record,1,{read_bytes}) FROM membership
                 WHERE project=?1 AND run=?2 AND {task} AND {attempt}
-                ORDER BY task,attempt LIMIT 65"
+                ORDER BY task,attempt LIMIT {row_limit}",
+                read_bytes = MEMBER_BYTES + 1,
+                row_limit = ROW_LIMIT + 1
             ))?;
             let mut rows = query.query(params![
                 selection.project.to_string(),
@@ -99,15 +111,19 @@ impl WorkIndex {
                 selection.attempt.map(|id| id.to_string())
             ])?;
             let mut coverage = WorkCoverage::Unindexed;
+            let qualified = selection.task.is_some() || selection.attempt.is_some();
             for n in 0..=ROW_LIMIT {
                 let Some(row) = rows.next()? else {
+                    if coverage == WorkCoverage::Verified && !qualified {
+                        return Ok(WorkCoverage::Partial);
+                    }
                     return Ok(coverage);
                 };
                 if n == ROW_LIMIT {
                     return Ok(WorkCoverage::Limit);
                 }
                 let raw: Vec<u8> = row.get(0)?;
-                if raw.len() > 65536 {
+                if raw.len() > MEMBER_BYTES {
                     return Err(RunError::Validation("work membership size"));
                 }
                 let value: Membership = decode(&raw)?;
@@ -129,24 +145,28 @@ impl WorkIndex {
                         .head
                         .is_some_and(|head| value.head.is_some_and(|v| v != head))
                 {
-                    if coverage == WorkCoverage::Unindexed {
-                        coverage = WorkCoverage::Mismatch;
-                    }
+                    coverage = WorkCoverage::Mismatch;
                     continue;
                 }
                 if selection.repository.is_some() && value.repository.is_none() {
-                    coverage = WorkCoverage::RepositoryUnavailable;
+                    coverage = coverage.max(WorkCoverage::RepositoryUnavailable);
                 } else if selection.head.is_some() && value.head.is_none() {
-                    coverage = WorkCoverage::HeadUnavailable;
+                    coverage = coverage.max(WorkCoverage::HeadUnavailable);
                 } else {
-                    return Ok(WorkCoverage::Verified);
+                    coverage = coverage.max(WorkCoverage::Verified);
                 }
             }
             Ok(coverage)
         })
     }
-    // Only Run's trusted host launch path publishes immutable membership.
     fn seal(&self, value: &Membership, call: &Request<'_>) -> Result<()> {
+        let canonical = provenant_records::CanonicalV1::bytes(value)?;
+        let raw = canonical.as_bytes();
+        if raw.len() > MEMBER_BYTES {
+            return Err(RunError::TooLarge {
+                limit: MEMBER_BYTES as u64,
+            });
+        }
         immediate(&self.0, call, |tx| {
             let previous: Option<Vec<u8>> = tx
                 .query_row(
@@ -169,7 +189,7 @@ impl WorkIndex {
                     value.run.to_string(),
                     value.task.to_string(),
                     value.attempt.to_string(),
-                    crate::db::bytes(value)?
+                    raw
                 ],
             )?;
             Ok(())
@@ -183,6 +203,11 @@ impl RunStore {
         plan: &PreparedLaunch,
         call: &Request<'_>,
     ) -> Result<()> {
+        if self.sealed_requester.is_some()
+            || self.context.state_root.as_path() != self.writer_registry()
+        {
+            return Ok(());
+        }
         WorkIndex::open(self.writer_registry(), call)?.seal(
             &Membership {
                 schema_version: 1,
@@ -204,13 +229,21 @@ mod tests {
     use crate::tests::{call, clock, context, input};
     use provenant_core::CancelToken;
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+    type Fixture = (
+        tempfile::TempDir,
+        ExecutionContext,
+        provenant_core::TestClock,
+        CancelToken,
+    );
+    fn fixture() -> std::result::Result<Fixture, Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        Ok((temp, context, clock(), CancelToken::new()))
+    }
 
     #[test]
     fn request_correlation_lookup() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let clock = clock();
-        let cancel = CancelToken::new();
+        let (_temp, context, clock, cancel) = fixture()?;
         let call = call(&clock, &cancel);
         let index = WorkIndex::open(context.state_root.as_path(), &call)?;
         let input = input();
@@ -260,15 +293,16 @@ mod tests {
         drop(index);
         let index = WorkIndex::open(context.state_root.as_path(), &call)?;
         assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Verified);
+        let mut run_only = selection.clone();
+        run_only.task = None;
+        run_only.attempt = None;
+        assert_eq!(index.validate(&run_only, &call)?, WorkCoverage::Partial);
         Ok(())
     }
 
     #[test]
     fn request_correlation_missing_facts_and_bounds() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let clock = clock();
-        let cancel = CancelToken::new();
+        let (_temp, context, clock, cancel) = fixture()?;
         let call = call(&clock, &cancel);
         let index = WorkIndex::open(context.state_root.as_path(), &call)?;
         let input = input();
@@ -294,6 +328,17 @@ mod tests {
             index.validate(&selection, &call)?,
             WorkCoverage::RepositoryUnavailable
         );
+        let contradictory = Membership {
+            attempt: AttemptId::from_bytes([99; 16]),
+            repository: Some(AbsolutePath::new(Path::new("/other/.git"))?),
+            ..value.clone()
+        };
+        index.seal(&contradictory, &call)?;
+        assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Mismatch);
+        index.0.execute(
+            "DELETE FROM membership WHERE attempt=?1",
+            [contradictory.attempt.to_string()],
+        )?;
         selection.repository = None;
         selection.head = Some(GitOid::parse(&"a".repeat(40))?);
         assert_eq!(
@@ -313,6 +358,14 @@ mod tests {
         selection.attempt = Some(value.attempt);
         selection.head = None;
         assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Verified);
+        value.repository = Some(AbsolutePath::new(Path::new(&format!(
+            "/{}",
+            "x".repeat(66000)
+        )))?);
+        assert!(matches!(
+            index.seal(&value, &call),
+            Err(RunError::TooLarge { limit: 65536 })
+        ));
         cancel.cancel();
         assert!(matches!(
             index.validate(&selection, &call),
@@ -320,8 +373,9 @@ mod tests {
         ));
         Ok(())
     }
+
     #[test]
-    fn request_correlation_nested_host_authority() -> TestResult {
+    fn request_correlation_rewritten_child_cannot_poison_sibling() -> TestResult {
         let temp = tempfile::tempdir()?;
         let host = context(temp.path())?;
         let lane_dir = temp.path().join("lane");
@@ -330,14 +384,32 @@ mod tests {
         let clock = clock();
         let cancel = CancelToken::new();
         let call = call(&clock, &cancel);
+        let sibling = input();
+        let root = RunStore::open(&host, &call)?;
+        root.create(&sibling, &call)?;
         let store = RunStore::open(&lane, &call)?
             .with_writer_registry(host.state_root.as_path())
             .with_sealed_requester(host.actor_id);
         let mut nested = input();
-        let parent = AttemptId::from_bytes([9; 16]);
+        nested.run_id = RunId::from_bytes([8; 16]);
+        nested.attempts[0].attempt_id = AttemptId::from_bytes([7; 16]);
         nested.request.lane_depth = Some(2);
+        let parent = AttemptId::from_bytes([9; 16]);
         nested.request.parent_attempt = Some(parent);
         store.create(&nested, &call)?;
+        let old = nested.attempts[0].attempt_id.to_string();
+        let stolen = sibling.attempts[0].attempt_id.to_string();
+        store.db.execute_batch(&format!("PRAGMA foreign_keys=OFF;
+            UPDATE attempts SET id='{stolen}',record=CAST(replace(CAST(record AS TEXT),'{old}','{stolen}') AS BLOB);
+            UPDATE admission SET attempt='{stolen}',record=CAST(replace(CAST(record AS TEXT),'{old}','{stolen}') AS BLOB);
+            UPDATE events SET attempt='{stolen}',record=CAST(replace(CAST(record AS TEXT),'{old}','{stolen}') AS BLOB);"))?;
+        let attempts = lane
+            .state_root
+            .as_path()
+            .join("runs")
+            .join(nested.run_id.to_string())
+            .join("attempts");
+        std::fs::rename(attempts.join(&old), attempts.join(&stolen))?;
         let validated = store.validate_child(
             nested.run_id,
             parent,
@@ -346,47 +418,194 @@ mod tests {
             2,
             &call,
         )?;
-        let selector = WorkSelector {
-            project: host.project_id,
-            run: nested.run_id,
-            task: Some(nested.attempts[0].task_id),
-            attempt: Some(nested.attempts[0].attempt_id),
-            repository: None,
-            head: None,
-        };
-        let index = WorkIndex::open(host.state_root.as_path(), &call)?;
-        assert_eq!(index.validate(&selector, &call)?, WorkCoverage::Unindexed);
-        // A child-root index cannot establish membership in the host index.
-        let forged = Membership {
-            schema_version: 1,
-            project: selector.project,
-            run: selector.run,
-            task: selector.task.unwrap(),
-            attempt: selector.attempt.unwrap(),
-            repository: Some(AbsolutePath::new(Path::new("/forged/.git"))?),
-            head: None,
-        };
-        WorkIndex::open(lane.state_root.as_path(), &call)?.seal(&forged, &call)?;
-        assert_eq!(index.validate(&selector, &call)?, WorkCoverage::Unindexed);
         store.start_child(
             nested.run_id,
             &validated,
             &crate::dispatch_tests::Ready,
-            &|_, _| Err(RunError::Validation("fixture stops before guardian")),
+            &|_, _| Err(RunError::Validation("fixture child handoff")),
             &call,
         )?;
-        assert_eq!(index.validate(&selector, &call)?, WorkCoverage::Verified);
-        // The lane can replace its database, including its SQL guards.
-        store
-            .db
-            .execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER immutable_terminal_delete; DELETE FROM attempts;")?;
-        assert_eq!(index.validate(&selector, &call)?, WorkCoverage::Verified);
-        let mut claimed_repository = selector;
-        claimed_repository.repository = forged.repository;
-        assert_eq!(
-            index.validate(&claimed_repository, &call)?,
-            WorkCoverage::RepositoryUnavailable
+        let outcome = root.start(
+            sibling.run_id,
+            &crate::dispatch_tests::Ready,
+            &|_, _| Err(RunError::Validation("fixture sibling handoff")),
+            &call,
+        )?;
+        let index = WorkIndex::open(host.state_root.as_path(), &call)?;
+        let forged = WorkSelector {
+            project: host.project_id,
+            run: nested.run_id,
+            task: Some(nested.attempts[0].task_id),
+            attempt: Some(sibling.attempts[0].attempt_id),
+            repository: None,
+            head: None,
+        };
+        let coverage = index.validate(&forged, &call)?;
+        assert!(
+            matches!(outcome.as_slice(), [Started::Refused {reason, ..}]
+            if reason.contains("fixture sibling handoff")),
+            "forged lookup={coverage:?}, sibling={outcome:?}"
         );
+        assert_eq!(coverage, WorkCoverage::Unindexed);
+        Ok(())
+    }
+    #[test]
+    fn request_correlation_capture_failures_leave_work_queued() -> TestResult {
+        use provenant_os::fs::{Directory, LockMode};
+        let (_temp, context, clock, cancel) = fixture()?;
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let prepared = input();
+        store.create(&prepared, &call)?;
+        let index = WorkIndex::open(store.writer_registry(), &call)?;
+        let directory = Directory::open_anchor(store.writer_registry())?;
+        let lock = directory.try_lock_existing(
+            std::ffi::OsStr::new("work-index.sqlite3.lock"),
+            LockMode::Exclusive,
+        )?;
+        let nonblocking = Request {
+            budget: provenant_core::WaitBudget::nonblocking(provenant_core::Clock::mono_now(
+                &clock,
+            )),
+            ..call
+        };
+        assert!(matches!(
+            store.start(
+                prepared.run_id,
+                &crate::dispatch_tests::Ready,
+                &|_, _| Err(RunError::Validation("must not reach handoff")),
+                &nonblocking
+            ),
+            Err(RunError::Contention)
+        ));
+        assert_eq!(
+            store.record(prepared.attempts[0].attempt_id, &call)?.state,
+            AttemptState::Queued
+        );
+        drop(lock);
+        cancel.cancel();
+        let result = store.start(
+            prepared.run_id,
+            &crate::dispatch_tests::Ready,
+            &|_, _| unreachable!("cancelled call reached handoff"),
+            &call,
+        );
+        let fresh_cancel = CancelToken::new();
+        let call = Request {
+            cancel: &fresh_cancel,
+            ..call
+        };
+        assert!(matches!(result, Err(RunError::Cancelled)));
+        assert_eq!(
+            store.record(prepared.attempts[0].attempt_id, &call)?.state,
+            AttemptState::Queued
+        );
+        index.0.execute_batch("CREATE TRIGGER reject_membership BEFORE INSERT ON membership BEGIN SELECT RAISE(ABORT,'fixture seal failure'); END;")?;
+        let result = store.start(
+            prepared.run_id,
+            &crate::dispatch_tests::Ready,
+            &|_, _| unreachable!("seal failure reached handoff"),
+            &call,
+        );
+        assert!(matches!(result, Err(RunError::Sqlite(_))));
+        assert_eq!(
+            store.record(prepared.attempts[0].attempt_id, &call)?.state,
+            AttemptState::Queued
+        );
+        index.0.execute_batch("DROP TRIGGER reject_membership;")?;
+        let before = store.record(prepared.attempts[0].attempt_id, &call)?;
+        let head = Some(GitOid::parse(&"a".repeat(40))?);
+        // Launcher A has captured its observed HEAD but has not claimed Starting.
+        index.seal(
+            &Membership {
+                schema_version: 1,
+                project: context.project_id,
+                run: prepared.run_id,
+                task: before.task_id,
+                attempt: before.attempt_id,
+                repository: None,
+                head,
+            },
+            &call,
+        )?;
+        // Launcher B prepared different facts (HEAD unavailable). It must not
+        // withdraw the queued attempt before A can claim it.
+        let second = store.start(
+            prepared.run_id,
+            &crate::dispatch_tests::Ready,
+            &|_, _| unreachable!("conflicting capture reached handoff"),
+            &call,
+        );
+        assert!(matches!(second, Err(RunError::Conflict)));
+        assert_eq!(
+            store.record(before.attempt_id, &call)?.state,
+            AttemptState::Queued
+        );
+        let claimed = store.mark_starting(
+            &before,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            head,
+            &call,
+        )?;
+        assert_eq!(claimed.state, AttemptState::Starting);
+        Ok(())
+    }
+    #[test]
+    fn request_correlation_host_resumes_seal_through_start() -> TestResult {
+        let (_temp, context, clock, cancel) = fixture()?;
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let original = input();
+        store.create(&original, &call)?;
+        let index = WorkIndex::open(store.writer_registry(), &call)?;
+        let mut prior = original.attempts[0].attempt_id;
+        store.start(
+            original.run_id,
+            &crate::dispatch_tests::Ready,
+            &|_, _| Err(RunError::Validation("fixture host handoff")),
+            &call,
+        )?;
+        for (fresh, n) in [(false, 20_u8), (true, 30)] {
+            let next = Resume {
+                prior,
+                expected_generation: 0,
+                operation_id: provenant_core::OperationId::parse(&format!("resume-{n}"))?,
+                run_id: RunId::from_bytes([n; 16]),
+                attempt_id: AttemptId::from_bytes([n + 1; 16]),
+                prompt: "continue".into(),
+                created_at: original.created_at,
+            };
+            let run = if fresh {
+                store.resume_fresh(&next, "fixture fresh", &call)?
+            } else {
+                store.resume(&next, &call)?
+            };
+            let selector = WorkSelector {
+                project: context.project_id,
+                run: run.run_id,
+                task: Some(original.attempts[0].task_id),
+                attempt: Some(next.attempt_id),
+                repository: None,
+                head: None,
+            };
+            assert_eq!(index.validate(&selector, &call)?, WorkCoverage::Unindexed);
+            let handed = std::cell::Cell::new(false);
+            store.start(
+                run.run_id,
+                &crate::dispatch_tests::Ready,
+                &|record, _| {
+                    assert_eq!(record.attempt_id, next.attempt_id);
+                    handed.set(true);
+                    Err(RunError::Validation("fixture host handoff"))
+                },
+                &call,
+            )?;
+            assert!(handed.get());
+            assert_eq!(index.validate(&selector, &call)?, WorkCoverage::Verified);
+            prior = next.attempt_id;
+        }
         Ok(())
     }
 }

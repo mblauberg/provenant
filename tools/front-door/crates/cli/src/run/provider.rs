@@ -1580,22 +1580,19 @@ fn host_indexes_protected(
     };
     ["fabric/host.sqlite3", run::WORK_INDEX_FILE]
         .iter()
+        .flat_map(|file| {
+            ["", "-wal", "-shm", "-journal", ".lock"].map(|suffix| format!("{file}{suffix}"))
+        })
         .all(|file| {
-            ["", "-wal", "-shm", "-journal", ".lock"]
-                .iter()
-                .all(|suffix| {
-                    let Some(path) = resolve(&state.join(format!("{file}{suffix}"))) else {
-                        return false;
-                    };
-                    grants.iter().all(|grant| {
-                        resolve(&grant.path).is_some_and(|root| match grant.scope {
-                            PathScope::Exact => {
-                                root != path && !(root.is_dir() && path.starts_with(root))
-                            }
-                            PathScope::Subtree => !path.starts_with(root),
-                        })
-                    })
+            let Some(path) = resolve(&state.join(file)) else {
+                return false;
+            };
+            grants.iter().all(|grant| {
+                resolve(&grant.path).is_some_and(|root| match grant.scope {
+                    PathScope::Exact => root != path && !(root.is_dir() && path.starts_with(root)),
+                    PathScope::Subtree => !path.starts_with(root),
                 })
+            })
         })
 }
 
@@ -1613,6 +1610,7 @@ fn configured_grants_cannot_expose_host_indexes() -> Result<(), Box<dyn std::err
         "/state/fabric/host.sqlite3-wal",
         "/state/fabric/host.sqlite3-shm",
         "/state/fabric/host.sqlite3-journal",
+        "/state/fabric/host.sqlite3.lock",
     ] {
         let grant = WriteGrant {
             source: run::WriteSource::WriteRoot,
