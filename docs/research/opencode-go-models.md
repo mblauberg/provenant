@@ -11,8 +11,10 @@ The [Go pricing table](https://opencode.ai/v2/docs/console/go/), accessed on
 28 October 2026, supplies the catalogue's monthly allowance values for the
 $10 plan. The routing floor defaults to $60; models below it or without a
 recorded allowance are refused while it is enabled, including exact selections.
-The table lists Beam Free as unlimited for a limited time and Claude Haiku 5.5
-at $15. Zen models use a separate account and are not subject to this floor.
+The table lists Beam Free and Iceman as free for a limited time, with no
+published end date, and Claude Haiku 5.5 at $15. OpenCode states that Iceman
+uses prompts and completions to improve the model. Zen models use a separate
+account and are not subject to this floor.
 The IDs for the other documented models at or above $60 were checked against
 the [models.dev provider catalogue](https://models.dev/api.json), accessed on
 28 October 2026. They are explicit-only pending local trial evidence.

@@ -112,6 +112,8 @@ monthly_allowance_usd = 60
 efforts = []
 evidence_ref = "https://opencode.ai/v2/docs/console/go/; IDs: https://models.dev/api.json; accessed 2026-10-28"
 
+# OpenCode states that Iceman uses prompts and completions to improve the model.
+# Iceman and Beam Free are free for a limited time, with no published end date.
 [[models]]
 model = "opencode/opencode-go/iceman-contributor-free"
 monthly_allowance_usd = "unlimited"

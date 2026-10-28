@@ -496,7 +496,7 @@ fn validate_profile(field: &str, profile: &PacingProfile, errors: &mut Vec<Secti
 }
 
 #[cfg(test)]
-mod pacing_profile_tests {
+mod go_allowance_tests {
     use super::*;
 
     #[test]
@@ -543,6 +543,11 @@ mod pacing_profile_tests {
         );
         Ok(())
     }
+}
+
+#[cfg(test)]
+mod pacing_profile_tests {
+    use super::*;
 
     #[test]
     fn provider_and_account_pacing_share_a_table() {
@@ -672,7 +677,7 @@ pub fn check_go_allowance(
         None => "unknown".to_owned(),
     };
     Err(format!(
-        "{}: Go monthly allowance {description}; domains.routing.opencode_go.min_monthly_allowance_usd is {floor}; update the catalogue allowance or lower the setting (0 disables it)",
+        "{}: Go monthly allowance {description}; domains.routing.opencode_go.min_monthly_allowance_usd is {floor}; lower [domains.routing.opencode_go] min_monthly_allowance_usd or choose a model with a documented allowance of at least ${floor} (0 disables the floor)",
         model.as_str()
     ))
 }

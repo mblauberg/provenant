@@ -53,7 +53,7 @@ Zen is a separate account and is unaffected. The floor is independent of
 quota calibration and pacing.
 - Why: protect the shared Go plan from low-allowance models regardless of
   selection path.
-- Tests: `crates/routing/src/catalog.rs::pacing_profile_tests::go_allowance_floor_handles_limits_unknown_and_zen`,
+- Tests: `crates/routing/src/catalog.rs::go_allowance_tests::go_allowance_floor_handles_limits_unknown_and_zen`,
   `crates/cli/src/route.rs::route_tests::go_floor_gates_explicit_pool_and_fallback_dispatch`
 - Owner: `crates/routing/src/`
 

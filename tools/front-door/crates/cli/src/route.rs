@@ -523,6 +523,7 @@ pub(crate) fn resolve_dispatch(
         &requested_models,
         |context, records| {
             let mut excluded_members = Vec::new();
+            let mut refusals = Vec::new();
             let mut resolved = provenant_routing::resolve_for_account_with_seed_excluding(
                 request,
                 context,
@@ -558,13 +559,19 @@ pub(crate) fn resolve_dispatch(
                     }
                 });
                 if let Err(error) = gate {
+                    let is_go_refusal = matches!(&error, EdgeError::GoAllowance(_));
+                    let has_fallback = matches!(&request.fallback, Fallback::Models(_));
                     if !matches!(&request.choice, RouteChoice::NamedRoute(_))
                         || resolved.pool_selection.is_none()
                         || excluded_members.contains(&model)
                     {
+                        if is_go_refusal && has_fallback {
+                            return Ok(resolved);
+                        }
                         return Err(error);
                     }
                     let reason = error.to_string();
+                    refusals.push(reason.clone());
                     excluded_members.push(model);
                     let mut replacement =
                         match provenant_routing::resolve_for_account_with_seed_excluding(
@@ -580,7 +587,15 @@ pub(crate) fn resolve_dispatch(
                             {
                                 route
                             }
-                            Ok(_) | Err(_) => return Err(error),
+                            Ok(_) | Err(_) => {
+                                if is_go_refusal && has_fallback {
+                                    return Ok(resolved);
+                                }
+                                if refusals.len() == 1 {
+                                    return Err(error);
+                                }
+                                return Err(EdgeError::GoAllowance(refusals.join("; ")));
+                            }
                         };
                     if replacement.adapter == resolved.adapter
                         && replacement.model == resolved.model
@@ -1022,6 +1037,8 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
             with_context(roots, &[], &[], "local-preview", &[], |context, records| {
                 let route = provenant_routing::resolve(&resolve_request(query, context)?, context)?;
                 let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
+                provenant_routing::check_go_allowance(&model, context.config, context.catalogue)
+                    .map_err(EdgeError::GoAllowance)?;
                 let quota = records
                     .iter()
                     .find(|r| {
@@ -1382,6 +1399,21 @@ mod route_tests {
                 "fixture",
             )
         };
+        let preview = super::Route::Resolve(super::RouteResolve {
+            name: None,
+            request: super::RouteRequest {
+                model: Some(super::Model("opencode/opencode-go/claude-haiku-5-5".into())),
+                route: None,
+                effort: None,
+                confidential: false,
+                allow_free: false,
+                fallback: vec![],
+            },
+        });
+        match super::execute(&preview, &roots) {
+            Err(error) => assert!(error.to_string().contains("$15")),
+            Ok(_) => panic!("preview must refuse the model"),
+        }
         let error = resolve(&request(
             Some("opencode/opencode-go/claude-haiku-5-5"),
             None,
@@ -1390,6 +1422,42 @@ mod route_tests {
         assert!(error.contains("claude-haiku-5-5") && error.contains("$15"));
         let error = resolve(&request(Some("opencode/opencode-go/unlisted"), None)?).unwrap_err();
         assert!(error.contains("opencode-go/unlisted") && error.contains("unknown"));
+        let fallback = |model: Option<&str>, route: Option<&str>| -> Result<(), Box<dyn Error>> {
+            let request = super::RouteRequest {
+                model: model.map(|m| super::Model(m.into())),
+                route: route.map(str::to_owned),
+                effort: None,
+                confidential: false,
+                allow_free: false,
+                fallback: vec![super::Model("opencode/opencode-go/glm-5.3-flash".into())],
+            };
+            let resolved = resolve(&request.to_domain()?)?;
+            assert!(super::check_dispatch_candidate(&roots, &resolved).is_err());
+            assert_eq!(
+                resolved.alternatives.as_slice()[0].model,
+                "opencode-go/glm-5.3-flash"
+            );
+            Ok(())
+        };
+        fallback(Some("opencode/opencode-go/claude-haiku-5-5"), None)?;
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/claude-haiku-5-5',weight=1}]\n",
+        )?;
+        fallback(None, Some("test"))?;
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/claude-haiku-5-5',weight=1},{model='opencode/opencode-go/glm-5.3-flash',weight=1}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=100\n",
+        )?;
+        let error = resolve(&request(None, Some("test"))?).unwrap_err();
+        assert!(
+            error.contains("claude-haiku-5-5") && error.contains("glm-5.3-flash"),
+            "{error}"
+        );
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/claude-haiku-5-5',weight=1},{model='opencode/opencode-go/glm-5.3-flash',weight=0}]\n",
+        )?;
         let selected = resolve(&request(None, Some("test"))?)?;
         assert_eq!(selected.model, "opencode-go/glm-5.3-flash");
         assert!(
