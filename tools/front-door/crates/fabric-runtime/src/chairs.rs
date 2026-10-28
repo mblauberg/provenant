@@ -6,6 +6,14 @@ use provenant_records::run::CanonicalRequest;
 
 pub struct ChairIndex(HostStore);
 impl ChairIndex {
+    /// Read existing host associations without creating or migrating state.
+    pub fn open_read_only(
+        root: &StateRoot,
+        deadline: std::time::Instant,
+    ) -> Result<Option<Self>, Error> {
+        HostStore::open_read_only(root, deadline).map(|store| store.map(Self))
+    }
+
     pub fn open(root: &StateRoot, call: &Request<'_>) -> Result<Self, Error> {
         HostStore::open(root, call).map(Self)
     }

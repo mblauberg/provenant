@@ -6,6 +6,7 @@ use std::io;
 
 pub fn run(command: Console, globals: &Globals) -> u8 {
     let leaf = match &command {
+        Console::Board { .. } => "console board",
         Console::Overview => "console overview",
         Console::Projects => "console projects",
         Console::Sessions { .. } => "console sessions",
@@ -44,7 +45,8 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
             let (status, code) = match error.downcast_ref::<provenant_cli::console::Error>() {
                 Some(
                     provenant_cli::console::Error::Cursor
-                    | provenant_cli::console::Error::InvalidSession,
+                    | provenant_cli::console::Error::InvalidSession
+                    | provenant_cli::console::Error::BoardCursor,
                 ) => (Outcome::Invalid, "CATALOGUE_INPUT"),
                 _ => (Outcome::Error, "CATALOGUE"),
             };

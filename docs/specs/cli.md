@@ -12,6 +12,67 @@ lists every leaf, flag and bound. Paths are relative to `tools/front-door/`.
 
 ## Local console catalogue
 
+### Board snapshot and cursor contract
+
+`console board` reads host-local attempt and run metadata, newest attempt
+sequence first. It includes active attempts by default; `--all` includes
+retained terminal attempts. `--project` restricts the existing project binding;
+without it the board covers the host run store across projects. Pages default
+to 50 rows, with `--limit` restricted to 1–100. Retries are separate rows.
+
+The version 1 payload carries `snapshot`, `generation`, UTC `observed_at`,
+effective `filters`, `lanes`, `next_cursor`, `truncated` and `coverage`.
+`truncated` means more matching rows exist. A null cursor marks the final page.
+Each row contains:
+
+- `lane_id: {host,run_id,task_id,attempt_id}`; unknown host identity is null.
+- `metadata: {attempt,run}` containing the complete owner records: title,
+  state and terminal reason, all four routes (including effort and account),
+  timings, usage, trace, delivery and write-grant facts, and artifact
+  descriptors. Run metadata distinguishes continuation `parent`, nested
+  `parent_attempt` and `children`; attempt metadata retains `retry_of`.
+- `chair`, from the immutable host-owned index, checked against the run request
+  digest. A missing binding is null; provider sessions never imply a chair.
+- `wait`, a best-effort admission observation, and `attention`, true for
+  terminal outcomes other than success or cancellation.
+- `usage_coverage: {known,missing}` listing the five token categories. Null
+  remains unknown, including reasoning; a reported zero is known. Source and
+  context coverage remain in the attempt usage record.
+- `estimated_cost` and `verified_links`, null with unavailable coverage until
+  their owners expose these facts. Worktree delivery metadata stays in the
+  attempt delivery receipt; no Git probing or inferred issue/PR links.
+
+One SQLite read transaction supplies run/attempt records and their content
+generation. Generation hashes every retained attempt identity/revision and run
+record in the project scope, including rows outside the current page or state
+filter. It survives reopening the same store and changes when those facts
+change. Generation discovery scans metadata within a five-second call budget;
+only the selected page's attempt records are decoded. No snapshot cache or
+new durable state is written. SQLite may maintain WAL/shared-memory companions,
+as with the run owner's existing read-only path. Chair bindings are immutable; live wait reasons
+and observation time are ancillary observations outside the SQLite snapshot.
+
+Cursors are opaque version 1 tokens binding the generation, host, project,
+state filter and page size to an exclusive sequence position. A changed
+generation, changed filter, malformed cursor or empty continuation fails as
+invalid input (exit 2), with instructions to restart `console board` using the
+same filters and without `--cursor`. Clients discard the prior pages and begin
+again; they must not combine generations or edit cursors.
+
+Coverage identifies the local host, run and chair availability. Isolated child
+stores and peers are unavailable in this slice; lineage references are still
+returned. Missing run state is an empty board; unsafe or incompatible run
+stores fail through the command error envelope. Unreadable chair state yields
+null associations and unavailable/partial coverage. Artifact descriptors are
+locators, not proof that files still exist. No prompt, result, transcript or
+artifact body is read or returned. The existing 1 MiB response cap refuses
+oversized metadata pages without writing overflow artifacts; retry with a
+smaller limit. `board_paging_end_to_end_and_100_row_p95` measures 20 local
+100-row reads plus JSON encoding, excluding fixture setup, and asserts p95
+at most one second. CI retains the full integration gate.
+
+### Project and session catalogue
+
 `console projects` lists registered project IDs and their canonical Git common
 directories. Linked worktrees share a binding. `console sessions [SESSION]`
 lists only explicitly registered chairs, with the discovery record and its
