@@ -54,6 +54,14 @@ path and reason. A writer that succeeded but left edits uncommitted with no
 new commit ends `uncommitted`, and its reason names the dirty paths.
 No force removal is offered.
 
+A custody refusal names its reason (a stale registration names the recorded
+field that differs, as a tree re-added with `git worktree add` at a registered
+path does; a locked or prunable Git entry; a reservation; an unreadable record)
+and a repair. `worktree adopt PATH --owner NAME`, run from outside the tree,
+replaces a stale registration. It still refuses a held writer lock, a
+reservation and a live process, and names the process by pid and command, as
+`pr land` does.
+
 `worktree list` prints one terse line per tree. The path is a plain path,
 quoted only when it needs it; `--json` keeps the structured path object.
 

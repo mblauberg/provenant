@@ -165,7 +165,7 @@ pub fn collect(
                 Ok(())
             };
             if let Err(error) = prune()
-                && !matches!(error, WorktreeError::UnknownWriter)
+                && !error.is_custody_unknown()
             {
                 retain(&mut report.worktrees, &branch, retain_reason(&error));
                 continue;

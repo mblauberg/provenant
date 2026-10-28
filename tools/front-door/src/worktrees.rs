@@ -81,6 +81,13 @@ fn warn_fetch(error: &Error) {
 }
 
 impl Error {
+    fn repair(&self) -> Option<&'static str> {
+        match self {
+            Self::Worktree(error) => error.repair(),
+            _ => None,
+        }
+    }
+
     fn outcome(&self) -> Outcome {
         match self {
             Self::Root(roots::RootError::Checkout | roots::RootError::State(_))
@@ -93,7 +100,12 @@ impl Error {
                 | WorktreeError::IgnoredPaths(_)
                 | WorktreeError::GitOperationInProgress
                 | WorktreeError::LiveWriter
+                | WorktreeError::LiveProcess(_)
                 | WorktreeError::UnknownWriter
+                | WorktreeError::RegistrationMismatch { .. }
+                | WorktreeError::GitEntryHeld { .. }
+                | WorktreeError::ReservationPresent
+                | WorktreeError::UnreadableRecord
                 | WorktreeError::IncompleteCensus
                 | WorktreeError::Primary
                 | WorktreeError::IdentityChanged
@@ -138,11 +150,12 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
                 globals,
             ),
         },
-        Err(error) => fail(
+        Err(error) => crate::fail_with_repair(
             name,
             error.outcome(),
             "WORKTREE",
             &error.to_string(),
+            error.repair(),
             globals,
         ),
     }
@@ -690,7 +703,8 @@ pub(crate) fn land_cleanup(
             {
                 Some(worktrees::WorkerState::Free) => {}
                 Some(worktrees::WorkerState::Live) => {
-                    landed.kept = Some(WorktreeError::LiveWriter.to_string());
+                    landed.kept =
+                        Some(worktrees::live_refusal(context.workers, &lane.path).to_string());
                     return Ok(landed);
                 }
                 _ => {
@@ -813,7 +827,9 @@ fn clear_landed_writer(
         .get(&lane.path)
     {
         Some(worktrees::WorkerState::Free) => {}
-        Some(worktrees::WorkerState::Live) => return Err(WorktreeError::LiveWriter.into()),
+        Some(worktrees::WorkerState::Live) => {
+            return Err(worktrees::live_refusal(context.workers, &lane.path).into());
+        }
         _ => return Err(WorktreeError::IncompleteCensus.into()),
     }
     let verified = provenant_confinement::repo::verify_worktree(context.repo, &lane.path)

@@ -140,12 +140,22 @@ fn fail(
     message: &str,
     globals: &provenant_cli::Globals,
 ) -> u8 {
+    fail_with_repair(command, status, code, message, None, globals)
+}
+fn fail_with_repair(
+    command: &str,
+    status: Outcome,
+    code: &str,
+    message: &str,
+    repair: Option<&str>,
+    globals: &provenant_cli::Globals,
+) -> u8 {
     let mut result = CommandResult::new(command, status, ());
     result.error = Some(CommandError {
         code: code.into(),
         message: message.into(),
         cause: None,
-        repair: None,
+        repair: repair.map(Into::into),
     });
     if let Some(error) = &mut result.error {
         apply_repair(command, error, globals.json);

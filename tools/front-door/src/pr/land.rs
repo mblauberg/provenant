@@ -3,7 +3,7 @@
 use super::git::{Git, plain_ref};
 use super::{Result, checks, head, merge, successful};
 use crate::{emit, roots, worktrees};
-use provenant_confinement::worktrees::WorkerObserver;
+use provenant_confinement::worktrees::{ObservedProcess, WorkerObserver};
 use provenant_core::GitOid;
 use provenant_records::{CommandError, CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
@@ -152,6 +152,10 @@ impl WorkerObserver for LandWorkers<'_> {
         roots: &[PathBuf],
     ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState> {
         self.0.observe_roots_for_land(roots)
+    }
+
+    fn live_process(&self, root: &std::path::Path) -> Option<ObservedProcess> {
+        self.0.live_process_for_land(root)
     }
 }
 

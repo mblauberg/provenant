@@ -44,7 +44,10 @@ without taking over its lifecycle. A missing branch name creates an owned
 checkout; for an absolute path or a path below `.worktrees/`, use
 `--branch BRANCH` to create it. To register a native linked checkout, use
 `provenant worktree adopt PATH --owner manual`; another project's checkout and
-a live or reserved writer are refused.
+a live or reserved writer are refused, and a live refusal names the process
+(pid and command). The same command replaces a stale registration, such as one
+left by an earlier tree at the same path; run it from outside the tree, since a
+shell inside the tree counts as a live process.
 
 Choose `--deliver none`, `push`, `integrate:integration` or `pr`. Push and PR
 use origin and the lane branch. Integration targets must already exist;
