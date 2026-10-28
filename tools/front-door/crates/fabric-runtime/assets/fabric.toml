@@ -25,6 +25,7 @@ graph_timeout_seconds = 14400
 bundle_bytes = 67108864
 
 [graph.limits]
+continuations = 2
 nodes = 512
 edges = 4096
 routes_per_node = 16
