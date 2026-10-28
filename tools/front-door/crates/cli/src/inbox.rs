@@ -288,7 +288,7 @@ impl Error {
         match self {
             Self::Inbox(error) => (
                 match error.code() {
-                    "invalid_input" | "not_found" => Outcome::Invalid,
+                    "invalid_input" | "not_found" | "work_mismatch" => Outcome::Invalid,
                     "conflict"
                     | "operation_conflict"
                     | "cursor_expired"
@@ -406,6 +406,7 @@ pub fn run(
                         "Retry the same request with --operation-id {operation_id}; preserve its original content and revision."
                     )),
                     Error::Inbox(error) if matches!(error.code(),"conflict"|"operation_conflict")=>Some("Inspect `provenant inbox --state all --json` before submitting another operation; preserve the authoritative answer and its revision.".into()),
+                    Error::Inbox(error) if error.code() == "work_mismatch" => Some("Correct the work repository or head to match the selected run before retrying.".into()),
                     Error::Inbox(InboxError::CursorExpired) => {
                         Some("Restart the list without --cursor.".into())
                     }

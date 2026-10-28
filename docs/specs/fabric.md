@@ -102,9 +102,9 @@ claims, never promoted by a UI, summary or receipt replay. Even verified work
 confers no execution, repository or approval authority.
 
 Both edges resolve through Run at the configured host root and current project.
-They reject `mismatch`, including unqualified selectors; partial, unavailable,
-unindexed and capped results remain explicit claims. Replay validates the exact
-actor and input before lookup. New lookups finish before Fabric opens its write
+They reject `mismatch` with `work_mismatch`, including unqualified selectors;
+partial, unavailable, unindexed and capped results remain explicit claims. Replay
+validates the exact actor and input before lookup. New lookups finish before Fabric opens its write
 transaction, so index locks, creation and backoff cannot stall other coordination.
 Inside the transaction the exact actor/input receipt is checked again to handle
 concurrent preparations. Membership is an observation, not a cross-store atomic
@@ -116,6 +116,8 @@ including hexadecimal expansion for `native_bytes`, excluding the root slash.
 
 Unlinked requests omit absent correlation fields and retain the version-1 wire
 shape. Newly correlated records declare version 2 and require a version-2 reader.
+An older reader that rejects a record fails the entire list page, so an inbox
+list or console overview can be unavailable even when other records are readable.
 Current readers accept both record versions, including retained history and the
 bounded overview projection; the database schema is unchanged. Existing version-1
 records and immutable receipts remain readable and retain their original shape.

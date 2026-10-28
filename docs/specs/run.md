@@ -77,8 +77,8 @@ successful launch nor workflow authority.
 and head constraints. Reads check at most 64 candidates and 64 KiB per record,
 using the same byte bound as writes. `Verified` requires a task or attempt;
 run-only matches are at best `Partial` because there is no trusted complete member list.
-Missing qualified nested, historical and unprepared work returns `Unindexed`;
-an empty run-only selection remains `Partial`. Contradictory
+Missing nested, historical and unprepared work, including an empty run-only
+selection, returns `Unindexed`. Contradictory
 facts return `Mismatch`, ahead of unavailable repository/head facts and unindexed
 coverage, including run-only selectors. A mismatch observed among the first 64
 candidates also wins over `Limit`; otherwise `Limit` never proves absence. Lookups traverse no child roots and accept

@@ -110,7 +110,7 @@ impl WorkIndex {
             let qualified = selection.task.is_some() || selection.attempt.is_some();
             for n in 0..=ROW_LIMIT {
                 let Some(row) = rows.next()? else {
-                    if !qualified {
+                    if !qualified && coverage != WorkCoverage::Unindexed {
                         return Ok(coverage.max(WorkCoverage::Partial));
                     }
                     return Ok(coverage);
@@ -268,7 +268,7 @@ mod tests {
         let mut run_only = selection.clone();
         run_only.task = None;
         run_only.attempt = None;
-        assert_eq!(index.validate(&run_only, &call)?, WorkCoverage::Partial);
+        assert_eq!(index.validate(&run_only, &call)?, WorkCoverage::Unindexed);
         index.seal(&value, &call)?;
         index.seal(&value, &call)?;
         assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Verified);
@@ -305,6 +305,49 @@ mod tests {
         let index = WorkIndex::open(context.state_root.as_path(), &call)?;
         assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Verified);
         assert_eq!(index.validate(&run_only, &call)?, WorkCoverage::Partial);
+        Ok(())
+    }
+
+    #[test]
+    fn request_correlation_survives_attempt_record_removal() -> TestResult {
+        let (_temp, context, clock, cancel) = fixture()?;
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let prepared = input();
+        store.create(&prepared, &call)?;
+        store.start(
+            prepared.run_id,
+            &crate::dispatch_tests::Ready,
+            &|_, _| Err(RunError::Validation("fixture handoff")),
+            &call,
+        )?;
+        let selector = WorkSelector {
+            project: context.project_id,
+            run: prepared.run_id,
+            task: Some(prepared.attempts[0].task_id),
+            attempt: Some(prepared.attempts[0].attempt_id),
+            repository: None,
+            head: None,
+        };
+        assert_eq!(
+            validate_work(&context.state_root, &selector, &call)?,
+            WorkCoverage::Verified
+        );
+        // Model lane-local cleanup without touching the host membership index.
+        store
+            .db
+            .execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER immutable_terminal_delete;")?;
+        assert_eq!(
+            store.db.execute(
+                "DELETE FROM attempts WHERE id=?1",
+                [prepared.attempts[0].attempt_id.to_string()]
+            )?,
+            1
+        );
+        assert_eq!(
+            validate_work(&context.state_root, &selector, &call)?,
+            WorkCoverage::Verified
+        );
         Ok(())
     }
 

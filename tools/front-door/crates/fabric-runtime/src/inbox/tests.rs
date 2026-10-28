@@ -906,7 +906,7 @@ fn request_correlation_saves_exact_coverage_once_and_requires_host_lookup() {
         }
         let result = service.execute(input.clone(), f.budget(), &f.cancel);
         if coverage == WorkCoverage::Mismatch {
-            assert_eq!(result.unwrap_err().code(), "invalid_input");
+            assert_eq!(result.unwrap_err().code(), "work_mismatch");
             continue;
         }
         let saved = receipt(result.unwrap());
@@ -943,6 +943,67 @@ fn request_correlation_saves_exact_coverage_once_and_requires_host_lookup() {
             .items
             .len(),
         6
+    );
+}
+
+#[test]
+fn request_correlation_v2_survives_answer_close_and_acknowledgement() {
+    let f = Fixture::new();
+    let work = RequestWork {
+        run_id: provenant_core::RunId::from_bytes([3; 16]),
+        task_id: Some(provenant_core::TaskId::from_bytes([4; 16])),
+        attempt_id: None,
+        repository: None,
+        head: None,
+    };
+    let mut input = ask(RequestKind::Decision, "linked-roundtrip");
+    if let InboxInput::Ask { request, .. } = &mut input {
+        request.work = Some(work.clone());
+    }
+    let created = receipt(
+        f.service()
+            .with_work_lookup(&|_, _| Ok(WorkCoverage::Verified))
+            .execute(input, f.budget(), &f.cancel)
+            .unwrap(),
+    );
+    let check = |history_len| {
+        let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+            panic!("item")
+        };
+        assert_eq!(item.history.len(), history_len);
+        for record in std::iter::once(&item.request).chain(&item.history) {
+            assert_eq!(record.schema_version, 2);
+            assert_eq!(record.request.work.as_ref(), Some(&work));
+            assert_eq!(record.work_coverage, Some(WorkCoverage::Verified));
+            assert_eq!(record.verified_work(), Some(&work));
+        }
+        item
+    };
+    check(1);
+    let answered = receipt(f.call(answer(created.request_id, "linked-answer")).unwrap());
+    check(2);
+    f.call(InboxInput::Close {
+        id: created.request_id,
+        state: RequestState::Superseded,
+        reason: "Replaced by a new scoped request".into(),
+        expect_revision: 2,
+        operation_id: op("linked-close"),
+    })
+    .unwrap();
+    check(3);
+    f.call(InboxInput::Acknowledge {
+        id: created.request_id,
+        answer_id: answered.answer_id.unwrap(),
+        session: "session-a".into(),
+        operation_id: op("linked-ack"),
+    })
+    .unwrap();
+    let item = check(3);
+    assert_eq!(item.request.state, RequestState::Superseded);
+    assert_eq!(item.answer.unwrap().id, answered.answer_id.unwrap());
+    assert_eq!(
+        item.delivery.unwrap().state,
+        AnswerDeliveryState::Acknowledged
     );
 }
 
