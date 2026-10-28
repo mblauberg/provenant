@@ -55,6 +55,7 @@ as a graph file in the project:
       "prompt": "Review the change in .worktrees/feature.",
       "access": "read_only",
       "depends_on": ["write"],
+      "inputs": [{"node": "write", "outputs": ["result", "branch"]}],
       "route": {
         "adapter": "claude",
         "model": "claude/claude-sonnet-5-5",
@@ -74,6 +75,31 @@ adapter and model routes also work. A route must include an adapter or alias;
 that can mix both forms. Both forms accept `account`. A node's optional `title`
 appears in `lanes` and graph status; it defaults to the node ID and must pass
 the task title validation, including the prohibition on control characters.
+
+`inputs` selects outputs from direct dependencies to include in the node's
+brief. The available selectors are `result`, `verdict`, `findings`, `branch`
+and `commit`. Omit `inputs` for ordering without passing data. The result is a
+bounded digest and a run-file path when available, not a transcript. The
+path is available for a local attempt with a result; remote attempts may have
+no local path. The rendered brief is bounded by the effective
+`node_prompt_bytes` limit; whole input sections that do not fit are omitted.
+If a dependency's outputs are unavailable, as with a checkpoint from before
+outputs were recorded, advancement reports an error. Inspect the checkpoint's
+node outputs with `provenant fabric graph status --json`.
+
+To report findings, include a fenced `findings` block in the result containing
+JSON with `schema_version: 1` and a `findings` array. Each finding has `id`,
+`severity`, `file`, `line`, `summary` and `status`. For example:
+
+````text
+```findings
+{"schema_version":1,"findings":[{"id":"F1","severity":"high","file":"src/lib.rs","line":12,"summary":"Missing validation","status":"open"}]}
+```
+````
+
+The runtime accepts at most 32 findings. A missing or invalid block produces
+an empty list and a warning rather than failing the node. See the
+[graph spec](../specs/fabric.md#typed-node-outputs) for the output contract.
 
 ```sh
 provenant fabric graph run --document graph.json

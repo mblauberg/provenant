@@ -3180,7 +3180,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             ));
             (target, reference)
         };
-        let attempt = owner.snapshot(target, self.budget, self.cancel)?;
+        let attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
         use provenant_records::run::{AttemptState, Outcome};
         match attempt.state {
             AttemptState::Terminal { outcome, .. } => {
@@ -3207,7 +3207,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     .map(|(_, receipt)| receipt)
                     .or(attempt.delivery.as_ref());
                 let launched = attempt.provider_launched.unwrap_or(true);
-                let result = if outcome == Outcome::Succeeded {
+                let result = if attempt.result.is_some() {
                     let service = provenant_run::Service::new(&store);
                     read_result_to_eof(|offset| {
                         service
@@ -3255,6 +3255,27 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         _ => AttemptOutcome::OtherFailure,
                     },
                     result,
+                    result_path: attempt.result.as_ref().and_then(|_| {
+                        (target.host.unwrap_or(self.factory.context.identity.host)
+                            == self.factory.context.identity.host)
+                            .then(|| {
+                                self.factory
+                                    .context
+                                    .roots
+                                    .state
+                                    .as_path()
+                                    .join(format!(
+                                        "runs/{}/attempts/{}/result.md",
+                                        attempt.run_id, attempt.attempt_id
+                                    ))
+                                    .to_string_lossy()
+                                    .into_owned()
+                            })
+                    }),
+                    branch: effective_delivery.map(|receipt| receipt.branch.clone()),
+                    commit: (access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite)
+                        .then(|| attempt.head.map(|head| head.to_string()))
+                        .flatten(),
                 })
             }
             _ => Ok(AttemptObservation::Pending {

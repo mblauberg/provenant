@@ -211,6 +211,27 @@ specify a single `route` or an ordered `routes` list. A route can name a pool
 with just `alias`, resolved as for `dispatch --route`, or supply an explicit
 adapter. Routes require an adapter or alias and may mix these forms in a list.
 
+### Typed node outputs
+
+Settled nodes record version 1 outputs in the checkpoint, exposed by graph
+status JSON. A result has a UTF-8 digest of at most 4096 bytes and an optional
+run-file path for a local attempt. The optional verdict is a `VERDICT:` line. Findings use a fenced
+`findings` JSON block with `schema_version: 1` and a `findings` array; each
+item has `id`, `severity`, `file`, `line`, `summary` and `status`; `line` may
+be null. A block may contain at most 32 findings and 8 KiB of JSON, and text
+fields are bounded to 1024 bytes. Missing or invalid findings produce an empty list and a warning,
+not a node failure. Writers can also provide a branch or commit.
+
+A node's `inputs` list selects `result`, `verdict`, `findings`, `branch` or
+`commit` from named direct dependencies. Each dependency and output selector
+may occur only once. The selected data is rendered into its brief, which is
+bounded by the effective per-node prompt byte limit; whole input sections that
+do not fit are omitted. If a selected dependency has no recorded outputs, as
+in an older checkpoint, advancement reports an error. Result digests and paths
+are passed instead of transcripts.
+- Why: downstream nodes can use bounded evidence without copying transcripts.
+- Owner: `crates/fabric-runtime/src/graph.rs`
+
 ### Checkpoint before launch
 
 The owner writes a checkpoint under a stable graph, node and route key
