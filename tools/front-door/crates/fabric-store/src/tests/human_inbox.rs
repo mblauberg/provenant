@@ -485,6 +485,8 @@ fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
         chair_actor: actor(2),
         request: RequestDraft {
             work: None,
+            deadline: None,
+            supersedes: None,
             kind: RequestKind::Question,
             title: "Question".into(),
             body: "What next?".into(),
@@ -757,4 +759,65 @@ fn local_delivery_fresh_process() -> Result<()> {
     assert!(!f.path().with_extension("sqlite3-wal").exists());
     assert!(!f.path().with_extension("sqlite3-shm").exists());
     Ok(())
+}
+
+#[test]
+fn request_correlation_expiry_filter_precedes_page_limit() {
+    let mut f = Fixture::new();
+    let store = f.open();
+    let mut value: HumanRequest = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"id":HumanRequestId::from_bytes([1;16]),"revision":1,
+        "operation_id":"fixture","created_at":f.now(),"updated_at":f.now(),
+        "project_id":project(),"project_key":null,"owner_host":HostId::from_bytes([8;16]),
+        "chair_session_id":"chair-a","chair_actor":actor(2),
+        "request":{"kind":"question","title":"Next","body":"What next?"},
+        "state":"open","answer_id":null,"closure_reason":null
+    }))
+    .unwrap();
+    for n in 1..=5 {
+        value.id = HumanRequestId::from_bytes([n; 16]);
+        value.request.deadline = if n == 1 || n == 4 {
+            Some(
+                f.now()
+                    .checked_add(provenant_core::DurationMicros::from_micros(1))
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        store.create_human_request(&value, &f.request()).unwrap();
+    }
+    f.clock
+        .advance(provenant_core::DurationMicros::from_micros(1))
+        .unwrap();
+    let call = f.request();
+    let mut after = None;
+    for n in [2, 3, 5] {
+        let page = store
+            .human_requests(project(), None, false, after, 1, &call)
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, HumanRequestId::from_bytes([n; 16]));
+        assert_eq!(page.items[0].state, RequestState::Open);
+        assert_eq!(page.truncated, n != 5);
+        after = Some(page.items[0].id);
+    }
+    let all = store
+        .human_requests(project(), None, true, None, 10, &call)
+        .unwrap();
+    assert_eq!(all.items.len(), 5);
+    assert_eq!(all.items[0].state, RequestState::Expired);
+    assert_eq!(all.items[3].state, RequestState::Expired);
+    let pending = store.pending_human_requests(10, 1_048_576, &call).unwrap();
+    assert_eq!(pending.items.len(), 3);
+    let owner_host = HostId::from_bytes([8; 16]).to_string();
+    assert!(
+        pending
+            .items
+            .iter()
+            .all(|item| item.owner_host.as_deref() == Some(owner_host.as_str()))
+    );
+    let bounded = store.pending_human_requests(1, 1_048_576, &call).unwrap();
+    assert!(bounded.items.is_empty());
+    assert!(bounded.truncated);
 }

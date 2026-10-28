@@ -417,3 +417,17 @@ fn request_correlation_mcp_accepts_links_but_rejects_caller_coverage() {
     input["request"]["work_coverage"] = json!("verified");
     assert!(ToolCall::parse("fabric_inbox", input).is_err());
 }
+
+#[test]
+fn request_correlation_mcp_replacement_and_deadline_are_explicit_and_typed() {
+    let mut input = json!({"op":"ask","session":"chair-a","request":{
+        "kind":"question","title":"Next","body":"What next?",
+        "supersedes":{"id":"00000000000000000000000000000001","expect_revision":2},
+        "deadline":"2033-05-18T03:33:20.000000Z"}});
+    assert!(ToolCall::parse("fabric_inbox", input.clone()).is_ok());
+    input["request"]["supersedes"]["expect_revision"] = json!(0);
+    assert!(ToolCall::parse("fabric_inbox", input.clone()).is_err());
+    input["request"]["supersedes"]["expect_revision"] = json!(2);
+    input["request"]["deadline"] = json!("tomorrow");
+    assert!(ToolCall::parse("fabric_inbox", input).is_err());
+}

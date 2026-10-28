@@ -1976,6 +1976,17 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json and
                 "maxLength": 8192,
                 "type": "string"
               },
+              "deadline": {
+                "anyOf": [
+                  {
+                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "kind": {
                 "enum": [
                   "decision",
@@ -2026,6 +2037,31 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json and
                 "anyOf": [
                   {
                     "$ref": "#/$defs/OperationId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "expect_revision": {
+                        "maximum": 18446744073709551615,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "id": {
+                        "$ref": "#/$defs/Id"
+                      }
+                    },
+                    "required": [
+                      "expect_revision",
+                      "id"
+                    ],
+                    "type": "object"
                   },
                   {
                     "type": "null"

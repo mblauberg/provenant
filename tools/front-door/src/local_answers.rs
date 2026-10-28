@@ -174,7 +174,9 @@ mod tests {
             InboxInput::Ask {
                 session: "chair-a".into(),
                 operation_id: None,
-                request: RequestDraft {
+                request: Box::new(RequestDraft {
+                    deadline: None,
+                    supersedes: None,
                     work: None,
                     kind: RequestKind::Question,
                     title: "Next?".into(),
@@ -183,7 +185,7 @@ mod tests {
                     options: vec![],
                     recommended_option_id: None,
                     proceeding_with: None,
-                },
+                }),
             },
             budget(),
             &cancel,
