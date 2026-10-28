@@ -37,11 +37,18 @@ pub fn observe_model(data: &std::path::Path, session: &str) -> Result<String, Pr
     .map_err(|_| ProviderError::UnknownIdentity)?;
     db.busy_timeout(std::time::Duration::from_millis(250))
         .map_err(|_| ProviderError::UnknownIdentity)?;
+    let v2: bool = db
+        .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_message')", [], |row| row.get(0))
+        .map_err(|_| ProviderError::UnknownIdentity)?;
+    let query = if v2 {
+        "SELECT DISTINCT json_extract(data,'$.model.providerID'), json_extract(data,'$.model.id') \
+         FROM session_message WHERE session_id=? AND type='assistant' LIMIT 2"
+    } else {
+        "SELECT DISTINCT json_extract(data,'$.providerID'), json_extract(data,'$.modelID') \
+         FROM message WHERE session_id=? AND json_extract(data,'$.role')='assistant' LIMIT 2"
+    };
     let mut statement = db
-        .prepare(
-            "SELECT DISTINCT json_extract(data,'$.providerID'), json_extract(data,'$.modelID') \
-             FROM message WHERE session_id=? AND json_extract(data,'$.role')='assistant' LIMIT 2",
-        )
+        .prepare(query)
         .map_err(|_| ProviderError::UnknownIdentity)?;
     let models = statement
         .query_map([session], |row| {
@@ -461,6 +468,56 @@ mod tests {
     const GLM: &str =
         r#"{"role":"assistant","providerID":"opencode","modelID":"glm-5.3-flash-free"}"#;
     const OTHER: &str = r#"{"role":"assistant","providerID":"opencode","modelID":"other"}"#;
+
+    #[test]
+    fn recorded_stream_session_selects_v2_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = rusqlite::Connection::open(dir.path().join("opencode.db")).unwrap();
+        db.execute_batch("CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")
+            .unwrap();
+        db.execute(
+            "INSERT INTO session_message VALUES (?, 'assistant', ?)",
+            (
+                "FIXTURE_SESSION_IDENTIFIER_007",
+                r#"{"model":{"id":"glm-5.3-flash-free","providerID":"opencode"}}"#,
+            ),
+        )
+        .unwrap();
+        let mut stream = OpenCode.stream(None).unwrap();
+        OpenCode
+            .observe(
+                &mut stream,
+                include_bytes!(
+                    "../../../tests/fixtures/providers/opencode/unversioned-success.jsonl"
+                ),
+            )
+            .unwrap();
+        let outcome = OpenCode
+            .finish(
+                stream,
+                crate::ExitObservation {
+                    code: Some(0),
+                    timed_out: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            observe_model(dir.path(), outcome.session().unwrap()).unwrap(),
+            "opencode/opencode/glm-5.3-flash-free"
+        );
+        db.execute(
+            "INSERT INTO session_message VALUES (?, 'assistant', ?)",
+            (
+                "FIXTURE_SESSION_IDENTIFIER_007",
+                r#"{"model":{"id":"other","providerID":"opencode"}}"#,
+            ),
+        )
+        .unwrap();
+        assert!(matches!(
+            observe_model(dir.path(), outcome.session().unwrap()),
+            Err(ProviderError::IdentityMismatch)
+        ));
+    }
 
     #[test]
     fn model_comes_from_the_session_record() {
