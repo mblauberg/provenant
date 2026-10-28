@@ -4,6 +4,21 @@ use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 use support::{Result, TestRig, code, mcp::McpClient};
 
 #[test]
+fn chair_summary_reads_do_not_record_usage() -> Result {
+    let rig = TestRig::new()?;
+    fs::create_dir_all(&rig.state)?;
+    fs::set_permissions(&rig.state, fs::Permissions::from_mode(0o700))?;
+    for args in [
+        &["chair", "summary", "show", "unknown"][..],
+        &["chair", "summary", "diff", "unknown", "--from", "1"][..],
+    ] {
+        let _ = rig.command(args)?;
+    }
+    assert!(!rig.state.join("usage.jsonl").exists());
+    Ok(())
+}
+
+#[test]
 fn cli_and_mcp_usage_records_exclude_arguments_prompts_and_results() -> Result {
     let rig = TestRig::new()?;
     fs::create_dir_all(&rig.state)?;

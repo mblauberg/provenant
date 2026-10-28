@@ -537,11 +537,11 @@ fn log_input<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, Error> {
 
 fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
     use provenant_workflow::session::{SessionError, SummaryPatch, parse_summary};
-    let read_only = matches!(command, ChairSummary::Show { .. });
-    let path = if read_only {
-        "chair summary show"
-    } else {
-        "chair summary update"
+    let read_only = !matches!(command, ChairSummary::Update { .. });
+    let path = match &command {
+        ChairSummary::Show { .. } => "chair summary show",
+        ChairSummary::Diff { .. } => "chair summary diff",
+        ChairSummary::Update { .. } => "chair summary update",
     };
     let result = (|| -> Result<Value, Error> {
         let resolved = crate::roots::resolve(
@@ -550,7 +550,7 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
             crate::roots::Product::Required,
         )?;
         match command {
-            ChairSummary::Show { session } => {
+            ChairSummary::Show { ref session } | ChairSummary::Diff { ref session, .. } => {
                 let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
                 let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
                 let executor = SystemExecutor::new(1)?;
@@ -567,14 +567,30 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
                     .ok_or("project not registered")?
                     .project_id();
                 let store = SessionStore::new(
-                    resolved.roots.state,
+                    resolved.roots.state.clone(),
                     project,
-                    HostSessionId::parse(&session)?,
+                    HostSessionId::parse(session)?,
                 );
-                let checkpoint = store
-                    .read()?
-                    .ok_or(SessionError::MissingCheckpoint { session })?;
-                Ok(json!({"summary": parse_summary(&checkpoint.markdown)?}))
+                if let ChairSummary::Diff { from, to, .. } = command {
+                    Ok(json!({"diff": store.summary_diff(from, to)?}))
+                } else {
+                    let checkpoint =
+                        store
+                            .read()?
+                            .ok_or_else(|| SessionError::MissingCheckpoint {
+                                session: session.clone(),
+                            })?;
+                    let summary = parse_summary(&checkpoint.markdown)?;
+                    let comparison = summary.as_ref().map(|value| {
+                        provenant_cli::console::summary_comparison(
+                            &resolved.roots,
+                            project,
+                            session,
+                            &value.needs_you,
+                        )
+                    });
+                    Ok(json!({"summary": summary, "comparison": comparison}))
+                }
             }
             ChairSummary::Update {
                 session,
@@ -639,6 +655,17 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
                     repair: Some("Reread with `provenant chair summary show` and reapply the intended change.".into()),
                 });
                 crate::emit(&result, globals, "", false)
+            } else if matches!(
+                error.downcast_ref::<SessionError>(),
+                Some(SessionError::MissingCheckpoint { .. })
+            ) {
+                crate::fail(
+                    path,
+                    Outcome::Failed,
+                    "MISSING",
+                    &error.to_string(),
+                    globals,
+                )
             } else {
                 crate::fail(
                     path,
