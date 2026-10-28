@@ -529,20 +529,9 @@ fn prepare_with(
             .as_ref()
             .filter(|_| plan.permissions().writer_publishing())
         {
-            let publishing = (|| {
-                spec.configure_publishing(
-                    scratch,
-                    &git,
-                    gh,
-                    &home,
-                    writer
-                        .as_ref()
-                        .ok_or("writer authority missing")?
-                        .branch
-                        .short_name(),
-                )
-                .map_err(|error| error.to_string())
-            })();
+            let publishing = spec
+                .configure_publishing(scratch, &git, gh, &home)
+                .map_err(|error| error.to_string());
             if let Err(error) = publishing {
                 reasons.push(skip(&label, SkipKind::Setup, error));
                 continue;

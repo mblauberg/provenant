@@ -1,4 +1,4 @@
-//! Provenant-only provider customisation and bounded writer publishing setup.
+//! Provenant-only provider customisation and writer publishing setup.
 use crate::launch::{exact, subtree};
 use crate::{ProviderError, SetupStep};
 use provenant_confinement::permissions::ProviderProfileSpec;
@@ -16,10 +16,7 @@ impl crate::LaunchSpec {
         git: &Path,
         gh: &Path,
         home: &Path,
-        branch: &str,
     ) -> Result<(), ProviderError> {
-        provenant_confinement::repo::GitRefName::branch(branch)
-            .map_err(|_| ProviderError::InvalidPath)?;
         let text = |path: &Path| -> Result<String, ProviderError> {
             if !path.is_absolute() {
                 return Err(ProviderError::InvalidPath);
@@ -36,10 +33,8 @@ impl crate::LaunchSpec {
         let gh_config = shell_quote(&text(&home.join(".config/gh"))?);
         let gh = format!("GH_CONFIG_DIR={gh_config} {}", shell_quote(&gh_path));
         let config = scratch.join("publishing.gitconfig");
-        let hooks = scratch.join("publishing-hooks");
         let config_text = format!(
-            "[core]\n\thooksPath = {}\n[credential]\n\thelper =\n\thelper = {}\n\tinteractive = false\n",
-            serde_json::to_string(&text(&hooks)?).map_err(|_| ProviderError::Malformed)?,
+            "[credential]\n\thelper =\n\thelper = {}\n\tinteractive = false\n",
             serde_json::to_string(&format!("!{gh} auth git-credential"))
                 .map_err(|_| ProviderError::Malformed)?,
         );
@@ -75,14 +70,9 @@ impl crate::LaunchSpec {
         )
         .map_err(|_| ProviderError::InvalidPath)?;
         self.setup.extend([
-            SetupStep::CreateDir(hooks.clone()),
             SetupStep::WriteFile {
                 path: config,
                 bytes: config_text.into_bytes(),
-            },
-            SetupStep::WriteExecutable {
-                path: hooks.join("pre-push"),
-                bytes: publishing_hook(&git, &gh, branch).into_bytes(),
             },
             SetupStep::WriteExecutable {
                 path: scratch.join("bin/gh"),
@@ -125,53 +115,6 @@ impl crate::LaunchSpec {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn publishing_hook(git: &str, gh: &str, branch: &str) -> String {
-    let encoded: String = branch
-        .bytes()
-        .map(|byte| {
-            if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
-                char::from(byte).to_string()
-            } else {
-                format!("%{byte:02X}")
-            }
-        })
-        .collect();
-    let branch = shell_quote(branch);
-    format!(
-        r#"#!/bin/sh
-set -eu
-refuse() {{ echo 'lane push refused: only an unprotected lane branch on origin may advance' >&2; exit 1; }}
-[ "$1" = origin ] || refuse
-# Check repository config without push command-line overrides.
-unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
-branch={branch}
-case "$branch" in main|master) refuse ;; esac
-[ "$({git} symbolic-ref --quiet HEAD)" = "refs/heads/$branch" ] || refuse
-[ "$({git} remote get-url --push origin)" = "$2" ] || refuse
-# Bind gh's repository placeholders to this push destination, never upstream.
-GH_REPO=$2
-export GH_REPO
-default=$({gh} repo view "$2" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null) || refuse
-[ -n "$default" ] && [ "$branch" != "$default" ] || refuse
-protected=$({gh} api --paginate 'repos/{{owner}}/{{repo}}/branches?protected=true&per_page=100' --jq '.[].name' 2>/dev/null) || refuse
-newline='
-'
-case "$newline$protected$newline" in *"$newline$branch$newline"*) refuse ;; esac
-# Rules can protect a branch before it exists on the remote.
-rules=$({gh} api --paginate 'repos/{{owner}}/{{repo}}/rules/branches/{encoded}' --jq '.[].type' 2>/dev/null) || refuse
-[ -z "$rules" ] || refuse
-while read -r local_ref local_oid remote_ref remote_oid; do
-    case "$local_oid" in ''|*[!0]*) ;; *) refuse ;; esac
-    case "$local_ref:$remote_ref" in *refs/tags/*) refuse ;; esac
-    [ "$remote_ref" = "refs/heads/$branch" ] || refuse
-    case "$remote_oid" in
-        ''|*[!0]*) {git} merge-base --is-ancestor "$remote_oid" "$local_oid" || refuse ;;
-    esac
-done
-"#
-    )
 }
 
 /// Canonical runtime paths supplied by the composition edge.
@@ -422,7 +365,6 @@ mod tests {
                 Path::new("/fixture/git"),
                 Path::new("/fixture/gh"),
                 Path::new("/fixture/home"),
-                "feat/lane",
             );
             assert!(result.is_ok(), "publishing setup for {id}: {result:?}");
         }
@@ -430,8 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn writer_publishing_pushes_only_its_branch_and_redacts_credentials()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn writer_publishing_redacts_credentials() -> Result<(), Box<dyn std::error::Error>> {
         use crate::{Access, Adapter, Prompt, codex::Codex};
         use provenant_confinement::redact::Redactor;
         use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
@@ -443,7 +384,6 @@ mod tests {
         let home = root.join("home");
         let repo = root.join("repo");
         let origin = root.join("origin.git");
-        let other_origin = root.join("other.git");
         let worktree = root.join("lane");
         let attempt = root.join("attempt");
         let scratch = attempt.join("tmp");
@@ -457,22 +397,12 @@ mod tests {
             home.join(".config/gh/hosts.yml"),
             format!("username=fixture\npassword={token}\n"),
         )?;
-        for (name, value) in [("default", "main\n"), ("protected", ""), ("rules", "")] {
-            fs::write(home.join(name), value)?;
-        }
         let gh = root.join("gh fixture's executable");
         fs::write(
             &gh,
             br#"#!/bin/sh
-[ ! -f "$HOME/offline" ] || exit 1
 case "$1" in
     auth) cat "$GH_CONFIG_DIR/hosts.yml" ;;
-    repo) cat "$HOME/default" ;;
-    api) case "$3" in
-        */rules/branches/*) cat "$HOME/rules" ;;
-        */branches\?*) cat "$HOME/protected" ;;
-        *) exit 1 ;;
-    esac ;;
     pr) printf 'fixture pr\n' ;;
     *) exit 1 ;;
 esac
@@ -528,12 +458,6 @@ esac
                 origin.to_str().ok_or("origin path")?,
             ],
             vec![
-                "init",
-                "-q",
-                "--bare",
-                other_origin.to_str().ok_or("other origin path")?,
-            ],
-            vec![
                 "remote",
                 "add",
                 "origin",
@@ -574,7 +498,7 @@ esac
         let mut spec = Codex.prepare(crate::tests::fixture_input(
             &route, &plan, &prompt, &worktree, None,
         ))?;
-        spec.configure_publishing(&scratch, &git, &gh, &home, "feat/lane")?;
+        spec.configure_publishing(&scratch, &git, &gh, &home)?;
         // Apply only the generated publishing setup; adapter-specific auth
         // setup belongs to the existing provider tests.
         fs::create_dir_all(scratch.join("bin"))?;
@@ -626,71 +550,6 @@ esac
         let push = |args: &[&str]| run(&lane_git, args, &worktree, &env, None);
         assert_eq!(
             push(&["push", "origin", "HEAD"])?.termination,
-            Termination::Exit(0)
-        );
-        let remote_override = format!("remote.origin.pushurl={}", other_origin.display());
-        for args in [
-            vec!["push", "origin", "HEAD:main"],
-            vec!["push", "origin", "HEAD:other"],
-            vec!["push", "origin", "HEAD:refs/tags/v1"],
-            vec!["push", "origin", ":refs/heads/feat/lane"],
-            vec!["push", origin.to_str().ok_or("origin path")?, "HEAD"],
-            vec!["-c", &remote_override, "push", "origin", "HEAD"],
-        ] {
-            assert_ne!(
-                push(&args)?.termination,
-                Termination::Exit(0),
-                "refused push: {args:?}"
-            );
-        }
-        for (file, value) in [
-            ("default", "feat/lane\n"),
-            ("protected", "feat/lane\n"),
-            ("rules", "pull_request\n"),
-            ("offline", "yes"),
-        ] {
-            fs::write(home.join(file), value)?;
-            // A second commit ensures Git supplies an update to the hook.
-            assert_eq!(
-                push(&[
-                    "-c",
-                    "user.name=Fixture",
-                    "-c",
-                    "user.email=fixture@example.invalid",
-                    "commit",
-                    "-q",
-                    "--allow-empty",
-                    "-m",
-                    "advance"
-                ])?
-                .termination,
-                Termination::Exit(0)
-            );
-            assert_ne!(
-                push(&["push", "origin", "HEAD"])?.termination,
-                Termination::Exit(0),
-                "policy: {file}"
-            );
-            if file == "offline" {
-                fs::remove_file(home.join(file))?;
-            } else {
-                fs::write(
-                    home.join(file),
-                    if file == "default" { "main\n" } else { "" },
-                )?;
-            }
-        }
-        assert_eq!(
-            push(&["push", "origin", "HEAD"])?.termination,
-            Termination::Exit(0)
-        );
-        // Rewinding a ref with --force is rejected by the stdin OID ancestry check.
-        assert_eq!(
-            push(&["reset", "--hard", "HEAD~1"])?.termination,
-            Termination::Exit(0)
-        );
-        assert_ne!(
-            push(&["push", "--force", "origin", "HEAD"])?.termination,
             Termination::Exit(0)
         );
         for verb in ["create", "comment", "view", "checks"] {

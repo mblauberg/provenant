@@ -92,7 +92,7 @@ Source: `config/harness-knobs.json`.
 | Field | Value |
 |---|---|
 | `default` | `true` |
-| `effect` | `"Let worktree-write lanes with open network read gh configuration, push their own branch to origin and manage pull requests."` |
+| `effect` | `"Let worktree-write lanes with open network read gh configuration, push branches and open pull requests."` |
 | `reader` | `"tools/front-door/crates/cli/src/run/provider.rs"` |
 | `status` | `"wired"` |
 | `trade_off` | `"Off keeps publishing with the chair; on exposes the existing gh login read-only to the writer lane."` |

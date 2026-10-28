@@ -31,23 +31,10 @@ token. Provider-only and local network lanes retain the gh credential deny.
 The helper selects the host's `~/.config/gh`; custom gh configuration paths and
 keychain-only logins are not mirrored into the lane.
 
-The lane's Git pre-push hook permits only its checked-out branch on `origin`.
-It refuses default and protected branches, tags, deletions and updates that
-would discard remote history, including forced rewinds. GitHub protection
-lookups must succeed before a push proceeds. The hook checks active rules even
-when the branch has not been created on GitHub yet.
-
-This hook governs ordinary lane Git pushes. A lane with the full gh login can
-bypass it with `--no-verify`, another Git directory, changed scratch files or
-the GitHub API.
-Repository rulesets remain the server-side boundary for those actions.
-
-Use `gh pr create`, `gh pr comment`, `gh pr view` and `gh pr checks` to manage
-the pull request. Merge through `provenant pr merge --head SHA N` or `pr land`,
-which require green CI for the exact head. The Provenant executable is not on
-the lane's shell PATH; use the host's gated path, handing the merge to the chair
-when that path is unavailable. GitHub's required checks still apply to raw
-`gh pr merge`.
+Writers can push branches and open pull requests. Merge through
+`provenant pr merge --head SHA N` or `pr land`. Main is protected by the
+repository ruleset. The Provenant executable is not on the lane's shell PATH;
+hand the merge to the chair when the host's gated path is unavailable.
 
 Publishing defaults on. Disable it for a dispatch with
 `--knob lanes.publish=false` or Fabric `knobs: ["lanes.publish=false"]`.

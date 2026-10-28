@@ -1,6 +1,6 @@
 ## Additions
 
-Writer lanes with open network can push their own branch to origin and manage
-pull requests using the existing gh login. A pre-push hook refuses protected
-branches, tags, deletions and forced rewinds. Merges use the existing exact-head
-CI gate. Set `lanes.publish=false` to keep publishing with the chair.
+Networked writer lanes can push branches and open pull requests using the
+existing gh login. Merges go through `provenant pr merge --head` or `pr land`;
+main is protected by the repository ruleset. Set `lanes.publish=false` to keep
+publishing with the chair.
