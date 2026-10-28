@@ -407,9 +407,15 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
     }
     let repo = root.join("repo");
     let executor = SystemExecutor::new(1)?;
+    let clt_git = Path::new("/Library/Developer/CommandLineTools/usr/bin/git");
+    let git = if clt_git.is_file() {
+        clt_git
+    } else {
+        Path::new("/usr/bin/git")
+    };
     let run_git = |args: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
-        let argv = std::iter::once("/usr/bin/git")
-            .chain(args.iter().copied())
+        let argv = std::iter::once(git.as_os_str())
+            .chain(args.iter().map(|arg| std::ffi::OsStr::new(arg)))
             .map(Into::into)
             .collect::<Vec<_>>();
         let output = executor.execute(ExecOptions::new(&argv, &repo, Duration::from_secs(10)))?;
@@ -421,6 +427,8 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
         Ok(())
     };
     run_git(&["init"])?;
+    std::fs::write(repo.join("file"), "base\n")?;
+    run_git(&["add", "file"])?;
     run_git(&[
         "-c",
         "user.name=Fixture",
@@ -432,6 +440,8 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
         "fixture",
     ])?;
     run_git(&["checkout", "-b", "side"])?;
+    std::fs::write(repo.join("file"), "side\n")?;
+    run_git(&["add", "file"])?;
     run_git(&[
         "-c",
         "user.name=Fixture",
@@ -443,6 +453,17 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
         "side",
     ])?;
     run_git(&["checkout", "-"])?;
+    std::fs::write(repo.join("file"), "main\n")?;
+    run_git(&["add", "file"])?;
+    run_git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "-m",
+        "main",
+    ])?;
     run_git(&[
         "-c",
         "user.name=Fixture",
@@ -450,6 +471,8 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
         "user.email=fixture@example.test",
         "merge",
         "--no-ff",
+        "-s",
+        "ours",
         "side",
         "-m",
         "merge",
@@ -483,12 +506,13 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
     })?;
     let route = route("agy", "fixture-model");
     let prompt = Prompt::new("fixture".into());
-    let input = PrepareInput {
+    let mut input = PrepareInput {
         executable: &executable,
         home: &root,
         git_context: true,
         ..fixture_input(&route, &plan, &prompt, &worktree, None)
     };
+    input.provenant.git = git;
     let adapter = REGISTRY
         .iter()
         .find(|entry| entry.adapter.id() == "agy")
@@ -496,7 +520,7 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
     let spec = adapter.adapter.prepare(input)?;
     for step in &spec.setup {
         match step {
-            SetupStep::CreateDir(path) if path.starts_with(root.join("scratch/git-objects")) => {
+            SetupStep::CreateDir(path) if path.starts_with(root.join("scratch")) => {
                 std::fs::create_dir_all(path)?
             }
             SetupStep::WriteFile { path, bytes }
@@ -504,46 +528,14 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
             {
                 std::fs::write(path, bytes)?
             }
+            SetupStep::WriteExecutable { path, bytes } if path == &root.join("scratch/bin/git") => {
+                std::fs::write(path, bytes)?;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+            }
             _ => {}
         }
     }
     let object_dir = root.join("scratch/git-objects");
-    for args in [
-        &["show", "--remerge-diff", "HEAD"][..],
-        &["diff", "--merge-base", "HEAD^", "HEAD"][..],
-    ] {
-        let output = std::process::Command::new("/usr/bin/git")
-            .args(args)
-            .current_dir(&worktree)
-            .env("GIT_OBJECT_DIRECTORY", &object_dir)
-            .output()?;
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    // A write goes to scratch, never the host's common object store.
-    let output = std::process::Command::new("/usr/bin/git")
-        .args(["hash-object", "-w", "--stdin"])
-        .current_dir(&worktree)
-        .env("GIT_OBJECT_DIRECTORY", &object_dir)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()?;
-    let mut child = output;
-    use std::io::Write;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"lane scratch object")?;
-    let output = child.wait_with_output()?;
-    assert!(output.status.success());
-    let oid = std::str::from_utf8(&output.stdout)?.trim();
-    let relative = format!("{}/{}", &oid[..2], &oid[2..]);
-    assert!(object_dir.join(&relative).is_file());
-    assert!(!common.join("objects").join(relative).exists());
     let directories = required_anchors(plan.permissions(), &spec.profile, None)
         .iter()
         .map(AnchoredDirectory::open_canonical)
@@ -554,6 +546,91 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
         worktree: None,
     };
     let compiled = compile(plan.permissions(), &spec.profile, &anchors)?;
+    let sandboxed =
+        |argv: &[std::ffi::OsString]| -> Result<std::process::Command, Box<dyn std::error::Error>> {
+            let command =
+                compiled.command(argv, &provenant_core::AttemptId::from_bytes([1; 16]))?;
+            let mut process = std::process::Command::new(&command[0]);
+            process
+                .args(&command[1..])
+                .current_dir(&worktree)
+                .env_clear()
+                .envs(spec.env.iter().cloned());
+            Ok(process)
+        };
+    let sandboxed_git = |args: &[&str]| {
+        let argv: Vec<std::ffi::OsString> =
+            std::iter::once(root.join("scratch/bin/git").into_os_string())
+                .chain(args.iter().map(Into::into))
+                .collect();
+        sandboxed(&argv)
+    };
+    for args in [
+        &["show", "--remerge-diff", "HEAD"][..],
+        &["diff", "--merge-base", "HEAD^", "HEAD"][..],
+    ] {
+        let output = sandboxed_git(args)?.output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if args[0] == "show" {
+            assert!(String::from_utf8_lossy(&output.stdout).contains("diff --git"));
+        }
+    }
+    // Exercise the applied profile, including scratch writes and common-store confinement.
+    let output = sandboxed_git(&["hash-object", "-w", "--stdin"])?
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let mut child = output;
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"lane scratch object")?;
+    let output = child.wait_with_output()?;
+    assert!(output.status.success());
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let oid = std::str::from_utf8(&output.stdout)?.trim();
+    let relative = format!("{}/{}", &oid[..2], &oid[2..]);
+    assert!(object_dir.join(&relative).is_file());
+    assert!(!common.join("objects").join(&relative).exists());
+    // Bypassing the wrapper must still leave the real store unwritable.
+    let input = root.join("scratch/object-input");
+    std::fs::write(&input, b"lane scratch object")?;
+    let output =
+        sandboxed(&[git.into(), "hash-object".into(), "-w".into(), input.into()])?.output()?;
+    assert!(
+        !output.status.success(),
+        "direct Git unexpectedly wrote the common store"
+    );
+    assert!(!common.join("objects").join(relative).exists());
+    let link = object_dir.join("redirect");
+    let output = sandboxed(&[
+        "/bin/ln".into(),
+        "-s".into(),
+        common.join("objects").into(),
+        link.clone().into(),
+    ])?
+    .output()?;
+    assert!(
+        !output.status.success(),
+        "scratch object symlink unexpectedly allowed"
+    );
+    assert!(std::fs::symlink_metadata(link).is_err());
     let source = std::str::from_utf8(&compiled.profile)?;
     assert!(source.contains(&format!(
         "(allow file-read* (subpath \"{}\"))",

@@ -216,6 +216,29 @@ refused, and the attempt records every granted path.
   `crates/run/src/dispatch_tests.rs::read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt`
 - Owner: `crates/confinement/src/plan/read_only.rs`
 
+Read-only runs with a verified Git binding prepare `scratch/git-objects` with
+the bound common directory's `objects` as an alternate. The shell Git wrapper
+sets `GIT_OBJECT_DIRECTORY` for `show`, `log`, `diff`, `merge-tree` and
+`hash-object` only when Git resolves that common directory, including linked
+worktrees. Aliases and external subcommands receive no override. The launch
+environment has no lane-wide override, so other repositories and submodules
+retain their own object stores. The wrapper honours recognised Git global
+options; unknown options and direct
+absolute-path Git calls run without this temporary-object convenience.
+Configured callbacks of those builtins inherit their repository-local Git
+environment; callbacks entering another repository must clear Git-local
+variables.
+The shared Git directories remain write-denied, and symlink creation in the
+scratch object store is denied. No quarantine write exception is granted.
+The lane can alter its scratch objects and alternates; lane Git output must
+never serve as trusted host evidence. The host uses its own Git environment.
+- Why: `show --remerge-diff` needs temporary objects, while #1532 requires the
+  shared store to remain unwritable. Repository scoping preserves other reads.
+- Test: `crates/providers/src/tests.rs::prepared_git_objects_are_repository_scoped_for_every_adapter`;
+  `::prepared_git_reads_linked_and_other_repositories`;
+  `crates/providers/src/seatbelt_snapshots.rs::agy_read_only_linked_worktree_git_directories_are_not_writable`
+- Owner: `crates/providers/src/launch.rs`, `crates/confinement/src/permissions.rs`
+
 ## Writer hard-link refusal
 
 On macOS, launch refuses a writable worktree containing an existing hard-linked

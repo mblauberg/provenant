@@ -2040,6 +2040,12 @@ fn render_profile(
     }
 
     if let Some(read_only) = &plan.read_only {
+        // The attempt object store is writable, but must not redirect writes
+        // through a lane-planted symlink into the common object store.
+        source.push_str(&format!(
+            "(deny file-write-create (require-all (vnode-type SYMLINK) (subpath \"{}\")))\n",
+            sbpl_path(&plan.scratch.path.join("git-objects"))?
+        ));
         for grant in &read_only.writes {
             for operation in ["file-read*", "file-write*"] {
                 push_rule(&mut source, "allow", operation, &grant.path, grant.scope)?;
