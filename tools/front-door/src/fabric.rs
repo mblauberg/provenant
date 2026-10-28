@@ -3208,21 +3208,21 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     .or(attempt.delivery.as_ref());
                 let launched = attempt.provider_launched.unwrap_or(true);
                 let result = if attempt.result.is_some() {
-                    let service = provenant_run::Service::new(&store);
-                    read_result_to_eof(|offset| {
-                        service
-                            .output(
-                                attempt.attempt_id,
-                                provenant_run::ArtifactPart::Result,
-                                provenant_run::ByteRange {
-                                    offset,
-                                    max_bytes: provenant_records::run::OUTPUT_LIMIT,
-                                },
-                                &call,
-                            )
-                            .ok()
-                            .map(|chunk| (chunk.bytes, chunk.next_offset, chunk.eof))
-                    })
+                    let mut capture = provenant_fabric_runtime::result_capture::ResultCapture::new(
+                        node.required_verdict,
+                    );
+                    store
+                        .stream_result(attempt.attempt_id, &call, |chunk| capture.push(chunk))
+                        .ok()
+                        .map(|digest| {
+                            let mut result = capture.finish();
+                            result.digest = digest.to_string();
+                            result.source_truncated = attempt
+                                .result
+                                .as_ref()
+                                .is_some_and(|artifact| artifact.bytes > 4096);
+                            result
+                        })
                 } else {
                     None
                 };
@@ -3928,23 +3928,6 @@ pub fn events(
         }
     }
 }
-/// Read a bounded result through EOF in output-sized chunks. A verdict line
-/// may sit anywhere in it, so one chunk is not enough.
-fn read_result_to_eof(mut read: impl FnMut(u64) -> Option<(Vec<u8>, u64, bool)>) -> Option<String> {
-    let mut bytes = Vec::new();
-    let mut offset = 0;
-    loop {
-        let (chunk, next, eof) = read(offset)?;
-        bytes.extend_from_slice(&chunk);
-        if eof {
-            return String::from_utf8(bytes).ok();
-        }
-        if next <= offset || next > provenant_records::run::RESULT_LIMIT {
-            return None;
-        }
-        offset = next;
-    }
-}
 #[cfg(test)]
 mod result_tests {
     #[test]
@@ -3971,27 +3954,6 @@ mod result_tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
-    }
-
-    #[test]
-    fn result_reader_reaches_a_verdict_after_the_first_chunk() {
-        let limit = usize::try_from(provenant_records::run::OUTPUT_LIMIT).unwrap();
-        // A multibyte character straddles the chunk boundary.
-        let text = format!("{}é\nVERDICT: PASS\n", "x".repeat(limit - 1));
-        let bytes = text.as_bytes();
-        let read = |offset: u64| {
-            let start = usize::try_from(offset).ok()?;
-            let end = bytes.len().min(start + limit);
-            Some((bytes[start..end].to_vec(), end as u64, end == bytes.len()))
-        };
-        assert_eq!(
-            super::read_result_to_eof(read).as_deref(),
-            Some(text.as_str())
-        );
-        assert_eq!(
-            super::read_result_to_eof(|offset| Some((Vec::new(), offset, false))),
-            None
-        );
     }
 }
 #[cfg(test)]

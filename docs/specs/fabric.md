@@ -213,22 +213,36 @@ adapter. Routes require an adapter or alias and may mix these forms in a list.
 
 ### Typed node outputs
 
-Settled nodes record version 1 outputs in the checkpoint, exposed by graph
-status JSON. A result has a UTF-8 digest of at most 4096 bytes and an optional
-run-file path for a local attempt. The optional verdict is a `VERDICT:` line. Findings use a fenced
-`findings` JSON block with `schema_version: 1` and a `findings` array; each
-item has `id`, `severity`, `file`, `line`, `summary` and `status`; `line` may
-be null. A block may contain at most 32 findings and 8 KiB of JSON, and text
-fields are bounded to 1024 bytes. Missing or invalid findings produce an empty list and a warning,
-not a node failure. Writers can also provide a branch or commit.
+Settled nodes record version 2 outputs in the checkpoint, exposed by graph
+status JSON. A result's `digest` is `sha256:` followed by the lowercase
+SHA-256 of the complete stored result's raw bytes. The runtime applies
+stateful credential redaction while streaming the result. Its `excerpt` is a
+UTF-8 prefix of at most 4096 bytes of the redacted text, and `truncated`
+indicates that either the stored result or redacted text exceeded that window. A local attempt may
+also have a run-file path. The runtime retains only the excerpt and a 16 KiB
+tail of the redacted text for parsing.
+
+The optional verdict is a `VERDICT:` line in one of those windows. Findings
+use a fenced `findings` JSON block with `schema_version: 1` and a `findings`
+array; each item has `id`, `severity`, `file`, `line`, `summary` and `status`;
+`line` may be null. Parsing only uses complete lines and blocks within a
+window, so content in the middle of a large result may not be captured. A
+block may contain at most 32 findings and 8 KiB of JSON, and text fields are
+bounded to 1024 bytes. Missing or invalid findings produce an empty list and a
+warning, not a node failure. The separate `required_verdict` contract checks
+for its exact line across the complete redacted stream. Writers can also
+provide a branch or commit.
 
 A node's `inputs` list selects `result`, `verdict`, `findings`, `branch` or
 `commit` from named direct dependencies. Each dependency and output selector
 may occur only once. The selected data is rendered into its brief, which is
 bounded by the effective per-node prompt byte limit; whole input sections that
-do not fit are omitted. If a selected dependency has no recorded outputs, as
-in an older checkpoint, advancement reports an error. Result digests and paths
-are passed instead of transcripts.
+do not fit are omitted. Selected outputs appear in a delimited block labelled
+as untrusted data, with delimiter collisions escaped. If a selected dependency
+has no recorded outputs, or has version 1 outputs from an older checkpoint,
+advancement reports an error. Version 1 outputs remain visible in status but
+cannot feed selected inputs. Result digests, excerpts and paths are passed
+instead of transcripts.
 - Why: downstream nodes can use bounded evidence without copying transcripts.
 - Owner: `crates/fabric-runtime/src/graph.rs`
 

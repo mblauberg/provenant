@@ -78,14 +78,15 @@ the task title validation, including the prohibition on control characters.
 
 `inputs` selects outputs from direct dependencies to include in the node's
 brief. The available selectors are `result`, `verdict`, `findings`, `branch`
-and `commit`. Omit `inputs` for ordering without passing data. The result is a
-bounded digest and a run-file path when available, not a transcript. The
-path is available for a local attempt with a result; remote attempts may have
-no local path. The rendered brief is bounded by the effective
+and `commit`. Omit `inputs` for ordering without passing data. The result has a
+SHA-256 digest of the complete stored result, a bounded credential-redacted
+excerpt and a run-file path when available. The path is available for a local attempt with a result;
+remote attempts may have no local path. Selected outputs appear in a block
+marked as untrusted data. The rendered brief is bounded by the effective
 `node_prompt_bytes` limit; whole input sections that do not fit are omitted.
-If a dependency's outputs are unavailable, as with a checkpoint from before
-outputs were recorded, advancement reports an error. Inspect the checkpoint's
-node outputs with `provenant fabric graph status --json`.
+If a dependency's outputs are unavailable or use the older version 1 schema,
+advancement reports an error. Inspect the checkpoint's node outputs with
+`provenant fabric graph status --json`.
 
 To report findings, include a fenced `findings` block in the result containing
 JSON with `schema_version: 1` and a `findings` array. Each finding has `id`,
