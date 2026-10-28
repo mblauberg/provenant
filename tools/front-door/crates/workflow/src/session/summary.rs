@@ -65,6 +65,15 @@ fn changed<T: PartialEq + Clone>(from: &T, to: &T) -> Option<SummaryChange<T>> {
 }
 
 impl super::SessionStore {
+    /// Compare against a viewer's retained baseline, if one has been rendered.
+    pub fn viewer_summary_diff(
+        &self,
+        baseline: Option<u64>,
+        to: Option<u64>,
+    ) -> Result<Option<SummaryDiff>, super::SessionError> {
+        baseline.map(|from| self.summary_diff(from, to)).transpose()
+    }
+
     /// Compare summary revision IDs found in the bounded retained checkpoint
     /// history. Repeated identical summaries from ordinary saves are allowed.
     pub fn summary_diff(

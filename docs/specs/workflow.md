@@ -143,10 +143,15 @@ revision guard. A bounded comparison of retained summary revisions reports
 unavailable history, scalar changes and added or removed request IDs. Inbox
 reconciliation compares the local host, project and chair; references observed
 elsewhere or unaccounted for by an incomplete scan are unknown, not stale.
+Viewer comparisons use the viewer's rendered revision as their baseline.
+The CLI validates the session and revision through Workflow before writing to
+Fabric; the two owners do not share a transaction. The caller acknowledges the
+revision it rendered, and missing retained history remains unavailable.
 - Why: concurrent saves and incomplete or differently scoped observations must
   not overwrite chair work or represent a live request as resolved.
 - Test: `crates/workflow/src/session.rs::retained_summary_diff_compares_fields_and_reports_missing`;
-  `crates/cli/src/console/overview.rs::compares_only_matching_host_project_and_chair_and_respects_partial_coverage`
+  `crates/cli/src/console/overview.rs::compares_only_matching_host_project_and_chair_and_respects_partial_coverage`;
+  `tests/inbox.rs::viewer_cli_isolation_and_render_race`
 - Owner: `crates/workflow/src/session/summary.rs`, `crates/cli/src/console/overview.rs`
 
 ### Explicit chairs are discoverable

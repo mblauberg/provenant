@@ -360,7 +360,9 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             | Error::Overlap { .. } => Self::Conflict,
             Error::Busy => Self::Busy,
             Error::Cancelled => Self::Cancelled,
-            Error::Invalid(_) | Error::PathEncoding => Self::InvalidInput,
+            Error::Invalid(_) | Error::PathEncoding | Error::ViewerLimit | Error::ViewerNotOpen => {
+                Self::InvalidInput
+            }
             Error::Decode(_)
             | Error::Encode(_)
             | Error::SchemaVersion(_)

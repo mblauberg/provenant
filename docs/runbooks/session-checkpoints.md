@@ -94,6 +94,29 @@ unavailable revisions when history has been pruned; it does not treat them as
 unchanged. Request IDs are reported as added and removed sets. Repeated
 identical summaries across checkpoint saves are allowed.
 
+Viewer state is local and keyed by a caller-chosen stable viewer name. After
+rendering a summary, record its actual revision with `provenant chair viewer
+rendered VIEWER SESSION --revision N`. `chair viewer summary VIEWER SESSION
+[--to N] --json` compares that baseline with the selected or current revision;
+the baseline and diff are null before the first acknowledgement. The response
+returns the current summary and its `to` revision by default; for an explicit
+historical `--to`, `summary` is null. Acknowledge the revision only after
+displaying it, so an intervening update is not marked as seen. A pruned
+baseline appears in the diff's `unavailable` list; missing summaries report
+unavailable coverage. Baselines cannot move backwards. `chair viewer forget
+VIEWER SESSION` clears a baseline.
+
+`chair viewer request VIEWER ID --json` reads the request and that viewer's
+presentation state. `chair viewer set-request VIEWER ID [--seen-revision N]
+[--snoozed-until UTC] [--dismissed]` replaces the whole presentation state;
+omitted values clear their fields. These operations do not answer, close or
+change the blocking flag. Each viewer has a limit of 10,000 request rows and
+10,000 summary rows per project, and the project has a combined limit of
+100,000 viewer rows. Writes reclaim closed or expired requests; if all retained
+requests remain open, resolve or close one before retrying. At the summary
+limit a new baseline is refused with `VIEWER_LIMIT` and existing baselines are
+kept; run `chair viewer forget VIEWER SESSION` to free one.
+
 Summary show also compares `needs_you` with the bounded local inbox. It reports
 stale references and open requests missing from the summary for the same host,
 project and chair. Coverage is `partial` when the scan is truncated or a
