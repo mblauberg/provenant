@@ -99,12 +99,13 @@ five-hour floor entered at 09:00 with a window ending at 13:00 should expire at
 13:00, within five hours. Editing or removing the table takes effect on the next read;
 floors are never written over the raw ledger cache. Zen does not use Go floors.
 
-MiMo Flash is a provisional junior and senior member at weight 1. Go pool
+DeepSeek V4.1 Flash (junior weight 2, senior 1) and GLM-5.3 Flash (junior 1,
+senior 1) are provisional Go pool members. Go pool
 selection requires a fresh reading with all three windows and an active floor
 for each, or a future source with complete coverage. Missing or expired floors
 exclude Go members from pools. Exact model selection remains available with
-the partial-coverage diagnostic. MiMo Pro and GLM 5.3 await trials before pool
-membership. Paid OpenCode pacing remains `pace`.
+the partial-coverage diagnostic. MiMo V2.6 Flash is catalogued for exact selection
+only. Paid OpenCode pacing remains `pace`.
 
 Without an observable reset, a calibrated window uses a full remaining window
 for conservative pacing. Floors stay binding until expiry even if a recorded

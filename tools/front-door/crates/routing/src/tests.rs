@@ -2589,7 +2589,7 @@ fn go_pool_requires_current_full_calibration_and_paces_the_maximum()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_quota::{AccountRecord, Calibration, QuotaDetails, QuotaStatus, QuotaWindow};
     let catalogue = Catalogue::bundled()?;
-    let model = "opencode/opencode-go/mimo-v2.6-flash";
+    let model = "opencode/opencode-go/deepseek-v4.1-flash";
     let mut config = RoutingConfig::default();
     config.pacing.accounts.insert(
         "go".into(),
@@ -2834,7 +2834,7 @@ fn opencode_zen_pool_does_not_inherit_go_pacing_quota() -> Result<(), Box<dyn st
         confinement_ref: "grant",
     }];
     let mut observation = quota(
-        "opencode/opencode-go/mimo-v2.6-flash",
+        "opencode/opencode-go/deepseek-v4.1-flash",
         "go",
         provenant_quota::QuotaStatus::Exhausted,
         1,

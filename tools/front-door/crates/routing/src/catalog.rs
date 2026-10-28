@@ -710,13 +710,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let catalogue = Catalogue::bundled()?;
         let config = RoutingConfig::default();
-        let model_names = [
-            "mimo-v2.6-flash",
-            "deepseek-v4.1-flash",
-            "glm-5.3-flash",
-            "mimo-v2.6-pro",
-            "glm-5.3",
-        ];
+        let model_names = ["deepseek-v4.1-flash", "glm-5.3-flash", "mimo-v2.6-flash"];
         let availability = [AvailabilityRecord {
             schema_version: 1,
             adapter: "opencode".into(),
@@ -776,21 +770,20 @@ mod tests {
                         .map(|member| (pool.as_str(), member))
                 })
                 .collect();
-            let pools: &[&str] = match name {
-                "mimo-v2.6-flash" => &["junior", "senior"],
-                "deepseek-v4.1-flash" | "glm-5.3-flash" => &["junior"],
+            let pools: &[(&str, u8)] = match name {
+                "deepseek-v4.1-flash" => &[("junior", 2), ("senior", 1)],
+                "glm-5.3-flash" => &[("junior", 1), ("senior", 1)],
                 _ => &[],
             };
             if !pools.is_empty() {
                 assert_eq!(
                     memberships
                         .iter()
-                        .map(|(pool, _)| *pool)
+                        .map(|(pool, member)| (*pool, member.weight))
                         .collect::<Vec<_>>(),
                     pools
                 );
                 for (_, member) in memberships {
-                    assert_eq!(member.weight, 1);
                     assert!(!member.free);
                     assert!(member.effort.is_none());
                     assert!(member.efforts.is_empty());
