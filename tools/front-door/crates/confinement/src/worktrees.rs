@@ -1129,6 +1129,9 @@ fn refresh_identity(
 ) -> Result<WorktreeIdentity, WorktreeError> {
     let mut identity = read_identity(state)?;
     identity.check(project, None, canonical, branch.as_str(), require_active)?;
+    // Legacy records have no Git identities: the one-time upgrade accepts the
+    // improbable risk of a recreated path reusing its root inode during a
+    // device change, after current Git membership has been verified.
     identity.check_tree(verified)?;
     if identity.root_device != verified.identity().device {
         verified.repo().revalidate()?;
@@ -2973,6 +2976,151 @@ mod lifecycle_tests {
                 .iter()
                 .any(|entry| entry.reason == RetainReason::StaleRegistration)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn registration_refresh_refuses_changed_git_identity_and_paths() -> Result<(), Box<dyn Error>> {
+        for scenario in ["common", "gitdir", "gitfile", "symlink"] {
+            let fixture = Fixture::new()?;
+            let test = TestContext::new(&fixture)?;
+            let context = test.context();
+            let info = create(
+                &context,
+                WorktreeCreate {
+                    branch: "identity-check".into(),
+                    base: None,
+                },
+                &cancel(),
+            )?;
+            let entry = read_worktrees(&context, &cancel())?
+                .into_iter()
+                .find(|entry| entry.path == info.path)
+                .ok_or("missing entry")?;
+            let state = context
+                .project_state
+                .open_verified_directory(&state_dir_name(&info.path))?;
+            let mut record = read_identity(&state)?;
+            record.root_device ^= 1;
+            match scenario {
+                "common" => {
+                    record
+                        .git_identity
+                        .as_mut()
+                        .ok_or("missing identity")?
+                        .common_inode ^= 1
+                }
+                "gitdir" => {
+                    record
+                        .git_identity
+                        .as_mut()
+                        .ok_or("missing identity")?
+                        .private_inode ^= 1
+                }
+                "gitfile" => {
+                    let other = create(
+                        &context,
+                        WorktreeCreate {
+                            branch: "other-tree".into(),
+                            base: None,
+                        },
+                        &cancel(),
+                    )?;
+                    let other_tree = verify_worktree(context.repo, &other.path)?;
+                    let marker = info.path.join(".git");
+                    fs::remove_file(&marker)?;
+                    fs::write(
+                        marker,
+                        format!(
+                            "gitdir: {}\n",
+                            other_tree.repo().private_git_dir().display()
+                        ),
+                    )?;
+                }
+                "symlink" => {
+                    let moved = info.path.with_extension("moved");
+                    fs::rename(&info.path, &moved)?;
+                    std::os::unix::fs::symlink(&moved, &info.path)?;
+                }
+                _ => unreachable!(),
+            }
+            write_identity(&state, &record, PublishMode::Replace)?;
+            let _lock = repository_lock(&context, LockMode::Exclusive, &cancel())?;
+            let error = read_worktree_identity(&context, &entry, true)
+                .err()
+                .ok_or_else(|| format!("{scenario} unexpectedly refreshed"))?;
+            match scenario {
+                "common" => assert!(matches!(
+                    error,
+                    WorktreeError::RegistrationMismatch {
+                        field: "common git directory"
+                    }
+                )),
+                "gitdir" | "gitfile" => assert!(matches!(
+                    error,
+                    WorktreeError::RegistrationMismatch {
+                        field: "worktree git directory"
+                    }
+                )),
+                "symlink" => assert!(matches!(
+                    error,
+                    WorktreeError::Repository(_) | WorktreeError::Filesystem(_)
+                )),
+                _ => unreachable!(),
+            }
+            let after = read_identity(&state)?;
+            assert_eq!(after.root_device, record.root_device, "{scenario}");
+            assert_eq!(
+                after.device_refreshes, record.device_refreshes,
+                "{scenario}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn registration_refresh_refuses_worktree_from_another_common_dir() -> Result<(), Box<dyn Error>>
+    {
+        let fixture = Fixture::new()?;
+        let foreign = Fixture::new()?;
+        let test = TestContext::new(&fixture)?;
+        let foreign_test = TestContext::new(&foreign)?;
+        let context = test.context();
+        let foreign_context = foreign_test.context();
+        let info = create(
+            &foreign_context,
+            WorktreeCreate {
+                branch: "foreign".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        let entry = read_worktrees(&foreign_context, &cancel())?
+            .into_iter()
+            .find(|entry| entry.path == info.path)
+            .ok_or("missing foreign entry")?;
+        assert!(matches!(
+            verify_worktree(context.repo, &info.path),
+            Err(RepoError::InvalidRegistration)
+        ));
+        let foreign_state = foreign_context
+            .project_state
+            .open_verified_directory(&state_dir_name(&info.path))?;
+        let mut record = read_identity(&foreign_state)?;
+        record.project_id = context.binding.project_id();
+        record.root_device ^= 1;
+        let name = state_dir_name(&info.path);
+        context.project_state.mkdir(&name, 0o700)?;
+        let state = context.project_state.open_verified_directory(&name)?;
+        write_identity(&state, &record, PublishMode::Replace)?;
+        let _lock = repository_lock(&context, LockMode::Exclusive, &cancel())?;
+        assert!(matches!(
+            read_worktree_identity(&context, &entry, true),
+            Err(WorktreeError::RegistrationMismatch { .. })
+        ));
+        let after = read_identity(&state)?;
+        assert_eq!(after.root_device, record.root_device);
+        assert_eq!(after.device_refreshes, record.device_refreshes);
         Ok(())
     }
 
