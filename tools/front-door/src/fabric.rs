@@ -449,8 +449,8 @@ pub fn mcp(
                 .ok_or(EdgeError::Invalid)?
                 .to_owned();
             context.identity.client = context.config.client_label.clone();
-            context.identity.inbox = context.inbox_address(Some(client))?;
         }
+        context.identity.inbox = context.inbox_address(client)?;
         stdio::serve(&mut Stdin::new(), &mut Stdout, factory)?;
         Ok(())
     })();

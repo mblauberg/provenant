@@ -315,7 +315,7 @@ fn checkpoint_repair(
 ) -> String {
     let client = client
         .map(|harness| format!(" --client {}", harness.spec().name))
-        .unwrap_or_default();
+        .unwrap_or_else(|| " --client HARNESS".into());
     let rest = format!(
         "workflow session save {}{client} --rebind",
         session.as_str()
@@ -1285,6 +1285,17 @@ mod tests {
         let refusal = checkpoint_identity(&other, &repair).err().unwrap();
         assert_eq!(refusal.code, "IDENTITY");
         assert!(refusal.message.contains("provenant --state-dir '/custom state' --project '/selected project' workflow session save handoff-session --client codex --rebind --file <checkpoint.md>"));
+    }
+
+    #[test]
+    fn checkpoint_repair_without_a_client_requires_a_harness() {
+        let repair = checkpoint_repair(
+            &Globals::default(),
+            Path::new("/project"),
+            &HostSessionId::parse("chair").unwrap(),
+            None,
+        );
+        assert!(repair.contains("workflow session save chair --client HARNESS --rebind"));
     }
 
     #[test]

@@ -146,7 +146,7 @@ checkpoint and explicitly report stale metadata before using it.
 
 `workflow session save SESSION` registers the caller's exact Fabric host,
 bound project, supplied host session ID and trusted actor as a chair.
-Every writing edge uses Fabric's shared inbox derivation: host plus the first
+Chair identity paths use Fabric's shared inbox derivation: host plus the first
 nonempty label from `PROVENANT_AGENT_LABEL`, configured `fabric.agent_label`,
 the harness client, then configured `fabric.client_label` (default `agent`).
 The client is explicit `--client HARNESS` when supplied. Hook-generated save
@@ -160,7 +160,10 @@ unlabelled Claude and Codex chairs on the same host have different actors.
 The same derivation applies to CLI saves, MCP and source checkpoint saves
 during `session handoff`. Hooks include the client in
 `provenant workflow session save SESSION --file <checkpoint.md> --client HARNESS`.
-Handoff validates the binding before peer delivery.
+General CLI Fabric and lane commands retain their configured actor and
+`identity.client` (default `agent`); harness markers do not change either.
+Handoff validates the binding before peer delivery. Its recovery command
+includes the supplied client or `--client HARNESS` when none was supplied.
 Lanes (`context.in_lane`) are refused before saving or registering a
 chair, including when they request `--rebind`. The workflow
 owner stores a per-session index entry in
@@ -173,7 +176,7 @@ owner stores a per-session index entry in
 | `chair_actor` | Canonical Fabric actor; only an explicit `save --rebind` may replace it or the host |
 | `created_at`, `last_saved_at` | Canonical RFC3339 UTC with microseconds; first registration and latest save whose discovery was published, including unchanged saves |
 | `checkpoint` | The complete current `Revision`: revision, parent, SHA-256, bytes and saved time |
-| `rebound_from` | Optional list of the last 8 previous host/actor bindings and `changed_at`, oldest first; preserved by ordinary saves. Legacy single-hop objects remain readable and become lists on save |
+| `rebound_from` | Optional list of the last 8 previous host/actor bindings and `changed_at`, oldest first; preserved by ordinary saves. Longer lists are truncated to the newest 8 on read. Legacy single-hop objects remain readable and become lists on save |
 
 The discovery key is scoped to this host's state directory. Separate host state
 directories can contain the same project/session ID without collision. Shared

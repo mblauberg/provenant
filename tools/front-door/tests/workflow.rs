@@ -198,6 +198,51 @@ fn a_lane_cannot_register_or_overwrite_a_chair() -> Result {
 }
 
 #[test]
+fn conflicting_markers_fall_back_to_the_configured_client() -> Result {
+    let mut rig = TestRig::new()?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nclient_label='terminal'\n",
+    )?;
+    let identity = call(&rig, &["fabric", "identity"], 0)?["data"].clone();
+    rig.env.push(("CODEX_THREAD_ID".into(), "nested".into()));
+    rig.env.push(("CLAUDECODE".into(), "1".into()));
+    let file = rig.root.join("checkpoint.md");
+    std::fs::write(&file, "notes\n")?;
+    call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "conflict",
+            "--file",
+            file.to_str().ok_or("file")?,
+        ],
+        0,
+    )?;
+    let project = identity["project"].as_str().ok_or("project")?;
+    let discovery: Value = serde_json::from_slice(&std::fs::read(rig.state.join(format!(
+        "workflow/projects/{project}/sessions/conflict/discovery.json"
+    )))?)?;
+    assert_eq!(discovery["chair_actor"], identity["inbox"]["actor"]);
+    let mut mcp = support::mcp::McpClient::default();
+    mcp.initialise("2025-11-25")?;
+    mcp.initialised()?;
+    let id = mcp.call("fabric_context", json!({"op":"inspect"}))?;
+    let replies = mcp.eof(
+        &rig,
+        std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &["fabric", "mcp"],
+    )?;
+    let mcp_identity = &replies.get(&id).ok_or("identity")?["result"]["structuredContent"];
+    assert_eq!(mcp_identity["inbox"], identity["inbox"]);
+    assert_eq!(mcp_identity["client"], "terminal");
+    Ok(())
+}
+
+#[test]
 fn session_save_discovery_restart() -> Result {
     let mut rig = TestRig::new()?;
     rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
@@ -246,6 +291,19 @@ fn session_save_discovery_restart() -> Result {
             0,
         )?;
         rig.env.retain(|(key, _)| key != other_marker);
+        let mut inferred = support::mcp::McpClient::default();
+        inferred.initialise("2025-11-25")?;
+        inferred.initialised()?;
+        let inferred_id = inferred.call("fabric_context", json!({"op":"inspect"}))?;
+        let inferred_replies = inferred.eof(
+            &rig,
+            std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &["fabric", "mcp"],
+        )?;
+        let inferred_identity = &inferred_replies
+            .get(&inferred_id)
+            .ok_or("inferred identity")?["result"]["structuredContent"];
+        assert_eq!(inferred_identity["inbox"], identity["inbox"]);
         call(
             &rig,
             &[

@@ -123,13 +123,14 @@ impl Context {
             None
         };
         let host = provenant_config::bind_host(&roots)?;
+        // Chair paths resolve harness markers separately through inbox_address.
         let identity = Identity::bind(
             &binding,
             host,
             cwd,
             &config,
             std::env::var_os("PROVENANT_AGENT_LABEL").as_deref(),
-            harness_client(None).map(|harness| harness.spec().name),
+            None,
             key,
         )?;
         Ok(Self {

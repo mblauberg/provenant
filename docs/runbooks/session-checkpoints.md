@@ -8,8 +8,8 @@ and read it with `provenant workflow session show SESSION`. Each checkpoint is
 limited to 256 KiB. Session hooks and hand-off prompts can include a shorter
 excerpt.
 
-CLI, MCP callers, hooks and handoff use the same Fabric inbox actor: host plus
-`PROVENANT_AGENT_LABEL`, configured `fabric.agent_label`, the harness client,
+Session saves, MCP callers, hooks and handoff use the same Fabric inbox actor:
+host plus `PROVENANT_AGENT_LABEL`, configured `fabric.agent_label`, the harness client,
 then configured `fabric.client_label` (default `agent`), in that order.
 Pass `--client claude` or `--client codex` to select the harness explicitly.
 Hook-generated save commands carry their installing harness's `--client`.
@@ -20,17 +20,15 @@ Configuration directory variables are not active harness markers.
 Unlabelled Claude and Codex chairs on one host have different inbox actors.
 Lanes cannot save or register chairs (`IN_LANE`).
 
-Upgrading also changes the default actor of ordinary CLI Fabric and lane
-commands for unlabelled chairs from `agent` to their harness client. Settle
-in-flight lanes and release claims before upgrading when possible. To recover
-existing lanes, claims or human requests after upgrading, run their commands
-with `PROVENANT_AGENT_LABEL=agent`; lane selection also accepts explicit lane
-IDs or `--session agent`. New submissions should use the new harness actor.
+Ordinary CLI Fabric and lane commands retain their configured actor and
+`identity.client` (default `agent`) regardless of harness markers.
 
 An old binding under `agent` or a changed label can return `IDENTITY`.
 Before retrying handoff, or to recover a save, run
 `provenant workflow session save SESSION --file FILE --client HARNESS --rebind`;
 the record keeps the last 8 previous host/actor bindings and change times.
+Longer histories are truncated to the newest 8 on read. Handoff recovery
+commands include `--client HARNESS` when no explicit client was supplied.
 Legacy single-hop audit records upgrade to a list on the next save.
 Corrupt discovery JSON returns `HISTORY`; unreadable discovery files return
 `IO`. Restore a readable

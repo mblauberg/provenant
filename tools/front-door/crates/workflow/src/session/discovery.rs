@@ -44,16 +44,13 @@ fn rebind_history<'de, D: serde::Deserializer<'de>>(
         Many(Vec<ChairRebind>),
         One(ChairRebind),
     }
-    let history = match Option::<History>::deserialize(deserializer)? {
+    let mut history = match Option::<History>::deserialize(deserializer)? {
         Some(History::Many(history)) => history,
         Some(History::One(previous)) => vec![previous],
         None => Vec::new(),
     };
-    if history.len() > REBIND_LIMIT {
-        return Err(serde::de::Error::custom(
-            "chair rebind history exceeds 8 entries",
-        ));
-    }
+    let excess = history.len().saturating_sub(REBIND_LIMIT);
+    history.drain(..excess);
     Ok(history)
 }
 

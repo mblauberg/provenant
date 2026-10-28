@@ -825,6 +825,36 @@ mod tests {
     }
 
     #[test]
+    fn discovery_truncates_overlong_rebind_history_on_read() {
+        use provenant_core::{ActorId, HostId};
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "chair")
+            .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([20; 16]));
+        saved(&selected, "notes");
+        let mut record = selected.discovery().unwrap().unwrap().record;
+        record.rebound_from = (0..10)
+            .map(|actor| ChairRebind {
+                host: record.host,
+                actor: ActorId::from_bytes([actor; 16]),
+                changed_at: record.last_saved_at,
+            })
+            .collect();
+        let discovery = path(&root, project, "chair").join("discovery.json");
+        let bytes = serde_json::to_vec(&record).unwrap();
+        std::fs::write(&discovery, &bytes).unwrap();
+        let expected = record.rebound_from[2..].to_vec();
+        assert_eq!(
+            selected.discovery().unwrap().unwrap().record.rebound_from,
+            expected
+        );
+        assert_eq!(std::fs::read(&discovery).unwrap(), bytes);
+        saved(&selected, "notes");
+        let persisted: SessionDiscovery =
+            serde_json::from_slice(&std::fs::read(discovery).unwrap()).unwrap();
+        assert_eq!(persisted.rebound_from, expected);
+    }
+
+    #[test]
     fn rebind_keeps_eight_changes_and_upgrades_single_hop_records() {
         use provenant_core::{ActorId, HostId};
         let (_temp, root, project) = setup();
