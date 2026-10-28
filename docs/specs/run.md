@@ -90,9 +90,9 @@ run namespace by choosing its run ID and recomputing the public attempt hash.
 Nested continuation requests use version 1, retaining the original
 parent-attempt namespace and including their continuation parent in the
 canonical digest. Replays retain the original scheme, including legacy
-prepared operations whose request was not yet published. Launch from a child
-store is refused until the prior attempt's effective network can be recovered;
-see [child launch policy](routing.md#the-host-validates-and-launches-children).
+prepared operations whose request was not yet published. A child-store
+continuation uses its requesting parent's sealed network bound, or provider-only
+when that context is unavailable; see [child launch policy](routing.md#the-host-validates-and-launches-children).
 
 This scheme avoids rekeying lane-published records and IDs already returned to
 callers. There is no migration of existing child records: an absent version

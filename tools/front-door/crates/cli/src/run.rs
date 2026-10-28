@@ -2550,10 +2550,7 @@ fn check_chair_run_id(
 fn seal_launch_task(
     request_digest: provenant_core::Digest,
     task: &run::TaskRequest,
-    validated: Option<&run::ValidatedChild>,
 ) -> run::SealedTask {
-    let effective = validated.map(|child| child.effective_task(task));
-    let task = effective.as_ref().unwrap_or(task);
     run::SealedTask {
         request_digest,
         task_id: task.task_id,
@@ -2733,7 +2730,12 @@ fn launch_on_host(
                 .and_then(|task| task.deliver.as_ref())
                 .map(|_| run::HostDeliveryContext::capture()),
             launch: Some(host),
-            sealed: Some(seal_launch_task(request_digest, task, validated)),
+            sealed: Some(seal_launch_task(
+                request_digest,
+                &session
+                    .store
+                    .effective_launch_task(request, task, validated),
+            )),
         }
         .encode()
     };
@@ -2772,6 +2774,7 @@ fn launch_on_host(
                 )
             },
             validated,
+            Some(request),
             call,
         )?;
         check_launch_policy(&started)?;
@@ -2779,7 +2782,7 @@ fn launch_on_host(
     }
     let started = session
         .service()
-        .start(run, &providers, &holder, validated, call)?;
+        .start(run, &providers, &holder, validated, request, call)?;
     check_launch_policy(&started)?;
     Ok(started)
 }

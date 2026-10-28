@@ -1051,31 +1051,65 @@ fn rewrite_child_request(
 }
 
 #[test]
-fn lane_store_refuses_continuation_without_sealed_network() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?
-        .with_writer_registry(&temp.path().join("host"));
-    let prior = input();
-    store.create(&prior, &call)?;
-    let mut proposal = input();
-    proposal.run_id = RunId::from_bytes([35; 16]);
-    proposal.operation_id = "lane-continuation".parse()?;
-    proposal.attempts[0].attempt_id = AttemptId::from_bytes([36; 16]);
-    proposal.request.parent = Some(prior.attempts[0].attempt_id);
-    // A lane-writable request cannot bypass the check by omitting its parent lane.
-    proposal.request.parent_attempt = None;
-    let run = store.create(&proposal, &call)?;
-    let fake = Fake::default();
-    assert!(matches!(
-        store.start(run.run_id, &fake, &|_, _| unreachable!(), &call),
-        Err(RunError::Input {
-            kind: ErrorKind::ContinuationUnsupported,
-            ..
-        })
-    ));
-    assert_eq!(fake.prepared.get(), 0);
+fn lane_continuation_respects_sealed_parent_or_provider_fallback() -> TestResult {
+    for (bound, expected) in [
+        (None, NetworkAccess::Provider),
+        (Some(NetworkAccess::Local), NetworkAccess::Local),
+        (Some(NetworkAccess::Provider), NetworkAccess::Provider),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?
+            .with_writer_registry(&temp.path().join("host"));
+        let store = if let Some(network) = bound {
+            store.with_sealed_parent_network(network)
+        } else {
+            store
+        };
+        let prior = input();
+        store.create(&prior, &call)?;
+        let mut proposal = input();
+        proposal.run_id = RunId::from_bytes([35; 16]);
+        proposal.operation_id = "lane-continuation".parse()?;
+        proposal.attempts[0].attempt_id = AttemptId::from_bytes([36; 16]);
+        proposal.request.parent = Some(prior.attempts[0].attempt_id);
+        proposal.request.tasks[0].access.network = Some(NetworkAccess::Provider);
+        let mut narrower = proposal.request.tasks[0].clone();
+        narrower.access.network = Some(NetworkAccess::Provider);
+        assert_eq!(
+            store
+                .effective_launch_task(&proposal.request, &narrower, None)
+                .access
+                .network(false),
+            NetworkAccess::Provider
+        );
+        // A lane-writable request cannot bypass the check by omitting its parent lane.
+        proposal.request.parent_attempt = None;
+        let run = store.create(&proposal, &call)?;
+        let expected_request = proposal.request.clone();
+        proposal.request.tasks[0].access.network = Some(NetworkAccess::Open);
+        rewrite_child_request(&store, run.run_id, &proposal.request, &call)?;
+        let fake = Fake {
+            refuse: true,
+            ..Default::default()
+        };
+        assert!(matches!(
+            store.start_checked(
+                run.run_id,
+                &expected_request,
+                &fake,
+                &|_, _| unreachable!(),
+                &call
+            ),
+            Err(RunError::Validation(
+                "request changed after launch validation"
+            ))
+        ));
+        assert_eq!(fake.prepared.get(), 0);
+        store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
+        assert_eq!(fake.network.get(), Some(expected));
+    }
     Ok(())
 }
 
@@ -1112,6 +1146,18 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     )?;
     assert_eq!(store.request(record.run_id, &call)?, swapped);
     let fake = Fake::default();
+    assert!(matches!(
+        store.start_checked(
+            record.run_id,
+            &validated,
+            &fake,
+            &|_, _| unreachable!(),
+            &call
+        ),
+        Err(RunError::Validation(
+            "request changed after launch validation"
+        ))
+    ));
     assert!(matches!(
         store.start_child(
             record.run_id,
@@ -1157,13 +1203,12 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
             "a child run cannot continue an attempt"
         ))
     ));
-    assert!(matches!(
-        store.start(continued.run_id, &Ready, &|_, _| unreachable!(), &call),
-        Err(RunError::Input {
-            kind: ErrorKind::ContinuationUnsupported,
-            ..
-        })
-    ));
+    let fake = Fake {
+        refuse: true,
+        ..Default::default()
+    };
+    store.start(continued.run_id, &fake, &|_, _| unreachable!(), &call)?;
+    assert_eq!(fake.network.get(), Some(NetworkAccess::Provider));
     Ok(())
 }
 
@@ -2312,6 +2357,7 @@ impl Resources for Host {
 }
 #[derive(Default)]
 struct Fake {
+    network: Cell<Option<NetworkAccess>>,
     refuse: bool,
     policy_task: Option<TaskId>,
     observed: Option<RouteRecord>,
@@ -2360,11 +2406,13 @@ impl Providers for Fake {
 
     fn prepare(
         &self,
-        _: &TaskRequest,
+        task: &TaskRequest,
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String> {
+        self.network
+            .set(Some(task.access.network(task.writer.is_some())));
         self.prepared.set(self.prepared.get() + 1);
         assert!(paths.temporary.ends_with("tmp"));
         assert!(paths.temporary.is_dir());

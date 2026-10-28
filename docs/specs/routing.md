@@ -298,15 +298,17 @@ requester. The host applies inherited network restrictions as launch policy,
 validates the effective access against the parent, and checks the original
 digest again before launch. Every attempt's effective network is sealed in
 its holder context, so grandchildren inherit the bound. Older live contexts
-without this field default to provider-only network. A continuation in a child
-store is refused with `CONTINUATION_UNSUPPORTED` because the prior host-sealed
-network cannot be recovered reliably; dispatch a new child instead.
+without this field default to provider-only network. A child-store continuation
+is bounded by the requesting parent's host-sealed effective network, intersected
+with the requested access. Without a live sealed parent, the host uses
+provider-only network and emits a diagnostic. The prior lane's writable
+records do not supply the bound.
 - Why: a writer child could leave scripts that run unconfined, and child
   storage is lane-writable, so only the host's sealed view counts.
 - Test: `crates/run/src/dispatch_tests.rs::host_refuses_writer_child_after_request_rewrite`;
   `::host_refuses_child_access_beyond_its_parent_task`;
   `::host_launches_only_the_validated_child_request`;
-  `::lane_store_refuses_continuation_without_sealed_network`;
+  `::lane_continuation_respects_sealed_parent_or_provider_fallback`;
   `crates/cli/src/run/children.rs::tests::restricted_parent_launches_child_with_inherited_chair`;
   `::inherited_network_survives_holder_context_for_grandchildren`;
   `::launch_seal_records_root_network_and_legacy_defaults_restrictively`

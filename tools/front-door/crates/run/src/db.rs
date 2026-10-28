@@ -77,6 +77,7 @@ pub struct RunStore {
     pub(crate) writer_registry: std::path::PathBuf,
     pub(crate) policy: crate::admission::AdmissionPolicy,
     pub(crate) sealed_requester: Option<ActorId>,
+    pub(crate) sealed_parent_network: Option<NetworkAccess>,
     /// This host's ID, stamped on new attempts when the edge supplies it.
     pub(crate) host: Option<provenant_core::HostId>,
     /// Scopes and bounded custody handles this host view handed to a guardian.
@@ -149,6 +150,11 @@ impl RunStore {
     /// from the scope and directory it held at hand-off, never from the record.
     pub fn with_sealed_requester(mut self, requester: ActorId) -> Self {
         self.sealed_requester = Some(requester);
+        self
+    }
+    /// Network bound verified from the live parent holder's sealed task.
+    pub fn with_sealed_parent_network(mut self, network: NetworkAccess) -> Self {
+        self.sealed_parent_network = Some(network);
         self
     }
     /// Stamp new attempts and their events with this host. Supplied by the host
@@ -238,6 +244,7 @@ impl RunStore {
             writer_registry: context.state_root.as_path().to_owned(),
             policy: Default::default(),
             sealed_requester: None,
+            sealed_parent_network: None,
             host: None,
             launched: Default::default(),
             launched_tasks: Default::default(),
@@ -257,6 +264,7 @@ impl RunStore {
             writer_registry: context.state_root.as_path().to_owned(),
             policy: Default::default(),
             sealed_requester: None,
+            sealed_parent_network: None,
             host: None,
             launched: Default::default(),
             launched_tasks: Default::default(),

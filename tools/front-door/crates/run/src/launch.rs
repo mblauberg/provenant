@@ -185,6 +185,32 @@ fn output_prompt(directory: &std::path::Path, prompt: &str) -> String {
 }
 
 impl RunStore {
+    pub fn effective_launch_task(
+        &self,
+        request: &CanonicalRequest,
+        task: &TaskRequest,
+        child: Option<&ValidatedChild>,
+    ) -> TaskRequest {
+        let mut task = child.map_or_else(|| task.clone(), |value| value.effective_task(task));
+        if request.parent.is_some()
+            && (request.parent_attempt.is_some()
+                || self.sealed_requester.is_some()
+                || self.context.state_root.as_path() != self.writer_registry())
+        {
+            let bound = self
+                .sealed_parent_network
+                .unwrap_or(NetworkAccess::Provider);
+            let reach = |network| match network {
+                NetworkAccess::Provider => 0,
+                NetworkAccess::Local => 1,
+                NetworkAccess::Open => 2,
+            };
+            if reach(task.access.network(task.writer.is_some())) > reach(bound) {
+                task.access.network = Some(bound);
+            }
+        }
+        task
+    }
     pub(crate) fn prepare_fresh_start(
         &self,
         input: &PreparedRun,
@@ -194,6 +220,8 @@ impl RunStore {
         let [task] = input.request.tasks.as_slice() else {
             return Err(RunError::Validation("continuation task count"));
         };
+        let effective = self.effective_launch_task(&input.request, task, None);
+        let task = &effective;
         let [attempt] = input.attempts.as_slice() else {
             return Err(RunError::Validation("continuation attempt count"));
         };
@@ -633,6 +661,34 @@ impl RunStore {
                 )
             },
             None,
+            None,
+            call,
+        )
+    }
+    pub fn start_checked(
+        &self,
+        run: RunId,
+        expected: &CanonicalRequest,
+        providers: &dyn Providers,
+        context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
+        call: &Request<'_>,
+    ) -> Result<Vec<Started>> {
+        self.start_inner(
+            run,
+            providers,
+            context,
+            &|directory, scope, binding| {
+                custody::acquire_writer(
+                    directory,
+                    scope,
+                    binding,
+                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.cancel,
+                    call.clock,
+                )
+            },
+            None,
+            Some(expected.digest()?),
             call,
         )
     }
@@ -665,12 +721,14 @@ impl RunStore {
                 )
             },
             Some((validated, self.child_requester()?)),
+            None,
             call,
         )
     }
     /// Native observation seam for integration fixtures. The ordinary start
     /// path always uses supervisor's system observer and nonblocking lease.
     #[cfg(feature = "fixture")]
+    #[allow(clippy::too_many_arguments)]
     pub fn start_with_writer_lease(
         &self,
         run: RunId,
@@ -682,13 +740,22 @@ impl RunStore {
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,
         validated: Option<&ValidatedChild>,
+        expected: Option<&CanonicalRequest>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
         let child = match validated {
             Some(request) => Some((request, self.child_requester()?)),
             None => None,
         };
-        self.start_inner(run, providers, context, acquire_writer, child, call)
+        self.start_inner(
+            run,
+            providers,
+            context,
+            acquire_writer,
+            child,
+            expected.map(CanonicalRequest::digest).transpose()?,
+            call,
+        )
     }
     pub(crate) fn child_requester(&self) -> Result<ActorId> {
         self.sealed_requester.ok_or(RunError::Validation(
@@ -697,6 +764,7 @@ impl RunStore {
     }
     /// `child` is a validated child request's digest and its host-held
     /// requester; a top-level run takes its requester from its own record.
+    #[allow(clippy::too_many_arguments)]
     fn start_inner(
         &self,
         run: RunId,
@@ -708,10 +776,18 @@ impl RunStore {
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,
         child: Option<(&ValidatedChild, ActorId)>,
+        expected: Option<provenant_core::Digest>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
         // Every later use reads this one value, never the store again.
         let request = self.request(run, call)?;
+        if let Some(digest) = expected
+            && request.digest()? != digest
+        {
+            return Err(RunError::Validation(
+                "request changed after launch validation",
+            ));
+        }
         let requester = match child {
             Some((validated, _)) if request.digest()? != validated.digest()? => {
                 return Err(RunError::Validation(
@@ -724,17 +800,17 @@ impl RunStore {
             }
             None => self.run(run, call)?.actor_id,
         };
-        // A lane-owned store does not retain the host-sealed network of the
-        // prior attempt. Its canonical request may omit an inherited bound.
         if request.parent.is_some()
+            && self.sealed_parent_network.is_none()
             && (request.parent_attempt.is_some()
                 || self.sealed_requester.is_some()
                 || self.context.state_root.as_path() != self.writer_registry())
         {
-            return Err(RunError::Input {
-                kind: ErrorKind::ContinuationUnsupported,
-                message: "child continuation cannot recover its host-sealed network; dispatch a new child instead".into(),
-            });
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: parent network unavailable; child continuation uses provider-only network"
+            );
         }
         let resume = request
             .parent
@@ -830,8 +906,9 @@ impl RunStore {
                 .enumerate()
                 .find(|(_, task)| task.task_id == record.task_id)
                 .ok_or(RunError::Validation("attempt task missing from request"))?;
-            let effective_task = child.map(|(validated, _)| validated.effective_task(task));
-            let task = effective_task.as_ref().unwrap_or(task);
+            let effective_task =
+                self.effective_launch_task(&request, task, child.map(|(validated, _)| validated));
+            let task = &effective_task;
             let task_index = u64::try_from(task_index)
                 .map_err(|_| RunError::Validation("attempt task index"))?;
             let prompt = match self

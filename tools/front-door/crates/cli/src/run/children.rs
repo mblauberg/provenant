@@ -234,7 +234,8 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
         .with_writer_registry(roots.state.as_path())
         // Launch, ownership and cancellation of children use the requester
         // sealed in this attempt's host-built context, never the lane's actor.
-        .with_sealed_requester(context.actor_id),
+        .with_sealed_requester(context.actor_id)
+        .with_sealed_parent_network(parent_task.access.network(parent_task.writer.is_some())),
         context: run::ExecutionContext {
             state_root: child_state,
             project_id: context.project_id,
@@ -680,7 +681,7 @@ mod tests {
         let (_, child) = child_fixture(temp.path(), &SystemClock::new())?;
         let mut task = child.request.tasks[0].clone();
         assert_eq!(
-            seal_launch_task(child.request.digest()?, &task, None).effective_network,
+            seal_launch_task(child.request.digest()?, &task).effective_network,
             NetworkAccess::Open
         );
         for network in [
@@ -689,11 +690,10 @@ mod tests {
             NetworkAccess::Open,
         ] {
             task.access.network = Some(network);
-            let sealed = seal_launch_task(child.request.digest()?, &task, None);
+            let sealed = seal_launch_task(child.request.digest()?, &task);
             assert_eq!(sealed.effective_network, network);
         }
-        let mut json =
-            serde_json::to_value(seal_launch_task(child.request.digest()?, &task, None))?;
+        let mut json = serde_json::to_value(seal_launch_task(child.request.digest()?, &task))?;
         json.as_object_mut()
             .ok_or("sealed task")?
             .remove("effective_network");
@@ -725,7 +725,10 @@ mod tests {
             3,
             &call,
         )?;
-        let sealed = seal_launch_task(validated.digest()?, &validated.tasks[0], Some(&validated));
+        let sealed = seal_launch_task(
+            validated.digest()?,
+            &store.effective_launch_task(&validated, &validated.tasks[0], Some(&validated)),
+        );
         let sealed: run::SealedTask = serde_json::from_slice(&serde_json::to_vec(&sealed)?)?;
         let mut next_parent = validated.tasks[0].clone();
         sealed.apply_network(&mut next_parent);
@@ -997,10 +1000,8 @@ mod tests {
                     assets: &cwd,
                     cwd: &cwd,
                 };
-                let failure =
-                    launch_on_host(&session, honest.run_id, &edge, &call, None, None, None)
-                        .unwrap_err();
-                assert_eq!(failure.kind, run::ErrorKind::ContinuationUnsupported);
+                launch_on_host(&session, honest.run_id, &edge, &call, None, None, None)
+                    .map_err(|f| f.message)?;
                 with_chair_index(&roots, &call, |index, c| {
                     assert_eq!(
                         index
@@ -1215,7 +1216,7 @@ mod tests {
             )
         })
         .map_err(|f| f.message)?;
-        let failure = continue_attempt(
+        let (replayed, _) = continue_attempt(
             &session,
             &edge,
             prior,
@@ -1224,8 +1225,8 @@ mod tests {
             0,
             &call,
         )
-        .unwrap_err();
-        assert_eq!(failure.kind, run::ErrorKind::ContinuationUnsupported);
+        .map_err(|f| f.message)?;
+        assert_eq!(replayed.run_id, child.run_id);
         assert_eq!(session.store.request(child.run_id, &call)?, child.request);
         with_chair_index(&roots, &call, |index, c| {
             let binding = index
