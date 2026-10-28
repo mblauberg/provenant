@@ -444,6 +444,7 @@ pub(crate) fn persist_provider_success(
         {
             row.snapshot = None;
             row.status = QuotaStatus::Unknown;
+            row.age_seconds = None;
         }
         row.error = None;
         row.refreshing = false;
@@ -456,6 +457,13 @@ pub(crate) fn persist_provider_success(
             .iter()
             .filter_map(|r| r.next_due_unix_seconds)
             .min();
+        let elapsed =
+            u64::try_from(now.saturating_sub(report.generated_unix_seconds)).unwrap_or(u64::MAX);
+        for row in &mut report.accounts {
+            if let Some(age) = &mut row.age_seconds {
+                *age = age.saturating_add(elapsed);
+            }
+        }
         report.generated_unix_seconds = now;
         let bytes = serde_json::to_vec(&report)?;
         durable(provenant_os::fs::Directory::atomic_write_with_permissions(
