@@ -2740,6 +2740,138 @@ bounds are null. Positional arguments have no long flag.
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
+## `provenant chair viewer`
+
+| Argument | Contract |
+|---|---|
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant chair viewer request`
+
+| Argument | Contract |
+|---|---|
+| `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
+| `id` | `{"name": "id", "positional": true, "required": true}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "viewer",
+        "id"
+      ],
+      "multiple": true,
+      "name": "Request",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant chair viewer set-request`
+
+| Argument | Contract |
+|---|---|
+| `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
+| `id` | `{"name": "id", "positional": true, "required": true}` |
+| `--seen-revision` | `{"name": "seen_revision"}` |
+| `--snoozed-until` | `{"name": "snoozed_until"}` |
+| `--dismissed` | `{"defaults": ["false"], "name": "dismissed", "values": ["true", "false"]}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "viewer",
+        "id",
+        "seen_revision",
+        "snoozed_until",
+        "dismissed"
+      ],
+      "multiple": true,
+      "name": "SetRequest",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant chair viewer summary`
+
+| Argument | Contract |
+|---|---|
+| `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
+| `session` | `{"name": "session", "positional": true, "required": true}` |
+| `--to` | `{"name": "to"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "viewer",
+        "session",
+        "to"
+      ],
+      "multiple": true,
+      "name": "Summary",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant chair viewer rendered`
+
+| Argument | Contract |
+|---|---|
+| `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
+| `session` | `{"name": "session", "positional": true, "required": true}` |
+| `--revision` | `{"name": "revision", "required": true}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "viewer",
+        "session",
+        "revision"
+      ],
+      "multiple": true,
+      "name": "Rendered",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant chair summary`
 
 | Argument | Contract |

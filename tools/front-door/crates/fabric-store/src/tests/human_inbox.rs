@@ -22,6 +22,8 @@ fn viewer_isolation() {
         chair_actor: actor(2),
         request: RequestDraft {
             work: None,
+            deadline: None,
+            supersedes: None,
             kind: RequestKind::Decision,
             title: "Decision".into(),
             body: "Choose".into(),
