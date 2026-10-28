@@ -411,26 +411,27 @@ struct ExecutablePin {
 
 impl ExecutablePin {
     fn new(input: &Path, tool: &'static str) -> Result<Self, UtilityError> {
-        if !input.is_absolute() || input.file_name().and_then(OsStr::to_str) != Some(tool) {
+        let path = canonicalize(input)?;
+        if !path.is_absolute() || path.file_name().and_then(OsStr::to_str) != Some(tool) {
             return Err(UtilityError::InvalidExecutable { tool });
         }
-        let input_parent = input
+        let parent_path = path
             .parent()
-            .ok_or(UtilityError::InvalidExecutable { tool })?;
-        let parent_path = canonicalize(input_parent)?;
+            .ok_or(UtilityError::InvalidExecutable { tool })?
+            .to_path_buf();
         let parent = Directory::open_anchor(&parent_path)
             .map_err(|_| UtilityError::InvalidExecutable { tool })?;
         let parent_identity = parent.metadata()?;
         if parent_identity.kind != FileKind::Directory || parent_identity.mode & 0o022 != 0 {
             return Err(UtilityError::InvalidExecutable { tool });
         }
-        let name = input
+        let name = path
             .file_name()
             .ok_or(UtilityError::InvalidExecutable { tool })?
             .to_os_string();
         let identity = verify_executable_at(&parent, &name, tool)?;
         Ok(Self {
-            path: parent_path.join(&name),
+            path,
             parent_path,
             name,
             parent_identity,
@@ -1465,6 +1466,70 @@ pub(crate) mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
+
+    #[test]
+    fn executable_pin_resolves_symlink_and_detects_target_replacement() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let target_dir = temp.path().join("target");
+        fs::create_dir(&target_dir)?;
+        let target = target_dir.join("git");
+        fs::write(&target, b"first")?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755))?;
+        let link = temp.path().join("git");
+        std::os::unix::fs::symlink(&target, &link)?;
+
+        let pin = ExecutablePin::new(&link, "git")?;
+        assert_eq!(pin.path, fs::canonicalize(&target)?);
+        pin.verify()?;
+        let replacement = target_dir.join("replacement");
+        fs::write(&replacement, b"second")?;
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755))?;
+        fs::rename(replacement, target)?;
+        assert!(matches!(
+            pin.verify(),
+            Err(UtilityError::ExecutableChanged { tool: "git" })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn executable_pin_rejects_symlink_to_other_name() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let target = temp.path().join("other");
+        fs::write(&target, b"executable")?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755))?;
+        let link = temp.path().join("git");
+        std::os::unix::fs::symlink(target, &link)?;
+        assert!(matches!(
+            ExecutablePin::new(&link, "git"),
+            Err(UtilityError::InvalidExecutable { tool: "git" })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn executable_pin_rejects_symlink_to_group_writable_target() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let target_dir = temp.path().join("target");
+        fs::create_dir(&target_dir)?;
+        let target = target_dir.join("git");
+        fs::write(&target, b"executable")?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o775))?;
+        let link = temp.path().join("git");
+        std::os::unix::fs::symlink(&target, &link)?;
+        assert!(matches!(
+            ExecutablePin::new(&link, "git"),
+            Err(UtilityError::InvalidExecutable { tool: "git" })
+        ));
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755))?;
+        fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o775))?;
+        assert!(matches!(
+            ExecutablePin::new(&link, "git"),
+            Err(UtilityError::InvalidExecutable { tool: "git" })
+        ));
+        Ok(())
+    }
 
     struct CredentialEchoFetch<'a>(&'a SystemExecutor);
 
