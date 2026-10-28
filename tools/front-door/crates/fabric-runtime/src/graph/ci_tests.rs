@@ -19,6 +19,7 @@ impl GraphJournal for Journal {
 struct Owner {
     observations: VecDeque<CiObservation>,
     targets: Vec<String>,
+    checks: Vec<Vec<String>>,
     attempts: usize,
     deliveries: usize,
     wall_seconds: i64,
@@ -32,8 +33,9 @@ impl CiStatus for Owner {
             host_monotonic_micros: self.monotonic_micros,
         })
     }
-    fn observe_ci(&mut self, target: &str, _: &[String]) -> CiObservation {
+    fn observe_ci(&mut self, target: &str, checks: &[String]) -> CiObservation {
         self.targets.push(target.into());
+        self.checks.push(checks.to_vec());
         self.observations
             .pop_front()
             .expect("CI fixture observation")
@@ -88,6 +90,13 @@ fn observation(state: CiState, summary: &str) -> CiObservation {
         state,
         summary: summary.into(),
     }
+}
+
+#[test]
+fn ci_optional_evidence_fields_remain_absent() {
+    let value = serde_json::json!({"state": "pending", "summary": "waiting"});
+    let evidence: CiEvidence = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(evidence).unwrap(), value);
 }
 
 #[test]
@@ -241,6 +250,62 @@ fn ci_timeout_ignores_wall_clock_steps_and_reanchors_after_boot() {
             .as_deref(),
         Some("timeout")
     );
+}
+
+#[test]
+fn ci_document_checks_reach_host_query() {
+    let mut doc = document();
+    let Some(GateCondition::Ci { checks, .. }) = &mut doc.nodes[0].condition else {
+        unreachable!()
+    };
+    *checks = vec!["build".into(), "test".into()];
+    let mut owner = Owner {
+        observations: VecDeque::from([observation(CiState::Passed, "passed")]),
+        ..Default::default()
+    };
+    advance(&doc, &mut owner, &mut Journal::default()).unwrap();
+    assert_eq!(owner.checks, [vec!["build", "test"]]);
+}
+
+#[test]
+fn ci_backwards_clock_reanchors_are_bounded() {
+    let mut owner = Owner {
+        observations: VecDeque::from(vec![observation(CiState::Pending, "waiting"); 4]),
+        monotonic_micros: 100,
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    advance(&document(), &mut owner, &mut journal).unwrap();
+    for count in 1..=3 {
+        owner.monotonic_micros -= 1;
+        let result = advance(&document(), &mut owner, &mut journal).unwrap();
+        assert_eq!(result.status, GraphStatus::Pending);
+        assert_eq!(
+            result.checkpoint.nodes[0]
+                .ci
+                .as_ref()
+                .unwrap()
+                .clock_reanchors,
+            count
+        );
+        journal.0 =
+            Some(serde_json::from_slice(&serde_json::to_vec(&result.checkpoint).unwrap()).unwrap());
+    }
+    owner.monotonic_micros -= 1;
+    let result = advance(&document(), &mut owner, &mut journal).unwrap();
+    let node = &result.checkpoint.nodes[0];
+    assert_eq!(node.state, NodeState::Failed);
+    assert_eq!(
+        node.gate.as_ref().unwrap().reason.as_deref(),
+        Some("timeout: clock re-anchor limit (3) exceeded")
+    );
+    let evidence = node.ci.as_ref().unwrap();
+    assert_eq!(evidence.clock_reanchors, 4);
+    assert_eq!(
+        evidence.clock_reanchor_reason.as_deref(),
+        Some("host monotonic clock moved backwards")
+    );
+    assert_eq!(owner.targets.len(), 4);
 }
 
 #[test]

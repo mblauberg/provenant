@@ -345,8 +345,13 @@ The evidence records the applied policy. Failed checks fail; missing or unavaila
 checks fail with reason `unavailable`. Pending checks leave the gate waiting,
 and fail with reason `timeout` after the configured timeout (two hours by
 default). The checkpoint retains the first observation time, last state and
-check summary. Replay restores waiting without querying the host; explicit graph
-advance, resume and attempt settlement re-evaluate the gate. Graph status reads
+check summary. Timeout uses the host's monotonic clock, so wall clock changes do
+not affect it. If the host boot changes or the monotonic clock moves backwards,
+the gate re-anchors its timeout to the new host stamp. The checkpoint retains
+the re-anchor count; after three re-anchors, another such change settles the
+gate as `timeout` with a reason naming the re-anchor limit. Replay restores
+waiting without querying the host; explicit graph advance, resume and attempt
+settlement re-evaluate the gate. Graph status reads
 the saved snapshot, and there is no automatic background re-check.
 Gates must save their decision before dependants run and retain it on replay,
 even if budgets change. Gates expose `PASS` or `FAIL` as their typed verdict.
@@ -371,12 +376,26 @@ recorded in the final PR body.
   `::gate_only_graph_obeys_structural_limits_before_evaluating`;
   `::gate_verdict_rejects_spoofed_multiple_and_malformed_lines`;
   `::gate_budget_overrides_warn_only_for_configured_metrics`;
-  `::agent_json_still_requires_explicit_access`;
+  `crates/fabric-runtime/src/graph/ci_tests.rs::ci_outcomes_are_recorded_and_fail_closed`;
+  `::ci_pending_checkpoint_replays_then_passes`;
+  `::ci_pending_times_out_using_original_observation_time`;
+  `::ci_timeout_ignores_wall_clock_steps_and_reanchors_after_boot`;
+  `::ci_backwards_clock_reanchors_are_bounded`;
+  `::ci_document_checks_reach_host_query`;
+  `::ci_optional_evidence_fields_remain_absent`;
+  `::ci_check_names_are_validated`;
+  `::pending_ci_does_not_consume_attempt_concurrency`;
+  `::ci_failure_activates_recovery_path`;
+  `::ci_validation_rejects_bad_targets_and_timeouts`;
+  `crates/fabric-runtime/src/graph.rs::agent_json_still_requires_explicit_access`;
   `::legacy_checkpoint_keeps_its_digest_without_delivery_fields`;
   `::gate_skipped_chain_replays_every_save_after_the_gate_decision`;
   `::gate_reachability_handles_two_gates_and_deep_paths`;
-  `::gate_reachability_accepts_a_limit_sized_graph_and_rejects_lower_limits`.
-- Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`
+  `::gate_reachability_accepts_a_limit_sized_graph_and_rejects_lower_limits`;
+  `src/pr/status.rs::tests::branch_requirements_merge_protection_and_paginated_rulesets`;
+  `::branch_requirements_reject_incomplete_data_and_empty_sets`;
+  `::gate_check_buckets_fail_closed`.
+- Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`, `src/pr/status.rs`
 
 ### Bounded loops
 

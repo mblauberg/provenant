@@ -225,6 +225,10 @@ fn default_ci_timeout() -> u64 {
     7200
 }
 
+fn is_zero_u8(value: &u8) -> bool {
+    *value == 0
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CiState {
@@ -252,9 +256,9 @@ pub struct CiHostStamp {
 #[serde(deny_unknown_fields)]
 pub struct CiEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub first_observed_seconds: Option<u64>,
-    #[serde(default)]
     pub first_observed_stamp: Option<CiHostStamp>,
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub clock_reanchors: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clock_reanchor_reason: Option<String>,
     pub state: CiState,
@@ -1624,14 +1628,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let prior = checkpoint.nodes[node_index].ci.as_ref();
                 let mut anchor = prior.and_then(|e| e.first_observed_stamp.clone());
                 let mut reanchor_reason = prior.and_then(|e| e.clock_reanchor_reason.clone());
+                let mut reanchors = prior.map_or(0, |e| e.clock_reanchors);
+                const REANCHOR_LIMIT: u8 = 3;
                 if let Some(now) = &sampled {
                     match &anchor {
                         Some(first) if first.boot_identity != now.boot_identity => {
                             anchor = Some(now.clone());
+                            reanchors = reanchors.saturating_add(1);
                             reanchor_reason = Some("host boot changed".into());
                         }
                         Some(first) if now.host_monotonic_micros < first.host_monotonic_micros => {
                             anchor = Some(now.clone());
+                            reanchors = reanchors.saturating_add(1);
                             reanchor_reason = Some("host monotonic clock moved backwards".into());
                         }
                         None => {
@@ -1653,7 +1661,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 .saturating_sub(first.host_monotonic_micros)
                                 >= timeout_seconds.saturating_mul(1_000_000)
                         });
-                if timed_out {
+                if reanchors > REANCHOR_LIMIT {
+                    if let Some(evidence) = checkpoint.nodes[node_index].ci.as_mut() {
+                        evidence.first_observed_stamp = anchor;
+                        evidence.clock_reanchors = reanchors;
+                        evidence.clock_reanchor_reason = reanchor_reason;
+                    }
+                    Some(format!(
+                        "timeout: clock re-anchor limit ({REANCHOR_LIMIT}) exceeded"
+                    ))
+                } else if timed_out {
                     Some("timeout".into())
                 } else {
                     let observation = host.as_mut().filter(|_| sampled.is_some()).map_or_else(
@@ -1665,8 +1682,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     );
                     let state = observation.state;
                     checkpoint.nodes[node_index].ci = Some(CiEvidence {
-                        first_observed_seconds: prior.and_then(|e| e.first_observed_seconds),
                         first_observed_stamp: anchor,
+                        clock_reanchors: reanchors,
                         clock_reanchor_reason: reanchor_reason,
                         state,
                         summary: observation.summary,
@@ -1753,7 +1770,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         .filter(|(index, node)| {
                             *index != node_index
                                 && node.state == NodeState::Running
-                                && !node.attempts.is_empty()
+                                && node.ci.is_none()
                         })
                         .count()
                         >= cap
@@ -4826,6 +4843,10 @@ mod tests {
             "on_fail",
             "gate",
             "verdict_error",
+            "ci",
+            "first_observed_stamp",
+            "clock_reanchor_reason",
+            "clock_reanchors",
         ] {
             assert!(!fixture.contains(&format!("\"{field}\"")));
         }
