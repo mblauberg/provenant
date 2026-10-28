@@ -4584,6 +4584,65 @@ fn rejected_resume_remains_visible_and_addressable() -> TestResult {
 }
 
 #[test]
+fn resumed_starting_lane_has_private_directories_before_checkpoint() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let original = input();
+    store.create(&original, &call)?;
+    let prior = original.attempts[0].attempt_id;
+    let fake = Fake {
+        refuse: true,
+        ..Fake::default()
+    };
+    store.start(original.run_id, &fake, &|_, _| unreachable!(), &call)?;
+    let resumed = Resume {
+        prior,
+        expected_generation: 0,
+        operation_id: provenant_core::OperationId::parse("resume-private")?,
+        run_id: RunId::from_bytes([50; 16]),
+        attempt_id: AttemptId::from_bytes([51; 16]),
+        prompt: "answer".into(),
+        created_at: WallTime::from_micros(100)?,
+    };
+    store.resume(&resumed, &call)?;
+    let record = store.record(resumed.attempt_id, &call)?;
+    store.mark_starting(&record, &route(), &[], &Default::default(), None, &call)?;
+    let directory = store.attempt_dir(resumed.run_id, resumed.attempt_id, false)?;
+    assert!(
+        matches!(directory.metadata_at("process.json".as_ref(), false), Err(error) if error.is_not_found())
+    );
+    let reader = RunStore::open_read_only(&context, &call)?.ok_or(RunError::NotFound)?;
+    assert_eq!(
+        reader.record(resumed.attempt_id, &call)?.state,
+        AttemptState::Starting
+    );
+    let state = context.state_root.as_path();
+    for path in [
+        state.join("runs"),
+        state.join("runs").join(resumed.run_id.to_string()),
+        state
+            .join("runs")
+            .join(resumed.run_id.to_string())
+            .join("attempts"),
+        state
+            .join("runs")
+            .join(resumed.run_id.to_string())
+            .join("attempts")
+            .join(resumed.attempt_id.to_string()),
+    ] {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::symlink_metadata(path)?.permissions().mode() & 0o077,
+            0
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

@@ -212,7 +212,7 @@ impl RunStore {
                 root = opened;
             }
         }
-        private(&root)?;
+        private_root(&root)?;
         let root = root.into_anchor()?;
         match root.metadata_at(OsStr::new("run.sqlite3"), false) {
             Ok(_) => {}
@@ -371,7 +371,7 @@ pub(crate) fn open_database(
             root = provenant_sqlite::checked_directory(&root, part, None)?;
         }
     }
-    private(&root)?;
+    private_root(&root)?;
     let root = root.into_anchor()?;
     // SQLite serialises transactions, but first-file and WAL setup precede them.
     let lock_name = format!("{name}.lock");
@@ -428,6 +428,13 @@ pub(crate) fn private(directory: &Directory) -> Result<()> {
     let m = directory.metadata()?;
     if let Some(check) = PathCheck::directory(m) {
         return Err(RunError::unsafe_path(directory.anchored_path(), check));
+    }
+    Ok(())
+}
+/// The state root has not been anchored yet, so name it relative to itself.
+fn private_root(directory: &Directory) -> Result<()> {
+    if let Some(check) = PathCheck::directory(directory.metadata()?) {
+        return Err(RunError::unsafe_path(".", check));
     }
     Ok(())
 }

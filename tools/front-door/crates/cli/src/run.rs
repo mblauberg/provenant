@@ -5701,6 +5701,18 @@ mod lane_depth_tests {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn unsafe_store_path_reason_survives_cli_conversion() {
+        let failure = super::Fail::from(provenant_run::RunError::UnsafePath {
+            path: "runs/example/process.json".into(),
+            check: provenant_run::PathCheck::Links,
+        });
+        assert_eq!(
+            failure.message,
+            "run-store path runs/example/process.json is not private or contained: link count"
+        );
+    }
+
+    #[test]
     fn stats_summary_reports_cost_coverage() {
         use provenant_telemetry::{CostTotal, Money, Totals};
         let mut totals = Totals {

@@ -99,9 +99,9 @@ impl PathCheck {
             Self::Mode => "mode",
             Self::Symlink => "symlink",
             Self::Kind => "kind",
-            Self::Links => "links",
-            Self::Containment => "containment",
-            Self::Identity => "identity",
+            Self::Links => "link count",
+            Self::Containment => "outside the root",
+            Self::Identity => "identity mismatch",
             Self::Missing => "missing",
         }
     }
