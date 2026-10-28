@@ -69,13 +69,17 @@ fn invalid_hook_candidates_do_not_block_valid_answers() {
             .unwrap();
     }
     let deadline = || Instant::now() + Duration::from_secs(1);
-    let candidates = store.read_hook_human_answers(&target, deadline()).unwrap();
+    let candidates = store
+        .read_queued_human_answers(&target, deadline())
+        .unwrap();
     assert_eq!(candidates.items.len(), 3);
     store.db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.schema_version',99) AS BLOB) WHERE answer=?1",
         [HumanAnswerId::from_bytes([1;16]).to_string()]).unwrap();
     store.db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.attempts','invalid') AS BLOB) WHERE answer=?1",
         [HumanAnswerId::from_bytes([2;16]).to_string()]).unwrap();
-    let valid = store.read_hook_human_answers(&target, deadline()).unwrap();
+    let valid = store
+        .read_queued_human_answers(&target, deadline())
+        .unwrap();
     assert_eq!(valid.items.len(), 1);
     assert_eq!(valid.items[0].answer.id, HumanAnswerId::from_bytes([3; 16]));
     // Revalidate selected rows at the write boundary too: a row may have been

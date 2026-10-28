@@ -22,9 +22,10 @@ The guard keeps its one-second deadline and enforces policy independently of
 answer-delivery support. A malformed `cwd` is rejected rather than evaluated
 against the hook process's directory. Optional delivery gets at most 50 ms
 off-thread, including blocking identity reads and offer recording. Final JSON,
-escaping and newline fit 8 KiB. Queued answers take priority; when the queued page
-is empty, offered answers may be re-offered to the same session until explicitly
-acknowledged. Deduplicate by answer ID before acting. Denials take priority.
+escaping and newline fit 8 KiB. Queued answers take priority; when no queued answer
+fits the final hook output, offered answers may be re-offered to the same session
+until explicitly acknowledged. Deduplicate by answer ID before acting. Denials
+take priority.
 Errors, timeouts, oversized candidates and output failures diagnose on stderr;
 a committed answer remains eligible for a later hook after a deadline or stdout
 failure. Fabric mail remains available. Injected answers are escaped untrusted

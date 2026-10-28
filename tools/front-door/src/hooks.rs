@@ -32,7 +32,7 @@ struct GuardInput {
     hook_event_name: String,
     tool_name: String,
     tool_input: serde_json::Value,
-    cwd: Option<serde_json::Value>,
+    cwd: serde_json::Value,
     // Delivery metadata is advisory; an unexpected type must not deny a tool.
     session_id: Option<serde_json::Value>,
 }
@@ -140,11 +140,12 @@ fn guard_reply(
     client: Option<Harness>,
 ) -> Result<Option<Vec<u8>>, &'static str> {
     let event_name = event.hook_event_name.clone();
-    let supplied_cwd = match event.cwd {
-        Some(serde_json::Value::String(value)) if Path::new(&value).is_absolute() => {
-            Some(PathBuf::from(value))
+    let cwd = match event.cwd {
+        serde_json::Value::String(value)
+            if Path::new(&value).is_absolute() && !value.contains('\0') =>
+        {
+            PathBuf::from(value)
         }
-        None => None,
         _ => return Err("hook input rejected: bounded-input error (invalid cwd)"),
     };
     if event.tool_name.is_empty() {
@@ -154,23 +155,16 @@ fn guard_reply(
         let Ok(tool) = serde_json::from_value::<ToolInput>(event.tool_input) else {
             return Err("hook input rejected: bounded-input error (invalid Bash command)");
         };
-        let cwd = supplied_cwd
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(std::env::current_dir)
-            .map_err(|_| "hook input rejected: bounded-input error (cwd unavailable)")?;
+        let policy = guard_policy(globals, &cwd)?;
+        let ctx = provenant_confinement::guard::Context {
+            cwd: &cwd,
+            home: Some(&policy.home),
+            state: Some(&policy.state),
+        };
+        if let Some(remedy) =
+            provenant_confinement::guard::violation(&tool.command, &ctx, &policy.config)
         {
-            let policy = guard_policy(globals, &cwd);
-            let ctx = provenant_confinement::guard::Context {
-                cwd: &cwd,
-                home: policy.home.as_deref(),
-                state: policy.state.as_deref(),
-            };
-            if let Some(remedy) =
-                provenant_confinement::guard::violation(&tool.command, &ctx, &policy.config)
-            {
-                return Err(remedy);
-            }
+            return Err(remedy);
         }
         if Instant::now() >= deadline {
             return Err("hook input rejected: bounded-input error (policy timed out)");
@@ -183,10 +177,9 @@ fn guard_reply(
         diagnostic("answer delivery unavailable: unsupported guard harness");
         return Ok(None);
     };
-    let Some((session, cwd)) = event
+    let Some(session) = event
         .session_id
         .and_then(|value| value.as_str().map(str::to_owned))
-        .zip(supplied_cwd.filter(|cwd| cwd.is_absolute()))
     else {
         return Ok(None);
     };
@@ -223,29 +216,28 @@ fn guard_reply(
         let Some(target) = reader.target(&session, deadline)? else {
             return Ok(None);
         };
-        let mut page = {
+        let at = SystemClock::new().wall_now()?;
+        let page = {
             let Some(store) = Store::open_read_only(&resolved.roots.state, deadline)? else {
                 return Ok(None);
             };
-            store.read_hook_human_answers(&target, deadline)?
-        };
-        if page.items.is_empty() {
-            return Ok(None);
-        }
-        let at = SystemClock::new().wall_now()?;
-        for item in &mut page.items {
-            let delivery = &mut item.delivery;
-            if delivery.state == AnswerDeliveryState::Offered {
-                continue; // Idempotent retries retain the committed offer record.
+            let queued = prepare_answers(
+                store.read_queued_human_answers(&target, deadline)?,
+                at,
+                &event_name,
+            )?;
+            if queued.items.is_empty() {
+                // Final escaping can make every queued candidate undeliverable.
+                // Such a page must not hide a previously committed small offer.
+                prepare_answers(
+                    store.read_offered_human_answers(&target, deadline)?,
+                    at,
+                    &event_name,
+                )?
+            } else {
+                queued
             }
-            delivery.state = AnswerDeliveryState::Offered;
-            delivery.attempts = delivery
-                .attempts
-                .checked_add(1)
-                .ok_or("offer attempts overflow")?;
-            delivery.last_attempt_at = Some(at);
-        }
-        let page = fit_answers(page, &event_name);
+        };
         if page.items.is_empty() {
             return Ok(None);
         }
@@ -332,35 +324,50 @@ fn fit_answers(page: Page<AnswerOffer>, event_name: &str) -> Page<AnswerOffer> {
     }
     output
 }
+
+fn prepare_answers(
+    mut page: Page<AnswerOffer>,
+    at: provenant_core::WallTime,
+    event_name: &str,
+) -> Result<Page<AnswerOffer>, Error> {
+    for item in &mut page.items {
+        let delivery = &mut item.delivery;
+        if delivery.state == AnswerDeliveryState::Offered {
+            continue; // Idempotent retries retain the committed offer record.
+        }
+        delivery.state = AnswerDeliveryState::Offered;
+        delivery.attempts = delivery
+            .attempts
+            .checked_add(1)
+            .ok_or("offer attempts overflow")?;
+        delivery.last_attempt_at = Some(at);
+    }
+    Ok(fit_answers(page, event_name))
+}
 /// The `[domains.guard]` rules and the directories they protect. Unreadable
 /// config keeps every rule on, since the rules only refuse irreversible
 /// actions and the alternative is always available.
 struct GuardPolicy {
     config: provenant_confinement::guard::GuardConfig,
-    home: Option<PathBuf>,
-    state: Option<PathBuf>,
+    home: PathBuf,
+    state: PathBuf,
 }
-fn guard_policy(globals: &Globals, cwd: &Path) -> GuardPolicy {
-    let Ok(resolved) = crate::roots::resolve(
+fn guard_policy(globals: &Globals, cwd: &Path) -> Result<GuardPolicy, &'static str> {
+    let resolved = crate::roots::resolve(
         globals,
         crate::roots::Workspace::At(cwd),
         crate::roots::Product::Optional,
-    ) else {
-        return GuardPolicy {
-            config: Default::default(),
-            home: None,
-            state: None,
-        };
-    };
+    )
+    .map_err(|_| "hook input rejected: bounded-input error (guard policy unavailable)")?;
     let config =
         provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)
             .map(|read| read.domains.guard)
             .unwrap_or_default();
-    GuardPolicy {
+    Ok(GuardPolicy {
         config,
-        home: Some(resolved.home),
-        state: Some(resolved.roots.state.as_path().to_owned()),
-    }
+        home: resolved.home,
+        state: resolved.roots.state.as_path().to_owned(),
+    })
 }
 // Advisory work is abandoned when its real-time host deadline expires.
 #[allow(clippy::disallowed_methods)]
@@ -833,6 +840,11 @@ mod answer_delivery_tests {
             json!({"id":"chair"}),
             json!(["chair"]),
             json!(true),
+            json!(null),
+            json!("relative"),
+            json!("/\0"),
+            json!("/tmp/.."),
+            json!("/tmp/."),
         ] {
             for field in ["session_id", "cwd"] {
                 for command in ["git status", "rm -rf /"] {
@@ -857,6 +869,9 @@ mod answer_delivery_tests {
                 }
             }
         }
+        assert!(serde_json::from_value::<GuardInput>(json!({
+            "hook_event_name":"PreToolUse", "tool_name":"Bash", "tool_input":{"command":"git status"}
+        })).is_err());
         Ok(())
     }
 
@@ -971,7 +986,7 @@ mod answer_delivery_tests {
         release.send(())?;
         completion.recv_timeout(LOCAL_BUDGET)?;
         let deadline = Instant::now() + LOCAL_BUDGET;
-        let retry = store.read_hook_human_answers(&target, deadline)?;
+        let retry = store.read_offered_human_answers(&target, deadline)?;
         assert_eq!(retry.items.len(), 1);
         assert_eq!(retry.items[0].delivery.state, AnswerDeliveryState::Offered);
         assert_eq!(

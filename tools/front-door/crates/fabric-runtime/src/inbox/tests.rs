@@ -374,13 +374,10 @@ fn delivery_capabilities_publish_only_tested_fabric_fallback_for_each_provider()
     let capabilities = delivery_capabilities();
     assert_eq!(
         capabilities.iter().map(|c| c.provider).collect::<Vec<_>>(),
-        vec![
-            provenant_records::Harness::Claude,
-            provenant_records::Harness::Codex,
-            provenant_records::Harness::Cursor,
-            provenant_records::Harness::Agy,
-            provenant_records::Harness::Opencode
-        ]
+        provenant_records::ADAPTER_SPECS
+            .iter()
+            .map(|spec| spec.id)
+            .collect::<Vec<_>>()
     );
     for capability in capabilities {
         assert_eq!(capability.transport, AnswerTransport::FabricMail);
@@ -883,7 +880,9 @@ fn hook_offers_retry_idempotently_without_hiding_later_queued_answers() {
     let deadline = || Instant::now() + Duration::from_secs(2);
     let read = || {
         let store = Store::open_read_only(&f.root, deadline()).unwrap().unwrap();
-        store.read_hook_human_answers(&target, deadline()).unwrap()
+        store
+            .read_queued_human_answers(&target, deadline())
+            .unwrap()
     };
     let first = read();
     assert_eq!(first.items.len(), 16);
@@ -916,7 +915,11 @@ fn hook_offers_retry_idempotently_without_hiding_later_queued_answers() {
     assert_eq!(claim(remaining, deadline()).unwrap().items.len(), 2);
     // A committed offer that missed the host's deadline or stdout is still
     // eligible for the exact same session, without recording another attempt.
-    let retries = read();
+    let retries = Store::open_read_only(&f.root, deadline())
+        .unwrap()
+        .unwrap()
+        .read_offered_human_answers(&target, deadline())
+        .unwrap();
     assert_eq!(retries.items.len(), 16);
     let retried = claim(retries.clone(), deadline()).unwrap();
     assert_eq!(retried, retries);

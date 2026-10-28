@@ -57,8 +57,9 @@ This uses the existing outbox without another schema migration.
 `offer_human_answers_once` instead uses bounded selected-key reads and one immediate
 transaction, with no busy retries, creation or migrations. Only queued records
 transition; matching offered snapshots replay the committed record idempotently.
-`read_hook_human_answers` gives queued rows priority using migration 11's index,
-then falls back to migration 10's pending index when the queued page is empty.
+The hook gives queued rows priority using migration 11's index. When none fit
+its final output, `read_offered_human_answers` selects only committed offers
+through migration 10's pending index.
 A late commit or failed stdout write remains re-offerable to the exact session
 until acknowledgement. Consumers deduplicate by answer ID before taking action.
 Invalid candidates are skipped with an answer-ID diagnostic.

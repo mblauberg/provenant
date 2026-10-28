@@ -508,6 +508,38 @@ fn queued_answer_survives_failed_recording_and_stdout_until_acknowledged() -> Re
     })?;
     let committed = json_command(&rig, &["inbox", id])?;
     assert_eq!(committed["data"]["item"]["delivery"]["state"], "offered");
+    // A new answer can fit the inbox's JSON boundary yet exceed the escaped
+    // hook boundary. It must not suppress recovery of the earlier small offer.
+    let oversized = json_command(
+        &rig,
+        &[
+            "ask",
+            "--file",
+            draft.to_str().ok_or("draft")?,
+            "--session",
+            "chair",
+        ],
+    )?;
+    let oversized_id = oversized["data"]["request_id"]
+        .as_str()
+        .ok_or("oversized request")?;
+    let large_reply = rig.root.join("large-reply.txt");
+    fs::write(&large_reply, "\"".repeat(3500))?;
+    json_command(
+        &rig,
+        &[
+            "answer",
+            oversized_id,
+            "--action",
+            "reply",
+            "--text-file",
+            large_reply.to_str().ok_or("large reply")?,
+            "--expect-revision",
+            "1",
+            "--channel",
+            "console",
+        ],
+    )?;
     let allowed = hook("git status")?;
     assert_eq!(code(&allowed), 0, "{:?}", allowed.stderr.bytes);
     assert!(allowed.stdout.bytes.len() <= provenant_records::inbox::MAX_OFFER_BYTES);

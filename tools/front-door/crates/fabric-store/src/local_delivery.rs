@@ -3,6 +3,12 @@ use crate::*;
 use provenant_records::inbox::*;
 use std::time::Instant;
 
+enum Candidates {
+    Pending,
+    Queued,
+    Offered,
+}
+
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn before(deadline: Instant) -> Result<()> {
     if Instant::now() >= deadline {
@@ -22,7 +28,7 @@ impl Store {
         max_bytes: usize,
         deadline: Instant,
     ) -> Result<Page<AnswerOffer>> {
-        self.read_candidates(target, limit, max_bytes, deadline, false)
+        self.read_candidates(target, limit, max_bytes, deadline, Candidates::Pending)
     }
 
     pub fn read_queued_human_answers(
@@ -35,26 +41,22 @@ impl Store {
             MAX_LOCAL_OFFER_ITEMS,
             MAX_LOCAL_OFFER_BYTES,
             deadline,
-            true,
+            Candidates::Queued,
         )
     }
 
-    /// Prefer newly queued answers so retries cannot hide them. Once that page
-    /// is empty, recover offers whose result may have missed the host's pipe.
-    pub fn read_hook_human_answers(
+    /// Read only committed offers for recovery after final protocol fitting.
+    pub fn read_offered_human_answers(
         &self,
         target: &AnswerTarget,
         deadline: Instant,
     ) -> Result<Page<AnswerOffer>> {
-        let queued = self.read_queued_human_answers(target, deadline)?;
-        if !queued.items.is_empty() || queued.truncated {
-            return Ok(queued);
-        }
-        self.read_human_answers(
+        self.read_candidates(
             target,
             MAX_LOCAL_OFFER_ITEMS,
             MAX_LOCAL_OFFER_BYTES,
             deadline,
+            Candidates::Offered,
         )
     }
 
@@ -64,7 +66,7 @@ impl Store {
         limit: u64,
         max_bytes: usize,
         deadline: Instant,
-        queued: bool,
+        candidates: Candidates,
     ) -> Result<Page<AnswerOffer>> {
         let rows_limit = page(0, limit)?;
         // Internal candidates may exceed a provider's output budget so one
@@ -73,10 +75,13 @@ impl Store {
             return Err(Error::Invalid("offer byte limit"));
         }
         before(deadline)?;
-        let (index, states) = if queued {
-            ("human_queued_delivery", "='queued'")
-        } else {
-            ("human_local_delivery", "IN ('queued','offered')")
+        let (index, states) = match candidates {
+            Candidates::Queued => ("human_queued_delivery", "='queued'"),
+            Candidates::Pending => ("human_local_delivery", "IN ('queued','offered')"),
+            Candidates::Offered => (
+                "human_local_delivery",
+                "IN ('queued','offered') AND json_extract(CAST(o.record AS TEXT),'$.state')='offered'",
+            ),
         };
         // An absent index is an error, never a fallback scan.
         let mut statement = self.db.prepare(&format!(

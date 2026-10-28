@@ -135,10 +135,10 @@ within a 50 ms local delivery budget and the existing one-second hook deadline.
 The final JSON, escaping and newline fit 8 KiB. Double escaping means some
 accepted answers cannot fit; a bounded stderr diagnostic directs callers to mail.
 The bounded thread atomically records selected answers as offered, with attempts
-and timestamp, before returning context. Queued answers take priority; when the
-queued page is empty, unacknowledged offered answers can be re-offered to their
-exact target session. A commit that finishes after the deadline or a failed stdout
-write may prevent that invocation from injecting the answer, but the answer remains
+and timestamp, before returning context. Queued answers take priority; when no
+queued answer fits the final hook output, unacknowledged offered answers can be
+re-offered to their exact target session. A commit that finishes after the deadline
+or a failed stdout write may prevent that invocation from injecting the answer, but the answer remains
 eligible for a later hook. The Fabric-mail copy also remains available. Skipped
 candidates retain their state; acknowledged answers are excluded.
 
@@ -147,6 +147,10 @@ Escaping prevents answer content from closing the block. Answers confer no new
 authority. Deduplicate by answer ID and explicitly acknowledge after consumption,
 using the request ID, `--answer`, `--session` and a unique `--operation-id` as shown
 above. Hooks never acknowledge consumption.
+
+If a hook reports that the local delivery index is unavailable, run a normal
+`provenant inbox` command to upgrade the store. The bounded diagnostic can repeat
+until then; hooks create no extra state to suppress it. Guard enforcement continues.
 
 CLI/MCP syntax is unchanged. Remote delivery and other provider input adapters
 remain separate work. Both apps may
