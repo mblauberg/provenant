@@ -638,8 +638,10 @@ fn prepare_with(
             }
         }
         if let Some(gh) = publishing_gh.as_ref() {
+            let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
+                .map_err(|error| error.to_string())?;
             let publishing = spec
-                .configure_publishing(scratch, &git, gh, &home)
+                .configure_publishing(scratch, &git, gh, &home, &policy)
                 .map_err(|error| error.to_string());
             if let Err(error) = publishing {
                 reasons.push(skip(&label, SkipKind::Setup, error));

@@ -43,6 +43,27 @@ head. Publishing defaults on; disable it with
 configuration `[knobs] "lanes.publish" = false`. Read-only lanes retain their
 existing open-network gh read access.
 
+For a project, the host can configure an advisory GitHub CLI deny list in
+`projects/<ProjectId>/github.json` under its state root. The project ID is
+host-local. Find it in the `projects` array of `provenant quota usage --json`,
+matched to the repository's Git common directory. For example:
+
+```json
+{
+  "deny_verbs": ["release create", "workflow run"],
+  "deny_labels": ["ci"]
+}
+```
+
+Both lists default to empty. A denied verb matches a command token prefix. For
+pull request and issue creation and editing, label checks recognise long label
+flags with separate or `=` values, including comma-separated lists. A refusal
+exits 1 and prints `github.deny_verbs` or `github.deny_labels` on standard
+error; other commands continue to the host's GitHub CLI. This is an advisory
+guard against accidental use, not a security boundary: a lane can invoke the
+real `gh` directly or use another GitHub API client. Use GitHub permissions
+and repository rules to enforce restrictions.
+
 After a settled writer without delivery, run:
 
 ```sh

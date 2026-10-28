@@ -16,6 +16,7 @@ impl crate::LaunchSpec {
         git: &Path,
         gh: &Path,
         home: &Path,
+        policy: &provenant_config::GithubPolicy,
     ) -> Result<(), ProviderError> {
         let text = |path: &Path| -> Result<String, ProviderError> {
             if !path.is_absolute() {
@@ -77,11 +78,7 @@ impl crate::LaunchSpec {
             },
             SetupStep::WriteExecutable {
                 path: scratch.join("bin/gh"),
-                bytes: format!(
-                    "#!/bin/sh\nGH_CONFIG_DIR={gh_config}\nexport GH_CONFIG_DIR\nexec {} \"$@\"\n",
-                    shell_quote(&gh_path)
-                )
-                .into_bytes(),
+                bytes: gh_wrapper(&gh_path, &gh_config, policy).into_bytes(),
             },
         ]);
         // Cursor and Agy do not use LaneRuntime::grant for Git.
@@ -113,6 +110,35 @@ impl crate::LaunchSpec {
             .push(exact(Path::new(&gh_path)));
         Ok(())
     }
+}
+
+fn gh_wrapper(gh: &str, gh_config: &str, policy: &provenant_config::GithubPolicy) -> String {
+    let mut guard = String::new();
+    for verb in &policy.deny_verbs {
+        let words: Vec<_> = verb.split_whitespace().collect();
+        if words.is_empty() {
+            continue;
+        }
+        let conditions = words
+            .iter()
+            .enumerate()
+            .map(|(i, word)| format!("[ \"${{{}}}\" = {} ]", i + 1, shell_quote(word)))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        guard.push_str(&format!("if [ \"$#\" -ge {} ] && {conditions}; then\n  printf '%s\\n' 'github.deny_verbs' >&2; exit 1\nfi\n", words.len()));
+    }
+    if !policy.deny_labels.is_empty() {
+        guard.push_str("check_labels() {\n  case \"$1 $2\" in\n    'pr create'|'issue create') flag=--label ;;\n    'pr edit'|'issue edit') flag=--add-label ;;\n    *) return ;;\n  esac\n  shift 2\n  while [ \"$#\" -gt 0 ]; do\n    value=\n    case \"$1\" in\n      --) break ;;\n      \"$flag\") shift; [ \"$#\" -gt 0 ] || break; value=$1 ;;\n      \"$flag\"=*) value=${1#*=} ;;\n    esac\n");
+        for label in &policy.deny_labels {
+            // Quoting the literal keeps shell metacharacters in labels inert.
+            guard.push_str(&format!("    case \",$value,\" in *,{},*) printf '%s\\n' 'github.deny_labels' >&2; exit 1 ;; esac\n", shell_quote(label)));
+        }
+        guard.push_str("    shift\n  done\n}\ncheck_labels \"$@\"\n");
+    }
+    format!(
+        "#!/bin/sh\n{guard}GH_CONFIG_DIR={gh_config}\nexport GH_CONFIG_DIR\nexec {} \"$@\"\n",
+        shell_quote(gh)
+    )
 }
 
 fn shell_quote(value: &str) -> String {
@@ -375,6 +401,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn github_policy_guards_labels_and_verb_prefixes() -> Result<(), Box<dyn std::error::Error>> {
+        use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+        let temp = tempfile::tempdir()?;
+        let shim = temp.path().join("gh");
+        let policy = provenant_config::GithubPolicy {
+            deny_verbs: vec!["release create".into()],
+            deny_labels: vec!["ci".into()],
+        };
+        fs::write(&shim, gh_wrapper("/usr/bin/true", "'/tmp'", &policy))?;
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o700))?;
+        for args in [
+            vec!["pr", "edit", "42", "--add-label", "ci"],
+            vec!["pr", "create", "--label=docs,ci"],
+            vec!["issue", "edit", "42", "--add-label=ci"],
+            vec!["issue", "create", "--label", "ci"],
+        ] {
+            let output = Command::new(&shim).args(args).output()?;
+            assert_eq!(output.status.code(), Some(1));
+            assert_eq!(output.stderr, b"github.deny_labels\n");
+        }
+        let output = Command::new(&shim)
+            .args(["release", "create", "v1"])
+            .output()?;
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.stderr, b"github.deny_verbs\n");
+        for args in [
+            vec!["release", "view"],
+            vec!["pr", "create", "--label", "docs"],
+        ] {
+            assert!(Command::new(&shim).args(args).status()?.success());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn publishing_setup_supports_every_writer_adapter() -> Result<(), ProviderError> {
         let prompt = crate::Prompt::new("fixture".into());
         let token = crate::tests::fixture_token();
@@ -401,6 +462,7 @@ mod tests {
                 Path::new("/fixture/git"),
                 Path::new("/fixture/gh"),
                 Path::new("/fixture/home"),
+                &provenant_config::GithubPolicy::default(),
             );
             assert!(result.is_ok(), "publishing setup for {id}: {result:?}");
             let wrapper = plan.permissions().scratch.path.join("bin/git");
@@ -505,7 +567,7 @@ mod tests {
         let mut spec = Codex.prepare(crate::tests::fixture_input(
             &route, &plan, &prompt, &root, None,
         ))?;
-        spec.configure_publishing(&scratch, &git, &gh, &home)?;
+        spec.configure_publishing(&scratch, &git, &gh, &home, &Default::default())?;
         // Apply only the generated publishing setup; adapter-specific auth
         // setup belongs to the existing provider tests.
         fs::create_dir_all(scratch.join("bin"))?;

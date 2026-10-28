@@ -480,6 +480,38 @@ impl Files {
 }
 
 #[test]
+fn github_policy_is_scoped_to_project_and_defaults_only_when_absent() {
+    let fixture = Files::new();
+    let state = fixture.roots.state.as_path();
+    std::fs::create_dir(state).unwrap();
+    let project = provenant_core::ProjectId::from_bytes([1; 16]);
+    let other = provenant_core::ProjectId::from_bytes([2; 16]);
+    assert_eq!(
+        GithubPolicy::read(&fixture.roots.state, project).unwrap(),
+        GithubPolicy::default()
+    );
+    let dir = state.join("projects").join(project.to_string());
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("github.json"),
+        r#"{"deny_verbs":["release create"],"deny_labels":["ci"]}"#,
+    )
+    .unwrap();
+    let policy = GithubPolicy::read(&fixture.roots.state, project).unwrap();
+    assert_eq!(policy.deny_verbs, ["release create"]);
+    assert_eq!(policy.deny_labels, ["ci"]);
+    assert_eq!(
+        GithubPolicy::read(&fixture.roots.state, other).unwrap(),
+        GithubPolicy::default()
+    );
+    std::fs::write(dir.join("github.json"), b"{broken").unwrap();
+    assert!(matches!(
+        GithubPolicy::read(&fixture.roots.state, project),
+        Err(ConfigError::InvalidGithubPolicy)
+    ));
+}
+
+#[test]
 fn show_and_check_are_read_only_and_only_absence_uses_defaults() {
     let fixture = Files::new();
 

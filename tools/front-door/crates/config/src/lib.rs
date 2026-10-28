@@ -7,7 +7,9 @@
 
 mod domains;
 mod gc;
+mod github_policy;
 pub use gc::{ForeignWorktrees, GcSettings, ProjectGcSettings, parse_cache_size};
+pub use github_policy::GithubPolicy;
 mod harness;
 mod hooks;
 pub use harness::mcp_entry;
@@ -93,6 +95,8 @@ pub enum ConfigError {
     KnobRegistry,
     #[error("project location must be an absolute canonical directory path")]
     InvalidProjectLocation,
+    #[error("project GitHub policy is invalid")]
+    InvalidGithubPolicy,
     #[error("project binding state is invalid")]
     InvalidProjectBinding,
     #[error("project binding lock budget is invalid")]
