@@ -2293,7 +2293,7 @@
             "cursor": {
               "anyOf": [
                 {
-                  "maxLength": 256,
+                  "pattern": "^2\\.[0-9]{1,20}\\.[0-9]{1,20}\\.sha256:[0-9a-f]{64}$",
                   "type": "string"
                 },
                 {
@@ -2356,7 +2356,7 @@
             "cursor": {
               "anyOf": [
                 {
-                  "maxLength": 256,
+                  "pattern": "^sha256:[0-9a-f]{64}:[0-9]{1,20}$",
                   "type": "string"
                 },
                 {
@@ -2446,11 +2446,13 @@
               "properties": {
                 "attempt_ids": {
                   "items": {
+                    "maxLength": 262144,
                     "type": "string"
                   },
                   "type": "array"
                 },
                 "channel": {
+                  "maxLength": 16384,
                   "type": "string"
                 },
                 "correction_of": {
@@ -2467,24 +2469,29 @@
                 },
                 "issue_ids": {
                   "items": {
+                    "maxLength": 262144,
                     "type": "string"
                   },
                   "type": "array"
                 },
                 "kind": {
+                  "maxLength": 16384,
                   "type": "string"
                 },
                 "markdown": {
+                  "maxLength": 262144,
                   "type": "string"
                 },
                 "pr_ids": {
                   "items": {
+                    "maxLength": 262144,
                     "type": "string"
                   },
                   "type": "array"
                 },
                 "request_ids": {
                   "items": {
+                    "maxLength": 262144,
                     "type": "string"
                   },
                   "type": "array"
@@ -2641,6 +2648,7 @@
                   "anyOf": [
                     {
                       "items": {
+                        "maxLength": 262144,
                         "type": "string"
                       },
                       "type": "array"
@@ -2653,6 +2661,7 @@
                 "next": {
                   "anyOf": [
                     {
+                      "maxLength": 262144,
                       "type": "string"
                     },
                     {
@@ -2663,6 +2672,7 @@
                 "now": {
                   "anyOf": [
                     {
+                      "maxLength": 262144,
                       "type": "string"
                     },
                     {
@@ -2673,6 +2683,7 @@
                 "risk": {
                   "anyOf": [
                     {
+                      "maxLength": 262144,
                       "type": "string"
                     },
                     {

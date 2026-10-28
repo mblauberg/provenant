@@ -128,6 +128,43 @@ fn console_chair_schema_parity() -> Result {
     actual["summary"]["updated_at"] = Value::Null;
     assert_eq!(actual, expected);
 
+    let stale = rig.command(&[
+        "chair",
+        "summary",
+        "update",
+        "chair",
+        "--file",
+        patch_path,
+        "--expect-revision",
+        "0",
+        "--json",
+    ])?;
+    assert_ne!(code(&stale), 0);
+    let cli_error: Value = serde_json::from_slice(&stale.stdout.bytes)?;
+    let replies = mcp(
+        &rig,
+        &[frame(
+            1,
+            "fabric_chair",
+            json!({
+                "op":"summary_update", "session":"chair", "patch":patch, "expect_revision":0
+            }),
+        )],
+    )?;
+    let result = &replies
+        .iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("MCP reply")?["result"];
+    assert_eq!(result["isError"], true);
+    assert_eq!(
+        result["structuredContent"]["code"],
+        cli_error["error"]["code"]
+    );
+    assert_eq!(
+        result["structuredContent"]["current_revision"],
+        cli_error["data"]["current_revision"]
+    );
+
     use provenant_core::Clock;
     let issued = provenant_os::clock::SystemClock::new()
         .wall_now()?
@@ -162,6 +199,23 @@ fn console_chair_schema_parity() -> Result {
         )?,
         appended
     );
+
+    let generated = invoke(
+        &rig,
+        "fabric_chair",
+        json!({
+            "op":"log_append", "session":"chair", "entry":entry
+        }),
+    )?;
+    let retry = invoke(
+        &rig,
+        "fabric_chair",
+        json!({
+            "op":"log_append", "session":"chair", "entry":entry,
+            "operation_id":generated["operation_id"]
+        }),
+    )?;
+    assert_eq!(retry, generated);
 
     let cases: &[(&str, Value, &[&str])] = &[
         (

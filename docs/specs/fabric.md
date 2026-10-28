@@ -206,6 +206,9 @@ returns a receipt and continuation instructions. Run listings are bounded and
 newest first, and compact status, wait and cancel responses can request detail.
 Run operation IDs are generated when omitted and returned for retries;
 explicit IDs preserve planned retry identity.
+Chair log appends generate an operation ID when omitted. Retry with the same
+ID and content; generated IDs also preserve the original issuance time. When
+supplying your own ID, supply the original `issued_at` as well.
 
 ### Strict tool input
 

@@ -390,6 +390,7 @@ impl BoundFacade<'_> {
         let mut options = ExecOptions::new(&argv, &self.factory.cwd, timeout);
         options.stdin = body.as_deref();
         options.cancel = Some(cancel);
+        options.process_group = true;
         options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };
         options.stderr = StreamPolicy::Capture { limit: 16 * 1024 };
         let output = self
@@ -403,20 +404,40 @@ impl BoundFacade<'_> {
         if cancel.is_cancelled() {
             return Err(FacadeError::Cancelled.into());
         }
+        if output.termination != Termination::Exit(0) {
+            let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout.bytes).ok();
+            if let Some(value) = parsed.as_ref()
+                && let (Some(code), Some(message)) = (
+                    value["error"]["code"].as_str(),
+                    value["error"]["message"].as_str(),
+                )
+            {
+                return Err(ServiceError::Cli {
+                    code: code.to_owned(),
+                    message: message.to_owned(),
+                    data: value
+                        .get("data")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                });
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+            return Err(ServiceError::Cli {
+                code: "cli_failed".into(),
+                message: stderr
+                    .lines()
+                    .next()
+                    .filter(|line| !line.is_empty())
+                    .unwrap_or("CLI service failed without an error message")
+                    .to_owned(),
+                data: serde_json::Value::Null,
+            });
+        }
         if output.stdout.truncated {
             return Err(ServiceError::ResultTooLarge);
         }
         let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)
             .map_err(|_| FacadeError::OwnerUnavailable)?;
-        if output.termination != Termination::Exit(0) {
-            return Err(FacadeError::DispatchRefused {
-                reason: value["error"]["message"]
-                    .as_str()
-                    .unwrap_or("CLI service refused the request")
-                    .to_owned(),
-            }
-            .into());
-        }
         Ok(value["data"].clone())
     }
 }

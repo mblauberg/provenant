@@ -261,8 +261,8 @@ fn build_strict() -> Vec<Value> {
             "Read projects, sessions, board, tree and overview; board and tree can include peers.",
             json!({
                 "projects":{}, "overview":{},
-                "sessions":{"session?":nullable(inbox_session.clone()),"limit?":integer(1,100),"cursor?":nullable(text(256))},
-                "board":{"all?":{"type":"boolean"},"limit?":integer(1,100),"cursor?":nullable(text(256)),"hosts?":nullable(text(1024))},
+                "sessions":{"session?":nullable(inbox_session.clone()),"limit?":integer(1,100),"cursor?":nullable(pattern(r"^sha256:[0-9a-f]{64}:[0-9]{1,20}$"))},
+                "board":{"all?":{"type":"boolean"},"limit?":integer(1,100),"cursor?":nullable(pattern(r"^2\.[0-9]{1,20}\.[0-9]{1,20}\.sha256:[0-9a-f]{64}$")),"hosts?":nullable(text(1024))},
                 "tree":{"max_depth?":integer(1,16),"max_nodes?":integer(1,100),"detail?":{"type":"boolean"},"hosts?":nullable(text(1024))}
             }),
         ),
@@ -271,9 +271,9 @@ fn build_strict() -> Vec<Value> {
             json!({
                 "summary_show":{"session":inbox_session.clone()},
                 "summary_diff":{"session":inbox_session.clone(),"from":integer(1,u64::MAX),"to?":nullable(integer(1,u64::MAX))},
-                "summary_update":{"session":inbox_session.clone(),"patch":object(json!({"now?":nullable(json!({"type":"string"})),"next?":nullable(json!({"type":"string"})),"needs_you?":nullable(json!({"type":"array","items":{"type":"string"}})),"risk?":nullable(json!({"type":"string"}))})),"expect_revision":integer(0,u64::MAX)},
+                "summary_update":{"session":inbox_session.clone(),"patch":object(json!({"now?":nullable(text(256 * 1024)),"next?":nullable(text(256 * 1024)),"needs_you?":nullable(json!({"type":"array","items":text(256 * 1024)})),"risk?":nullable(text(256 * 1024))})),"expect_revision":integer(0,u64::MAX)},
                 "log_list":{"session":inbox_session.clone(),"after?":nullable(integer(0,u64::MAX)),"limit?":integer(1,100)},
-                "log_append":{"session":inbox_session,"entry":object(json!({"kind":{"type":"string"},"markdown":{"type":"string"},"channel":{"type":"string"},"request_ids?":json!({"type":"array","items":{"type":"string"}}),"attempt_ids?":json!({"type":"array","items":{"type":"string"}}),"issue_ids?":json!({"type":"array","items":{"type":"string"}}),"pr_ids?":json!({"type":"array","items":{"type":"string"}}),"correction_of?":nullable(integer(0,u64::MAX))})),"operation_id?":nullable(reference("OperationId")),"issued_at?":nullable(json!({"type":"integer"}))}
+                "log_append":{"session":inbox_session,"entry":object(json!({"kind":text(16 * 1024),"markdown":text(256 * 1024),"channel":text(16 * 1024),"request_ids?":json!({"type":"array","items":text(256 * 1024)}),"attempt_ids?":json!({"type":"array","items":text(256 * 1024)}),"issue_ids?":json!({"type":"array","items":text(256 * 1024)}),"pr_ids?":json!({"type":"array","items":text(256 * 1024)}),"correction_of?":nullable(integer(0,u64::MAX))})),"operation_id?":nullable(reference("OperationId")),"issued_at?":nullable(json!({"type":"integer"}))}
             }),
         ),
     ];

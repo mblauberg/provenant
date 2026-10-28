@@ -252,6 +252,17 @@ fn lane_graph_status_reaches_the_owner() -> Result<(), Box<dyn Error>> {
         &CancelToken::new(),
     )?;
     let mut service = Service::new(coordination, FakeFacade, &clock).with_lane_restrictions(true);
+    for args in [
+        json!({"op":"summary_update","session":"chair","patch":{"now":"work"},"expect_revision":0}),
+        json!({"op":"log_append","session":"chair","entry":{"kind":"progress","markdown":"work","channel":"chat"}}),
+    ] {
+        let result =
+            ToolCall::parse("fabric_chair", args)?.execute(&mut service, &CancelToken::new());
+        assert_eq!(
+            result.err().ok_or("lane mutation accepted")?.code(),
+            "lane_coordination_refused"
+        );
+    }
     let result = ToolCall::Graph(GraphInput::Status {
         id: "g-test".into(),
     })

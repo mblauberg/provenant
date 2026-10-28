@@ -103,7 +103,8 @@ impl ChairInput {
     fn validate(&self) -> Result<(), InputError> {
         let bad = |path: &str| InputError { path: path.into() };
         match self {
-            Self::SummaryDiff { from, to, .. } if *from == 0 || *to == Some(0) => Err(bad("from")),
+            Self::SummaryDiff { from, .. } if *from == 0 => Err(bad("from")),
+            Self::SummaryDiff { to: Some(0), .. } => Err(bad("to")),
             Self::LogList { limit, .. } if !(1..=100).contains(limit) => Err(bad("limit")),
             Self::LogAppend {
                 operation_id: Some(id),
@@ -548,6 +549,25 @@ impl ToolCall {
         service: &mut Service<'_, F>,
         cancel: &CancelToken,
     ) -> Result<ToolResponse, ServiceError> {
+        if let Self::Chair(ChairInput::LogAppend {
+            operation_id,
+            issued_at,
+            ..
+        }) = &mut self
+        {
+            if operation_id.is_none() {
+                let timestamp = match *issued_at {
+                    Some(timestamp) => timestamp,
+                    None => service.clock.wall_now()?.as_timestamp().as_second(),
+                };
+                *operation_id = Some(format!("mcp-log-{timestamp}-{}", new_operation_id()?));
+                *issued_at = Some(timestamp);
+            } else if issued_at.is_none() {
+                *issued_at = operation_id
+                    .as_deref()
+                    .and_then(|id| id.strip_prefix("mcp-log-")?.split_once('-')?.0.parse().ok());
+            }
+        }
         if let Self::Inbox(
             InboxInput::Ask { operation_id, .. }
             | InboxInput::Answer { operation_id, .. }
@@ -582,6 +602,10 @@ impl ToolCall {
                 | InboxInput::Acknowledge { operation_id, .. },
                 _,
             ) => operation_id.clone(),
+            Self::Chair(ChairInput::LogAppend {
+                operation_id: Some(id),
+                ..
+            }) => OperationId::parse(id).ok(),
             Self::Submit(SubmitInput::Submit { operation_id, .. })
             | Self::SubmitWait(SubmitInput::Submit { operation_id, .. }, ..)
             | Self::Run(
@@ -630,6 +654,7 @@ impl ToolCall {
             && matches!(
                 &self,
                 Self::Inbox(..)
+                    | Self::Chair(..)
                     | Self::Mail(..)
                     | Self::Task(..)
                     | Self::Events(..)
@@ -1003,6 +1028,12 @@ impl ToolCall {
 /// sources while the protocol exposes a stable domain code.
 #[derive(Debug, Error)]
 pub enum ServiceError {
+    #[error("{message}")]
+    Cli {
+        code: String,
+        message: String,
+        data: Value,
+    },
     #[error(transparent)]
     Inbox(#[from] InboxError),
     #[error("{message}")]
@@ -1032,7 +1063,7 @@ impl ServiceError {
         match self {
             Self::Mutation { source, .. } => source.code(),
             Self::Inbox(error) => error.code(),
-            Self::InboxOwner { code, .. } => code,
+            Self::InboxOwner { code, .. } | Self::Cli { code, .. } => code,
             Self::Invalid(_) => "invalid_input",
             Self::Coordination(error) => error.code(),
             Self::Facade(error) => error.code(),
@@ -1055,6 +1086,12 @@ impl ServiceError {
             return detail;
         }
         let mut detail = match self {
+            Self::Cli { data, .. } => {
+                let mut detail = data.as_object().cloned().unwrap_or_default();
+                detail.insert("data".into(), data.clone());
+                detail.insert("code".into(), Value::String(self.code().into()));
+                Value::Object(detail)
+            }
             Self::Invalid(error) => serde_json::json!({"code":self.code(),"path":error.path}),
             Self::Coordination(CoordinationError::LaneMutation) => {
                 serde_json::json!({"code":self.code(),"message":self.to_string()})
