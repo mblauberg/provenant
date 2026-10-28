@@ -86,8 +86,9 @@ Viewer request presentation state is separate from resolution and blocking.
 Viewer names are caller-supplied labels, like agent labels: they are not an
 authentication boundary. A local caller that knows a label can change that
 viewer's state; the direct SQLite access residual above also applies.
-Quotas are per project and viewer. Writes reclaim closed or expired request
-rows and evict the oldest summary baseline when its quota is full.
+Quotas are per project and viewer, with a combined per-project cap. Writes
+reclaim closed or expired request rows. A new summary baseline is refused at
+capacity rather than evicting an existing one.
 - Why: viewing and snoozing do not authorise an answer or unblock work.
 - Test: `crates/fabric-store/src/tests/human_inbox.rs::viewer_isolation`
 - Owner: `crates/fabric-store/src/viewer.rs`
