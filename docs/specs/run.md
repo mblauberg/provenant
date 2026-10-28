@@ -32,9 +32,10 @@ different digest fails with `operation_conflict` (exit 2).
 Run and dispatch accept an optional human-supplied title, including per-task
 titles in manifests and Fabric submissions. The title is sealed in the request
 and copied to each attempt; it participates in operation replay identity.
-Titles are nonempty, contain no NUL and are limited to 256 UTF-8 bytes.
-Absent titles remain absent in older records, and readers retain their existing
-task-ID or operation-ID labels. Titles are never inferred from prompts.
+Titles are nonempty, contain no control characters and are limited to 256 UTF-8
+bytes. `lanes` displays titles when present and includes them in JSON output;
+absent titles remain absent in older records. Titles are never inferred from
+prompts.
 - Test: `crates/run/src/service_tests.rs::task_title_roundtrip`
 - Owner: `crates/run/src/service.rs`, `crates/records/src/run.rs`
 

@@ -2580,9 +2580,14 @@ fn render_lanes(
                 .as_deref()
                 .map(|r| format!(" ({})", plain_text(r, usize::MAX)))
                 .unwrap_or_default();
+            let title_text = lane
+                .title
+                .as_deref()
+                .map(|title| format!(" {}", plain_text(title, usize::MAX)))
+                .unwrap_or_default();
             // Peer records remain intact in JSON; terminal text excludes controls.
             human.push_str(&format!(
-                "{}/{}/{} {state} {route_text}{account_field}{reason_text}\n",
+                "{}/{}/{}{title_text} {state} {route_text}{account_field}{reason_text}\n",
                 lane.run_id, lane.task_id, lane.attempt_id,
             ));
             for skipped in &lane.skipped_routes {
@@ -2639,7 +2644,7 @@ fn render_lanes(
                         .map(|path| attempt.join(path));
                     json!({ "adapter": adapter, "session": session, "path": path })
                 });
-            json!({
+            let mut row = json!({
                 "run_id": lane.run_id,
                 "task_id": lane.task_id,
                 "attempt_id": lane.attempt_id,
@@ -2668,7 +2673,11 @@ fn render_lanes(
                 "continuation": lane.continuation,
                 "result_path": result,
                 "transcript": transcript,
-            })
+            });
+            if let Some(title) = &lane.title {
+                row["title"] = json!(title);
+            }
+            row
         })
         .collect();
     if rows.is_empty() {
@@ -5869,6 +5878,7 @@ mod tests {
             "task_id": TaskId::from_bytes([4; 16]),
             "operation_id": "peer-lane-render",
             "attempt_number": 1,
+            "title": "Review\nchanges",
             "revision": 1,
             "generation": 0,
             "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
@@ -5895,7 +5905,7 @@ mod tests {
         assert_eq!(
             human,
             format!(
-                "{}/{}/{} failed fixture/[32mmodel account=]0;account ([31mreason[0m)\n  skipped fixture/[33mfallback Unavailable: skipdetail\n  delivery origin:mainline NotAttempted head=unknown\n",
+                "{}/{}/{} Reviewchanges failed fixture/[32mmodel account=]0;account ([31mreason[0m)\n  skipped fixture/[33mfallback Unavailable: skipdetail\n  delivery origin:mainline NotAttempted head=unknown\n",
                 RunId::from_bytes([2; 16]),
                 TaskId::from_bytes([4; 16]),
                 AttemptId::from_bytes([1; 16])
@@ -5903,6 +5913,7 @@ mod tests {
         );
         assert!(!human.chars().any(|c| c.is_control() && c != '\n'));
         assert!(!human.contains('\u{202e}'));
+        assert_eq!(data["lanes"][0]["title"], "Review\nchanges");
         assert_eq!(data["lanes"][0]["reason"], json!(reason));
         assert_eq!(data["lanes"][0]["write_grants"][0]["source"], "write_root");
         assert_eq!(data["lanes"][0]["write_grants"][0]["scope"], "subtree");
@@ -6100,6 +6111,7 @@ mod tests {
             )
         );
         assert!(!human.contains("account="));
+        assert!(data["lanes"][0].get("title").is_none());
         assert_eq!(data["lanes"][0]["account"], json!("unknown"));
         assert_eq!(data["lanes"][0]["state"], "rejected");
         assert_eq!(data["lanes"][0]["reason"], json!(reason));

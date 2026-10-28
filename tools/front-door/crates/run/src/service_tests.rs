@@ -60,16 +60,28 @@ fn task_title_roundtrip() -> TestResult {
     )?;
     assert_eq!(page.lanes[0].task_id, attempt);
     assert_eq!(page.lanes[0].title.as_deref(), Some("Review changes"));
-    let mut invalid = submission("review this code");
-    invalid.operation_id = OperationId::parse("invalid-title")?;
-    invalid.tasks[0].title = Some("x".repeat(257));
-    assert!(matches!(
-        Service::new(&store).dispatch(invalid, temp.path(), &call),
-        Err(RunError::Input {
-            kind: ErrorKind::Invalid,
-            ..
-        })
-    ));
+    for title in [
+        "x".repeat(257),
+        "line\nbreak".into(),
+        "tab\there".into(),
+        "escape\u{1b}".into(),
+        "unicode\u{85}".into(),
+    ] {
+        let mut invalid = submission("review this code");
+        invalid.operation_id = OperationId::parse("invalid-title")?;
+        invalid.tasks[0].title = Some(title);
+        let error = Service::new(&store)
+            .dispatch(invalid, temp.path(), &call)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RunError::Input {
+                kind: ErrorKind::Invalid,
+                ..
+            }
+        ));
+        assert!(error.to_string().contains("control characters"));
+    }
     Ok(())
 }
 

@@ -73,12 +73,9 @@ impl<'a> Service<'a> {
         for mut task in input.tasks {
             task.route = Self::route(task.route)?;
             Self::scan(&task.prompt)?;
-            if task
-                .title
-                .as_ref()
-                .is_some_and(|title| title.is_empty() || title.len() > 256 || title.contains('\0'))
-            {
-                return Err(input_error(ErrorKind::Invalid, "invalid task title"));
+            if let Some(title) = &task.title {
+                provenant_core::validate_task_title(title)
+                    .map_err(|message| input_error(ErrorKind::Invalid, message))?;
             }
             // A lane's child launches outside the lane's sandbox, so it may not
             // name access its parent never had.
