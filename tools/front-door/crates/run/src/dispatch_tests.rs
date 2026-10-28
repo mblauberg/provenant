@@ -4445,8 +4445,8 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
         None,
         &call,
     )?;
-    // Before the handoff publishes its launch summary there is nothing to
-    // stop; cancel retries until its budget ends, then says so.
+    // Before the handoff publishes its launch summary, cancellation records
+    // a durable request without waiting for custody or recovery.
     let system = provenant_os::clock::SystemClock::new();
     let spent = Request {
         clock: &system,
@@ -4466,14 +4466,23 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
         &cancel,
         &clock,
     )?;
-    assert!(matches!(
+    assert_eq!(
         store.cancel(starting, "stop", &spent)?,
-        CancelReceipt::Unobservable { .. }
-    ));
-    drop(held);
-    // Supervisor's stop writes cancel.json; the waiting guardian sees it.
+        CancelReceipt::Requested
+    );
     let dir = store.attempt_dir(batch.run_id, starting, false)?;
-    artifacts::seal(&dir, "cancel.json", b"{}", RECORD_LIMIT)?;
+    let request: serde_json::Value = serde_json::from_slice(
+        &artifacts::read_sealed(&dir, "cancel.json", RECORD_LIMIT)?
+            .ok_or("cancel request missing")?,
+    )?;
+    assert_eq!(request["scope"], serde_json::to_value(scope)?);
+    assert_eq!(store.record(starting, &call)?.state, AttemptState::Starting);
+    assert!(
+        dir.metadata_at(std::ffi::OsStr::new("reservation.json"), false)
+            .is_ok()
+    );
+    drop(held);
+    // The waiting guardian sees the actual request before admission.
     let host = Host { available: 100 };
     assert!(matches!(
         store.admit(starting, &dir, &host, &clock, &cancel),
@@ -4990,7 +4999,7 @@ fn fresh_resume_preserves_lineage_and_authority_without_provider_state() -> Test
 }
 
 #[test]
-fn cancel_settles_a_prepared_attempt_nobody_holds() -> TestResult {
+fn cancel_requests_then_reconcile_settles_a_prepared_attempt_nobody_holds() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -5026,9 +5035,31 @@ fn cancel_settles_a_prepared_attempt_nobody_holds() -> TestResult {
     };
     assert_eq!(
         store.cancel(orphan, "stop", &spent)?,
-        CancelReceipt::Cancelled
+        CancelReceipt::Requested
     );
-    assert_eq!(terminal(&store, orphan, &call)?, Outcome::Rejected);
+    let attempt = store.attempt_dir(batch.run_id, orphan, false)?;
+    let request: serde_json::Value = serde_json::from_slice(
+        &artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
+            .ok_or("cancel request missing")?,
+    )?;
+    assert_eq!(request["scope"], serde_json::to_value(scope)?);
+    assert_eq!(store.record(orphan, &call)?.state, AttemptState::Starting);
+    assert!(
+        attempt
+            .metadata_at(std::ffi::OsStr::new("reservation.json"), false)
+            .is_ok()
+    );
+    assert!(
+        store
+            .reconcile_with_observer(
+                batch.run_id,
+                &Fake::default(),
+                &call,
+                &provenant_supervisor::census::SystemProcessObserver,
+            )?
+            .contains(&(orphan, Reconciled::Withdrawn))
+    );
+    assert_eq!(terminal(&store, orphan, &call)?, Outcome::Cancelled);
     assert_eq!(
         store.cancel(orphan, "stop", &spent)?,
         CancelReceipt::AlreadyTerminal
@@ -6061,30 +6092,36 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
             ReservationCase::Missing | ReservationCase::Stale
         );
     if cancel_run {
+        let before = std::fs::read(&reservation).ok();
         assert_eq!(
             store.cancel_with_observer(id, "stop", &call, observer)?,
-            if should_settle {
-                CancelReceipt::AlreadyTerminal
-            } else {
-                CancelReceipt::Requested
-            }
+            CancelReceipt::Requested
         );
-    } else {
-        assert!(
-            store
-                .reconcile_with_observer(run.run_id, &Fake::default(), &call, observer)?
-                .contains(&(
-                    id,
-                    match evidence {
-                        1 => Reconciled::Held,
-                        2 if should_settle => Reconciled::Finished,
-                        _ => Reconciled::Uncertain {
-                            reason: UncertainReason::GuardianNotObservable
-                        },
-                    }
-                ))
-        );
+        let request: serde_json::Value = serde_json::from_slice(
+            &artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
+                .ok_or("cancel request missing")?,
+        )?;
+        assert_eq!(request["scope"], serde_json::to_value(scope)?);
+        assert!(!matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal { .. }
+        ));
+        assert_eq!(std::fs::read(&reservation).ok(), before);
     }
+    assert!(
+        store
+            .reconcile_with_observer(run.run_id, &Fake::default(), &call, observer)?
+            .contains(&(
+                id,
+                match evidence {
+                    1 => Reconciled::Held,
+                    2 if should_settle => Reconciled::Finished,
+                    _ => Reconciled::Uncertain {
+                        reason: UncertainReason::GuardianNotObservable
+                    },
+                }
+            ))
+    );
     if should_settle {
         assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
         assert!(!reservation.exists());

@@ -986,7 +986,7 @@ fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
     let snapshot_path = attempt_path.join("quarantine/snapshot.json");
     let baseline = fs::read(&snapshot_path)?;
     fs::write(&snapshot_path, b"{}")?;
-    let uncertain = store.reconcile(record.run_id, &provider, &call)?;
+    let uncertain = store.reconcile_for_fixture(record.run_id, &provider, &call)?;
     assert!(
         matches!(uncertain.as_slice(), [(id, provenant_run::Reconciled::Uncertain { .. })] if *id == attempt)
     );
@@ -1005,7 +1005,7 @@ fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
             .join("CHERRY_PICK_HEAD"),
         b"unfinished cherry-pick",
     )?;
-    let found = store.reconcile(record.run_id, &provider, &call)?;
+    let found = store.reconcile_for_fixture(record.run_id, &provider, &call)?;
     assert_eq!(found, vec![(attempt, provenant_run::Reconciled::Finished)]);
     let terminal = store.record(attempt, &call)?;
     assert_terminal_outcome(&terminal, provenant_run::Outcome::Failed)?;
@@ -2886,20 +2886,22 @@ fn lane_prepare_isolates_nested_state() -> Result {
             fs::canonicalize(provenant_os::git::git_executable().ok_or("host Git")?)?;
         let scratch_git = confinement.plan.permissions().scratch.path.join("bin/git");
         let git_entry = fs::symlink_metadata(&scratch_git)?.file_type();
-        assert!(
+        let wrapped = writer || adapter == "claude" || publishing;
+        assert_eq!(
             git_entry.is_file(),
-            "Git wrapper for {adapter} writer={writer} publishing={publishing}"
+            wrapped,
+            "Git setup for {adapter} writer={writer} publishing={publishing}"
         );
-        if adapter == "claude" || publishing {
+        if !wrapped {
+            assert_eq!(fs::canonicalize(&scratch_git)?, selected_git);
+        }
+        if wrapped {
             // Claude's env scrub and publishing both need a Git wrapper.
             let wrapper = fs::read_to_string(&scratch_git)?;
             assert!(wrapper.contains("GIT_CONFIG_GLOBAL=/dev/null"));
-            // Routed wrappers exec the bound Git through `$lane_git`.
             let git = format!("'{}'", selected_git.display());
             assert!(
-                wrapper.contains(&format!("exec {git}"))
-                    || (wrapper.contains(&format!("lane_git={git}\n"))
-                        && wrapper.contains("exec \"$lane_git\"")),
+                wrapper.contains(&format!("exec {git}")),
                 "Git exec for {adapter} writer={writer} publishing={publishing}"
             );
             assert_eq!(wrapper.contains(" -c 'include.path="), publishing);

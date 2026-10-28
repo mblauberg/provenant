@@ -692,8 +692,21 @@ impl RunStore {
                     },
                 )
             };
+            let last_failure = check.as_ref().err().map(ToString::to_string);
+            let archived = match crate::artifacts::subdir(
+                attempt,
+                std::ffi::OsStr::new("quarantine"),
+                false,
+            ) {
+                Ok(archive) => read_sealed(&archive, "manifest.json", RECORD_LIMIT)?.is_some(),
+                Err(RunError::Filesystem(error)) if error.is_not_found() => false,
+                Err(error) => return Err(error),
+            };
             let check = match check {
-                Err(error) if crate::writer::worktree_removed(writer) => Err(error),
+                Err(error) if crate::writer::worktree_removed(writer) || archived => Err(error),
+                Err(RunError::Writer(_)) => Err(RunError::ObjectImportLimit(
+                    "writer preconditions refused; private Git retained for host recovery",
+                )),
                 Err(error) if !matches!(error, RunError::ObjectImportLimit(_)) => {
                     if crate::artifacts::read_sealed(attempt, "cancel.json", RECORD_LIMIT)?
                         .is_some()
@@ -717,8 +730,9 @@ impl RunStore {
             match check {
                 Err(error @ RunError::ObjectImportLimit(_)) => {
                     let reason = format!(
-                        "writer object import refused for {}: {error}; private Git retained for host recovery; live writer custody released",
-                        writer.worktree.display()
+                        "writer terminal check failed for {}: {error}; {}; private Git retained for host recovery; live writer custody released",
+                        writer.worktree.display(),
+                        last_failure.as_deref().unwrap_or("settlement retry limit")
                     );
                     crate::artifacts::seal(
                         attempt,
