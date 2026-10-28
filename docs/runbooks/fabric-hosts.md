@@ -159,6 +159,81 @@ dependency. For example:
 Omitting `kind` or using `"task"` keeps task behaviour. All nodes require an
 explicit `access`; gates require `"read_only"`.
 
+### Plan a small graph
+
+On a configured host with the default limits, save this as
+`.provenant/scratch/graphs/plan-example.json`:
+
+```json
+{
+  "schema_version": 1, "graph_id": "plan-example",
+  "nodes": [{
+    "id": "plan", "kind": "plan", "access": "read_only",
+    "route": {"alias": "senior"},
+    "plan": {"kinds": ["task"], "max_nodes": 2},
+    "prompt": "Emit one read-only task with id inspect, goal Summarise README.md, write_scope [README.md], acceptance_checks [Identify the documented entry points], and depends_on []."
+  }]
+}
+```
+
+```sh
+provenant fabric graph run --document .provenant/scratch/graphs/plan-example.json
+provenant fabric graph status plan-example --json
+```
+
+The runtime supplies the planner's result contract. A complete result looks
+like this; keep the JSON within 12 KiB and the final block within the retained
+result tail:
+
+````text
+```fragment
+{"schema_version":1,"nodes":[{"id":"inspect","goal":"Summarise README.md","access":"read_only","write_scope":["README.md"],"acceptance_checks":["Identify the documented entry points"],"depends_on":[]}]}
+```
+````
+
+The task defaults to `senior`. Status shows `plan--inspect`, the validated
+definitions under `checkpoint.expansions`, and `checkpoint.remaining`.
+Dependencies and selected inputs in a fragment use local IDs. A planner may
+declare `task`, `plan`, `synthesise` or `gate` children. Gates use the existing
+condition schema. Presets and review shapes remain future extensions.
+
+For writers, create and register their worktrees first. Add
+`"integration_branch": "integration"` to the graph and optionally
+`"delivery": "pr"` for one final PR. Emitted writer nodes specify
+`"access": "worktree_write"` and their registered `worktree`. The integration
+branch must differ from the checked-out writer branch. Overlapping literal
+file/directory scopes share the first writer's checkout and run serially with
+`integrate:integration`; disjoint scopes in separate checkouts may run together.
+Scopes use `.` for the whole repository and do not accept globs or `..`.
+
+A writer that has committed a useful partial result can finish successfully
+with this structured note instead of its completion verdict:
+
+````text
+```handoff
+{"schema_version":1,"status":"stopped_early","note":"First half committed. Finish the second half, then run the acceptance checks."}
+```
+````
+
+Use a note of at most 4096 bytes. The continuation keeps the checkout and
+completion contract; consumers wait for it and read its selected outputs.
+Use integrate delivery or no delivery for these writers. Graph checkouts are
+retained for later work and explicit cleanup. Plain prose and failed provider
+attempts do not trigger continuation.
+
+The graph allows two continuations by default. Configure `continuations` in
+the graph's `limits` or host graph policy; 0 disables them. To extend a paused
+graph within its host ceiling:
+
+```sh
+provenant fabric graph resume --document graph.json --extend limits.continuations=3
+```
+
+Invalid planner output pauses with an explicit reason; correct the brief or
+fragment bounds and start with a new graph ID. No invalid fragment is saved or
+partly admitted. Status retains the original handoff if a continuation cannot
+fit; it can resume after the relevant limit is extended.
+
 ### Repeat review and repair
 
 Use a `loop` node when review and repair should repeat until a gate passes.
@@ -357,7 +432,7 @@ wall_time_seconds = 7200
 ```
 
 Limits also include `routes_per_node`, `node_prompt_bytes`,
-`graph_prompt_bytes`, `expansion_depth`, `fan_out_width` and `concurrency`.
+`graph_prompt_bytes`, `expansion_depth`, `fan_out_width`, `continuations` and `concurrency`.
 The defaults are 16 routes, 256 KiB per node prompt, 4 MiB per graph,
 expansion depth 4 and fan-out 32. Set concurrency to 0 to use host lane caps.
 Fan-out counts direct dependants of a node; expansion depth is the longest
@@ -367,7 +442,7 @@ allow a graph document to request a higher value. Budget fields are optional;
 unset fields have no budget. Costs are in US dollars.
 
 A graph document can set a `limits` object with any of these fields. Values
-must be positive. Values above the current configured ceiling are clamped to
+must be positive, except that `continuations` may be 0. Values above the current configured ceiling are clamped to
 that ceiling and recorded in a note.
 When a structural limit or budget is reached, graph status reports `paused` and
 the checkpoint records the reason. A paused command exits successfully; scripts
