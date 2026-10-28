@@ -194,26 +194,6 @@ pub(super) fn tick(fetch: &mut Fetch<'_>, deadline: Instant) -> Result<Tick, Fai
 pub(super) fn pause(poll: Duration, deadline: Instant) {
     std::thread::park_timeout(poll.min(deadline.saturating_duration_since(Instant::now())));
 }
-/// Briefly recheck an unsafe store observation, retaining a persistent error.
-#[allow(clippy::disallowed_methods)]
-pub(super) fn retry_store_path<T>(
-    deadline: Instant,
-    mut operation: impl FnMut() -> Result<T, Fail>,
-) -> Result<T, Fail> {
-    let until = deadline.min(Instant::now() + Duration::from_secs(1));
-    loop {
-        match operation() {
-            Err(mut fail) if fail.store_path_unsafe && Instant::now() < until => {
-                pause(Duration::from_millis(50), until);
-                if Instant::now() >= until {
-                    fail.store_path_unsafe = false;
-                    return Err(fail);
-                }
-            }
-            result => return result,
-        }
-    }
-}
 /// Retry a store operation until it succeeds or contention outlasts the wait.
 #[allow(clippy::disallowed_methods)]
 pub(super) fn retry_contention(
@@ -440,61 +420,6 @@ mod tests {
     use super::*;
     use provenant_core::{Digest, ProjectId, RunId, TaskId};
     use provenant_records::CanonicalV1;
-
-    #[test]
-    #[allow(clippy::disallowed_methods)]
-    fn incomplete_store_is_rechecked_and_persistent_unsafe_store_fails()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir()?;
-        let home = temp.path().join("home");
-        let checkout = temp.path().join("checkout");
-        std::fs::create_dir(&home)?;
-        std::fs::create_dir(&checkout)?;
-        let state = temp.path().join("state");
-        let mut inputs = provenant_core::RootInputs::new(home, checkout);
-        inputs.state_dir = Some(state.clone());
-        let context = run::ExecutionContext {
-            state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
-            project_id: ProjectId::from_bytes([1; 16]),
-            actor_id: provenant_core::ActorId::from_bytes([2; 16]),
-            read_prompts: true,
-        };
-        std::fs::create_dir(&state)?;
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755))?;
-        let clock = SystemClock::new();
-        let cancel = provenant_core::CancelToken::new();
-        let call = run::Request {
-            clock: &clock,
-            budget: provenant_core::WaitBudget::nonblocking(provenant_core::Clock::mono_now(
-                &clock,
-            )),
-            cancel: &cancel,
-        };
-        let mut reads = 0;
-        retry_store_path(Instant::now() + Duration::from_secs(2), || {
-            reads += 1;
-            if reads == 2 {
-                std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
-            }
-            run::RunStore::open_read_only(&context, &call)
-                .map(|_| ())
-                .map_err(Fail::from)
-        })
-        .unwrap();
-        assert_eq!(reads, 2);
-        let store = run::RunStore::open(&context, &call)?;
-        drop(store);
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755))?;
-        let failure = retry_store_path(Instant::now() + Duration::from_millis(120), || {
-            run::RunStore::open_read_only(&context, &call)
-                .map(|_| ())
-                .map_err(Fail::from)
-        })
-        .unwrap_err();
-        assert!(failure.message.contains("not private or contained"));
-        Ok(())
-    }
 
     fn lane(id: u8, state: serde_json::Value) -> run::AttemptRecord {
         serde_json::from_value(json!({

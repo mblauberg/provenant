@@ -59,8 +59,6 @@ pub struct Fail {
     pub message: String,
     /// Safe typed detail retained for the MCP edge, without raw source errors.
     pub detail: Option<provenant_fabric_runtime::coordination::facade::FacadeError>,
-    /// Whether a wait may briefly recheck this run-store path failure.
-    pub store_path_unsafe: bool,
 }
 impl Fail {
     fn new(status: Status, kind: ErrorKind, message: impl Into<String>) -> Self {
@@ -69,7 +67,6 @@ impl Fail {
             kind,
             message: message.into(),
             detail: None,
-            store_path_unsafe: false,
         }
     }
 }
@@ -114,7 +111,6 @@ impl From<run::RunError> for Fail {
         };
         Self {
             detail,
-            store_path_unsafe: matches!(error, run::RunError::UnsafePath { .. }),
             ..Self::new(status, kind, error.to_string())
         }
     }
@@ -3381,9 +3377,7 @@ fn wait_command(
             } else {
                 None
             };
-            watch::retry_store_path(deadline, || {
-                candidates(session, picks, cursor_value)(remaining)
-            })
+            candidates(session, picks, cursor_value)(remaining)
         },
         watch::Scope {
             entered,
@@ -3517,9 +3511,7 @@ fn lanes_wait_entry(
     let deadline = Instant::now() + Duration::from_secs(seconds);
     let entered = watch::entered()?;
     loop {
-        match watch::retry_store_path(deadline, || {
-            lanes_inner(command, edge, json, &mut *emit, Some((deadline, entered)))
-        }) {
+        match lanes_inner(command, edge, json, &mut *emit, Some((deadline, entered))) {
             Err(fail) if fail.kind == ErrorKind::Contention => {
                 if Instant::now() >= deadline {
                     let cooldowns = read_lane_cooldowns(edge.roots.state.as_path());
