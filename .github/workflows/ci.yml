@@ -260,6 +260,11 @@ jobs:
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
         run: cargo nextest run --profile ci --locked --test dispatch_provider
+      - name: Require Claude network and native TLS file probes
+        working-directory: tools/front-door
+        env:
+          PROVENANT_CONFINEMENT_REQUIRED: "1"
+        run: cargo nextest run --profile ci --locked -p provenant-providers -E 'test(claude_network_on)'
       - name: Run menu bar tests
         working-directory: apps/quota-menubar
         run: swift test

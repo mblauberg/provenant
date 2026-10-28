@@ -3,7 +3,9 @@ use crate::launch::{
     uuid_v4,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
-use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
+use provenant_confinement::permissions::{
+    NetworkAccess, NetworkEndpoint, ProviderProfile, ProviderProfileSpec,
+};
 use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
 use provenant_os::clock::SystemClock;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
@@ -560,16 +562,22 @@ fn prepare(
     });
     argv.push(session_id.clone().into());
     let shell = access == Access::WorktreeWrite;
+    let web = plan.network == NetworkAccess::Open;
     let (mode, tools) = match access {
         Access::ReadOnly => ("dontAsk", "Read,Grep,Glob,Bash"),
         Access::WorktreeWrite => ("default", "Read,Grep,Glob,Edit,Write,Bash"),
+    };
+    let tools = if web {
+        format!("{tools},WebFetch,WebSearch")
+    } else {
+        tools.to_owned()
     };
     argv.extend(
         [
             "--permission-mode",
             mode,
             "--tools",
-            tools,
+            &tools,
             "--model",
             input.route.model.as_str(),
         ]
@@ -607,9 +615,15 @@ fn prepare(
     } else {
         "Bash,mcp__fabric__*"
     };
-    let mut setup = input.provenant.claude(scratch, &mut argv, allowed_tools)?;
+    let allowed_tools = if web {
+        format!("{allowed_tools},WebFetch,WebSearch")
+    } else {
+        allowed_tools.to_owned()
+    };
+    let mut setup = input.provenant.claude(scratch, &mut argv, &allowed_tools)?;
 
-    let path = if shell {
+    let toolchain = shell || web;
+    let path = if toolchain {
         format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display())
     } else {
         "/usr/bin:/bin".into()
@@ -651,15 +665,27 @@ fn prepare(
     ]);
     // The git wrapper script; the scrub drops GIT_CONFIG_GLOBAL from Bash.
     tool_exec_roots.push(subtree(scratch.join("bin")));
-    if shell {
-        crate::launch::rust_tools(
-            input,
-            access,
-            &mut runtime_reads,
-            &mut tool_exec_roots,
-            &mut env,
-            &mut setup,
-        );
+    // Use the same read-only toolchain, public TLS configuration and CLT
+    // selection as Codex. Access still controls private caches and writes.
+    if toolchain {
+        // Network access must not make Rust an installation prerequisite.
+        // Every subtree grant needs an existing directory at anchoring time.
+        let rust_installed = [".cargo/bin", ".rustup/toolchains"]
+            .iter()
+            .all(|path| input.home.join(path).is_dir());
+        if shell || rust_installed {
+            crate::launch::rust_tools(
+                input,
+                access,
+                &mut runtime_reads,
+                &mut tool_exec_roots,
+                &mut env,
+                &mut setup,
+            );
+        } else {
+            crate::launch::system_tools(access, &mut runtime_reads, &mut tool_exec_roots, &mut env);
+            tool_exec_roots.push(subtree(input.cwd));
+        }
         crate::launch::node_tools(
             input.home,
             access,
