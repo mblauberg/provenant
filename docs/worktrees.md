@@ -146,12 +146,24 @@ host operation: only build seeds from a trusted `origin/main`.
 Fresh writer targets are cloned from the newest generation whose full rustc
 version and host triple match the lane's toolchain. Cargo fingerprints decide
 which units can be reused when source, profile, features or flags differ. The
-lane writes only its own target; it cannot promote output into the seed. An
-existing lane target is retained. `cargo-target-setup.json` records whether
+host probes an installed release compiler directly, without executing a toolchain
+or binary from the writer checkout. Verification requires an explicit fixed
+release pin in `tools/front-door/rust-toolchain.toml` or the legacy
+`rust-toolchain`, an unambiguous host installation, and no rustup overrides or
+lane environment overrides. The lane's PATH must resolve to the protected host
+rustup shim, the lane must not be able to write its toolchain, and Cargo config
+files that could select another compiler cause a fallback. If verification
+fails, the target falls back with `toolchain_unverified`. The lane writes only
+its own target; it cannot promote output into the seed. An existing lane target
+is retained. `cargo-target-setup.json` records whether
 preparation seeded, skipped or fell back, including mismatch reasons. The lane
 starts with an empty target if no matching generation can be cloned. The
 configuration above limits retained generations to three and 20 GiB of apparent
 file size; `provenant gc` removes the oldest generations over either limit.
+It also reclaims abandoned build staging trees once no seed build is active,
+and removes incomplete generations. Only one host seed build runs at a time.
+Generations created before the completion marker was introduced are treated
+as incomplete; build a fresh generation after upgrading.
 GC skips the store while a lane is cloning. Zero for either limit removes all
 generations at the next GC.
 

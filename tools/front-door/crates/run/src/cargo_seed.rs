@@ -13,8 +13,7 @@ impl Outcome {
             reason,
         }
     }
-    #[cfg(any(target_os = "macos", test))]
-    fn fallback(reason: &'static str) -> Self {
+    pub(crate) fn fallback(reason: &'static str) -> Self {
         Self {
             status: "fallback",
             reason,
@@ -61,28 +60,29 @@ pub(crate) fn seed_git(enabled: bool, home: &Path, cache: &Path) -> Outcome {
     }
 }
 
-pub(crate) fn seed_target(enabled: bool, state: &Path, cache: &Path, worktree: &Path) -> Outcome {
+pub(crate) fn seed_target(
+    enabled: bool,
+    state: &Path,
+    cache: &Path,
+    worktree: &Path,
+    home: &Path,
+    environment: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Outcome {
     if !enabled {
         return Outcome::skipped("disabled");
     }
     #[cfg(target_os = "macos")]
     {
-        // The host seed is built in this workspace, which can pin its own
-        // toolchain below the repository root.
-        let front_door = worktree.join("tools/front-door");
-        let rustc_dir = if front_door.join("rust-toolchain.toml").is_file() {
-            front_door.as_path()
-        } else {
-            worktree
-        };
-        let Ok((version, triple)) = crate::target_seed::rustc_metadata(rustc_dir) else {
-            return Outcome::fallback("toolchain_unavailable");
+        let Ok((version, triple)) =
+            crate::target_seed::lane_rustc_metadata(worktree, home, environment)
+        else {
+            return Outcome::fallback("toolchain_unverified");
         };
         seed_target_with(state, cache, &version, &triple, clone_target)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (state, cache, worktree);
+        let _ = (state, cache, worktree, home, environment);
         Outcome::skipped("unsupported_platform")
     }
 }
@@ -120,12 +120,22 @@ fn seed_target_with(
     let mut saw_entry = false;
     let mut selected = None;
     for entry in entries {
+        use std::os::unix::fs::PermissionsExt;
         if !entry.file_type().is_ok_and(|kind| kind.is_dir())
             || entry.file_name().to_string_lossy().starts_with('.')
         {
             continue;
         }
         saw_entry = true;
+        if !entry
+            .metadata()
+            .is_ok_and(|m| m.permissions().mode() & 0o222 == 0)
+        {
+            continue;
+        }
+        if !std::fs::read(entry.path().join("complete")).is_ok_and(|data| data == b"complete\n") {
+            continue;
+        }
         let Ok(data) = std::fs::read(entry.path().join("manifest.json")) else {
             continue;
         };
@@ -429,6 +439,7 @@ mod tests {
             .join("generations")
             .join(name);
         std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::write(dir.join("complete"), b"complete\n").unwrap();
         let manifest = crate::target_seed::Manifest {
             rustc_vv: version.into(),
             host_triple: triple.into(),
@@ -442,6 +453,8 @@ mod tests {
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
     }
 
     #[test]
@@ -500,6 +513,27 @@ mod tests {
         assert_eq!(run(), Outcome::fallback("manifest_invalid"));
         let _lock = crate::target_seed::lock_store(tmp.path()).unwrap();
         assert_eq!(run(), Outcome::fallback("seed_lock_unavailable"));
+    }
+
+    #[test]
+    fn target_incomplete_generation_falls_back() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        generation(tmp.path(), "001", "v1", "host");
+        let dir = crate::target_seed::store_path(tmp.path()).join("generations/001");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let run = || {
+            seed_target_with(tmp.path(), &cache, "v1", "host", |_, _| {
+                panic!("must not clone")
+            })
+        };
+        assert_eq!(run(), Outcome::fallback("manifest_invalid"));
+        std::fs::remove_file(dir.join("complete")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert_eq!(run(), Outcome::fallback("manifest_invalid"));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[cfg(target_os = "macos")]

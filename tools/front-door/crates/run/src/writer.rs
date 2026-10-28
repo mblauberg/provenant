@@ -234,6 +234,7 @@ impl LaunchConfinement {
     pub(crate) fn command(
         &self,
         argv: &[OsString],
+        environment: &[(OsString, OsString)],
         attempt: &provenant_core::AttemptId,
         cancel: &CancelToken,
         attempt_dir: &Directory,
@@ -290,12 +291,33 @@ impl LaunchConfinement {
             );
         }
         let target_outcome = match (&self.plan.permissions().mode, writer) {
+            (AccessMode::WorktreeWrite(authority), Some((worktree, _)))
+                if cfg!(target_os = "macos")
+                    && self.cargo_registry_seed
+                    && (!verified_cargo_config(
+                        worktree.path(),
+                        &authority.cargo_cache().path,
+                        environment,
+                    ) || !trusted_lane_toolchain(
+                        &self.home,
+                        worktree.path(),
+                        environment,
+                        &provenant_confinement::write_grants(
+                            self.plan.permissions(),
+                            &self.profile,
+                        ),
+                    )) =>
+            {
+                crate::cargo_seed::Outcome::fallback("toolchain_unverified")
+            }
             (AccessMode::WorktreeWrite(authority), Some((worktree, _))) => {
                 crate::cargo_seed::seed_target(
                     self.cargo_registry_seed,
                     &self.state_root,
                     &authority.cargo_cache().path,
                     worktree.path(),
+                    &self.home,
+                    environment,
                 )
             }
             _ => crate::cargo_seed::Outcome::skipped("read_only_lane"),
@@ -327,6 +349,101 @@ impl LaunchConfinement {
     }
 }
 
+// Cargo configuration can override rustc independently of the rustup pin.
+// Refuse ambiguous configurations without executing or interpreting them.
+fn verified_cargo_config(
+    worktree: &Path,
+    cache: &Path,
+    environment: &[(OsString, OsString)],
+) -> bool {
+    for path in [worktree.join("tools"), worktree.join("tools/front-door")] {
+        if !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+            return false;
+        }
+    }
+    let cargo_home = cache.join("cargo-home");
+    let mut values = environment.iter().filter(|(key, _)| key == "CARGO_HOME");
+    if !matches!(values.next(), Some((_, value)) if Path::new(value) == cargo_home)
+        || values.next().is_some()
+    {
+        return false;
+    }
+    let has_config = |directory: &Path| {
+        ["config", "config.toml"].iter().any(|name| {
+            !matches!(std::fs::symlink_metadata(directory.join(name)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        })
+    };
+    !has_config(&cargo_home)
+        && worktree
+            .join("tools/front-door")
+            .ancestors()
+            .all(|ancestor| !has_config(&ancestor.join(".cargo")))
+}
+
+// Refuse the host probe if a lane can alter the host compiler or an earlier
+// PATH entry, or if its rustc does not resolve to the host rustup shim.
+fn trusted_lane_toolchain(
+    home: &Path,
+    worktree: &Path,
+    environment: &[(OsString, OsString)],
+    grants: &[provenant_confinement::permissions::WriteGrant],
+) -> bool {
+    use provenant_confinement::permissions::PathScope;
+    use provenant_core::PathResolver;
+    let resolve = |path: &Path| {
+        provenant_os::fs::SystemPathResolver
+            .resolve_existing_ancestor(path)
+            .ok()
+    };
+    let Some(worktree) = resolve(worktree) else {
+        return false;
+    };
+    let protected = |path: &Path| {
+        let Some(path) = resolve(path) else {
+            return false;
+        };
+        if path.starts_with(&worktree) || worktree.starts_with(&path) {
+            return false;
+        }
+        grants.iter().all(|grant| {
+            resolve(&grant.path).is_some_and(|root| {
+                !root.starts_with(&path)
+                    && !(path.starts_with(&root)
+                        && (grant.scope == PathScope::Subtree || root.is_dir()))
+            })
+        })
+    };
+    if !protected(&home.join(".rustup")) || !protected(&home.join(".cargo/bin")) {
+        return false;
+    }
+    let mut paths = environment.iter().filter(|(key, _)| key == "PATH");
+    let Some((_, path)) = paths.next() else {
+        return false;
+    };
+    if paths.next().is_some() {
+        return false;
+    }
+    let Ok(shim) = home.join(".cargo/bin/rustup").canonicalize() else {
+        return false;
+    };
+    if !protected(&shim) {
+        return false;
+    }
+    for directory in std::env::split_paths(path) {
+        if !directory.is_absolute() || !protected(&directory) {
+            return false;
+        }
+        let executable = directory.join("rustc");
+        match executable.canonicalize() {
+            Ok(found) => return found == shim,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
 fn record_cargo_setup(
     directory: &Directory,
     outcome: &crate::cargo_seed::Outcome,
@@ -354,6 +471,58 @@ fn record_cargo_setup_file(
 #[cfg(test)]
 mod cargo_setup_tests {
     use super::*;
+
+    #[test]
+    fn toolchain_probe_requires_immutable_host_paths_and_trusted_path_order() {
+        use provenant_confinement::permissions::{PathScope, WriteGrant, WriteSource};
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let worktree = tmp.path().join("worktree");
+        let bin = home.join(".cargo/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(home.join(".rustup")).unwrap();
+        std::fs::create_dir(&worktree).unwrap();
+        std::fs::write(bin.join("rustup"), b"fixture").unwrap();
+        std::os::unix::fs::symlink("rustup", bin.join("rustc")).unwrap();
+        let env = vec![(OsString::from("PATH"), bin.as_os_str().to_owned())];
+        assert!(trusted_lane_toolchain(&home, &worktree, &env, &[]));
+        let grant = WriteGrant {
+            source: WriteSource::WriteRoot,
+            path: home.join(".rustup"),
+            scope: PathScope::Subtree,
+        };
+        assert!(!trusted_lane_toolchain(&home, &worktree, &env, &[grant]));
+        let path = std::env::join_paths([&worktree, &bin]).unwrap();
+        let unsafe_env = vec![(OsString::from("PATH"), path)];
+        assert!(!trusted_lane_toolchain(&home, &worktree, &unsafe_env, &[]));
+        std::fs::write(worktree.join("rustc"), b"untrusted").unwrap();
+        assert!(!trusted_lane_toolchain(&home, &worktree, &unsafe_env, &[]));
+    }
+
+    #[test]
+    fn cargo_config_makes_toolchain_unverifiable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree = tmp.path().join("worktree");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir_all(worktree.join("tools/front-door")).unwrap();
+        std::fs::create_dir_all(cache.join("cargo-home")).unwrap();
+        let env = vec![(
+            OsString::from("CARGO_HOME"),
+            cache.join("cargo-home").into_os_string(),
+        )];
+        assert!(verified_cargo_config(&worktree, &cache, &env));
+        assert!(!verified_cargo_config(&worktree, &cache, &[]));
+        std::fs::write(
+            cache.join("cargo-home/config.toml"),
+            "[build]\nrustc = 'evil'\n",
+        )
+        .unwrap();
+        assert!(!verified_cargo_config(&worktree, &cache, &env));
+        std::fs::remove_file(cache.join("cargo-home/config.toml")).unwrap();
+        std::fs::create_dir_all(worktree.join(".cargo")).unwrap();
+        std::fs::write(worktree.join(".cargo/config"), "[build]\nrustc = 'evil'\n").unwrap();
+        assert!(!verified_cargo_config(&worktree, &cache, &env));
+    }
 
     #[test]
     fn cargo_setup_record_reports_writer_and_read_only_outcomes() {

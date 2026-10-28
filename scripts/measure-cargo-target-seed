@@ -100,6 +100,9 @@ def main():
     # The same flock protects readers from generation GC during the clone.
     with (store / "store.lock").open("rb") as lock:
         fcntl.flock(lock, fcntl.LOCK_SH)
+        if ((generation / "complete").read_bytes() != b"complete\n"
+                or generation.stat().st_mode & 0o222):
+            raise RuntimeError("generation is incomplete")
         print("manifest=" + (generation / "manifest.json").read_text().strip(), flush=True)
         clone_tree(generation / "target", seeded)
     print(f"clone_seconds={time.monotonic() - start:.3f}", flush=True)

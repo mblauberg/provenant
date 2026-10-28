@@ -17,6 +17,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+/// Sync file data and metadata, including the storage-device flush on macOS.
+pub fn durable_sync_file(file: &File) -> io::Result<()> {
+    os::durable_sync_file(file)
+}
+
 #[derive(Debug, Error)]
 pub enum FsError {
     #[error("expected one normal relative path component: {name:?}")]
