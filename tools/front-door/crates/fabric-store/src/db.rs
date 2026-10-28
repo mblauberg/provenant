@@ -147,6 +147,8 @@ pub struct Store {
 impl Store {
     /// No creation, migration, journal changes or retries. WAL and shared memory
     /// are opened read-only too; an unavailable WAL index fails closed.
+    /// Filesystem calls are blocking. The deadline is checked between steps;
+    /// callers needing a hard bound must run this off-thread with a timeout.
     #[allow(clippy::disallowed_methods)]
     pub fn open_read_only(root: &StateRoot, deadline: std::time::Instant) -> Result<Option<Self>> {
         crate::local_delivery::before(deadline)?;

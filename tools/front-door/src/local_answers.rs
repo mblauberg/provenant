@@ -21,6 +21,9 @@ pub struct LocalReader<'a> {
 impl LocalReader<'_> {
     /// Validate an explicitly registered workspace/session before opening an
     /// existing read-only store. Missing or stale registration returns no offers.
+    /// Deadlines are cooperative, checked between steps and during SQLite work.
+    /// Filesystem calls cannot be interrupted; callers needing a hard bound must
+    /// run the reader off-thread with a timeout and discard late results.
     pub fn read(
         &self,
         session: &str,

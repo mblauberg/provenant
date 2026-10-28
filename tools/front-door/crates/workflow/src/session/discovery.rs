@@ -349,6 +349,9 @@ fn location_directory(root: &StateRoot, create: bool) -> Result<Directory, FsErr
 
 /// Direct workspace/session lookup of an explicitly saved chair. No enumeration,
 /// allocation, locking, Git discovery or repair. Stale locators remain unknown.
+/// The deadline is checked between steps. Blocking filesystem operations,
+/// including canonicalisation and checkpoint reads, cannot be interrupted.
+/// Callers needing a hard bound must run this off-thread and time out the wait.
 #[allow(clippy::disallowed_methods)]
 pub fn discover_session_at(
     root: &StateRoot,
