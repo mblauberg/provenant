@@ -1,1 +1,3 @@
-- Writer lanes use the host’s configured Git name and email for commits while keeping global Git configuration isolated.
+## Fixes
+
+- Writer lanes commit with the host's configured Git name and email, while global Git configuration stays isolated.
