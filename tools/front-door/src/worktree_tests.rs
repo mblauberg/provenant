@@ -2894,7 +2894,15 @@ fn lane_prepare_isolates_nested_state() -> Result {
             // Claude's env scrub and publishing both need a Git wrapper.
             let wrapper = fs::read_to_string(&scratch_git)?;
             assert!(wrapper.contains("GIT_CONFIG_GLOBAL=/dev/null"));
-            assert!(wrapper.contains(&format!("exec '{}'", selected_git.display())));
+            // Routed wrappers exec the bound Git through `$lane_git`.
+            let git = format!("'{}'", selected_git.display());
+            assert!(
+                wrapper.contains(&format!("exec {git}"))
+                    || (wrapper.contains(&format!("lane_git={git}\n"))
+                        && wrapper.contains("exec \"$lane_git\"")),
+                "Git exec for {adapter} writer={writer} publishing={publishing}"
+            );
+            assert_eq!(wrapper.contains(" -c 'include.path="), publishing);
         }
         let scratch = &confinement.plan.permissions().scratch.path;
         assert_eq!(scratch.join("publishing.gitconfig").exists(), publishing);
