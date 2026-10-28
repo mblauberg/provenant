@@ -8,6 +8,14 @@ and read it with `provenant workflow session show SESSION`. Each checkpoint is
 limited to 256 KiB. Session hooks and hand-off prompts can include a shorter
 excerpt.
 
+Chair session start and a successful session save show one disk warning when
+free space on the state, checkout or lane Cargo cache volume falls below twice
+the dispatch floor, `gc.free_floor`, capped at half that volume's capacity.
+The warning identifies the volume, gives its free space and threshold, and
+points to `provenant disk report` and `provenant gc`. It samples free space
+without scanning files; an unavailable observation is silently skipped. See
+the [disk runbook](disk.md) to inspect and reclaim space.
+
 Session saves, MCP callers, hooks and handoff use the same Fabric inbox actor:
 host plus `PROVENANT_AGENT_LABEL`, configured `fabric.agent_label`, the harness client,
 then configured `fabric.client_label` (default `agent`), in that order.

@@ -910,7 +910,7 @@ const IMPORTS_TABLE: &str = "CREATE TABLE imports(source TEXT PRIMARY KEY, \
      skipped_rows BLOB NOT NULL DEFAULT X'7B7D') STRICT;";
 // Fixtures rewinding a current database must remove migration 8's tables in
 // foreign-key order before the older schema can be upgraded again.
-const REMOVE_HUMAN_TABLES: &str = "DROP TABLE human_answer_outbox; \
+const REMOVE_HUMAN_TABLES: &str = "DROP TABLE run_chairs; DROP TABLE human_answer_outbox; \
     DROP TABLE human_answers; DROP TABLE human_request_history; DROP TABLE human_requests;";
 fn downgrade_to_six(store: &Store, rows: &str) {
     store
@@ -1336,3 +1336,101 @@ mod f2;
 
 mod human_inbox;
 mod operations;
+
+#[test]
+fn run_chair_migration_preserves_mail_and_rejects_older_readers() {
+    let f = Fixture::new();
+    let store = f.open();
+    store.send(&message(&f, 9), &f.request()).unwrap();
+    store
+        .db
+        .execute_batch("DROP TABLE run_chairs; PRAGMA user_version=8;")
+        .unwrap();
+    drop(store);
+    let store = f.open();
+    assert_eq!(
+        store
+            .read_mail(project(), actor(3), Some(0), 100, &f.request())
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert!(matches!(
+        provenant_sqlite::read_version(&store.db, 8),
+        Err(provenant_sqlite::VersionError::Unsupported(9))
+    ));
+    assert!(
+        HostStore::open(&f.root, &f.request())
+            .unwrap()
+            .run_chair(
+                project(),
+                provenant_core::RunId::from_bytes([1; 16]),
+                &f.request()
+            )
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn host_store_refuses_unsafe_database_companions() {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let f = Fixture::new();
+        let store = f.open();
+        let path = f
+            .root
+            .as_path()
+            .join("fabric")
+            .join(format!("host.sqlite3{suffix}"));
+        std::os::unix::fs::symlink(f.path(), &path).unwrap();
+        assert!(matches!(
+            HostStore::open(&f.root, &f.request()),
+            Err(Error::UnsafePath(_))
+        ));
+        // The host refusal must leave ordinary mail storage intact.
+        store.send(&message(&f, 9), &f.request()).unwrap();
+    }
+}
+
+#[test]
+fn host_store_ignores_lane_writable_locks_and_shared_rows() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let shared = f.open();
+    let host = HostStore::open(&f.root, &f.request()).unwrap();
+    let run = provenant_core::RunId::from_bytes([1; 16]);
+    let value = RunChair {
+        request_digest: provenant_core::Digest::from_bytes([2; 32]),
+        chair: None,
+    };
+    host.seal_run_chair(project(), run, &value, &f.request())
+        .unwrap();
+    shared
+        .db
+        .execute(
+            "INSERT INTO run_chairs VALUES(?1,?2,?3)",
+            params![project().to_string(), run.to_string(), b"forged".as_slice()],
+        )
+        .unwrap();
+    std::fs::set_permissions(
+        f.root.as_path().join("fabric/locks"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    assert!(matches!(
+        Store::open(&f.root, &f.request()),
+        Err(Error::UnsafePath(_))
+    ));
+    drop(host);
+    // A current-schema open must not need a migration write transaction.
+    let writer = rusqlite::Connection::open(f.root.as_path().join("fabric/host.sqlite3")).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert_eq!(
+        HostStore::open(&f.root, &f.request())
+            .unwrap()
+            .run_chair(project(), run, &f.request())
+            .unwrap(),
+        Some(value)
+    );
+}

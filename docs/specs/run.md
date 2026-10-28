@@ -9,7 +9,7 @@ Run turns a request into bounded provider attempts and keeps the exact
 prompt, route and result of each, so completion and cancellation survive a
 disconnected caller. Routing resolves models ([routing](routing.md));
 supervisor owns every process and signal ([supervisor](supervisor.md)); Fabric
-keeps no second registry ([fabric](fabric.md)). Run starts no process
+stores chair associations, with execution facts owned by Run ([fabric](fabric.md)). Run starts no process
 itself. Grammar and bounds are in the generated [CLI
 reference](../reference/cli.md). Paths are relative to `tools/front-door/`.
 
@@ -38,6 +38,42 @@ absent titles remain absent in older records. Titles are never inferred from
 prompts.
 - Test: `crates/run/src/service_tests.rs::task_title_roundtrip`
 - Owner: `crates/run/src/service.rs`, `crates/records/src/run.rs`
+
+## Chair associations
+
+Local CLI and MCP submissions seal a chair's host and Fabric inbox actor with
+the request. CLI selection matches session discovery; MCP uses its bound inbox.
+This actor-scoped association identifies no particular live chair session and
+does not change run ownership. Worker provider sessions never establish it.
+
+The Fabric `run_chairs` index in `<state>/fabric/host.sqlite3` is authoritative,
+keyed by project and run. This database and its companions are outside the exact
+coordination database write grants lanes receive. It seals the request digest
+and optional chair before launch. Each nested launch inherits from the host
+index using the parent's host-sealed request
+digest. A disagreeing child proposal is refused. Lane-local requests and even a
+lane-local Fabric database or the shared mail database cannot replace this
+association. A retry preserves the original proposal; continuations copy the
+original host index binding.
+Index failures or exposing write grants refuse launch. Replay a root submission with the
+same operation ID: launch repairs its index from the immutable host request,
+including owned-worktree replay. Lane stores cannot repair it.
+Transient index errors leave queued children available for a later scan.
+
+Launch validation reads `fabric-runtime::chairs::ChairIndex`; missing records
+and older runs are unbound. Display readers arrive in a later slice. Provider handles and child requests are never fallbacks. Graph and
+peer executions remain unbound until they retain an originating chair separately
+from the actor owning operation replay. Board and tree rendering are separate.
+
+Association rows live as long as run metadata. Current GC removes provider
+payloads, logs, events and worktrees; it never removes run/attempt metadata.
+Whole-run collection must delete its association in the same host-owned removal
+workflow. Lane-writable missing child records alone cannot authorise deletion.
+
+- Test: `crates/fabric-runtime/src/chairs.rs::nested_chair_binding`;
+  `crates/run/src/service_tests.rs::chair_binding_replays_the_original_submission`
+- Owner: `crates/fabric-runtime/src/chairs.rs`, `crates/fabric-store/src/chairs.rs`,
+  `crates/cli/src/run.rs`, `crates/cli/src/run/children.rs`
 
 ## Atomic admission
 
@@ -132,6 +168,23 @@ action simply shows none.
   `crates/cli/src/run.rs::render_lanes_says_what_an_unstarted_lane_waits_for`;
   `crates/run/src/tests.rs::full_database_retains_admission_and_recovers_original_terminal_intent`
 - Owner: `crates/run/src/admission.rs`, `crates/run/src/ledger.rs`, `crates/os/src/sys/clock.rs`
+
+## Lane priority
+
+The host selects a configured nice value for each lane: 10 for writers, 5 for
+read-only lanes and 15 for build-heavy lanes by default. The guardian applies
+it to the provider before confinement; the provider's descendants inherit it.
+An inherited higher nice value is preserved. Failure to read or change priority
+must never refuse a lane: launch proceeds and the reason is recorded. Launch
+evidence reports the applied value when known and the requested value when it
+differs.
+- Why: lanes should yield CPU without requiring new privileges or preventing
+  nested work from starting.
+- Test: `crates/supervisor/src/process_os/provider.rs::provider_and_descendant_inherit_priority`;
+  `::priority_failures_degrade_and_preserve_evidence`;
+  `crates/run/src/tests.rs::lanes_read_last_output_time_from_supervisor_checkpoint`;
+  `crates/cli/src/run.rs::render_lanes_removes_peer_terminal_controls`
+- Owner: `crates/supervisor/src/process_os/provider.rs`, `crates/run/src/launch.rs`
 
 ## Immutable attempts, no writer replay
 
@@ -413,8 +466,12 @@ ancestry proof. Remote delivery refreshes and verifies its tracking ref.
 `lane deliver ATTEMPT [--deliver MODE]` uses the recorded destination, or
 origin push when the settled lane recorded none. It requires a succeeded
 writer, released custody, no new reservation, a clean tree and the exact
-receipt head. It persists a keyed host pickup receipt separately from the
-immutable terminal record. Successful pickup replays without repeating
+receipt head. After reviewing a `review_required` writer, the chair can use
+`lane deliver --accept-review ATTEMPT` to accept its protected changes and
+deliver the same exact head. The delivery receipt records the acceptance and
+protected paths. Lanes and peers cannot accept review. Delivery persists a
+keyed host pickup receipt separately from the immutable terminal record.
+Successful pickup replays without repeating
 external effects, while failures remain explicitly retryable. A worktree
 already pruned by its own lifecycle may replay its successful receipt.
 PR bodies use commit subjects and bodies with run and attempt IDs, capped at

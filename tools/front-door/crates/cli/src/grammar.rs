@@ -330,6 +330,9 @@ pub struct DispatchInput {
 #[derive(Debug, Args)]
 #[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
 pub struct Dispatch {
+    /// Use the build-heavy scheduling priority
+    #[arg(long)]
+    pub build_heavy: bool,
     #[command(flatten)]
     pub input: DispatchInput,
     /// Caller-chosen ID that makes retries idempotent
@@ -693,6 +696,9 @@ pub enum Lane {
         /// Override the recorded delivery mode (default push when none recorded)
         #[arg(long)]
         deliver: Option<provenant_records::run::DeliveryMode>,
+        /// Accept the settled writer's protected-path review as chair
+        #[arg(long)]
+        accept_review: bool,
     },
 }
 #[derive(Debug, Subcommand)]

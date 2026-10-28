@@ -201,13 +201,13 @@ bounds frames to 1 MiB and refuses identity or version mismatches.
 Tasks and messages have no `legacy` or `legacy_output_path` members. A store
 or peer reply that still carries one, even as null, is refused.
 
-Every request and reply envelope carries integer `protocol`, currently 5.
+Every request and reply envelope carries integer `protocol`, currently 6.
 Ingress refuses a different protocol before decoding or executing the action,
 replying with `peer_version` and its own version. The client checks the reply
 protocol; a missing field or the released peer's decode refusal means protocol
 1. Each call uses one SSH connection. A difference fails the call with
 `peer_version` (`PEER_VERSION` on the CLI), for example: "peer workshop speaks
-protocol 1, this host speaks 5; upgrade both". Peers must be upgraded together.
+protocol 1, this host speaks 6; upgrade both". Peers must be upgraded together.
 There is no capability negotiation or support for older peers. The framing
 envelope's `version` remains 1.
 
@@ -485,10 +485,16 @@ release, archive the store and let Fabric create a fresh one:
    archive=~/fabric-store-archive-$(date +%Y%m%d)
    mkdir -m 700 "$archive"
    mv "$state"/fabric/fabric.sqlite3* "$archive"/
+   # Include the host-owned chair index when present.
+   for file in "$state"/fabric/host.sqlite3 "$state"/fabric/host.sqlite3-wal "$state"/fabric/host.sqlite3-shm "$state"/fabric/host.sqlite3-journal; do
+     if [ -e "$file" ]; then mv "$file" "$archive"/; fi
+   done
    ```
 
 4. Run the newer release. It starts with no tasks, mail, events, claims or peer
-   journal; create again any work you still need.
+   journal. The host chair association index also starts empty, so retained runs
+   display as unbound until an explicit root replay repairs their association;
+   create again any coordination work you still need.
 
 On a project's home host, the archive removes that project's tasks and mail for
 every peer, and their in-flight operations against it report `launch_unknown`.

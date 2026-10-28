@@ -1541,21 +1541,37 @@ impl crate::RunStore {
         id: provenant_core::AttemptId,
         override_request: Option<WriterDeliveryRequest>,
         host: HostDeliveryContext,
+        accept_review: bool,
         call: &crate::Request<'_>,
     ) -> Result<WriterDeliveryReceipt> {
         use provenant_os::fs::LockMode;
         let record = self.record(id, call)?;
-        if !matches!(
-            record.state,
+        let review_acceptance = match record.state {
             crate::AttemptState::Terminal {
                 outcome: crate::Outcome::Succeeded,
                 ..
+            } => None,
+            crate::AttemptState::Terminal {
+                outcome: crate::Outcome::ReviewRequired,
+                ..
+            } if accept_review => Some(crate::WriterReviewAcceptance {
+                actor: self.context.actor_id,
+                protected_paths: record.protected_paths.clone(),
+            }),
+            crate::AttemptState::Terminal {
+                outcome: crate::Outcome::ReviewRequired,
+                ..
+            } => {
+                return Err(RunError::Validation(
+                    "review required; use lane deliver --accept-review ATTEMPT",
+                ));
             }
-        ) {
-            return Err(RunError::Validation(
-                "delivery needs a succeeded settled writer",
-            ));
-        }
+            _ => {
+                return Err(RunError::Validation(
+                    "delivery needs a succeeded settled writer",
+                ));
+            }
+        };
         let task = self
             .request(record.run_id, call)?
             .tasks
@@ -1654,6 +1670,7 @@ impl crate::RunStore {
             remote: request.remote.clone(),
             branch: request.branch.clone(),
             head: Some(head),
+            review_acceptance,
             state,
         };
         // Failed effects may be explicitly retried; successful effects replay.
@@ -1701,6 +1718,7 @@ pub(crate) fn deliver_once(
             remote: request.remote.clone(),
             branch: request.branch.clone(),
             head: host.head(writer).ok(),
+            review_acceptance: None,
             state: WriterDeliveryState::Failed {
                 stage: Stage::Interrupted,
             },

@@ -437,6 +437,8 @@ impl RunStore {
                     scope: provenant_supervisor::custody::Scope,
                     #[serde(default)]
                     last_output_at: Option<WallTime>,
+                    #[serde(default)]
+                    priority: Option<i32>,
                 }
                 let observation: ProcessCheckpoint = serde_json::from_slice(&bytes)
                     .map_err(|_| RunError::Validation("process observation"))?;
@@ -451,6 +453,7 @@ impl RunStore {
                     return Err(RunError::Validation("process observation scope"));
                 }
                 record.last_output_at = observation.last_output_at;
+                record.priority = observation.priority;
             }
             Ok((run, record))
         })

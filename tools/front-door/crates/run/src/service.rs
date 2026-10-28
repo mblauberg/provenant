@@ -192,6 +192,7 @@ impl<'a> Service<'a> {
             .map_err(|error| input_error(ErrorKind::Io, error.to_string()))?;
 
             requests.push(TaskRequest {
+                build_heavy: task.build_heavy,
                 title: task.title,
                 profile: task.profile,
                 task_id: task.task_id,
@@ -219,6 +220,9 @@ impl<'a> Service<'a> {
             run_id: fresh(RunId::from_bytes)?,
             operation_id: input.operation_id,
             request: CanonicalRequest {
+                chair: previous
+                    .as_ref()
+                    .map_or(input.chair, |request| request.chair.clone()),
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: requests,
@@ -471,6 +475,7 @@ impl From<&RunError> for ErrorKind {
 
 /// Prepared transport-independent dispatch input.
 pub struct DispatchTask {
+    pub build_heavy: bool,
     pub title: Option<String>,
     pub task_id: provenant_core::TaskId,
     pub prompt: String,
@@ -487,6 +492,7 @@ pub struct DispatchTask {
     pub access: LaneAccess,
 }
 pub struct DispatchRequest {
+    pub chair: Option<ChairBinding>,
     pub operation_id: OperationId,
     pub tasks: Vec<DispatchTask>,
     pub concurrency: u64,

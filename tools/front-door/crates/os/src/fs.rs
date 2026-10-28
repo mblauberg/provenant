@@ -94,6 +94,11 @@ pub fn available_bytes_at(path: &Path) -> io::Result<u64> {
     crate::sys::resources::available_bytes_at(path)
 }
 
+/// Available and total bytes from one filesystem observation, following links.
+pub fn filesystem_bytes_at(path: &Path) -> io::Result<(u64, u64)> {
+    crate::sys::resources::filesystem_bytes_at(path)
+}
+
 /// Resolve trusted setup paths without granting filesystem mutation authority.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemPathResolver;

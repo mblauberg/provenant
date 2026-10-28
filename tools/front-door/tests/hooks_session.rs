@@ -99,9 +99,11 @@ fn create_lane(rig: &TestRig) -> Result<String> {
             run_id,
             operation_id: OperationId::parse("hook-lane")?,
             request: run::CanonicalRequest {
+                chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    build_heavy: false,
                     title: None,
                     base: None,
                     head: None,
@@ -139,6 +141,63 @@ fn create_lane(rig: &TestRig) -> Result<String> {
     // Keep the writer connection alive until the lane is read.
     std::mem::forget(store);
     Ok(format!("{run_id}/{task_id}/{attempt_id}"))
+}
+
+#[test]
+fn session_start_warns_once_only_when_disk_is_below_headroom() -> Result {
+    let mut rig = TestRig::new()?;
+    binding(&rig)?;
+    for source in ["startup", "compact"] {
+        let hook = if source == "compact" {
+            "compact"
+        } else {
+            "session-start"
+        };
+        let output = run_hook(&rig, hook, &start(&rig, "disk-session", source))?;
+        assert_eq!(code(&output), 0);
+        assert!(!context(&output)?.contains("Disk pressure:"));
+    }
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
+    )?;
+    let (free, total) = provenant_os::fs::filesystem_bytes_at(&rig.state)?;
+    let pressure = free < total / 2;
+    for source in ["startup", "compact"] {
+        let hook = if source == "compact" {
+            "compact"
+        } else {
+            "session-start"
+        };
+        let output = run_hook(&rig, hook, &start(&rig, "disk-session", source))?;
+        assert_eq!(code(&output), 0);
+        let text = context(&output)?;
+        let lines: Vec<_> = text
+            .lines()
+            .filter(|line| line.starts_with("Disk pressure:"))
+            .collect();
+        assert_eq!(lines.len(), usize::from(pressure), "{text}");
+        if let Some(line) = lines.first() {
+            assert!(line.contains("provenant disk report"));
+            assert!(line.contains("provenant gc"));
+            assert!(line.len() <= 160);
+        }
+    }
+    for (hook, event) in [("pre-compact", "PreCompact"), ("stop", "Stop")] {
+        let input = json!({"hook_event_name":event,"session_id":"disk-session","cwd":rig.project});
+        let output = run_hook(&rig, hook, &input)?;
+        assert_eq!(code(&output), 0);
+        assert!(!String::from_utf8_lossy(&output.stdout.bytes).contains("Disk pressure:"));
+        assert!(!String::from_utf8_lossy(&output.stderr.bytes).contains("Disk pressure:"));
+    }
+    rig.env.push(("PROVENANT_LANE_DEPTH".into(), "1".into()));
+    for (hook, source) in [("session-start", "startup"), ("compact", "compact")] {
+        let output = run_hook(&rig, hook, &start(&rig, "disk-session", source))?;
+        assert_eq!(code(&output), 0);
+        assert!(!context(&output)?.contains("Disk pressure:"));
+        assert!(!String::from_utf8_lossy(&output.stderr.bytes).contains("Disk pressure:"));
+    }
+    Ok(())
 }
 
 #[test]

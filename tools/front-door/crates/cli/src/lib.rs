@@ -1289,13 +1289,19 @@ mod tests {
             invalid(&words);
         }
         valid(&["worktree", "adopt", "../native", "--owner", "manual"]);
-        valid(&[
+        let Command::Lane(Lane::Deliver { accept_review, .. }) = valid(&[
             "lane",
             "deliver",
             "11111111111111111111111111111111",
             "--deliver",
             "pr",
-        ]);
+            "--accept-review",
+        ])
+        .command
+        else {
+            panic!("lane deliver");
+        };
+        assert!(accept_review);
         let Command::Resume(resume) = valid(&[
             "resume",
             "11111111111111111111111111111111",

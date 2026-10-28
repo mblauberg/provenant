@@ -631,6 +631,12 @@ fn prepare_with(
                 continue;
             }
         };
+        if !chair_index_protected(
+            roots.state.as_path(),
+            &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
+        ) {
+            return Err("write grants overlap the host chair index".into());
+        }
         if let Some(head) = &task.head {
             spec.env.push(("PROVENANT_LANE_HEAD".into(), head.into()));
             if let Some(base) = &task.base {
@@ -1551,6 +1557,61 @@ struct ConfinementRoots<'a> {
     prompt_file: Option<&'a Path>,
 }
 
+fn chair_index_protected(
+    state: &Path,
+    grants: &[provenant_confinement::permissions::WriteGrant],
+) -> bool {
+    let resolve = |path: &Path| {
+        provenant_core::PathResolver::resolve_existing_ancestor(
+            &provenant_os::fs::SystemPathResolver,
+            path,
+        )
+        .ok()
+    };
+    ["", "-wal", "-shm", "-journal"].iter().all(|suffix| {
+        let Some(path) = resolve(&state.join("fabric").join(format!("host.sqlite3{suffix}")))
+        else {
+            return false;
+        };
+        grants.iter().all(|grant| {
+            resolve(&grant.path).is_some_and(|root| match grant.scope {
+                PathScope::Exact => root != path && !(root.is_dir() && path.starts_with(root)),
+                PathScope::Subtree => !path.starts_with(root),
+            })
+        })
+    })
+}
+
+#[test]
+fn configured_grants_cannot_expose_the_chair_index() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::permissions::WriteGrant;
+    for path in [
+        "/state/fabric",
+        "/state/fabric/host.sqlite3",
+        "/state/fabric/host.sqlite3-wal",
+        "/state/fabric/host.sqlite3-shm",
+        "/state/fabric/host.sqlite3-journal",
+    ] {
+        let grant = WriteGrant {
+            source: run::WriteSource::WriteRoot,
+            path: path.into(),
+            scope: PathScope::Subtree,
+        };
+        assert!(!chair_index_protected(Path::new("/state"), &[grant]));
+    }
+    assert!(chair_index_protected(Path::new("/state"), &[]));
+    let temp = tempfile::tempdir()?;
+    let fabric = temp.path().join("fabric");
+    std::fs::create_dir(&fabric)?;
+    let grant = WriteGrant {
+        source: run::WriteSource::StateWrite,
+        path: fabric,
+        scope: PathScope::Exact,
+    };
+    assert!(!chair_index_protected(temp.path(), &[grant]));
+    Ok(())
+}
+
 /// Read access to the primary checkout's project scratch (`.provenant/scratch`, or
 /// `.agent-run`), where briefs and graph documents live. Git excludes it, so a
 /// writer's linked worktree does not hold it. Final-component links are refused;
@@ -2320,6 +2381,7 @@ mod tests {
         for entry in REGISTRY {
             let adapter = entry.adapter.id();
             let requested = run::TaskRequest {
+                build_heavy: false,
                 title: None,
                 base: None,
                 head: None,
@@ -2681,6 +2743,7 @@ mod tests {
         let prompt = "é".repeat(75_000);
         let review_oid = run::resolve_git_base(&git, &project, "HEAD")?;
         let task = run::TaskRequest {
+            build_heavy: false,
             title: None,
             base: Some(review_oid.clone()),
             head: Some(review_oid.clone()),
@@ -2741,6 +2804,7 @@ mod tests {
                 run_id,
                 operation_id: paths.operation_id.clone(),
                 request: run::CanonicalRequest {
+                    chair: None,
                     fresh_continuation: None,
                     schema_version: 1,
                     tasks: vec![task.clone()],

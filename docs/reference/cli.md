@@ -1933,6 +1933,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
 | `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
@@ -2104,6 +2105,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
 | `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
@@ -2390,6 +2392,7 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `attempt` | `{"name": "attempt", "positional": true, "required": true}` |
 | `--deliver` | `{"name": "deliver"}` |
+| `--accept-review` | `{"defaults": ["false"], "name": "accept_review", "values": ["true", "false"]}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -2402,7 +2405,8 @@ bounds are null. Positional arguments have no long flag.
     {
       "arguments": [
         "attempt",
-        "deliver"
+        "deliver",
+        "accept_review"
       ],
       "multiple": true,
       "name": "Deliver",

@@ -988,9 +988,11 @@ fn persisted_attempt(
         run_id,
         operation_id: OperationId::parse(&format!("{provider}-cooldown"))?,
         request: CanonicalRequest {
+            chair: None,
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                build_heavy: false,
                 title: None,
                 base: None,
                 head: None,
