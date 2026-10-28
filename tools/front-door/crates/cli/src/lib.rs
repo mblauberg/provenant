@@ -335,7 +335,7 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
         if matches!(path.as_str(), "provenant dispatch" | "provenant run") {
             command = command
                 .mut_arg("model", |arg| {
-                    arg.required_unless_present_any(["route", "manifest"])
+                    arg.required_unless_present_any(["route", "manifest", "preset"])
                 })
                 .mut_arg("manifest", |arg| {
                     arg.conflicts_with_all([
@@ -375,6 +375,9 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
             let visible = [
                 "prompt_file",
                 "prompt_stdin",
+                "preset",
+                "preset_set",
+                "explain",
                 "route",
                 "model",
                 "worktree",
@@ -505,6 +508,9 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             route_valid(&resolve.request)?
         }
         Command::Dispatch(dispatch) | Command::Run(dispatch) => {
+            if matches!(inv.command, Command::Dispatch(_)) && dispatch.preset.is_some() {
+                return invalid("--preset is supported by run, not dispatch");
+            }
             let access = &dispatch.access;
             route_valid(&dispatch.route)?;
             if (access.mode == Mode::WorktreeWrite)
@@ -1110,6 +1116,33 @@ mod tests {
         invalid(&["disk", "delete"]);
         invalid(&["disk", "report", "--force"]);
         invalid(&["disk", "report", "--dry-run"]);
+    }
+    #[test]
+    fn preset_arguments_require_run_and_prompt_and_reject_dispatch_options() {
+        valid(&[
+            "run",
+            "--preset",
+            "single",
+            "--prompt-file",
+            "brief",
+            "--explain",
+            "--set",
+            "parameters.route='utility'",
+        ]);
+        valid(&["preset", "list"]);
+        valid(&["preset", "show", "single"]);
+        invalid(&["run", "--preset", "single"]);
+        invalid(&["run", "--prompt-file", "brief", "--explain"]);
+        invalid(&[
+            "run",
+            "--preset",
+            "single",
+            "--prompt-file",
+            "brief",
+            "--route",
+            "senior",
+        ]);
+        invalid(&["dispatch", "--preset", "single", "--prompt-file", "brief"]);
     }
     #[test]
     fn task_title_flags_are_optional_and_per_task() {

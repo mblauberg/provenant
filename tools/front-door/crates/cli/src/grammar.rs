@@ -78,6 +78,9 @@ pub enum Command {
     /// Inspect and edit model routing
     #[command(subcommand)]
     Route(crate::route::Route),
+    /// List and inspect pipeline presets
+    #[command(subcommand)]
+    Preset(Preset),
     /// Dispatch, wait and read the result
     Run(Box<Dispatch>),
     /// Dispatch and collect a configured review shape
@@ -146,6 +149,13 @@ pub enum Command {
     Hook(Hook),
     #[command(subcommand, hide = true)]
     Internal(Internal),
+}
+#[derive(Debug, Subcommand)]
+pub enum Preset {
+    /// List available presets
+    List,
+    /// Show effective preset values and their origins
+    Show { name: String },
 }
 #[derive(Debug, Args)]
 pub struct Review {
@@ -475,6 +485,15 @@ pub struct DispatchInput {
 #[derive(Debug, Args)]
 #[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
 pub struct Dispatch {
+    /// Expand and run a named pipeline preset
+    #[arg(long, requires = "prompt_file", conflicts_with_all = ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "worktree", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "read_root", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "confidential", "allow_free", "provider_timeout", "operation_id", "wait"])]
+    pub preset: Option<String>,
+    /// Override a preset value (PATH=TOML_VALUE); repeatable
+    #[arg(long = "set", requires = "preset")]
+    pub preset_set: Vec<String>,
+    /// Print the expanded graph and origins without running it
+    #[arg(long, requires = "preset")]
+    pub explain: bool,
     /// Use the build-heavy scheduling priority
     #[arg(long)]
     pub build_heavy: bool,
