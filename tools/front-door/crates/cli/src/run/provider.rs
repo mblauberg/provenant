@@ -666,6 +666,22 @@ fn prepare_with(
                 spec.env.push(("PROVENANT_LANE_BASE".into(), base.into()));
             }
         }
+        let jobs = provenant_config::LaneBuildSettings {
+            max_concurrent_builds: config.domains.fabric.lanes.max_concurrent_builds,
+            cargo_build_jobs: config.domains.fabric.lanes.cargo_build_jobs,
+        }
+        .jobs();
+        set_cargo_jobs(
+            &mut spec.env,
+            registry
+                .host
+                .and_then(|host| host.cargo_build_jobs.as_deref()),
+            jobs,
+        );
+        if adapter.id() == "claude" {
+            spec.configure_claude_shell(scratch)
+                .map_err(|error| error.to_string())?;
+        }
         if let Some(gh) = publishing_gh.as_ref() {
             let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
                 .map_err(|error| error.to_string())?;
@@ -737,18 +753,6 @@ fn prepare_with(
             Stdin::Bytes(bytes) => bytes,
             Stdin::Null => Vec::new(),
         };
-        let jobs = provenant_config::LaneBuildSettings {
-            max_concurrent_builds: config.domains.fabric.lanes.max_concurrent_builds,
-            cargo_build_jobs: config.domains.fabric.lanes.cargo_build_jobs,
-        }
-        .jobs();
-        set_cargo_jobs(
-            &mut spec.env,
-            registry
-                .host
-                .and_then(|host| host.cargo_build_jobs.as_deref()),
-            jobs,
-        );
         return Ok(run::PreparedLaunch {
             provider_lease: provider_leases.remove(adapter.id()),
             skipped_routes: reasons,

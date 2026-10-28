@@ -502,6 +502,19 @@ impl RunStore {
         clock: &dyn Clock,
         call: &Request<'_>,
     ) -> Result<Option<AttemptRecord>> {
+        // Avoid the ledger and store write locks when this run is already full.
+        // The transaction below repeats the count to decide the claim.
+        if let (Ok(record), Ok(ticket)) = (self.record(id, call), self.ticket(&self.db, id))
+            && record.state == AttemptState::Starting
+            && let Ok(active) = self.db.query_row(
+                "SELECT COUNT(*) FROM admission WHERE active=1 AND run=?1",
+                [record.run_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            && active >= sql_int(ticket.run_concurrency)?
+        {
+            return Ok(None);
+        }
         let ledger = crate::ledger::open(&self.writer_registry, call)?;
         self.write(call, |tx| {
             let old = self.record(id, call)?;

@@ -3,11 +3,9 @@
 //! stores alike, leases capacity in one SQLite file under the host state root.
 //! Per-run concurrency stays in each store's own `admission` table.
 //!
-//! A lease names its owning store and lives exactly as long as that store's
-//! admission row: the terminal commit, including owner recovery, deletes the
-//! row and so frees the lease. A full ledger drops leases whose row is gone
-//! before refusing, so terminal paths never write here and confined lanes,
-//! which may cancel or recover their children, need no grant to this file.
+//! A lease names its owning store, boot and guardian. Terminal publication
+//! deletes the store admission row; pruning also releases leases after a boot
+//! change, confirmed guardian death, or unreadable owner evidence.
 use crate::{
     admission::{HOST_ACTIVE, PROJECT_ACTIVE},
     db::{immediate, open_database, sql_int},
@@ -25,7 +23,7 @@ const LEASES: &str = "
 CREATE TABLE leases (
  attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL,
  class TEXT NOT NULL DEFAULT 'writer' CHECK(class IN ('writer','read_only')),
- boot TEXT, guardian TEXT
+ boot TEXT NOT NULL, guardian TEXT NOT NULL
 ) STRICT;
 CREATE INDEX lease_projects ON leases(project);
 ";
@@ -47,7 +45,7 @@ CREATE TABLE spacing (
 /// last, so a crash leaves the old ledger whole or the new one.
 pub(crate) fn open(host: &Path, request: &Request<'_>) -> Result<Connection> {
     let (_, db, _initialisation) = open_database(host, FILE, request)?;
-    if request.retry(|| version(&db))? < 3 || !request.retry(|| timed_spacing(&db))? {
+    if request.retry(|| version(&db))? < 4 || !request.retry(|| timed_spacing(&db))? {
         immediate(&db, request, |tx| {
             let current_version = version(tx)?;
             match current_version {
@@ -77,10 +75,12 @@ pub(crate) fn open(host: &Path, request: &Request<'_>) -> Result<Connection> {
                 }
                 _ => {}
             }
-            if current_version > 0 && current_version < 3 {
-                tx.execute_batch("ALTER TABLE leases ADD COLUMN boot TEXT; ALTER TABLE leases ADD COLUMN guardian TEXT;")?;
+            if current_version > 0 && current_version < 4 {
+                // Old lease schemas were never installed; retain only spacing history.
+                tx.execute_batch("DROP TABLE leases;")?;
+                tx.execute_batch(LEASES)?;
             }
-            tx.execute_batch("PRAGMA user_version=3;")?;
+            tx.execute_batch("PRAGMA user_version=4;")?;
             Ok(())
         })?;
     }
@@ -113,7 +113,7 @@ fn timed_spacing(db: &Connection) -> Result<bool> {
     )?)
 }
 fn version(db: &Connection) -> Result<i64> {
-    match provenant_sqlite::read_version(db, 3) {
+    match provenant_sqlite::read_version(db, 4) {
         Ok(version) => Ok(version as i64),
         Err(provenant_sqlite::VersionError::Unsupported(version)) => {
             Err(RunError::Version(version))
@@ -152,7 +152,17 @@ pub(crate) fn lease(
             |r| r.get(0),
         )?;
         if held {
-            return Ok(Some(now));
+            // A retry must not preserve a malformed lease merely because its
+            // attempt key matches. Recheck it through the same pruning rules.
+            prune(tx, time)?;
+            let still_held: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM leases WHERE attempt=?1)",
+                [&id],
+                |r| r.get(0),
+            )?;
+            if still_held {
+                return Ok(Some(now));
+            }
         }
         if full(tx, project)? || (class == LaneClass::Writer && writers_full(tx, max_builds)?) {
             prune(tx, time)?;
@@ -200,21 +210,30 @@ pub(crate) fn writer_count(host: &Path, request: &Request<'_>) -> Option<u64> {
     let db = provenant_sqlite::open_connection(&host.join(FILE), true).ok()?;
     let boot = request.clock.boot_identity().ok()?;
     let mut statement = db
-        .prepare("SELECT store, attempt, boot, guardian FROM leases WHERE class='writer'")
+        .prepare("SELECT rowid, CAST(store AS BLOB), CAST(attempt AS BLOB), CAST(boot AS BLOB), CAST(guardian AS BLOB) FROM leases WHERE class='writer'")
         .ok()?;
     let rows = statement
         .query_map([], |r| {
             Ok((
-                r.get::<_, Vec<u8>>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, Option<String>>(3)?,
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<Vec<u8>>>(1)?,
+                r.get::<_, Option<Vec<u8>>>(2)?
+                    .and_then(|bytes| String::from_utf8(bytes).ok()),
+                r.get::<_, Option<Vec<u8>>>(3)?
+                    .and_then(|bytes| String::from_utf8(bytes).ok()),
+                r.get::<_, Option<Vec<u8>>>(4)?
+                    .and_then(|bytes| String::from_utf8(bytes).ok()),
             ))
         })
         .ok()?;
     let mut count = 0;
     for row in rows {
-        let (store, attempt, lease_boot, guardian) = row.ok()?;
+        let (rowid, store, attempt, lease_boot, guardian) = row.ok()?;
+        let (Some(store), Some(attempt)) = (store, attempt.filter(|value| !value.is_empty()))
+        else {
+            malformed_row(rowid);
+            continue;
+        };
         let owner = Owner::open(&Path::new(OsStr::from_bytes(&store)).join("run.sqlite3"));
         if !released(
             &owner,
@@ -299,25 +318,37 @@ fn full(tx: &Connection, project: ProjectId) -> Result<bool> {
     )?;
     Ok(host >= sql_int(HOST_ACTIVE)? || project >= sql_int(PROJECT_ACTIVE)?)
 }
-/// Drop leases whose owning store no longer holds the attempt's admission row.
+/// Inspect at most 256 of the oldest existing leases. Normal admission caps
+/// the ledger at 64, so every lease is covered without an unbounded scan.
 fn prune(tx: &Connection, time: &dyn Clock) -> Result<()> {
     let boot = time.boot_identity().map_err(|_| RunError::HostClock)?;
     let leases = {
-        let mut statement =
-            tx.prepare("SELECT store, attempt, boot, guardian FROM leases ORDER BY store")?;
+        let mut statement = tx.prepare(
+            "SELECT rowid, CAST(store AS BLOB), CAST(attempt AS BLOB), CAST(boot AS BLOB), CAST(guardian AS BLOB) FROM leases ORDER BY rowid LIMIT 256",
+        )?;
         statement
             .query_map([], |r| {
                 Ok((
-                    r.get::<_, Vec<u8>>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<Vec<u8>>>(1)?,
+                    r.get::<_, Option<Vec<u8>>>(2)?
+                        .and_then(|bytes| String::from_utf8(bytes).ok()),
+                    r.get::<_, Option<Vec<u8>>>(3)?
+                        .and_then(|bytes| String::from_utf8(bytes).ok()),
+                    r.get::<_, Option<Vec<u8>>>(4)?
+                        .and_then(|bytes| String::from_utf8(bytes).ok()),
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
     let mut current: Option<(Vec<u8>, Owner)> = None;
-    for (store, attempt, lease_boot, guardian) in leases {
+    for (rowid, store, attempt, lease_boot, guardian) in leases {
+        let (Some(store), Some(attempt)) = (store, attempt.filter(|value| !value.is_empty()))
+        else {
+            malformed_row(rowid);
+            tx.execute("DELETE FROM leases WHERE rowid=?1", [rowid])?;
+            continue;
+        };
         let owner = match current.take() {
             Some((path, owner)) if path == store => owner,
             _ => Owner::open(&Path::new(OsStr::from_bytes(&store)).join("run.sqlite3")),
@@ -329,12 +360,17 @@ fn prune(tx: &Connection, time: &dyn Clock) -> Result<()> {
             guardian.as_deref(),
             &boot,
         ) {
-            tx.execute("DELETE FROM leases WHERE attempt=?1", [&attempt])?;
+            tx.execute("DELETE FROM leases WHERE rowid=?1", [rowid])?;
         }
         current = Some((store, owner));
     }
     Ok(())
 }
+#[allow(clippy::print_stderr)]
+fn malformed_row(rowid: i64) {
+    eprintln!("admission: releasing malformed lease row {rowid}");
+}
+#[allow(clippy::print_stderr)]
 fn released(
     owner: &Owner,
     attempt: &str,
@@ -342,17 +378,24 @@ fn released(
     guardian: Option<&str>,
     boot: &str,
 ) -> bool {
-    let other_boot = lease_boot.is_some_and(|old| old != boot);
-    let guardian_gone = guardian
+    let Some(lease_boot) = lease_boot.filter(|value| !value.is_empty()) else {
+        eprintln!("admission: releasing lease {attempt}: invalid boot identity");
+        return true;
+    };
+    let Some(identity) = guardian
         .and_then(|raw| serde_json::from_str::<ProcessIdentity>(raw).ok())
-        .is_some_and(
-            |identity| match SystemProcessObserver.observe(identity.pid) {
-                ProcessObservation::Absent => true,
-                ProcessObservation::Present(fact) => fact.identity != identity || fact.zombie,
-                ProcessObservation::Unknown(_) => false,
-            },
-        );
-    other_boot || guardian_gone || owner.released(attempt)
+        .filter(|value| !value.boot.is_empty() && value.pid > 0 && value.native_start > 0)
+    else {
+        eprintln!("admission: releasing lease {attempt}: invalid guardian identity");
+        return true;
+    };
+    lease_boot != boot
+        || match SystemProcessObserver.observe(identity.pid) {
+            ProcessObservation::Absent => true,
+            ProcessObservation::Present(fact) => fact.identity != identity || fact.zombie,
+            ProcessObservation::Unknown(_) => false,
+        }
+        || owner.released(attempt)
 }
 /// The lease's owning store. Only a definite answer frees a lease: a store
 /// file that is gone, or a readable store without the admission row.
@@ -412,39 +455,46 @@ mod tests {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(LEASES).unwrap();
         let store = good.as_os_str().as_bytes();
-        db.execute(
-            "INSERT INTO leases VALUES ('old','p',?1,'writer','another boot',NULL)",
-            [store],
-        )
-        .unwrap();
-        db.execute(
-            "INSERT INTO leases VALUES ('bad','p',?1,'writer',NULL,NULL)",
-            [bad.as_os_str().as_bytes()],
-        )
-        .unwrap();
         let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
-        let identity = ProcessIdentity {
-            boot: clock.boot_identity().unwrap(),
-            pid: i64::from(std::process::id()),
-            native_start: 0,
-            group_id: 0,
-            session_id: 0,
+        let live = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+            ProcessObservation::Present(fact) => fact.identity,
+            _ => panic!("current guardian unavailable"),
         };
+        let encoded = serde_json::to_string(&live).unwrap();
+        let boot = clock.boot_identity().unwrap();
+        db.execute(
+            "INSERT INTO leases VALUES ('old','p',?1,'writer','another boot',?2)",
+            params![store, encoded],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO leases VALUES ('bad','p',?1,'writer',?2,?3)",
+            params![bad.as_os_str().as_bytes(), boot, encoded],
+        )
+        .unwrap();
+        let mut dead = live.clone();
+        dead.native_start = dead.native_start.saturating_add(1);
         db.execute(
             "INSERT INTO leases VALUES ('dead','p',?1,'writer',?2,?3)",
-            params![
-                store,
-                identity.boot,
-                serde_json::to_string(&identity).unwrap()
-            ],
+            params![store, boot, serde_json::to_string(&dead).unwrap()],
         )
         .unwrap();
         db.execute(
-            "INSERT INTO leases VALUES ('live','p',?1,'writer',NULL,NULL)",
-            [store],
+            "INSERT INTO leases VALUES ('malformed','p',?1,'writer',?2,'invalid')",
+            params![store, boot],
         )
         .unwrap();
-        assert!(writers_full(&db, 4).unwrap());
+        db.execute(
+            "INSERT INTO leases VALUES ('live','p',?1,'writer',?2,?3)",
+            params![store, boot, encoded],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO leases VALUES (CAST(x'ff' AS TEXT),'p',?1,'writer',?2,?3)",
+            params![store, boot, encoded],
+        )
+        .unwrap();
+        assert!(writers_full(&db, 6).unwrap());
         prune(&db, &clock).unwrap();
         assert!(writers_full(&db, 1).unwrap());
         assert!(!writers_full(&db, 2).unwrap());

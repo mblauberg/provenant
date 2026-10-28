@@ -9,8 +9,21 @@ use std::{
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LaneBuildSettings {
+    #[serde(default, deserialize_with = "deserialize_auto")]
     pub max_concurrent_builds: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_auto")]
     pub cargo_build_jobs: Option<u64>,
+}
+/// The asset's -1 sentinel selects the host-dependent default.
+pub fn deserialize_auto<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    use serde::de::Error;
+    let value = Option::<i64>::deserialize(deserializer)?;
+    match value {
+        None | Some(-1) => Ok(None),
+        Some(value) => u64::try_from(value).map(Some).map_err(D::Error::custom),
+    }
 }
 impl LaneBuildSettings {
     pub fn read(state: &Path) -> std::io::Result<Self> {
@@ -310,6 +323,19 @@ mod tests {
 #[cfg(test)]
 mod build_tests {
     use super::LaneBuildSettings;
+    #[test]
+    fn automatic_and_invalid_build_values() {
+        let automatic: LaneBuildSettings =
+            toml_edit::de::from_str("max_concurrent_builds = -1\ncargo_build_jobs = -1").unwrap();
+        assert_eq!(automatic, LaneBuildSettings::default());
+        let invalid: LaneBuildSettings =
+            toml_edit::de::from_str("max_concurrent_builds = 0\ncargo_build_jobs = 1025").unwrap();
+        assert_eq!(
+            invalid.invalid_keys(),
+            ["max_concurrent_builds", "cargo_build_jobs"]
+        );
+        assert!(toml_edit::de::from_str::<LaneBuildSettings>("cargo_build_jobs = -2").is_err());
+    }
     #[test]
     fn defaults_and_overrides() {
         let settings = LaneBuildSettings::default();

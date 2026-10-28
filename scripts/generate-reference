@@ -99,11 +99,13 @@ def mcp_reference(data, all_tools):
 
 def config_reference(data):
     text = header("Configuration keys", KNOBS.as_posix())
-    text += ("## Host lane build settings\n\n"
-             "Set these in `[domains.fabric.lanes]` in the host configuration.\n\n"
-             "| Key | Default | Effect |\n|---|---|---|\n"
-             "| `max_concurrent_builds` | 1 at 16 GiB or less, otherwise 2 | Maximum active worktree-write lanes across the host (1 to 64). |\n"
-             "| `cargo_build_jobs` | Half the available cores, at least 1 | Default `CARGO_BUILD_JOBS` for lanes (1 to 1024); an inherited value takes precedence. |\n\n")
+    host = data.get("host_lane_build_settings")
+    if host:
+        text += (f"## Host lane build settings\n\nSet these in `[{host['path']}]` in the host configuration. "
+                 "Use -1 for the host-dependent default.\n\n| Key | Default | Effect |\n|---|---|---|\n")
+        for name, setting in host["settings"].items():
+            text += f"| `{name}` | {setting['default']} | {setting['effect']} ({setting['min']} to {setting['max']}). |\n"
+        text += "\n"
     provider_updates = data.get("provider_updates")
     if provider_updates:
         text += "## Provider updates\n\n" + fenced(provider_updates) + "\n"
@@ -113,7 +115,7 @@ def config_reference(data):
             text += f"| `{key}` | {cell(value)} |\n"
         text += "\n"
     remainder = {key: value for key, value in data.items()
-                 if key not in {"knobs", "provider_updates"}}
+                 if key not in {"knobs", "provider_updates", "host_lane_build_settings"}}
     if remainder:
         text += "## Registry and profiles\n\n" + fenced(remainder)
     return text.rstrip() + "\n"

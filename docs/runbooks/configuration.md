@@ -67,6 +67,9 @@ max_concurrent_builds = 2
 cargo_build_jobs = 5
 ```
 
+Use `-1` for either build setting to select its host-dependent default.
+
+
 Higher values can reduce waiting but increase peak memory and CPU demand.
 An existing `CARGO_BUILD_JOBS` in the submitting environment takes precedence;
 a brief can also set it inside the lane. Pressure and slots are checked before

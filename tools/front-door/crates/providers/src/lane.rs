@@ -8,6 +8,18 @@ use serde_json::Value;
 use std::{ffi::OsString, path::Path};
 
 impl crate::LaunchSpec {
+    /// Restore selected environment before Claude starts each Bash command.
+    pub fn configure_claude_shell(&mut self, scratch: &Path) -> Result<(), ProviderError> {
+        let path = scratch.join("bin/claude-shell");
+        self.setup.push(SetupStep::CreateDir(scratch.join("bin")));
+        self.setup.push(SetupStep::WriteExecutable {
+            path: path.clone(),
+            bytes: claude_shell(&self.env)?,
+        });
+        self.env
+            .push(("CLAUDE_CODE_SHELL_PREFIX".into(), path.into_os_string()));
+        Ok(())
+    }
     /// Configure shell Git after adapter preparation, including shells that
     /// scrub Git environment variables. No credential is read during setup.
     pub fn configure_publishing(
@@ -375,6 +387,15 @@ impl LaneRuntime<'_> {
     }
 }
 
+fn claude_shell(env: &[(OsString, OsString)]) -> Result<Vec<u8>, ProviderError> {
+    let mut exports = identity_exports(env)?;
+    if let Some((_, value)) = env.iter().find(|(key, _)| key == "CARGO_BUILD_JOBS") {
+        let value = value.to_str().ok_or(ProviderError::InvalidPath)?;
+        exports.push_str(&format!("export CARGO_BUILD_JOBS={}\n", shell_quote(value)));
+    }
+    Ok(format!("#!/bin/sh\n{exports}exec /bin/bash -c \"$1\"\n").into_bytes())
+}
+
 /// Shell exports that carry the host's git identity past an environment scrub.
 fn identity_exports(env: &[(OsString, OsString)]) -> Result<String, ProviderError> {
     let mut identity = String::new();
@@ -662,6 +683,31 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn claude_shell_restores_jobs_after_scrub() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefix");
+        std::fs::write(
+            &path,
+            claude_shell(&[
+                ("CARGO_BUILD_JOBS".into(), "4".into()),
+                ("GIT_AUTHOR_NAME".into(), "O'Brien".into()),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let result = std::process::Command::new(path)
+            .env_clear()
+            .arg("printf '%s\\n' \"$CARGO_BUILD_JOBS\" \"$GIT_AUTHOR_NAME\" 'quoted argument'")
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert_eq!(result.stdout, b"4\nO'Brien\nquoted argument\n");
     }
 
     #[test]

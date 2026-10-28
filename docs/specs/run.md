@@ -213,11 +213,15 @@ pressure sample is logged and falls back to the floor; Linux uses the floor.
 Disk and memory floors apply to both classes. Writers also require a host-wide
 build slot, defaulting to one at or below 16 GiB of RAM and two above that;
 read-only lanes do not consume one. At expiry, disk floor, known pressure and
-full build slots have distinct refusal reasons. The ledger associates new leases
+full build slots have distinct refusal reasons. Disk-floor refusal takes precedence
+when disk and pressure are both insufficient; otherwise Warning or Critical
+pressure is named before build-slot contention. A failed memory sample or a
+floor-only memory shortage retains the generic admission refusal. The ledger associates new leases
 with the boot and guardian identity; a different boot, a definitely absent
 guardian, a removed admission row, or an unreadable owner store releases a
-lease. Unreadable owner stores are logged. Legacy leases without identity
-remain subject to their owner admission row.
+lease. Unreadable owner stores and malformed identities are logged and released.
+Both identity fields are required on every lease. Earlier lease schemas were
+never installed; upgrades retain spacing but discard their lease rows.
 
 Each ticket and host ledger lease records a lane class: `writer` for a
 `worktree-write` lane, `read_only` for every other. Startup spacing is per
@@ -242,8 +246,7 @@ one spacing. If the clock or the boot identity cannot be read the claim is refus
 judged: host clock or boot identity unreadable`), which the guardian publishes
 as the lane's never-spawned reason, rather than judged on the wall clock;
 `lanes` then names no spacing wait. The wall clock is kept only as the `started_at` a lane displays. The
-memory floor (5 %) and disk floor (500 MiB) refuse both classes. A ledger row
-or ticket with no class is a writer; opening a version 1 ledger upgrades it in
+memory floor (5 %) and disk floor (500 MiB) refuse both classes. A ticket with no class is a writer; opening a version 1 ledger upgrades it in
 place, in one transaction, carrying any wall-time start across as a start of now under the current boot
 for each class, whatever its age and without reading the wall clock, so the
 one-time upgrade holds each class for one spacing (a version 1 ledger with no
@@ -269,15 +272,18 @@ action simply shows none.
   must not queue behind writer spacing that exists to pace worktree and
   provider startup.
 - Test: `crates/run/src/ledger.rs::tests::prune_releases_old_boot_and_unreadable_owners`;
-  `crates/run/src/dispatch_tests.rs::memory_pressure_defers_even_when_available_memory_is_high`;
-  `crates/config/src/gc.rs::build_tests::defaults_and_overrides`;
+  `crates/run/src/dispatch_tests.rs::{memory_pressure_defers_even_when_available_memory_is_high, pressure_errors_fall_back_and_normal_still_obeys_floor, writer_slot_refusal_and_release}`;
+  `crates/providers/src/lane.rs::tests::claude_shell_restores_jobs_after_scrub`;
+  `crates/config/src/gc.rs::build_tests::{defaults_and_overrides, automatic_and_invalid_build_values}`;
+  `crates/run/src/dispatch_tests.rs::configured_build_limit_controls_host_leases`;
+  `crates/fabric-runtime/src/config.rs::tests::lane_build_settings_validate_shared_bounds_and_auto`;
   `crates/run/src/dispatch_tests.rs::admission_holds_run_concurrency_spacing_floors_and_deadline`;
   `::read_only_lane_is_admitted_inside_a_writers_spacing_window`;
   `::writers_stay_20_seconds_apart_and_read_only_starts_do_not_reset_the_clock`;
   `::read_only_lanes_are_spaced_2_seconds_apart`;
   `::memory_floor_refuses_both_lane_classes`;
   `::project_cap_allows_up_to_32_active_lanes`;
-  `::legacy_rows_without_a_class_are_treated_as_writers`;
+  `::legacy_tickets_without_a_class_are_treated_as_writers`;
   `::batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins`;
   `::sixteen_read_only_lanes_run_in_one_batch_two_seconds_apart`;
   `::the_store_accepts_run_concurrency_above_the_task_count_up_to_sixteen`;

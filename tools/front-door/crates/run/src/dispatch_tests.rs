@@ -2293,6 +2293,18 @@ fn memory_pressure_defers_even_when_available_memory_is_high() -> TestResult {
         let run = lane(54, writer);
         let id = starting(&store, &run, &call)?;
         let attempt = store.attempt_dir(run.run_id, id, false)?;
+        if level != MemoryPressure::Normal {
+            let waits = store.lane_waits_with_resources(
+                &[store.record(id, &call)?],
+                &call,
+                &Pressured(level),
+            );
+            assert!(
+                waits[0]
+                    .waiting_for
+                    .contains(&format!("memory pressure {level:?}"))
+            );
+        }
         let result = store.admit(id, &attempt, &Pressured(level), &clock, &cancel);
         if level == MemoryPressure::Normal {
             assert_eq!(result?.state, AttemptState::Running);
@@ -2380,6 +2392,46 @@ fn writer_build_limit_is_shared_across_runs() -> TestResult {
     Ok(())
 }
 #[test]
+fn configured_build_limit_controls_host_leases() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 0,
+        admission_seconds: 1,
+        ..AdmissionPolicy::default()
+    });
+    std::fs::write(
+        store.writer_registry.join("config.toml"),
+        "[domains.fabric.lanes]\nmax_concurrent_builds = 2\n",
+    )?;
+    let first_run = lane(63, true);
+    let second_run = lane(64, true);
+    let third_run = lane(65, true);
+    for run in [&first_run, &second_run] {
+        let id = starting(&store, run, &call)?;
+        let dir = store.attempt_dir(run.run_id, id, false)?;
+        assert_eq!(
+            store
+                .admit(id, &dir, &Host { available: 100 }, &clock, &cancel)?
+                .state,
+            AttemptState::Running
+        );
+    }
+    let id = starting(&store, &third_run, &call)?;
+    let dir = store.attempt_dir(third_run.run_id, id, false)?;
+    assert!(matches!(
+        store.admit(id, &dir, &Host { available: 100 }, &clock, &cancel),
+        Err(RunError::BuildSlots {
+            active: 2,
+            limit: 2
+        })
+    ));
+    Ok(())
+}
+
+#[test]
 fn writer_slot_refusal_and_release() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -2407,12 +2459,23 @@ fn writer_slot_refusal_and_release() -> TestResult {
             limit: 1
         })
     ));
-    // Terminal publication deletes the owner's admission row.
-    store.db.execute(
-        "DELETE FROM admission WHERE attempt=?1",
-        [first.to_string()],
-    )?;
     let next = starting(&store, &lane(62, true), &call)?;
+    assert!(
+        store
+            .claim_with_build_limit(next, 1, &clock, &call)?
+            .is_none()
+    );
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(first, &call)?);
+    seal_exit(&store, &observed)?;
+    let revision = store.record(first, &call)?.revision;
+    store.publish_terminal(
+        first,
+        revision,
+        &super::tests::publication(),
+        &observed,
+        &call,
+    )?;
     assert!(
         store
             .claim_with_build_limit(next, 1, &clock, &call)?
@@ -3588,7 +3651,7 @@ fn lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for() -> TestRes
 }
 
 #[test]
-fn legacy_rows_without_a_class_are_treated_as_writers() -> TestResult {
+fn legacy_tickets_without_a_class_are_treated_as_writers() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -3624,12 +3687,6 @@ fn legacy_rows_without_a_class_are_treated_as_writers() -> TestResult {
     let reader = starting(&store, &lane(82, false), &call)?;
 
     assert!(store.claim(old, &at(11_000), &call)?.is_some());
-    let ledger = crate::ledger::open(&store.writer_registry, &call)?;
-    let class: String =
-        ledger.query_row("SELECT class FROM leases WHERE attempt='legacy'", [], |r| {
-            r.get(0)
-        })?;
-    assert_eq!(class, "writer", "a lease from before classes is a writer's");
     assert!(
         store.claim(writer, &at(11_001), &call)?.is_none(),
         "a ticket with no class is a writer, spaced 20 s from the last writer start"
