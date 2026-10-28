@@ -329,7 +329,9 @@ briefs.
   `::matched_required_contract_cannot_override_ambiguous_verdict_evidence`;
   `::upstream_data_boundary_cannot_be_closed_by_result_content`;
   `crates/records/src/result_capture.rs::hashes_all_bytes_and_keeps_bounded_windows`;
+  `crates/records/src/result_capture.rs::verdict_evidence_is_unique_final_and_independent_of_chunk_boundaries`;
   `crates/run/src/tests.rs::streamed_result_is_verified_and_redacted_across_chunks`;
+  `crates/run/src/tests.rs::streamed_verdict_evidence_validates_complete_large_artifacts`;
   `src/fabric.rs::graph_owner_fails_node_when_result_integrity_is_lost`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
