@@ -122,13 +122,19 @@ pub struct GraphNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<NodeKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<GateCondition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_fail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<provenant_records::run::DeliveryMode>,
+    #[serde(default)]
     pub access: AccessMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default)]
     pub prompt: String,
     #[serde(default)]
     pub depends_on: Vec<String>,
@@ -144,12 +150,50 @@ pub struct GraphNode {
     pub required_verdict: Option<String>,
 }
 
-/// Agent node purpose. Omitted kinds retain the original task wire format.
+impl GraphNode {
+    fn content_bytes(&self) -> usize {
+        self.prompt.len().saturating_add(match &self.condition {
+            Some(GateCondition::Verdict { expected, .. }) => expected.len(),
+            _ => 0,
+        })
+    }
+}
+
+/// Node purpose. Omitted kinds retain the original task wire format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
     Task,
     Synthesise,
+    Gate,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GateCondition {
+    Verdict {
+        expected: String,
+        threshold: VerdictThreshold,
+    },
+    /// Check the effective host graph budget, including saved extensions.
+    Budget,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum VerdictThreshold {
+    All,
+    Any,
+    Majority,
+    Count(usize),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GateResult {
+    pub passed: bool,
+    pub reason: Option<String>,
+    pub on_fail: Option<String>,
 }
 
 /// Select outputs from a direct dependency for inclusion in this node's brief.
@@ -260,6 +304,8 @@ fn not_delivered(delivered: &bool) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct NodeProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<GateResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// Retain the writer checkout for chair inspection after a failed launch.
     pub worktree: Option<String>,
@@ -333,6 +379,61 @@ pub enum NodeState {
     Succeeded,
     Failed,
     Blocked,
+    Skipped,
+}
+
+impl NodeState {
+    fn settled(self) -> bool {
+        !matches!(self, Self::Pending | Self::Running)
+    }
+}
+
+impl GraphCheckpoint {
+    /// Failed gates are handled only when their recovery path succeeds.
+    pub fn successful(&self) -> bool {
+        self.nodes.iter().all(|node| {
+            let mut current = node;
+            for depth in 0..self.nodes.len() {
+                match current.state {
+                    NodeState::Succeeded => return true,
+                    NodeState::Skipped => return depth == 0,
+                    NodeState::Failed => {
+                        let Some(target) = current
+                            .gate
+                            .as_ref()
+                            .filter(|gate| !gate.passed)
+                            .and_then(|gate| gate.on_fail.as_ref())
+                            .and_then(|target| self.nodes.iter().find(|node| &node.id == target))
+                        else {
+                            return false;
+                        };
+                        current = target;
+                    }
+                    _ => return false,
+                }
+            }
+            false
+        })
+    }
+}
+
+impl NodeProgress {
+    /// Attempt-less evidence for final graph delivery.
+    pub fn deterministic_summary(&self) -> Option<String> {
+        if self.state == NodeState::Skipped {
+            Some(format!("Node {}: skipped\n\n", self.id))
+        } else {
+            self.gate.as_ref().map(|gate| {
+                format!(
+                    "Node {}: gate {}, reason: {}, on_fail: {}\n\n",
+                    self.id,
+                    if gate.passed { "PASS" } else { "FAIL" },
+                    gate.reason.as_deref().unwrap_or("condition satisfied"),
+                    gate.on_fail.as_deref().unwrap_or("none")
+                )
+            })
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -665,11 +766,7 @@ impl FileJournal {
                     || !stored.checkpoint.delivered
                         && stored.execution.document.delivery
                             == Some(provenant_records::run::DeliveryMode::Pr)
-                        && stored
-                            .checkpoint
-                            .nodes
-                            .iter()
-                            .all(|node| node.state == NodeState::Succeeded)))
+                        && stored.checkpoint.successful()))
             .then_some(stored.execution)
         }))
     }
@@ -910,6 +1007,10 @@ struct PlannedNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<NodeKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    condition: Option<GateCondition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    on_fail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     delivery: Option<provenant_records::run::DeliveryMode>,
     access: AccessMode,
     worktree: Option<String>,
@@ -1047,6 +1148,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .nodes
                     .iter()
                     .map(|node| NodeProgress {
+                        gate: None,
                         id: node.id.clone(),
                         title: Some(node.title.as_deref().unwrap_or(&node.id).to_owned()),
                         worktree: node.worktree.clone(),
@@ -1099,15 +1201,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
 
-    if !checkpoint.nodes.iter().all(|node| {
-        matches!(
-            node.state,
-            NodeState::Succeeded | NodeState::Failed | NodeState::Blocked
-        )
-    }) && let Some(reason) =
+    let structural_pause = if checkpoint.nodes.iter().all(|node| node.state.settled()) {
+        None
+    } else {
         structural_limit_reason(document, &plan, &effective_limits, &checkpoint.extensions)
-    {
-        checkpoint.pause_reason = Some(reason);
+    };
+    if let Some(reason) = &structural_pause {
+        checkpoint.pause_reason = Some(reason.clone());
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
 
@@ -1124,40 +1224,37 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     }
 
     for node_index in 0..plan.nodes.len() {
-        if matches!(
-            checkpoint.nodes[node_index].state,
-            NodeState::Succeeded | NodeState::Failed | NodeState::Blocked
-        ) {
-            continue;
-        }
-
-        let parent_states = plan.nodes[node_index]
-            .depends_on
-            .iter()
-            .map(|parent| {
-                positions
-                    .get(parent)
-                    .map(|index| checkpoint.nodes[*index].state)
-                    .ok_or(GraphError::Invalid("dependency position"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if parent_states
-            .iter()
-            .any(|state| matches!(state, NodeState::Failed | NodeState::Blocked))
-        {
-            checkpoint.nodes[node_index].state = NodeState::Blocked;
-            journal.save(&checkpoint).map_err(GraphError::Journal)?;
-            continue;
-        }
-        if parent_states
-            .iter()
-            .any(|state| *state != NodeState::Succeeded)
-        {
+        if checkpoint.nodes[node_index].state.settled() {
             continue;
         }
 
         let node = &plan.nodes[node_index];
+        let dependency = dependency_state(node, &plan, &checkpoint, &positions);
+        if let Some(state) = dependency {
+            checkpoint.nodes[node_index].state = state;
+            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            continue;
+        }
+        if let Some(condition) = &node.condition {
+            if structural_pause.is_some() {
+                continue;
+            }
+            let reason = gate_failure(condition, node, &checkpoint, &positions, &effective_budget);
+            let progress = &mut checkpoint.nodes[node_index];
+            progress.state = if reason.is_none() {
+                NodeState::Succeeded
+            } else {
+                NodeState::Failed
+            };
+            progress.gate = Some(GateResult {
+                passed: reason.is_none(),
+                reason,
+                on_fail: node.on_fail.clone(),
+            });
+            progress.outputs = Some(gate_outputs(progress.state == NodeState::Succeeded));
+            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            continue;
+        }
         loop {
             let progress = &checkpoint.nodes[node_index];
             let route_index = match progress.attempts.last() {
@@ -1411,21 +1508,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
     }
 
-    let all_settled = checkpoint.nodes.iter().all(|node| {
-        matches!(
-            node.state,
-            NodeState::Succeeded | NodeState::Failed | NodeState::Blocked
-        )
-    });
+    let all_settled = checkpoint.nodes.iter().all(|node| node.state.settled());
     if all_settled && checkpoint.pause_reason.take().is_some() {
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
     if document.delivery == Some(provenant_records::run::DeliveryMode::Pr)
         && !checkpoint.delivered
-        && checkpoint
-            .nodes
-            .iter()
-            .all(|node| node.state == NodeState::Succeeded)
+        && checkpoint.successful()
     {
         checkpoint.pull_request = owner
             .deliver_graph(document, &checkpoint)
@@ -1449,6 +1538,91 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         checkpoint,
         advance_error,
     })
+}
+
+/// A failure target must declare its gate as a dependency. Other dependants
+/// follow the success edge; inactive paths propagate a skipped state.
+fn dependency_state(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Option<NodeState> {
+    let mut waiting = false;
+    let mut skipped = false;
+    for parent in &node.depends_on {
+        let index = positions[parent];
+        let recovery = plan.nodes[index].on_fail.as_ref() == Some(&node.id);
+        match checkpoint.nodes[index].state {
+            NodeState::Failed if recovery => {}
+            NodeState::Failed if plan.nodes[index].on_fail.is_some() => skipped = true,
+            NodeState::Failed | NodeState::Blocked => return Some(NodeState::Blocked),
+            NodeState::Succeeded if recovery => skipped = true,
+            NodeState::Skipped => skipped = true,
+            NodeState::Pending | NodeState::Running => waiting = true,
+            NodeState::Succeeded => {}
+        }
+    }
+    if skipped {
+        Some(NodeState::Skipped)
+    } else if waiting {
+        Some(NodeState::Pending)
+    } else {
+        None
+    }
+}
+
+fn gate_outputs(passed: bool) -> NodeOutputs {
+    NodeOutputs {
+        schema_version: 2,
+        result: None,
+        verdict: Some(if passed { "PASS" } else { "FAIL" }.to_owned()),
+        findings: Vec::new(),
+        branch: None,
+        commit: None,
+        warnings: Vec::new(),
+    }
+}
+
+fn gate_failure(
+    condition: &GateCondition,
+    node: &PlannedNode,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+    budget: &crate::config::GraphBudget,
+) -> Option<String> {
+    match condition {
+        GateCondition::Verdict {
+            expected,
+            threshold,
+        } => {
+            let matched = node
+                .inputs
+                .iter()
+                .filter(|input| {
+                    checkpoint.nodes[positions[&input.node]]
+                        .outputs
+                        .as_ref()
+                        .and_then(|outputs| outputs.verdict.as_ref())
+                        == Some(expected)
+                })
+                .count();
+            let total = node.inputs.len();
+            let passed = match threshold {
+                VerdictThreshold::All => matched == total,
+                VerdictThreshold::Any => matched > 0,
+                VerdictThreshold::Majority => matched > total / 2,
+                VerdictThreshold::Count(count) => matched >= *count,
+            };
+            (!passed).then(|| format!("verdict threshold not met: {matched}/{total} matched"))
+        }
+        GateCondition::Budget => {
+            // An explicit check must fail closed even if admission only warns.
+            let mut budget = budget.clone();
+            budget.unknown_usage = crate::config::UnknownUsage::Pause;
+            budget_reason(checkpoint, &budget)
+        }
+    }
 }
 
 fn apply_limit_extension(
@@ -1589,7 +1763,7 @@ fn structural_limit_reason(
             document.nodes.iter().find_map(|node| {
                 check(
                     "node_prompt_bytes",
-                    node.prompt.len(),
+                    node.content_bytes(),
                     limits.node_prompt_bytes,
                 )
             })
@@ -1597,7 +1771,7 @@ fn structural_limit_reason(
         .or_else(|| {
             check(
                 "graph_prompt_bytes",
-                document.nodes.iter().map(|node| node.prompt.len()).sum(),
+                document.nodes.iter().map(GraphNode::content_bytes).sum(),
                 limits.graph_prompt_bytes,
             )
         })
@@ -1912,6 +2086,51 @@ fn validate_plan_with_limits(
     let mut prompt_bytes = 0usize;
     let mut nodes = Vec::with_capacity(document.nodes.len());
     for node in &document.nodes {
+        let is_gate = node.kind == Some(NodeKind::Gate);
+        if is_gate != node.condition.is_some()
+            || !is_gate && node.on_fail.is_some()
+            || is_gate
+                && (node.route.is_some()
+                    || node.routes.is_some()
+                    || node.access != AccessMode::ReadOnly
+                    || node.delivery.is_some()
+                    || node.worktree.is_some()
+                    || !node.prompt.is_empty()
+                    || node.required_verdict.is_some())
+        {
+            return Err("gate requires a condition and no agent configuration");
+        }
+        if let Some(target) = &node.on_fail
+            && (target == &node.id
+                || !positions
+                    .get(target)
+                    .is_some_and(|index| document.nodes[*index].depends_on.contains(&node.id)))
+        {
+            return Err("on_fail target must depend on its gate");
+        }
+        match &node.condition {
+            Some(GateCondition::Verdict {
+                expected,
+                threshold,
+            }) => {
+                if expected.trim().is_empty()
+                    || expected.len() > limits.node_prompt_bytes
+                    || expected.contains(['\n', '\r'])
+                    || node.inputs.is_empty()
+                    || node
+                        .inputs
+                        .iter()
+                        .any(|input| input.outputs != [OutputKind::Verdict])
+                    || matches!(threshold, VerdictThreshold::Count(n) if *n == 0 || *n > node.inputs.len())
+                {
+                    return Err("invalid verdict gate");
+                }
+            }
+            Some(GateCondition::Budget) if !node.inputs.is_empty() => {
+                return Err("budget gate has no selected inputs");
+            }
+            _ => {}
+        }
         if let (Some(integration), Some(DeliveryMode::Integrate(target))) =
             (&document.integration_branch, &node.delivery)
             && integration != target
@@ -1937,11 +2156,11 @@ fn validate_plan_with_limits(
         if document.delivery == Some(DeliveryMode::Pr) && node.delivery == Some(DeliveryMode::Pr) {
             return Err("graph PR is exclusive with node PRs");
         }
-        if node.prompt.is_empty() || node.prompt.len() > limits.node_prompt_bytes {
+        if !is_gate && node.prompt.is_empty() || node.prompt.len() > limits.node_prompt_bytes {
             return Err("prompt size");
         }
         prompt_bytes = prompt_bytes
-            .checked_add(node.prompt.len())
+            .checked_add(node.content_bytes())
             .ok_or("prompt size")?;
         if prompt_bytes > limits.graph_prompt_bytes {
             return Err("total prompt size");
@@ -1954,6 +2173,7 @@ fn validate_plan_with_limits(
         }
 
         let routes = match (&node.route, &node.routes) {
+            (None, None) if is_gate => Vec::new(),
             (Some(route), None) => vec![route.clone()],
             (None, Some(routes)) if !routes.is_empty() => routes.clone(),
             (Some(_), Some(_)) => return Err("route and routes are exclusive"),
@@ -2007,9 +2227,11 @@ fn validate_plan_with_limits(
         depends_on.sort();
         nodes.push(PlannedNode {
             kind: match node.kind {
-                Some(NodeKind::Synthesise) => node.kind,
+                Some(NodeKind::Synthesise | NodeKind::Gate) => node.kind,
                 _ => None,
             },
+            condition: node.condition.clone(),
+            on_fail: node.on_fail.clone(),
             delivery: node.delivery.clone(),
             access: node.access,
             worktree: node.worktree.clone(),
@@ -2277,6 +2499,12 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
     if checkpoint.nodes.len() != plan.nodes.len() {
         return Err(GraphError::BadCheckpoint);
     }
+    let positions = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| (node.id.clone(), i))
+        .collect();
     for (progress, node) in checkpoint.nodes.iter().zip(&plan.nodes) {
         if progress.id != node.id
             || progress.worktree != node.worktree
@@ -2287,6 +2515,36 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 .is_some_and(|outputs| outputs.schema_version != 2)
         {
             return Err(GraphError::BadCheckpoint);
+        }
+        if node.condition.is_some() {
+            let valid = match (&progress.gate, progress.state) {
+                (None, NodeState::Pending | NodeState::Blocked | NodeState::Skipped) => {
+                    progress.outputs.is_none()
+                }
+                (Some(result), NodeState::Succeeded | NodeState::Failed) => {
+                    result.passed == (progress.state == NodeState::Succeeded)
+                        && result.passed == result.reason.is_none()
+                        && result.on_fail == node.on_fail
+                        && progress.outputs == Some(gate_outputs(result.passed))
+                        && dependency_state(node, plan, checkpoint, &positions).is_none()
+                }
+                _ => false,
+            };
+            if !valid || !progress.attempts.is_empty() || progress.advance_error.is_some() {
+                return Err(GraphError::BadCheckpoint);
+            }
+        } else if progress.gate.is_some() {
+            return Err(GraphError::BadCheckpoint);
+        }
+        if progress.state == NodeState::Skipped
+            && (dependency_state(node, plan, checkpoint, &positions) != Some(NodeState::Skipped)
+                || !progress.attempts.is_empty()
+                || progress.outputs.is_some())
+        {
+            return Err(GraphError::BadCheckpoint);
+        }
+        if node.condition.is_some() {
+            continue;
         }
         for (index, attempt) in progress.attempts.iter().enumerate() {
             if attempt.key.graph_id != plan.graph_id
@@ -2305,7 +2563,9 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         }
         let last = progress.attempts.last();
         let state_is_consistent = match progress.state {
-            NodeState::Pending | NodeState::Blocked => progress.attempts.is_empty(),
+            NodeState::Pending | NodeState::Blocked | NodeState::Skipped => {
+                progress.attempts.is_empty()
+            }
             NodeState::Running => match last {
                 Some(attempt) if attempt.state != AttemptState::Terminal => true,
                 Some(attempt) => {
@@ -2452,6 +2712,8 @@ mod tests {
     fn node(id: &str, route: GraphRoute) -> GraphNode {
         GraphNode {
             kind: None,
+            condition: None,
+            on_fail: None,
             delivery: None,
             access: AccessMode::ReadOnly,
             worktree: None,
@@ -2474,6 +2736,338 @@ mod tests {
             schema_version: 1,
             graph_id: "g-test".to_owned(),
             nodes,
+        }
+    }
+
+    #[test]
+    fn gate_verdict_fixture_is_attempt_less_and_replays() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "g-test", "nodes": [
+                {"id": "review", "prompt": "Review", "access": "read_only",
+                 "route": {"adapter": "fixture", "model": "fixture/model"},
+                 "required_verdict": "VERDICT: PASS"},
+                {"id": "gate", "kind": "gate", "depends_on": ["review"],
+                 "inputs": [{"node": "review", "outputs": ["verdict"]}],
+                 "condition": {"type": "verdict", "expected": "VERDICT: PASS", "threshold": "all"}}
+            ]
+        }))
+        .unwrap();
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([terminal_with_result(
+                AttemptOutcome::Succeeded,
+                "VERDICT: PASS",
+            )]),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(run.status, GraphStatus::Complete);
+        assert_eq!(run.checkpoint.nodes[1].state, NodeState::Succeeded);
+        assert!(run.checkpoint.nodes[1].attempts.is_empty());
+        let replay = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(replay.checkpoint, run.checkpoint);
+        assert_eq!(owner.calls.len(), 1);
+    }
+
+    fn gate_node(condition: GateCondition) -> GraphNode {
+        let mut gate = node("gate", route("unused"));
+        gate.kind = Some(NodeKind::Gate);
+        gate.condition = Some(condition);
+        gate.prompt.clear();
+        gate.route = None;
+        gate
+    }
+
+    fn verdict_fixture(
+        threshold: VerdictThreshold,
+        verdicts: &[Option<&str>],
+    ) -> (GraphDocument, FakeOwner) {
+        let mut gate = gate_node(GateCondition::Verdict {
+            expected: "PASS".into(),
+            threshold,
+        });
+        let mut nodes = Vec::new();
+        let mut owner = FakeOwner::default();
+        for (i, verdict) in verdicts.iter().enumerate() {
+            let mut review = node(&format!("review-{i}"), route("fixture"));
+            review.required_verdict = verdict.map(str::to_owned);
+            gate.depends_on.push(review.id.clone());
+            gate.inputs.push(GraphInput {
+                node: review.id.clone(),
+                outputs: vec![OutputKind::Verdict],
+            });
+            let mut capture = crate::result_capture::ResultCapture::new(*verdict);
+            capture.push(verdict.unwrap_or("no verdict").as_bytes());
+            let mut observation = terminal(AttemptOutcome::Succeeded);
+            if let AttemptObservation::Terminal { result, .. } = &mut observation {
+                *result = Some(capture.finish());
+            }
+            owner.observations.push_back(observation);
+            nodes.push(review);
+        }
+        nodes.push(gate);
+        (graph(nodes), owner)
+    }
+
+    #[test]
+    fn gate_threshold_fixtures_count_missing_verdicts_and_strict_majorities() {
+        for (threshold, verdicts, passed) in [
+            (
+                VerdictThreshold::All,
+                vec![Some("PASS"), Some("PASS"), Some("FAIL")],
+                false,
+            ),
+            (
+                VerdictThreshold::Any,
+                vec![Some("PASS"), None, Some("FAIL")],
+                true,
+            ),
+            (VerdictThreshold::Any, vec![None, Some("FAIL")], false),
+            (
+                VerdictThreshold::Majority,
+                vec![Some("PASS"), Some("PASS"), None],
+                true,
+            ),
+            (VerdictThreshold::Majority, vec![Some("PASS"), None], false),
+            (
+                VerdictThreshold::Count(2),
+                vec![Some("PASS"), Some("PASS"), None],
+                true,
+            ),
+            (
+                VerdictThreshold::Count(3),
+                vec![Some("PASS"), Some("PASS"), None],
+                false,
+            ),
+        ] {
+            let (document, mut owner) = verdict_fixture(threshold, &verdicts);
+            let mut journal = MemoryJournal::default();
+            let run = advance(&document, &mut owner, &mut journal).unwrap();
+            let gate = run.checkpoint.nodes.last().unwrap();
+            assert_eq!(gate.gate.as_ref().unwrap().passed, passed);
+            assert_eq!(gate.outputs, Some(gate_outputs(passed)));
+            assert!(gate.attempts.is_empty());
+            assert_eq!(run.checkpoint.successful(), passed);
+            journal.0 = Some(
+                serde_json::from_value(serde_json::to_value(&run.checkpoint).unwrap()).unwrap(),
+            );
+            assert_eq!(
+                advance(&document, &mut owner, &mut journal)
+                    .unwrap()
+                    .checkpoint,
+                run.checkpoint
+            );
+        }
+    }
+
+    #[test]
+    fn gate_budget_fixtures_fail_closed_and_preserve_the_decision_on_resume() {
+        for (tokens, partial, limit, passed) in [
+            (Some(9), false, 10, true),
+            (Some(10), false, 10, false),
+            (Some(11), false, 10, false),
+            (None, false, 10, false),
+            (Some(1), true, 10, false),
+        ] {
+            let mut gate = gate_node(GateCondition::Budget);
+            gate.depends_on.push("review".into());
+            let document = graph(vec![node("review", route("fixture")), gate]);
+            let mut observation = terminal(AttemptOutcome::Succeeded);
+            if let AttemptObservation::Terminal { attempt_ref, .. } = &mut observation {
+                *attempt_ref = Some("host/attempt".into());
+            }
+            let mut owner = FakeOwner {
+                observations: VecDeque::from([observation]),
+                usage: AttemptUsage {
+                    tokens,
+                    tokens_partial: partial,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let budget = crate::config::GraphBudget {
+                per_graph: crate::config::BudgetLimit {
+                    tokens: Some(limit),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut journal = MemoryJournal::default();
+            let run = advance_with_budget(
+                &document,
+                &mut owner,
+                &mut journal,
+                &Default::default(),
+                &Default::default(),
+                &budget,
+            )
+            .unwrap();
+            assert_eq!(run.status, GraphStatus::Complete);
+            assert_eq!(
+                run.checkpoint.nodes[1].gate.as_ref().unwrap().passed,
+                passed
+            );
+            let replay = resume_with_budget(
+                &document,
+                &mut owner,
+                &mut journal,
+                &Default::default(),
+                &Default::default(),
+                &budget,
+                &["budget.per_graph.tokens=100".into()],
+            )
+            .unwrap();
+            assert_eq!(replay.checkpoint.nodes, run.checkpoint.nodes);
+            assert_eq!(owner.calls.len(), 1);
+        }
+    }
+
+    #[test]
+    fn gate_on_fail_routes_only_the_active_path_and_delivers_after_recovery() {
+        for (passed, recovery_succeeds) in [(true, true), (false, true), (false, false)] {
+            let (mut document, mut owner) = verdict_fixture(
+                VerdictThreshold::All,
+                &[Some(if passed { "PASS" } else { "FAIL" })],
+            );
+            document.nodes[1].on_fail = Some("recovery".into());
+            let mut recovery = node("recovery", route("fixture"));
+            recovery.depends_on.push("gate".into());
+            let mut success = node("success", route("fixture"));
+            success.depends_on.push("gate".into());
+            document.nodes.extend([recovery, success]);
+            document.integration_branch = Some("integration".into());
+            document.delivery = Some(provenant_records::run::DeliveryMode::Pr);
+            owner.observations.push_back(terminal(if recovery_succeeds {
+                AttemptOutcome::Succeeded
+            } else {
+                AttemptOutcome::TaskFailed
+            }));
+            let mut journal = MemoryJournal::default();
+            let run = advance(&document, &mut owner, &mut journal).unwrap();
+            assert_eq!(
+                run.checkpoint.nodes[2].state,
+                if passed {
+                    NodeState::Skipped
+                } else if recovery_succeeds {
+                    NodeState::Succeeded
+                } else {
+                    NodeState::Failed
+                }
+            );
+            assert_eq!(
+                run.checkpoint.nodes[3].state,
+                if passed {
+                    NodeState::Succeeded
+                } else {
+                    NodeState::Skipped
+                }
+            );
+            assert_eq!(owner.calls.len(), 2);
+            assert_eq!(owner.deliveries, usize::from(recovery_succeeds));
+            assert!(
+                run.checkpoint.nodes[1]
+                    .deterministic_summary()
+                    .unwrap()
+                    .contains(if passed { "gate PASS" } else { "gate FAIL" })
+            );
+            assert_eq!(
+                advance(&document, &mut owner, &mut journal)
+                    .unwrap()
+                    .checkpoint,
+                run.checkpoint
+            );
+        }
+    }
+
+    #[test]
+    fn gate_checkpoint_rejects_attempts_inconsistent_results_and_forged_skips() {
+        let (document, mut owner) = verdict_fixture(VerdictThreshold::All, &[Some("PASS")]);
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        for mutation in 0..5 {
+            let mut corrupt = run.checkpoint.clone();
+            match mutation {
+                0 => corrupt.nodes[1].gate.as_mut().unwrap().passed = false,
+                1 => corrupt.nodes[1].attempts = corrupt.nodes[0].attempts.clone(),
+                2 => corrupt.nodes[1].state = NodeState::Running,
+                3 => corrupt.nodes[0].gate = corrupt.nodes[1].gate.clone(),
+                _ => {
+                    corrupt.nodes[1].state = NodeState::Skipped;
+                    corrupt.nodes[1].gate = None;
+                    corrupt.nodes[1].outputs = None;
+                }
+            }
+            journal.0 = Some(corrupt);
+            assert!(matches!(
+                advance(&document, &mut owner, &mut journal),
+                Err(GraphError::BadCheckpoint)
+            ));
+        }
+    }
+
+    #[test]
+    fn gate_only_graph_obeys_structural_limits_before_evaluating() {
+        let document = graph(vec![
+            gate_node(GateCondition::Budget),
+            GraphNode {
+                id: "second".into(),
+                ..gate_node(GateCondition::Budget)
+            },
+        ]);
+        let limits = crate::config::GraphLimits {
+            nodes: 1,
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance_with_budget(
+            &document,
+            &mut FakeOwner::default(),
+            &mut journal,
+            &limits,
+            &limits,
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(run.status, GraphStatus::Paused);
+        assert!(run.checkpoint.nodes.iter().all(|node| node.gate.is_none()));
+    }
+
+    #[test]
+    fn gate_validation_rejects_agent_fields_bad_thresholds_and_failure_cycles() {
+        let (document, _) = verdict_fixture(VerdictThreshold::All, &[Some("PASS")]);
+        for mutation in 0..6 {
+            let mut document = document.clone();
+            let expected = match mutation {
+                0 => {
+                    document.nodes[1].route = Some(route("fixture"));
+                    "gate requires a condition and no agent configuration"
+                }
+                1 => {
+                    document.nodes[1].condition = Some(GateCondition::Verdict {
+                        expected: "PASS".into(),
+                        threshold: VerdictThreshold::Count(0),
+                    });
+                    "invalid verdict gate"
+                }
+                2 => {
+                    document.nodes[1].on_fail = Some("missing".into());
+                    "on_fail target must depend on its gate"
+                }
+                3 => {
+                    document.nodes[1].on_fail = Some("review-0".into());
+                    document.nodes[0].depends_on.push("gate".into());
+                    "dependency cycle"
+                }
+                4 => {
+                    document.nodes[0].condition = Some(GateCondition::Budget);
+                    "gate requires a condition and no agent configuration"
+                }
+                _ => {
+                    document.nodes[1].inputs.clear();
+                    "invalid verdict gate"
+                }
+            };
+            assert_eq!(validate_plan(&document).err(), Some(expected));
         }
     }
 
@@ -3332,6 +3926,8 @@ mod tests {
         ];
         let document = graph(vec![GraphNode {
             kind: None,
+            condition: None,
+            on_fail: None,
             delivery: None,
             access: AccessMode::ReadOnly,
             worktree: None,
@@ -3482,6 +4078,8 @@ mod tests {
             let routes = vec![route("first"), route("second")];
             let document = graph(vec![GraphNode {
                 kind: None,
+                condition: None,
+                on_fail: None,
                 delivery: None,
                 access: AccessMode::ReadOnly,
                 worktree: None,
@@ -3725,6 +4323,8 @@ mod tests {
     fn terminal_task_failure_does_not_try_a_fallback_route() {
         let document = graph(vec![GraphNode {
             kind: None,
+            condition: None,
+            on_fail: None,
             delivery: None,
             access: AccessMode::ReadOnly,
             worktree: None,

@@ -207,7 +207,7 @@ describes defaults, ceilings, budget telemetry and resuming a paused graph.
 
 Each node has an optional task `title`, defaulting to its ID; titles use the
 shared task title validation and appear in lanes and graph status. A node may
-specify a single `route` or an ordered `routes` list. A route can name a pool
+specify a single `route` or an ordered `routes` list for agent work. A route can name a pool
 with just `alias`, resolved as for `dispatch --route`, or supply an explicit
 adapter. Routes require an adapter or alias and may mix these forms in a list.
 
@@ -220,6 +220,33 @@ Why: one configurable agent can combine results for different purposes without
 adding a node kind for each purpose.
 Test: `synthesise_receives_selected_reviewer_findings_and_emits_typed_output`.
 Owner: Fabric runtime.
+
+### Deterministic gates
+
+A `gate` must evaluate its condition without a model or attempt. Verdict gates
+must compare selected direct dependencies' verdicts exactly, with missing
+verdicts counting as non-matches. Majority requires strictly more than half;
+count requires at least the configured positive count. Budget gates must check
+settled attempt usage against the effective host budgets, including saved
+extensions, and fail on unknown or partial usage for a configured metric.
+Gates must save their decision before dependants run and retain it on replay,
+even if budgets change. Gates expose `PASS` or `FAIL` as their typed verdict.
+
+A failure target named by `on_fail` must depend on its gate, so ordinary cycle
+and edge limits cover the failure path. Only that target may follow a failed
+gate; other dependants and inactive failure paths must be skipped. An unhandled
+failure or failed recovery must prevent graph delivery. A recovered graph may
+deliver once its active paths succeed, with gate evidence and skipped nodes
+recorded in the final PR body.
+
+- Why: deterministic decisions need durable evidence without a provider launch.
+- Test: `crates/fabric-runtime/src/graph.rs::gate_verdict_fixture_is_attempt_less_and_replays`;
+  `::gate_threshold_fixtures_count_missing_verdicts_and_strict_majorities`;
+  `::gate_budget_fixtures_fail_closed_and_preserve_the_decision_on_resume`;
+  `::gate_on_fail_routes_only_the_active_path_and_delivers_after_recovery`;
+  `::gate_checkpoint_rejects_attempts_inconsistent_results_and_forged_skips`;
+  `::gate_validation_rejects_agent_fields_bad_thresholds_and_failure_cycles`.
+- Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`
 
 ### Typed node outputs
 
@@ -460,14 +487,14 @@ execution record before the first node is admitted. Replays preserve that base;
 final PR commit messages
 cover only `base..integration-head`, regardless of the primary checkout's HEAD.
 A legacy graph without a recorded base must use a new graph ID for PR delivery.
-Once every node succeeds and custody is released, the graph publishes local
+Once all active paths succeed, gate failures are handled and custody is released, the graph publishes local
 integration through a separately created graph branch,
 recovering an interrupted publication when its unmarked ref still points at
 the exact graph head. A matching sealed marker also permits recreating an absent
 publication ref at that same head. A different marker, a different ref head or
 a symbolic ref refuses. Alternatively,
 the graph uses its existing remote integration branch, and opens one PR. Its body
-contains bounded commit messages and run and attempt IDs. The checkpoint
+contains bounded commit messages, run and attempt IDs, gate decisions and skipped nodes. The checkpoint
 records the PR URL and successful final delivery;
 replay observes it. A failed final delivery keeps its advance error and remains
 eligible for advancement or manual resume. Neither conflicts nor unknown
