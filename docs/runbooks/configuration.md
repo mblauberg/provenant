@@ -360,8 +360,10 @@ or names a credential directory such as `~/.ssh`; a launch is refused if an
 entry overlaps the state directory's protected parts or Git metadata.
 `/usr/bin` is already executable in lanes, so `/usr/bin/lockf` works.
 
-A shared Cargo target across worktrees is unsupported because it can run another
-checkout's stale test binaries; see [writer lanes](providers.md#writer-lanes).
+Fabric supplies private Cargo paths to each lane; see
+[writer lanes](providers.md#writer-lanes). Native unconfined agents may share a
+per-host target outside worktrees, taking care to run the intended checkout's
+test binaries.
 
 ## Routing pools
 

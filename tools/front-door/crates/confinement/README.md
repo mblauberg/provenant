@@ -11,8 +11,10 @@ held linked `VerifiedWorktree` and `GitRefName`; records retain their digest.
 `WorktreeWriteAuthority::for_worktree` also takes the host home to derive the
 single `Library/Caches/provenant-lane-cargo/<sha256>` cache. Codex writer
 preparation sets `CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` to its
-`target/`; `CARGO_HOME` is the
-user's own, with only its shared stores writable. Its hash binds canonical worktree and common Git paths plus held directory identities, so
+`target/` and uses a lane-private `CARGO_HOME` linked to shared stores. Lanes
+should use these values without overriding them. For lint-only runs, both build
+directories may use `PROVENANT_LANE_CARGO_LINT_TARGET`. The cache hash binds
+canonical worktree and common Git paths plus held directory identities, so
 same-named and recreated worktrees do not share a lane cache. Host builds use
 separate target directories outside this namespace.
 Before collecting `required_anchors`, call `prepare_writer_directories` under

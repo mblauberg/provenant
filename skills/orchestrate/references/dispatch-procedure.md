@@ -230,12 +230,12 @@ Scope/paths: <target, base/head and allowed paths>
 Constraints: <authority, isolation, governing skill and stop condition>
 Output: <shape, length and durable evidence location>
 Verification: <checks; for review, the rubric path or full rubric>
-Cargo (writer lanes): batch targeted tests into one invocation
-(`cargo test -p a -p b FILTER`) and never run two cargo commands on the same
-target directory at once. Run `cargo check` and `cargo clippy` with both
-`CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` set to
-`$PROVENANT_LANE_CARGO_LINT_TARGET`, so they can run beside a test build. Keep incremental builds on: the sandbox's hard-link
-warning only means rustc copies instead.
+Cargo (Fabric lanes): Fabric supplies lane-private CARGO_TARGET_DIR,
+CARGO_BUILD_BUILD_DIR and CARGO_HOME. Do not override them. For lint-only
+runs, writer lanes may set both build directories to
+$PROVENANT_LANE_CARGO_LINT_TARGET to run beside a test build. Batch targeted
+tests into one invocation and keep incremental builds on. The sandbox's
+hard-link warning only means rustc copies instead.
 Agent-filed issues: when filing is authorised, apply source:agent and end the
 issue body with Filed-by: <PROVENANT_AGENT_LABEL> <run> using the actual label
 and originating run ID. This applies to any issue an agent files.
