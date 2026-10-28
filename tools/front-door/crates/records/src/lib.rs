@@ -31,7 +31,7 @@ pub use source::{SourceDigest, SourceDigestError, SourceInput, source_digest};
 pub use trace::Trace;
 pub use yaml::{
     Span as YamlSpan, SpannedYaml, YamlError, YamlErrorKind, YamlValue, parse_frontmatter,
-    parse_sidecar,
+    parse_frontmatter_integers, parse_sidecar,
 };
 
 pub mod inbox;
@@ -54,4 +54,5 @@ pub use resolved_route::{
     RouteSelectionReceipt, RouteSelectionRedraw, TooManyAlternatives,
 };
 
+pub mod result_capture;
 pub mod run;

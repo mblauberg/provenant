@@ -364,7 +364,10 @@ impl RunStore {
         use provenant_os::fs::FsError;
         use provenant_os::fs::LockMode;
         if record.project_id != self.context.project_id {
-            return Err(RunError::UnsafePath);
+            return Err(RunError::unsafe_path(
+                format!("runs/{}/attempts/{}", record.run_id, record.attempt_id),
+                PathCheck::Containment,
+            ));
         }
         if !matches!(record.state, AttemptState::Terminal { .. }) {
             return Ok(false);
@@ -508,8 +511,19 @@ impl RunStore {
                 let dir = self.attempt_dir(record.run_id, id, false)?;
                 let (dir, name, _) = crate::transcript::find(&dir, session, &record.write_grants)
                     .ok_or(RunError::NotFound)?;
-                let (bytes, complete) =
-                    crate::transcript::tail(&dir, &name).ok_or(RunError::UnsafePath)?;
+                let (bytes, complete) = crate::transcript::tail(&dir, &name).ok_or_else(|| {
+                    let check = match dir.metadata_at(&name, false) {
+                        Ok(meta) if meta.kind == provenant_os::fs::FileKind::Symlink => {
+                            PathCheck::Symlink
+                        }
+                        Ok(meta) if meta.kind != provenant_os::fs::FileKind::Regular => {
+                            PathCheck::Kind
+                        }
+                        Ok(_) => PathCheck::Identity,
+                        Err(_) => PathCheck::Missing,
+                    };
+                    RunError::unsafe_entry(&dir, &name, check)
+                })?;
                 let digest = provenant_records::CanonicalV1::file_digest(&bytes);
                 (bytes, complete, digest)
             }

@@ -92,6 +92,42 @@ session discovery or evidence of a live provider connection.
   `crates/fabric-runtime/src/inbox/tests.rs::inbox_acknowledgement_requires_the_exact_host_project_session_and_actor`
 - Owner: `crates/fabric-runtime/src/inbox.rs`, `crates/records/src/inbox.rs`
 
+`request.work` is caller-authored claimed work, never a verified binding by itself.
+Its optional repository names the canonical Git common directory; head names
+launch HEAD. `work_coverage` is a host-only preparation snapshot. Consumers MUST
+use both together: only `verified` permits navigation or task-label joins to work,
+repository or head. `HumanRequest::verified_work()` enforces that rule. Other
+coverage, missing coverage and legacy claims may be displayed only as unverified
+claims, never promoted by a UI, summary or receipt replay. Even verified work
+confers no execution, repository or approval authority.
+
+Both edges resolve through Run at the configured host root and current project.
+They reject `mismatch`, including unqualified selectors; partial, unavailable,
+unindexed and capped results remain explicit claims. Replay validates the exact
+actor and input before lookup. New lookups finish before Fabric opens its write
+transaction, so index locks, creation and backoff cannot stall other coordination.
+Inside the transaction the exact actor/input receipt is checked again to handle
+concurrent preparations. Membership is an observation, not a cross-store atomic
+snapshot: a later host capture does not retroactively change saved coverage.
+Ask receipts report the saved coverage. Missing resolvers fail closed; lookup
+failures disclose their cause as `work_lookup_failed`, preserving busy/cancelled.
+Repository limits count at most 4096 UTF-8 bytes of `relative_to_root.path`,
+including hexadecimal expansion for `native_bytes`, excluding the root slash.
+
+Unlinked requests omit absent correlation fields and retain the version-1 wire
+shape. Requests using work, deadlines or replacement links declare version 2 and
+require a version-2 reader.
+Current readers accept both record versions, including retained history and the
+bounded overview projection; the database schema is unchanged. Existing version-1
+records and immutable receipts remain readable and retain their original shape.
+- Why: unknown work must not appear verified; index contention must not hold
+  Fabric's write lock; optional features must not rewrite unrelated version-1 data.
+- Test: `crates/fabric-runtime/src/inbox/tests.rs::request_correlation_lookup_never_holds_fabric_write_lock`;
+  `crates/fabric-runtime/src/inbox/tests.rs::request_correlation_legacy_records_keep_v1_wire_shape_and_answer`;
+  `tests/inbox.rs::request_correlation_edges_verify_host_seals_and_refuse_mismatches`
+- Owner: `crates/records/src/inbox.rs`, `crates/fabric-runtime/src/inbox.rs`,
+  `crates/fabric-store/src/operations.rs`, `crates/cli/src/inbox.rs`
+
 One operation must commit the revision comparison, answer, request state,
 history, delivery intent, local Fabric response and replay receipt together.
 Replays return the original receipt before checking the current revision.
@@ -211,6 +247,65 @@ specify a single `route` or an ordered `routes` list. A route can name a pool
 with just `alias`, resolved as for `dispatch --route`, or supply an explicit
 adapter. Routes require an adapter or alias and may mix these forms in a list.
 
+### Typed node outputs
+
+Settled nodes record version 2 outputs in the checkpoint, exposed by graph
+status JSON. A result's `digest` is `sha256:` followed by the lowercase
+SHA-256 of the complete stored result's raw bytes. This identifies the stored
+artifact: it is not a hash of the excerpt or of the redacted output returned by
+run output reads, and cannot be verified by hashing those redacted bytes when
+redaction changed the content. The runtime applies stateful credential
+redaction while streaming the result. Its `excerpt` is a UTF-8 prefix of at
+most 4096 bytes of the redacted text, and `truncated` indicates that either the
+stored result or redacted text exceeded that window. A local attempt may also
+have a run-file path. The runtime retains only the excerpt and a 16 KiB tail
+of the redacted text for parsing.
+
+When `required_verdict` matches, the recorded verdict is that exact trimmed
+line. Otherwise the optional verdict is the last `VERDICT:` line in the tail
+window, falling back to the last such line in the head window, and may be
+absent. Findings use a fenced `findings` JSON block with `schema_version: 1`
+and a `findings` array; each item has string fields `id`, `severity`, `file`, `summary` and
+`status`, and an optional non-negative integer `line` (which may be null).
+Unknown fields or a different schema version make the block invalid. Parsing
+only uses complete lines and blocks within a window, so content in the middle
+of a large result may not be captured. A block may contain at most 32 findings
+and 8 KiB of JSON, and text fields are
+limited to 1024 bytes each; a block with an overlong field is invalid. Missing
+or invalid findings produce an empty list and, when a result exists, a warning,
+not a node failure. The final findings block in the tail window takes
+precedence; if it is absent, the final block in the head window is used. An
+invalid final block yields an empty list and warning.
+The separate `required_verdict` contract checks for its exact line across the
+complete redacted stream. Writers can also provide a branch or commit.
+
+A node's `inputs` list selects `result`, `verdict`, `findings`, `branch` or
+`commit` from named direct dependencies. Each dependency and output selector
+may occur only once. The selected data is rendered into its brief, which is
+bounded by the effective per-node prompt byte limit. If the node prompt leaves
+no room for the block, or the selected outputs do not fit, the node fails
+before its next attempt is admitted with a per-node advance error. A failure
+before a fallback preserves the earlier attempt's outcome and creates no
+fallback attempt. An admitted attempt retains its admission cap on replay; a
+node without selected inputs replays its full admitted prompt even if the
+limit is lowered. Increase `node_prompt_bytes` within the host ceiling and start a new
+graph to retry a failed node. A document prompt exceeding a structural limit
+instead pauses the graph; it may be resumed after extending that limit.
+Selected outputs appear in a delimited block labelled as untrusted data, with
+delimiter collisions escaped. Result digests and excerpts are passed instead
+of transcripts. Paths remain visible in status but are omitted from downstream
+briefs.
+- Why: downstream nodes can use bounded evidence without copying transcripts.
+- Test: `crates/fabric-runtime/src/graph.rs::outputs_feed_direct_dependants_and_survive_replay`;
+  `::output_parsing_is_lenient_and_rendering_fails_instead_of_omitting`;
+  `::findings_and_verdict_at_the_end_of_a_large_result_are_parsed`;
+  `::matched_required_verdict_takes_precedence_even_in_middle`;
+  `::upstream_data_boundary_cannot_be_closed_by_result_content`;
+  `crates/records/src/result_capture.rs::hashes_all_bytes_and_keeps_bounded_windows`;
+  `crates/run/src/tests.rs::streamed_result_is_verified_and_redacted_across_chunks`;
+  `src/fabric.rs::graph_owner_fails_node_when_result_integrity_is_lost`
+- Owner: `crates/fabric-runtime/src/graph.rs`
+
 ### Checkpoint before launch
 
 The owner writes a checkpoint under a stable graph, node and route key
@@ -229,6 +324,8 @@ moves a node to the next route. Model capacity failures are treated as model
 unavailability for this purpose. Task failure, input requirements and uncertain
 launches never fall back; after launch only read-only nodes may fall back. A failed
 writer keeps its worktree. Graph writers deliver only when their node explicitly requests it.
+An unreadable or integrity-invalid result fails the node without fallback,
+regardless of the provider outcome.
 - Why: retrying a writer elsewhere would duplicate edits.
 - Test: `crates/fabric-runtime/src/graph.rs::writer_limit_after_launch_never_tries_a_second_route`;
   `::terminal_task_failure_does_not_try_a_fallback_route`

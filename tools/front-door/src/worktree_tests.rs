@@ -1197,6 +1197,7 @@ impl provenant_run::Providers for WriterProvider {
                 profile,
                 writer: Some(writer),
                 home: self.home.clone(),
+                cargo_registry_seed: false,
             }),
             observed_head: None,
             repository: None,

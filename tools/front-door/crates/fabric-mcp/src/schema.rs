@@ -167,7 +167,7 @@ fn build_strict() -> Vec<Value> {
         "work?":nullable(object(json!({
             "run_id":reference("Id"),"task_id?":nullable(reference("Id")),
             "attempt_id?":nullable(reference("Id")),"repository?":nullable(object(json!({"relative_to_root":object(json!({
-                "encoding":choices(&["utf8","native_bytes"]),"path":text(4096)
+                "encoding":choices(&["utf8","native_bytes"]),"path":text(provenant_records::inbox::REQUEST_REPOSITORY_BYTES)
             }))}))),
             "head?":nullable(reference("GitOid"))
         }))),

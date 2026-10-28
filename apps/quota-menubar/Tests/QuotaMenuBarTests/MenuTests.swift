@@ -17,8 +17,13 @@ final class MenuTests: XCTestCase {
         entries.compactMap { if case .item(let spec) = $0 { spec } else { nil } }
     }
 
+    private func allItems(_ entries: [MenuEntry]) -> [MenuItemSpec] {
+        let rows = items(entries)
+        return rows + rows.flatMap { allItems($0.submenu ?? []) }
+    }
+
     private func row(_ id: String) throws -> MenuItemSpec {
-        try XCTUnwrap(items(entries(try fixture())).first { $0.id == id })
+        try XCTUnwrap(allItems(entries(try fixture())).first { $0.id == id })
     }
 
     func testTitleRowCarriesFreshness() throws {
@@ -29,7 +34,7 @@ final class MenuTests: XCTestCase {
 
     func testAccountsStayTogetherByProviderInStatusOrder() throws {
         let rows = items(entries(try fixture())).filter { $0.id != nil }
-        XCTAssertEqual(rows.map(\.title), ["Claude", "Codex", "OpenCode", "Antigravity", "Cursor"])
+        XCTAssertEqual(rows.map(\.title), ["Claude", "Codex", "OpenCode", "Cursor"])
         // No per-provider section headers: the provider names each row.
         XCTAssertFalse(entries(try fixture()).contains { if case .header = $0 { true } else { false } })
     }
@@ -68,6 +73,21 @@ final class MenuTests: XCTestCase {
         XCTAssertFalse(try row("claude/anese").subtitle?.contains("ago") ?? true)
     }
 
+    func testAuthCheckFailureAndStaleAreDistinct() throws {
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appending(path: "Fixtures/current.json")
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        var accounts = try XCTUnwrap(json["accounts"] as? [[String: Any]])
+        accounts[0]["status"] = "unknown"
+        accounts[0]["error"] = "probe failed"
+        json["accounts"] = accounts
+        let report = try CLI.decode(JSONSerialization.data(withJSONObject: json)).get()
+        let rows = allItems(entries(report))
+        XCTAssertEqual(rows.first { $0.id == "claude/anese" }?.subtitle, "Couldn’t check")
+        XCTAssertEqual(rows.first { $0.id == "cursor/cursor-test-01" }?.subtitle, "Sign-in required")
+        XCTAssertTrue(rows.first { $0.id == "opencode/local-test-01" }?.subtitle?.contains("last checked") == true)
+    }
+
     func testRowsWithASubmenuHaveNoTooltip() throws {
         let rows = items(entries(try fixture())).filter { $0.submenu != nil }
         XCTAssertFalse(rows.isEmpty)
@@ -81,14 +101,77 @@ final class MenuTests: XCTestCase {
         XCTAssertEqual(facts, ["Checked"])
     }
 
-    func testFooterHasRefreshReportFolderAndQuitWithHiddenShortcuts() throws {
-        let footer = items(entries(try fixture())).suffix(6)
-        let visible = footer.filter { !$0.hidden }, hidden = footer.filter(\.hidden)
-        XCTAssertEqual(visible.map(\.title), ["Refresh", "Open Report Folder", "Customise", "Quit Quota"])
-        XCTAssertEqual(visible.map(\.shortcut), [nil, nil, nil, nil])
-        XCTAssertEqual(hidden.map(\.shortcut), ["r", "q"])
-        XCTAssertEqual(hidden.map(\.action), [.refresh, .quit])
-        XCTAssertEqual(visible[1].action, .open(URL(fileURLWithPath: "/tmp/provenant/quota/report.json").deletingLastPathComponent()))
+    func testFooterHasConsoleHintAndSettings() throws {
+        let rows = items(entries(try fixture()))
+        let console = try XCTUnwrap(rows.first { $0.title == "Open Console" })
+        XCTAssertFalse(console.enabled)
+        XCTAssertTrue(console.subtitle?.contains("provenant inbox") == true)
+        let settings = try XCTUnwrap(rows.first { $0.title == "Settings" }?.submenu)
+        XCTAssertTrue(items(settings).contains { $0.title == "Open Report Folder" })
+        XCTAssertTrue(items(settings).contains { $0.action == .quit })
+        XCTAssertEqual(rows.filter(\.hidden).map(\.shortcut), ["r", "q"])
+    }
+
+    func testOverviewLeadsWithThreeRequestsAndUsefulLabels() throws {
+        let json = """
+        {"schema_version":1,"command":"console overview","status":"ok","data":{
+          "needs_you":[
+            {"id":"1","title":"First","project_label":"Project","task_label":null},
+            {"id":"2","title":"Second","project_label":null,"task_label":null},
+            {"id":"3","title":"Third","project_label":"Other","task_label":null},
+            {"id":"4","title":"Fourth","project_label":null,"task_label":null}],
+          "lanes":[{"task_label":"Build menu","project_label":"Project","state":"running","attention":false},
+                   {"task_label":null,"project_label":null,"state":"terminal","attention":true}],
+          "counts":{"needs_you":4,"running":1,"attention":1},
+          "coverage":{"scope":"local","inbox":"partial","runs":"complete","nested_runs":"unavailable"}}}
+        """
+        let overview = try ConsoleOverview.decode(Data(json.utf8))
+        let report = try fixture()
+        let menu = QuotaMenu.entries(report: report, error: nil, updatedAt: nil, refreshing: false, lanes: [],
+                                     stateRoot: URL(fileURLWithPath: "/tmp"), now: report.generatedAt, overview: overview)
+        XCTAssertTrue(menu.contains(.header("At least 4 needs you")))
+        let rows = items(menu)
+        XCTAssertEqual(Array(rows.prefix(3).map(\.title)), ["First", "Second", "Third"])
+        XCTAssertEqual(rows[0].subtitle, "Project")
+        XCTAssertNil(rows[1].subtitle)
+        XCTAssertEqual(rows.first { $0.title == "Build menu" }?.subtitle, "Project · Running")
+        XCTAssertEqual(rows.first { $0.title == "Untitled task" }?.subtitle, "Needs attention")
+        XCTAssertTrue(menu.contains(.note("1 more · use provenant inbox", nil)))
+        XCTAssertTrue(menu.contains(.note("Local inbox: partial", .orange)))
+        XCTAssertLessThan(try XCTUnwrap(rows.firstIndex { $0.title == "First" }),
+                          try XCTUnwrap(rows.firstIndex { $0.title == "Claude" }))
+    }
+
+    func testInboxCountReflectsCoverageAndNull() throws {
+        func heading(_ coverage: String, _ count: Int?) -> String? {
+            let overview = ConsoleOverview(needsYou: [], lanes: [],
+                counts: .init(needsYou: count, running: 0, attention: 0),
+                coverage: .init(scope: "local", inbox: coverage, runs: "complete", nestedRuns: "unavailable"))
+            return QuotaMenu.overviewEntries(overview, error: nil, updatedAt: nil, now: Date()).compactMap {
+                if case .header(let title) = $0 { title } else { nil }
+            }.first
+        }
+        XCTAssertEqual(heading("complete", 0), "0 needs you")
+        XCTAssertEqual(heading("partial", 2), "At least 2 needs you")
+        XCTAssertEqual(heading("partial", nil), "Needs you unavailable")
+        XCTAssertEqual(heading("unavailable", nil), "Needs you unavailable")
+        XCTAssertEqual(heading("incompatible", nil), "Needs you unavailable")
+        // An inconsistent response must never make an unavailable source look complete.
+        XCTAssertEqual(heading("unavailable", 2), "Needs you unavailable")
+        XCTAssertEqual(heading("incompatible", 2), "Needs you unavailable")
+    }
+
+    func testSpentAccountsAreFolded() throws {
+        let rows = items(entries(try fixture()))
+        let spent = try XCTUnwrap(rows.first { $0.title == "Spent accounts" })
+        XCTAssertEqual(spent.value, "1")
+        XCTAssertEqual(items(try XCTUnwrap(spent.submenu)).map(\.title), ["Antigravity"])
+    }
+
+    func testUnavailableOverviewIsNotAnEmptyInbox() throws {
+        let menu = QuotaMenu.overviewEntries(nil, error: "failed", updatedAt: nil, now: Date())
+        XCTAssertEqual(items(menu).first?.title, "Overview unavailable")
+        XCTAssertFalse(menu.contains(.header("0 needs you")))
     }
 
     // MARK: Display settings
@@ -136,7 +219,7 @@ final class MenuTests: XCTestCase {
     func testHiddenAccountsAreLeftOut() throws {
         let report = try configured(rows: ["anese": ["id": "claude-anese", "hidden": true]])
         XCTAssertFalse(titles(report).contains("Claude"))
-        XCTAssertEqual(titles(report).count, 4)
+        XCTAssertEqual(titles(report).count, 3)
     }
 
     func testOrderedAccountsComeFirstAndUnorderedLast() throws {
@@ -144,7 +227,7 @@ final class MenuTests: XCTestCase {
             "cursor-test-01": ["id": "cursor", "hidden": false, "order": 1],
             "anese": ["id": "claude-anese", "hidden": false, "order": 2],
         ])
-        XCTAssertEqual(titles(report), ["Cursor", "Claude", "Codex", "OpenCode", "Antigravity"])
+        XCTAssertEqual(titles(report), ["Cursor", "Claude", "Codex", "OpenCode"])
         // A stable sort: equal orders keep the menu's own order.
         let tied = try configured(rows: [
             "cursor-test-01": ["id": "cursor", "hidden": false, "order": 5],
@@ -183,10 +266,10 @@ final class MenuTests: XCTestCase {
         XCTAssertEqual(MenuLabel(report: chosen, failed: false, now: now).text, "52%")
     }
 
-    func testCustomiseSubmenuRunsTheCliCommands() throws {
+    func testSettingsSubmenuRunsTheCliCommands() throws {
         let report = try configured(global: ["headline": "weekly", "icon": "most_constrained"],
                                     rows: ["anese": ["id": "claude-anese", "name": "Work", "hidden": false]])
-        let customise = try XCTUnwrap(items(entries(report)).first { $0.title == "Customise" }?.submenu)
+        let customise = try XCTUnwrap(items(entries(report)).first { $0.title == "Settings" }?.submenu)
         let rows = items(customise)
         XCTAssertEqual(rows.filter(\.checked).map(\.title), ["Weekly", "Most constrained", "Work"])
         XCTAssertTrue(rows.contains { $0.action == .run(["quota", "display", "--headline", "5h"]) })

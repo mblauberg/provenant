@@ -638,7 +638,7 @@ mod tests {
         let directory = Directory::open_anchor(scratch.path())?;
         assert!(matches!(
             context.write_to(&directory, scratch.path()),
-            Err(RunError::UnsafePath)
+            Err(RunError::UnsafePath { .. })
         ));
         Ok(())
     }

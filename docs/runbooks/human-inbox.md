@@ -83,13 +83,18 @@ an exact 40- or 64-character Git object ID observed at launch.
 Creation validates these claims through Run's host-sealed membership lookup for
 the current project. A lookup result of `mismatch` is refused. The saved
 `work_coverage` reports the lookup result: `verified`, `partial`, `unindexed`,
-`repository_unavailable`, `head_unavailable` or `limit`. It is null when no work
-was supplied. Run-only selection is partial even when indexed facts differ; a capped lookup
-reports limit. Neither result rules out mismatches. Nested, historical and unprepared
+`repository_unavailable`, `head_unavailable` or `limit`. It is omitted when no work
+was supplied. Run-only selection is at best partial. Observed contradictions are refused,
+including run-only and capped lookups. A limit without an observed contradiction
+leaves remaining candidates unknown. Nested, historical and unprepared
 work may be unindexed. Neither case establishes membership or grants authority.
 No Git probes, child-store traversal or later promotion of coverage occurs.
 Item, history and list JSON preserve the links and creation-time coverage;
-callers cannot supply coverage. Task labels remain a future overview concern.
+callers cannot supply coverage. `request.work` always contains claims; only
+`verified` coverage permits a work link or task-label join. Other results must be
+labelled unverified and must not become navigable work. Use the records owner's
+`verified_work()` accessor and the binding [Fabric contract](../specs/fabric.md#human-requests).
+Task labels remain a future overview concern.
 
 ## Consume once
 
@@ -135,15 +140,23 @@ its original timestamp on retries. Neither offering nor mail-read success proves
 model consumption. Deduplicate by answer ID before taking action. An adapter
 failure after an offer commits leaves it eligible to be offered again.
 
-`delivery_capabilities()` publishes the implemented fallback matrix:
+`provenant_cli::hooks::delivery_capabilities()` composes the delivery matrix.
+The records-level matrix supplies Fabric mail fallback:
 
-| Provider | Transport | Live injection |
-|---|---|---|
-| Claude | Fabric mail | Unavailable |
-| Codex | Fabric mail | Unavailable |
-| Cursor | Fabric mail | Unavailable |
-| Agy | Fabric mail | Unavailable |
-| OpenCode | Fabric mail | Unavailable |
+| Provider | Transport | Local offer reader | Live injection |
+|---|---|---|---|
+| Claude | Fabric mail | Library API | Unavailable |
+| Codex | Fabric mail | Unavailable | Unavailable |
+| Cursor | Fabric mail | Unavailable | Unavailable |
+| Agy | Fabric mail | Unavailable | Unavailable |
+| OpenCode | Fabric mail | Unavailable | Unavailable |
+
+The local reader observes up to 16 indexed pending answers within an explicit
+deadline. It creates no state and never records an offer attempt or acknowledges
+an answer. It requires a current explicit save from that working directory.
+Configured Fabric home mappings defer to mail; no remote I/O runs in the reader.
+Internal candidate pages cap at 128 KiB; adapters must fit their final protocol
+output within 8 KiB, skipping oversized candidates without hiding smaller ones.
 
 This slice adds the service API. CLI/MCP syntax is unchanged. Hook composition,
 remote delivery and provider input adapters remain separate work. Both apps may
@@ -164,7 +177,8 @@ answer and delivery, even after the deadline. Expiry does not infer approval.
 No timer or background write runs: expiry is a projection of the saved deadline
 at read time. It does not change revisions, history, update timestamps or
 operation receipts; replay returns the original receipt. History retains the
-saved state. Refresh explicitly to observe elapsed deadlines. Manual closure
+saved state. Bounded overview scans also omit expired candidates; those
+candidates still consume the scan budget and may leave coverage partial. Refresh explicitly to observe elapsed deadlines. Manual closure
 remains available, and a replacement can supersede an unresolved item whose
 deadline has elapsed. Requests without deadlines behave as before.
 

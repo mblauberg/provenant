@@ -8,6 +8,7 @@ mod events;
 mod federation;
 mod human_inbox;
 mod landing;
+mod local_delivery;
 mod messages;
 mod operations;
 mod tasks;
@@ -17,7 +18,9 @@ pub use claims::*;
 pub use db::{Request, RetryWait, Store, ThreadWait};
 pub use events::*;
 pub use federation::*;
-pub use human_inbox::{HumanAcknowledgement, HumanClosure};
+pub use human_inbox::{
+    HumanAcknowledgement, HumanClosure, PendingHumanRequest, PendingHumanRequests,
+};
 pub use landing::*;
 pub use messages::*;
 pub use tasks::*;

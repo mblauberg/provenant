@@ -863,7 +863,6 @@ fn sealed_exit(
     dir: &provenant_os::fs::Directory,
     exit: &ExitObservation,
 ) -> Result<ArtifactRecord> {
-    use provenant_os::fs::FileKind;
     use provenant_supervisor::custody::PublicationState;
     use provenant_supervisor::custody::SettlementEvidence;
     if !matches!(exit.publication, PublicationState::Durable)
@@ -876,8 +875,8 @@ fn sealed_exit(
     let name = OsStr::new(AttemptFile::ProcessExit.name());
     let mut file = dir.open_read(name)?;
     let meta = file.metadata()?;
-    if meta.kind != FileKind::Regular || meta.links != 1 || meta.mode & 0o077 != 0 {
-        return Err(RunError::UnsafePath);
+    if let Some(check) = PathCheck::file(meta) {
+        return Err(RunError::unsafe_entry(dir, name, check));
     }
     let raw = file.read_bounded(RECORD_LIMIT)?;
     let stored: SealedExit = decode(&raw)?;

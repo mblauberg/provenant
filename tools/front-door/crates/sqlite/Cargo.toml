@@ -10,5 +10,18 @@ provenant-os = { workspace = true }
 provenant-core = { workspace = true }
 rusqlite = { workspace = true }
 
-[lints]
-workspace = true
+# Native VFS callbacks live only in read_only_vfs. Mirror workspace lints.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+float_cmp = "deny"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+disallowed_methods = "deny"

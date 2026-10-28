@@ -1,8 +1,8 @@
 use crate::*;
 use provenant_core::{RelativePath, RunId};
-use provenant_os::fs::{Directory, FileKind, PayloadTree, PublishMode};
+use provenant_os::fs::{Directory, FileKind, Metadata, PayloadTree, PublishMode};
 use provenant_records::{CanonicalV1, PathWire};
-use std::{ffi::OsStr, path::Component};
+use std::{ffi::OsStr, io::Read, path::Component};
 
 pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<Directory> {
     if create {
@@ -82,6 +82,78 @@ pub(crate) fn remove_entry_tree(parent: &Directory, name: &OsStr) -> provenant_o
 }
 
 impl RunStore {
+    /// Verify the original artifact before returning bounded, redacted evidence.
+    /// The returned digest identifies the original artifact.
+    pub fn stream_result(
+        &self,
+        id: provenant_core::AttemptId,
+        call: &Request<'_>,
+        required_verdict: Option<&str>,
+    ) -> Result<provenant_records::result_capture::CapturedResult> {
+        use provenant_os::exec::CaptureFilter;
+        use sha2::{Digest as _, Sha256};
+
+        let record = self.record(id, call)?;
+        let artifact = record.result.as_ref().ok_or_else(|| {
+            if matches!(record.state, AttemptState::Terminal { .. }) {
+                RunError::NotFound
+            } else {
+                RunError::Nonterminal
+            }
+        })?;
+        if artifact.bytes > RESULT_LIMIT {
+            return Err(RunError::TooLarge {
+                limit: RESULT_LIMIT,
+            });
+        }
+        let dir = self.attempt_dir(record.run_id, id, false)?;
+        let mut file = dir.open_read(OsStr::new("result.md"))?;
+        let before = file.metadata()?;
+        if let Some(check) = PathCheck::file(before) {
+            return Err(RunError::unsafe_entry(&dir, OsStr::new("result.md"), check));
+        }
+        if before.size != artifact.bytes {
+            return Err(RunError::ArtifactMismatch);
+        }
+        let mut hash = Sha256::new();
+        let mut redactor = provenant_confinement::redact::Redactor::new([])
+            .map_err(|_| RunError::Validation("output redaction failed"))?;
+        let mut capture = provenant_records::result_capture::ResultCapture::new(required_verdict);
+        let mut buffer = [0u8; 8192];
+        let mut total = 0u64;
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            total = total.saturating_add(count as u64);
+            if total > artifact.bytes {
+                return Err(RunError::ArtifactMismatch);
+            }
+            hash.update(&buffer[..count]);
+            let safe = redactor
+                .filter(&buffer[..count])
+                .map_err(|_| RunError::Validation("output redaction failed"))?;
+            capture.push(&safe);
+        }
+        let digest = provenant_records::FileDigest::from_bytes(hash.finalize().into());
+        if total != artifact.bytes
+            || digest != artifact.digest
+            || !before.unchanged(&file.metadata()?)
+        {
+            return Err(RunError::ArtifactMismatch);
+        }
+        let safe = redactor
+            .finish()
+            .map_err(|_| RunError::Validation("output redaction failed"))?;
+        capture.push(&safe);
+        let mut result = capture.finish();
+        result.digest = digest.to_string();
+        result.source_truncated =
+            artifact.bytes > provenant_records::result_capture::ResultCapture::HEAD_BYTES as u64;
+        Ok(result)
+    }
+
     pub(crate) fn run_dir(&self, run: RunId, create: bool) -> Result<Directory> {
         let runs = subdir(&self.root, OsStr::new("runs"), create)?;
         subdir(&runs, OsStr::new(&run.to_string()), create)
@@ -112,13 +184,8 @@ impl RunStore {
             if parts.peek().is_some() {
                 dir = subdir(&dir, name, false)?;
             } else {
-                let m = dir.metadata_at(name, false)?;
-                if m.kind != FileKind::Regular
-                    || m.links != 1
-                    || m.mode & 0o077 != 0
-                    || m.uid != provenant_os::fs::effective_uid()
-                {
-                    return Err(RunError::UnsafePath);
+                if let Some(check) = PathCheck::file(dir.metadata_at(name, false)?) {
+                    return Err(RunError::unsafe_entry(&dir, name, check));
                 }
                 let bytes = dir.read_bounded(name, limit)?;
                 if bytes.len() as u64 != artifact.bytes
@@ -129,32 +196,67 @@ impl RunStore {
                 return Ok(bytes);
             }
         }
-        Err(RunError::UnsafePath)
+        Err(RunError::unsafe_path(
+            path.as_path(),
+            PathCheck::Containment,
+        ))
     }
 }
 pub(crate) fn artifact_path(attempt: provenant_core::AttemptId, name: &str) -> Result<PathWire> {
-    let path = RelativePath::parse(format!("attempts/{attempt}/{name}"))
-        .map_err(|_| RunError::UnsafePath)?;
+    let path = RelativePath::parse(format!("attempts/{attempt}/{name}")).map_err(|_| {
+        RunError::unsafe_path(format!("attempts/{attempt}/{name}"), PathCheck::Containment)
+    })?;
     Ok(PathWire::from_relative(&path)?)
 }
+/// Opens of a sealed name that concurrent replacements may retire in a row.
+const REPLACED_OPENS: usize = 4;
 pub(crate) fn read_sealed(dir: &Directory, name: &str, limit: u64) -> Result<Option<Vec<u8>>> {
-    let mut file = match dir.open_read(OsStr::new(name)) {
-        Ok(file) => file,
-        Err(error) if error.is_not_found() => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    let meta = file.metadata()?;
-    if meta.kind != FileKind::Regular
-        || meta.links != 1
-        || meta.mode & 0o077 != 0
-        || meta.uid != provenant_os::fs::effective_uid()
-    {
-        return Err(RunError::UnsafePath);
+    read_sealed_observing(dir, name, limit, || {})
+}
+/// A checkpoint such as process.json is replaced by rename while readers poll it.
+/// A handle opened just before the rename then reports no links. That is a
+/// lifecycle transition, not a hard-link attack: discard the handle unread and
+/// resolve the name again, so privacy is judged on the entry now published.
+/// A name that vanished meanwhile is absent. `opened` runs after each open.
+pub(crate) fn read_sealed_observing(
+    dir: &Directory,
+    name: &str,
+    limit: u64,
+    mut opened: impl FnMut(),
+) -> Result<Option<Vec<u8>>> {
+    let mut retired = 0;
+    loop {
+        let mut file = match dir.open_read(OsStr::new(name)) {
+            Ok(file) => file,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        opened();
+        let meta = file.metadata()?;
+        let unlinked = meta.links == 0;
+        let judged = Metadata {
+            links: meta.links.max(1),
+            ..meta
+        };
+        if let Some(check) = PathCheck::file(judged) {
+            return Err(RunError::unsafe_entry(dir, OsStr::new(name), check));
+        }
+        if unlinked {
+            retired += 1;
+            if retired >= REPLACED_OPENS {
+                return Err(RunError::unsafe_entry(
+                    dir,
+                    OsStr::new(name),
+                    PathCheck::Links,
+                ));
+            }
+            continue;
+        }
+        let bytes = file.read_bounded(limit)?;
+        file.sync()?;
+        dir.sync()?;
+        return Ok(Some(bytes));
     }
-    let bytes = file.read_bounded(limit)?;
-    file.sync()?;
-    dir.sync()?;
-    Ok(Some(bytes))
 }
 pub(crate) fn seal(dir: &Directory, name: &str, content: &[u8], limit: u64) -> Result<()> {
     if content.len() as u64 > limit {
@@ -169,5 +271,152 @@ pub(crate) fn seal(dir: &Directory, name: &str, content: &[u8], limit: u64) -> R
             Ok(())
         }
         Err(e) => Err(e.into()),
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    fn checkpoint(dir: &Directory, bytes: &[u8]) -> TestResult {
+        dir.atomic_write(
+            OsStr::new("process.json"),
+            ".checkpoint-",
+            bytes,
+            PublishMode::Replace,
+        )?
+        .require_durable()?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_sealed_follows_a_checkpoint_replaced_after_open() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let dir = Directory::open_anchor(temp.path())?;
+        checkpoint(&dir, b"old")?;
+        let mut opens = 0;
+        let read = read_sealed_observing(&dir, "process.json", 1024, || {
+            opens += 1;
+            if opens == 1 {
+                // The guardian's next periodic checkpoint lands between the
+                // reader's open and its fstat, leaving the handle unlinked.
+                checkpoint(&dir, b"new").expect("replace checkpoint");
+            }
+        })?;
+        assert_eq!(read.as_deref(), Some(&b"new"[..]));
+        assert_eq!(opens, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn read_sealed_treats_a_name_retired_after_open_as_absent() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let dir = Directory::open_anchor(temp.path())?;
+        checkpoint(&dir, b"old")?;
+        let read = read_sealed_observing(&dir, "process.json", 1024, || {
+            let _ = dir.unlink(OsStr::new("process.json"));
+        })?;
+        assert_eq!(read, None);
+        Ok(())
+    }
+
+    #[test]
+    fn read_sealed_gives_up_on_a_name_replaced_on_every_open() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let dir = Directory::open_anchor(temp.path())?;
+        checkpoint(&dir, b"old")?;
+        let mut opens = 0;
+        let read = read_sealed_observing(&dir, "process.json", 1024, || {
+            opens += 1;
+            checkpoint(&dir, b"again").expect("replace checkpoint");
+        });
+        assert!(matches!(
+            read,
+            Err(RunError::UnsafePath {
+                check: PathCheck::Links,
+                ..
+            })
+        ));
+        assert_eq!(opens, REPLACED_OPENS);
+        Ok(())
+    }
+
+    #[test]
+    fn read_sealed_still_refuses_unsafe_entries_and_names_them() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let dir = Directory::open_anchor(temp.path())?;
+        checkpoint(&dir, b"x")?;
+        let meta = dir.metadata_at(OsStr::new("process.json"), false)?;
+        assert_eq!(PathCheck::file(meta), None);
+        assert_eq!(
+            PathCheck::file(Metadata { links: 2, ..meta }),
+            Some(PathCheck::Links)
+        );
+        assert_eq!(
+            PathCheck::file(Metadata {
+                uid: meta.uid.wrapping_add(1),
+                ..meta
+            }),
+            Some(PathCheck::Owner)
+        );
+        assert_eq!(
+            PathCheck::file(Metadata {
+                kind: FileKind::Symlink,
+                ..meta
+            }),
+            Some(PathCheck::Symlink)
+        );
+        std::fs::set_permissions(
+            temp.path().join("process.json"),
+            std::fs::Permissions::from_mode(0o644),
+        )?;
+        let error = read_sealed(&dir, "process.json", 1024).expect_err("group-readable");
+        assert!(matches!(
+            error,
+            RunError::UnsafePath {
+                check: PathCheck::Mode,
+                ..
+            }
+        ));
+        assert_eq!(
+            error.to_string(),
+            "run-store path process.json is not private or contained: mode"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unsafe_directory_is_named_relative_to_the_state_root() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let attempt = run.attempts[0].attempt_id;
+        let relative = Path::new("runs")
+            .join(run.run_id.to_string())
+            .join("attempts")
+            .join(attempt.to_string());
+        std::fs::set_permissions(
+            context.state_root.as_path().join(&relative),
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+        let error = store
+            .attempt_dir(run.run_id, attempt, false)
+            .expect_err("group-readable attempt directory");
+        assert!(
+            matches!(
+                &error,
+                RunError::UnsafePath { path, check: PathCheck::Mode } if path == &relative
+            ),
+            "{error:?}"
+        );
+        Ok(())
     }
 }

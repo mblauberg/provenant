@@ -730,7 +730,9 @@ impl RunStore {
                 .find(|fence| fence.scope == Self::scope(record));
             let directory = match fence {
                 Some(fence) => provenant_os::fs::Directory::open_anchor(
-                    fence.reservation.parent().ok_or(RunError::UnsafePath)?,
+                    fence.reservation.parent().ok_or_else(|| {
+                        RunError::unsafe_path(fence.reservation.clone(), PathCheck::Containment)
+                    })?,
                 )?,
                 None => attempt.try_clone()?,
             };
@@ -1523,7 +1525,9 @@ impl RunStore {
         Ok(found)
     }
     fn withdraw_prepared_writer(&self, fence: &WriterFence, call: &Request<'_>) -> Result<bool> {
-        let directory = fence.reservation.parent().ok_or(RunError::UnsafePath)?;
+        let directory = fence.reservation.parent().ok_or_else(|| {
+            RunError::unsafe_path(fence.reservation.clone(), PathCheck::Containment)
+        })?;
         let recovery = custody::acquire_recovery(
             provenant_os::fs::Directory::open_anchor(directory)?,
             provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
