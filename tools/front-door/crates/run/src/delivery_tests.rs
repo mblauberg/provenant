@@ -112,15 +112,19 @@ fn integration_refuses_lane_branch_before_provider_launch()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
     for target in ["lane", "LaNe", "origin/lane", "origin/LaNe"] {
-        fixture.request = HostDeliveryContext::destination(
-            DeliveryMode::Integrate(target.into()),
-            "lane",
-        )?
-        .ok_or("destination")?;
-        assert!(matches!(
-            fixture.prepare(),
-            Err(RunError::DeliveryPrepare { step: "integration target", .. })
-        ), "{target}");
+        fixture.request =
+            HostDeliveryContext::destination(DeliveryMode::Integrate(target.into()), "lane")?
+                .ok_or("destination")?;
+        assert!(
+            matches!(
+                fixture.prepare(),
+                Err(RunError::DeliveryPrepare {
+                    step: "integration target",
+                    ..
+                })
+            ),
+            "{target}"
+        );
     }
     Ok(())
 }
@@ -132,14 +136,23 @@ fn graph_remote_target_refuses_a_lane_tracking_ref()
     for target in ["lane", "LaNe", "origin/lane", "origin/LaNe"] {
         assert!(matches!(
             HostDeliveryContext::validate_integration_target(&fixture.writer.project, target),
-            Err(RunError::DeliveryPrepare { step: "integration target", .. })
+            Err(RunError::DeliveryPrepare {
+                step: "integration target",
+                ..
+            })
         ));
         let base = GitOid::parse("0000000000000000000000000000000000000001")?;
         assert!(matches!(
             HostDeliveryContext::new(fixture.environment.clone()).deliver_graph_pr(
-                &fixture.writer.project, target, base, "Graph"
+                &fixture.writer.project,
+                target,
+                base,
+                "Graph"
             ),
-            Err(RunError::DeliveryPrepare { step: "integration target", .. })
+            Err(RunError::DeliveryPrepare {
+                step: "integration target",
+                ..
+            })
         ));
     }
     Ok(())

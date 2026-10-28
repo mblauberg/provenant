@@ -98,14 +98,20 @@ impl HostDeliveryContext {
         Ok(())
     }
 
-    fn refuse_checked_out_tracking_target(&self, writer: &WriterRequest, target: &str) -> Result<()> {
+    fn refuse_checked_out_tracking_target(
+        &self,
+        writer: &WriterRequest,
+        target: &str,
+    ) -> Result<()> {
         let trees = self.command(
             &writer.worktree,
             "git",
             &["worktree", "list", "--porcelain"],
             Stage::Prepare,
         )?;
-        if trees.lines().filter_map(|line| line.strip_prefix("branch refs/heads/"))
+        if trees
+            .lines()
+            .filter_map(|line| line.strip_prefix("branch refs/heads/"))
             .any(|branch| branch.eq_ignore_ascii_case(target))
         {
             return Err(prepare_error(
@@ -955,7 +961,10 @@ impl HostDeliveryContext {
             let stderr = if output.stderr.filter_failed {
                 "diagnostic redaction failed".into()
             } else {
-                redact_url_userinfo(&String::from_utf8_lossy(&output.stderr.bytes), output.stderr.truncated)
+                redact_url_userinfo(
+                    &String::from_utf8_lossy(&output.stderr.bytes),
+                    output.stderr.truncated,
+                )
             };
             return Err(failure(format!(
                 "{tool} {:?} (timed out: {}): {stderr}",
@@ -1458,7 +1467,9 @@ fn redact_url_userinfo(detail: &str, truncated: bool) -> String {
         result.push_str(&rest[..authority_start]);
         rest = &rest[authority_start..];
         let authority_end = rest
-            .find(|c: char| c.is_whitespace() || matches!(c, '/' | '?' | '#' | '\'' | '"' | '<' | '>'))
+            .find(|c: char| {
+                c.is_whitespace() || matches!(c, '/' | '?' | '#' | '\'' | '"' | '<' | '>')
+            })
             .unwrap_or(rest.len());
         let authority = &rest[..authority_end];
         if let Some(at) = authority.rfind('@') {
