@@ -681,7 +681,7 @@ fn bare_install_detects_clis_and_claude_directories_then_replays_receipt() -> Re
         if dry {
             arguments.push("--dry-run".into());
         }
-        Ok(rig.execute_os(Path::new(env!("CARGO_BIN_EXE_provenant")), &arguments, None)?)
+        rig.execute_os(Path::new(env!("CARGO_BIN_EXE_provenant")), &arguments, None)
     };
     let dry = install(&first, true)?;
     assert_eq!(code(&dry), 0, "{dry:?}");
@@ -747,6 +747,218 @@ fn bare_install_preserves_recorded_custom_paths() -> Result {
     assert_eq!(
         receipt.harness_targets[0].skills_dir.to_path_buf()?,
         rig.root.join("codex/skills")
+    );
+    Ok(())
+}
+#[test]
+fn bootstrap_verifies_release_checksum() -> Result {
+    let mut rig = TestRig::new()?;
+    let fixtures = rig.root.join("downloads");
+    let fake_bin = rig.root.join("fake-bin");
+    let release = rig.root.join("package");
+    fs::create_dir_all(&fixtures)?;
+    fs::create_dir_all(&fake_bin)?;
+    fs::create_dir_all(release.join("bin"))?;
+    fs::create_dir_all(release.join("instructions"))?;
+    fs::write(
+        release.join("instructions/AGENTS.md"),
+        "fixture instructions\n",
+    )?;
+    fs::write(
+        release.join("instructions/HARNESS.md"),
+        "fixture constitution\n",
+    )?;
+    let recorded = rig.root.join("installed-args");
+    let executable = release.join("bin/provenant");
+    fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
+            recorded.display()
+        ),
+    )?;
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))?;
+    let archive = fixtures.join("package.tar.gz");
+    let tar = rig.execute_os(
+        Path::new("/usr/bin/tar"),
+        &[
+            "-czf".into(),
+            archive.clone().into(),
+            "-C".into(),
+            release.into(),
+            ".".into(),
+        ],
+        None,
+    )?;
+    assert_eq!(code(&tar), 0);
+    let hash = rig.execute_os(
+        Path::new("/usr/bin/shasum"),
+        &["-a".into(), "256".into(), archive.clone().into()],
+        None,
+    )?;
+    assert_eq!(code(&hash), 0);
+    let digest = String::from_utf8(hash.stdout.bytes)?
+        .split_whitespace()
+        .next()
+        .ok_or("hash")?
+        .to_owned();
+    fs::write(
+        fixtures.join("checksum"),
+        format!("{digest}  package.tar.gz\n"),
+    )?;
+    let curl = fake_bin.join("curl");
+    fs::write(
+        &curl,
+        format!(
+            r#"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    *) url=$1; shift ;;
+  esac
+done
+case "$url" in
+  *.sha256) cp '{}/checksum' "$out" ;;
+  *.tar.gz) cp '{}/package.tar.gz' "$out" ;;
+  *) exit 99 ;;
+esac
+"#,
+            fixtures.display(),
+            fixtures.display()
+        ),
+    )?;
+    fs::set_permissions(curl, fs::Permissions::from_mode(0o755))?;
+    for (key, value) in &mut rig.env {
+        if key == "PATH" {
+            *value = format!("{}:/usr/bin:/bin", fake_bin.display()).into();
+        }
+    }
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../install.sh")
+        .canonicalize()?;
+    let args = [
+        script.into_os_string(),
+        "--yes".into(),
+        "--tag".into(),
+        "v1.2.3".into(),
+    ];
+    let result = rig.execute_os(Path::new("/bin/sh"), &args, None)?;
+    assert_eq!(
+        code(&result),
+        0,
+        "{}",
+        String::from_utf8_lossy(&result.stderr.bytes)
+    );
+    let installed = fs::read_to_string(&recorded)?;
+    assert!(installed.contains("install\n--source\n"));
+    assert!(!installed.contains("--harness"));
+    fs::remove_file(&recorded)?;
+    rig.env.push(("PROVENANT_INSTALL_TTY".into(), "1".into()));
+    let codex = rig.root.join("codex/AGENTS.md");
+    fs::write(&codex, "keep my instructions\n")?;
+    let guided_args = [args[0].clone(), "--tag".into(), "v1.2.3".into()];
+    let guided = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"n\ny\nn\nn\nn\nappend\nskip\n"),
+    )?;
+    assert_eq!(
+        code(&guided),
+        0,
+        "{}",
+        String::from_utf8_lossy(&guided.stderr.bytes)
+    );
+    assert_eq!(
+        fs::read_to_string(&codex)?,
+        "keep my instructions\n\nfixture instructions\n"
+    );
+    assert!(fs::read(rig.root.join("codex/HARNESS.md"))?.is_empty());
+    assert!(fs::read_to_string(&recorded)?.contains("--harness\ncodex\n"));
+    fs::remove_file(&recorded)?;
+    fs::create_dir_all(rig.state.join("install"))?;
+    fs::write(rig.state.join("install/receipt.json"), "fixture receipt")?;
+    let rerun = rig.execute_os(Path::new("/bin/sh"), &guided_args, None)?;
+    assert_eq!(
+        code(&rerun),
+        0,
+        "{}",
+        String::from_utf8_lossy(&rerun.stderr.bytes)
+    );
+    assert!(rerun.stderr.bytes.is_empty());
+    assert!(!fs::read_to_string(&recorded)?.contains("--harness"));
+    fs::remove_file(&recorded)?;
+    fs::write(
+        fixtures.join("checksum"),
+        format!("{}  package.tar.gz\n", "0".repeat(64)),
+    )?;
+    let result = rig.execute_os(Path::new("/bin/sh"), &args, None)?;
+    assert_eq!(code(&result), 4);
+    assert!(!recorded.exists());
+    Ok(())
+}
+
+#[test]
+fn bootstrap_source_build_requires_consent_and_cleans_its_target() -> Result {
+    let mut rig = TestRig::new()?;
+    let source = rig.root.join("source");
+    fs::create_dir_all(source.join("tools/front-door"))?;
+    fs::write(
+        source.join("tools/front-door/rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.99.1\"\n",
+    )?;
+    let fake_bin = rig.root.join("fake-bin");
+    fs::create_dir(&fake_bin)?;
+    let record = rig.root.join("build-target");
+    for (name, content) in [
+        ("rustup", "#!/bin/sh\n[ \"$1\" != run ]\n".to_owned()),
+        (
+            "cargo",
+            format!(
+                r#"#!/bin/sh
+[ "$CARGO_TARGET_DIR" = "$CARGO_BUILD_BUILD_DIR" ] || exit 90
+printf '%s\n' "$CARGO_TARGET_DIR" > '{}'
+[ "$1" = run ] || exit 0
+while [ "$1" != --out ]; do shift; done
+mkdir -p "$2/bin"
+printf '#!/bin/sh\nexit 0\n' > "$2/bin/provenant"
+chmod +x "$2/bin/provenant"
+"#,
+                record.display()
+            ),
+        ),
+    ] {
+        let file = fake_bin.join(name);
+        fs::write(&file, content)?;
+        fs::set_permissions(file, fs::Permissions::from_mode(0o755))?;
+    }
+    for (key, value) in &mut rig.env {
+        if key == "PATH" {
+            *value = format!("{}:/usr/bin:/bin", fake_bin.display()).into();
+        }
+    }
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
+    let mut args = vec![
+        script.into_os_string(),
+        "--from-source".into(),
+        source.into_os_string(),
+    ];
+    let declined = rig.execute_os(Path::new("/bin/sh"), &args, None)?;
+    assert_eq!(code(&declined), 3);
+    assert!(!record.exists());
+    args.push("--yes".into());
+    let built = rig.execute_os(Path::new("/bin/sh"), &args, None)?;
+    assert_eq!(
+        code(&built),
+        0,
+        "{}",
+        String::from_utf8_lossy(&built.stderr.bytes)
+    );
+    let target = fs::read_to_string(record)?;
+    assert!(
+        !Path::new(target.trim())
+            .parent()
+            .ok_or("target parent")?
+            .exists()
     );
     Ok(())
 }
