@@ -714,6 +714,8 @@ impl RunStore {
             ) && record.exit_evidence.is_none())
         {
             self.settle_recovered(&attempt, proof.into_recovery())?;
+            // Recheck custody after release before removing lock-named payloads.
+            let _ = self.reconcile_terminal_temporary(record, call, _observer)?;
         } else {
             // Lost without exit evidence deliberately preserves scratch.
             self.commit_reboot_lost(&proof, call)?;
@@ -721,7 +723,17 @@ impl RunStore {
                 .release()
                 .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
         }
-        self.set_temporary_retained(record.attempt_id, false, call)?;
+        if matches!(
+            record.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Lost,
+                exit_code: None,
+                ..
+            }
+        ) && record.exit_evidence.is_none()
+        {
+            self.set_temporary_retained(record.attempt_id, false, call)?;
+        }
         Ok(Some(Reconciled::Finished))
     }
     /// Writer exclusion for an attempt, taken without waiting: failure means a

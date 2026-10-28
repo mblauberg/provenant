@@ -257,7 +257,15 @@ impl RunStore {
                     Err(error) => return Err(error.into()),
                 }
                 let age = now.as_micros().saturating_sub(finished_at.as_micros());
-                if age >= DAY_MICROS {
+                let uncertain_loss = matches!(
+                    record.state,
+                    AttemptState::Terminal {
+                        outcome: Outcome::Lost,
+                        exit_code: None,
+                        ..
+                    }
+                ) && record.exit_evidence.is_none();
+                if age >= DAY_MICROS && !uncertain_loss {
                     let temporary = path.with_file_name("tmp");
                     let collection = (|| -> Result<()> {
                         collect_temporary(&attempt, &temporary, dry_run, &mut report)?;
