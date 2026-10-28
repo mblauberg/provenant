@@ -285,6 +285,10 @@ preset = "fan-out"
 width = 3
 ```
 
+A preset run announces every repository preset file used in resolution order,
+including inherited files and files whose values are overridden. Each file is
+listed once; bundled and user layers are excluded.
+
 Slots may name another preset and override its parameters. A named preset uses
 its own route; it does not inherit the parent's `parameters.route`. A file
 overriding an existing preset by the same name should omit `extends` and supply

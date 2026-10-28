@@ -335,3 +335,57 @@ fn malformed_files_are_isolated_and_name_the_path() -> Result<(), Box<dyn std::e
     );
     Ok(())
 }
+
+#[test]
+fn repository_notice_tracks_resolved_layers_in_order() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let user = temp.path().join("user");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&user)?;
+    std::fs::create_dir(&repo)?;
+    std::fs::write(
+        repo.join("base.toml"),
+        "extends = 'single'\n[parameters]\nroute = 'utility'\n",
+    )?;
+    std::fs::write(
+        repo.join("middle.toml"),
+        "extends = 'base'\n[parameters]\nroute = 'senior'\n",
+    )?;
+    std::fs::write(repo.join("top.toml"), "extends = 'middle'\n")?;
+    std::fs::write(user.join("top.toml"), "[parameters]\nroute = 'utility'\n")?;
+    let layers = Layers::load(&user, &repo)?;
+    let files = expand(
+        &layers,
+        "top",
+        "brief",
+        &["parameters.route='senior'".into()],
+    )?
+    .repo_files;
+    assert_eq!(
+        files,
+        ["base", "middle", "top"]
+            .map(|name| repo.join(format!("{name}.toml")).display().to_string())
+    );
+    Ok(())
+}
+
+#[test]
+fn repository_notice_deduplicates_nested_presets() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo)?;
+    std::fs::write(
+        repo.join("chain.toml"),
+        "[slots.first]\npreset = 'single'\n[slots.second]\npreset = 'single'\n",
+    )?;
+    std::fs::write(
+        repo.join("single.toml"),
+        "[parameters]\nroute = 'utility'\n",
+    )?;
+    let layers = Layers::load(&temp.path().join("user"), &repo)?;
+    assert_eq!(
+        expand(&layers, "chain", "brief", &[])?.repo_files,
+        ["chain", "single"].map(|name| repo.join(format!("{name}.toml")).display().to_string())
+    );
+    Ok(())
+}
