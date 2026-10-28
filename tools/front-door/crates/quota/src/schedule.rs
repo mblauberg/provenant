@@ -66,11 +66,15 @@ pub fn next_due(
     let Some(ttl) = interval(policies, &record.account.adapter, trigger, power) else {
         return Ok(None);
     };
+    let manual_auth_retry =
+        trigger == Trigger::Manual && record.last_error == Some(ProbeFailure::Auth);
     let mut due = match record.last_attempt_unix_seconds {
-        Some(at) => add(at, ttl)?,
-        None => i64::MIN,
+        Some(at) if !manual_auth_retry => add(at, ttl)?,
+        _ => i64::MIN,
     };
-    if let Some(backoff) = record.backoff_until_unix_seconds {
+    if let Some(backoff) = record.backoff_until_unix_seconds
+        && !manual_auth_retry
+    {
         due = due.max(backoff);
     }
     if let Some(claim) = &record.claim {
@@ -83,7 +87,7 @@ pub fn backoff(failure: ProbeFailure, failures: u64, retry_after_seconds: Option
         ProbeFailure::Network | ProbeFailure::RateLimited => 120_u64
             .saturating_mul(1_u64 << failures.saturating_sub(1).min(5))
             .min(3600),
-        ProbeFailure::Auth => 3600,
+        ProbeFailure::Auth => 900,
         ProbeFailure::MissingCli | ProbeFailure::Disabled => 86400,
         ProbeFailure::Malformed | ProbeFailure::ProbeDirectory => 120,
     };
@@ -300,7 +304,17 @@ pub fn plan_tick_with_settings(
                 // Skip probing on AuthRequired only when unambiguous (single account),
                 // so multi-account adapters still probe each account to learn its auth state.
                 && !(d.status == QuotaStatus::AuthRequired
-                    && d.accounts.as_ref().is_some_and(|a| a.len() == 1))
+                    && d.accounts.as_ref().is_some_and(|a| a.len() == 1)
+                    && !(tick.trigger == Trigger::Manual
+                        && records.iter().any(|record| {
+                            record.last_error == Some(ProbeFailure::Auth)
+                                && d.accounts.as_ref().is_some_and(|accounts| {
+                                    accounts.iter().any(|account| {
+                                        account.adapter == record.account.adapter
+                                            && account.account_key == record.account.account_key
+                                    })
+                                })
+                        })))
         })
         .filter_map(|d| d.accounts.as_ref())
         .flatten()
@@ -546,11 +560,66 @@ mod tests {
         ));
     }
     #[test]
+    fn manual_tick_reprobes_auth_backoff() {
+        let mut record = AccountRecord::empty(account());
+        record.last_attempt_unix_seconds = Some(100);
+        record.last_error = Some(ProbeFailure::Auth);
+        record.failures = 1;
+        record.backoff_until_unix_seconds = Some(3700);
+        let detection = Detection {
+            adapter: "claude".into(),
+            accounts: Some(vec![record.account.clone()]),
+            status: QuotaStatus::AuthRequired,
+        };
+        let tick = QuotaTick {
+            adapter: None,
+            trigger: Trigger::Manual,
+            power: Power::Ac,
+        };
+        let plan = plan_tick(
+            crate::source::TEST_POLICIES,
+            &[record.clone()],
+            &[detection],
+            &tick,
+            110,
+        )
+        .unwrap();
+        assert_eq!(plan.batches, vec![vec![record.account.clone()]]);
+        assert!(
+            reserve(
+                crate::source::TEST_POLICIES,
+                Some(&record),
+                &record.account,
+                110,
+                "claim",
+                tick.trigger,
+                tick.power
+            )
+            .is_ok()
+        );
+        record.claim = Some(RefreshClaim {
+            token: "active".into(),
+            deadline_unix_seconds: 155,
+        });
+        assert!(
+            reserve(
+                crate::source::TEST_POLICIES,
+                Some(&record),
+                &record.account,
+                110,
+                "claim",
+                tick.trigger,
+                tick.power
+            )
+            .is_err()
+        );
+    }
+    #[test]
     fn backoff_has_bounded_exponential_and_retry_after_floor() {
         assert_eq!(backoff(ProbeFailure::Network, 1, None), 120);
         assert_eq!(backoff(ProbeFailure::RateLimited, 50, None), 3600);
         assert_eq!(backoff(ProbeFailure::Network, 1, Some(999999)), 86400);
-        assert_eq!(backoff(ProbeFailure::Auth, 1, None), 3600);
+        assert_eq!(backoff(ProbeFailure::Auth, 1, None), 900);
         assert_eq!(backoff(ProbeFailure::MissingCli, 1, None), 86400);
         assert_eq!(backoff(ProbeFailure::ProbeDirectory, 1, None), 120);
     }
