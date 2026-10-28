@@ -829,8 +829,14 @@ fn inbox_worker_mutations_are_refused_without_opening_store() {
     assert_eq!(result.unwrap_err().code(), "lane_coordination_refused");
     assert!(!f.root.as_path().join("fabric").exists());
     let result = execute(
-        &f.root, &f.identity, &config, false, &f.clock,
-        ask(RequestKind::Decision, "create"), f.budget(), &f.cancel,
+        &f.root,
+        &f.identity,
+        &config,
+        false,
+        &f.clock,
+        ask(RequestKind::Decision, "create"),
+        f.budget(),
+        &f.cancel,
         &|_, _| panic!("lookup must not run"),
     );
     assert!(result.is_ok());

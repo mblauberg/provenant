@@ -2616,6 +2616,11 @@ fn remote_inbox_owner() -> Result {
     let (status, conflict) = json_command(&rig, &args)?;
     assert_ne!(status, 0);
     assert_eq!(conflict["error"]["code"], "operation_conflict");
+    let mut new_operation = args;
+    new_operation[11] = "another-answer";
+    let (status, conflict) = json_command(&rig, &new_operation)?;
+    assert_ne!(status, 0);
+    assert_eq!(conflict["error"]["code"], "conflict");
     let (_, before_answered) = json_command(&rig, &["inbox", &qualified, "--json"])?;
     let (_, before_open) = json_command(&rig, &["inbox", &format!("{peer}:{other}"), "--json"])?;
     let (status, close) = json_command(
@@ -2663,7 +2668,10 @@ fn remote_inbox_owner() -> Result {
         shown["data"]["item"]["answer"]["source_host"],
         local_identity["data"]["host"]
     );
-    assert_eq!(shown["data"]["item"]["answer"]["actor"], local_identity["data"]["inbox"]["actor"]);
+    assert_eq!(
+        shown["data"]["item"]["answer"]["actor"],
+        local_identity["data"]["inbox"]["actor"]
+    );
     assert_eq!(shown["data"], before_answered["data"]);
     assert_eq!(shown["data"]["item"]["delivery"]["state"], "queued");
     let (status, untouched) = json_command(&rig, &["inbox", &format!("{peer}:{other}"), "--json"])?;
