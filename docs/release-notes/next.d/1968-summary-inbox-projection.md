@@ -1,5 +1,6 @@
 ## Additions
 
+- Keep request presentation state and last-rendered summary revisions per viewer, without resolving or unblocking requests.
 - Include the addressed chair session in local overview inbox rows.
 - Record structured checkpoint summary metadata in chair discovery when available.
 - Publish checkpoint history and discovery metadata for guarded field edits.

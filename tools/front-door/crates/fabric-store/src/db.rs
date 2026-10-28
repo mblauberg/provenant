@@ -27,6 +27,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/009-run-chairs.sql"),
     include_str!("migrations/010-local-delivery.sql"),
     include_str!("migrations/011-queued-delivery.sql"),
+    include_str!("migrations/012-viewer-state.sql"),
 ];
 // Index of 007, which may drop only the always-null legacy members and the
 // traces of an import that brought nothing over. Anything the removed import

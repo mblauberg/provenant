@@ -3,6 +3,104 @@ use provenant_core::{HostId, HumanAnswerId, HumanRequestId, OperationId};
 use provenant_records::inbox::*;
 
 #[test]
+fn viewer_isolation() {
+    let f = Fixture::new();
+    let store = f.open();
+    let request = f.request();
+    let id = HumanRequestId::from_bytes([5; 16]);
+    let original = HumanRequest {
+        schema_version: 1,
+        id,
+        revision: 1,
+        operation_id: OperationId::parse("ask").unwrap(),
+        created_at: f.now(),
+        updated_at: f.now(),
+        project_id: project(),
+        project_key: None,
+        owner_host: HostId::from_bytes([8; 16]),
+        chair_session_id: "chair".into(),
+        chair_actor: actor(2),
+        request: RequestDraft {
+            work: None,
+            kind: RequestKind::Decision,
+            title: "Decision".into(),
+            body: "Choose".into(),
+            blocking: true,
+            options: vec![],
+            recommended_option_id: None,
+            proceeding_with: None,
+        },
+        work_coverage: None,
+        state: RequestState::Open,
+        answer_id: None,
+        closure_reason: None,
+    };
+    store.create_human_request(&original, &request).unwrap();
+    let view = RequestView {
+        seen_revision: Some(1),
+        snoozed_until: Some(f.now()),
+        dismissed: true,
+    };
+    store
+        .set_request_view(project(), "console", id, &view, &request)
+        .unwrap();
+    assert_eq!(
+        store
+            .request_view(project(), "console", id, &request)
+            .unwrap(),
+        view
+    );
+    assert_eq!(
+        store
+            .request_view(project(), "phone", id, &request)
+            .unwrap(),
+        RequestView::default()
+    );
+    assert_eq!(
+        store.human_request(project(), id, &request).unwrap(),
+        original
+    );
+    assert!(
+        store
+            .human_request(project(), id, &request)
+            .unwrap()
+            .request
+            .blocking
+    );
+    store
+        .set_summary_baseline(project(), "console", "chair", 1, &request)
+        .unwrap();
+    store
+        .set_summary_baseline(project(), "phone", "chair", 2, &request)
+        .unwrap();
+    assert_eq!(
+        store
+            .summary_baseline(project(), "console", "chair", &request)
+            .unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        store
+            .summary_baseline(project(), "phone", "chair", &request)
+            .unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        store
+            .summary_baseline(project(), "console", "other", &request)
+            .unwrap(),
+        None
+    );
+    drop(store);
+    assert_eq!(
+        f.open()
+            .request_view(project(), "console", id, &request)
+            .unwrap(),
+        view
+    );
+}
+
+#[test]
 #[allow(clippy::disallowed_methods)] // Native deadlines are part of this store API.
 fn invalid_hook_candidates_do_not_block_valid_answers() {
     use std::time::{Duration, Instant};

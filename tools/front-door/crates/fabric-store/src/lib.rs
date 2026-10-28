@@ -12,6 +12,7 @@ mod local_delivery;
 mod messages;
 mod operations;
 mod tasks;
+mod viewer;
 
 pub use chairs::*;
 pub use claims::*;
@@ -24,6 +25,7 @@ pub use human_inbox::{
 pub use landing::*;
 pub use messages::*;
 pub use tasks::*;
+pub use viewer::*;
 
 use provenant_core::{ActorId, ProjectId, WallTime};
 use provenant_records::{CanonicalV1, Limits};

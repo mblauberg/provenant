@@ -1,5 +1,5 @@
 //! Opt-in chair handoff composition. Hooks read cached quota, never probe it.
-use provenant_cli::{Chair, ChairLog, ChairSummary, Globals};
+use provenant_cli::{Chair, ChairLog, ChairSummary, ChairViewer, Globals};
 use provenant_core::{Clock, Roots};
 use provenant_os::{
     exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
@@ -438,6 +438,7 @@ pub fn run(chair: Chair, globals: &Globals) -> u8 {
     let chair = match chair {
         Chair::Log(log) => return log_run(log, globals),
         Chair::Summary(summary) => return summary_run(summary, globals),
+        Chair::Viewer(viewer) => return viewer_run(viewer, globals),
         chair => chair,
     };
     let Chair::Switch {
@@ -493,6 +494,148 @@ pub fn run(chair: Chair, globals: &Globals) -> u8 {
             "chair switch",
             Outcome::Refused,
             "CHAIR_SWITCH",
+            &error.to_string(),
+            globals,
+        ),
+    }
+}
+fn viewer_run(command: ChairViewer, globals: &Globals) -> u8 {
+    use provenant_fabric_store::{Request, RequestView, Store, ThreadWait};
+    let path = "chair viewer";
+    let read_only = matches!(
+        command,
+        ChairViewer::Request { .. } | ChairViewer::Summary { .. }
+    );
+    let result = (|| -> Result<Value, Error> {
+        if !read_only && provenant_cli::fabric::in_lane() {
+            return Err("viewer state cannot be changed from a lane".into());
+        }
+        let resolved = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::Project,
+            crate::roots::Product::Required,
+        )?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+        let executor = SystemExecutor::new(1)?;
+        let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+        let location = runtime
+            .project_location(
+                &executor,
+                &resolved.project,
+                budget,
+                &provenant_core::CancelToken::new(),
+            )?
+            .location;
+        let project = provenant_config::lookup_project(&resolved.roots, &location)?
+            .ok_or("project not registered")?
+            .project_id();
+        let clock = provenant_os::clock::SystemClock;
+        let cancel = provenant_core::CancelToken::new();
+        let request = Request {
+            clock: &clock,
+            budget: provenant_core::WaitBudget::cli(clock.mono_now(), 5)?,
+            cancel: &cancel,
+            backoff: &ThreadWait,
+        };
+        let store = if read_only {
+            match Store::open_existing(&resolved.roots.state, &request) {
+                Ok(store) => store,
+                Err(provenant_fabric_store::Error::NotFound) => {
+                    if let ChairViewer::Summary {
+                        viewer, session, ..
+                    } = &command
+                    {
+                        if viewer.is_empty()
+                            || viewer.len() > 128
+                            || viewer.chars().any(char::is_control)
+                        {
+                            return Err("invalid viewer".into());
+                        }
+                        HostSessionId::parse(session)?;
+                        return Ok(json!({"baseline": null, "diff": null}));
+                    }
+                    return Err("request unavailable".into());
+                }
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            Store::open(&resolved.roots.state, &request)?
+        };
+        match command {
+            ChairViewer::Request { viewer, id } => {
+                let item = store.human_request(project, id, &request)?;
+                Ok(
+                    json!({"request": item, "view": store.request_view(project, &viewer, id, &request)?}),
+                )
+            }
+            ChairViewer::SetRequest {
+                viewer,
+                id,
+                seen_revision,
+                snoozed_until,
+                dismissed,
+            } => {
+                let value = RequestView {
+                    seen_revision,
+                    snoozed_until: snoozed_until
+                        .map(|s| provenant_core::WallTime::parse(&s))
+                        .transpose()?,
+                    dismissed,
+                };
+                store.set_request_view(project, &viewer, id, &value, &request)?;
+                Ok(json!({"view": value}))
+            }
+            ChairViewer::Summary {
+                viewer,
+                session,
+                to,
+            } => {
+                let baseline = store.summary_baseline(project, &viewer, &session, &request)?;
+                let workflow = SessionStore::new(
+                    resolved.roots.state.clone(),
+                    project,
+                    HostSessionId::parse(&session)?,
+                );
+                Ok(
+                    json!({"baseline": baseline, "diff": workflow.viewer_summary_diff(baseline, to)?}),
+                )
+            }
+            ChairViewer::Rendered {
+                viewer,
+                session,
+                revision,
+            } => {
+                let workflow = SessionStore::new(
+                    resolved.roots.state.clone(),
+                    project,
+                    HostSessionId::parse(&session)?,
+                );
+                let checkpoint = workflow.read()?.ok_or("checkpoint unavailable")?;
+                let summary = provenant_workflow::session::parse_summary(&checkpoint.markdown)?
+                    .ok_or("summary unavailable")?;
+                if revision == 0 || revision > summary.revision {
+                    return Err("rendered revision is outside summary history".into());
+                }
+                store.set_summary_baseline(project, &viewer, &session, revision, &request)?;
+                Ok(json!({"baseline": revision}))
+            }
+        }
+    })();
+    match result {
+        Ok(value) => {
+            let human = serde_json::to_string_pretty(&value).unwrap_or_default();
+            crate::emit(
+                &CommandResult::new(path, Outcome::Ok, value),
+                globals,
+                &human,
+                read_only,
+            )
+        }
+        Err(error) => crate::fail(
+            path,
+            Outcome::Refused,
+            "VIEWER_STATE",
             &error.to_string(),
             globals,
         ),

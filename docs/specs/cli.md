@@ -37,6 +37,11 @@ bounded inbox comparison for the local host, project and chair. Coverage marks
 incomplete scans and unavailable host identity; references attributed elsewhere
 or not accounted for by an incomplete scan are unknown.
 
+`chair viewer` stores local presentation state under an explicit viewer name.
+Request state is separate from resolution and blocking. A rendered summary
+acknowledgement names the revision displayed; comparison uses retained summary
+history and reports a pruned baseline as unavailable.
+
 `console overview` combines local pending request titles and recent lane
 attention in one bounded read. Project labels use the registered Git common
 directory's parent name; unavailable labels and task titles are null. Inbox
