@@ -43,6 +43,9 @@ pub enum Command {
     Help {
         /// Command path to describe, such as `quota tick`
         command: Vec<String>,
+        /// Include advanced commands and options
+        #[arg(long)]
+        all: bool,
     },
     /// Print the resolved release root
     Root,
@@ -69,6 +72,18 @@ pub enum Command {
     /// Inspect and edit model routing
     #[command(subcommand)]
     Route(crate::route::Route),
+    /// Dispatch, wait and read the result
+    Run(Box<Dispatch>),
+    /// Show active and recent lanes, newest first
+    Status(Status),
+    /// Merge on green CI and prune the merged worktree
+    Land {
+        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+        number: u64,
+        /// Pin a reviewed head instead of using the current PR head
+        #[arg(long, hide = true)]
+        head: Option<GitOid>,
+    },
     /// Start a provider lane or manifest of lanes
     Dispatch(Box<Dispatch>),
     /// List lanes or wait on their state
@@ -88,8 +103,10 @@ pub enum Command {
     #[command(subcommand)]
     Telemetry(Telemetry),
     /// Show and refresh provider quota
-    #[command(subcommand)]
-    Quota(crate::quota::Quota),
+    Quota {
+        #[command(subcommand)]
+        command: Option<crate::quota::Quota>,
+    },
     /// Manage the chair session
     #[command(subcommand)]
     Chair(Chair),
@@ -127,22 +144,6 @@ pub enum Pr {
     Watch {
         #[arg(value_parser = clap::value_parser!(u64).range(1..))]
         number: u64,
-    },
-    /// Merge only the specified head after CI has passed
-    Merge {
-        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
-        number: u64,
-        #[arg(long)]
-        head: GitOid,
-    },
-    /// Wait for CI, merge the specified head, then fetch, fast-forward the
-    /// base when clean and remove the merged branch and its worktree
-    Land {
-        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
-        number: u64,
-        /// Full object ID of the head that was reviewed and will be merged
-        #[arg(long)]
-        head: GitOid,
     },
     /// Open a pull request with the repository template filled from receipts
     Open(Box<PrOpen>),
@@ -295,7 +296,7 @@ pub struct Dispatch {
     #[command(flatten)]
     pub input: DispatchInput,
     /// Caller-chosen ID that makes retries idempotent
-    #[arg(long)]
+    #[arg(long, default_value = "", value_parser = operation_id, hide = true, hide_default_value = true)]
     pub operation_id: OperationId,
     /// Fabric task this lane serves
     #[arg(long)]
@@ -343,12 +344,14 @@ pub struct Dispatch {
     /// Git base for attempt history and, with --branch, the peer writer's branch
     #[arg(long)]
     pub base: Option<String>,
-    /// Wait up to this many seconds for the lane to settle
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=14400))]
+    /// Wait for settlement (seconds, or a duration such as 30m)
+    #[arg(long, value_parser = duration_seconds)]
     pub wait: Option<u64>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
+    /// Deferred selection when at least one ID is a unique hexadecimal prefix.
+    pub selection: Option<String>,
     pub run: Option<RunId>,
     pub task: Option<TaskId>,
     pub attempt: Option<provenant_core::AttemptId>,
@@ -356,8 +359,28 @@ pub struct Target {
 impl FromStr for Target {
     type Err = &'static str;
     fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<_> = text.split('/').collect();
+        if parts.len() > 3
+            || parts.iter().any(|part| {
+                !(8..=32).contains(&part.len())
+                    || !part.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        {
+            return Err(
+                "expected 8+ hexadecimal ID characters; run `provenant status --all` to find IDs",
+            );
+        }
+        if parts.iter().any(|part| part.len() < 32) {
+            return Ok(Self {
+                selection: Some(text.to_ascii_lowercase()),
+                run: None,
+                task: None,
+                attempt: None,
+            });
+        }
         if !text.contains('/') {
             return Ok(Self {
+                selection: None,
                 run: None,
                 task: None,
                 attempt: Some(text.parse().map_err(|_| "invalid attempt or run ID")?),
@@ -384,7 +407,12 @@ impl FromStr for Target {
         if parts.next().is_some() {
             return Err("expected RUN[/TASK[/ATTEMPT]]");
         }
-        Ok(Self { run, task, attempt })
+        Ok(Self {
+            selection: None,
+            run,
+            task,
+            attempt,
+        })
     }
 }
 /// One attempt: a bare ID, `RUN/ATTEMPT`, `HOST/ATTEMPT` (a graph
@@ -396,16 +424,25 @@ pub struct Attempt(pub Target);
 impl Attempt {
     /// Whether the target is the two-part `QUALIFIER/ATTEMPT` form.
     pub fn is_qualified_pair(&self) -> bool {
-        self.0.run.is_some() && self.0.task.is_none() && self.0.attempt.is_some()
+        self.0
+            .selection
+            .as_ref()
+            .is_some_and(|selection| selection.split('/').count() == 2)
+            || self.0.run.is_some() && self.0.task.is_none() && self.0.attempt.is_some()
     }
 }
 impl FromStr for Attempt {
     type Err = &'static str;
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         const EXPECTED: &str = "expected ATTEMPT, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT";
+        let target: Target = text.parse().map_err(|_| EXPECTED)?;
+        if target.selection.is_some() {
+            return Ok(Self(target));
+        }
         let mut parts = text.split('/');
         if let (Some(qualifier), Some(attempt), None) = (parts.next(), parts.next(), parts.next()) {
             return Ok(Self(Target {
+                selection: None,
                 run: Some(qualifier.parse().map_err(|_| "invalid run or host ID")?),
                 task: None,
                 attempt: Some(attempt.parse().map_err(|_| "invalid attempt ID")?),
@@ -471,7 +508,7 @@ impl LaneState {
         }
     }
 }
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct Lanes {
     /// Show this attempt ID or RUN[/TASK[/ATTEMPT]] (repeatable)
     #[arg(long, conflicts_with = "all")]
@@ -491,8 +528,8 @@ pub struct Lanes {
     /// Continue from a previous page's cursor
     #[arg(long, conflicts_with_all = ["wait", "watch"])]
     pub cursor: Option<String>,
-    /// Wait up to this many seconds for a lane to settle after the wait starts
-    #[arg(long, conflicts_with = "watch", value_parser = clap::value_parser!(u64).range(1..=14400))]
+    /// Wait for settlement (seconds, or a duration such as 30m)
+    #[arg(long, conflicts_with = "watch", value_parser = duration_seconds)]
     pub wait: Option<u64>,
     /// Wait for any or all lanes to settle
     #[arg(
@@ -564,13 +601,13 @@ pub struct Cancel {
     /// Attempt ID or RUN[/TASK[/ATTEMPT]]
     pub target: Target,
     /// Caller-chosen ID that makes retries idempotent
-    #[arg(long)]
+    #[arg(long, default_value = "", value_parser = operation_id, hide = true, hide_default_value = true)]
     pub operation_id: OperationId,
     /// Reason to record (up to 256 bytes)
     #[arg(long, value_parser = reason)]
     pub reason: Option<String>,
     /// Wait up to this many seconds for cancellation to settle
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=14400))]
+    #[arg(long, value_parser = duration_seconds)]
     pub wait: Option<u64>,
 }
 #[derive(Debug, Args)]
@@ -588,7 +625,7 @@ pub struct Resume {
     /// Attempt ID, or RUN/ATTEMPT or RUN/TASK/ATTEMPT
     pub attempt: Attempt,
     /// Caller-chosen ID that makes retries idempotent
-    #[arg(long)]
+    #[arg(long, default_value = "", value_parser = operation_id, hide = true, hide_default_value = true)]
     pub operation_id: OperationId,
     /// Refuse instead of starting fresh when provider continuation is unavailable
     #[arg(long)]
@@ -596,14 +633,14 @@ pub struct Resume {
     #[command(flatten)]
     pub prompt: Prompt,
     /// Wait up to this many seconds for the attempt to settle
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=14400))]
+    #[arg(long, value_parser = duration_seconds)]
     pub wait: Option<u64>,
 }
 #[derive(Debug, Args)]
 pub struct Reconcile {
     /// Reconcile only this run (repeatable)
     #[arg(long)]
-    pub id: Vec<RunId>,
+    pub id: Vec<Target>,
 }
 #[derive(Debug, Subcommand)]
 pub enum Lane {
@@ -632,7 +669,7 @@ pub struct Trace {
     pub since: Option<jiff::Timestamp>,
     /// Restrict the trace to one run.
     #[arg(long)]
-    pub run: Option<RunId>,
+    pub run: Option<Target>,
     /// Also read the attempts of runs placed on peers, one SSH status read per peer
     #[arg(long)]
     pub peers: bool,
@@ -650,7 +687,7 @@ pub struct Stats {
     pub until: Option<jiff::Timestamp>,
     /// Restrict usage and cost to one run.
     #[arg(long)]
-    pub run_id: Option<RunId>,
+    pub run_id: Option<Target>,
     /// Include per-attempt detail
     #[arg(long, conflicts_with = "usage")]
     pub detail: bool,
@@ -918,4 +955,43 @@ mod target_tests {
             assert!(invalid.parse::<Target>().is_err(), "{invalid}");
         }
     }
+}
+
+/// Generate at parse time so help remains deterministic.
+fn operation_id(value: &str) -> Result<OperationId, String> {
+    if !value.is_empty() {
+        return OperationId::parse(value).map_err(|error| error.to_string());
+    }
+    let bytes = provenant_os::fs::entropy_128().map_err(|error| error.to_string())?;
+    OperationId::parse(&format!(
+        "cli-{}",
+        provenant_core::AttemptId::from_bytes(bytes)
+    ))
+    .map_err(|error| error.to_string())
+}
+fn duration_seconds(value: &str) -> Result<u64, &'static str> {
+    let (digits, multiplier) = match value.as_bytes().last() {
+        Some(b's') => (&value[..value.len() - 1], 1),
+        Some(b'm') => (&value[..value.len() - 1], 60),
+        Some(b'h') => (&value[..value.len() - 1], 3600),
+        _ => (value, 1),
+    };
+    digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(multiplier))
+        .filter(|n| (1..=14400).contains(n))
+        .ok_or("wait must be 1s to 4h; run `provenant help run` for examples")
+}
+#[derive(Debug, Args)]
+pub struct Status {
+    /// Maximum full records per page
+    #[arg(long, hide = true, default_value = "50", value_parser = clap::value_parser!(u64).range(1..=100))]
+    pub limit: u64,
+    /// Continue a full-record page from its cursor
+    #[arg(long, hide = true)]
+    pub cursor: Option<u64>,
+    /// Include full records and older lanes
+    #[arg(long)]
+    pub all: bool,
 }

@@ -1,6 +1,139 @@
 mod support;
 use support::{Result, TestRig, code};
 #[test]
+fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
+    let mut rig = TestRig::new()?;
+    let binary = std::path::Path::new(env!("CARGO_BIN_EXE_provenant"));
+    let mut attempts = Vec::new();
+    for _ in 0..2 {
+        let out = rig.execute(
+            binary,
+            &[
+                "run",
+                "--prompt-stdin",
+                "--model",
+                "codex/id",
+                "--wait",
+                "1s",
+                "--json",
+            ],
+            Some(b"fixture"),
+        )?;
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert_eq!(code(&out), 1, "{value}");
+        assert_eq!(value["command"], "run");
+        assert!(
+            value["data"]["operation_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("cli-"))
+        );
+        attempts.push(
+            value["data"]["lanes"][0]["attempt_id"]
+                .as_str()
+                .ok_or("attempt")?
+                .to_owned(),
+        );
+    }
+    let out = rig.command(&["status", "--json"])?;
+    assert_eq!(code(&out), 0);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let lanes = value["data"]["lanes"].as_array().ok_or("lanes")?;
+    assert_eq!(lanes.len(), 2);
+    assert_eq!(lanes[0]["attempt_id"], attempts[1]);
+    assert_eq!(lanes[1]["attempt_id"], attempts[0]);
+    assert!(lanes[0]["state"].is_object(), "full record: {value}");
+    let human = rig.command(&["status"])?;
+    let text = String::from_utf8(human.stdout.bytes)?;
+    assert_eq!(text.lines().count(), 2, "{text}");
+    assert!(text.starts_with(&attempts[1][..8]), "{text}");
+    let page = rig.command(&["status", "--json", "--limit", "1"])?;
+    let page: serde_json::Value = serde_json::from_slice(&page.stdout.bytes)?;
+    assert_eq!(page["data"]["lanes"].as_array().ok_or("page")?.len(), 1);
+    let cursor = page["data"]["next_cursor"]
+        .as_u64()
+        .ok_or("next cursor")?
+        .to_string();
+    let next = rig.command(&["status", "--json", "--limit", "1", "--cursor", &cursor])?;
+    let next: serde_json::Value = serde_json::from_slice(&next.stdout.bytes)?;
+    assert_eq!(next["data"]["lanes"][0]["attempt_id"], attempts[0]);
+    // Recovery works from a different, non-Git directory without --project.
+    rig.project = rig.root.join("elsewhere");
+    std::fs::create_dir(&rig.project)?;
+    let prompt = rig.command(&["output", &attempts[0][..8], "--part", "prompt", "--json"])?;
+    let prompt: serde_json::Value = serde_json::from_slice(&prompt.stdout.bytes)?;
+    assert_eq!(prompt["data"]["attempt_id"], attempts[0], "{prompt}");
+    let waited = rig.command(&["lanes", "--id", &attempts[0][..8], "--wait", "1s", "--json"])?;
+    let waited: serde_json::Value = serde_json::from_slice(&waited.stdout.bytes)?;
+    assert_eq!(
+        waited["data"]["lanes"][0]["attempt_id"], attempts[0],
+        "{waited}"
+    );
+    let cancelled = rig.command(&["cancel", &attempts[0][..8], "--json"])?;
+    assert_eq!(
+        code(&cancelled),
+        0,
+        "{}",
+        String::from_utf8_lossy(&cancelled.stdout.bytes)
+    );
+    let run = lanes[0]["run_id"].as_str().ok_or("run")?;
+    let reconciled = rig.command(&["reconcile", "--id", &run[..8], "--json"])?;
+    assert_eq!(
+        code(&reconciled),
+        0,
+        "{}",
+        String::from_utf8_lossy(&reconciled.stdout.bytes)
+    );
+    rig.assert_legacy_unchanged()
+}
+#[test]
+fn core_run_creates_a_new_managed_worktree_from_an_absolute_path() -> Result {
+    let rig = TestRig::new()?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let commit = rig.execute(
+        &git,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&commit), 0);
+    let path = rig.project.join(".worktrees/new-lane");
+    let out = rig.execute(
+        std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "run",
+            "--prompt-stdin",
+            "--model",
+            "codex/id",
+            "--worktree",
+            path.to_str().ok_or("path")?,
+            "--base",
+            "HEAD",
+            "--wait",
+            "1s",
+            "--json",
+        ],
+        Some(b"fixture"),
+    )?;
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(code(&out), 1, "{value}");
+    assert_eq!(
+        value["data"]["worktree"]["path"],
+        path.to_string_lossy().as_ref(),
+        "{value}"
+    );
+    assert!(path.join(".git").exists());
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn invalid_json_is_an_envelope() -> Result {
     let rig = TestRig::new()?;
     let invalid = rig.command(&["lanes", "--wait", "0", "--json"])?;

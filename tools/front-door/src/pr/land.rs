@@ -546,13 +546,14 @@ fn delete_branch(
     )
 }
 
-pub(super) fn run(
+pub(crate) fn run(
     number: u64,
-    expected: GitOid,
+    expected: Option<GitOid>,
     globals: &provenant_cli::Globals,
     workers: &dyn WorkerObserver,
 ) -> u8 {
-    const LEAF: &str = "pr land";
+    const LEAF: &str = "land";
+    let mut captured = expected;
     let mut merged = false;
     let mut state = String::new();
     let mut steps = Vec::new();
@@ -560,7 +561,8 @@ pub(super) fn run(
         let project = roots::selected_project(globals.project.as_deref(), true)?;
         let text = number.to_string();
         let current = head(&project, &text)?;
-        if current != expected {
+        captured = Some(current);
+        if expected.is_some_and(|expected| current != expected) {
             return Err(format!("pull request head moved to {current}").into());
         }
         checks(&project, &text, current, true)?;
@@ -573,6 +575,9 @@ pub(super) fn run(
         }
         Ok(())
     })();
+    let expected = captured
+        .map(|head| head.to_string())
+        .unwrap_or_else(|| "unknown".into());
     let refused: Vec<&str> = steps
         .iter()
         .filter(|step| step.status == Status::Refused)
@@ -606,7 +611,9 @@ pub(super) fn run(
                 format!("fail #{number} {expected}: {error}")
             },
             cause: None,
-            repair: None,
+            repair: Some(format!(
+                "run `provenant pr watch {number}`, then `provenant land {number}`"
+            )),
         });
     } else if !refused.is_empty() {
         report.error = Some(CommandError {
@@ -616,7 +623,9 @@ pub(super) fn run(
                 refused.join(", ")
             ),
             cause: None,
-            repair: None,
+            repair: Some(format!(
+                "run `provenant pr watch {number}`, then `provenant land {number}`"
+            )),
         });
     }
     let mut text = if merged {

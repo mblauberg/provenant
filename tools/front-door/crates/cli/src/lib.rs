@@ -51,7 +51,10 @@ pub enum ParseOutcome {
 /// Iterator contains arguments after argv[0]. Only the JSON transport bit is
 /// pre-scanned; Clap owns option values, including recovery for help and errors.
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
-    let args: Vec<_> = args.into_iter().collect();
+    let mut args: Vec<_> = args.into_iter().collect();
+    if args.is_empty() {
+        args.push(OsString::from("help"));
+    }
     let json = args
         .iter()
         .take_while(|arg| *arg != "--")
@@ -64,7 +67,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         Err(error) => {
             // Help/version short-circuit Clap. A passive, tolerant pass recovers
             // only values Clap accepted, without interpreting option text here.
-            let recovered = build_model(true)
+            let recovered = build_model(true, true)
                 .ignore_errors(true)
                 .try_get_matches_from(&argv)
                 .ok();
@@ -84,8 +87,19 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
             return match error.kind() {
                 clap::error::ErrorKind::DisplayHelp => match help_scope(&model, &argv) {
                     Some(scope) => ParseOutcome::Help {
-                        text: error.to_string(),
-                        catalog: scoped(catalog(&model), &scope),
+                        text: if scope == "provenant" {
+                            CORE_HELP.into()
+                        } else {
+                            error.to_string()
+                        },
+                        catalog: scoped(
+                            if scope == "provenant" {
+                                catalog(&model)
+                            } else {
+                                catalog(&expanded_model())
+                            },
+                            &scope,
+                        ),
                         globals,
                     },
                     None => ParseOutcome::Invalid {
@@ -105,7 +119,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
     if let Some(error) = duplicate {
         return ParseOutcome::Invalid { error, globals };
     }
-    let invocation = match RawInvocation::from_arg_matches(&matches) {
+    let mut invocation = match RawInvocation::from_arg_matches(&matches) {
         Ok(value) => Invocation {
             globals,
             command: value.command,
@@ -121,8 +135,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
             };
         }
     };
-    if let Command::Help { command } = &invocation.command {
-        let mut selected = &mut model;
+    if let Command::Help { command, all } = &invocation.command {
+        let mut expanded = expanded_model();
+        let mut selected = &mut expanded;
         let mut scope = String::from("provenant");
         for component in command {
             selected = match selected.find_subcommand_mut(component) {
@@ -139,10 +154,34 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
             };
         }
         return ParseOutcome::Help {
-            text: selected.render_long_help().to_string(),
-            catalog: scoped(catalog(&command_model()), &scope),
+            text: if command.is_empty() && !all {
+                CORE_HELP.into()
+            } else {
+                selected.render_long_help().to_string()
+            },
+            catalog: scoped(
+                catalog(if command.is_empty() && !all {
+                    &model
+                } else {
+                    &expanded
+                }),
+                &scope,
+            ),
             globals: invocation.globals,
         };
+    }
+    if let Command::Run(request) = &mut invocation.command {
+        if request.host.is_none()
+            && let Some(branch) = request.branch.take()
+        {
+            request.worktree_branch = Some(branch);
+        }
+        if request.access.worktree.is_some()
+            || request.worktree_branch.is_some()
+            || request.branch.is_some()
+        {
+            request.access.mode = Mode::WorktreeWrite;
+        }
     }
     match validate(&invocation) {
         Ok(()) => ParseOutcome::Invocation(invocation),
@@ -235,10 +274,33 @@ fn parsed_globals(matches: &clap::ArgMatches, json: bool) -> (Globals, Option<Cl
 }
 
 pub fn command_model() -> clap::Command {
-    build_model(false)
+    build_model(false, false)
 }
-fn build_model(passive: bool) -> clap::Command {
-    fn configure(mut command: clap::Command, globals: &[Arg], parent: &str) -> clap::Command {
+const CORE_HELP: &str = "Provenant: run work, inspect progress and land changes.
+
+  run       Dispatch, wait and read the result
+            provenant run --prompt-file brief.md --route senior
+  status    Active and recent lanes, newest first
+            provenant status
+  land      Merge on green CI and prune the merged worktree
+            provenant land 1947
+  quota     Show provider quota
+            provenant quota
+  install   Install harness integrations
+            provenant install
+  help --all  All commands and advanced options
+              provenant help --all
+";
+fn expanded_model() -> clap::Command {
+    build_model(false, true)
+}
+fn build_model(passive: bool, advanced: bool) -> clap::Command {
+    fn configure(
+        mut command: clap::Command,
+        globals: &[Arg],
+        parent: &str,
+        advanced: bool,
+    ) -> clap::Command {
         let path = if parent.is_empty() {
             command.get_name().to_owned()
         } else {
@@ -261,7 +323,7 @@ fn build_model(passive: bool) -> clap::Command {
         if command.get_name() == "resolve" {
             command = command.group(ArgGroup::new("route_choice").args(["name", "model", "route"]));
         }
-        if command.get_name() == "dispatch" {
+        if matches!(path.as_str(), "provenant dispatch" | "provenant run") {
             command = command
                 .mut_arg("model", |arg| {
                     arg.required_unless_present_any(["route", "manifest"])
@@ -286,6 +348,49 @@ fn build_model(passive: bool) -> clap::Command {
                     ])
                 });
         }
+        if path == "provenant run" {
+            command = command
+                .mut_arg("wait", |arg| arg.default_value("240"))
+                .mut_arg("branch", |arg| {
+                    arg.requires(clap::builder::Resettable::Reset)
+                });
+        }
+        if !advanced
+            && matches!(
+                path.as_str(),
+                "provenant run" | "provenant dispatch" | "provenant resume" | "provenant lanes"
+            )
+        {
+            let visible = [
+                "prompt_file",
+                "prompt_stdin",
+                "route",
+                "model",
+                "worktree",
+                "branch",
+                "base",
+                "wait",
+                "all",
+                "id",
+            ];
+            let advanced: Vec<_> = command
+                .get_arguments()
+                .filter(|arg| !arg.is_positional() && !visible.contains(&arg.get_id().as_str()))
+                .map(|arg| arg.get_id().clone())
+                .collect();
+            for id in advanced {
+                command = command.mut_arg(id, |arg| arg.hide(true));
+            }
+        }
+        if !advanced
+            && parent == "provenant"
+            && !matches!(
+                command.get_name(),
+                "run" | "status" | "land" | "quota" | "install" | "help"
+            )
+        {
+            command = command.hide(true);
+        }
         if path == "provenant worktree remove" {
             command = command.group(
                 ArgGroup::new("remove_scope")
@@ -293,10 +398,19 @@ fn build_model(passive: bool) -> clap::Command {
                     .multiple(false),
             );
         }
+        if advanced {
+            let ids: Vec<_> = command
+                .get_arguments()
+                .map(|arg| arg.get_id().clone())
+                .collect();
+            for id in ids {
+                command = command.mut_arg(id, |arg| arg.hide(false));
+            }
+        }
         let children: Vec<_> = command
             .get_subcommands()
             .cloned()
-            .map(|child| configure(child, globals, &path))
+            .map(|child| configure(child, globals, &path, advanced))
             .collect();
         for child in children {
             let name = child.get_name();
@@ -311,7 +425,7 @@ fn build_model(passive: bool) -> clap::Command {
         .cloned()
         .map(|arg| arg.global(false))
         .collect();
-    let mut command = configure(base, &globals, "")
+    let mut command = configure(base, &globals, "", advanced)
         .arg(
             Arg::new("help")
                 .long("help")
@@ -371,7 +485,7 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             }
             route_valid(&resolve.request)?
         }
-        Command::Dispatch(dispatch) => {
+        Command::Dispatch(dispatch) | Command::Run(dispatch) => {
             let access = &dispatch.access;
             route_valid(&dispatch.route)?;
             if (access.mode == Mode::WorktreeWrite)
@@ -427,7 +541,7 @@ fn help_scope(model: &clap::Command, argv: &[OsString]) -> Option<String> {
         if arg == "--state-dir" || arg == "--project" {
             words.next();
         } else if let Some(child) = arg.to_str().and_then(|name| current.find_subcommand(name)) {
-            if child.is_hide_set() {
+            if child.get_name() == "internal" || (child.is_hide_set() && scope != "provenant") {
                 return None;
             }
             scope = format!("{scope} {}", child.get_name());
@@ -552,8 +666,9 @@ pub fn usage_verbs() -> Vec<String> {
 }
 fn constraints(path: &str) -> Vec<String> {
     let values: &[&str] = match path {
-        "provenant dispatch" => &[
+        "provenant dispatch" | "provenant run" => &[
             "single prompt requires exactly one of model or route",
+            "operation-id is generated when omitted; supply it for planned retries",
             "manifest conflicts with per-task route, access, metadata and provider-timeout",
             "concurrency requires manifest",
             "worktree, or a peer writer's branch, is required with, and only valid for, worktree-write",
@@ -571,6 +686,7 @@ fn constraints(path: &str) -> Vec<String> {
         "provenant resume" => &[
             "target is an ATTEMPT ID, RUN/ATTEMPT or RUN/TASK/ATTEMPT",
             "prompt is at most 1 MiB; expected generation is 0",
+            "operation-id is generated when omitted; supply it for planned retries",
         ],
         "provenant output" => &[
             "target is an ATTEMPT ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT",
@@ -618,6 +734,63 @@ fn requirements(path: &str, name: &str) -> Vec<String> {
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
+    #[test]
+    fn core_path_help_and_defaults() {
+        for words in [&[][..], &["help"][..]] {
+            let ParseOutcome::Help { text, .. } = parsed(words) else {
+                panic!("core help");
+            };
+            for verb in ["run", "status", "land", "quota", "install", "help --all"] {
+                assert!(text.contains(verb), "{text}");
+            }
+            assert!(!text.contains("dispatch"), "{text}");
+            assert!(!text.contains("telemetry"), "{text}");
+        }
+        valid(&[
+            "run",
+            "--prompt-file",
+            "brief.md",
+            "--route",
+            "senior",
+            "--wait",
+            "30m",
+        ]);
+        valid(&[
+            "run",
+            "--prompt-stdin",
+            "--model",
+            "codex/id",
+            "--wait",
+            "3600s",
+        ]);
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--json"]) else {
+            panic!("catalog");
+        };
+        assert!(
+            catalog
+                .commands
+                .iter()
+                .any(|entry| entry.command == "provenant run")
+        );
+        assert!(
+            !catalog
+                .commands
+                .iter()
+                .any(|entry| entry.command == "provenant dispatch")
+        );
+        valid(&["status"]);
+        valid(&["status", "--all", "--json"]);
+        valid(&["land", "1947"]);
+        valid(&["quota"]);
+        valid(&["cancel", &"a".repeat(32)]);
+        valid(&["resume", &"a".repeat(32), "--prompt-stdin"]);
+        assert!(matches!(
+            parsed(&["help", "--all"]),
+            ParseOutcome::Help { .. }
+        ));
+        invalid(&["pr", "merge", "1947", "--head", &"a".repeat(40)]);
+        invalid(&["pr", "land", "1947", "--head", &"a".repeat(40)]);
+    }
     fn parsed(words: &[&str]) -> ParseOutcome {
         parse(words.iter().map(OsString::from))
     }
@@ -1145,7 +1318,7 @@ mod tests {
         invalid(&["lanes", "--limit", "1", "--limit", "2"]);
         invalid(&["--json", "lanes", "--json"]);
         invalid(&["--state-dir", "/a", "lanes", "--state-dir", "/b"]);
-        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--json"]) else {
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--all", "--json"]) else {
             panic!("catalog")
         };
         assert!(

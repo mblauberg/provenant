@@ -1136,6 +1136,224 @@ pub fn submit_with_host(
     Ok((record, started))
 }
 
+/// The main CLI path reuses admission, managed worktrees and bounded waits.
+pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
+    if command.host.is_none()
+        && let Some(path) = &command.access.worktree
+    {
+        let absolute = if path.is_absolute() {
+            path.clone()
+        } else {
+            edge.cwd.join(path)
+        };
+        if !absolute.exists() {
+            let branch = if path.is_absolute() || path.starts_with(".worktrees") {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            } else {
+                path.to_string_lossy().into_owned()
+            };
+            command.worktree_branch = Some(branch);
+            command.access.worktree = None;
+        }
+    }
+    let mut result = dispatch(command, edge);
+    result.result.command = "run".into();
+    if result.result.error.is_some() {
+        return result;
+    }
+    let rows = result.result.data["lanes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut human = format!(
+        "operation {}\n",
+        result.result.data["operation_id"]
+            .as_str()
+            .unwrap_or("unknown")
+    );
+    let timed_out = result.result.status == Status::Timeout;
+    for row in rows {
+        let Some(id) = row["attempt_id"].as_str() else {
+            continue;
+        };
+        let state = row["state"].as_str().unwrap_or("unknown");
+        human.push_str(&format!(
+            "{} {state} {}\n",
+            &id[..id.len().min(8)],
+            row["applied_route"]["model"]
+                .as_str()
+                .unwrap_or("unresolved")
+        ));
+        if let Some(reason) = row["reason"].as_str() {
+            human.push_str(&format!("{}\n", plain_text(reason, usize::MAX)));
+        }
+        if (row["result_path"].is_string()
+            || (row["host"].is_string()
+                && !matches!(state, "queued" | "starting" | "running" | "settling")))
+            && let Ok(attempt) = id.parse()
+        {
+            let tail = output(
+                Output {
+                    attempt,
+                    host: None,
+                    part: Part::Result,
+                    offset: 0,
+                    tail: Some(20),
+                    max_bytes: 8192,
+                    trace: false,
+                },
+                edge,
+            );
+            if tail.result.error.is_none() {
+                human.push_str(&tail.human);
+                if !human.ends_with('\n') {
+                    human.push('\n');
+                }
+                result.result.data["result_tails"][id] = tail.result.data;
+            } else {
+                human.push_str(&format!(
+                    "result unavailable; run `provenant output {id}`\n"
+                ));
+            }
+        }
+        if timed_out {
+            human.push_str(&format!(
+                "attempt {id}\nkeep waiting: provenant lanes --id {id} --wait 4m\n"
+            ));
+        }
+        human.push_str(&format!("more: provenant output {id}\n"));
+        if !timed_out && !matches!(state, "succeeded" | "review_required") {
+            result.result.status = Status::Failed;
+        }
+    }
+    result.human = human;
+    result
+}
+
+/// Active attempts plus the twenty most recent settled lanes.
+pub fn status(command: crate::Status, json_output: bool, edge: &Edge<'_>) -> Reply {
+    reply(
+        "status",
+        (|| {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel)?;
+            let (context, store) = open_read_only(edge, &call)?;
+            let Some(store) = store else {
+                return Ok((json!({"lanes": []}), "no lanes\n".into()));
+            };
+            let session = Session { store, context };
+            let full = command.all || json_output || command.cursor.is_some();
+            let mut query = lane_query(
+                &session,
+                &[],
+                full,
+                if full { command.limit } else { 100 },
+                command.cursor.unwrap_or(0),
+                &call,
+            )?;
+            query.newest_first = true;
+            let mut rows = Vec::new();
+            let mut next = None;
+            if full {
+                let page = session.service().lanes(&query, &call)?;
+                rows = page.lanes;
+                next = page.next;
+            } else {
+                // Active lanes remain visible even when old; settled history
+                // needs only enough pages to find the twenty newest results.
+                loop {
+                    let page = session.service().lanes(&query, &call)?;
+                    rows.extend(page.lanes);
+                    match page.next {
+                        Some(after) => query.after = after,
+                        None => break,
+                    }
+                }
+                query.all = true;
+                query.after = 0;
+                let mut recent = 0;
+                loop {
+                    let page = session.service().lanes(&query, &call)?;
+                    for lane in page.lanes {
+                        if settled(&lane.state).0 {
+                            rows.push(lane);
+                            recent += 1;
+                            if recent == 20 {
+                                break;
+                            }
+                        }
+                    }
+                    if recent == 20 {
+                        break;
+                    }
+                    match page.next {
+                        Some(after) => query.after = after,
+                        None => break,
+                    }
+                }
+                rows.sort_by_key(|lane| std::cmp::Reverse(lane.queued_at));
+            }
+            let waits = session.store.lane_waits(&rows, &call);
+            let now = now(&clock)?;
+            let human = if command.all {
+                render_lanes(&rows, &waits, next, session.context.state_root.as_path()).1
+            } else {
+                compact_status(&rows, &waits, now)
+            };
+            let human = match next {
+                Some(cursor) => format!("{human}more: provenant status --all --cursor {cursor}\n"),
+                None => human,
+            };
+            Ok((json!({"lanes": rows, "next_cursor": next}), human))
+        })(),
+    )
+}
+fn compact_status(rows: &[run::AttemptRecord], waits: &[run::LaneWait], now: WallTime) -> String {
+    if rows.is_empty() {
+        return "no lanes\n".into();
+    }
+    rows.iter()
+        .map(|lane| {
+            let id = lane.attempt_id.to_string();
+            let (state, reason) = state_and_reason(&lane.state);
+            let model = lane
+                .applied_route
+                .as_ref()
+                .and_then(|route| route.model.as_deref())
+                .unwrap_or("unresolved");
+            let age = now
+                .as_micros()
+                .saturating_sub(lane.queued_at.as_micros())
+                .max(0)
+                / 1_000_000;
+            let age = if age < 60 {
+                format!("{age}s")
+            } else if age < 3600 {
+                format!("{}m", age / 60)
+            } else {
+                format!("{}h", age / 3600)
+            };
+            let reason = reason
+                .or_else(|| {
+                    waits
+                        .iter()
+                        .find(|wait| wait.attempt_id == lane.attempt_id)
+                        .map(|wait| wait.waiting_for.clone())
+                })
+                .unwrap_or_default();
+            format!(
+                "{} {state} {} {age} {}\n",
+                &id[..8],
+                plain_text(model, usize::MAX),
+                plain_text(&reason, usize::MAX)
+            )
+        })
+        .collect()
+}
+
 pub fn dispatch(command: Dispatch, edge: &Edge<'_>) -> Reply {
     dispatch_with_workers(
         command,
@@ -1215,7 +1433,20 @@ fn dispatch_with_workers(
             ));
         }
     }
-    reply_waited("dispatch", result)
+    let mut out = reply_waited("dispatch", result);
+    operation_reply(&mut out, &operation_id);
+    out
+}
+fn operation_reply(reply: &mut Reply, id: &OperationId) {
+    if reply.result.data.is_null() {
+        reply.result.data = json!({});
+    }
+    reply.result.data["operation_id"] = json!(id);
+    if let Some(error) = &mut reply.result.error {
+        error.message.push_str(&format!("; operation {id}"));
+    } else {
+        reply.human = format!("operation {id}\n{}", reply.human);
+    }
 }
 fn check_delivery_branch(project: &Path, branch: &str) -> Result<(), Fail> {
     run::HostDeliveryContext::check_delivery_branch(project, branch)
@@ -2135,6 +2366,7 @@ fn report(
     call: &run::Request<'_>,
 ) -> Result<(Value, String, bool), Fail> {
     let target = Target {
+        selection: None,
         run: Some(record.run_id),
         task: None,
         attempt: None,
@@ -2664,11 +2896,19 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
 /// `lanes` with a watch writing each line to `out` and flushing it as it
 /// happens. With `json` each line is a JSON object and the reply is the last.
 pub fn lanes_streaming(
-    command: Lanes,
+    mut command: Lanes,
     edge: &Edge<'_>,
     json: bool,
     out: &mut dyn FnMut(&str) -> Result<(), Fail>,
 ) -> Reply {
+    for target in &mut command.id {
+        if target.selection.is_some() {
+            match targets::resolve(edge, target, true) {
+                Ok(candidate) => *target = candidate.target,
+                Err(fail) => return reply("lanes", Err(fail)),
+            }
+        }
+    }
     reply_waited("lanes", lanes_inner(&command, edge, json, out))
 }
 fn lanes_inner(
@@ -2677,6 +2917,23 @@ fn lanes_inner(
     json: bool,
     emit: Emit<'_>,
 ) -> Result<(Value, String, bool), Fail> {
+    let mut normalised = command.clone();
+    let mut projects = std::collections::BTreeSet::new();
+    for target in &mut normalised.id {
+        let candidate = targets::resolve(edge, target, true)?;
+        if let Some(project) = candidate.project {
+            projects.insert(project);
+        }
+        *target = candidate.target;
+    }
+    if projects.len() > 1 {
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            "targets belong to different projects; run one `provenant lanes --id ID --wait 4m` command per project",
+        ));
+    }
+    let command = &normalised;
     if let Some(host) = command.host.as_deref()
         && !remote::names_local_host(edge, host)?
     {
@@ -2688,7 +2945,12 @@ fn lanes_inner(
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let (context, store) = open_read_only(edge, &call)?;
+    let (context, store) = if let Some(target) = command.id.first() {
+        let (session, _) = targets::read(edge, target, true, &call)?;
+        (session.context, Some(session.store))
+    } else {
+        open_read_only(edge, &call)?
+    };
     let Some(store) = store else {
         let root = execution_state(edge.roots, edge.home, edge.assets)?;
         let (mut data, human) = render_lanes(&[], &[], None, root.as_path());
@@ -2851,13 +3113,6 @@ pub fn attempt_facts(
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let (context, store) = open_read_only(edge, &call)?;
-    let store = store.ok_or(Fail::new(
-        Status::Invalid,
-        ErrorKind::NotFound,
-        "run store is not initialised",
-    ))?;
-    let session = Session { store, context };
     attempts
         .iter()
         .map(|attempt| {
@@ -2868,7 +3123,8 @@ pub fn attempt_facts(
                     "that attempt ran on a peer; its record is read on that host",
                 ));
             }
-            let id = targets::local(&session, &attempt.0, &call)?
+            let (session, selected) = targets::read(edge, &attempt.0, false, &call)?;
+            let id = targets::local(&session, &selected, &call)?
                 .attempt
                 .ok_or(Fail::new(
                     Status::Invalid,
@@ -2935,6 +3191,14 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         Some(host) => Some(remote::site(edge, host)?),
         None => None,
     };
+    if command.attempt.0.selection.is_some() {
+        command.attempt.0 = match site {
+            Some(remote::Site::Peer(host)) => {
+                remote::resolve_prefix(edge, host, &command.attempt.0)?
+            }
+            _ => targets::resolve(edge, &command.attempt.0, false)?.target,
+        };
+    }
     if let Some(remote::Site::Peer(host)) = site {
         return remote::output_on_peer(&command, host, edge);
     }
@@ -2959,14 +3223,7 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let (context, store) = open_read_only(edge, &call)?;
-    let store = store.ok_or(Fail::new(
-        Status::Invalid,
-        ErrorKind::NotFound,
-        "run store is not initialised",
-    ))?;
-    let session = Session { store, context };
-    let target = command.attempt.0;
+    let (session, target) = targets::read(edge, &command.attempt.0, false, &call)?;
     let id = target.attempt.ok_or(Fail::new(
         Status::Invalid,
         ErrorKind::Invalid,
@@ -3175,6 +3432,18 @@ pub fn align_utf8_tail(chunk: &mut run::OutputChunk) {
 /// Cancel every attempt the target names. Queued work ends at once; started
 /// work gets a stop request its guardian acts on. Requested is not exit.
 pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
+    let id = command.operation_id.clone();
+    let mut out = cancel_inner(command, edge);
+    operation_reply(&mut out, &id);
+    out
+}
+fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
+    if command.target.selection.is_some() {
+        match targets::resolve(edge, &command.target, true) {
+            Ok(candidate) => command.target = candidate.target,
+            Err(fail) => return reply("cancel", Err(fail)),
+        }
+    }
     match targets::placement(edge, &command.target, true) {
         Ok(Some(placement)) => {
             if crate::fabric::in_lane() {
@@ -3199,9 +3468,9 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
-            let session = open(edge, &call)?;
+            let (session, selected_target) = targets::open(edge, &command.target, true, &call)?;
             let reason = command.reason.as_deref().unwrap_or("cancelled by request");
-            let targets = [command.target];
+            let targets = [selected_target];
             let selected = select(&session, &targets, None, session.context.actor_id, &call)?;
             if selected.is_empty() {
                 return Err(Fail::new(
@@ -3252,11 +3521,12 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
                 // A request has no actor once the guardian is gone, so recover
                 // the run now: ending proven orphans and settling is the same
                 // path `reconcile` takes, and a live guardian is left alone.
+                let scoped_cwd = targets::cwd(edge, session.context.project_id)?;
                 let registry = Registry {
                     roots: Some(edge.roots),
                     home: Some(edge.home),
                     assets: Some(edge.assets),
-                    cwd: Some(edge.cwd),
+                    cwd: Some(&scoped_cwd),
                     state_root: Some(session.context.state_root.as_path()),
                     project_id: Some(session.context.project_id),
                     host: None,
@@ -3329,6 +3599,12 @@ fn reconcile_summary(state: &run::Reconciled) -> String {
 /// Continue one terminal attempt with new input as a new single-task run on
 /// the same route and access.
 pub fn resume(command: Resume, edge: &Edge<'_>) -> Reply {
+    let id = command.operation_id.clone();
+    let mut out = resume_reply(command, edge);
+    operation_reply(&mut out, &id);
+    out
+}
+fn resume_reply(command: Resume, edge: &Edge<'_>) -> Reply {
     reply_waited("resume", resume_inner(command, edge))
 }
 pub fn lane(command: crate::Lane, edge: &Edge<'_>) -> Reply {
@@ -3346,7 +3622,8 @@ pub fn lane(command: crate::Lane, edge: &Edge<'_>) -> Reply {
             let clock = SystemClock;
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
-            let session = open(edge, &call)?;
+            let (session, selected) = targets::open(edge, &attempt.0, false, &call)?;
+            let attempt = crate::Attempt(selected);
             let id = attempt.0.attempt.ok_or_else(|| {
                 Fail::new(Status::Invalid, ErrorKind::Invalid, "attempt required")
             })?;
@@ -3857,7 +4134,11 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let mut target = command.attempt.0.clone();
+    let mut target = if command.attempt.0.selection.is_some() {
+        targets::resolve(edge, &command.attempt.0, false)?.target
+    } else {
+        command.attempt.0.clone()
+    };
     if command.attempt.is_qualified_pair()
         && target
             .run
@@ -3875,7 +4156,8 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool
         Some(path) => read_bounded(path)?,
         None => read_text(std::io::stdin().lock())?,
     };
-    let session = open(edge, &call)?;
+    let (session, target) = targets::open(edge, &target, false, &call)?;
+    let prior = target.attempt.unwrap_or(prior);
     let record = session.service().status(prior, &call)?;
     if target.run.is_some_and(|run| record.run_id != run)
         || target.task.is_some_and(|task| task != record.task_id)
@@ -3888,9 +4170,14 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool
     }
     // The CLI continues an attempt once; a second continuation of the same
     // attempt is a conflict, not a new branch.
+    let scoped_cwd = targets::cwd(edge, session.context.project_id)?;
+    let scoped_edge = Edge {
+        cwd: &scoped_cwd,
+        ..*edge
+    };
     let (run, started) = continue_attempt_mode(
         &session,
-        edge,
+        &scoped_edge,
         prior,
         command.operation_id,
         prompt,
@@ -3898,7 +4185,8 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool
         &call,
         !command.no_fallback,
     )?;
-    let (mut data, human, timed_out) = report(&session, &run, &started, command.wait, edge, &call)?;
+    let (mut data, human, timed_out) =
+        report(&session, &run, &started, command.wait, &scoped_edge, &call)?;
     data["resumed_from"] = json!(prior);
     let continuation = session.store.request(run.run_id, &call)?.fresh_continuation;
     data["continuation"] = json!(if continuation.is_some() {
@@ -3929,29 +4217,46 @@ fn reconcile_inner(
 ) -> Result<(Value, String), Fail> {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let session = open(edge, &request(&clock, &cancel)?)?;
     let (runs, truncated) = if command.id.is_empty() {
+        let session = open(edge, &request(&clock, &cancel)?)?;
         let mut runs = session
             .store
             .open_runs(SCAN + 1, &request(&clock, &cancel)?)?;
         let truncated = runs.len() as u64 > SCAN;
         runs.truncate(SCAN as usize);
-        (runs, truncated)
+        (
+            runs.into_iter()
+                .map(|run| Target {
+                    selection: None,
+                    run: Some(run),
+                    task: None,
+                    attempt: None,
+                })
+                .collect(),
+            truncated,
+        )
     } else {
         (command.id, false)
     };
-    let registry = Registry {
-        roots: Some(edge.roots),
-        home: Some(edge.home),
-        assets: Some(edge.assets),
-        cwd: Some(edge.cwd),
-        state_root: Some(session.context.state_root.as_path()),
-        project_id: Some(session.context.project_id),
-        host: None,
-    };
     let mut rows = Vec::new();
     let mut human = String::new();
-    for run in runs {
+    for target in runs {
+        let (session, selected) = targets::open(edge, &target, true, &request(&clock, &cancel)?)?;
+        let run = selected.run.ok_or(run::RunError::NotFound)?;
+        let scoped_cwd = targets::cwd(edge, session.context.project_id)?;
+        let scoped_edge = Edge {
+            cwd: &scoped_cwd,
+            ..*edge
+        };
+        let registry = Registry {
+            roots: Some(edge.roots),
+            home: Some(edge.home),
+            assets: Some(edge.assets),
+            cwd: Some(&scoped_cwd),
+            state_root: Some(session.context.state_root.as_path()),
+            project_id: Some(session.context.project_id),
+            host: None,
+        };
         // Each step gets a fresh budget; recovery waits on custody locks.
         let found = match request(&clock, &cancel)
             .and_then(|call| Ok(session.service().reconcile(run, &registry, &call)?))
@@ -3965,7 +4270,7 @@ fn reconcile_inner(
             }
         };
         let started = if found.iter().any(|(_, r)| *r == run::Reconciled::Queued) {
-            request(&clock, &cancel).and_then(|call| launch(&session, run, edge, &call))
+            request(&clock, &cancel).and_then(|call| launch(&session, run, &scoped_edge, &call))
         } else {
             Ok(Vec::new())
         };
@@ -4010,7 +4315,9 @@ fn reconcile_inner(
             "more than {SCAN} open runs; name the rest with --id\n"
         ));
     }
-    let reservations = session.store.writer_fence_listing()?;
+    let reservations = open(edge, &request(&clock, &cancel)?)?
+        .store
+        .writer_fence_listing()?;
     *fenced |= !reservations.issues.is_empty();
     for issue in &reservations.issues {
         human.push_str(&format!(
@@ -4055,6 +4362,11 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
     let (context, store) = open_read_only(edge, &call)?;
+    let selected_run = command
+        .run_id
+        .as_ref()
+        .map(|target| targets::run_id(edge, target))
+        .transpose()?;
     let window = provenant_telemetry::Window {
         since: instant(command.since)?,
         until: instant(command.until)?,
@@ -4066,7 +4378,7 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
             store
                 .attempts(
                     run::AttemptFilter {
-                        run_id: command.run_id,
+                        run_id: selected_run,
                         task_id: None,
                     },
                     &call,
@@ -4101,13 +4413,18 @@ fn trace_inner(command: Trace, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
+    let selected_run = command
+        .run
+        .as_ref()
+        .map(|target| targets::run_id(edge, target))
+        .transpose()?;
     let (_, store) = open_read_only(edge, &call)?;
     let mut facts = store
         .map(|store| {
             store
                 .attempts(
                     run::AttemptFilter {
-                        run_id: command.run,
+                        run_id: selected_run,
                         task_id: None,
                     },
                     &call,
@@ -4119,7 +4436,7 @@ fn trace_inner(command: Trace, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let mut hosts = provenant_telemetry::Hosts::default();
     let mut peers = Vec::new();
     if command.peers
-        && let Some(found) = remote::peer_facts(edge, command.run)?
+        && let Some(found) = remote::peer_facts(edge, selected_run)?
     {
         facts.extend(found.facts);
         hosts.local = Some(found.local);
@@ -4998,7 +5315,7 @@ mod tests {
         Ok(())
     }
 
-    fn trace_run(
+    pub(super) fn trace_run(
         n: u8,
         parent_attempt: AttemptId,
         created_at: WallTime,

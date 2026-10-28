@@ -92,6 +92,7 @@ fn plan(
             .iter()
             .map(|id| {
                 Attempt(Target {
+                    selection: None,
                     run: None,
                     task: None,
                     attempt: Some(*id),
