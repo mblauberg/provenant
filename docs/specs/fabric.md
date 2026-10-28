@@ -206,9 +206,12 @@ returns a receipt and continuation instructions. Run listings are bounded and
 newest first, and compact status, wait and cancel responses can request detail.
 Run operation IDs are generated when omitted and returned for retries;
 explicit IDs preserve planned retry identity.
-Chair log appends generate an operation ID when omitted. Retry with the same
-ID and content; generated IDs also preserve the original issuance time. When
-supplying your own ID, supply the original `issued_at` as well.
+Chair log appends generate an operation ID when omitted and return it in the
+receipt; a generated ID also encodes the original issuance time. A generated ID
+protects only retries made after that receipt arrives. To survive a lost
+response, choose the ID before the first call and send the same ID, content and
+`issued_at` on every retry. Summary updates use revision compare-and-set and
+have no operation ID yet (#2149).
 
 ### Strict tool input
 
