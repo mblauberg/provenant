@@ -38,6 +38,16 @@ pub struct Uninstall {
     pub harness: Vec<Harness>,
 }
 
+#[derive(Debug, clap::Args)]
+pub struct Upgrade {
+    /// Build this checkout instead of downloading the latest release
+    #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(crate::grammar::absolute))]
+    pub from_source: Option<PathBuf>,
+    /// Upgrade this host and every registered Fabric peer
+    #[arg(long, value_parser = ["all"], default_value = "all")]
+    pub hosts: String,
+}
+
 pub(crate) fn harness_parser() -> impl clap::builder::TypedValueParser<Value = Harness> {
     clap::builder::PossibleValuesParser::new(
         provenant_records::ADAPTER_SPECS

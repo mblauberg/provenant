@@ -46,7 +46,23 @@ if ! "$yes" && [ ! -f "$receipt" ]; then
 fi
 umask 077
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/provenant-install.XXXXXX")
-trap 'rm -rf "$scratch"' 0
+instruction_count=0
+instructions_committed=false
+cleanup() {
+    if ! "$instructions_committed"; then
+        while [ "$instruction_count" -gt 0 ]; do
+            record=$scratch/instructions/$instruction_count
+            file=$(cat "$record/path")
+            rm -f "$file"
+            if [ -e "$record/original" ] || [ -L "$record/original" ]; then
+                cp -Pp "$record/original" "$file"
+            fi
+            instruction_count=$((instruction_count - 1))
+        done
+    fi
+    rm -rf "$scratch"
+}
+trap cleanup 0
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 release=$scratch/release
@@ -102,7 +118,7 @@ else
     actual=${actual%% *}
     [ "$actual" = "$expected" ] || die 4 'Release checksum mismatch'
     mkdir "$release"
-    tar -xzf "$scratch/package.tar.gz" -C "$release" || die 4 'Cannot unpack release'
+    tar -xzpf "$scratch/package.tar.gz" -C "$release" || die 4 'Cannot unpack release'
 fi
 [ -x "$release/bin/provenant" ] || die 4 'Release binary is missing'
 
@@ -112,6 +128,13 @@ if [ -n "$bin_dir" ]; then set -- "$@" --bin-dir "$bin_dir"; fi
 providers=
 register=false
 hooks=off
+backup_instruction() {
+    record=$scratch/instructions/$((instruction_count + 1))
+    mkdir -p "$record"
+    printf '%s' "$file" > "$record/path"
+    if [ -e "$file" ] || [ -L "$file" ]; then cp -Pp "$file" "$record/original"; fi
+    instruction_count=$((instruction_count + 1))
+}
 instruction() {
     file=$1
     asset=$2
@@ -121,16 +144,20 @@ instruction() {
         case "$answer" in
             replace|r)
                 if [ -d "$file" ] && [ ! -L "$file" ]; then die 2 "Instruction path is a directory: $file"; fi
+                backup_instruction
                 rm -f "$file" # The install below creates the managed link.
                 return 0 ;;
             append|a)
                 [ ! -L "$file" ] || die 2 "Cannot append to a symlink: $file"
+                [ ! -d "$file" ] || die 2 "Instruction path is a directory: $file"
+                backup_instruction
                 mkdir -p "$(dirname -- "$file")"
                 printf '\n' >> "$file"
                 cat "$asset" >> "$file"
                 return 0 ;;
             skip|s)
                 if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+                    backup_instruction
                     mkdir -p "$(dirname -- "$file")"
                     : > "$file"
                 fi
@@ -164,7 +191,11 @@ if "$guided"; then
         case "$provider" in
             claude)
                 instructions "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" CLAUDE.md
-                for directory in "$HOME"/.claude-*; do [ ! -d "$directory" ] || instructions "$directory" CLAUDE.md; done ;;
+                for directory in "$HOME"/.claude-*; do
+                    if [ -d "$directory" ] && [ "$directory" != "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ]; then
+                        instructions "$directory" CLAUDE.md
+                    fi
+                done ;;
             codex) instructions "${CODEX_HOME:-$HOME/.codex}" AGENTS.md ;;
             agy) instructions "$HOME/.gemini" GEMINI.md ;;
             opencode) instructions "$HOME/.config/opencode" AGENTS.md ;;
@@ -186,13 +217,19 @@ if "$guided"; then
     case " $providers " in *' claude '*)
         for directory in "$HOME"/.claude-*; do
             [ -d "$directory" ] || continue
-            set -- --state-dir "$state" install --source "$release" --harness claude --hooks "$hooks"
-            if [ -n "$bin_dir" ]; then set -- "$@" --bin-dir "$bin_dir"; fi
-            CLAUDE_CONFIG_DIR=$directory "$release/bin/provenant" "$@"
-            if "$register"; then
-                label=${directory##*/.claude-}
-                "$release/bin/provenant" --state-dir "$state" accounts register "$label" --adapter claude --directory "$directory"
+            if [ "$directory" != "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ]; then
+                set -- --state-dir "$state" install --source "$release" --harness claude --hooks "$hooks"
+                if [ -n "$bin_dir" ]; then set -- "$@" --bin-dir "$bin_dir"; fi
+                CLAUDE_CONFIG_DIR=$directory "$release/bin/provenant" "$@"
             fi
         done ;;
     esac
+fi
+instructions_committed=true
+if "$register"; then
+    for directory in "$HOME"/.claude-*; do
+        [ -d "$directory" ] || continue
+        label=${directory##*/.claude-}
+        "$release/bin/provenant" --state-dir "$state" accounts register "$label" --adapter claude --directory "$directory"
+    done
 fi

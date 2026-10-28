@@ -62,6 +62,8 @@ pub enum Command {
     Fabric(crate::fabric::Fabric),
     /// Install the release for chosen harnesses
     Install(Install),
+    /// Upgrade the recorded installation on this host and Fabric peers
+    Upgrade(Upgrade),
     /// Remove installed harness integrations
     Uninstall(Uninstall),
     /// Inspect and edit model routing
@@ -235,7 +237,7 @@ pub enum Config {
     },
 }
 
-pub use crate::install::{Install, Uninstall};
+pub use crate::install::{Install, Uninstall, Upgrade};
 pub use crate::route::{Model, RouteRequest};
 #[derive(Debug, Args)]
 pub struct Adapter {

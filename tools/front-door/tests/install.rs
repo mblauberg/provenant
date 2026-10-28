@@ -88,7 +88,8 @@ fn staged_named(rig: &TestRig, name: &str, identity: &[u8]) -> Result<PathBuf> {
     // A fake release executable, never a provider or a real harness. Its two
     // stdout envelopes exercise the actual bounded production smoke path.
     let script = format!(
-        "#!/bin/sh\ncase \"$1\" in\n--version) printf '%s\\n' '{version_json}' ;;\n--help|help) printf '%s\\n' '{help_json}' ;;\n*) exit 2 ;;\nesac\n"
+        "#!/bin/sh\ncase \"$1\" in\n--version) printf '%s\\n' '{version_json}' ;;\n--help|help) printf '%s\\n' '{help_json}' ;;\n--state-dir) exec '{}' \"$@\" ;;\n*) exit 2 ;;\nesac\n",
+        env!("CARGO_BIN_EXE_provenant").replace('\'', "'\\''")
     );
     let binary = stage.join("bin/provenant");
     fs::write(&binary, script)?;
@@ -678,6 +679,7 @@ fn bare_install_detects_clis_and_claude_directories_then_replays_receipt() -> Re
             stage.into(),
             "--json".into(),
         ];
+        arguments.extend(["--hooks".into(), "on".into()]);
         if dry {
             arguments.push("--dry-run".into());
         }
@@ -857,6 +859,13 @@ esac
     let codex = rig.root.join("codex/AGENTS.md");
     fs::write(&codex, "keep my instructions\n")?;
     let guided_args = [args[0].clone(), "--tag".into(), "v1.2.3".into()];
+    let cancelled = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"n\ny\nn\nn\nn\nreplace\n"),
+    )?;
+    assert_eq!(code(&cancelled), 2);
+    assert_eq!(fs::read_to_string(&codex)?, "keep my instructions\n");
     let guided = rig.execute_os(
         Path::new("/bin/sh"),
         &guided_args,
@@ -886,6 +895,28 @@ esac
     );
     assert!(rerun.stderr.bytes.is_empty());
     assert!(!fs::read_to_string(&recorded)?.contains("--harness"));
+    fs::remove_file(&recorded)?;
+    fs::remove_file(rig.state.join("install/receipt.json"))?;
+    let account = rig.home.join(".claude-work");
+    fs::create_dir(&account)?;
+    for (key, value) in &mut rig.env {
+        if key == "CLAUDE_CONFIG_DIR" {
+            *value = account.clone().into_os_string();
+        }
+    }
+    let account_setup = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"y\nn\nn\nn\nn\nskip\nskip\nn\nn\n"),
+    )?;
+    assert_eq!(
+        code(&account_setup),
+        0,
+        "{}",
+        String::from_utf8_lossy(&account_setup.stderr.bytes)
+    );
+    let prompts = String::from_utf8(account_setup.stderr.bytes)?;
+    assert_eq!(prompts.matches("CLAUDE.md: replace").count(), 1);
     fs::remove_file(&recorded)?;
     fs::write(
         fixtures.join("checksum"),
@@ -960,5 +991,259 @@ chmod +x "$2/bin/provenant"
             .ok_or("target parent")?
             .exists()
     );
+    Ok(())
+}
+
+#[test]
+fn upgrade_requires_a_receipt_before_download_or_build() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    let result = rig.command(&["upgrade", "--json"])?;
+    let value: serde_json::Value = serde_json::from_slice(&result.stdout.bytes)?;
+    assert_eq!(code(&result), 2, "{value}");
+    assert_eq!(value["command"], "upgrade");
+    assert_eq!(value["error"]["code"], "UPGRADE_RECEIPT");
+    assert!(!rig.state.exists());
+    Ok(())
+}
+
+#[test]
+fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Result {
+    let mut rig = TestRig::new()?;
+    let first = staged(&rig)?;
+    let second = staged_named(&rig, "next-release", b"upgraded release")?;
+    let installed = rig.command(&[
+        "install",
+        "--source",
+        first.to_str().ok_or("stage")?,
+        "--harness",
+        "codex",
+        "--json",
+    ])?;
+    assert_eq!(code(&installed), 0);
+    let archive = rig.root.join("package.tar.gz");
+    let tar = rig.execute_os(
+        Path::new("/usr/bin/tar"),
+        &[
+            "-czf".into(),
+            archive.clone().into(),
+            "-C".into(),
+            second.into(),
+            ".".into(),
+        ],
+        None,
+    )?;
+    assert_eq!(code(&tar), 0);
+    let hash = rig.execute_os(
+        Path::new("/usr/bin/shasum"),
+        &["-a".into(), "256".into(), archive.clone().into()],
+        None,
+    )?;
+    let digest = String::from_utf8(hash.stdout.bytes)?
+        .split_whitespace()
+        .next()
+        .ok_or("digest")?
+        .to_owned();
+    let fake_bin = rig.root.join("fake-bin");
+    fs::create_dir(&fake_bin)?;
+    let ssh = fake_bin.join("ssh");
+    let ssh_args = rig.root.join("ssh-args");
+    fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat >/dev/null\nexit 17\n",
+            ssh_args.display()
+        ),
+    )?;
+    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755))?;
+    fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[domains.fabric]\nssh_executable={:?}\n[domains.fabric.peers.worker]\nhost='{}'\ndestination='worker.example'\n",
+            ssh.to_str().ok_or("ssh")?,
+            provenant_core::HostId::from_bytes([1; 16])
+        ),
+    )?;
+    let curl = fake_bin.join("curl");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../install.sh")
+        .canonicalize()?;
+    fs::write(
+        &curl,
+        format!(
+            r#"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    *) url=$1; shift ;;
+  esac
+done
+case "$url" in
+  */releases/latest) printf '%s\n' '{{"tag_name":"v9.8.7"}}' ;;
+  */v9.8.7/install.sh) cat '{}' ;;
+  */download/v9.8.7/*.sha256) printf '%s  package.tar.gz\n' '{digest}' > "$out" ;;
+  */download/v9.8.7/*.tar.gz) cp '{}' "$out" ;;
+  *) exit 99 ;;
+esac
+"#,
+            script.display(),
+            archive.display()
+        ),
+    )?;
+    fs::set_permissions(curl, fs::Permissions::from_mode(0o755))?;
+    for (key, value) in &mut rig.env {
+        if key == "PATH" {
+            *value = format!("{}:/usr/bin:/bin", fake_bin.display()).into();
+        }
+    }
+    let result = rig.command(&["upgrade", "--hosts", "all", "--json"])?;
+    let value: serde_json::Value = serde_json::from_slice(&result.stdout.bytes)?;
+    assert_eq!(value["data"][0]["host"], "local", "{value}");
+    assert_eq!(value["data"][0]["success"], true, "{value}");
+    assert_eq!(value["data"][1]["host"], "worker");
+    assert_eq!(value["data"][1]["success"], false);
+    assert_ne!(code(&result), 0);
+    let arguments = fs::read_to_string(ssh_args)?;
+    assert!(arguments.contains("worker.example\n"));
+    assert!(arguments.contains("'--tag' 'v9.8.7'"));
+    assert!(arguments.contains("-oBatchMode=yes"));
+    let receipt: provenant_records::InstallReceipt = provenant_records::decode_v1(
+        fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
+        provenant_records::Limits::CONFIG,
+    )?;
+    assert_eq!(receipt.harnesses, vec![provenant_records::Harness::Codex]);
+    assert_eq!(
+        receipt.harness_targets[0].skills_dir.to_path_buf()?,
+        rig.root.join("codex/skills")
+    );
+    assert_ne!(
+        receipt.source_digest,
+        provenant_config::Release::read(&first, env!("PROVENANT_TARGET_TRIPLE"))?
+            .manifest()
+            .source_digest
+    );
+    Ok(())
+}
+
+#[test]
+fn source_upgrade_builds_tracked_files_on_each_host() -> Result {
+    let mut rig = TestRig::new()?;
+    let peer = TestRig::new()?;
+    let first = staged(&rig)?;
+    let second = staged_named(&rig, "next-release", b"source upgrade")?;
+    for host in [&rig, &peer] {
+        let installed = host.command(&[
+            "install",
+            "--source",
+            first.to_str().ok_or("stage")?,
+            "--harness",
+            "codex",
+            "--json",
+        ])?;
+        assert_eq!(code(&installed), 0);
+    }
+    let source = rig.root.join("source");
+    fs::create_dir_all(source.join("tools/front-door"))?;
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh"),
+        source.join("install.sh"),
+    )?;
+    fs::write(
+        source.join("tools/front-door/rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.99.1\"\n",
+    )?;
+    for command in [vec!["init", "-q"], vec!["add", "."]] {
+        let mut args = vec!["-C", source.to_str().ok_or("source")?];
+        args.extend(command);
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let result = rig.execute(&git, &args, None)?;
+        assert_eq!(
+            code(&result),
+            0,
+            "{}",
+            String::from_utf8_lossy(&result.stderr.bytes)
+        );
+    }
+    fs::write(source.join("untracked-canary"), "do not transfer")?;
+    let fake_bin = rig.root.join("fake-bin");
+    fs::create_dir(&fake_bin)?;
+    let archive = rig.root.join("sent-source.tar.gz");
+    std::os::unix::fs::symlink(
+        provenant_os::git::git_executable().ok_or("git")?,
+        fake_bin.join("git"),
+    )?;
+    for (name, content) in [
+        ("rustup", "#!/bin/sh\nexit 0\n".to_owned()),
+        (
+            "cargo",
+            format!(
+                "#!/bin/sh\n[ \"$1\" = run ] || exit 0\nwhile [ \"$1\" != --out ]; do shift; done\ncp -Rp '{}' \"$2\"\n",
+                second.display()
+            ),
+        ),
+        (
+            "ssh",
+            format!(
+                r#"#!/bin/sh
+for last do :; done
+cat > '{}'
+exec env HOME='{}' PROVENANT_STATE_DIR='{}' CODEX_HOME='{}' CLAUDE_CONFIG_DIR='{}' /bin/sh -c "$last" < '{}'
+"#,
+                archive.display(),
+                peer.home.display(),
+                peer.state.display(),
+                peer.root.join("codex").display(),
+                peer.root.join("claude").display(),
+                archive.display()
+            ),
+        ),
+    ] {
+        let file = fake_bin.join(name);
+        fs::write(&file, content)?;
+        fs::set_permissions(file, fs::Permissions::from_mode(0o755))?;
+    }
+    fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[domains.fabric]\nssh_executable={:?}\n[domains.fabric.peers.worker]\nhost='{}'\ndestination='worker.example'\n",
+            fake_bin.join("ssh").to_str().ok_or("ssh")?,
+            provenant_core::HostId::from_bytes([1; 16])
+        ),
+    )?;
+    for (key, value) in &mut rig.env {
+        if key == "PATH" {
+            *value = format!("{}:/usr/bin:/bin", fake_bin.display()).into();
+        }
+    }
+    let upgraded = rig.command(&[
+        "upgrade",
+        "--from-source",
+        source.to_str().ok_or("source")?,
+        "--json",
+    ])?;
+    let value: serde_json::Value = serde_json::from_slice(&upgraded.stdout.bytes)?;
+    assert_eq!(code(&upgraded), 0, "{value}");
+    assert_eq!(value["data"][0]["success"], true);
+    assert_eq!(value["data"][1]["success"], true);
+    let listing = rig.execute_os(
+        Path::new("/usr/bin/tar"),
+        &["-tzf".into(), archive.into()],
+        None,
+    )?;
+    let listing = String::from_utf8(listing.stdout.bytes)?;
+    assert!(listing.contains("install.sh"));
+    assert!(!listing.contains("untracked-canary"));
+    for host in [&rig, &peer] {
+        let receipt: provenant_records::InstallReceipt = provenant_records::decode_v1(
+            fs::read(host.state.join("install/receipt.json"))?.as_slice(),
+            provenant_records::Limits::CONFIG,
+        )?;
+        assert_eq!(
+            receipt.source_digest,
+            Release::read(&second, env!("PROVENANT_TARGET_TRIPLE"))?
+                .manifest()
+                .source_digest
+        );
+        assert_eq!(receipt.harnesses, vec![provenant_records::Harness::Codex]);
+    }
     Ok(())
 }

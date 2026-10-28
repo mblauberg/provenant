@@ -454,6 +454,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             }
         }
         Command::Install(args) => install::run_install(args, globals),
+        Command::Upgrade(args) => install::run_upgrade(args, globals),
         Command::Uninstall(args) => install::run_uninstall(args, globals),
         Command::Route(command) => {
             match roots::resolve(globals, Workspace::Project, Product::Required) {
