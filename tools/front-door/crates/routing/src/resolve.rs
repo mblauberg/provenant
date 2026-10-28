@@ -511,7 +511,7 @@ fn candidate_with_quota(
                 && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
                     a.account_key
                         .as_deref()
-                        .is_some_and(|key| spec.account_serves_model(key, model.model()))
+                        .is_none_or(|key| spec.account_serves_model(key, model.model()))
                 })
         })
         .map(|a| {
