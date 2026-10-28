@@ -114,7 +114,7 @@ impl WorkIndex {
             let qualified = selection.task.is_some() || selection.attempt.is_some();
             for n in 0..=ROW_LIMIT {
                 let Some(row) = rows.next()? else {
-                    if coverage == WorkCoverage::Verified && !qualified {
+                    if !qualified {
                         return Ok(WorkCoverage::Partial);
                     }
                     return Ok(coverage);
@@ -265,6 +265,10 @@ mod tests {
             head: value.head,
         };
         assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Unindexed);
+        let mut run_only = selection.clone();
+        run_only.task = None;
+        run_only.attempt = None;
+        assert_eq!(index.validate(&run_only, &call)?, WorkCoverage::Partial);
         index.seal(&value, &call)?;
         index.seal(&value, &call)?;
         assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Verified);
@@ -293,9 +297,6 @@ mod tests {
         drop(index);
         let index = WorkIndex::open(context.state_root.as_path(), &call)?;
         assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Verified);
-        let mut run_only = selection.clone();
-        run_only.task = None;
-        run_only.attempt = None;
         assert_eq!(index.validate(&run_only, &call)?, WorkCoverage::Partial);
         Ok(())
     }
@@ -319,7 +320,7 @@ mod tests {
         let mut selection = WorkSelector {
             project: value.project,
             run: value.run,
-            task: None,
+            task: Some(value.task),
             attempt: None,
             repository: Some(AbsolutePath::new(Path::new("/repo/.git"))?),
             head: None,
@@ -354,6 +355,7 @@ mod tests {
         }
         value.attempt = AttemptId::from_bytes([65; 16]);
         index.seal(&value, &call)?;
+        selection.task = None;
         assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Limit);
         selection.attempt = Some(value.attempt);
         selection.head = None;
