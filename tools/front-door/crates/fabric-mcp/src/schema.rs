@@ -220,7 +220,7 @@ fn build_strict() -> Vec<Value> {
             "Run, inspect, cancel or resume a checkpointed graph. Run and resume take a project-local document path.",
             json!({
                 "run":{"document":text(MAX_ARTIFACT_PATH_BYTES)},"status":{"id":pattern("^[A-Za-z0-9._-]{1,64}$")},
-                "cancel":{"id":pattern("^[A-Za-z0-9._-]{1,64}$")},"resume":{"document":text(MAX_ARTIFACT_PATH_BYTES),"extend?":array(text(256),0,64)}
+                "cancel":{"id":pattern("^[A-Za-z0-9._-]{1,64}$")},"resume":{"document":text(MAX_ARTIFACT_PATH_BYTES),"extend?":array(json!({"type":"string","minLength":3,"maxLength":256,"pattern":r"^[^=\u0000]+=[^\u0000]+$","x-provenant-maxUtf8Bytes":256}),0,64)}
             }),
         ),
         (

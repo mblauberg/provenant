@@ -184,6 +184,7 @@ fn strings() -> Vec<String> {
         "x".into(),
         "a".into(),
         "0".into(),
+        "a=1".into(),
         "0".repeat(32),
         "0".repeat(40),
         "0".repeat(64),

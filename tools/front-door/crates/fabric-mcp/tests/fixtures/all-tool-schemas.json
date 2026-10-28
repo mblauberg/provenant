@@ -1541,6 +1541,7 @@
             "extend": {
               "items": {
                 "maxLength": 256,
+                "pattern": "^[^=\\u0000]+=[^\\u0000]+$",
                 "type": "string"
               },
               "maxItems": 64,
