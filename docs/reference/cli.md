@@ -2776,6 +2776,7 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `--max-depth` | `{"defaults": ["8"], "name": "max_depth"}` |
 | `--max-nodes` | `{"defaults": ["100"], "name": "max_nodes"}` |
+| `--detail` | `{"defaults": ["false"], "name": "detail", "values": ["true", "false"]}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -2788,7 +2789,8 @@ bounds are null. Positional arguments have no long flag.
     {
       "arguments": [
         "max_depth",
-        "max_nodes"
+        "max_nodes",
+        "detail"
       ],
       "multiple": true,
       "name": "Tree",

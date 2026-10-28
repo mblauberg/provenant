@@ -23,6 +23,9 @@ pub enum Console {
         /// Maximum attempts to include
         #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u64).range(1..=100))]
         max_nodes: u64,
+        /// Include complete run and attempt records
+        #[arg(long)]
+        detail: bool,
     },
     /// Read a local board snapshot without artifact bodies
     Board {
@@ -116,9 +119,10 @@ fn read_with_budget(
     if let Console::Tree {
         max_depth,
         max_nodes,
+        detail,
     } = command
     {
-        return tree::read(roots, selected, *max_depth, *max_nodes);
+        return tree::read(roots, selected, *max_depth, *max_nodes, *detail);
     }
     let projects = projects(roots, selected)?;
     let (session, limit, cursor) = match command {
