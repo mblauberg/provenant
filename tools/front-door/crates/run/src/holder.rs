@@ -620,7 +620,14 @@ impl RunStore {
             .find(|task| task.task_id == record.task_id)
             .ok_or(RunError::Validation("terminal task missing from request"))?;
         let mut review_required = false;
+        let mut legacy_policy_note = None;
         if let Some(writer) = &task.writer {
+            if crate::objects::legacy_policy(attempt)? {
+                legacy_policy_note = Some(crate::objects::legacy_policy_diagnostic(&format!(
+                    "Run {} Attempt {id}",
+                    record.run_id
+                )));
+            }
             let refusal = object_import_refused(attempt, exit.scope)?;
             let refused = refusal.is_some();
             let check = if let Some(reason) = refusal {
@@ -644,6 +651,9 @@ impl RunStore {
                 )
             };
             match check {
+                Err(error @ (RunError::ObjectStoreBusy | RunError::ObjectVerificationRetry(_))) => {
+                    return Err(error);
+                }
                 Err(error @ RunError::ObjectImportLimit(_)) => {
                     let reason = format!(
                         "writer object import refused for {}: {error}; private objects and writer custody retained for recovery",
@@ -841,6 +851,14 @@ impl RunStore {
                 &format!("Run {}\nAttempt {id}", record.run_id),
             )?;
         }
+        // Terminal state is also published as a run event. Record this host
+        // warning there without changing validation of the provider's result.
+        if let Some(note) = legacy_policy_note {
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(reason) => format!("{reason}; {note}"),
+                None => note,
+            });
+        }
         let publication = TerminalPublication {
             outcome: decoded.outcome,
             finished_at,
@@ -977,11 +995,38 @@ mod writer_recovery_tests {
     use super::*;
     use crate::tests::{call, clock, context, input, route};
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ImportCase {
+        PackLimit,
+        LockWait,
+        LegacyPolicy,
+    }
+
     #[test]
     fn object_import_limit_is_terminal_and_retains_private_evidence_and_custody()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
+        object_import_refusal_fixture(ImportCase::PackLimit)
+    }
+
+    #[test]
+    fn object_store_lock_timeout_leaves_settlement_nonterminal_and_can_be_retried()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        object_import_refusal_fixture(ImportCase::LockWait)
+    }
+
+    #[test]
+    fn legacy_git_policy_warning_names_run_and_attempt_in_the_terminal_event()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        object_import_refusal_fixture(ImportCase::LegacyPolicy)
+    }
+
+    fn object_import_refusal_fixture(
+        case: ImportCase,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+        use provenant_os::fs::LockMode;
         use std::ffi::OsStr;
+        let lock_wait = case == ImportCase::LockWait;
 
         let fixture = PrepareFixture::new()?;
         let execution = registered_landed_writer_fixture(&fixture)?;
@@ -1013,17 +1058,21 @@ mod writer_recovery_tests {
         let candidate = temporary.join("candidate-0");
         std::fs::create_dir_all(&candidate)?;
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-        crate::objects::prepare_bound(
-            &git,
-            launch.worktree.repo(),
-            &attempt,
-            &candidate,
-            launch.branch.as_str(),
-            launch.base,
-        )?;
+        if case != ImportCase::LegacyPolicy {
+            crate::objects::prepare_bound(
+                &git,
+                launch.worktree.repo(),
+                &attempt,
+                &candidate,
+                launch.branch.as_str(),
+                launch.base,
+            )?;
+        } else {
+            std::fs::create_dir_all(candidate.join("git-objects"))?;
+        }
         let packs = candidate.join("git-objects/pack");
         std::fs::create_dir(&packs)?;
-        for number in 0..65 {
+        for number in 0..if case == ImportCase::PackLimit { 65 } else { 0 } {
             std::fs::write(packs.join(format!("pack-{number:040x}.pack")), b"untrusted")?;
         }
         std::fs::write(candidate.join("recovery.lock"), b"private evidence")?;
@@ -1040,14 +1089,62 @@ mod writer_recovery_tests {
         let mut observed = crate::tests::exit();
         observed.scope = scope;
         crate::dispatch_tests::seal_exit(&store, &observed)?;
-        let failed = store.finish_in_custody(
+        let shared_lock = if lock_wait {
+            let common = launch.worktree.repo().common_dir();
+            common.create_new(OsStr::new("provenant-objects.lock"))?;
+            Some(common.try_lock_existing(OsStr::new("provenant-objects.lock"), LockMode::Shared)?)
+        } else {
+            None
+        };
+        if lock_wait {
+            crate::objects::TEST_LOCK_BUDGET.set(Some(std::time::Duration::from_millis(100)));
+        }
+        let first = store.finish_in_custody(
             id,
             &attempt,
             &observed,
             Completion::Recovered(Some(&recovery)),
             &crate::dispatch_tests::Fake::default(),
             &call,
-        )?;
+        );
+        crate::objects::TEST_LOCK_BUDGET.set(None);
+        if lock_wait {
+            assert!(matches!(first, Err(RunError::ObjectStoreBusy)));
+            assert!(!matches!(
+                store.record(id, &call)?.state,
+                AttemptState::Terminal { .. }
+            ));
+            assert!(object_import_refused(&attempt, scope)?.is_none());
+            assert!(read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.is_none());
+            assert!(read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?.is_none());
+            assert!(read_sealed(&attempt, "release.json", RECORD_LIMIT)?.is_none());
+            assert!(candidate.exists());
+            assert_eq!(store.writer_fence_listing()?.reservations.len(), 1);
+            drop(shared_lock);
+            let retried = store.finish_in_custody(
+                id,
+                &attempt,
+                &observed,
+                Completion::Recovered(Some(&recovery)),
+                &crate::dispatch_tests::Fake::default(),
+                &call,
+            )?;
+            assert!(matches!(retried.state, AttemptState::Terminal { .. }));
+            assert!(read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?.is_some());
+            assert!(object_import_refused(&attempt, scope)?.is_none());
+            return Ok(());
+        }
+        let failed = first?;
+        if case == ImportCase::LegacyPolicy {
+            let events = store.events(0, 64, Some(id), &call)?;
+            assert!(events.iter().any(|event| matches!(&event.change, AttemptState::Terminal { reason: Some(reason), .. }
+                if reason.contains("legacy pre-v11 Git grants policy") && reason.contains(&run.run_id.to_string()) && reason.contains(&id.to_string())
+            )));
+            assert!(
+                matches!(&failed.state, AttemptState::Terminal { reason: Some(reason), .. } if reason.contains("legacy pre-v11"))
+            );
+            return Ok(());
+        }
         assert!(matches!(
             &failed.state,
             AttemptState::Terminal { outcome: Outcome::Failed, reason: Some(reason), .. }

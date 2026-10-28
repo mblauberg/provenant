@@ -17,6 +17,46 @@ use std::{
 type TestResult<T = ()> = std::result::Result<T, Box<dyn Error>>;
 
 #[test]
+fn verification_has_a_fresh_budget_after_import() -> TestResult {
+    use std::time::Instant;
+    let fixture = Fixture::new("sha1")?;
+    let wrapper = fixture.root.join("slow-fsck-git");
+    let log = fixture.root.join("fsck-args");
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nfor arg do\ncase \"$arg\" in fsck) printf '%s\\n' \"$*\" >> {}; /bin/sleep 1;; esac\ndone\nexec {} \"$@\"\n",
+            quote(&log),
+            quote(&fixture.git),
+        ),
+    )?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+    super::import_before(
+        &wrapper,
+        fixture.worktree.repo(),
+        &Directory::open_anchor(&fixture.source)?,
+        &Directory::open_anchor(&fixture.staging)?,
+        &fixture.staging,
+        fixture.head,
+        Instant::now() + Duration::from_millis(750),
+    )?;
+    let calls = fs::read_to_string(log)?;
+    assert_eq!(
+        calls.lines().filter(|line| line.contains("--full")).count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.contains("--connectivity-only"))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn object_source_binding_is_scoped_and_refuses_symlinked_candidates() -> TestResult {
     let temp = tempfile::tempdir()?;
     let root = fs::canonicalize(temp.path())?;
@@ -456,45 +496,278 @@ fn stale_import_staging_sweep_is_bounded_and_preserves_fresh_and_unrelated_entri
     let old = now - super::STALE_AGE - Duration::from_secs(1);
     let count = super::MAX_STALE_SWEEP + 3;
     let mut stale = Vec::new();
-    for number in 0..count {
-        let path = common.join(format!("{}old-{number}", super::STAGING_PREFIX));
+    for _ in 0..count {
+        let path = common.join(super::staging_name()?);
         fs::create_dir(&path)?;
         fs::write(path.join("partial-pack"), b"crash evidence")?;
         fs::File::open(&path)?.set_modified(old)?;
         stale.push(path);
     }
-    let fresh = common.join(format!("{}fresh", super::STAGING_PREFIX));
+    let fresh = common.join(super::staging_name()?);
     fs::create_dir(&fresh)?;
     fs::File::open(&fresh)?.set_modified(now)?;
     let unrelated = common.join("unrelated-staging");
     fs::create_dir(&unrelated)?;
     fs::File::open(&unrelated)?.set_modified(old)?;
-    let ordinary_file = common.join(format!("{}file", super::STAGING_PREFIX));
+    let ordinary_file = common.join(super::staging_name()?);
     fs::write(&ordinary_file, b"keep")?;
     fs::File::open(&ordinary_file)?.set_modified(old)?;
     let outside = temp.path().join("outside");
     fs::create_dir(&outside)?;
     fs::write(outside.join("payload"), b"keep")?;
     fs::File::open(&outside)?.set_modified(old)?;
-    let link = common.join(format!("{}symlink", super::STAGING_PREFIX));
+    let link = common.join(super::staging_name()?);
     symlink(&outside, &link)?;
     let directory = Directory::open_anchor(&common)?;
-    super::sweep_staging(&directory, now)?;
+    super::sweep_staging(&directory, now);
     assert_eq!(stale.iter().filter(|path| path.exists()).count(), 3);
-    super::sweep_staging(&directory, now)?;
+    super::sweep_staging(&directory, now);
     assert!(stale.iter().all(|path| !path.exists()));
     assert!(fresh.is_dir());
     assert!(unrelated.is_dir());
     assert_eq!(fs::read(ordinary_file)?, b"keep");
     assert!(fs::symlink_metadata(link)?.file_type().is_symlink());
     assert_eq!(fs::read(outside.join("payload"))?, b"keep");
-    // Imports before this repair used the generic host staging name.
+    // Generic staging and names which only share the prefix are not imports.
     let legacy = common.join(provenant_os::fs::temporary_name()?);
     fs::create_dir(&legacy)?;
     fs::write(legacy.join("partial-pack"), b"crashed import")?;
     fs::File::open(&legacy)?.set_modified(old)?;
-    super::sweep_staging(&directory, now)?;
-    assert!(!legacy.exists());
+    let unrelated_prefix = common.join(format!("{}unrelated", super::STAGING_PREFIX));
+    fs::create_dir(&unrelated_prefix)?;
+    fs::File::open(&unrelated_prefix)?.set_modified(old)?;
+    super::sweep_staging(&directory, now);
+    assert!(legacy.exists());
+    assert!(unrelated_prefix.exists());
+    Ok(())
+}
+
+#[test]
+fn stale_sweep_ignores_vanished_entries_and_continues_after_permission_errors() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let common = Directory::open_anchor(temp.path())?;
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000);
+    let old = now - super::STALE_AGE - Duration::from_secs(1);
+    let vanished = super::staging_name()?;
+    let blocked = super::staging_name()?;
+    let healthy = super::staging_name()?;
+    for name in [&vanished, &blocked, &healthy] {
+        let path = temp.path().join(name);
+        fs::create_dir(&path)?;
+        fs::write(path.join("file"), b"stale")?;
+        fs::File::open(path)?.set_modified(old)?;
+    }
+    // Deny traversal before the sweep, then restore it even if assertions fail.
+    let blocked_path = temp.path().join(&blocked);
+    fs::set_permissions(&blocked_path, fs::Permissions::from_mode(0o000))?;
+    let mut raced = false;
+    let mut denied = false;
+    super::sweep_staging_with(&common, now, |directory, name, remaining| {
+        if name == vanished {
+            // Another settlement removes the entry after the initial stat.
+            crate::artifacts::remove_entry_tree(directory, name)?;
+            raced = true;
+        }
+        let result = super::stale_tree_size(directory, name, remaining, 0);
+        if name == blocked {
+            denied = result.is_err();
+        }
+        if !result? {
+            return Ok(false);
+        }
+        crate::artifacts::remove_entry_tree(directory, name)?;
+        Ok(true)
+    });
+    fs::set_permissions(&blocked_path, fs::Permissions::from_mode(0o700))?;
+    assert!(raced);
+    assert!(denied, "fixture must actually deny traversal");
+    assert!(blocked_path.exists());
+    assert!(!temp.path().join(healthy).exists());
+    assert!(!temp.path().join(vanished).exists());
+    // Race specifically in removal, after the bounded traversal succeeded.
+    let name = super::staging_name()?;
+    let path = temp.path().join(&name);
+    fs::create_dir(&path)?;
+    fs::File::open(&path)?.set_modified(old)?;
+    super::sweep_staging_with(&common, now, |directory, name, remaining| {
+        if !super::stale_tree_size(directory, name, remaining, 0)? {
+            return Ok(false);
+        }
+        crate::artifacts::remove_entry_tree(directory, name)?;
+        crate::artifacts::remove_entry_tree(directory, name)?;
+        Ok(true)
+    });
+    assert!(!path.exists());
+    Ok(())
+}
+
+#[test]
+fn verification_allowance_scales_with_bytes_and_has_a_ceiling() {
+    assert_eq!(super::verification_budget(0), Duration::from_secs(120));
+    assert_eq!(super::verification_budget(1), Duration::from_secs(180));
+    assert_eq!(
+        super::verification_budget(super::GIB),
+        Duration::from_secs(180)
+    );
+    assert_eq!(
+        super::verification_budget(super::GIB + 1),
+        Duration::from_secs(240)
+    );
+    assert_eq!(
+        super::verification_budget(u64::MAX),
+        Duration::from_secs(3600)
+    );
+}
+
+#[test]
+fn staged_files_are_rechecked_after_verification_and_before_publication() -> TestResult {
+    use std::time::Instant;
+    for (packed, replace) in [
+        (None, false),
+        (None, true),
+        (Some("pack"), false),
+        (Some("idx"), true),
+    ] {
+        let mut fixture = Fixture::new("sha1")?;
+        if packed.is_some() {
+            fixture.pack()?;
+        }
+        let entered = fixture.root.join("verified");
+        let resume = fixture.root.join("resume");
+        let wrapper = fixture.root.join("paused-git");
+        let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+        fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nfor arg do\ncase \"$arg\" in cat-file)\n{} \"$@\" || exit $?\n: > {}\ni=0\nwhile [ ! -e {} ]; do\n[ \"$i\" -lt 200 ] || exit 91\n/bin/sleep 0.05\ni=$((i + 1))\ndone\nexit 0;;\nesac\ndone\nexec {} \"$@\"\n",
+                quote(&fixture.git),
+                quote(&entered),
+                quote(&resume),
+                quote(&fixture.git),
+            ),
+        )?;
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+        fixture.git = wrapper;
+        std::thread::scope(|scope| -> TestResult {
+            let importing = scope.spawn(|| fixture.import());
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !entered.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let reached = entered.exists();
+            if reached {
+                let path = if let Some(extension) = packed {
+                    fs::read_dir(fixture.staging.join("objects/pack"))?
+                        .collect::<std::io::Result<Vec<_>>>()?
+                        .into_iter()
+                        .find(|entry| entry.path().extension().is_some_and(|ext| ext == extension))
+                        .ok_or("staged pack or index")?
+                        .path()
+                } else {
+                    object_path(&fixture.staging.join("objects"), fixture.blob)
+                };
+                let metadata = fs::metadata(&path)?;
+                let original = fs::read(&path)?;
+                if replace {
+                    let replacement = fixture.root.join("replacement");
+                    fs::write(&replacement, &original)?;
+                    fs::rename(replacement, &path)?;
+                } else {
+                    // Same bytes, inode, size, mtime and permissions. ctime is
+                    // the only read-relevant metadata that exposes the write.
+                    fs::write(&path, &original)?;
+                }
+                fs::File::open(&path)?.set_modified(metadata.modified()?)?;
+                fs::set_permissions(&path, metadata.permissions())?;
+            }
+            fs::write(&resume, b"resume")?;
+            let result = importing.join().map_err(|_| "import thread panicked")?;
+            assert!(reached, "verification boundary was not reached");
+            assert!(matches!(
+                result,
+                Err(crate::RunError::Validation(
+                    "staged object file changed during verification"
+                ))
+            ));
+            fixture.assert_not_published();
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn publication_checks_new_files_again_after_connectivity_verification() -> TestResult {
+    let mut fixture = Fixture::new("sha1")?;
+    let object = object_path(&fixture.common_objects(), fixture.blob);
+    let wrapper = fixture.root.join("mutating-connectivity-git");
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nfor arg do\ncase \"$arg\" in --connectivity-only) /usr/bin/touch {};; esac\ndone\nexec {} \"$@\"\n",
+            quote(&object),
+            quote(&fixture.git),
+        ),
+    )?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+    fixture.git = wrapper;
+    assert!(matches!(
+        fixture.import(),
+        Err(crate::RunError::Validation(
+            "staged object file changed during verification"
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
+fn verification_retries_one_concurrent_host_change_and_does_not_cache_repeated_changes()
+-> TestResult {
+    for keep_changing in [false, true] {
+        let fixture = Fixture::new("sha1")?;
+        fixture.import()?;
+        let wrapper = fixture.root.join("host-changing-git");
+        let calls = fixture.root.join("fsck-calls");
+        let object = object_path(&fixture.common_objects(), fixture.base_blob);
+        let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+        fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nfor arg do\ncase \"$arg\" in fsck)\nif [ {} = yes ] || [ ! -e {} ]; then\n/usr/bin/touch {}\nprintf 'changed\\n' >> {}\nexit 1\nfi\nprintf 'stable\\n' >> {}\n;; esac\ndone\nexec {} \"$@\"\n",
+                if keep_changing { "yes" } else { "no" },
+                quote(&calls),
+                quote(&object),
+                quote(&calls),
+                quote(&calls),
+                quote(&fixture.git),
+            ),
+        )?;
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+        let mut cache = super::VerificationCache::default();
+        let result = cache.verify_graph(
+            &wrapper,
+            fixture.worktree.repo().common_git_dir(),
+            &fixture.root,
+            fixture.head,
+        );
+        if keep_changing {
+            assert!(
+                matches!(result, Err(crate::RunError::ObjectVerificationRetry(reason)) if reason.contains("changed during verification"))
+            );
+            assert!(cache.heads.is_empty());
+            assert!(cache.generation.is_none());
+        } else {
+            result?;
+            cache.verify_graph(
+                &wrapper,
+                fixture.worktree.repo().common_git_dir(),
+                &fixture.root,
+                fixture.head,
+            )?;
+        }
+        assert_eq!(fs::read_to_string(calls)?.lines().count(), 2);
+    }
     Ok(())
 }
 

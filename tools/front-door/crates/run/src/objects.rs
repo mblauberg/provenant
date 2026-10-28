@@ -15,6 +15,9 @@ use std::{
 
 const MAX_PACKS: usize = 64;
 const IMPORT_BUDGET: Duration = Duration::from_secs(120);
+const LOCK_BUDGET: Duration = Duration::from_secs(120);
+const GIB: u64 = 1024 * 1024 * 1024;
+const SMALL_FILE_HASH_LIMIT: u64 = 1024 * 1024;
 const STAGING_PREFIX: &str = ".provenant-object-import-";
 const STALE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_STALE_SWEEP: usize = 32;
@@ -39,15 +42,51 @@ fn command(
 
 // Import deadlines are a host real-time boundary.
 #[allow(clippy::disallowed_methods)]
-fn remaining(deadline: Option<Instant>) -> Result<Duration> {
+fn remaining(deadline: Option<Deadline>) -> Result<Duration> {
     match deadline {
         Some(deadline) => deadline
+            .at
             .checked_duration_since(Instant::now())
             .filter(|duration| !duration.is_zero())
-            .ok_or(RunError::ObjectImportLimit(
-                "total 120 s wall-clock budget exceeded",
-            )),
+            .ok_or_else(|| deadline.expired()),
         None => Ok(Duration::from_secs(120)),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Deadline {
+    at: Instant,
+    import: bool,
+}
+
+impl Deadline {
+    fn expired(self) -> RunError {
+        if self.import {
+            RunError::ObjectImportLimit("copy/index-pack 120 s wall-clock budget exceeded")
+        } else {
+            RunError::ObjectVerificationRetry("verification deadline exceeded; retry settlement")
+        }
+    }
+}
+
+/// Each verification gets 120 s plus 60 s per started GiB, capped at one hour.
+fn verification_budget(bytes: u64) -> Duration {
+    Duration::from_secs(
+        120_u64
+            .saturating_add(bytes.div_ceil(GIB).saturating_mul(60))
+            .min(3600),
+    )
+}
+
+#[allow(clippy::disallowed_methods)]
+fn verification_deadline(generation: &[(PathBuf, Metadata)], extra: u64) -> Deadline {
+    let bytes = generation
+        .iter()
+        .filter(|(_, m)| m.kind == FileKind::Regular)
+        .fold(extra, |total, (_, m)| total.saturating_add(m.size));
+    Deadline {
+        at: Instant::now() + verification_budget(bytes),
+        import: false,
     }
 }
 
@@ -57,7 +96,7 @@ fn command_before(
     cwd: &Path,
     args: &[OsString],
     alternate: Option<&Path>,
-    deadline: Option<Instant>,
+    deadline: Option<Deadline>,
 ) -> Result<Vec<u8>> {
     let mut env: Vec<(OsString, OsString)> = [
         ("GIT_CONFIG_NOSYSTEM", "1"),
@@ -120,10 +159,10 @@ fn command_before(
     options.stderr = StreamPolicy::Tail { limit: 4096 };
     options.stop_on_output_limit = true;
     let output = executor.execute(options).map_err(|_| invalid())?;
-    if output.timed_out && deadline.is_some() {
-        return Err(RunError::ObjectImportLimit(
-            "total 120 s wall-clock budget exceeded",
-        ));
+    if output.timed_out
+        && let Some(deadline) = deadline
+    {
+        return Err(deadline.expired());
     }
     remaining(deadline)?;
     if output.termination != Termination::Exit(0)
@@ -169,30 +208,37 @@ fn quote_alternate(path: &Path) -> String {
     value
 }
 
+#[derive(Clone, Copy)]
+struct Verification {
+    deadline: Deadline,
+    mode: &'static str,
+}
+
 fn verify(
     git: &Path,
     git_dir: &Path,
     cwd: &Path,
     head: GitOid,
     alternate: Option<&Path>,
-    deadline: Option<Instant>,
+    check: Verification,
 ) -> Result<()> {
     // Callers supply a fresh bare view without lane refs or a lane index.
-    // --full hashes loose contents and packed objects, including alternates.
+    // The full mode hashes loose contents and packed objects, including
+    // alternates. Publication only needs connectivity after the snapshot hash.
     command_before(
         git,
         git_dir,
         cwd,
         &args(&[
             "fsck",
-            "--full",
+            check.mode,
             "--strict",
             "--no-reflogs",
             "--no-dangling",
             &head.to_string(),
         ]),
         alternate,
-        deadline,
+        Some(check.deadline),
     )?;
     let kind = command_before(
         git,
@@ -200,7 +246,7 @@ fn verify(
         cwd,
         &args(&["cat-file", "-t", &head.to_string()]),
         alternate,
-        deadline,
+        Some(check.deadline),
     )?;
     if kind != b"commit\n" {
         return Err(invalid());
@@ -232,24 +278,41 @@ impl VerificationCache {
     ) -> Result<()> {
         let common = Directory::open_anchor(common_path)?;
         let _lock = object_lock(&common, LockMode::Shared)?;
-        let generation = (common_path.to_path_buf(), store_generation(&common)?);
-        if self.generation.as_ref() != Some(&generation) {
-            self.heads.clear();
-            self.generation = None;
-        } else if self.heads.contains(&head) && !shared_alternates(&common)? {
+        for retry in 0..2 {
+            let generation = (common_path.to_path_buf(), store_generation(&common)?);
+            if self.generation.as_ref() != Some(&generation) {
+                self.heads.clear();
+                self.generation = None;
+            } else if self.heads.contains(&head) && !shared_alternates(&common)? {
+                return Ok(());
+            }
+            let result = verify_shared(
+                git,
+                &common,
+                common_path,
+                cwd,
+                head,
+                Verification {
+                    deadline: verification_deadline(&generation.1, 0),
+                    mode: "--full",
+                },
+            );
+            if store_generation(&common)? != generation.1 {
+                self.heads.clear();
+                self.generation = None;
+                if retry == 0 {
+                    continue;
+                }
+                return Err(RunError::ObjectVerificationRetry(
+                    "shared object store changed during verification; retry settlement",
+                ));
+            }
+            result?;
+            self.generation = Some(generation);
+            self.heads.push(head);
             return Ok(());
         }
-        verify_shared(git, &common, common_path, cwd, head, None)?;
-        if store_generation(&common)? != generation.1 {
-            self.heads.clear();
-            self.generation = None;
-            return Err(RunError::Validation(
-                "shared object store changed during verification",
-            ));
-        }
-        self.generation = Some(generation);
-        self.heads.push(head);
-        Ok(())
+        Err(invalid())
     }
 }
 
@@ -325,9 +388,20 @@ fn store_generation(common: &Directory) -> Result<Vec<(PathBuf, Metadata)>> {
 }
 
 fn object_lock(common: &Directory, mode: LockMode) -> Result<LockGuard> {
+    #[cfg(test)]
+    if let Some(budget) = TEST_LOCK_BUDGET.get() {
+        #[allow(clippy::disallowed_methods)]
+        return object_lock_before(common, mode, Some(Instant::now() + budget));
+    }
     object_lock_before(common, mode, None)
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_LOCK_BUDGET: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+}
+
+#[allow(clippy::disallowed_methods)]
 fn object_lock_before(
     common: &Directory,
     mode: LockMode,
@@ -344,11 +418,11 @@ fn object_lock_before(
         Err(error) if error.is_exists() => {}
         Err(error) => return Err(error.into()),
     }
-    let seconds = if deadline.is_some() {
-        remaining(deadline)?.as_secs().max(1)
-    } else {
-        600
-    };
+    let duration = deadline.map_or(Ok(LOCK_BUDGET), |at| {
+        at.checked_duration_since(Instant::now())
+            .ok_or(RunError::ObjectStoreBusy)
+    })?;
+    let seconds = duration.as_secs().max(1);
     let lock = common.lock_existing(
         name,
         mode,
@@ -356,14 +430,9 @@ fn object_lock_before(
         &CancelToken::new(),
         &clock,
     );
-    remaining(deadline)?;
     match lock {
         Ok(lock) => Ok(lock),
-        Err(provenant_os::fs::FsError::LockTimeout { .. }) if deadline.is_some() => {
-            Err(RunError::ObjectImportLimit(
-                "total 120 s wall-clock budget exceeded while waiting for object-store lock",
-            ))
-        }
+        Err(provenant_os::fs::FsError::LockTimeout { .. }) => Err(RunError::ObjectStoreBusy),
         Err(error) => Err(error.into()),
     }
 }
@@ -545,7 +614,7 @@ fn copy(
     destination: &Directory,
     name: &OsStr,
     budget: &mut u64,
-    deadline: Option<Instant>,
+    deadline: Option<Deadline>,
 ) -> Result<()> {
     let mut input = source.open_read(name)?;
     let before = input.metadata()?;
@@ -581,7 +650,7 @@ fn initialise_view(
     staging: &Directory,
     staging_path: &Path,
     head: GitOid,
-    deadline: Option<Instant>,
+    deadline: Option<Deadline>,
 ) -> Result<()> {
     let format = if head.to_string().len() == 64 {
         "sha256"
@@ -624,22 +693,23 @@ fn verify_shared(
     common_path: &Path,
     cwd: &Path,
     head: GitOid,
-    deadline: Option<Instant>,
+    check: Verification,
 ) -> Result<()> {
     let name = staging_name()?;
     common.mkdir(&name, 0o700)?;
     let view = common.open_verified_directory(&name)?;
     let path = common_path.join(&name);
-    let result = initialise_view(git, common, cwd, &view, &path, head, deadline).and_then(|()| {
-        verify(
-            git,
-            &path,
-            cwd,
-            head,
-            Some(&common_path.join("objects")),
-            deadline,
-        )
-    });
+    let result = initialise_view(git, common, cwd, &view, &path, head, Some(check.deadline))
+        .and_then(|()| {
+            verify(
+                git,
+                &path,
+                cwd,
+                head,
+                Some(&common_path.join("objects")),
+                check,
+            )
+        });
     let cleanup = crate::artifacts::remove_entry_tree(common, &name);
     result?;
     cleanup?;
@@ -678,7 +748,10 @@ fn import_before(
     head: GitOid,
     deadline: Instant,
 ) -> Result<()> {
-    let deadline = Some(deadline);
+    let deadline = Some(Deadline {
+        at: deadline,
+        import: true,
+    });
     remaining(deadline)?;
     repo.revalidate().map_err(|_| invalid())?;
     // Count all packs before copying or invoking Git.
@@ -769,50 +842,151 @@ fn import_before(
         }
         to.sync()?;
     }
-    verify(
-        git,
-        staging_path,
-        repo.root_path(),
-        head,
-        Some(&shared),
-        deadline,
-    )?;
-    // Only publication and the final shared check exclude other lanes.
-    let _lock = object_lock_before(repo.common_dir(), LockMode::Exclusive, deadline)?;
+    remaining(deadline)?;
+    // Bind the files before Git hashes them. A still-live pre-v11 lane can
+    // reach the common directory even though current lane policies cannot.
+    let snapshot = snapshot_files(&objects)?;
+    let mut retried = false;
+    let (generation, _lock) = loop {
+        let generation = store_generation(repo.common_dir())?;
+        let check = Verification {
+            deadline: verification_deadline(&generation, MAX_BYTES - bytes),
+            mode: "--full",
+        };
+        let result = verify(
+            git,
+            staging_path,
+            repo.root_path(),
+            head,
+            Some(&shared),
+            check,
+        );
+        // Only publication and the final shared check exclude other lanes.
+        let lock = object_lock(repo.common_dir(), LockMode::Exclusive)?;
+        for file in &snapshot {
+            file.check(&objects)?;
+        }
+        if store_generation(repo.common_dir())? != generation {
+            if !retried {
+                retried = true;
+                continue;
+            }
+            return Err(RunError::ObjectVerificationRetry(
+                "shared object store changed during verification; retry settlement",
+            ));
+        }
+        result?;
+        break (generation, lock);
+    };
     let shared_dir = repo
         .common_dir()
         .open_verified_directory(OsStr::new("objects"))?;
     // Snapshot is verified in full before the first publication. Existing
     // shared objects always win; verify the resulting store before consuming it.
-    for fanout in entry_names(&objects, 258)? {
-        if !hex(&fanout, 2) && fanout != "pack" {
-            continue;
-        }
-        let from = objects.open_verified_directory(&fanout)?;
-        let to = directory(&shared_dir, &fanout)?;
-        let mut names = entry_names(&from, MAX_FILES)?;
-        // A pack becomes discoverable with its index. Publish the complete
-        // pack first so concurrent host readers never see an index alone.
-        names.sort_by_key(|name| Path::new(name).extension() == Some(OsStr::new("idx")));
-        for name in names {
-            remaining(deadline)?;
-            match from.rename_noreplace(&name, &to, &name) {
-                Ok(()) => {}
-                Err(error) if error.is_exists() => {}
-                Err(error) => return Err(error.into()),
+    let mut published = Vec::new();
+    for file in snapshot {
+        let from = objects.open_verified_directory(&file.fanout)?;
+        let to = directory(&shared_dir, &file.fanout)?;
+        file.check(&objects)?;
+        match from.rename_noreplace(&file.name, &to, &file.name) {
+            Ok(()) => {
+                let stamp = file_stamp(&to, &file.name)?;
+                // Rename changes ctime. All other read-relevant metadata,
+                // identity and the inexpensive content digest must match.
+                let mut renamed = file.stamp.clone();
+                renamed.metadata.changed_ns = stamp.metadata.changed_ns;
+                if renamed != stamp {
+                    return Err(staged_changed());
+                }
+                published.push(StagedFile { stamp, ..file });
             }
+            Err(error) if error.is_exists() => {}
+            Err(error) => return Err(error.into()),
         }
         to.sync()?;
     }
     shared_dir.sync()?;
+    for file in &published {
+        file.check(&shared_dir)?;
+    }
     verify_shared(
         git,
         repo.common_dir(),
         repo.common_git_dir(),
         repo.root_path(),
         head,
-        deadline,
-    )
+        Verification {
+            deadline: verification_deadline(&generation, MAX_BYTES - bytes),
+            mode: "--connectivity-only",
+        },
+    )?;
+    for file in &published {
+        file.check(&shared_dir)?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct FileStamp {
+    metadata: Metadata,
+    digest: Option<[u8; 32]>,
+}
+
+struct StagedFile {
+    fanout: OsString,
+    name: OsString,
+    stamp: FileStamp,
+}
+
+fn staged_changed() -> RunError {
+    RunError::Validation("staged object file changed during verification")
+}
+
+fn file_stamp(directory: &Directory, name: &OsStr) -> Result<FileStamp> {
+    use sha2::{Digest as _, Sha256};
+    let metadata = directory.metadata_at(name, false)?;
+    if metadata.kind != FileKind::Regular || metadata.links != 1 {
+        return Err(staged_changed());
+    }
+    let digest = if metadata.size <= SMALL_FILE_HASH_LIMIT {
+        Some(Sha256::digest(directory.read_stable(name, SMALL_FILE_HASH_LIMIT)?).into())
+    } else {
+        None
+    };
+    if !metadata.unchanged(&directory.metadata_at(name, false)?) {
+        return Err(staged_changed());
+    }
+    Ok(FileStamp { metadata, digest })
+}
+
+impl StagedFile {
+    fn check(&self, objects: &Directory) -> Result<()> {
+        let directory = objects.open_verified_directory(&self.fanout)?;
+        if self.stamp != file_stamp(&directory, &self.name)? {
+            return Err(staged_changed());
+        }
+        Ok(())
+    }
+}
+
+fn snapshot_files(objects: &Directory) -> Result<Vec<StagedFile>> {
+    let mut files = Vec::new();
+    for fanout in entry_names(objects, 258)? {
+        if !hex(&fanout, 2) && fanout != "pack" {
+            continue;
+        }
+        let directory = objects.open_verified_directory(&fanout)?;
+        for name in entry_names(&directory, MAX_FILES)? {
+            files.push(StagedFile {
+                stamp: file_stamp(&directory, &name)?,
+                fanout: fanout.clone(),
+                name,
+            });
+        }
+    }
+    // A pack becomes discoverable with its index. Publish packs first.
+    files.sort_by_key(|file| Path::new(&file.name).extension() == Some(OsStr::new("idx")));
+    Ok(files)
 }
 
 fn staging_name() -> Result<OsString> {
@@ -845,20 +1019,44 @@ fn stale_tree_size(
 }
 
 /// Sweep only this host-owned namespace, at most 32 old directories per import.
-/// The age exceeds the import budget, so an active importer is never swept.
-fn sweep_staging(common: &Directory, now: SystemTime) -> Result<()> {
-    let cutoff = now
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| invalid())?
-        .as_nanos() as i128
-        - STALE_AGE.as_nanos() as i128;
-    let mut swept = 0;
+/// The age exceeds all phase budgets. Cleanup must never prevent settlement.
+fn sweep_staging(common: &Directory, now: SystemTime) {
+    sweep_staging_with(common, now, |common, name, remaining| {
+        if !stale_tree_size(common, name, remaining, 0)? {
+            return Ok(false);
+        }
+        crate::artifacts::remove_entry_tree(common, name)?;
+        Ok(true)
+    });
+}
+
+#[allow(clippy::print_stderr)]
+fn sweep_staging_with(
+    common: &Directory,
+    now: SystemTime,
+    mut remove: impl FnMut(&Directory, &OsStr, &mut usize) -> Result<bool>,
+) {
+    let cutoff = match now.duration_since(UNIX_EPOCH) {
+        Ok(time) => time.as_nanos() as i128 - STALE_AGE.as_nanos() as i128,
+        Err(error) => {
+            eprintln!("warning: object import staging sweep: {error}");
+            return;
+        }
+    };
+    let names = match entry_names(common, MAX_FILES) {
+        Ok(names) => names,
+        Err(error) => {
+            eprintln!("warning: object import staging sweep: {error}");
+            return;
+        }
+    };
+    let mut attempted = 0;
     let mut entries_left = MAX_FILES;
-    for name in entry_names(common, MAX_FILES)? {
+    for name in names {
         let import_staging = name.to_str().is_some_and(|s| {
-            s.starts_with(STAGING_PREFIX)
-                || s.strip_prefix(".provenant-staging.")
-                    .is_some_and(|suffix| hex(OsStr::new(suffix), 24))
+            s.strip_prefix(STAGING_PREFIX)
+                .and_then(|suffix| suffix.strip_prefix(".provenant-staging."))
+                .is_some_and(|suffix| hex(OsStr::new(suffix), 24))
         });
         if !import_staging {
             continue;
@@ -866,27 +1064,33 @@ fn sweep_staging(common: &Directory, now: SystemTime) -> Result<()> {
         let metadata = match common.metadata_at(&name, false) {
             Ok(metadata) => metadata,
             Err(error) if error.is_not_found() => continue,
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                eprintln!("warning: object import staging sweep {name:?}: {error}");
+                continue;
+            }
         };
         if metadata.kind == FileKind::Directory && metadata.modified_ns < cutoff {
-            if !stale_tree_size(common, &name, &mut entries_left, 0)? {
-                break;
+            attempted += 1;
+            match remove(common, &name, &mut entries_left) {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(RunError::Filesystem(error)) if error.is_not_found() => {}
+                Err(error) => eprintln!("warning: object import staging sweep {name:?}: {error}"),
             }
-            crate::artifacts::remove_entry_tree(common, &name)?;
-            swept += 1;
-            if swept == MAX_STALE_SWEEP {
+            if attempted == MAX_STALE_SWEEP || entries_left == 0 {
                 break;
             }
         }
     }
-    Ok(())
 }
 
 #[allow(clippy::print_stderr)]
-pub(crate) fn legacy_policy_diagnostic() {
-    eprintln!(
-        "warning: legacy pre-v11 Git grants policy retains shared-store write access; running full shared-store verification"
+pub(crate) fn legacy_policy_diagnostic(identity: &str) -> String {
+    let note = format!(
+        "warning: {identity}: legacy pre-v11 Git grants policy retains shared-store write access; running full shared-store verification"
     );
+    eprintln!("{note}");
+    note
 }
 
 /// Only the host's sealed launch binding chooses the source, never lane output.
@@ -898,18 +1102,24 @@ pub(crate) fn settle(
     head: GitOid,
 ) -> Result<()> {
     if let Some(source) = source {
-        let deadline = Instant::now() + IMPORT_BUDGET;
-        sweep_staging(repo.common_dir(), SystemTime::now())?;
+        sweep_staging(repo.common_dir(), SystemTime::now());
         let name = staging_name()?;
         repo.common_dir().mkdir(&name, 0o700)?;
         let staging = repo.common_dir().open_verified_directory(&name)?;
         let staging_path = repo.common_git_dir().join(&name);
-        let result = import_before(git, repo, source, &staging, &staging_path, head, deadline);
+        let result = import_before(
+            git,
+            repo,
+            source,
+            &staging,
+            &staging_path,
+            head,
+            Instant::now() + IMPORT_BUDGET,
+        );
         let cleanup = crate::artifacts::remove_entry_tree(repo.common_dir(), &name);
         result?;
         cleanup?;
     } else {
-        legacy_policy_diagnostic();
         verify_graph(git, repo.common_git_dir(), repo.root_path(), head)?;
     }
     Ok(())

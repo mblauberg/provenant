@@ -194,6 +194,34 @@ fn terminal_archives_a_verified_private_rewind_before_refusing_ancestry()
 }
 
 #[test]
+fn delivery_retries_verification_once_after_a_concurrent_host_change()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let wrapper = fixture.root.join("changing-git");
+    let log = fixture.root.join("fsck-calls");
+    let armed = fixture.root.join("armed");
+    let changed = fixture.root.join("changed");
+    let objects = fixture.writer.project.join(".git/objects");
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    fixture.executable(&wrapper, &format!(
+        "#!/bin/sh\nfor arg do\ncase \"$arg\" in fsck)\nprintf 'fsck\\n' >> {}\nif [ -e {} ] && [ ! -e {} ]; then\n/usr/bin/touch {}\n: > {}\nexit 1\nfi\n;; esac\ndone\nexec {} \"$@\"\n",
+        quote(&log), quote(&armed), quote(&changed), quote(&objects), quote(&changed), quote(&executable),
+    ))?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    let host = fixture.prepare()?;
+    std::fs::write(&log, b"")?;
+    std::fs::write(&armed, b"armed")?;
+    let head = host.head(&fixture.writer)?;
+    assert_eq!(host.head(&fixture.writer)?, head);
+    assert_eq!(std::fs::read_to_string(&log)?.lines().count(), 2);
+    assert!(changed.exists());
+    Ok(())
+}
+
+#[test]
 fn delivery_reuses_verified_heads_until_the_store_generation_changes()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;

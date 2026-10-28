@@ -182,6 +182,12 @@ pub enum RunError {
     Validation(&'static str),
     #[error("lane object import refused: {0}")]
     ObjectImportLimit(&'static str),
+    #[error(
+        "object-store lock wait timed out; retry settlement (custody and private objects retained)"
+    )]
+    ObjectStoreBusy,
+    #[error("object verification deferred: {0}")]
+    ObjectVerificationRetry(&'static str),
     #[error("invalid Git base {0:?}: expected a resolvable commit reference")]
     InvalidBase(String),
     #[error("run-store schema version {0} is unsupported")]

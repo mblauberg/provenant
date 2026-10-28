@@ -2015,7 +2015,7 @@ impl crate::RunStore {
             }
         }
         let host = host.prepare(&writer, &request)?;
-        diagnose_legacy_git_policy(&attempt)?;
+        diagnose_legacy_git_policy(&attempt, &format!("Run {} Attempt {id}", record.run_id))?;
         host.clean(&writer)?;
         if host.head(&writer)? != head {
             return Err(RunError::Validation(
@@ -2056,9 +2056,9 @@ impl crate::RunStore {
     }
 }
 
-fn diagnose_legacy_git_policy(attempt: &Directory) -> Result<()> {
+fn diagnose_legacy_git_policy(attempt: &Directory, identity: &str) -> Result<()> {
     if crate::objects::legacy_policy(attempt)? {
-        crate::objects::legacy_policy_diagnostic();
+        crate::objects::legacy_policy_diagnostic(identity);
     }
     Ok(())
 }
@@ -2081,7 +2081,7 @@ pub(crate) fn deliver_once(
     {
         return crate::db::decode(&raw);
     }
-    diagnose_legacy_git_policy(attempt)?;
+    diagnose_legacy_git_policy(attempt, identity)?;
     if host
         .bound
         .as_ref()

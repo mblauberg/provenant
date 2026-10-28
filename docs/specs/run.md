@@ -493,15 +493,29 @@ loose graph is being published. Verification holds the shared side of the same
 lock.
 The snapshot lives in the common Git directory, so publication uses atomic
 creation on the repository volume even when lane scratch is on another volume.
-The host verifies the resulting shared graph again before consuming it. Existing object
+After taking the exclusive lock, the host rechecks every staged file's device,
+inode, size, ctime and other read-relevant metadata against the snapshot taken
+before hashing. Files up to 1 MiB also carry a SHA-256 digest. A change refuses
+publication, including a swap by a still-live lane using a pre-v11 policy.
+The final shared-store check uses `fsck --connectivity-only --strict` and checks
+each newly published file again, avoiding a second full hash. Existing object
 files retain their contents, inode and permissions. SHA-1 and SHA-256 repositories
 use the same boundary. Only the host's trusted shallow boundary is preserved;
 lane-supplied boundaries cannot excuse missing history. Import is bounded by
-100,000 directory entries, 2 GiB of source objects, 64 packs and one 120-second
-wall-clock budget. Exceeding either the pack limit or time budget terminally
-refuses the import with the limit named in the reason. Import snapshots are
-removed after each attempt; a later import sweeps at most 32 host staging
-directories older than 24 hours, with bounded traversal. A pack-count or time
+100,000 directory entries, 2 GiB of source objects, 64 packs and a 120-second
+wall-clock budget for copying and `index-pack`, including initialisation and
+preflight. Each verification phase has a separate deadline: 120 seconds plus
+60 seconds per started GiB of object files (shared plus staged for import),
+capped at one hour. Delivery cache misses get a fresh verification deadline.
+Exclusive or shared lock waiting has its own 120-second limit. A lock-wait
+timeout leaves settlement non-terminal with a retry reason, retaining custody
+and private evidence. Verification deadlines also leave settlement retryable.
+Exceeding either the pack limit or the copy/index budget terminally refuses
+the import with the limit named in the reason. Import snapshots are
+removed after each attempt; a later import attempts to sweep at most 32 exact
+import staging names older than 24 hours, with bounded traversal. Generic
+staging names are preserved. Sweeping ignores vanished entries, logs all other
+errors and never prevents settlement. A pack-count or import-time
 refusal retains writer custody and private scratch for recovery. Other ordinary
 terminal cleanup owns lane scratch.
 
@@ -522,12 +536,14 @@ reused only for the same head and shared-store generation. The generation
 includes object and shallow-file identities, sizes, permissions, mtime and
 ctime, so restoring mtime cannot hide a write. Stores with external alternates
 receive a fresh check because their external generation is not tracked. Cached
-results never cross a handoff or a new delivery. Older attempts
-without a private-store binding use the host's verified common Git directory
+results never cross a handoff or a new delivery. A concurrent host change during
+verification triggers one fresh verification; another change leaves settlement
+retryable. Older attempts without a private-store binding use the host's verified common Git directory
 directly; lane-writable worktree metadata cannot select the store. Lanes whose
 compiled confinement policy predates v11 retain their old write grants until
-they exit. Settlement and delivery name that legacy policy in a diagnostic and
-run the same full strict verification against the shared store. Operators
+they exit. Settlement and delivery name that legacy policy, run and attempt in
+a diagnostic. Settlement also records the warning in its terminal run event.
+Both run full strict verification against the shared store. Operators
 should [drain writers before upgrading](../runbooks/install.md#bootstrap-and-upgrade);
 the host does not force-cancel running lanes.
 - Why: Git's ordinary reads do not prove that stored content matches its OID.

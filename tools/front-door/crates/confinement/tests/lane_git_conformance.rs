@@ -405,6 +405,13 @@ fn linked_lane_uses_private_objects_and_cannot_mutate_shared_objects() -> Result
         ("HOME".into(), home.clone().into_os_string()),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
     ];
+    let host_staging =
+        repo_git.join(".provenant-object-import-.provenant-staging.0123456789abcdef01234567");
+    fs::create_dir(&host_staging)?;
+    let staged_file = host_staging.join("verified-object");
+    fs::write(&staged_file, b"host verified content")?;
+    let new_staging =
+        repo_git.join(".provenant-object-import-.provenant-staging.abcdef0123456789abcdef01");
     // CI requires the native backend; a lane may already have an inherited sandbox.
     let backend = match system_backend(&BackendContext {
         executor: &executor,
@@ -459,6 +466,23 @@ fn linked_lane_uses_private_objects_and_cannot_mutate_shared_objects() -> Result
             .output()
             .expect("run object probe")
     };
+    let created = shell("/bin/mkdir \"$1\"", &new_staging, &scratch);
+    assert!(
+        !created.status.success(),
+        "lane created host import staging: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert!(!new_staging.exists());
+    for target in [&staged_file, &host_staging.join("lane-created-object")] {
+        let output = shell("printf replacement > \"$1\"", target, &scratch);
+        assert!(
+            !output.status.success(),
+            "lane wrote inside host import staging: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(fs::read(&staged_file)?, b"host verified content");
+    assert!(!host_staging.join("lane-created-object").exists());
     for target in &shared_objects {
         let before = fs::read(target)?;
         let mode = fs::metadata(target)?.permissions().mode();
