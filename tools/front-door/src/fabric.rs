@@ -2403,7 +2403,7 @@ fn settle_owned_worktree(
         // A long-running collector still owns the pass. Leave a visible
         // receipt rather than skipping silently; replay ignores retained ones.
         Err(crate::worktrees::Error::Fs(provenant_os::fs::FsError::LockTimeout { .. })) => {
-            let receipt = serde_json::json!({"schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":crate::worktrees::COLLECTION_BUSY});
+            let receipt = serde_json::json!({"schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":crate::worktrees::COLLECTION_BUSY, "tracking_ref_warning":"refresh skipped: worktree collection busy"});
             // Never replace a receipt that already settled or began pruning.
             if store
                 .worktree_settlement(record.attempt_id, &call)?
@@ -2436,6 +2436,7 @@ fn settle_owned_worktree(
         settlement_retention_reason(&record.state, task.deliver.is_some(), delivery);
     let mut pruning_intent = None;
     let collection_error = std::cell::RefCell::new(None::<String>);
+    let tracking_ref_warning = std::cell::RefCell::new(None::<String>);
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
         let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)?;
         let settings = config
@@ -2456,17 +2457,23 @@ fn settle_owned_worktree(
                 let Some(owner) = worktrees::load_owner(&tree)? else {
                     return Ok(None);
                 };
-                if owner.origin != WorktreeOrigin::Lane {
-                    return Ok(None);
-                }
                 // Resumed attempts share the original owner's lane. Apply the
                 // continuation proof before pruning against that owner's ID.
-                if store
-                    .check_continuation_writer(record.attempt_id, &call)
-                    .map_err(|_| worktrees::WorktreeError::UnknownWriter)?
-                    != Some(owner.clone())
+                if owner.origin == WorktreeOrigin::Lane
+                    && store
+                        .check_continuation_writer(record.attempt_id, &call)
+                        .map_err(|_| worktrees::WorktreeError::UnknownWriter)?
+                        != Some(owner.clone())
                 {
                     return Err(worktrees::WorktreeError::UnknownWriter.into());
+                }
+                if let Err(error) =
+                    crate::gc_support::refresh_writer_tracking_ref(context, &owner.branch)
+                {
+                    *tracking_ref_warning.borrow_mut() = Some(error.to_string());
+                }
+                if owner.origin != WorktreeOrigin::Lane {
+                    return Ok(None);
                 }
                 let owner_attempt = owner
                     .attempt_id
@@ -2585,10 +2592,13 @@ fn settle_owned_worktree(
                         .map(|_| pinned),
                     ..output_policy
                 };
-                let intent = serde_json::json!({
+                let mut intent = serde_json::json!({
                     "schema_version":1, "state":"pruning", "worktree":writer.worktree,
                     "branch":format!("refs/heads/{}", owner.branch)
                 });
+                if let Some(warning) = tracking_ref_warning.borrow().as_ref() {
+                    intent["tracking_ref_warning"] = serde_json::json!(warning);
+                }
                 record_worktree_settlement(&store, record.attempt_id, &intent)
                     .map_err(|_| worktrees::WorktreeError::RegistrationUnconfirmed)?;
                 pruning_intent = Some(intent);
@@ -2604,10 +2614,12 @@ fn settle_owned_worktree(
             },
         )?)
     })();
-    let receipt = match result {
+    let mut receipt = match result {
         Ok(None) => {
-            let Some(reason) = retention_reason else {
-                return Ok(());
+            let reason = match retention_reason {
+                Some(reason) => reason,
+                None if tracking_ref_warning.borrow().is_some() => "worktree retained",
+                None => return Ok(()),
             };
             let reason = match collection_error.take() {
                 Some(error) => format!("{reason}; collection failed: {error}"),
@@ -2629,6 +2641,9 @@ fn settle_owned_worktree(
             }
         }
     };
+    if let Some(warning) = tracking_ref_warning.into_inner() {
+        receipt["tracking_ref_warning"] = serde_json::json!(warning);
+    }
     // The Git mutation has its own 120-second bound. Start a fresh storage
     // budget after it so a completed prune can always publish its receipt.
     record_worktree_settlement(&store, record.attempt_id, &receipt)?;
@@ -4725,6 +4740,39 @@ mod peer_tests {
             );
             assert!(orphan.exists(), "unrelated cache collected");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_records_tracking_ref_failure_without_failing_lane()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::settlement_records_tracking_ref_failure_without_failing_lane",
+        )? {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let output = fixture.rig.execute(
+            &git,
+            &["remote", "add", "origin", "/nonexistent/provenant-remote"],
+            None,
+        )?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+            budget: WaitBudget::cli(clock.mono_now(), 30)?,
+        };
+        let receipt = fixture
+            .store
+            .worktree_settlement(fixture.settled.attempt_id, &call)?
+            .ok_or("settlement")?;
+        assert!(receipt["tracking_ref_warning"].is_string(), "{receipt}");
+        assert_eq!(receipt["state"], "pruned", "{receipt}");
         Ok(())
     }
 
