@@ -724,20 +724,26 @@ impl RunStore {
             }
             // Recovery needs the persisted binding, not a fresh Git inspection of
             // the worktree the interrupted writer left behind.
-            let fences = self.writer_fences()?;
-            let fence = fences
-                .into_iter()
-                .find(|fence| fence.scope == Self::scope(record));
-            let directory = match fence {
-                Some(fence) => provenant_os::fs::Directory::open_anchor(
-                    fence.reservation.parent().ok_or_else(|| {
-                        RunError::unsafe_path(fence.reservation.clone(), PathCheck::Containment)
-                    })?,
+            let request = self.request(record.run_id, call)?;
+            let writer = request
+                .tasks
+                .iter()
+                .find(|task| task.task_id == record.task_id)
+                .and_then(|task| task.writer.as_ref());
+            let directory = match writer {
+                Some(writer) => provenant_os::fs::Directory::open_anchor(
+                    &self
+                        .writer_registry
+                        .join("worktrees")
+                        .join(self.context.project_id.to_string())
+                        .join(provenant_confinement::worktrees::state_dir_name(
+                            &writer.worktree,
+                        )),
                 )?,
                 None => attempt.try_clone()?,
             };
             let recovery = match custody::acquire_recovery(
-                directory,
+                directory.try_clone()?,
                 provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
                 call.cancel,
                 call.clock,
@@ -748,6 +754,30 @@ impl RunStore {
                         || matches!(error, provenant_os::fs::FsError::LockTimeout { .. }) =>
                 {
                     return Ok(None);
+                }
+                Err(CustodyError::InvalidRecord) => {
+                    #[cfg(test)]
+                    let recovered = provenant_supervisor::fixture::acquire_reboot_recovery_with(
+                        directory,
+                        &attempt,
+                        Self::scope(record),
+                        provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                        call.cancel,
+                        call.clock,
+                        observer,
+                    );
+                    #[cfg(not(test))]
+                    let recovered = custody::acquire_reboot_recovery(
+                        directory,
+                        &attempt,
+                        Self::scope(record),
+                        provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                        call.cancel,
+                        call.clock,
+                    );
+                    recovered.map_err(|error| RunError::Io(std::io::Error::other(format!(
+                        "reservation cannot be verified after reboot: {error}; retain custody and inspect the reservation and boot identity before chair recovery"
+                    ))))?
                 }
                 Err(error) => return Err(RunError::Io(std::io::Error::other(error.to_string()))),
             };
