@@ -15,13 +15,15 @@ does not verify account billing. An unknown cost is not zero.
 
 To inspect native Claude Code sub-agents for a session, run
 `provenant telemetry stats --claude-subagents PATH`, where `PATH` is that
-session's `subagents` directory under `~/.claude/projects`. This is an
+session's `subagents` directory under `~/.claude*/projects/<project>/<session>`.
+The directory must contain only regular, non-symlink `agent-*.jsonl` files. This is an
 explicit import and produces a separate usage and API-equivalent cost report
 grouped by model; it does not add those calls to supervised attempt totals.
 The import uses usage metadata, not message bodies. It cannot be combined with
 `--run-id`, `--since`, `--until` or `--usage`.
 With `--json`, the `native_claude_subagents` section reports agent and message
-counts, usage, price-table billing and cost by model. A model's `cost_usd` is
+counts, usage, price-table billing and cost by model, with `cost_basis` set to
+`api_equivalent_estimate`. A model's `cost_usd` is
 null when its usage or price is incomplete. Model prices are matched exactly;
 dated aliases are not inferred.
 

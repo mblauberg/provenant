@@ -4523,10 +4523,10 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     if let Some(native) = &native {
         human.push_str(&format!("{} native Claude subagents\n", native.agents));
         for row in &native.models {
-            let cost = row
-                .cost_usd
-                .as_ref()
-                .map_or_else(|| "unknown".to_owned(), |cost| format!("${cost}"));
+            let cost = row.cost_usd.as_ref().map_or_else(
+                || "unknown".to_owned(),
+                |cost| format!("est. API-equivalent ${cost}"),
+            );
             let billing = match row.price_table_billing {
                 Some(provenant_telemetry::BillingKind::Subscription) => {
                     " (price-table subscription model)"
@@ -4551,10 +4551,10 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
 fn stats_summary(totals: &provenant_telemetry::Totals) -> String {
     let cost = &totals.cost;
     let human = if let Some(money) = &cost.complete {
-        format!("${}", money.usd)
+        format!("est. API-equivalent ${}", money.usd)
     } else if let Some(money) = &cost.known_lower_bound {
         format!(
-            "at least ${} ({} of {} attempts priced)",
+            "est. API-equivalent at least ${} ({} of {} attempts priced)",
             money.usd, cost.priced_attempts, totals.attempts
         )
     } else {
@@ -4919,6 +4919,7 @@ mod tests {
             attempts: 3,
             usage: Default::default(),
             cost: CostTotal {
+                cost_basis: "api_equivalent_estimate",
                 subscription_attempts: 0,
                 complete: None,
                 known_lower_bound: None,
@@ -4939,10 +4940,13 @@ mod tests {
         totals.cost.missing_attempts = 2;
         assert_eq!(
             stats_summary(&totals),
-            "3 attempts, at least $2.000000 (1 of 3 attempts priced)\n"
+            "3 attempts, est. API-equivalent at least $2.000000 (1 of 3 attempts priced)\n"
         );
         totals.cost.complete = totals.cost.known_lower_bound.clone();
-        assert_eq!(stats_summary(&totals), "3 attempts, $2.000000\n");
+        assert_eq!(
+            stats_summary(&totals),
+            "3 attempts, est. API-equivalent $2.000000\n"
+        );
     }
 
     #[test]

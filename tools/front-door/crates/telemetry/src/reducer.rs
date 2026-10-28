@@ -145,6 +145,7 @@ impl Money {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct CostTotal {
+    pub cost_basis: &'static str,
     /// API-equivalent estimate, not a bill. Absent when any cost is unknown.
     pub complete: Option<Money>,
     /// Absent when no attempt is priced and no partial cost is known.
@@ -261,6 +262,7 @@ impl Accumulator {
             attempts: self.attempts,
             usage: self.usage,
             cost: CostTotal {
+                cost_basis: "api_equivalent_estimate",
                 complete: (self.missing_cost == 0).then(|| known_lower_bound.clone()),
                 known_lower_bound: (self.attempts == 0
                     || self.missing_cost < self.attempts
