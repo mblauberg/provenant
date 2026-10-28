@@ -2450,6 +2450,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `--claude-subagents` | `{"conflicts": ["usage", "since", "until", "run_id"], "name": "claude_subagents"}` |
 | `--usage` | `{"defaults": ["false"], "name": "usage", "values": ["true", "false"]}` |
 | `--since` | `{"name": "since"}` |
 | `--until` | `{"name": "until"}` |
@@ -2470,6 +2471,7 @@ bounds are null. Positional arguments have no long flag.
   "groups": [
     {
       "arguments": [
+        "claude_subagents",
         "usage",
         "since",
         "until",

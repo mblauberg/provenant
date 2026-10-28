@@ -4511,9 +4511,40 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         .unwrap_or_default();
     let report = provenant_telemetry::stats(facts, &prices, window)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
-    let human = stats_summary(&report.totals);
-    let data = serde_json::to_value(&report)
+    let mut human = stats_summary(&report.totals);
+    let native = command
+        .claude_subagents
+        .as_deref()
+        .map(|path| {
+            provenant_telemetry::claude_subagents(path, &prices)
+                .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))
+        })
+        .transpose()?;
+    if let Some(native) = &native {
+        human.push_str(&format!("{} native Claude subagents\n", native.agents));
+        for row in &native.models {
+            let cost = row
+                .cost_usd
+                .as_ref()
+                .map_or_else(|| "unknown".to_owned(), |cost| format!("${cost}"));
+            let billing = match row.price_table_billing {
+                Some(provenant_telemetry::BillingKind::Subscription) => {
+                    " (price-table subscription model)"
+                }
+                _ => "",
+            };
+            human.push_str(&format!(
+                "  {}: {} agents, {} messages, cost {}{}\n",
+                row.model, row.agents, row.messages, cost, billing
+            ));
+        }
+    }
+    let mut data = serde_json::to_value(&report)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    if let Some(native) = native {
+        data["native_claude_subagents"] = serde_json::to_value(native)
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    }
     Ok((data, human))
 }
 
@@ -4888,6 +4919,7 @@ mod tests {
             attempts: 3,
             usage: Default::default(),
             cost: CostTotal {
+                subscription_attempts: 0,
                 complete: None,
                 known_lower_bound: None,
                 priced_attempts: 0,

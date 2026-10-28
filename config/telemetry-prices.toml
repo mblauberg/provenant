@@ -7,7 +7,7 @@ units = "usd_microdollars_per_million_tokens"
 
 [[models]]
 provider = "agy"
-model = "claude-opus-4-6-thinking"
+model = "agy/claude-opus-4-6-thinking"
 billing = "subscription"
 sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
 # Google subscription route; Anthropic Claude Opus 4.6 API prices as the equivalent.
@@ -19,7 +19,7 @@ output_excluding_reasoning = 25000000
 
 [[models]]
 provider = "agy"
-model = "claude-sonnet-4-6"
+model = "agy/claude-sonnet-4-6"
 billing = "subscription"
 sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
 # Google subscription route; Anthropic Claude Sonnet 4.6 API prices as the equivalent.
@@ -31,7 +31,7 @@ output_excluding_reasoning = 15000000
 
 [[models]]
 provider = "agy"
-model = "gemini-3.8-flash"
+model = "agy/gemini-3.8-flash"
 billing = "subscription"
 sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only; no verified price)"]
 # No official Google price was verified for this model.
@@ -39,7 +39,7 @@ sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only
 
 [[models]]
 provider = "claude"
-model = "claude-fable-5-1"
+model = "claude/claude-fable-5-1"
 billing = "subscription"
 sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
 [models.rates]
@@ -50,7 +50,7 @@ output_excluding_reasoning = 50000000
 
 [[models]]
 provider = "claude"
-model = "claude-haiku-4-5"
+model = "claude/claude-haiku-4-5"
 billing = "subscription"
 sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only; no verified price)"]
 # The Anthropic reference used here does not state Haiku 4.5 prices.
@@ -58,7 +58,7 @@ sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only
 
 [[models]]
 provider = "claude"
-model = "claude-haiku-5-5"
+model = "claude/claude-haiku-5-5"
 billing = "subscription"
 sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
 # Prompts of 100K tokens or fewer; larger prompts bill $0.50 input and $2.50 output.
@@ -70,7 +70,7 @@ output_excluding_reasoning = 500000
 
 [[models]]
 provider = "claude"
-model = "claude-opus-5"
+model = "claude/claude-opus-5"
 billing = "subscription"
 sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
 [models.rates]
@@ -81,7 +81,7 @@ output_excluding_reasoning = 25000000
 
 [[models]]
 provider = "claude"
-model = "claude-opus-5-5"
+model = "claude/claude-opus-5-5"
 billing = "subscription"
 sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
 [models.rates]
@@ -92,7 +92,7 @@ output_excluding_reasoning = 20000000
 
 [[models]]
 provider = "claude"
-model = "claude-sonnet-5"
+model = "claude/claude-sonnet-5"
 billing = "subscription"
 sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
 [models.rates]
@@ -103,7 +103,7 @@ output_excluding_reasoning = 10000000
 
 [[models]]
 provider = "claude"
-model = "claude-sonnet-5-5"
+model = "claude/claude-sonnet-5-5"
 billing = "subscription"
 sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
 [models.rates]
@@ -114,7 +114,7 @@ output_excluding_reasoning = 10000000
 
 [[models]]
 provider = "codex"
-model = "gpt-6.1-terra"
+model = "codex/gpt-6.1-terra"
 billing = "subscription"
 sources = ["https://developers.openai.com/api/docs/models/gpt-6.1-terra", "https://developers.openai.com/api/docs/pricing"]
 # Standard speed, prompts up to 272K input tokens, 30-minute cache writes.
@@ -126,7 +126,7 @@ output_excluding_reasoning = 5000000
 
 [[models]]
 provider = "codex"
-model = "gpt-6-luna"
+model = "codex/gpt-6-luna"
 billing = "subscription"
 sources = ["https://developers.openai.com/api/docs/models/compare"]
 [models.rates]
@@ -137,7 +137,7 @@ output_excluding_reasoning = 500000
 
 [[models]]
 provider = "codex"
-model = "gpt-6.1-sol"
+model = "codex/gpt-6.1-sol"
 billing = "subscription"
 sources = ["https://developers.openai.com/api/docs/models/compare"]
 [models.rates]
@@ -148,7 +148,7 @@ output_excluding_reasoning = 10000000
 
 [[models]]
 provider = "cursor"
-model = "auto"
+model = "cursor/auto"
 billing = "subscription"
 sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only; no verified price)"]
 # Auto picks the model per request, so no single rate applies.
@@ -156,7 +156,7 @@ sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only
 
 [[models]]
 provider = "cursor"
-model = "composer-2.5"
+model = "cursor/composer-2.5"
 billing = "subscription"
 sources = ["https://cursor.com/docs/models-and-pricing"]
 # Cache-write rate is not published.
@@ -167,14 +167,14 @@ output_excluding_reasoning = 2500000
 
 [[models]]
 provider = "cursor"
-model = "cursor-grok-4.6"
+model = "cursor/cursor-grok-4.6"
 billing = "subscription"
 sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only; no verified price)"]
 [models.rates]
 
 [[models]]
 provider = "cursor"
-model = "grok-4.7"
+model = "cursor/grok-4.7"
 billing = "subscription"
 sources = ["https://cursor.com/docs/models-and-pricing"]
 # Standard speed; context above 256K bills at 2x. Cache-write rate is not published.
@@ -185,7 +185,7 @@ output_excluding_reasoning = 6000000
 
 [[models]]
 provider = "opencode"
-model = "opencode-go/deepseek-v4.1-flash"
+model = "opencode/opencode-go/deepseek-v4.1-flash"
 billing = "subscription"
 sources = ["https://opencode.ai/docs/go/"]
 # Off-peak rate; peak hours (01-04 and 06-10 UTC, Monday to Friday) bill at 2x.
@@ -196,7 +196,7 @@ output_excluding_reasoning = 600000
 
 [[models]]
 provider = "opencode"
-model = "opencode-go/gemini-4-argon-contributor"
+model = "opencode/opencode-go/gemini-4-argon-contributor"
 billing = "subscription"
 sources = ["https://opencode.ai/docs/go/"]
 [models.rates]
@@ -206,7 +206,7 @@ output_excluding_reasoning = 20000000
 
 [[models]]
 provider = "opencode"
-model = "opencode-go/glm-5.3-flash"
+model = "opencode/opencode-go/glm-5.3-flash"
 billing = "subscription"
 sources = ["https://opencode.ai/docs/go/"]
 [models.rates]
@@ -216,7 +216,7 @@ output_excluding_reasoning = 500000
 
 [[models]]
 provider = "opencode"
-model = "opencode/deepseek-v4.1-flash-free"
+model = "opencode/opencode/deepseek-v4.1-flash-free"
 billing = "free"
 sources = ["tools/front-door/crates/routing/assets/catalogue.toml (-free models carry no charge)"]
 zero_rate_verified = true
@@ -228,7 +228,7 @@ output_excluding_reasoning = 0
 
 [[models]]
 provider = "opencode"
-model = "opencode/glm-5.3-flash-free"
+model = "opencode/opencode/glm-5.3-flash-free"
 billing = "free"
 sources = ["tools/front-door/crates/routing/assets/catalogue.toml (-free models carry no charge)"]
 zero_rate_verified = true

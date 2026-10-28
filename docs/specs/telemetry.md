@@ -37,8 +37,12 @@ priced and no partial cost contribution is known, `known_lower_bound` is null
 and the CLI prints `cost unknown (N attempts missing cost data)`. With partial
 coverage it prints `at least $X (N of M attempts priced)`. Known contributions
 from partially priced attempts remain in the lower bound. Measured zero and
-an empty report retain a numeric zero. An unpriced subscription is not free. The latest task outcome is the highest-numbered
-attempt.
+an empty report retain a numeric zero. An unpriced subscription is not free.
+The latest task outcome is the highest-numbered attempt.
+`subscription_attempts` counts attempts whose exact provider and model have a
+subscription entry in the price table, even when usage or rates are missing.
+Unknown identities are not classified as subscriptions, and this classification
+does not verify account billing.
 - Why: a partial or zero-filled total reads as a real one.
 - Test: `crates/telemetry/src/tests.rs::attempt_and_group_limits_are_enforced_before_insertion`;
   `::missing_usage_and_prices_preserve_known_lower_bounds`
@@ -55,6 +59,17 @@ regex or alias. Cost is an estimate, not a bill.
 - Test: `crates/telemetry/src/tests.rs::rounding_occurs_once_across_categories_attempts_and_groups`;
   `::price_validation_refuses_unsupported_units_duplicates_and_unverified_zero`
 - Owner: `crates/telemetry/src/`, `../../config/telemetry-prices.toml`
+
+## Native Claude Code sub-agents
+
+An explicit `--claude-subagents PATH` report reads usage metadata from one
+Claude session's `subagents` directory and groups usage and estimated cost by
+model. Message bodies are not used. Message IDs are deduplicated. These records
+remain separate from supervised attempts, and the option cannot be combined
+with attempt filters or `--usage`.
+- Why: native sub-agent usage should be visible without counting it as a
+  Provenant attempt or collecting conversation content.
+- Owner: `crates/telemetry/src/`
 
 ## Trace export
 

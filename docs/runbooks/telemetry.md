@@ -8,6 +8,23 @@ from `config/telemetry-prices.toml`. Optional `--since`, `--until DATE`,
 number of seconds ago, a date or an RFC3339 timestamp. Use `--json` for
 structured output. The contract is in the [telemetry spec](../specs/telemetry.md).
 
+Cost is an API-equivalent estimate, not a bill. The report separately counts
+attempts whose price-table entry is marked as a subscription, including those
+whose token usage or API-equivalent price is unavailable. This classification
+does not verify account billing. An unknown cost is not zero.
+
+To inspect native Claude Code sub-agents for a session, run
+`provenant telemetry stats --claude-subagents PATH`, where `PATH` is that
+session's `subagents` directory under `~/.claude/projects`. This is an
+explicit import and produces a separate usage and API-equivalent cost report
+grouped by model; it does not add those calls to supervised attempt totals.
+The import uses usage metadata, not message bodies. It cannot be combined with
+`--run-id`, `--since`, `--until` or `--usage`.
+With `--json`, the `native_claude_subagents` section reports agent and message
+counts, usage, price-table billing and cost by model. A model's `cost_usd` is
+null when its usage or price is incomplete. Model prices are matched exactly;
+dated aliases are not inferred.
+
 ## Offline timeline
 
 `provenant telemetry trace [--out FILE] [--since 604800] [--run ID] [--peers]`
