@@ -19,9 +19,10 @@ pub(crate) enum ToolKind {
     Run,
     Output,
     Graph,
+    Discover,
 }
 
-pub(crate) const TOOL_NAMES: [(ToolKind, &str); 8] = [
+pub(crate) const TOOL_NAMES: [(ToolKind, &str); 9] = [
     (ToolKind::Identity, "fabric_context"),
     (ToolKind::Mail, "fabric_mail"),
     (ToolKind::Task, "fabric_task"),
@@ -30,6 +31,7 @@ pub(crate) const TOOL_NAMES: [(ToolKind, &str); 8] = [
     (ToolKind::Run, "fabric_run"),
     (ToolKind::Graph, "fabric_graph"),
     (ToolKind::Output, "fabric_output"),
+    (ToolKind::Discover, "fabric_discover"),
 ];
 
 pub(crate) fn tool_name(kind: ToolKind) -> &'static str {
@@ -155,7 +157,7 @@ fn build_strict() -> Vec<Value> {
     let artifacts = array(reference("Artifact"), 0, 100);
     let mut recipients = array(reference("Id"), 1, 100);
     recipients["uniqueItems"] = json!(true);
-    let tools: [(&str, Value); 8] = [
+    let tools: [(&str, Value); 9] = [
         (
             "Inspect the authenticated Fabric identity or list peer hosts.",
             json!({"inspect":{},"hosts":{"after?":nullable(reference("Id")),"limit":page.clone()}}),
@@ -195,13 +197,13 @@ fn build_strict() -> Vec<Value> {
             }),
         ),
         (
-            "Submit, list, inspect, wait for, cancel or resume runs. List returns compact attempt summaries newest queued first; pass next_after as after to continue towards older attempts. Status returns the full attempt record.",
+            "Submit and wait for results, list, inspect, wait for, cancel or resume runs. List returns compact attempts newest first; pass next_after as after to continue. Set detail for full records.",
             json!({
-                "submit":{"operation_id":reference("OperationId"),"tasks":array(object(json!({"prompt":text(MAX_TEXT_BYTES),"base?":nullable(text(1024)),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_seconds":integer(1,14_400),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,64),"concurrency?":nullable(integer(1,16)),"knobs?":array(text(256),0,64),"host?":nullable(reference("Id"))},
-                "list":{"after?":nullable(reference("AttemptTarget")),"limit":page},"status":{"target":reference("AttemptTarget")},
-                "wait":{"targets":array(reference("AttemptTarget"),1,100),"condition":choices(&["any","all"]),"wait_seconds":wait},
-                "cancel":{"target":reference("AttemptTarget"),"operation_id":reference("OperationId")},
-                "resume":{"target":reference("AttemptTarget"),"operation_id":reference("OperationId"),"prompt":text(MAX_TEXT_BYTES),"expected_generation":count.clone(),"no_fallback?":{"type":"boolean"}}
+                "submit":{"operation_id?":reference("OperationId"),"wait_seconds?":wait.clone(),"detail?":{"type":"boolean"},"tasks":array(object(json!({"prompt":text(MAX_TEXT_BYTES),"base?":nullable(text(1024)),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_seconds":integer(1,14_400),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,64),"concurrency?":nullable(integer(1,16)),"knobs?":array(text(256),0,64),"host?":nullable(reference("Id"))},
+                "list":{"after?":nullable(reference("AttemptTarget")),"limit?":page},"status":{"target":reference("AttemptTarget"),"detail?":{"type":"boolean"}},
+                "wait":{"targets":array(reference("AttemptTarget"),1,100),"condition":choices(&["any","all"]),"wait_seconds":wait,"detail?":{"type":"boolean"}},
+                "cancel":{"target":reference("AttemptTarget"),"operation_id?":reference("OperationId"),"detail?":{"type":"boolean"}},
+                "resume":{"target":reference("AttemptTarget"),"operation_id?":reference("OperationId"),"prompt":text(MAX_TEXT_BYTES),"expected_generation":count.clone(),"no_fallback?":{"type":"boolean"}}
             }),
         ),
         (
@@ -214,9 +216,13 @@ fn build_strict() -> Vec<Value> {
         (
             "Read bounded output or fetch a manifest artefact.",
             json!({
-                "read":{"target":reference("AttemptTarget"),"part":choices(&["prompt","result","stderr","events"]),"offset":count,"max_bytes":integer(1,provenant_records::run::OUTPUT_LIMIT)},
+                "read":{"target":reference("AttemptTarget"),"part?":choices(&["prompt","result","stderr","events"]),"offset?":count,"max_bytes?":integer(1,provenant_records::run::OUTPUT_LIMIT)},
                 "fetch":{"target":reference("AttemptTarget"),"artifact":reference("Artifact"),"max_bytes":integer(1,MAX_FETCH_BYTES)}
             }),
+        ),
+        (
+            "Discover advanced Fabric tools and their input schemas. Call a discovered tool by its name.",
+            json!({"discover":{}}),
         ),
     ];
     TOOL_NAMES
@@ -396,7 +402,7 @@ fn compact(tool: &Value) -> Value {
 
 /// The only operation of a single-operation tool, which callers may omit.
 pub fn sole_operation(name: &str) -> Option<&'static str> {
-    let input = &catalogue().iter().find(|tool| tool["name"] == name)?["inputSchema"];
+    let input = &all_catalogue().iter().find(|tool| tool["name"] == name)?["inputSchema"];
     if input["oneOf"].is_array() {
         return None;
     }
@@ -410,7 +416,33 @@ pub(crate) fn strict_catalogue() -> &'static [Value] {
 
 pub fn catalogue() -> &'static [Value] {
     static CATALOGUE: OnceLock<Vec<Value>> = OnceLock::new();
+    CATALOGUE.get_or_init(|| {
+        all_catalogue()
+            .iter()
+            .filter(|tool| !is_advanced(&tool["name"]))
+            .cloned()
+            .collect()
+    })
+}
+
+fn is_advanced(name: &Value) -> bool {
+    matches!(
+        name.as_str(),
+        Some("fabric_task" | "fabric_events" | "fabric_lease" | "fabric_graph")
+    )
+}
+
+pub(crate) fn all_catalogue() -> &'static [Value] {
+    static CATALOGUE: OnceLock<Vec<Value>> = OnceLock::new();
     CATALOGUE.get_or_init(|| strict_catalogue().iter().map(compact).collect())
+}
+
+pub(crate) fn advanced_catalogue() -> Vec<Value> {
+    all_catalogue()
+        .iter()
+        .filter(|tool| is_advanced(&tool["name"]))
+        .cloned()
+        .collect()
 }
 
 pub fn legacy_catalogue() -> &'static [Value] {
@@ -436,6 +468,105 @@ pub fn invalid_path(name: &str, value: &Value) -> Option<String> {
         .iter()
         .find(|tool| tool["name"] == name)?["inputSchema"];
     structural_path(root, root, value, "arguments")
+}
+
+/// Describe the schema constraint at a rejected argument path, without echoing input.
+pub fn expected(name: &str, value: &Value, path: &str) -> String {
+    let Some(root) = strict_catalogue()
+        .iter()
+        .find(|tool| tool["name"] == name)
+        .map(|tool| &tool["inputSchema"])
+    else {
+        return "valid tool arguments".into();
+    };
+    let mut schema = root;
+    let mut current = value;
+    let normalised = path.replace('[', ".").replace(']', "");
+    for segment in normalised.split('.').skip(1) {
+        loop {
+            if let Some(pointer) = schema["$ref"].as_str().and_then(|p| p.strip_prefix('#')) {
+                if let Some(next) = root.pointer(pointer) {
+                    schema = next;
+                    continue;
+                }
+            }
+            if let Some(options) = schema["oneOf"].as_array() {
+                if let Some(next) = options.iter().find(|option| {
+                    ["op", "kind", "scope"].iter().any(|tag| {
+                        current
+                            .get(*tag)
+                            .is_some_and(|v| option["properties"][*tag]["const"] == *v)
+                    })
+                }) {
+                    schema = next;
+                    continue;
+                }
+                if segment == "op" || segment == "kind" || segment == "scope" {
+                    let choices: Vec<_> = options
+                        .iter()
+                        .filter_map(|option| option["properties"][segment]["const"].as_str())
+                        .collect();
+                    if !choices.is_empty() {
+                        return format!("one of {}", choices.join(", "));
+                    }
+                }
+            }
+            if let Some(options) = schema["anyOf"].as_array() {
+                schema = &options[0];
+                continue;
+            }
+            break;
+        }
+        if let Ok(index) = segment.parse::<usize>() {
+            schema = &schema["items"];
+            current = current.get(index).unwrap_or(&Value::Null);
+        } else {
+            schema = &schema["properties"][segment];
+            current = current.get(segment).unwrap_or(&Value::Null);
+        }
+    }
+    while let Some(pointer) = schema["$ref"].as_str().and_then(|p| p.strip_prefix('#')) {
+        let Some(next) = root.pointer(pointer) else {
+            break;
+        };
+        schema = next;
+    }
+    if let Some(options) = schema["anyOf"].as_array() {
+        schema = &options[0];
+    }
+    if let Some(values) = schema["enum"].as_array() {
+        return format!(
+            "one of {}",
+            values
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if let Some(value) = schema.get("const") {
+        return format!("{value}");
+    }
+    match schema["type"].as_str() {
+        Some("integer") => format!(
+            "an integer from {} to {}",
+            schema["minimum"], schema["maximum"]
+        ),
+        Some("string") if schema["pattern"].is_string() => {
+            format!("a string matching {}", schema["pattern"])
+        }
+        Some("string") => format!(
+            "a non-empty string of at most {} UTF-8 bytes",
+            schema["maxLength"]
+        ),
+        Some("array") => format!(
+            "an array with {} to {} items",
+            schema["minItems"], schema["maxItems"]
+        ),
+        Some("object") => "an object with the documented fields".into(),
+        Some("boolean") => "a boolean".into(),
+        _ => "a documented argument".into(),
+    }
 }
 fn structural_path(root: &Value, schema: &Value, value: &Value, path: &str) -> Option<String> {
     if let Some(pointer) = schema["$ref"].as_str() {

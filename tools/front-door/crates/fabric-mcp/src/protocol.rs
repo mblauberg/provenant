@@ -297,7 +297,7 @@ impl Protocol {
                     Err(_) => return refuse(-32602, "Invalid tool call envelope"),
                 };
                 self.usage_tool = Some(ToolCall::usage_name(&call.name));
-                let call = match ToolCall::parse(&call.name, call.arguments) {
+                let call = match ToolCall::parse(&call.name, call.arguments.clone()) {
                     Ok(call) => call,
                     Err(InvalidInput::UnknownTool) => return refuse(-32602, "Unknown tool name"),
                     Err(InvalidInput::Arguments { path }) => {
@@ -306,7 +306,7 @@ impl Protocol {
                             tool_error(
                                 Some(&call.name),
                                 "invalid_input",
-                                json!({"code":"invalid_input","path":path}),
+                                json!({"code":"invalid_input","message":format!("Invalid argument at {path}; expected {}", crate::schema::expected(&call.name, &call.arguments, &path)),"path":path,"hint":"Correct the argument and retry; use fabric_discover for advanced tool schemas."}),
                             ),
                             modern,
                         ));
