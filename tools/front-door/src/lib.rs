@@ -694,30 +694,21 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Workflow(cmd) => {
             match roots::resolve(globals, Workspace::Project, Product::Required) {
                 Ok(resolved) => {
-                    let session_save = matches!(
-                        cmd,
-                        provenant_cli::Workflow::Session(
-                            provenant_cli::workflow::Session::Save { .. }
-                        )
-                    );
-                    let status = provenant_cli::workflow::run(
+                    let state = resolved.roots.state.as_path().to_owned();
+                    let home = resolved.home.clone();
+                    let project = resolved.project.clone();
+                    provenant_cli::workflow::run(
                         cmd,
                         globals,
                         &resolved.roots,
                         &resolved.home,
                         &resolved.project,
-                    );
-                    if session_save
-                        && status == 0
-                        && let Some(warning) = disk_guard::session_warning(
-                            resolved.roots.state.as_path(),
-                            &resolved.home,
-                            &resolved.project,
-                        )
-                    {
-                        let _ = writeln!(io::stderr().lock(), "{warning}");
-                    }
-                    status
+                        move || {
+                            bounded_session_warning(move || {
+                                disk_guard::session_warning(&state, &home, &project)
+                            })
+                        },
+                    )
                 }
                 Err(error) => fail(
                     &inv.leaf,
@@ -735,6 +726,37 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Bench(command) => bench::run(command, globals),
         Command::Check(check) => checks::run(check, globals),
         Command::Hook(hook) => hooks::run(hook, globals),
+    }
+}
+
+/// Disk observations are best-effort and may stall on an unhealthy volume.
+fn bounded_session_warning(
+    observe: impl FnOnce() -> Option<String> + Send + 'static,
+) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("session-disk-warning".into())
+        .spawn(move || {
+            let _ = tx.send(observe());
+        })
+        .ok()?;
+    rx.recv_timeout(std::time::Duration::from_millis(250))
+        .ok()
+        .flatten()
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod session_warning_tests {
+    #[test]
+    fn stalled_observation_does_not_hold_save() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let warning = super::bounded_session_warning(move || {
+            let _ = rx.recv();
+            Some("late".to_owned())
+        });
+        assert_eq!(warning, None);
+        drop(tx);
     }
 }
 /// Run one parsed command line and count it, returning the exit status.

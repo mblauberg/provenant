@@ -116,17 +116,6 @@ pub(crate) fn total_bytes(file: &File) -> io::Result<u64> {
     Ok(blocks.saturating_mul(size))
 }
 
-pub(crate) fn filesystem_bytes(file: &File) -> io::Result<(u64, u64)> {
-    let stats = filesystem(file)?;
-    #[allow(clippy::useless_conversion)]
-    let size = u64::from(stats.f_frsize);
-    #[allow(clippy::useless_conversion)]
-    let available = u64::from(stats.f_bavail).saturating_mul(size);
-    #[allow(clippy::useless_conversion)]
-    let total = u64::from(stats.f_blocks).saturating_mul(size);
-    Ok((available, total))
-}
-
 fn filesystem(file: &File) -> io::Result<libc::statvfs> {
     let mut stats = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
     // SAFETY: the descriptor is owned by file for the call; stats is a live,
@@ -141,6 +130,10 @@ fn filesystem(file: &File) -> io::Result<libc::statvfs> {
 
 /// Sample an existing path's filesystem with one syscall, without opening it.
 pub(crate) fn available_bytes_at(path: &Path) -> io::Result<u64> {
+    filesystem_bytes_at(path).map(|(available, _)| available)
+}
+
+pub(crate) fn filesystem_bytes_at(path: &Path) -> io::Result<(u64, u64)> {
     let path = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
     #[cfg(target_os = "macos")]
@@ -165,7 +158,9 @@ pub(crate) fn available_bytes_at(path: &Path) -> io::Result<u64> {
     let size = u64::from(stats.f_bsize);
     #[cfg(target_os = "linux")]
     let size = stats.f_frsize;
-    Ok(blocks.saturating_mul(size))
+    #[allow(clippy::useless_conversion)]
+    let total = u64::from(stats.f_blocks).saturating_mul(size);
+    Ok((blocks.saturating_mul(size), total))
 }
 
 #[cfg(test)]

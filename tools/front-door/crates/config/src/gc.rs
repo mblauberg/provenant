@@ -204,6 +204,18 @@ mod tests {
     }
 
     #[test]
+    fn observed_default_floor_matches_dispatch_floor() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let settings = super::GcSettings::read(temp.path())?;
+        let total = provenant_os::fs::Directory::open_anchor(temp.path())?.total_bytes()?;
+        assert_eq!(
+            settings.free_floor_for_total(total)?,
+            settings.free_floor_bytes(temp.path())?
+        );
+        Ok(())
+    }
+
+    #[test]
     fn cache_sizes_accept_binary_suffixes_and_plain_gib_and_refuse_overflow() {
         for size in ["20", "20G", "20GiB", "20gib"] {
             assert_eq!(super::parse_cache_size(size), Ok(20 * 1024_u64.pow(3)));

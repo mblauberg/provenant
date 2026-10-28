@@ -94,6 +94,11 @@ pub fn available_bytes_at(path: &Path) -> io::Result<u64> {
     crate::sys::resources::available_bytes_at(path)
 }
 
+/// Available and total bytes from one filesystem observation, following links.
+pub fn filesystem_bytes_at(path: &Path) -> io::Result<(u64, u64)> {
+    crate::sys::resources::filesystem_bytes_at(path)
+}
+
 /// Resolve trusted setup paths without granting filesystem mutation authority.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemPathResolver;
@@ -544,10 +549,6 @@ impl Directory {
     /// Total capacity of this directory's filesystem.
     pub fn total_bytes(&self) -> std::io::Result<u64> {
         crate::sys::resources::total_bytes(&self.file)
-    }
-    /// Available and total bytes from a single filesystem observation.
-    pub fn filesystem_bytes(&self) -> std::io::Result<(u64, u64)> {
-        crate::sys::resources::filesystem_bytes(&self.file)
     }
     /// Exclusive APFS allocation, or None when the filesystem omits it.
     /// Observes one normal component without following its final symlink.

@@ -726,7 +726,8 @@ fn session_save_warns_once_only_when_disk_is_low() -> Result {
     let file = rig.root.join("checkpoint.md");
     std::fs::write(&file, "# Goal\nship it\n")?;
     let file = file.to_string_lossy().into_owned();
-    for (floor, warning) in [("1B", false), ("9223372036854775807B", true)] {
+    let (free, total) = provenant_os::fs::filesystem_bytes_at(&rig.state)?;
+    for (floor, warning) in [("1B", free < 2), ("9223372036854775807B", free < total / 2)] {
         std::fs::write(
             rig.state.join("config.toml"),
             format!("schema_version=1\n[gc]\nfree_floor='{floor}'\n"),
@@ -738,15 +739,27 @@ fn session_save_warns_once_only_when_disk_is_low() -> Result {
             }
             let output = rig.command(&args)?;
             assert_eq!(code(&output), 0);
-            if json {
-                let _: Value = serde_json::from_slice(&output.stdout.bytes)?;
-            }
             let stderr = String::from_utf8_lossy(&output.stderr.bytes);
-            let lines: Vec<_> = stderr
-                .lines()
-                .filter(|line| line.starts_with("Disk pressure:"))
-                .collect();
-            assert_eq!(lines.len(), usize::from(warning), "{stderr}");
+            assert!(!stderr.contains("Disk pressure:"), "{stderr}");
+            let stdout = String::from_utf8_lossy(&output.stdout.bytes);
+            let lines: Vec<String> = if json {
+                let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+                value["data"]["warnings"]
+                    .as_array()
+                    .ok_or("warnings")?
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|line| line.starts_with("Disk pressure:"))
+                    .map(str::to_owned)
+                    .collect()
+            } else {
+                stdout
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("warning: Disk pressure:"))
+                    .map(|line| format!("Disk pressure:{line}"))
+                    .collect()
+            };
+            assert_eq!(lines.len(), usize::from(warning), "{stdout}");
             if warning {
                 assert!(lines[0].contains("provenant disk report"));
                 assert!(lines[0].contains("provenant gc"));

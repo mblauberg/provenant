@@ -370,14 +370,9 @@ fn checkpoint(
         }
         _ => {}
     }
-    if matches!(moment, Moment::Compact | Moment::Restart)
-        && let Some(warning) = crate::disk_guard::session_warning(roots.state.as_path(), &home, cwd)
-    {
-        if !digest.is_empty() {
-            digest.push('\n');
-        }
-        digest.push_str(&warning);
-    }
+    append_session_warning(&mut digest, moment, in_lane, || {
+        crate::disk_guard::session_warning(roots.state.as_path(), &home, cwd)
+    });
     if moment == Moment::Stop {
         return Ok(session::HookContext {
             session_id: None,
@@ -400,6 +395,58 @@ fn checkpoint(
             client,
         },
     ))
+}
+
+fn append_session_warning(
+    digest: &mut String,
+    moment: Moment,
+    in_lane: bool,
+    observe: impl FnOnce() -> Option<String>,
+) {
+    if !in_lane
+        && matches!(moment, Moment::Compact | Moment::Restart)
+        && let Some(warning) = observe()
+    {
+        if !digest.is_empty() {
+            digest.push('\n');
+        }
+        digest.push_str(&warning);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod disk_warning_tests {
+    #[allow(unused_imports)] // Also included by the harness=false worktree driver.
+    use super::{Moment, append_session_warning};
+
+    #[test]
+    fn session_warning_is_only_added_for_chair_starts() {
+        for moment in [Moment::Restart, Moment::Compact] {
+            let mut digest = String::from("state");
+            append_session_warning(&mut digest, moment, false, || None);
+            assert_eq!(digest, "state");
+            append_session_warning(&mut digest, moment, false, || {
+                Some("Disk pressure: low".into())
+            });
+            assert_eq!(digest, "state\nDisk pressure: low");
+        }
+        for (moment, lane) in [
+            (Moment::Restart, true),
+            (Moment::Compact, true),
+            (Moment::PreCompact, false),
+            (Moment::Stop, false),
+        ] {
+            let mut digest = String::new();
+            let observed = std::cell::Cell::new(false);
+            append_session_warning(&mut digest, moment, lane, || {
+                observed.set(true);
+                None
+            });
+            assert!(digest.is_empty());
+            assert!(!observed.get());
+        }
+    }
 }
 /// Collect state and save it to the hook-owned file beside the checkpoint.
 fn autosave(
