@@ -657,7 +657,7 @@ fn native_boundaries_mirror_workspace_lints_except_for_unsafe_code() -> Result<(
     expected["rust"]["unsafe_code"] = toml_edit::value("deny");
     // Compare parsed values, so key order, comments and whitespace do not matter.
     let expected: serde_json::Value = toml_edit::de::from_str(&expected.to_string())?;
-    for member in ["os", "supervisor"] {
+    for member in ["os", "supervisor", "sqlite"] {
         let manifest = read_manifest(&root.join(format!("crates/{member}/Cargo.toml")))?;
         let actual: serde_json::Value = toml_edit::de::from_str(&manifest["lints"].to_string())?;
         assert_eq!(
