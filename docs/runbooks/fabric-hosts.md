@@ -647,7 +647,10 @@ settlements. `--session LABEL` selects the lanes an agent label submitted, so
 no ID list is needed. The wait starts when the command does, so a peer lane
 that settles while the peer is unreachable still counts once it answers. The
 comparison uses the peer's recorded settlement time against this host's clock,
-so keep the hosts' clocks synchronised. For a background job or monitor, run
+so keep the hosts' clocks synchronised. The
+local wait briefly rechecks a run-store privacy or containment failure, up to
+one second or the remaining wait budget. A failure that persists is reported.
+For a background job or monitor, run
 `provenant lanes --watch 3600`. One poll shares a single deadline across
 all its peer reads (one per host and per 100 lanes, plus the lookup of lanes
 that left the newest page). Each read is bounded by the time the earlier reads

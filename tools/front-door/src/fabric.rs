@@ -6598,6 +6598,7 @@ mod peer_tests {
                 kind,
                 message: error.to_string(),
                 detail: Some(error),
+                store_path_unsafe: false,
             };
             assert_eq!(super::fail_error(fail), expected);
         }
