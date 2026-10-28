@@ -67,6 +67,9 @@ pub use provenant_records::run::LaneWait;
 /// Resource probes. A failed probe queues; it never admits unchecked.
 pub trait Resources {
     fn memory(&self) -> std::io::Result<MemorySample>;
+    fn pressure(&self) -> std::io::Result<Option<resources::MemoryPressure>> {
+        Ok(None)
+    }
     fn disk(&self, attempt: &Directory) -> std::io::Result<u64>;
     /// Host admission observes the same output volumes as the running guardian.
     /// Test probes may retain their synthetic attempt-level observation.
@@ -78,6 +81,9 @@ pub struct SystemResources;
 impl Resources for SystemResources {
     fn memory(&self) -> std::io::Result<MemorySample> {
         resources::memory()
+    }
+    fn pressure(&self) -> std::io::Result<Option<resources::MemoryPressure>> {
+        resources::memory_pressure()
     }
     fn disk(&self, attempt: &Directory) -> std::io::Result<u64> {
         attempt.available_bytes()
@@ -182,6 +188,24 @@ impl RunStore {
                             class_name(class),
                             tenths(left),
                             tenths(spacing)
+                        )
+                    } else if let Ok(Some(
+                        pressure @ (resources::MemoryPressure::Warning
+                        | resources::MemoryPressure::Critical),
+                    )) = resources::memory_pressure()
+                    {
+                        format!("host capacity: memory pressure {pressure:?}")
+                    } else if class == LaneClass::Writer
+                        && let (Ok(memory), Ok(settings), Some(count)) = (
+                            resources::memory(),
+                            provenant_config::LaneBuildSettings::read(&self.writer_registry),
+                            crate::ledger::writer_count(&self.writer_registry),
+                        )
+                        && count >= settings.build_limit(memory.total_bytes)
+                    {
+                        format!(
+                            "host capacity: {count} of {} writer build slots active",
+                            settings.build_limit(memory.total_bytes)
                         )
                     } else {
                         "host capacity: active lane caps and memory or disk floors".to_owned()
@@ -375,24 +399,32 @@ impl RunStore {
                 .and_then(|settings| settings.free_floor_bytes(&self.writer_registry));
             let fits = match (
                 resources.memory(),
+                resources.pressure(),
                 resources.disk(attempt),
                 disk_floor_bytes,
+                provenant_config::LaneBuildSettings::read(&self.writer_registry),
             ) {
-                (Ok(memory), Ok(disk), Ok(floor)) => {
+                (Ok(memory), Ok(pressure), Ok(disk), Ok(floor), Ok(settings)) => {
                     disk_refusal = (disk < floor).then_some((disk, floor));
-                    memory.total_bytes > 0
-                        && u128::from(memory.available_bytes) * 10_000
-                            >= u128::from(memory.total_bytes)
-                                * u128::from(ticket.memory_floor_basis_points)
-                        && disk >= floor
+                    let fits = (match pressure {
+                        Some(resources::MemoryPressure::Normal) => true,
+                        Some(_) => false,
+                        None => {
+                            memory.total_bytes > 0
+                                && u128::from(memory.available_bytes) * 10_000
+                                    >= u128::from(memory.total_bytes)
+                                        * u128::from(ticket.memory_floor_basis_points)
+                        }
+                    }) && disk >= floor;
+                    fits.then_some(settings.build_limit(memory.total_bytes))
                 }
                 _ => {
                     disk_refusal = None;
-                    false
+                    None
                 }
             };
-            if fits {
-                match self.claim(id, clock, &call) {
+            if let Some(limit) = fits {
+                match self.claim_with_build_limit(id, limit, clock, &call) {
                     Ok(Some(record)) => return Ok(record),
                     // A busy store is transient; keep waiting to the deadline.
                     Ok(None) | Err(RunError::Contention) => {}
@@ -422,9 +454,19 @@ impl RunStore {
             delay = (delay * 2).min(Duration::from_secs(2));
         }
     }
+    #[cfg(test)]
     pub(crate) fn claim(
         &self,
         id: AttemptId,
+        clock: &dyn Clock,
+        call: &Request<'_>,
+    ) -> Result<Option<AttemptRecord>> {
+        self.claim_with_build_limit(id, HOST_ACTIVE, clock, call)
+    }
+    pub(crate) fn claim_with_build_limit(
+        &self,
+        id: AttemptId,
+        max_builds: u64,
         clock: &dyn Clock,
         call: &Request<'_>,
     ) -> Result<Option<AttemptRecord>> {
@@ -451,6 +493,7 @@ impl RunStore {
                 &ledger,
                 self.context.state_root.as_path(),
                 &ticket,
+                max_builds,
                 clock,
                 call,
             )?

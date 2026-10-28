@@ -34,6 +34,8 @@ pub struct HostLaunchContext {
     pub executable_search_path: Vec<PathBuf>,
     pub git: PathBuf,
     pub codex_home: Option<PathBuf>,
+    #[serde(default)]
+    pub cargo_build_jobs: Option<String>,
     /// Synthetic fake-provider evidence; absent from installed builds.
     #[cfg(feature = "fixture")]
     #[serde(default)]
@@ -179,6 +181,9 @@ struct LaneResources<'a> {
     context: &'a HolderContext,
 }
 impl Resources for LaneResources<'_> {
+    fn pressure(&self) -> std::io::Result<Option<provenant_os::sys::resources::MemoryPressure>> {
+        self.resources.pressure()
+    }
     fn memory(&self) -> std::io::Result<provenant_os::sys::resources::MemorySample> {
         self.resources.memory()
     }
@@ -810,6 +815,7 @@ mod disk_admission_tests {
                 executable_search_path: Vec::new(),
                 git: "/usr/bin/git".into(),
                 codex_home: None,
+                cargo_build_jobs: None,
                 #[cfg(feature = "fixture")]
                 fixture_state_write: false,
             }),

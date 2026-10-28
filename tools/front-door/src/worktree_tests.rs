@@ -3096,6 +3096,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
                 executable_search_path: Vec::new(),
                 git: selected_git.clone(),
                 codex_home: None,
+                cargo_build_jobs: None,
                 fixture_state_write: true,
             }),
             sealed: Some(provenant_run::SealedTask {

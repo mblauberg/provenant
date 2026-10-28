@@ -5,6 +5,75 @@ use std::{
     path::{Component, Path},
 };
 
+/// Host-wide build limits, read independently by admission guardians.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LaneBuildSettings {
+    pub max_concurrent_builds: Option<u64>,
+    pub cargo_build_jobs: Option<u64>,
+}
+impl LaneBuildSettings {
+    pub fn read(state: &Path) -> std::io::Result<Self> {
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Root {
+            domains: Domains,
+        }
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Domains {
+            fabric: Fabric,
+        }
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Fabric {
+            lanes: LaneBuildSettings,
+        }
+        let read = provenant_os::fs::Directory::open_anchor(state).and_then(|directory| {
+            directory.read_bounded(
+                "config.toml".as_ref(),
+                provenant_records::Limits::CONFIG.max_bytes,
+            )
+        });
+        let settings = match read {
+            Ok(bytes) => {
+                toml_edit::de::from_str::<Root>(
+                    std::str::from_utf8(&bytes).map_err(std::io::Error::other)?,
+                )
+                .map_err(std::io::Error::other)?
+                .domains
+                .fabric
+                .lanes
+            }
+            Err(error) if error.is_not_found() => Self::default(),
+            Err(error) => return Err(std::io::Error::other(error)),
+        };
+        if settings
+            .max_concurrent_builds
+            .is_some_and(|n| !(1..=64).contains(&n))
+            || settings
+                .cargo_build_jobs
+                .is_some_and(|n| !(1..=1024).contains(&n))
+        {
+            return Err(std::io::Error::other("invalid lane build settings"));
+        }
+        Ok(settings)
+    }
+    pub fn build_limit(&self, total_bytes: u64) -> u64 {
+        self.max_concurrent_builds
+            .unwrap_or(if total_bytes <= 16 * 1024_u64.pow(3) {
+                1
+            } else {
+                2
+            })
+    }
+    pub fn jobs(&self) -> u64 {
+        self.cargo_build_jobs.unwrap_or_else(|| {
+            std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1) as u64)
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GcSettings {

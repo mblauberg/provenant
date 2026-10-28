@@ -2259,6 +2259,80 @@ fn host_view_refuses_a_launched_child_renamed_after_start() -> TestResult {
 struct Host {
     available: u64,
 }
+
+#[test]
+fn memory_pressure_defers_even_when_available_memory_is_high() -> TestResult {
+    use provenant_os::sys::resources::MemoryPressure;
+    struct Pressured(MemoryPressure);
+    impl Resources for Pressured {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            Host { available: 100 }.memory()
+        }
+        fn pressure(
+            &self,
+        ) -> std::io::Result<Option<provenant_os::sys::resources::MemoryPressure>> {
+            Ok(Some(self.0))
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            Ok(u64::MAX)
+        }
+    }
+    for (level, writer) in [
+        (MemoryPressure::Warning, true),
+        (MemoryPressure::Critical, false),
+        (MemoryPressure::Normal, true),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            admission_seconds: 1,
+            ..AdmissionPolicy::default()
+        });
+        let run = lane(54, writer);
+        let id = starting(&store, &run, &call)?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let result = store.admit(id, &attempt, &Pressured(level), &clock, &cancel);
+        if level == MemoryPressure::Normal {
+            assert_eq!(result?.state, AttemptState::Running);
+        } else {
+            assert!(matches!(result, Err(RunError::Refused)));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn writer_build_limit_is_shared_across_runs() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (Stepped::up(0), CancelToken::new());
+    let call = stepped_call(&clock, &cancel);
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 0,
+        ..AdmissionPolicy::default()
+    });
+    let first = starting(&store, &lane(55, true), &call)?;
+    let second = starting(&store, &lane(56, true), &call)?;
+    let third = starting(&store, &lane(57, true), &call)?;
+    assert!(
+        store
+            .claim_with_build_limit(first, 2, &clock, &call)?
+            .is_some()
+    );
+    assert!(
+        store
+            .claim_with_build_limit(second, 2, &clock, &call)?
+            .is_some()
+    );
+    assert!(
+        store
+            .claim_with_build_limit(third, 2, &clock, &call)?
+            .is_none()
+    );
+    Ok(())
+}
 impl Resources for Host {
     fn memory(&self) -> std::io::Result<MemorySample> {
         Ok(MemorySample {

@@ -99,6 +99,11 @@ def mcp_reference(data, all_tools):
 
 def config_reference(data):
     text = header("Configuration keys", KNOBS.as_posix())
+    text += ("## Host lane build settings\n\n"
+             "Set these in `[domains.fabric.lanes]` in the host configuration.\n\n"
+             "| Key | Default | Effect |\n|---|---|---|\n"
+             "| `max_concurrent_builds` | 1 at 16 GiB or less, otherwise 2 | Maximum active worktree-write lanes across the host (1 to 64). |\n"
+             "| `cargo_build_jobs` | Half the available cores, at least 1 | Default `CARGO_BUILD_JOBS` for lanes (1 to 1024); an inherited value takes precedence. |\n\n")
     provider_updates = data.get("provider_updates")
     if provider_updates:
         text += "## Provider updates\n\n" + fenced(provider_updates) + "\n"

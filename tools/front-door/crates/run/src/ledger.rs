@@ -129,6 +129,7 @@ pub(crate) fn lease(
     db: &Connection,
     store: &Path,
     ticket: &AdmissionTicket,
+    max_builds: u64,
     time: &dyn Clock,
     request: &Request<'_>,
 ) -> Result<Option<WallTime>> {
@@ -147,9 +148,9 @@ pub(crate) fn lease(
         if held {
             return Ok(Some(now));
         }
-        if full(tx, project)? {
+        if full(tx, project)? || (class == LaneClass::Writer && writers_full(tx, max_builds)?) {
             prune(tx)?;
-            if full(tx, project)? {
+            if full(tx, project)? || (class == LaneClass::Writer && writers_full(tx, max_builds)?) {
                 return Ok(None);
             }
         }
@@ -173,6 +174,25 @@ pub(crate) fn lease(
         )?;
         Ok(Some(now))
     })
+}
+fn writers_full(tx: &Connection, max: u64) -> Result<bool> {
+    let writers: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM leases WHERE class='writer'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(writers >= sql_int(max)?)
+}
+pub(crate) fn writer_count(host: &Path) -> Option<u64> {
+    let db = provenant_sqlite::open_connection(&host.join(FILE), true).ok()?;
+    let count: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM leases WHERE class='writer'",
+            [],
+            |r| r.get(0),
+        )
+        .ok()?;
+    u64::try_from(count).ok()
 }
 /// A reading of the host's monotonic clock and the boot it belongs to.
 struct HostInstant {

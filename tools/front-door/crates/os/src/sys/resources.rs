@@ -14,6 +14,48 @@ pub struct MemorySample {
     pub total_bytes: u64,
 }
 
+/// Kernel memory pressure, where available.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryPressure {
+    Normal,
+    Warning,
+    Critical,
+}
+
+#[cfg(target_os = "linux")]
+pub fn memory_pressure() -> io::Result<Option<MemoryPressure>> {
+    Ok(None)
+}
+
+#[cfg(target_os = "macos")]
+pub fn memory_pressure() -> io::Result<Option<MemoryPressure>> {
+    let mut level: libc::c_int = 0;
+    let mut length = std::mem::size_of_val(&level);
+    // SAFETY: the name is NUL terminated and level is a writable integer;
+    // sysctl retains no pointers.
+    let result = unsafe {
+        libc::sysctlbyname(
+            c"kern.memorystatus_vm_pressure_level".as_ptr(),
+            (&raw mut level).cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if length != std::mem::size_of_val(&level) {
+        return Err(io::Error::other("invalid memory pressure size"));
+    }
+    match level {
+        1 => Ok(Some(MemoryPressure::Normal)),
+        2 => Ok(Some(MemoryPressure::Warning)),
+        4 => Ok(Some(MemoryPressure::Critical)),
+        _ => Err(io::Error::other("unknown memory pressure level")),
+    }
+}
+
 /// Linux reads `MemAvailable`; it already accounts for reclaimable caches.
 #[cfg(target_os = "linux")]
 pub fn memory() -> io::Result<MemorySample> {

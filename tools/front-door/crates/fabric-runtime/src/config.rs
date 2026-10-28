@@ -117,6 +117,8 @@ impl Default for GraphLimits {
 pub struct Lanes {
     pub priority: LanePriority,
     pub cargo_seed: CargoSeed,
+    pub max_concurrent_builds: Option<u64>,
+    pub cargo_build_jobs: Option<u64>,
 }
 
 /// Optional host Cargo seeds for writer lanes.
@@ -385,6 +387,20 @@ impl DomainConfig for FabricConfig {
             if value > 19 {
                 reject(format!("lanes.priority.{name}"));
             }
+        }
+        if self
+            .lanes
+            .max_concurrent_builds
+            .is_some_and(|n| !(1..=64).contains(&n))
+        {
+            reject("lanes.max_concurrent_builds".into());
+        }
+        if self
+            .lanes
+            .cargo_build_jobs
+            .is_some_and(|n| !(1..=1024).contains(&n))
+        {
+            reject("lanes.cargo_build_jobs".into());
         }
         errors
     }

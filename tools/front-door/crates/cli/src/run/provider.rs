@@ -737,6 +737,18 @@ fn prepare_with(
             Stdin::Bytes(bytes) => bytes,
             Stdin::Null => Vec::new(),
         };
+        let jobs = provenant_config::LaneBuildSettings {
+            max_concurrent_builds: config.domains.fabric.lanes.max_concurrent_builds,
+            cargo_build_jobs: config.domains.fabric.lanes.cargo_build_jobs,
+        }
+        .jobs();
+        set_cargo_jobs(
+            &mut spec.env,
+            registry
+                .host
+                .and_then(|host| host.cargo_build_jobs.as_deref()),
+            jobs,
+        );
         return Ok(run::PreparedLaunch {
             provider_lease: provider_leases.remove(adapter.id()),
             skipped_routes: reasons,
@@ -765,7 +777,35 @@ fn prepare_with(
         .join("; "))
 }
 
+fn set_cargo_jobs(
+    env: &mut Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    inherited: Option<&str>,
+    jobs: u64,
+) {
+    if !env.iter().any(|(name, _)| name == "CARGO_BUILD_JOBS") {
+        env.push((
+            "CARGO_BUILD_JOBS".into(),
+            inherited
+                .map_or_else(|| jobs.to_string(), str::to_owned)
+                .into(),
+        ));
+    }
+}
+
 /// A candidate that did not launch, typed by why it was skipped.
+#[test]
+fn cargo_jobs_respect_supplied_environment() {
+    let mut env = vec![("CARGO_BUILD_JOBS".into(), "7".into())];
+    set_cargo_jobs(&mut env, Some("9"), 3);
+    assert_eq!(env[0].1, "7");
+    let mut env = Vec::new();
+    set_cargo_jobs(&mut env, Some("9"), 3);
+    assert_eq!(env[0].1, "9");
+    let mut env = Vec::new();
+    set_cargo_jobs(&mut env, None, 3);
+    assert_eq!(env[0].1, "3");
+}
+
 fn skip(route: &str, kind: SkipKind, detail: impl Into<String>) -> SkippedRoute {
     SkippedRoute {
         route: route.to_owned(),
@@ -2655,6 +2695,7 @@ mod tests {
             executable_search_path: vec![temp.path().into()],
             git: "/usr/bin/git".into(),
             codex_home: None,
+            cargo_build_jobs: None,
             #[cfg(feature = "fixture")]
             fixture_state_write: false,
         };

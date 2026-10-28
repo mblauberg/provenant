@@ -4,6 +4,15 @@
 
 Source: `config/harness-knobs.json`.
 
+## Host lane build settings
+
+Set these in `[domains.fabric.lanes]` in the host configuration.
+
+| Key | Default | Effect |
+|---|---|---|
+| `max_concurrent_builds` | 1 at 16 GiB or less, otherwise 2 | Maximum active worktree-write lanes across the host (1 to 64). |
+| `cargo_build_jobs` | Half the available cores, at least 1 | Default `CARGO_BUILD_JOBS` for lanes (1 to 1024); an inherited value takes precedence. |
+
 ## Provider updates
 
 ```json

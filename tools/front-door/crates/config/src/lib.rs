@@ -8,7 +8,9 @@
 mod domains;
 mod gc;
 mod github_policy;
-pub use gc::{ForeignWorktrees, GcSettings, ProjectGcSettings, parse_cache_size};
+pub use gc::{
+    ForeignWorktrees, GcSettings, LaneBuildSettings, ProjectGcSettings, parse_cache_size,
+};
 pub use github_policy::GithubPolicy;
 mod harness;
 mod hooks;
