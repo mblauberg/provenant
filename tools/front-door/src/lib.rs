@@ -810,6 +810,7 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
             | "console projects"
             | "console sessions"
             | "console overview"
+            | "console board"
     ) {
         None
     } else {

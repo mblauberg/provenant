@@ -6,6 +6,7 @@ use std::io;
 
 pub fn run(command: Console, globals: &Globals) -> u8 {
     let leaf = match &command {
+        Console::Board { .. } => "console board",
         Console::Overview => "console overview",
         Console::Projects => "console projects",
         Console::Sessions { .. } => "console sessions",
@@ -44,7 +45,8 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
             let (status, code) = match error.downcast_ref::<provenant_cli::console::Error>() {
                 Some(
                     provenant_cli::console::Error::Cursor
-                    | provenant_cli::console::Error::InvalidSession,
+                    | provenant_cli::console::Error::InvalidSession
+                    | provenant_cli::console::Error::BoardCursor,
                 ) => (Outcome::Invalid, "CATALOGUE_INPUT"),
                 _ => (Outcome::Error, "CATALOGUE"),
             };
@@ -109,7 +111,11 @@ fn render(
                 }
                 .into(),
                 message: if matches!(error, RenderError::TooLarge) {
-                    "catalogue exceeds 1 MiB; no artefact was written".into()
+                    if result.command == "console board" {
+                        "board exceeds 1 MiB; reduce --limit. If --limit 1 still fails, the row cannot fit this surface; inspect bounded artefacts with `provenant output ATTEMPT`. No artefact was written".into()
+                    } else {
+                        "catalogue exceeds 1 MiB; no artefact was written".into()
+                    }
                 } else {
                     error.to_string()
                 },
@@ -135,6 +141,28 @@ fn render(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn oversized_single_board_row_explains_recovery() {
+        let value =
+            serde_json::json!({"lanes":[{"metadata":"x".repeat(provenant_cli::MAX_RESULT_BYTES)}]});
+        let result = provenant_records::CommandResult::new(
+            "console board",
+            provenant_records::Outcome::Ok,
+            Some(value),
+        );
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        assert_eq!(
+            super::render(&result, true, "", &mut stdout, &mut stderr),
+            3
+        );
+        let failure: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(failure["error"]["code"], "RESULT_TOO_LARGE");
+        let message = failure["error"]["message"].as_str().unwrap();
+        assert!(message.contains("reduce --limit"));
+        assert!(message.contains("--limit 1 still fails"));
+        assert!(message.contains("provenant output ATTEMPT"));
+    }
+
     #[test]
     fn oversized_human_catalogue_never_publishes() {
         let row = serde_json::json!({"project_id":"x".repeat(32), "common_dir":{"encoding":"utf8","path":"a".repeat(180)}});

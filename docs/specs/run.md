@@ -182,7 +182,8 @@ Admission audit (#2088):
 
 The chair row is sealed before handoff, so presence in the index does not imply
 that the run launched. Launch validation reads `fabric-runtime::chairs::ChairIndex`;
-for reads of existing runs, missing records and older runs are unbound. Display readers arrive in a later slice. Provider handles and child requests are never fallbacks. Graph and
+for reads of existing runs, missing records and older runs are unbound. `console board` reads existing host associations
+without initialising the index. Provider handles and child requests are never fallbacks. Graph and
 peer executions remain unbound until they retain an originating chair separately
 from the actor owning operation replay. Board and tree rendering are separate.
 
