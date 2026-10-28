@@ -63,12 +63,7 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
         result
             .data
             .as_ref()
-            .map(|value| {
-                format!(
-                    "{}\n",
-                    serde_json::to_string_pretty(value).unwrap_or_default()
-                )
-            })
+            .map(provenant_cli::terse)
             .unwrap_or_default()
     };
     render(
@@ -141,10 +136,9 @@ fn render(
 mod tests {
     #[test]
     fn oversized_human_catalogue_never_publishes() {
-        let row = serde_json::json!({"project_id":"x".repeat(32), "common_dir":{"encoding":"utf8","path":"a".repeat(40)}});
+        let row = serde_json::json!({"project_id":"x".repeat(32), "common_dir":{"encoding":"utf8","path":"a".repeat(180)}});
         let value = serde_json::json!({"projects":vec![row; 6500], "coverage":{"scope":"local"}});
-        assert!(serde_json::to_vec(&value).unwrap().len() < 900_000);
-        let human = format!("{}\n", serde_json::to_string_pretty(&value).unwrap());
+        let human = provenant_cli::terse(&value);
         assert!(human.len() > provenant_cli::MAX_RESULT_BYTES);
         let result = provenant_records::CommandResult::new(
             "console projects",

@@ -114,6 +114,18 @@ fn catalogue_read_only() -> Result {
         .as_str()
         .ok_or("project id")?;
     let before = snapshot(&rig.state)?;
+    let human = rig.command(&["console", "projects"])?;
+    assert_eq!(code(&human), 0);
+    let human = String::from_utf8(human.stdout.bytes)?;
+    assert_eq!(
+        human
+            .lines()
+            .filter(|line| line.starts_with("projects: "))
+            .count(),
+        1
+    );
+    assert!(human.contains("project_id="));
+    assert!(!human.contains("\n  \"projects\""));
     let selected = call(&rig, &["--project", linked_text, "console", "sessions"], 0)?;
     assert_eq!(
         selected["data"]["sessions"]
@@ -173,6 +185,40 @@ fn catalogue_read_only() -> Result {
         &["console", "sessions", "--limit", "1", "--cursor", cursor],
         2,
     )?;
+    assert_eq!(snapshot(&rig.state)?, before);
+    Ok(())
+}
+
+#[test]
+fn oversized_catalogue_never_publishes() -> Result {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = TestRig::new()?;
+    let projects = rig.state.join("projects");
+    std::fs::create_dir(&projects)?;
+    std::fs::set_permissions(&projects, std::fs::Permissions::from_mode(0o700))?;
+    let common = format!("/{}", "a".repeat(180));
+    let encoded = provenant_core::hex(common.as_bytes());
+    for index in 0..6000 {
+        let id = format!("{index:032x}");
+        let dir = projects.join(&id);
+        std::fs::create_dir(&dir)?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        let path = dir.join("project.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version":1, "project":id, "canonical_common_dir":encoded
+            }))?,
+        )?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let before = snapshot(&rig.state)?;
+    let human = rig.command(&["console", "projects"])?;
+    assert_eq!(code(&human), 3);
+    assert!(human.stdout.bytes.is_empty());
+    assert!(String::from_utf8(human.stderr.bytes)?.contains("RESULT_TOO_LARGE"));
+    let json = call(&rig, &["console", "projects"], 3)?;
+    assert_eq!(json["error"]["code"], "RESULT_TOO_LARGE");
     assert_eq!(snapshot(&rig.state)?, before);
     Ok(())
 }

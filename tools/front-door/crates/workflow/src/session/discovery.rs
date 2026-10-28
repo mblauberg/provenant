@@ -77,12 +77,10 @@ pub struct DiscoveredSession {
     pub consistency: DiscoveryConsistency,
 }
 
-/// Enumerate only explicitly registered chairs for an already bound project.
-/// The bounded scan fails on unreadable entries rather than claiming coverage.
-pub fn discover_sessions(
+fn sessions_directory(
     root: &StateRoot,
     project: ProjectId,
-) -> Result<Vec<DiscoveredSession>, SessionError> {
+) -> Result<Option<Directory>, SessionError> {
     let open = || -> Result<Directory, FsError> {
         let mut dir = Directory::open_anchor(root.as_path())?;
         for name in ["workflow", "projects", &project.to_string(), "sessions"] {
@@ -90,10 +88,28 @@ pub fn discover_sessions(
         }
         Ok(dir)
     };
-    let dir = match open() {
-        Ok(dir) => dir,
-        Err(error) if error.is_not_found() => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
+    match open() {
+        Ok(dir) => Ok(Some(dir)),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Result of a bounded session-directory scan.
+pub struct SessionScan {
+    pub sessions: Vec<DiscoveredSession>,
+    pub examined: usize,
+    pub truncated: bool,
+}
+
+/// Enumerate only explicitly registered chairs for an already bound project.
+/// The bounded scan fails on unreadable entries rather than claiming coverage.
+pub fn discover_sessions(
+    root: &StateRoot,
+    project: ProjectId,
+) -> Result<Vec<DiscoveredSession>, SessionError> {
+    let Some(dir) = sessions_directory(root, project)? else {
+        return Ok(Vec::new());
     };
     let mut names = provenant_os::fs::entry_names(&dir, 16_384)?;
     names.sort();
@@ -117,21 +133,20 @@ pub fn discover_sessions_bounded(
     root: &StateRoot,
     project: ProjectId,
     budget: usize,
-) -> Result<(Vec<DiscoveredSession>, usize, bool), SessionError> {
+) -> Result<SessionScan, SessionError> {
     if budget == 0 {
-        return Ok((Vec::new(), 0, true));
+        return Ok(SessionScan {
+            sessions: Vec::new(),
+            examined: 0,
+            truncated: true,
+        });
     }
-    let open = || -> Result<Directory, FsError> {
-        let mut dir = Directory::open_anchor(root.as_path())?;
-        for name in ["workflow", "projects", &project.to_string(), "sessions"] {
-            dir = dir.open_verified_directory(OsStr::new(name))?;
-        }
-        Ok(dir)
-    };
-    let dir = match open() {
-        Ok(dir) => dir,
-        Err(error) if error.is_not_found() => return Ok((Vec::new(), 0, false)),
-        Err(error) => return Err(error.into()),
+    let Some(dir) = sessions_directory(root, project)? else {
+        return Ok(SessionScan {
+            sessions: Vec::new(),
+            examined: 0,
+            truncated: false,
+        });
     };
     let mut names = dir.entries()?.take(budget).collect::<Result<Vec<_>, _>>()?;
     let examined = names.len();
@@ -146,7 +161,11 @@ pub fn discover_sessions_bounded(
             found.push(record);
         }
     }
-    Ok((found, examined, examined == budget))
+    Ok(SessionScan {
+        sessions: found,
+        examined,
+        truncated: examined == budget,
+    })
 }
 
 impl SessionStore {
