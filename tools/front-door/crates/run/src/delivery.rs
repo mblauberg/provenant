@@ -677,7 +677,7 @@ impl HostDeliveryContext {
             return Ok(());
         }
         host.validate_transport_helpers(writer)?;
-        host.command(
+        let advertised = host.command(
             &writer.worktree,
             "git",
             &[
@@ -697,19 +697,97 @@ impl HostDeliveryContext {
                 "protocol.file.allow=always",
                 "-c",
                 "remote.origin.uploadpack=git-upload-pack",
-                "-c",
-                "core.logAllRefUpdates=false",
-                "fetch",
-                "--no-auto-maintenance",
-                "--no-tags",
-                "--no-recurse-submodules",
-                "--refmap=",
+                "ls-remote",
+                "--symref",
                 "--",
                 "origin",
-                "+refs/heads/*:refs/remotes/origin/*",
+                "HEAD",
+                "refs/heads/*",
             ],
             Stage::Prepare,
         )?;
+        let mut default = None;
+        let mut heads = Vec::new();
+        for line in advertised.lines() {
+            let (value, name) = line
+                .split_once('\t')
+                .ok_or_else(|| prepare_error("origin refresh", "malformed remote advertisement"))?;
+            if name == "HEAD" {
+                if let Some(branch) = value.strip_prefix("ref: refs/heads/") {
+                    default = Some(branch.to_owned());
+                } else if GitOid::parse(value).is_err() {
+                    return Err(prepare_error("origin refresh", "malformed remote HEAD"));
+                }
+            } else if let Some(branch) = name.strip_prefix("refs/heads/") {
+                if GitOid::parse(value).is_err() || GitRefName::branch(branch).is_err() {
+                    return Err(prepare_error("origin refresh", "malformed advertised head"));
+                }
+                heads.push(branch.to_owned());
+            } else {
+                return Err(prepare_error("origin refresh", "unexpected advertised ref"));
+            }
+        }
+        let refused: Vec<_> = heads
+            .iter()
+            .filter(|name| {
+                heads
+                    .iter()
+                    .any(|other| provenant_core::refs_collide(name, other))
+            })
+            .collect();
+        use std::io::Write;
+        for name in &refused {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: refusing colliding origin branch {name:?}"
+            );
+        }
+        if default
+            .as_ref()
+            .is_some_and(|branch| refused.contains(&branch))
+        {
+            return Err(prepare_error(
+                "origin refresh",
+                "default branch has a case or Unicode-normalisation collision",
+            ));
+        }
+        let refspecs: Vec<_> = heads
+            .iter()
+            .filter(|name| !refused.contains(name))
+            .map(|name| format!("+refs/heads/{name}:refs/remotes/origin/{name}"))
+            .collect();
+        if refspecs.is_empty() {
+            return Ok(());
+        }
+        let mut args = vec![
+            "--git-dir",
+            git_dir,
+            "--work-tree",
+            worktree,
+            "-c",
+            "protocol.allow=never",
+            "-c",
+            "protocol.ssh.allow=always",
+            "-c",
+            "protocol.https.allow=always",
+            "-c",
+            "protocol.http.allow=always",
+            "-c",
+            "protocol.file.allow=always",
+            "-c",
+            "remote.origin.uploadpack=git-upload-pack",
+            "-c",
+            "core.logAllRefUpdates=false",
+            "fetch",
+            "--no-auto-maintenance",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--refmap=",
+            "--",
+            "origin",
+        ];
+        args.extend(refspecs.iter().map(String::as_str));
+        host.command(&writer.worktree, "git", &args, Stage::Prepare)?;
         Ok(())
     }
 

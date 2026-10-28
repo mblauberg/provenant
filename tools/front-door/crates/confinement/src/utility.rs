@@ -196,6 +196,8 @@ pub enum GitRead {
     /// Read repository config, excluding the utility's core.bare override.
     LocalBare,
     BranchTips,
+    /// Read remote-tracking refs for branch-name collision checks.
+    RemoteBranchTips,
     FirstParentHistory {
         tip: GitOid,
     },
@@ -560,6 +562,13 @@ pub fn run_utility(
 
 /// Host-only remote preparation. Unlike evidence reads, this must retain the
 /// host's transport and credential configuration. It never edits fetch config.
+#[derive(Debug)]
+pub(crate) enum RemoteBase {
+    NotRemote,
+    Missing,
+    Found(GitOid),
+}
+
 pub(crate) fn fetch_missing_remote_branch(
     executor: &dyn Executor,
     repo: &VerifiedRepo,
@@ -568,13 +577,13 @@ pub(crate) fn fetch_missing_remote_branch(
     base: &str,
     budget: UtilityBudget,
     cancel: &CancelToken,
-) -> Result<(), UtilityError> {
+) -> Result<RemoteBase, UtilityError> {
+    let base = base.strip_prefix("refs/remotes/").unwrap_or(base);
     let Some((remote, branch)) = base.split_once('/') else {
-        return Ok(());
+        return Ok(RemoteBase::NotRemote);
     };
-    // Only literal branch names qualify, never revision expressions or options.
-    if remote.is_empty() || remote.starts_with('-') || GitRefName::branch(branch).is_err() {
-        return Ok(());
+    if remote.is_empty() || remote.starts_with('-') {
+        return Ok(RemoteBase::NotRemote);
     }
     runtime.revalidate()?;
     repo.revalidate()?;
@@ -633,9 +642,43 @@ pub(crate) fn fetch_missing_remote_branch(
             .split(|byte| *byte == b'\n')
             .any(|name| name == remote.as_bytes())
     {
-        return Ok(());
+        return Ok(RemoteBase::NotRemote);
     }
-    let refspec = format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}");
+    // Resolve the remote's symbolic HEAD from the advertisement itself.
+    let default_branch;
+    let branch = if branch == "HEAD" {
+        let head = run(&[
+            "ls-remote".into(),
+            "--symref".into(),
+            "--".into(),
+            remote.into(),
+            "HEAD".into(),
+        ])?;
+        if head.termination != Termination::Exit(0) {
+            return Err(UtilityError::InvalidOperationValue);
+        }
+        let text = std::str::from_utf8(&head.stdout.bytes)
+            .map_err(|_| UtilityError::InvalidOperationValue)?;
+        let mut targets = text.lines().filter_map(|line| {
+            line.strip_prefix("ref: refs/heads/")?
+                .strip_suffix("\tHEAD")
+        });
+        default_branch = targets
+            .next()
+            .ok_or(UtilityError::InvalidOperationValue)?
+            .to_owned();
+        if targets.next().is_some() {
+            return Err(UtilityError::InvalidOperationValue);
+        }
+        default_branch.as_str()
+    } else {
+        branch
+    };
+    // Expressions rooted at remote-tracking refs cannot be verified exactly.
+    if GitRefName::branch(branch).is_err() {
+        return Err(UtilityError::InvalidOperationValue);
+    }
+    let refspec = format!("refs/heads/{branch}");
     // A failed fetch can mean either a missing remote ref or a transport fault.
     let fetched = run(&[
         "fetch".into(),
@@ -643,13 +686,14 @@ pub(crate) fn fetch_missing_remote_branch(
         "--no-auto-maintenance".into(),
         "--no-tags".into(),
         "--no-recurse-submodules".into(),
+        "--no-write-fetch-head".into(),
         "--refmap=".into(),
         "--".into(),
         remote.into(),
         refspec.into(),
     ])?;
     let fetch_status = match fetched.termination {
-        Termination::Exit(0) => return Ok(()),
+        Termination::Exit(0) => 0,
         Termination::Exit(status) => status,
         Termination::Signal(signal) => return Err(UtilityError::Signalled { signal }),
     };
@@ -660,14 +704,41 @@ pub(crate) fn fetch_missing_remote_branch(
         "--heads".into(),
         "--".into(),
         remote.into(),
-        remote_ref.into(),
+        remote_ref.clone().into(),
     ]);
     // ls-remote uses status 2 when the remote answered but advertised no
     // matching ref. Let the caller's resolution return BaseNotFound.
     match advertised {
-        Ok(outcome) if outcome.termination == Termination::Exit(2) => return Ok(()),
+        Ok(outcome) if outcome.termination == Termination::Exit(2) => {
+            return Ok(RemoteBase::Missing);
+        }
         Err(error @ (UtilityError::TimedOut | UtilityError::Cancelled)) => return Err(error),
         Err(UtilityError::Execution(ExecError::Cancelled)) => return Err(UtilityError::Cancelled),
+        Ok(outcome) if fetch_status == 0 && outcome.termination == Termination::Exit(0) => {
+            let output = std::str::from_utf8(&outcome.stdout.bytes)
+                .map_err(|_| UtilityError::InvalidOperationValue)?;
+            let mut exact = output.lines().filter_map(|line| {
+                let (oid, name) = line.split_once('\t')?;
+                (name == remote_ref).then_some(oid)
+            });
+            let oid = exact.next().ok_or(UtilityError::InvalidOperationValue)?;
+            if exact.next().is_some() {
+                return Err(UtilityError::InvalidOperationValue);
+            }
+            return GitOid::parse(oid)
+                .map(RemoteBase::Found)
+                .map_err(|_| UtilityError::InvalidOperationValue);
+        }
+        Ok(outcome) if fetch_status == 0 => {
+            let status = match outcome.termination {
+                Termination::Exit(status) => status,
+                Termination::Signal(signal) => return Err(UtilityError::Signalled { signal }),
+            };
+            return Err(UtilityError::FetchFailed {
+                status,
+                stderr: fetch_stderr_excerpt(&outcome.stderr.bytes),
+            });
+        }
         _ => {}
     }
     Err(UtilityError::FetchFailed {
@@ -1053,6 +1124,11 @@ fn git_args(
             "for-each-ref".into(),
             "--format=%(refname)%00%(objectname)%00".into(),
             "refs/heads".into(),
+        ],
+        GitRead::RemoteBranchTips => vec![
+            "for-each-ref".into(),
+            "--format=%(refname)%00%(objectname)%00".into(),
+            "refs/remotes".into(),
         ],
         GitRead::MergeBase { left, right } => {
             vec![

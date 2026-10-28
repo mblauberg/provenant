@@ -534,6 +534,48 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
         run(&git_dir, &["rev-parse", "refs/remotes/origin/main"])?,
         expected
     );
+    // Packed refs let the fixture advertise both spellings even on a
+    // case-insensitive host. The new commit makes an accidental fetch visible.
+    run(
+        &git_dir,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "newer",
+        ],
+    )?;
+    let newer = run(&git_dir, &["rev-parse", "HEAD"])?;
+    run(&remote, &["update-ref", "-d", "refs/heads/main"])?;
+    std::fs::write(
+        remote.join("packed-refs"),
+        format!(
+            "# pack-refs with: sorted\n{newer} refs/heads/Main\n{newer} refs/heads/main\n{newer} refs/heads/other\n"
+        ),
+    )?;
+    run(&remote, &["symbolic-ref", "HEAD", "refs/heads/other"])?;
+    host().refresh_origin_with(&writer, &git_dir)?;
+    assert_eq!(
+        run(&git_dir, &["rev-parse", "refs/remotes/origin/main"])?,
+        expected
+    );
+    assert_eq!(
+        run(&git_dir, &["rev-parse", "refs/remotes/origin/other"])?,
+        newer
+    );
+    run(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
+    let Err(error) = host().refresh_origin_with(&writer, &git_dir) else {
+        return Err("colliding default must fail".into());
+    };
+    assert!(error.to_string().contains("default branch"));
+    assert_eq!(
+        run(&git_dir, &["rev-parse", "refs/remotes/origin/main"])?,
+        expected
+    );
     run(
         &git_dir,
         &[

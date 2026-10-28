@@ -55,6 +55,8 @@ const WORKTREE_ROOT: &str = ".worktrees";
 pub enum WorktreeError {
     #[error("worktree request is invalid")]
     InvalidRequest,
+    #[error("branch name collides with existing ref {existing}")]
+    BranchCollision { existing: String },
     #[error("worktree or branch was not found")]
     NotFound,
     #[error("base {base} did not resolve to a commit")]
@@ -751,7 +753,12 @@ fn parse_branch_tips(bytes: &[u8]) -> Result<BTreeMap<GitRefName, GitOid>, Workt
         let oid = fields.next().ok_or(WorktreeError::InvalidOutput)?;
         let name =
             std::str::from_utf8(trim_ascii(name)).map_err(|_| WorktreeError::InvalidOutput)?;
-        let name = GitRefName::new(name).map_err(|_| WorktreeError::InvalidOutput)?;
+        let name = if let Some(remote) = name.strip_prefix("refs/remotes/") {
+            GitRefName::remote_tracking(remote)
+        } else {
+            GitRefName::new(name)
+        }
+        .map_err(|_| WorktreeError::InvalidOutput)?;
         let oid = parse_oid(trim_ascii(oid))?;
         if result.insert(name, oid).is_some() || result.len() > MAX_BRANCHES {
             return Err(WorktreeError::InvalidOutput);
@@ -1532,6 +1539,31 @@ pub fn create(
         return Err(WorktreeError::InvalidRequest);
     }
     let create_branch = existing.is_none();
+    if create_branch {
+        let remote = run_git(context, context.repo, GitRead::RemoteBranchTips, cancel)?;
+        if exit_code(&remote)? != 0 {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        let remote_tips = parse_branch_tips(&remote.stdout.bytes)?;
+        for name in branch_tips.keys().chain(remote_tips.keys()) {
+            let text = name.as_str();
+            let local_collision = text
+                .strip_prefix("refs/heads/")
+                .is_some_and(|candidate| provenant_core::refs_collide(&request.branch, candidate));
+            // Remote names can themselves contain slashes. Consider every
+            // possible remote/branch boundary to avoid missing an alias.
+            let remote_collision = text.strip_prefix("refs/remotes/").is_some_and(|rest| {
+                rest.match_indices('/').any(|(index, _)| {
+                    provenant_core::refs_collide(&request.branch, &rest[index + 1..])
+                })
+            });
+            if local_collision || remote_collision {
+                return Err(WorktreeError::BranchCollision {
+                    existing: text.to_owned(),
+                });
+            }
+        }
+    }
     let base = if let Some(base) = request.base.as_deref() {
         pin_revision(context, base, cancel)?
     } else if let Some(existing) = existing {
@@ -1821,34 +1853,35 @@ fn pin_revision(
     revision: &str,
     cancel: &CancelToken,
 ) -> Result<GitOid, WorktreeError> {
-    let parsed = GitRevision::new(revision).map_err(|_| WorktreeError::InvalidRequest)?;
-    let resolve = || {
-        run_git(
-            context,
-            context.repo,
-            GitRead::ResolveRevision {
-                revision: parsed.clone(),
-            },
-            cancel,
-        )
-    };
-    let mut outcome = resolve()?;
-    if exit_code(&outcome)? != 0 {
-        crate::utility::fetch_missing_remote_branch(
-            context.executor,
-            context.repo,
-            context.utility,
-            context.home,
-            revision,
-            context.mutation_budget,
-            cancel,
-        )?;
-        outcome = resolve()?;
-        if exit_code(&outcome)? != 0 {
+    let remote = crate::utility::fetch_missing_remote_branch(
+        context.executor,
+        context.repo,
+        context.utility,
+        context.home,
+        revision,
+        context.mutation_budget,
+        cancel,
+    )?;
+    let verified_revision = match remote {
+        crate::utility::RemoteBase::Found(oid) => oid.to_string(),
+        crate::utility::RemoteBase::Missing => {
             return Err(WorktreeError::BaseNotFound {
                 base: revision.to_owned(),
             });
         }
+        crate::utility::RemoteBase::NotRemote => revision.to_owned(),
+    };
+    let parsed = GitRevision::new(&verified_revision).map_err(|_| WorktreeError::InvalidRequest)?;
+    let outcome = run_git(
+        context,
+        context.repo,
+        GitRead::ResolveRevision { revision: parsed },
+        cancel,
+    )?;
+    if exit_code(&outcome)? != 0 {
+        return Err(WorktreeError::BaseNotFound {
+            base: revision.to_owned(),
+        });
     }
     parse_oid(trim_ascii(&outcome.stdout.bytes))
 }
@@ -2053,7 +2086,14 @@ fn pin_integration(
     for candidate in candidates.into_iter().flatten() {
         invalid = false;
         match resolve_ref(context, candidate.clone(), cancel) {
-            Ok(oid) => return Ok((candidate, oid)),
+            Ok(oid) => {
+                let oid = if candidate.as_str().starts_with("refs/remotes/") {
+                    pin_revision(context, candidate.as_str(), cancel)?
+                } else {
+                    oid
+                };
+                return Ok((candidate, oid));
+            }
             Err(WorktreeError::NotFound) => {}
             Err(error) => return Err(error),
         }
@@ -4883,18 +4923,78 @@ mod lifecycle_tests {
                 .seen
                 .load(std::sync::atomic::Ordering::Relaxed)
         );
-        let tracking =
-            fixture.run(&["rev-parse", "refs/remotes/origin/chore/cleanup-code-sweep"])?;
-        assert_eq!(
-            String::from_utf8(tracking.stdout.bytes)?.trim(),
-            base.to_string()
-        );
+        let tracking = fixture.run(&[
+            "for-each-ref",
+            "refs/remotes/origin/chore/cleanup-code-sweep",
+        ])?;
+        assert!(tracking.stdout.bytes.is_empty());
         assert_eq!(
             fixture
                 .run(&["config", "--get-all", "remote.origin.fetch"])?
                 .stdout
                 .bytes,
             refspec.stdout.bytes
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remote_base_uses_exact_advertisement_instead_of_tracking_ref() -> Result<(), Box<dyn Error>>
+    {
+        let source = Fixture::new()?;
+        source.run(&["branch", "-M", "main"])?;
+        let expected = source.head()?;
+        let mut fixture = Fixture::new()?;
+        let clone = fixture._temp.path().join("clone");
+        fixture.run(&[
+            "clone",
+            source.root.to_str().ok_or("non-UTF8 source")?,
+            clone.to_str().ok_or("non-UTF8 clone")?,
+        ])?;
+        fixture.root = clone;
+        fixture.repo = fixture.runtime.open_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &cancel(),
+        )?;
+        fixture.run(&["config", "user.name", "Fixture"])?;
+        fixture.run(&["config", "user.email", "fixture@example.invalid"])?;
+        fixture.repo = fixture.runtime.open_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &cancel(),
+        )?;
+        fixture.run(&["commit", "--allow-empty", "-m", "different tracking tip"])?;
+        let wrong = fixture.head()?;
+        assert_ne!(wrong, expected);
+        fixture.run(&["update-ref", "refs/remotes/origin/main", &wrong.to_string()])?;
+        fixture.repo = fixture.runtime.open_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &cancel(),
+        )?;
+        let test_context = TestContext::new(&fixture)?;
+        let (_, integration) = pin_integration(&test_context.context(), "origin/main", &cancel())?;
+        assert_eq!(integration, expected);
+        let (_, default_integration) =
+            pin_integration(&test_context.context(), "origin/HEAD", &cancel())?;
+        assert_eq!(default_integration, expected);
+        let created = create(
+            &test_context.context(),
+            WorktreeCreate {
+                branch: "feature/verified-base".to_owned(),
+                base: Some("origin/main".to_owned()),
+            },
+            &cancel(),
+        )?;
+        assert_eq!(created.head, expected);
+        let tracking = fixture.run(&["rev-parse", "refs/remotes/origin/main"])?;
+        assert_eq!(
+            String::from_utf8(tracking.stdout.bytes)?.trim(),
+            wrong.to_string()
         );
         Ok(())
     }
@@ -5274,6 +5374,40 @@ mod lifecycle_tests {
             },
             &cancellation,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn create_refuses_aliases_of_local_and_remote_branches() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fixture.run(&["branch", "Feature/Topic"])?;
+        fixture.run(&["update-ref", "refs/remotes/origin/Remote/Topic", "HEAD"])?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        for (branch, existing) in [
+            ("feature/topic", "refs/heads/Feature/Topic"),
+            ("remote/topic", "refs/remotes/origin/Remote/Topic"),
+        ] {
+            let error = create(
+                &context,
+                WorktreeCreate {
+                    branch: branch.into(),
+                    base: None,
+                },
+                &cancel(),
+            );
+            assert!(
+                matches!(error, Err(WorktreeError::BranchCollision { existing: ref found }) if found == existing),
+                "unexpected result for {branch}: {error:?}"
+            );
+            assert!(
+                !fixture
+                    .root
+                    .join(".worktrees")
+                    .join(branch.replace('/', "-"))
+                    .exists()
+            );
+        }
         Ok(())
     }
 

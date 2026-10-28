@@ -30,6 +30,13 @@ such submissions with `worktree_unregistered` and the worktree path. Create
 a writer at the branch's tip with
 `provenant worktree create <new-branch> --base <branch>`.
 
+New branch names must not case-fold or Unicode-normalise to an existing local
+or remote-tracking branch name. A remote base such as `origin/main` is pinned
+to the exact advertised commit, rather than trusting the tracking ref. Remote
+revision expressions are not accepted as bases; use a local commit ID instead.
+Host origin refresh refuses advertised branch names that collide under these
+comparisons and fails if the remote default branch is among them.
+
 `remove NAME` deletes the clean worktree and then its branch when every commit
 on the branch is contained in the fetched upstream default branch. Without
 `origin`, or if fetching fails, the primary checkout's integration branch

@@ -95,7 +95,10 @@ impl Error {
             Self::Root(roots::RootError::Checkout | roots::RootError::State(_))
             | Self::InvalidScope
             | Self::Worktree(
-                WorktreeError::InvalidRequest | WorktreeError::NotFound | WorktreeError::CheckedOut,
+                WorktreeError::InvalidRequest
+                | WorktreeError::NotFound
+                | WorktreeError::CheckedOut
+                | WorktreeError::BranchCollision { .. },
             ) => Outcome::Invalid,
             Self::Worktree(
                 WorktreeError::Dirty

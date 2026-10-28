@@ -186,7 +186,93 @@ fn resolve(
     if timed_out || out.truncated {
         return Err(invalid());
     }
-    Ok(text.trim().to_owned())
+    let oid = text.trim().to_owned();
+    // A tracking ref can alias a differently spelled ref on the host's
+    // filesystem. Verify the exact advertised head before trusting its OID.
+    let remote_name = base.strip_prefix("refs/remotes/").unwrap_or(base);
+    if let Some((remote, branch)) = remote_name.split_once('/') {
+        let (remotes, timed_out) = read_git_with_env(executor, git, cwd, &["remote"], 16384, env)
+            .map_err(|_| invalid())?;
+        if timed_out || remotes.truncated {
+            return Err(invalid());
+        }
+        if remotes
+            .bytes
+            .split(|byte| *byte == b'\n')
+            .any(|name| name == remote.as_bytes())
+        {
+            let reference = if branch == "HEAD" {
+                let (symbolic, timed_out) = read_git_with_env(
+                    executor,
+                    git,
+                    cwd,
+                    &[
+                        "symbolic-ref",
+                        "--quiet",
+                        &format!("refs/remotes/{remote}/HEAD"),
+                    ],
+                    4096,
+                    env,
+                )
+                .map_err(|_| invalid())?;
+                if timed_out || symbolic.truncated {
+                    return Err(invalid());
+                }
+                let symbolic = std::str::from_utf8(&symbolic.bytes)
+                    .map_err(|_| invalid())?
+                    .trim();
+                let branch = symbolic
+                    .strip_prefix(&format!("refs/remotes/{remote}/"))
+                    .ok_or_else(invalid)?;
+                format!("refs/heads/{branch}")
+            } else {
+                provenant_confinement::repo::GitRefName::branch(branch).map_err(|_| invalid())?;
+                format!("refs/heads/{branch}")
+            };
+            let mut transport_env: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
+                .collect();
+            transport_env.extend(
+                env.iter()
+                    .filter(|(key, _)| {
+                        matches!(
+                            key.to_str(),
+                            Some("GIT_DIR" | "GIT_WORK_TREE" | "GIT_COMMON_DIR")
+                        )
+                    })
+                    .cloned(),
+            );
+            transport_env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
+            let (advertised, timed_out) = read_git_with_env(
+                executor,
+                git,
+                cwd,
+                &[
+                    "ls-remote",
+                    "--exit-code",
+                    "--heads",
+                    "--",
+                    remote,
+                    &reference,
+                ],
+                16384,
+                &transport_env,
+            )
+            .map_err(|_| invalid())?;
+            if timed_out || advertised.truncated {
+                return Err(invalid());
+            }
+            let advertised = std::str::from_utf8(&advertised.bytes).map_err(|_| invalid())?;
+            let mut matches = advertised.lines().filter_map(|line| {
+                let (value, name) = line.split_once('\t')?;
+                (name == reference).then_some(value)
+            });
+            if matches.next() != Some(oid.as_str()) || matches.next().is_some() {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(oid)
 }
 
 /// Validate the base before admission; persist the resolved commit in the
@@ -739,6 +825,59 @@ mod tests {
             executor,
             base,
         })
+    }
+
+    #[test]
+    fn remote_base_requires_exact_advertised_oid() -> TestResult {
+        struct TestHome<'a> {
+            executor: &'a SystemExecutor,
+            home: &'a Path,
+        }
+        impl Executor for TestHome<'_> {
+            fn execute(
+                &self,
+                options: ExecOptions<'_>,
+            ) -> std::result::Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError>
+            {
+                let mut env = options.env.unwrap_or_default().to_vec();
+                env.retain(|(key, _)| key != "HOME");
+                env.push(("HOME".into(), self.home.as_os_str().to_owned()));
+                let mut isolated = ExecOptions::new(options.argv, options.cwd, options.timeout);
+                isolated.env = Some(&env);
+                isolated.stdout = options.stdout;
+                isolated.stderr = options.stderr;
+                isolated.stop_on_output_limit = options.stop_on_output_limit;
+                self.executor.execute(isolated)
+            }
+        }
+        let fixture = small_history()?;
+        let executor = TestHome {
+            executor: &fixture.executor,
+            home: &fixture.root,
+        };
+        let env = repository_environment(&executor, &fixture.binary, &fixture.root)?;
+        let resolve_base = |base| resolve(&executor, &fixture.binary, &fixture.root, base, &env);
+        let run = |args: &[&str]| git(&fixture.executor, &fixture.binary, &fixture.root, args);
+        run(&["branch", "-M", "main"])?;
+        run(&[
+            "remote",
+            "add",
+            "origin",
+            fixture.root.to_str().ok_or("non-UTF8 root")?,
+        ])?;
+        run(&["update-ref", "refs/remotes/origin/main", &fixture.base])?;
+        run(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ])?;
+        assert!(resolve_base("origin/main").is_err());
+        assert!(resolve_base("refs/remotes/origin/HEAD").is_err());
+        let head = resolve_git_base(&fixture.binary, &fixture.root, "HEAD")?;
+        run(&["update-ref", "refs/remotes/origin/main", &head])?;
+        assert_eq!(resolve_base("origin/main")?, head);
+        assert_eq!(resolve_base("refs/remotes/origin/HEAD")?, head);
+        Ok(())
     }
 
     #[test]

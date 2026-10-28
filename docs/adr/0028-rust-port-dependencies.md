@@ -23,6 +23,8 @@ lockfile own names, features and versions; this ADR does not duplicate them.
 Prefer established crates for typed serialisation, bundled SQLite,
 cryptographic digests, regular expressions, time zones, CLI parsing, formatted
 TOML edits and syscall bindings. Temporary fixture directories are test-only.
+Unicode case folding and normalisation use dedicated Unicode tables, which are
+not practical to maintain in-house, to detect filesystem ref-name aliases.
 
 ### 4. In-house primitives
 
