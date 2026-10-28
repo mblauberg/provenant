@@ -589,6 +589,14 @@ impl Directory {
             &self.path.join(name),
         )
     }
+    /// Clone a held regular file into a new entry. Never copies as a fallback
+    /// and never replaces an existing entry; filesystem errors are returned.
+    #[cfg(target_os = "macos")]
+    pub fn clone_file_from(&self, source: &FileHandle, name: &OsStr) -> Result<()> {
+        let name = component(name)?;
+        os::clone_file(&source.file, &self.file, name)
+            .map_err(error("clone file", &self.path.join(name)))
+    }
     /// Open and validate a stable owner lock, then acquire it with bounded
     /// nonblocking polling. The supplied clock interprets the WaitBudget's
     /// process-local monotonic coordinate; its current sample is taken once.

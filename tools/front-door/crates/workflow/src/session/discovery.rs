@@ -10,7 +10,7 @@ pub(super) struct ChairIdentity {
 }
 
 const DISCOVERY: &str = "discovery.json";
-const DISCOVERY_LIMIT: u64 = 4096;
+const DISCOVERY_LIMIT: u64 = 64 * 1024;
 const REBIND_LIMIT: usize = 8;
 
 /// One per-session index entry, stored in `discovery.json`. Unknown provider,
@@ -26,6 +26,9 @@ pub struct SessionDiscovery {
     pub created_at: UtcMicros,
     pub last_saved_at: UtcMicros,
     pub checkpoint: Revision,
+    /// Summary parsed from the checkpoint identified by `checkpoint`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<Summary>,
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
@@ -251,6 +254,7 @@ impl SessionStore {
         &self,
         existing: Option<SessionDiscovery>,
         checkpoint: &Revision,
+        summary: Option<Summary>,
         now: UtcMicros,
     ) -> Option<SessionDiscovery> {
         let mut record = existing.or_else(|| {
@@ -263,6 +267,7 @@ impl SessionStore {
                 created_at: now,
                 last_saved_at: now,
                 checkpoint: checkpoint.clone(),
+                summary: None,
                 rebound_from: Vec::new(),
             })
         })?;
@@ -282,6 +287,7 @@ impl SessionStore {
         }
         record.last_saved_at = now;
         record.checkpoint = checkpoint.clone();
+        record.summary = summary;
         Some(record)
     }
 

@@ -1308,6 +1308,7 @@ impl Providers for Confined {
             },
             writer: None,
             home: "/fixture/home".into(),
+            cargo_registry_seed: false,
         });
         Ok(launch)
     }

@@ -3,6 +3,8 @@ client_label = "agent"
 ssh_executable = "" # empty selects shared system SSH discovery
 home_hosts = {}
 peers = {}
+[lanes.cargo_seed]
+enabled = false
 [lanes.priority]
 writer = 10
 read-only = 5

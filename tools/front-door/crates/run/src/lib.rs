@@ -23,6 +23,7 @@ mod store;
 mod transcript;
 pub use service::{DispatchRequest, DispatchTask, ErrorKind, Service};
 pub use transcript::locate as locate_transcript;
+mod cargo_seed;
 mod writer;
 
 pub use admission::{

@@ -85,6 +85,18 @@ duplicate keys and multiline plain scalars; only `true` and `false` resolve.
 
 ## Configuration
 
+### Cargo registry seed opt-in
+
+The per-host Cargo registry seed switch must default off and must have no
+effect outside macOS. Its scope and manual configuration are described in
+the [worktree guide](../worktrees.md).
+- Why: cloning is an optional host-specific optimisation, not a prerequisite
+  for running a lane.
+- Test: `crates/fabric-runtime/src/config.rs::tests::lane_priority_defaults_and_bounds`;
+  `crates/run/src/cargo_seed.rs::tests::disabled_does_not_touch_cache`;
+  `::enabled_is_a_no_op_on_other_platforms`
+- Owner: `crates/fabric-runtime/src/config.rs`, `crates/run/src/cargo_seed.rs`
+
 ### Strict typed config
 
 `config.toml` declares `schema_version = 1`; unknown keys, duplicates, bad
