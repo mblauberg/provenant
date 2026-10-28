@@ -684,6 +684,7 @@ fn prepare(
             );
         } else {
             crate::launch::system_tools(access, &mut runtime_reads, &mut tool_exec_roots, &mut env);
+            tool_exec_roots.push(subtree(input.cwd));
         }
         crate::launch::node_tools(
             input.home,

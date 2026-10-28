@@ -1101,6 +1101,14 @@ fn claude_network_on_without_complete_rust_keeps_public_system_tools()
             )
         })?;
         assert!(launch.env.iter().all(|(key, _)| key != "CARGO_HOME"));
+        assert!(
+            launch
+                .profile
+                .spec
+                .tool_exec_roots
+                .contains(&crate::launch::subtree("/fixture/repo"))
+        );
+        assert!(launch.profile.spec.tool_writes.is_empty());
         for grant in launch
             .profile
             .spec
