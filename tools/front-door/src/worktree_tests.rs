@@ -207,6 +207,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root",
             "dispatch_into_an_unregistered_worktree_names_the_create_command",
             "dispatch_into_an_unregistered_worktree_beside_registered_ones_names_the_create_command",
+            "re_added_worktree_is_adopted_then_dispatchable",
             "pr_land_merges_then_fetches_fast_forwards_and_prunes",
             "pr_land_prunes_the_selected_merged_worktree",
             "pr_land_from_lane_ignores_only_its_callers",
@@ -347,6 +348,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "dispatch_into_an_unregistered_worktree_beside_registered_ones_names_the_create_command" => {
                     dispatch_into_an_unregistered_worktree_beside_registered_ones_names_the_create_command()
+                }
+                "re_added_worktree_is_adopted_then_dispatchable" => {
+                    re_added_worktree_is_adopted_then_dispatchable()
                 }
                 _ => escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root(),
             };
@@ -2468,6 +2472,78 @@ fn unregistered_worktree_dispatch_is_refused(register_sibling: bool) -> Result {
         message.contains("provenant worktree create --base <branch> <branch>"),
         "{message}"
     );
+    Ok(())
+}
+
+// A tree re-added with plain Git at a path Provenant registered earlier is a
+// stale registration: dispatch names it and the repair, and `worktree adopt`
+// from outside the tree makes the tree dispatchable.
+fn re_added_worktree_is_adopted_then_dispatchable() -> Result {
+    let rig = repository()?;
+    ok(
+        &rig,
+        &["worktree", "create", "stale", "--base", "HEAD", "--json"],
+    )?;
+    git(&rig, &["worktree", "remove", ".worktrees/stale"])?;
+    git(
+        &rig,
+        &["worktree", "add", "-qb", "stale-again", ".worktrees/stale"],
+    )?;
+    let prompt = rig.root.join("prompt.txt");
+    fs::write(&prompt, "hello")?;
+    let prompt = prompt.to_str().ok_or("prompt path")?;
+    let dispatch = |operation: &str| -> Result<Value> {
+        json(&command(
+            &rig,
+            &[
+                "dispatch",
+                "--prompt-file",
+                prompt,
+                "--model",
+                "codex/id",
+                "--mode",
+                "worktree-write",
+                "--worktree",
+                ".worktrees/stale",
+                "--operation-id",
+                operation,
+                "--json",
+            ],
+        )?)
+    };
+    let refused = dispatch("stale-before")?;
+    assert_eq!(refused["status"], "refused", "{refused}");
+    let message = refused["error"]["message"].as_str().ok_or("message")?;
+    assert!(message.contains("registration is stale"), "{message}");
+    assert!(
+        message.contains("provenant worktree adopt <path>"),
+        "{message}"
+    );
+
+    let adopted = ok(
+        &rig,
+        &[
+            "worktree",
+            "adopt",
+            ".worktrees/stale",
+            "--owner",
+            "chair",
+            "--json",
+        ],
+    )?;
+    assert_eq!(adopted["data"]["writer"], "free", "{adopted}");
+    let (_, context) = writer_context(&rig)?;
+    let request = provenant_run::resolve_writer(
+        context.state_root.as_path(),
+        &rig.project,
+        Path::new(".worktrees/stale"),
+    )?;
+    provenant_run::prepare_writer(&request, context.state_root.as_path(), context.project_id)?;
+    // Dispatch now gets past custody; whatever it reports is not the stale
+    // registration.
+    let after = dispatch("stale-after")?;
+    let message = after["error"]["message"].as_str().unwrap_or_default();
+    assert!(!message.contains("writer scope refused"), "{after}");
     Ok(())
 }
 
