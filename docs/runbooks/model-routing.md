@@ -12,9 +12,21 @@ and pacing policy; pacing and readiness apply at dispatch. Use
 model name. Unknown or ambiguous names report suggestions and examples.
 
 The resolver draws among ready positive-weight members using weight multiplied
-by the provider pacing factor. `pace` uses the best fresh quota snapshot for
-the provider and its shortest window with a reset; it divides remaining
-quota headroom by remaining window time and clamps the factor to 0.25–2.0.
+by the provider pacing factor. `pace` uses the selected account's latest fresh
+quota snapshot and takes the lowest factor across windows with a future reset.
+Each factor divides remaining quota headroom by remaining window time and is
+clamped to 0.25–2.0. A five-hour window at 85% used or a seven-day window at
+90% used makes the account unavailable with `pacing_reserve`. Override the
+default 15% and 10% reserves per adapter in `config.toml`, for example:
+
+```toml
+[domains.routing.pacing_reserve.claude]
+five_hour_percent = 15
+seven_day_percent = 10
+```
+
+Reserve percentages range from 0 to 100. Other window durations affect the
+factor but have no reserve. Expired resets do not affect pacing.
 Missing quota data uses 1.0. `spend` and `max` use 1.0; admission handles
 short rate-limit cooldowns, and a paid route remains eligible while credits
 remain. If no weighted member is ready, the first ready zero-weight member is

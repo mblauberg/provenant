@@ -271,10 +271,11 @@ const PACE_MIN_BASIS_POINTS: u32 = 2_500;
 const PACE_MAX_BASIS_POINTS: u32 = 20_000;
 const NEUTRAL_FACTOR_BASIS_POINTS: u32 = 10_000;
 
-/// Pace against the healthiest fresh account snapshot for this provider.
+/// Pace against the latest fresh snapshot for the selected account.
 fn pacing_factor_basis_points(
     policy: PacingPolicy,
     model: &ModelId,
+    account: Option<&str>,
     quota: &[QuotaObservation],
     now_seconds: i64,
 ) -> u32 {
@@ -284,18 +285,27 @@ fn pacing_factor_basis_points(
     quota
         .iter()
         .filter(|observation| {
-            observation.model.adapter() == model.adapter()
+            observation.model == *model
                 && observation.snapshot.schema_version == 1
                 && observation.snapshot.account.adapter == model.adapter()
+                && Some(observation.snapshot.account.account_key.as_str()) == account
                 && observation.snapshot.observed_unix_seconds <= now_seconds
+                && observation.snapshot.observed_unix_seconds < observation.expires_unix_seconds
                 && observation.expires_unix_seconds > now_seconds
-                && matches!(
-                    observation.snapshot.status,
-                    QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
-                )
         })
-        .filter_map(|observation| pace_snapshot_factor(&observation.snapshot, now_seconds))
-        .max()
+        .max_by_key(|observation| {
+            (
+                observation.snapshot.observed_unix_seconds,
+                observation.snapshot.revision,
+            )
+        })
+        .filter(|observation| {
+            matches!(
+                observation.snapshot.status,
+                QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
+            )
+        })
+        .and_then(|observation| pace_snapshot_factor(&observation.snapshot, now_seconds))
         .unwrap_or(NEUTRAL_FACTOR_BASIS_POINTS)
 }
 
@@ -303,7 +313,7 @@ fn pace_snapshot_factor(
     snapshot: &provenant_quota::QuotaSnapshot,
     now_seconds: i64,
 ) -> Option<u32> {
-    let window = snapshot
+    snapshot
         .windows
         .iter()
         .filter_map(|window| {
@@ -312,23 +322,35 @@ fn pace_snapshot_factor(
             if window_seconds == 0 || reset_seconds <= now_seconds {
                 return None;
             }
-            Some((window_seconds, window.used_basis_points, reset_seconds))
+            let remaining_seconds = u64::try_from(reset_seconds.checked_sub(now_seconds)?)
+                .ok()?
+                .min(window_seconds);
+            let headroom = 10_000_u64.saturating_sub(window.used_basis_points.min(10_000));
+            let factor =
+                (u128::from(headroom) * u128::from(window_seconds)) / u128::from(remaining_seconds);
+            u32::try_from(factor.clamp(
+                u128::from(PACE_MIN_BASIS_POINTS),
+                u128::from(PACE_MAX_BASIS_POINTS),
+            ))
+            .ok()
         })
-        .min_by_key(|(window_seconds, _, _)| *window_seconds)?;
-    let (window_seconds, used_basis_points, reset_seconds) = window;
-    let remaining_seconds = u64::try_from(reset_seconds.checked_sub(now_seconds)?).ok()?;
-    let remaining_seconds = remaining_seconds.min(window_seconds);
-    if remaining_seconds == 0 {
-        return None;
-    }
-    let headroom_basis_points = 10_000_u64.saturating_sub(used_basis_points.min(10_000));
-    let factor = (u128::from(headroom_basis_points) * u128::from(window_seconds))
-        / u128::from(remaining_seconds);
-    let factor = factor.clamp(
-        u128::from(PACE_MIN_BASIS_POINTS),
-        u128::from(PACE_MAX_BASIS_POINTS),
-    );
-    u32::try_from(factor).ok()
+        .min()
+}
+
+fn pacing_reserve_reached(
+    snapshot: &provenant_quota::QuotaSnapshot,
+    now: i64,
+    reserve: PacingReserve,
+) -> bool {
+    snapshot.windows.iter().any(|window| {
+        let percent = match window.window_seconds {
+            Some(18_000) => reserve.five_hour_percent,
+            Some(604_800) => reserve.seven_day_percent,
+            _ => return false,
+        };
+        window.resets_unix_seconds.is_some_and(|reset| reset > now)
+            && window.used_basis_points >= 10_000 - u64::from(percent) * 100
+    })
 }
 
 fn availability_reason(
@@ -397,6 +419,26 @@ fn account_reason<'q>(
             QuotaStatus::AuthRequired => Some(RouteExclusionReason::AuthRequired),
             _ => None,
         };
+    }
+    if reason.is_none()
+        && pacing_policy(context.catalogue, context.config, model) == PacingPolicy::Pace
+        && let Some(q) = quota
+        && matches!(
+            q.snapshot.status,
+            QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
+        )
+        && pacing_reserve_reached(
+            &q.snapshot,
+            context.now_seconds(),
+            context
+                .config
+                .pacing_reserve
+                .get(model.adapter())
+                .copied()
+                .unwrap_or_default(),
+        )
+    {
+        reason = Some(RouteExclusionReason::PacingReserve);
     }
     (reason, quota)
 }
@@ -731,8 +773,7 @@ fn classify_pool(
     for member in members {
         let effort = request.effort.clone().or(member.effort.clone());
         let policy = pacing_policy(context.catalogue, context.config, &member.model);
-        let factor_basis_points =
-            pacing_factor_basis_points(policy, &member.model, context.quota, context.now_seconds());
+        let mut factor_basis_points = NEUTRAL_FACTOR_BASIS_POINTS;
         if excluded_members.contains(&member.model) {
             classified
                 .exclusions
@@ -769,6 +810,13 @@ fn classify_pool(
         } else {
             match candidate(&member.model, effort.as_deref(), context) {
                 Ok(resolved) => {
+                    factor_basis_points = pacing_factor_basis_points(
+                        policy,
+                        &member.model,
+                        resolved.account_key.as_deref(),
+                        context.quota,
+                        context.now_seconds(),
+                    );
                     readiness = Some(resolved.readiness.clone());
                     if matches!(resolved.readiness, RouteReadiness::Ready { .. }) {
                         if member.weight == 0 {
@@ -789,7 +837,8 @@ fn classify_pool(
                                 .push(format!("{}: disabled", member.model.as_str())),
                             RouteExclusionReason::StaleAvailability
                             | RouteExclusionReason::AuthRequired
-                            | RouteExclusionReason::Exhausted => {
+                            | RouteExclusionReason::Exhausted
+                            | RouteExclusionReason::PacingReserve => {
                                 if classified.first_recoverable_unavailable.is_none() {
                                     classified.first_recoverable_unavailable =
                                         Some(classified.candidates.len());

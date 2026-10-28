@@ -427,7 +427,22 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
             redraw: false,
         },
         Case {
-            name: "pace clamps to maximum factor",
+            name: "pace keeps weight at half headroom and half time",
+            effort: "high",
+            weights: [4, 4, 2],
+            ready_adapters: &["codex", "claude", "agy"],
+            expected_pick: None,
+            expect_effort_exclusion: false,
+            codex_pacing: "pace",
+            quota_used_basis_points: Some(5_000),
+            quota_reset_after_seconds: Some(9_000),
+            alternative_quota_used_basis_points: None,
+            include_weekly_window: false,
+            expected_codex_factor: Some(10_000),
+            redraw: false,
+        },
+        Case {
+            name: "pace uses the limiting weekly factor",
             effort: "high",
             weights: [4, 4, 2],
             ready_adapters: &["codex", "claude", "agy"],
@@ -438,7 +453,7 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
             quota_reset_after_seconds: Some(4_500),
             alternative_quota_used_basis_points: Some(9_900),
             include_weekly_window: true,
-            expected_codex_factor: Some(20_000),
+            expected_codex_factor: Some(9_000),
             redraw: false,
         },
         Case {
@@ -1244,6 +1259,93 @@ fn quota(
             windows: vec![],
         },
     })
+}
+
+#[test]
+fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let catalogue = Catalogue::bundled()?;
+    let registry = [provenant_providers::codex::REGISTRATION];
+    let availability = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let window = |seconds, used, remaining: i64| QuotaWindow {
+        pool: "test".into(),
+        window_seconds: Some(seconds),
+        used_basis_points: used,
+        resets_unix_seconds: Some(100 + remaining),
+    };
+    for (windows, excluded) in [
+        (vec![window(18_000, 9_000, 9_000)], true),
+        (
+            vec![
+                window(18_000, 1_000, 9_000),
+                window(604_800, 9_500, 302_400),
+            ],
+            true,
+        ),
+        (vec![window(18_000, 5_000, 9_000)], false),
+    ] {
+        for policy in ["pace", "spend", "max"] {
+            let config: RoutingConfig =
+                serde_json::from_value(serde_json::json!({"pacing": {"codex": policy}}))?;
+            let mut observation = quota(
+                "codex/test",
+                "opaque-account",
+                QuotaStatus::Available,
+                1,
+                80,
+                120,
+            )?;
+            observation.snapshot.windows = windows.clone();
+            let observations = [observation];
+            let mut ctx = context(&catalogue, &config, now()?);
+            ctx.registry = &registry;
+            ctx.availability = &availability;
+            ctx.access = &access;
+            ctx.quota = &observations;
+            let route = resolve(&request("codex/test")?, &ctx)?;
+            assert_eq!(
+                reason(&route) == Some(&RouteExclusionReason::PacingReserve),
+                excluded && policy == "pace"
+            );
+            if excluded && policy == "pace" {
+                assert_eq!(
+                    route.exclusions[0].reason,
+                    RouteExclusionReason::PacingReserve
+                );
+                assert!(serde_json::to_string(&route)?.contains("pacing_reserve"));
+            }
+        }
+    }
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pacing": {"codex": "pace"},
+        "pacing_reserve": {"codex": {"five_hour_percent": 5}}
+    }))?;
+    let mut observation = quota(
+        "codex/test",
+        "opaque-account",
+        QuotaStatus::Available,
+        1,
+        80,
+        120,
+    )?;
+    observation.snapshot.windows = vec![window(18_000, 9_000, 9_000)];
+    let observations = [observation];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.registry = &registry;
+    ctx.availability = &availability;
+    ctx.access = &access;
+    ctx.quota = &observations;
+    assert!(reason(&resolve(&request("codex/test")?, &ctx)?).is_none());
+    let invalid: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pacing_reserve": {"codex": {"five_hour_percent": 101}}
+    }))?;
+    assert!(!provenant_config::DomainConfig::validate(&invalid).is_empty());
+    Ok(())
 }
 #[test]
 fn availability_access_and_scoped_quota_are_independent_gates()
