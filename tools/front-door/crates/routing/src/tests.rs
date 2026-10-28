@@ -2670,6 +2670,47 @@ fn go_pool_requires_current_full_calibration_and_paces_the_maximum()
         }
     };
     let calibrated = apply(&raw);
+    for (key, five_hour, seven_day, expected) in [
+        ("go", None, None, "five_hour, seven_day"),
+        (
+            "different-go",
+            Some(43),
+            Some(17),
+            "five_hour, seven_day, thirty_day",
+        ),
+    ] {
+        let mut partial_settings = provenant_quota::Settings::default();
+        partial_settings.calibration.insert(
+            key.into(),
+            Calibration {
+                five_hour,
+                seven_day,
+                thirty_day: Some(59),
+                expires: "1970-01-01T00:01:41Z".into(),
+            },
+        );
+        let mut record = AccountRecord::empty(raw.snapshot.account.clone());
+        record.snapshot = Some(raw.snapshot.clone());
+        let mut records = [record];
+        partial_settings.apply_calibration(&mut records, 100);
+        let observations = [QuotaObservation {
+            snapshot: records[0].snapshot.clone().unwrap(),
+            ..duplicate(&raw)
+        }];
+        let mut ctx = context(&catalogue, &config, now()?);
+        ctx.availability = &availability;
+        ctx.access = &access;
+        ctx.quota = &observations;
+        match resolve(&query, &ctx) {
+            Err(RoutingError::NoEligiblePoolMember { exclusions }) => assert!(
+                exclusions.iter().any(|reason| reason.contains(&format!(
+                    "Go calibration missing or stale: {expected} (calibration key must match account key \"go\")"
+                ))),
+                "{key}: {exclusions:?}"
+            ),
+            other => panic!("{key}: expected quota rejection, got {other:?}"),
+        }
+    }
     let mut expired = duplicate(&calibrated);
     expired
         .snapshot
@@ -2707,7 +2748,10 @@ fn go_pool_requires_current_full_calibration_and_paces_the_maximum()
         match resolve(&query, &ctx) {
             Err(RoutingError::NoEligiblePoolMember { exclusions }) => {
                 assert!(
-                    exclusions.iter().any(|reason| reason.contains("Go quota")),
+                    exclusions
+                        .iter()
+                        .any(|reason| reason.contains("Go quota")
+                            || reason.contains("Go calibration")),
                     "{name}: {exclusions:?}"
                 );
             }

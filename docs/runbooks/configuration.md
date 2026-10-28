@@ -92,7 +92,11 @@ expires = "2026-11-04T00:00:00Z"
 The table key is the OpenCode account key, usually `go`. Each percentage is an
 integer from 0 to 100, and expiry is a required timestamp with a UTC offset.
 Quota and pacing use the maximum of the raw ledger and each floor until the
-expiry instant. Editing or removing the table takes effect on the next read;
+expiry instant, even if a ledger window resets sooner. Set the expiry no later
+than the end of each included window. The table has one shared expiry, so use
+the earliest window end and refresh the floors afterwards. For example, a
+five-hour floor entered at 09:00 with a window ending at 13:00 should expire at
+13:00, within five hours. Editing or removing the table takes effect on the next read;
 floors are never written over the raw ledger cache. Zen does not use Go floors.
 
 MiMo Flash is a provisional junior and senior member at weight 1. Go pool

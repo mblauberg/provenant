@@ -164,6 +164,7 @@ impl QuotaSnapshot {
             && ["five_hour", "seven_day", "thirty_day"].iter().all(|pool| {
                 self.windows.iter().any(|w| w.pool == *pool)
                     && self.details.as_ref().is_some_and(|d| {
+                        // Complete coverage is reserved for a future authoritative source.
                         d.coverage.as_deref() == Some("complete") || d.calibration_active(pool, now)
                     })
             })

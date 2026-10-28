@@ -1252,16 +1252,13 @@ struct PoolDraw {
     total_weight: u64,
 }
 
-fn trustworthy_go_quota(
+fn go_quota_observation<'a>(
     model: &ModelId,
     account: Option<&str>,
-    context: &RoutingContext<'_>,
-) -> bool {
-    if model.adapter() != "opencode" || !model.model().starts_with("opencode-go/") {
-        return true;
-    }
+    context: &'a RoutingContext<'_>,
+) -> Option<&'a QuotaObservation> {
     let now = context.now_seconds();
-    let snapshot = context
+    context
         .quota
         .iter()
         .filter(|q| {
@@ -1271,8 +1268,19 @@ fn trustworthy_go_quota(
                 && q.snapshot.observed_unix_seconds <= now
                 && now < q.expires_unix_seconds
         })
-        .max_by_key(|q| (q.snapshot.observed_unix_seconds, q.snapshot.revision));
-    snapshot.is_some_and(|q| q.snapshot.trustworthy_go_windows(now))
+        .max_by_key(|q| (q.snapshot.observed_unix_seconds, q.snapshot.revision))
+}
+
+fn trustworthy_go_quota(
+    model: &ModelId,
+    account: Option<&str>,
+    context: &RoutingContext<'_>,
+) -> bool {
+    if model.adapter() != "opencode" || !model.model().starts_with("opencode-go/") {
+        return true;
+    }
+    go_quota_observation(model, account, context)
+        .is_some_and(|q| q.snapshot.trustworthy_go_windows(context.now_seconds()))
 }
 
 fn classify_pool(
@@ -1337,7 +1345,54 @@ fn classify_pool(
                         resolved.account_key.as_deref(),
                         context,
                     ) {
-                        let reason = "Go quota source: local-ledger, coverage: partial; requires fresh quota and unexpired calibration for all three windows";
+                        let mut reason = "Go quota source: local-ledger, coverage: partial; requires fresh quota and unexpired calibration for all three windows".to_owned();
+                        let diagnostic = context
+                            .availability
+                            .iter()
+                            .filter(|a| {
+                                a.adapter == member.model.adapter()
+                                    && a.account_key.as_deref().is_some_and(|key| {
+                                        provenant_records::AdapterSpec::get(member.model.adapter())
+                                            .is_none_or(|spec| {
+                                                spec.account_serves_model(key, member.model.model())
+                                            })
+                                    })
+                            })
+                            .find_map(|a| {
+                                let account = a.account_key.as_deref()?;
+                                Some((
+                                    account,
+                                    go_quota_observation(&member.model, Some(account), context)?,
+                                ))
+                            });
+                        if let Some((account, observation)) = diagnostic {
+                            let missing: Vec<_> = ["five_hour", "seven_day", "thirty_day"]
+                                .into_iter()
+                                .filter(|pool| {
+                                    !observation
+                                        .snapshot
+                                        .details
+                                        .as_ref()
+                                        .is_some_and(|details| {
+                                            details.calibration_active(pool, context.now_seconds())
+                                        })
+                                })
+                                .collect();
+                            if !missing.is_empty()
+                                && !observation
+                                    .snapshot
+                                    .details
+                                    .as_ref()
+                                    .is_some_and(|details| {
+                                        details.coverage.as_deref() == Some("complete")
+                                    })
+                            {
+                                reason = format!(
+                                    "Go calibration missing or stale: {} (calibration key must match account key {account:?})",
+                                    missing.join(", ")
+                                );
+                            }
+                        }
                         classified
                             .exclusions
                             .push(format!("{}: {reason}", member.model.as_str()));
@@ -1348,7 +1403,7 @@ fn classify_pool(
                             pacing_detail: None,
                             effort,
                             readiness: None,
-                            exclusion: Some(reason.into()),
+                            exclusion: Some(reason),
                         });
                         classified.routes.push(None);
                         continue;
