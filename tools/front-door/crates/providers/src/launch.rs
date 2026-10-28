@@ -163,13 +163,111 @@ pub(crate) fn base_env(
         input.provenant.git,
         input.cwd,
     ));
+    if input.confined.permissions().read_only.is_some() {
+        env.push((
+            "GIT_OBJECT_DIRECTORY".into(),
+            scratch.join("git-objects").into(),
+        ));
+    }
     env
+}
+
+/// Git's temporary object directories must live in attempt-owned scratch.
+/// The host-verified common store is an alternate and stays read-only.
+pub(crate) fn read_only_git_objects(
+    input: &PrepareInput<'_>,
+    spec: &mut LaunchSpec,
+) -> Result<(), ProviderError> {
+    let Some(grants) = input.confined.permissions().read_only.as_ref() else {
+        return Ok(());
+    };
+    let common = grants
+        .git_read_paths()
+        .next()
+        .ok_or(ProviderError::InvalidPath)?;
+    let objects = input
+        .confined
+        .permissions()
+        .scratch
+        .path
+        .join("git-objects");
+    let info = objects.join("info");
+    let quoted = quote_alternate(&common.join("objects"));
+    spec.setup.extend([
+        SetupStep::CreateDir(info.clone()),
+        SetupStep::WriteFile {
+            path: info.join("alternates"),
+            bytes: quoted.into_bytes(),
+        },
+    ]);
+    Ok(())
+}
+
+/// Git accepts C-quoted native paths in info/alternates.
+fn quote_alternate(alternate: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut quoted = String::from("\"");
+    for byte in alternate.as_os_str().as_bytes() {
+        match byte {
+            b'"' | b'\\' => {
+                quoted.push('\\');
+                quoted.push(char::from(*byte));
+            }
+            0x20..=0x7e => quoted.push(char::from(*byte)),
+            _ => quoted.push_str(&format!("\\{byte:03o}")),
+        }
+    }
+    quoted.push_str("\"\n");
+    quoted
 }
 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod git_identity_tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn git_reads_quoted_alternate_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo: space\"\\\n");
+        std::fs::create_dir(&repo).unwrap();
+        let run = |args: &[&str], objects: Option<&Path>| {
+            let mut command = std::process::Command::new("/usr/bin/git");
+            command.current_dir(&repo).args(args);
+            if let Some(objects) = objects {
+                command.env("GIT_OBJECT_DIRECTORY", objects);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-q"], None);
+        run(
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ],
+            None,
+        );
+        let objects = temp.path().join("objects");
+        std::fs::create_dir_all(objects.join("info")).unwrap();
+        std::fs::write(
+            objects.join("info/alternates"),
+            quote_alternate(&repo.join(".git/objects")),
+        )
+        .unwrap();
+        run(&["cat-file", "-e", "HEAD^{commit}"], Some(&objects));
+    }
 
     #[test]
     #[allow(clippy::disallowed_methods)]

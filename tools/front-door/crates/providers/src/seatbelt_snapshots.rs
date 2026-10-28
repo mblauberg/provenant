@@ -386,6 +386,7 @@ fn agy_read_only_compiled_profile_denies_read_root_write() -> Result<(), Box<dyn
 
 #[cfg(target_os = "macos")]
 #[test]
+#[allow(clippy::disallowed_methods)]
 fn agy_read_only_linked_worktree_git_directories_are_not_writable()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::permissions::snapshot::compile;
@@ -430,6 +431,29 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
         "-m",
         "fixture",
     ])?;
+    run_git(&["checkout", "-b", "side"])?;
+    run_git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "side",
+    ])?;
+    run_git(&["checkout", "-"])?;
+    run_git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "merge",
+        "--no-ff",
+        "side",
+        "-m",
+        "merge",
+    ])?;
     let worktree = root.join("linked");
     run_git(&[
         "worktree",
@@ -470,6 +494,56 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
         .find(|entry| entry.adapter.id() == "agy")
         .unwrap();
     let spec = adapter.adapter.prepare(input)?;
+    for step in &spec.setup {
+        match step {
+            SetupStep::CreateDir(path) if path.starts_with(root.join("scratch/git-objects")) => {
+                std::fs::create_dir_all(path)?
+            }
+            SetupStep::WriteFile { path, bytes }
+                if path.starts_with(root.join("scratch/git-objects")) =>
+            {
+                std::fs::write(path, bytes)?
+            }
+            _ => {}
+        }
+    }
+    let object_dir = root.join("scratch/git-objects");
+    for args in [
+        &["show", "--remerge-diff", "HEAD"][..],
+        &["diff", "--merge-base", "HEAD^", "HEAD"][..],
+    ] {
+        let output = std::process::Command::new("/usr/bin/git")
+            .args(args)
+            .current_dir(&worktree)
+            .env("GIT_OBJECT_DIRECTORY", &object_dir)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    // A write goes to scratch, never the host's common object store.
+    let output = std::process::Command::new("/usr/bin/git")
+        .args(["hash-object", "-w", "--stdin"])
+        .current_dir(&worktree)
+        .env("GIT_OBJECT_DIRECTORY", &object_dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+    let mut child = output;
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"lane scratch object")?;
+    let output = child.wait_with_output()?;
+    assert!(output.status.success());
+    let oid = std::str::from_utf8(&output.stdout)?.trim();
+    let relative = format!("{}/{}", &oid[..2], &oid[2..]);
+    assert!(object_dir.join(&relative).is_file());
+    assert!(!common.join("objects").join(relative).exists());
     let directories = required_anchors(plan.permissions(), &spec.profile, None)
         .iter()
         .map(AnchoredDirectory::open_canonical)

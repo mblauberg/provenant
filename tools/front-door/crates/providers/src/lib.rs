@@ -79,7 +79,9 @@ macro_rules! adapter {
                 if let Some(continuation) = input.continuation {
                     continuation.bind_stream($id, &mut stream)?;
                 }
-                $prepare(&input, access, session, stream)
+                let mut spec = $prepare(&input, access, session, stream)?;
+                crate::launch::read_only_git_objects(&input, &mut spec)?;
+                Ok(spec)
             }
             fn stream(
                 &self,

@@ -59,6 +59,12 @@ worktrees keep per-lane targets (`provenant worktree remove` and
 `provenant gc` prune the lane caches), because a target shared across
 worktrees can run another checkout's stale test binaries.
 
+Read-only lanes with a verified Git checkout use a private scratch object
+directory, with the host's common object store as a read-only alternate. Git
+can create temporary objects for commands such as `show --remerge-diff`
+without writing the shared store. Objects written there disappear with the
+attempt's scratch space.
+
 On macOS, launch inspects the whole writable worktree, including ignored
 `target/` and `node_modules/` directories. Existing hard-linked regular files
 stay readable, but each in-tree alias is write-denied and its ancestor

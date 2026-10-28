@@ -348,6 +348,7 @@ fn identity_exports(env: &[(OsString, OsString)]) -> Result<String, ProviderErro
             "GIT_AUTHOR_EMAIL",
             "GIT_COMMITTER_NAME",
             "GIT_COMMITTER_EMAIL",
+            "GIT_OBJECT_DIRECTORY",
         ]
         .iter()
         .any(|candidate| key == candidate)
@@ -579,7 +580,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let git = dir.path().join("git");
-        std::fs::write(&git, "#!/bin/sh\nprintf '%s\\n' \"$GIT_AUTHOR_NAME\" \"$GIT_COMMITTER_EMAIL\" \"$GIT_CONFIG_GLOBAL\"\n").unwrap();
+        std::fs::write(&git, "#!/bin/sh\nprintf '%s\\n' \"$GIT_AUTHOR_NAME\" \"$GIT_COMMITTER_EMAIL\" \"$GIT_CONFIG_GLOBAL\" \"$GIT_OBJECT_DIRECTORY\"\n").unwrap();
         std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
         let lane = LaneRuntime {
             executable: Path::new("/fixture/provenant"),
@@ -597,6 +598,10 @@ mod tests {
             lane.git_wrapper(&[
                 ("GIT_AUTHOR_NAME".into(), "O'Brien".into()),
                 ("GIT_COMMITTER_EMAIL".into(), "lane@example.org".into()),
+                (
+                    "GIT_OBJECT_DIRECTORY".into(),
+                    "/scratch/O'Brien/objects".into(),
+                ),
             ])
             .unwrap(),
         )
@@ -607,7 +612,10 @@ mod tests {
             .output()
             .unwrap();
         assert!(output.status.success());
-        assert_eq!(output.stdout, b"O'Brien\nlane@example.org\n/dev/null\n");
+        assert_eq!(
+            output.stdout,
+            b"O'Brien\nlane@example.org\n/dev/null\n/scratch/O'Brien/objects\n"
+        );
     }
 
     #[test]
