@@ -217,6 +217,12 @@ pub enum SessionError {
         "session discovery identity does not match the registered chair; repeat workflow session save <id> with the same options and add --rebind to explicitly replace the binding"
     )]
     DiscoveryIdentity,
+    #[error("summary revision is stale; current revision is {current_revision}")]
+    SummaryStale { current_revision: u64 },
+    #[error("{0}")]
+    Summary(#[from] SummaryError),
+    #[error("checkpoint not found")]
+    MissingCheckpoint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1085,6 +1091,110 @@ mod tests {
         assert_eq!(discovery.consistency, DiscoveryConsistency::Current);
         assert_eq!(discovery.record.checkpoint.revision, 2);
         assert_eq!(discovery.record.summary.unwrap().now, "Second");
+    }
+    #[test]
+    fn summary_save_race() {
+        use provenant_core::{ActorId, Clock, HostId};
+        use provenant_os::clock::SystemClock;
+        use std::sync::{Arc, Barrier, mpsc};
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "chair")
+            .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([4; 16]));
+        let first = "---\r\nother: \"keep\"\r\n\"provenant_summary\":\r\n  schema_version: 1\r\n  revision: 1\r\n  updated_at: \"2026-10-28T03:00:00Z\"\r\n  now: \"First\"\r\n  next: \"Next\"\r\n  needs_you: []\r\n  risk: \"None\"\r\n# retain comment\r\nafter: \"keep too\"\r\n---\r\nBody\r\n";
+        saved(&selected, first);
+        let changed = first.replace("Body", "Saved concurrently");
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let selected_ref = &selected;
+            let changed_ref = &changed;
+            let saving = scope.spawn(move || {
+                let clock = SystemClock::new();
+                selected_ref
+                    .save_revision_with(
+                        changed_ref.as_bytes(),
+                        WaitBudget::cli(clock.mono_now(), 5).unwrap(),
+                        &CancelToken::new(),
+                        &clock,
+                        |dir, record| {
+                            entered_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                            selected_ref.publish_discovery(dir, record)
+                        },
+                    )
+                    .unwrap()
+            });
+            entered_rx.recv().unwrap();
+            let editing = scope.spawn(|| {
+                let clock = SystemClock::new();
+                selected.update_summary(
+                    SummaryPatch {
+                        now: Some("Edited".into()),
+                        ..Default::default()
+                    },
+                    1,
+                    WaitBudget::cli(clock.mono_now(), 5).unwrap(),
+                    &CancelToken::new(),
+                    &clock,
+                )
+            });
+            release_tx.send(()).unwrap();
+            saving.join().unwrap();
+            editing.join().unwrap().unwrap();
+        });
+        let checkpoint = selected.read().unwrap().unwrap().markdown;
+        assert!(checkpoint.contains("Saved concurrently\r\n"));
+        assert!(checkpoint.contains("other: \"keep\"\r\n"));
+        assert!(checkpoint.contains("# retain comment\r\nafter: \"keep too\"\r\n"));
+        assert_eq!(parse_summary(&checkpoint).unwrap().unwrap().now, "Edited");
+        let barrier = Arc::new(Barrier::new(2));
+        std::thread::scope(|scope| {
+            let attempt = |value: &'static str, barrier: Arc<Barrier>| {
+                let selected = &selected;
+                scope.spawn(move || {
+                    let clock = SystemClock::new();
+                    barrier.wait();
+                    selected.update_summary(
+                        SummaryPatch {
+                            next: Some(value.into()),
+                            ..Default::default()
+                        },
+                        2,
+                        WaitBudget::cli(clock.mono_now(), 5).unwrap(),
+                        &CancelToken::new(),
+                        &clock,
+                    )
+                })
+            };
+            let one = attempt("one", barrier.clone());
+            let two = attempt("two", barrier);
+            let results = [one.join().unwrap(), two.join().unwrap()];
+            assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|r| matches!(
+                        r,
+                        Err(SessionError::SummaryStale {
+                            current_revision: 3
+                        })
+                    ))
+                    .count(),
+                1
+            );
+        });
+        let current = selected.read().unwrap().unwrap().markdown;
+        let discovery = selected.discovery().unwrap().unwrap();
+        assert_eq!(discovery.consistency, DiscoveryConsistency::Current);
+        assert_eq!(discovery.record.summary, parse_summary(&current).unwrap());
+        assert_eq!(
+            discovery.record.checkpoint,
+            *selected.revisions().unwrap().last().unwrap()
+        );
+        assert_eq!(
+            selected.read_revision(2).unwrap().unwrap().markdown,
+            changed
+        );
     }
     #[test]
     fn enforces_utf8_and_byte_bounds_on_read_and_write() {

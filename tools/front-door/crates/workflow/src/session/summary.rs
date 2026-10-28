@@ -19,6 +19,164 @@ pub struct Summary {
 #[error("invalid or unsupported checkpoint summary header")]
 pub struct SummaryError;
 
+/// Fields omitted from a patch retain their existing values. Revision zero
+/// creates a summary on an existing checkpoint.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SummaryPatch {
+    pub now: Option<String>,
+    pub next: Option<String>,
+    pub needs_you: Option<Vec<String>>,
+    pub risk: Option<String>,
+}
+
+impl super::SessionStore {
+    pub fn update_summary(
+        &self,
+        patch: SummaryPatch,
+        expected: u64,
+        budget: provenant_core::WaitBudget,
+        cancel: &provenant_core::CancelToken,
+        clock: &dyn provenant_core::Clock,
+    ) -> Result<(Summary, super::Saved), super::SessionError> {
+        if patch.now.is_none()
+            && patch.next.is_none()
+            && patch.needs_you.is_none()
+            && patch.risk.is_none()
+        {
+            return Err(SummaryError.into());
+        }
+        let mut result = None;
+        let saved = self
+            .update(
+                false,
+                |current| {
+                    let text = current.ok_or(super::SessionError::MissingCheckpoint)?;
+                    let mut summary = parse_summary(text)?.unwrap_or(Summary {
+                        schema_version: 1,
+                        revision: 0,
+                        updated_at: String::new(),
+                        now: String::new(),
+                        next: String::new(),
+                        needs_you: Vec::new(),
+                        risk: String::new(),
+                    });
+                    if summary.revision != expected {
+                        return Err(super::SessionError::SummaryStale {
+                            current_revision: summary.revision,
+                        });
+                    }
+                    summary.revision = summary.revision.checked_add(1).ok_or(SummaryError)?;
+                    summary.updated_at = clock.wall_now()?.to_string();
+                    if let Some(value) = patch.now {
+                        summary.now = value;
+                    }
+                    if let Some(value) = patch.next {
+                        summary.next = value;
+                    }
+                    if let Some(value) = patch.needs_you {
+                        summary.needs_you = value;
+                    }
+                    if let Some(value) = patch.risk {
+                        summary.risk = value;
+                    }
+                    let next = replace_summary(text, &summary)?;
+                    result = Some(summary);
+                    Ok(Some(next))
+                },
+                budget,
+                cancel,
+                clock,
+            )?
+            .ok_or(super::SessionError::MissingCheckpoint)?;
+        Ok((result.ok_or(SummaryError)?, saved))
+    }
+}
+
+fn replace_summary(text: &str, summary: &Summary) -> Result<String, SummaryError> {
+    let newline = if text.starts_with("---\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let quote = |value: &str| serde_json::to_string(value).map_err(|_| SummaryError);
+    let block = format!(
+        "provenant_summary:{newline}  schema_version: 1{newline}  revision: {}{newline}  updated_at: {}{newline}  now: {}{newline}  next: {}{newline}  needs_you: {}{newline}  risk: {}{newline}",
+        summary.revision,
+        quote(&summary.updated_at)?,
+        quote(&summary.now)?,
+        quote(&summary.next)?,
+        serde_json::to_string(&summary.needs_you).map_err(|_| SummaryError)?,
+        quote(&summary.risk)?
+    );
+    let output = if !text.starts_with("---\n") && !text.starts_with("---\r\n") {
+        format!("---\n{block}---\n{text}")
+    } else {
+        let parsed = parse_frontmatter_integers(text).map_err(|_| SummaryError)?;
+        let YamlValue::Mapping(root) = parsed.value else {
+            return Err(SummaryError);
+        };
+        let lines: Vec<&str> = text.split_inclusive('\n').collect();
+        let end = lines
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find(|(_, line)| line.trim_end_matches(['\r', '\n']) == "---")
+            .map(|(i, _)| i)
+            .ok_or(SummaryError)?;
+        let (start, stop) = if let Some(node) = root.get("provenant_summary") {
+            let child = node.span.line.checked_sub(1).ok_or(SummaryError)?;
+            let start = (1..=child)
+                .rev()
+                .find(|&i| {
+                    let line = lines[i].trim_end_matches(['\r', '\n']);
+                    !line.is_empty()
+                        && !line.starts_with(char::is_whitespace)
+                        && !line.starts_with('#')
+                })
+                .ok_or(SummaryError)?;
+            let mut stop = (start + 1..end)
+                .find(|&i| {
+                    let line = lines[i].trim_end_matches(['\r', '\n']);
+                    !line.is_empty()
+                        && !line.starts_with(char::is_whitespace)
+                        && !line.starts_with('#')
+                })
+                .unwrap_or(end);
+            while stop > start + 1 {
+                let trimmed = lines[stop - 1].trim();
+                if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                    break;
+                }
+                stop -= 1;
+            }
+            (start, stop)
+        } else {
+            (end, end)
+        };
+        let trivia: String = lines[start..stop]
+            .iter()
+            .skip(1)
+            .filter(|line| {
+                let trimmed = line.trim();
+                trimmed.is_empty() || trimmed.starts_with('#')
+            })
+            .copied()
+            .collect();
+        format!(
+            "{}{}{}{}",
+            lines[..start].concat(),
+            trivia,
+            block,
+            lines[stop..].concat()
+        )
+    };
+    if parse_summary(&output)?.as_ref() != Some(summary) {
+        return Err(SummaryError);
+    }
+    Ok(output)
+}
+
 /// Read the summary from YAML frontmatter, without interpreting the Markdown body.
 /// A missing header or absent summary is distinct from an invalid header.
 pub fn parse_summary(markdown: &str) -> Result<Option<Summary>, SummaryError> {

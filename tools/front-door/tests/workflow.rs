@@ -76,6 +76,67 @@ fn session_reads_allocate_nothing() -> Result {
 }
 
 #[test]
+fn chair_summary_guarded_update() -> Result {
+    let rig = TestRig::new()?;
+    let source = rig.root.join("checkpoint.md");
+    std::fs::write(&source, "# Checkpoint\nOriginal body.\n")?;
+    let source = source.to_string_lossy();
+    call(
+        &rig,
+        &["workflow", "session", "save", "chair", "--file", &source],
+        0,
+    )?;
+    assert!(call(&rig, &["chair", "summary", "show", "chair"], 0)?["data"]["summary"].is_null());
+    let patch = request(
+        &rig,
+        "summary.json",
+        json!({"now":"Working", "needs_you":["request-1"]}),
+    )?;
+    let update = call(
+        &rig,
+        &[
+            "chair",
+            "summary",
+            "update",
+            "chair",
+            "--file",
+            &patch,
+            "--expect-revision",
+            "0",
+        ],
+        0,
+    )?;
+    assert_eq!(update["data"]["summary"]["revision"], 1);
+    assert_eq!(update["data"]["checkpoint"]["revision"], 2);
+    let stale = call(
+        &rig,
+        &[
+            "chair",
+            "summary",
+            "update",
+            "chair",
+            "--file",
+            &patch,
+            "--expect-revision",
+            "0",
+        ],
+        1,
+    )?;
+    assert_eq!(stale["error"]["code"], "SUMMARY_STALE");
+    assert_eq!(stale["data"]["current_revision"], 1);
+    let show = call(&rig, &["chair", "summary", "show", "chair"], 0)?;
+    assert_eq!(show["data"]["summary"]["now"], "Working");
+    let checkpoint = call(&rig, &["workflow", "session", "show", "chair"], 0)?;
+    assert!(
+        checkpoint["data"]["markdown"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("# Checkpoint\nOriginal body.\n")
+    );
+    Ok(())
+}
+
+#[test]
 fn chair_log_cli_replay_and_pages() -> Result {
     let rig = TestRig::new()?;
     let first = request(
