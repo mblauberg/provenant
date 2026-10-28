@@ -604,6 +604,9 @@ pub(crate) fn prepare_bound(
         .ok_or_else(invalid)?;
     let temporary = attempt.open_verified_directory(OsStr::new("tmp"))?;
     let held = temporary.open_verified_directory(OsStr::new(candidate))?;
+    // Custom provider launches may only edit files and omit the adapter's Git
+    // setup. Their empty object store still needs a complete settlement path.
+    directory(&held, OsStr::new("git-objects"))?;
     prepare_refs(git, repo, &held, branch, base)?;
     bind(attempt, scratch)
 }

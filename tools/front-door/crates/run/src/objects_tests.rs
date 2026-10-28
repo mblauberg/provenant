@@ -605,6 +605,40 @@ fn private_ref_overlay_keeps_host_and_sibling_fetch_usable_until_verified_public
 }
 
 #[test]
+fn host_preparation_initialises_objects_without_adapter_git_setup() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    fs::write(
+        fixture.project.join(".git/refs/heads/lane"),
+        format!("{}\n", fixture.base),
+    )?;
+    let attempt_path = fixture.root.join("custom-attempt");
+    let scratch = attempt_path.join("tmp/candidate-0");
+    fs::create_dir_all(&scratch)?;
+    let attempt = Directory::open_anchor(&attempt_path)?;
+    super::prepare_bound(
+        &fixture.git,
+        fixture.worktree.repo(),
+        &attempt,
+        &scratch,
+        "refs/heads/lane",
+        fixture.base,
+    )?;
+    let source = super::bound_source(&attempt)?.ok_or("custom source")?;
+    assert!(source.objects.entries()?.next().is_none());
+    assert_eq!(
+        super::private_tip(&source, "refs/heads/lane")?,
+        fixture.base
+    );
+    super::settle(
+        &fixture.git,
+        fixture.worktree.repo(),
+        Some(&source.objects),
+        fixture.base,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn private_tip_ignores_lane_configuration_and_refuses_symlinked_refs() -> TestResult {
     let mut fixture = Fixture::new("sha1")?;
     let (attempt, scratch) = fixture.overlay()?;

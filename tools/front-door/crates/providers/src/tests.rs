@@ -2393,7 +2393,10 @@ fn agy_writers_exec_what_codex_writers_exec() -> Result<(), ProviderError> {
                 .iter()
                 .any(|(key, value)| key == "SHELL" && value == "/bin/zsh")
         );
-        assert_eq!(spec.profile.spec.process_executables.len(), 2);
+        assert_eq!(
+            spec.profile.spec.process_executables.len(),
+            if access == Access::ReadOnly { 2 } else { 4 }
+        );
         let exec = &spec.profile.spec.tool_exec_roots;
         if access == Access::ReadOnly {
             assert_eq!(
@@ -2531,10 +2534,14 @@ fn cursor_reads_and_execs_only_its_resolved_version_payload() -> Result<(), Prov
         let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
         input.executable = &launcher;
         let spec = cursor::Cursor.prepare(input)?.profile.spec;
-        assert_eq!(
-            spec.process_executables,
-            vec![crate::launch::exact(&launcher)]
-        );
+        let mut executables = vec![crate::launch::exact(&launcher)];
+        if access == Access::WorktreeWrite {
+            executables.extend([
+                crate::launch::exact("/bin/sh"),
+                crate::launch::exact("/fixture/git/bin/git"),
+            ]);
+        }
+        assert_eq!(spec.process_executables, executables);
         assert!(
             spec.runtime_reads
                 .contains(&crate::launch::subtree(payload))
@@ -2545,6 +2552,10 @@ fn cursor_reads_and_execs_only_its_resolved_version_payload() -> Result<(), Prov
                 .map(crate::launch::subtree)
                 .into_iter()
                 .chain([crate::launch::subtree(payload)])
+                .chain(
+                    (access == Access::WorktreeWrite)
+                        .then(|| crate::launch::subtree("/fixture/scratch/bin"))
+                )
                 .collect::<Vec<_>>()
         );
     }

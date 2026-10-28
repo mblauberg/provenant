@@ -1097,6 +1097,26 @@ impl crate::RunStore {
 }
 
 impl WriterLaunch {
+    /// Exercise the host's private Git preparation in manually confined fixtures.
+    /// The fixture owns the attempt and worktree; installed builds omit this seam.
+    #[cfg(feature = "fixture")]
+    pub fn prepare_private_git_for_fixture(
+        &self,
+        attempt: &Directory,
+        scratch: &Path,
+    ) -> Result<()> {
+        let git = provenant_os::git::git_executable()
+            .ok_or(RunError::Validation("Git executable unavailable"))?;
+        crate::objects::prepare_bound(
+            &git,
+            self.worktree.repo(),
+            attempt,
+            scratch,
+            self.branch.as_str(),
+            self.base,
+        )
+    }
+
     pub(crate) fn snapshot(
         &self,
         state: &Path,
