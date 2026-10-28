@@ -3554,7 +3554,7 @@ fn opencode_reapply_drops_old_release_and_keeps_receipt_ownership() {
 }
 
 #[test]
-fn inspect_install_binds_changed_tampered_bytes_with_identical_metadata_and_findings() {
+fn inspect_install_binds_changed_tampered_bytes_with_restored_metadata_and_findings() {
     let fixture = Fixture::new();
     let plan = fixture.plan();
     let clock = SystemClock::new();
@@ -3595,7 +3595,23 @@ fn inspect_install_binds_changed_tampered_bytes_with_identical_metadata_and_find
     let first = inspect();
     let metadata = snapshot(&asset).unwrap().unwrap().metadata;
     set_bytes(b'b');
-    assert_eq!(metadata, snapshot(&asset).unwrap().unwrap().metadata);
+    let after = snapshot(&asset).unwrap().unwrap().metadata;
+    // Restoring mtime preserves every original metadata field, but ctime now
+    // exposes the rewrite. Inspection's metadata evidence excludes ctime, so
+    // its changed input digest must still bind the changed content bytes.
+    assert_eq!(
+        metadata,
+        Metadata {
+            changed_ns: metadata.changed_ns,
+            ..after
+        }
+    );
+    assert_ne!(metadata.changed_ns, after.changed_ns);
+    let mut first_metadata = InspectionEvidence::default();
+    first_metadata.metadata(&asset, metadata);
+    let mut second_metadata = InspectionEvidence::default();
+    second_metadata.metadata(&asset, after);
+    assert_eq!(first_metadata.finish(), second_metadata.finish());
     let second = inspect();
     assert_eq!(first.findings, second.findings);
     assert!(

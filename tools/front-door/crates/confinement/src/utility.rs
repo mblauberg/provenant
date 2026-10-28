@@ -165,6 +165,10 @@ pub enum GitRead {
     ResolveRef {
         name: GitRefName,
     },
+    /// Read only the ref OID, before quarantined object content is verified.
+    ResolveRefOid {
+        name: GitRefName,
+    },
     ResolveRevision {
         revision: GitRevision,
     },
@@ -892,6 +896,12 @@ fn git_args(
             "--verify".into(),
             "--end-of-options".into(),
             "HEAD^{commit}".into(),
+        ],
+        GitRead::ResolveRefOid { name } => vec![
+            "rev-parse".into(),
+            "--verify".into(),
+            "--end-of-options".into(),
+            name.as_str().into(),
         ],
         GitRead::ResolveRef { name } => vec![
             "rev-parse".into(),

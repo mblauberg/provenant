@@ -54,6 +54,16 @@ provenant upgrade
 provenant upgrade --from-source /absolute/path/to/provenant --hosts all
 ```
 
+Before upgrading to the release that introduces private writer object stores,
+drain writer lanes on each host: let running writers settle before installing
+the release, then launch new writers afterwards. Running lanes keep their
+compiled confinement policy, so policies before v11 retain their shared-object
+write grants after the binary is upgraded. The host does not force-cancel these
+lanes. Settlement and delivery name the legacy policy, run and attempt in a
+diagnostic; settlement records it in the terminal run event. Both run a full
+strict check of the shared object store. See
+[writer object isolation](../specs/run.md#writer-object-isolation).
+
 Upgrade requires a receipt. It downloads one release tag for this host and all
 registered Fabric peers, or builds the selected source checkout on every host.
 It uses Fabric's SSH executable, destination and connection timeout, and each

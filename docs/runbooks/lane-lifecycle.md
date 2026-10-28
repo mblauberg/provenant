@@ -159,6 +159,21 @@ top-level `integration_branch: "integration"` and `delivery: "pr"` for one
 final PR. Delivery failures block dependants or retain the graph advance error;
 `fabric graph resume --document PATH` retries final delivery.
 
+Writer lanes keep the confinement policy compiled at launch. A diagnostic naming
+a policy before v11, with its run and attempt IDs, at settlement or delivery means that lane retained the old
+shared-object write grants; the host runs a full strict check of the shared
+store before consuming its head. Allow these writers to settle before upgrading
+to the release that introduces private writer object stores, as described in
+the [upgrade procedure](install.md#bootstrap-and-upgrade). Upgrading does not
+force-cancel running lanes.
+
+Object-store lock-wait timeouts leave settlement non-terminal and retain custody
+and private objects. Retry settlement with `provenant reconcile --id RUN` once
+the competing host verification finishes. Copying and indexing have a separate
+120-second budget; pack-count or import-budget refusals are terminal and keep
+the private evidence for recovery. See the
+[verification deadlines](../specs/run.md#writer-object-isolation).
+
 On macOS, existing hard-linked files in the writable worktree stay readable
 but are write-denied, including inside ignored directories. Excessive denials
 still refuse launch; see the [writer limits and recovery advice](providers.md#writer-lanes).

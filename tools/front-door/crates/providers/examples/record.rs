@@ -319,9 +319,9 @@ fn expected(profile: &ProviderProfile, writer: bool) -> BTreeMap<FixtureOperatio
         map.extend([
             (O::WorktreeWrite, Allowed),
             (O::GitIndexWrite, Allowed),
-            (O::GitHeadWrite, Allowed),
-            (O::GitObjectsWrite, Allowed),
-            (O::SelectedRefWrite, Allowed),
+            (O::GitHeadWrite, Denied),
+            (O::GitObjectsWrite, Denied),
+            (O::SelectedRefWrite, Denied),
             (O::GitConfigWrite, Denied),
             (O::OtherRefWrite, Denied),
         ]);

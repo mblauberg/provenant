@@ -2674,7 +2674,7 @@ impl Resources for Host {
     }
 }
 #[derive(Default)]
-struct Fake {
+pub(super) struct Fake {
     network: Cell<Option<NetworkAccess>>,
     refuse: bool,
     policy_task: Option<TaskId>,

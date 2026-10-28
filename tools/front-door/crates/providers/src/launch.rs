@@ -168,21 +168,40 @@ pub(crate) fn base_env(
     env
 }
 
-/// Git's temporary object directories must live in attempt-owned scratch.
-/// Scope the override to shell Git operating on the bound common directory.
+/// Git writes objects and writer refs into attempt-owned scratch. Writers keep
+/// only the linked index shared, for host quarantine after verified settlement.
+/// Scope the overrides to shell Git operating on the bound common directory.
 /// The host verifies the alternate target at preparation only: the lane can
 /// rewrite alternates and shadow objects, so its Git output is not host evidence.
-pub(crate) fn read_only_git_objects(
+pub(crate) fn private_git_objects(
     input: &PrepareInput<'_>,
     spec: &mut LaunchSpec,
 ) -> Result<(), ProviderError> {
-    let Some(grants) = input.confined.permissions().read_only.as_ref() else {
-        return Ok(());
+    let permissions = input.confined.permissions();
+    let writer = matches!(permissions.mode, AccessMode::WorktreeWrite(_));
+    let common = match &permissions.mode {
+        AccessMode::WorktreeWrite(authority) => authority
+            .common_git_dir()
+            .ok_or(ProviderError::InvalidPath)?,
+        AccessMode::ReadOnly => {
+            let Some(grants) = permissions.read_only.as_ref() else {
+                return Ok(());
+            };
+            grants
+                .git_read_paths()
+                .next()
+                .ok_or(ProviderError::InvalidPath)?
+        }
     };
-    let common = grants
-        .git_read_paths()
-        .next()
-        .ok_or(ProviderError::InvalidPath)?;
+    if writer {
+        spec.env.extend([
+            ("GIT_CONFIG_COUNT".into(), "2".into()),
+            ("GIT_CONFIG_KEY_0".into(), "gc.auto".into()),
+            ("GIT_CONFIG_VALUE_0".into(), "0".into()),
+            ("GIT_CONFIG_KEY_1".into(), "maintenance.auto".into()),
+            ("GIT_CONFIG_VALUE_1".into(), "false".into()),
+        ]);
+    }
     let objects = input
         .confined
         .permissions()
@@ -213,7 +232,7 @@ pub(crate) fn read_only_git_objects(
             if path == &wrapper
         )
     });
-    let routing = scoped_git_routing(input.provenant.git, common, &objects);
+    let routing = scoped_git_routing(input.provenant.git, common, &objects, input.cwd, writer);
     let bytes = if scrubbed {
         input.provenant.git_wrapper(&spec.env, &routing)?
     } else {
@@ -255,20 +274,34 @@ pub(crate) fn read_only_git_objects(
     Ok(())
 }
 
-fn scoped_git_routing(git: &Path, common: &Path, objects: &Path) -> Vec<u8> {
-    let mut bytes = Vec::new();
+fn scoped_git_routing(
+    git: &Path,
+    common: &Path,
+    objects: &Path,
+    worktree: &Path,
+    writer: bool,
+) -> Vec<u8> {
+    let mut bytes = if writer {
+        b"lane_writer=1\n".to_vec()
+    } else {
+        b"lane_writer=0\n".to_vec()
+    };
+    let private_common = objects.with_file_name("git-common");
     for (name, path) in [
         ("lane_git", git),
         ("lane_common", common),
         ("lane_objects", objects),
+        ("lane_private_common", private_common.as_path()),
+        ("lane_worktree", worktree),
     ] {
         bytes.extend_from_slice(name.as_bytes());
         bytes.extend_from_slice(b"=");
         shell_quote_path(&mut bytes, path);
         bytes.push(b'\n');
     }
-    bytes.extend_from_slice(br#"unset GIT_OBJECT_DIRECTORY
-lane_git_common() {
+    bytes.extend_from_slice(br#"unset GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
+lane_git_path() {
+    path_flag=$1; shift
     remaining=$#
     # Rotate recognised global options to the end, discarding the subcommand
     # and its arguments. The outer invocation keeps its original argv intact.
@@ -288,6 +321,8 @@ lane_git_common() {
                 # Only the object-producing builtins need the override.
                 case "$option" in
                     show|log|diff|merge-tree|hash-object) ;;
+                    add|am|apply|bisect|branch|cat-file|checkout|cherry-pick|clean|commit|commit-tree|describe|diff-files|diff-index|diff-tree|fetch|for-each-ref|format-patch|fsck|grep|index-pack|ls-files|ls-tree|merge|merge-base|mktag|mktree|multi-pack-index|notes|pack-objects|prune|prune-packed|push|read-tree|rebase|reflog|reset|restore|rev-list|rev-parse|revert|show-ref|stash|status|switch|tag|unpack-objects|update-index|update-ref|write-tree)
+                        [ "$lane_writer" = 1 ] || return 1 ;;
                     *) return 1 ;;
                 esac
                 while [ "$remaining" -gt 0 ]; do
@@ -296,13 +331,27 @@ lane_git_common() {
                 break ;;
         esac
     done
-    "$lane_git" "$@" rev-parse --path-format=absolute --git-common-dir
+    "$lane_git" "$@" rev-parse --path-format=absolute "$path_flag"
 }
 # Preserve even trailing newlines in native paths. rev-parse adds one newline.
-if found=$(lane_git_common "$@" 2>/dev/null && printf '.'); then
+if found=$(lane_git_path --git-common-dir "$@" 2>/dev/null && printf '.'); then
     found=${found%.}
     if [ "$found" = "$lane_common
 " ]; then
+        if [ "$lane_writer" = 1 ]; then
+            # A linked GIT_DIR can still publish shared refs despite a private
+            # GIT_COMMON_DIR. Use a complete private Git directory instead.
+            private=$(lane_git_path --absolute-git-dir "$@" 2>/dev/null && printf '.') || exit 1
+            private=${private%.}
+            # Remove the one newline appended by rev-parse, preserving path bytes.
+            private=${private%'
+'}
+            GIT_INDEX_FILE=$private/index
+            GIT_DIR=$lane_private_common
+            GIT_COMMON_DIR=$lane_private_common
+            GIT_WORK_TREE=$lane_worktree
+            export GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE
+        fi
         GIT_OBJECT_DIRECTORY=$lane_objects
         export GIT_OBJECT_DIRECTORY
     fi
