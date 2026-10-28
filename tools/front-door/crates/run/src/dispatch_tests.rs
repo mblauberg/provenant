@@ -4988,6 +4988,92 @@ fn unreserved_recorded_process_tree_before_reboot_is_lost() -> TestResult {
 }
 
 fn placed_writer_without_reservation(cancel_run: bool, evidence: u8) -> TestResult {
+    placed_writer_with_missing_or_stale_reservation(RecoveryCase {
+        cancel_run,
+        evidence,
+        reservation: ReservationCase::Missing,
+        removed: false,
+    })
+}
+
+#[test]
+fn stale_reservation_before_reboot_is_reclaimed() -> TestResult {
+    for cancel_run in [true, false] {
+        placed_writer_with_missing_or_stale_reservation(RecoveryCase {
+            cancel_run,
+            evidence: 2,
+            reservation: ReservationCase::Stale,
+            removed: false,
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn removed_worktree_before_reboot_is_lost() -> TestResult {
+    for cancel_run in [true, false] {
+        placed_writer_with_missing_or_stale_reservation(RecoveryCase {
+            cancel_run,
+            evidence: 2,
+            reservation: ReservationCase::Missing,
+            removed: true,
+        })?;
+    }
+    recover_rebooted_writer_removed_worktree()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReservationCase {
+    Missing,
+    Stale,
+    Newer,
+    DifferentAttempt,
+}
+
+struct RecoveryCase {
+    cancel_run: bool,
+    evidence: u8,
+    reservation: ReservationCase,
+    removed: bool,
+}
+
+#[test]
+fn stale_reservation_with_current_boot_process_is_retained() -> TestResult {
+    placed_writer_with_missing_or_stale_reservation(RecoveryCase {
+        cancel_run: false,
+        evidence: 1,
+        reservation: ReservationCase::Stale,
+        removed: false,
+    })
+}
+
+#[test]
+fn newer_generation_reservation_is_retained() -> TestResult {
+    placed_writer_with_missing_or_stale_reservation(RecoveryCase {
+        cancel_run: false,
+        evidence: 2,
+        reservation: ReservationCase::Newer,
+        removed: false,
+    })
+}
+
+#[test]
+fn different_attempt_reservation_is_retained() -> TestResult {
+    placed_writer_with_missing_or_stale_reservation(RecoveryCase {
+        cancel_run: false,
+        evidence: 2,
+        reservation: ReservationCase::DifferentAttempt,
+        removed: false,
+    })
+}
+
+fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestResult {
+    let RecoveryCase {
+        cancel_run,
+        evidence,
+        reservation: reservation_case,
+        removed,
+    } = case;
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -5013,6 +5099,15 @@ fn placed_writer_without_reservation(cancel_run: bool, evidence: u8) -> TestResu
     store
         .claim(id, &at_micros(100), &call)?
         .ok_or("not admitted")?;
+    if reservation_case == ReservationCase::Stale {
+        let old = store.record(id, &call)?;
+        let mut next = old.clone();
+        next.generation += 1;
+        next.revision += 1;
+        store.write(&call, |tx| {
+            crate::admission::update_attempt(tx, &old, &next)
+        })?;
+    }
     let scope = RunStore::scope(&store.record(id, &call)?);
     let attempt = store.attempt_dir(run.run_id, id, false)?;
     let custody = store
@@ -5080,42 +5175,74 @@ fn placed_writer_without_reservation(cancel_run: bool, evidence: u8) -> TestResu
         )?;
     }
     // A launch summary alone does not prove the provider was never spawned.
-    std::fs::remove_file(custody.join("reservation.json"))?;
+    let reservation = custody.join("reservation.json");
+    if reservation_case != ReservationCase::Missing {
+        let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
+        match reservation_case {
+            ReservationCase::Stale => value["scope"]["generation"] = (scope.generation - 1).into(),
+            ReservationCase::Newer => value["scope"]["generation"] = (scope.generation + 1).into(),
+            ReservationCase::DifferentAttempt => {
+                value["scope"]["attempt"] = serde_json::to_value(AttemptId::from_bytes([9; 16]))?
+            }
+            ReservationCase::Missing => unreachable!(),
+        }
+        std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
+    } else {
+        std::fs::remove_file(&reservation)?;
+    }
+    if removed {
+        std::fs::remove_dir(&worktree)?;
+    }
     let system = provenant_supervisor::census::SystemProcessObserver;
     let reboot = RebootObserver(NEW_BOOT);
     let observer: &dyn provenant_supervisor::census::ProcessObserver =
         if evidence == 2 { &reboot } else { &system };
+    let should_settle = evidence == 2
+        && matches!(
+            reservation_case,
+            ReservationCase::Missing | ReservationCase::Stale
+        );
     if cancel_run {
         assert_eq!(
             store.cancel_with_observer(id, "stop", &call, observer)?,
-            if evidence == 2 {
+            if should_settle {
                 CancelReceipt::AlreadyTerminal
             } else {
                 CancelReceipt::Requested
             }
         );
     } else {
-        assert_eq!(
-            store.reconcile_with_observer(run.run_id, &Fake::default(), &call, observer)?,
-            vec![(
-                id,
-                match evidence {
-                    1 => Reconciled::Held,
-                    2 => Reconciled::Finished,
-                    _ => Reconciled::Uncertain {
-                        reason: UncertainReason::GuardianNotObservable
-                    },
-                }
-            )]
+        assert!(
+            store
+                .reconcile_with_observer(run.run_id, &Fake::default(), &call, observer)?
+                .contains(&(
+                    id,
+                    match evidence {
+                        1 => Reconciled::Held,
+                        2 if should_settle => Reconciled::Finished,
+                        _ => Reconciled::Uncertain {
+                            reason: UncertainReason::GuardianNotObservable
+                        },
+                    }
+                ))
         );
     }
-    if evidence == 2 {
+    if should_settle {
         assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
+        assert!(!reservation.exists());
+        if removed {
+            assert!(
+                matches!(store.record(id, &call)?.state, AttemptState::Terminal { reason: Some(reason), .. } if reason.contains("worktree"))
+            );
+        }
     } else {
         assert!(!matches!(
             store.record(id, &call)?.state,
             AttemptState::Terminal { .. }
         ));
+        if reservation_case != ReservationCase::Missing {
+            assert!(reservation.exists());
+        }
     }
     Ok(())
 }
@@ -5154,6 +5281,20 @@ fn recover_rebooted_writer(
     interrupted: bool,
     writer: bool,
     boot: &'static str,
+) -> TestResult {
+    recover_rebooted_writer_inner(cancel_run, interrupted, writer, boot, false)
+}
+
+fn recover_rebooted_writer_removed_worktree() -> TestResult {
+    recover_rebooted_writer_inner(false, false, true, NEW_BOOT, true)
+}
+
+fn recover_rebooted_writer_inner(
+    cancel_run: bool,
+    interrupted: bool,
+    writer: bool,
+    boot: &'static str,
+    removed: bool,
 ) -> TestResult {
     let observer = RebootObserver(boot);
     let temp = tempfile::tempdir()?;
@@ -5254,6 +5395,10 @@ fn recover_rebooted_writer(
         .join(format!("runs/{}/attempts/{id}/provider-state", run.run_id));
     std::fs::write(history.join("session"), "history")?;
 
+    if removed {
+        std::fs::remove_dir_all(&worktree)?;
+    }
+
     if boot == OLD_BOOT {
         // Both exclusions are free. That alone cannot prove a reboot or exit.
         drop(attempt.try_lock(
@@ -5313,6 +5458,11 @@ fn recover_rebooted_writer(
         );
     }
     assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
+    if removed {
+        assert!(
+            matches!(store.record(id, &call)?.state, AttemptState::Terminal { reason: Some(reason), .. } if reason.contains("worktree"))
+        );
+    }
     let fact = store.attempt(id, &call)?;
     assert_eq!(fact.terminal_state, Outcome::Lost.into());
     assert!(fact.output_refs.is_empty());
@@ -5344,10 +5494,12 @@ fn recover_rebooted_writer(
     }
     assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "scratch");
     assert_eq!(std::fs::read_to_string(history.join("session"))?, "history");
-    assert_eq!(
-        std::fs::read_to_string(worktree.join("unfinished.rs"))?,
-        "keep my work"
-    );
+    if !removed {
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("unfinished.rs"))?,
+            "keep my work"
+        );
+    }
     assert!(artifacts::read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_none());
     assert!(store.open_runs(10, &call)?.is_empty());
     Ok(())
