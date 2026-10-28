@@ -1338,6 +1338,7 @@ mod human_inbox;
 mod operations;
 
 #[test]
+#[allow(clippy::disallowed_methods)] // Verify the upgraded deadline-aware index path.
 fn run_chair_migration_preserves_mail_and_rejects_older_readers() {
     let f = Fixture::new();
     let store = f.open();
@@ -1350,6 +1351,24 @@ fn run_chair_migration_preserves_mail_and_rejects_older_readers() {
         .unwrap();
     drop(store);
     let store = f.open();
+    let target = provenant_records::inbox::AnswerTarget {
+        host: provenant_core::HostId::from_bytes([8; 16]),
+        project: project(),
+        actor: actor(2),
+        session: "chair".into(),
+    };
+    // The production read forces INDEXED BY human_queued_delivery: this fails
+    // if the upgrade forgot the index or created one with an unusable predicate.
+    assert!(
+        store
+            .read_queued_human_answers(
+                &target,
+                std::time::Instant::now() + std::time::Duration::from_secs(1)
+            )
+            .unwrap()
+            .items
+            .is_empty()
+    );
     assert_eq!(
         store
             .read_mail(project(), actor(3), Some(0), 100, &f.request())

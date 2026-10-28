@@ -22,18 +22,6 @@ pub fn delivery_capabilities() -> Vec<provenant_records::inbox::DeliveryCapabili
     capabilities
 }
 
-#[test]
-fn composed_matrix_reports_claude_hook_readiness() {
-    use provenant_records::inbox::AnswerTransport;
-    let capabilities = delivery_capabilities();
-    let hook = capabilities
-        .iter()
-        .find(|cap| cap.transport == AnswerTransport::ClaudeHook)
-        .unwrap();
-    assert_eq!(hook.provider, Harness::Claude);
-    assert!(hook.local_offer_reader && hook.live_injection);
-    assert_eq!(capabilities.len(), 6);
-}
 pub const PRE_COMPACT: &str = "pre-compact";
 pub const COMPACT: &str = "compact";
 pub const CHAIR_PROMPT: &str = "chair-prompt";
@@ -173,5 +161,34 @@ impl Hook {
         };
         // These exhaustive grammar variants correspond to the static rows.
         &HOOK_SPECS[index]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provenant_records::{ADAPTER_SPECS, inbox::AnswerTransport};
+
+    #[test]
+    fn composed_matrix_reports_claude_hook_readiness() {
+        let capabilities = delivery_capabilities();
+        for spec in ADAPTER_SPECS {
+            let mail: Vec<_> = capabilities
+                .iter()
+                .filter(|cap| {
+                    cap.provider == spec.id && cap.transport == AnswerTransport::FabricMail
+                })
+                .collect();
+            assert_eq!(mail.len(), 1, "{} Fabric-mail capability", spec.name);
+            assert_eq!(mail[0].local_offer_reader, spec.id == Harness::Claude);
+            assert!(!mail[0].live_injection);
+        }
+        let hooks: Vec<_> = capabilities
+            .iter()
+            .filter(|cap| cap.transport == AnswerTransport::ClaudeHook)
+            .collect();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].provider, Harness::Claude);
+        assert!(hooks[0].local_offer_reader && hooks[0].live_injection);
     }
 }

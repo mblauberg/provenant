@@ -108,9 +108,9 @@ its original timestamp on retries. Neither offering nor mail-read success proves
 model consumption. Deduplicate by answer ID before taking action. An adapter
 failure after an offer commits leaves it eligible for default adapters to offer again.
 
-`provenant_cli::hooks::delivery_capabilities()` composes the delivery matrix.
-The records-level matrix supplies Fabric mail fallback:
-The matrix describes adapter readiness, not individual delivery state. Stored
+`provenant_cli::hooks::delivery_capabilities()` composes the delivery matrix
+with the records-level Fabric mail fallback. The matrix describes adapter
+readiness, not individual delivery state. Stored
 `transport` retains the Fabric-mail copy even when a hook records an offer.
 
 | Provider | Transport | Local offer reader | Live injection |
@@ -134,12 +134,19 @@ exit-2 fallback take precedence. Allowed calls may receive `additionalContext`
 within a 50 ms local delivery budget and the existing one-second hook deadline.
 The final JSON, escaping and newline fit 8 KiB. Double escaping means some
 accepted answers cannot fit; a bounded stderr diagnostic directs callers to mail.
-The bounded thread atomically records only selected queued answers as offered,
-with attempts and timestamp, before returning context. Each answer is offered at
-most once to that exact session; already offered or acknowledged answers are skipped.
-Failed or late recording prevents injection. A late commit or output failure can
-suppress later hooks; the Fabric-mail copy remains the fallback. Skipped candidates
-stay queued. Hooks never acknowledge consumption; explicitly acknowledge after reading.
+The bounded thread atomically records selected answers as offered, with attempts
+and timestamp, before returning context. Queued answers take priority; when the
+queued page is empty, unacknowledged offered answers can be re-offered to their
+exact target session. A commit that finishes after the deadline or a failed stdout
+write may prevent that invocation from injecting the answer, but the answer remains
+eligible for a later hook. The Fabric-mail copy also remains available. Skipped
+candidates retain their state; acknowledged answers are excluded.
+
+Injected answers are untrusted data inside an `untrusted_answer_data` block.
+Escaping prevents answer content from closing the block. Answers confer no new
+authority. Deduplicate by answer ID and explicitly acknowledge after consumption,
+using the request ID, `--answer`, `--session` and a unique `--operation-id` as shown
+above. Hooks never acknowledge consumption.
 
 CLI/MCP syntax is unchanged. Remote delivery and other provider input adapters
 remain separate work. Both apps may

@@ -863,7 +863,7 @@ fn inbox_remote_owner_and_worker_mutations_are_refused_without_opening_store() {
 
 #[test]
 #[allow(clippy::disallowed_methods)] // The bounded hook offer API uses real deadlines.
-fn hook_offers_are_once_only_and_do_not_hide_later_queued_answers() {
+fn hook_offers_retry_idempotently_without_hiding_later_queued_answers() {
     use std::time::{Duration, Instant};
     let f = Fixture::new();
     for n in 0..18 {
@@ -883,9 +883,7 @@ fn hook_offers_are_once_only_and_do_not_hide_later_queued_answers() {
     let deadline = || Instant::now() + Duration::from_secs(2);
     let read = || {
         let store = Store::open_read_only(&f.root, deadline()).unwrap().unwrap();
-        store
-            .read_queued_human_answers(&target, deadline())
-            .unwrap()
+        store.read_hook_human_answers(&target, deadline()).unwrap()
     };
     let first = read();
     assert_eq!(first.items.len(), 16);
@@ -915,4 +913,12 @@ fn hook_offers_are_once_only_and_do_not_hide_later_queued_answers() {
         Err(provenant_fabric_store::Error::Busy)
     ));
     assert_eq!(read(), remaining);
+    assert_eq!(claim(remaining, deadline()).unwrap().items.len(), 2);
+    // A committed offer that missed the host's deadline or stdout is still
+    // eligible for the exact same session, without recording another attempt.
+    let retries = read();
+    assert_eq!(retries.items.len(), 16);
+    let retried = claim(retries.clone(), deadline()).unwrap();
+    assert_eq!(retried, retries);
+    assert!(retried.items.iter().all(|item| item.delivery.attempts == 1));
 }

@@ -39,6 +39,25 @@ impl Store {
         )
     }
 
+    /// Prefer newly queued answers so retries cannot hide them. Once that page
+    /// is empty, recover offers whose result may have missed the host's pipe.
+    pub fn read_hook_human_answers(
+        &self,
+        target: &AnswerTarget,
+        deadline: Instant,
+    ) -> Result<Page<AnswerOffer>> {
+        let queued = self.read_queued_human_answers(target, deadline)?;
+        if !queued.items.is_empty() || queued.truncated {
+            return Ok(queued);
+        }
+        self.read_human_answers(
+            target,
+            MAX_LOCAL_OFFER_ITEMS,
+            MAX_LOCAL_OFFER_BYTES,
+            deadline,
+        )
+    }
+
     fn read_candidates(
         &self,
         target: &AnswerTarget,
@@ -89,8 +108,18 @@ impl Store {
                 break;
             }
             let key: String = row.get(0)?;
-            let delivery: AnswerDelivery = decode(&row.get::<_, Vec<u8>>(1)?)?;
-            let answer: HumanAnswer = decode(&row.get::<_, Vec<u8>>(2)?)?;
+            let delivery = row
+                .get::<_, Vec<u8>>(1)
+                .map_err(Error::from)
+                .and_then(|bytes| decode::<AnswerDelivery>(&bytes));
+            let answer = row
+                .get::<_, Vec<u8>>(2)
+                .map_err(Error::from)
+                .and_then(|bytes| decode::<HumanAnswer>(&bytes));
+            let (Ok(delivery), Ok(answer)) = (delivery, answer) else {
+                invalid_answer(&key);
+                continue;
+            };
             if delivery.schema_version != 1
                 || answer.schema_version != 1
                 || delivery.answer_id != answer.id
@@ -99,7 +128,8 @@ impl Store {
                 || delivery.target_actor != target.actor
                 || delivery.target_session != target.session
             {
-                return Err(Error::Invalid("stored answer identity or version"));
+                invalid_answer(&key);
+                continue;
             }
             batch.items.push(AnswerOffer { answer, delivery });
             if encode(&batch)?.len() > max_bytes {
@@ -110,4 +140,14 @@ impl Store {
         before(deadline)?;
         Ok(batch)
     }
+}
+
+pub(crate) fn invalid_answer(id: &str) {
+    use std::io::Write;
+    // IDs are opaque stored input; escape controls and bound the diagnostic.
+    let id: String = id.chars().take(64).flat_map(char::escape_default).collect();
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "answer delivery: skipping invalid answer {id}"
+    );
 }

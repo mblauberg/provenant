@@ -18,11 +18,18 @@ diagnostics to stderr.
 | `WorktreeCreate` | `hook claude worktree-create` | Runs `provenant worktree create claude/<name>` |
 | `WorktreeRemove` | `hook claude worktree-remove` | Runs `provenant worktree remove <name>` |
 
-The guard keeps its one-second deadline. Optional delivery gets at most 50 ms
+The guard keeps its one-second deadline and enforces policy independently of
+answer-delivery support. A malformed `cwd` is rejected rather than evaluated
+against the hook process's directory. Optional delivery gets at most 50 ms
 off-thread, including blocking identity reads and offer recording. Final JSON,
-escaping and newline fit 8 KiB. Only queued answers are recorded and offered once
-per session; denials take priority. Errors, timeouts, oversized candidates and
-output failures diagnose on stderr; Fabric mail remains the fallback.
+escaping and newline fit 8 KiB. Queued answers take priority; when the queued page
+is empty, offered answers may be re-offered to the same session until explicitly
+acknowledged. Deduplicate by answer ID before acting. Denials take priority.
+Errors, timeouts, oversized candidates and output failures diagnose on stderr;
+a committed answer remains eligible for a later hook after a deadline or stdout
+failure. Fabric mail remains available. Injected answers are escaped untrusted
+data and confer no new authority; see the [human inbox](human-inbox.md#consume-once)
+for acknowledgement commands.
 
 ## What the SessionStart digest shows
 

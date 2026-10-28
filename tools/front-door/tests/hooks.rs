@@ -380,7 +380,7 @@ fn json_command(rig: &TestRig, args: &[&str]) -> Result<serde_json::Value> {
 }
 
 #[test]
-fn queued_answer_is_injected_once_only_after_the_guard_allows() -> Result {
+fn queued_answer_survives_failed_recording_and_stdout_until_acknowledged() -> Result {
     use serde_json::json;
     let rig = TestRig::new()?;
     let checkpoint = rig.root.join("checkpoint.md");
@@ -409,7 +409,7 @@ fn queued_answer_is_injected_once_only_after_the_guard_allows() -> Result {
             )?),
         )
     };
-    hook("git status")?; // Warm the empty lookup; do not impose a cold-start timing assertion.
+    hook("git status")?; // Warm identity/discovery before testing delivery.
     let draft = rig.root.join("question.json");
     fs::write(
         &draft,
@@ -452,6 +452,62 @@ fn queued_answer_is_injected_once_only_after_the_guard_allows() -> Result {
             .get("additionalContext")
             .is_none()
     );
+    let db = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
+    // Warm a durable write, including BEGIN IMMEDIATE and fsync, without
+    // changing the queued state. The empty lookup above only warms reads.
+    db.execute_batch("BEGIN IMMEDIATE; UPDATE human_answer_outbox SET record=record; COMMIT;")?;
+    db.execute_batch("CREATE TRIGGER reject_hook_offer BEFORE UPDATE ON human_answer_outbox BEGIN SELECT RAISE(ABORT,'offer refused'); END;")?;
+    let failed = hook("git status")?;
+    assert_eq!(code(&failed), 0);
+    assert!(
+        failed.stdout.bytes.is_empty(),
+        "record failure injected context"
+    );
+    assert!(
+        String::from_utf8_lossy(&failed.stderr.bytes).contains("SQLite operation failed"),
+        "{}",
+        String::from_utf8_lossy(&failed.stderr.bytes)
+    );
+    let queued = json_command(&rig, &["inbox", id])?;
+    assert_eq!(queued["data"]["item"]["delivery"]["state"], "queued");
+    db.execute_batch("DROP TRIGGER reject_hook_offer;")?;
+
+    // An unwritable stdout fails after recording. The exact session must
+    // recover this committed offer on its next hook invocation.
+    rig.with_process_spawn_lock(|| {
+        use std::{
+            io::Write,
+            process::{Command, Stdio},
+        };
+        #[allow(clippy::disallowed_methods)] // Exercise a real unwritable hook stdout fd.
+        let mut child = Command::new(env!("CARGO_BIN_EXE_provenant"))
+            .args(["hook", "claude", "pre-tool-use"])
+            .current_dir(&rig.project)
+            .env_clear()
+            .envs(rig.env.iter().cloned())
+            .stdin(Stdio::piped())
+            .stdout(fs::File::open(&reply)?)
+            .stderr(Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or("stdin")?
+            .write_all(&serde_json::to_vec(
+                &json!({"hook_event_name":"PreToolUse", "tool_name":"Bash",
+            "tool_input":{"command":"git status"}, "session_id":"chair", "cwd":rig.project}),
+            )?)?;
+        let output = child.wait_with_output()?;
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("response write failed"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    })?;
+    let committed = json_command(&rig, &["inbox", id])?;
+    assert_eq!(committed["data"]["item"]["delivery"]["state"], "offered");
     let allowed = hook("git status")?;
     assert_eq!(code(&allowed), 0, "{:?}", allowed.stderr.bytes);
     assert!(allowed.stdout.bytes.len() <= provenant_records::inbox::MAX_OFFER_BYTES);
@@ -467,10 +523,28 @@ fn queued_answer_is_injected_once_only_after_the_guard_allows() -> Result {
             .get("permissionDecision")
             .is_none()
     );
-    assert!(hook("git status")?.stdout.bytes.is_empty());
+    assert!(!hook("git status")?.stdout.bytes.is_empty());
     let item = json_command(&rig, &["inbox", id])?;
     assert_eq!(item["data"]["item"]["delivery"]["state"], "offered");
     assert_eq!(item["data"]["item"]["delivery"]["attempts"], 1);
     assert!(item["data"]["item"]["delivery"]["last_attempt_at"].is_string());
+    let answer = item["data"]["item"]["answer"]["id"]
+        .as_str()
+        .ok_or("answer ID")?;
+    json_command(
+        &rig,
+        &[
+            "inbox",
+            "acknowledge",
+            id,
+            "--answer",
+            answer,
+            "--session",
+            "chair",
+            "--operation-id",
+            "ack-hook-test",
+        ],
+    )?;
+    assert!(hook("git status")?.stdout.bytes.is_empty());
     Ok(())
 }

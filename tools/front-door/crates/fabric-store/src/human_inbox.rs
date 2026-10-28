@@ -41,9 +41,10 @@ pub struct HumanAcknowledgement<'a> {
 }
 
 impl Store {
-    /// Slice-2 offer transition for selected hook candidates, once per exact
-    /// destination. No creation, migration, retries or history scan. A late
-    /// commit can still persist; callers must discard results after timeout.
+    /// Record selected hook candidates once per exact destination. Offered
+    /// snapshots can be replayed idempotently until acknowledgement, so a late
+    /// commit or failed pipe write never consumes the answer. No creation,
+    /// migration, busy retries or history scan.
     pub fn offer_human_answers_once(
         root: &provenant_core::StateRoot,
         target: &AnswerTarget,
@@ -67,16 +68,25 @@ impl Store {
         };
         for mut candidate in candidates.items {
             before(deadline)?;
-            let bytes: Vec<u8> = tx.query_row("SELECT substr(record,1,?3) FROM human_answer_outbox WHERE project=?1 AND answer=?2",
-                params![target.project.to_string(), candidate.answer.id.to_string(), MAX_RECORD_READ_BYTES], |row| row.get(0))?;
-            let mut delivery: AnswerDelivery = decode(&bytes)?;
+            let bytes: Option<Vec<u8>> = tx.query_row("SELECT substr(record,1,?3) FROM human_answer_outbox WHERE project=?1 AND answer=?2",
+                params![target.project.to_string(), candidate.answer.id.to_string(), MAX_RECORD_READ_BYTES], |row| row.get(0)).optional()?;
+            let delivery = bytes.as_deref().map(decode::<AnswerDelivery>);
+            let Some(Ok(mut delivery)) = delivery else {
+                crate::local_delivery::invalid_answer(&candidate.answer.id.to_string());
+                continue;
+            };
             if delivery.schema_version != 1
                 || delivery.answer_id != candidate.answer.id
                 || delivery.target_host != target.host
                 || delivery.target_actor != target.actor
                 || delivery.target_session != target.session
             {
-                return Err(Error::Conflict);
+                crate::local_delivery::invalid_answer(&candidate.answer.id.to_string());
+                continue;
+            }
+            if delivery.state == AnswerDeliveryState::Offered && candidate.delivery == delivery {
+                offered.items.push(candidate);
+                continue;
             }
             if delivery.state != AnswerDeliveryState::Queued {
                 continue;
@@ -100,7 +110,6 @@ impl Store {
         }
         before(deadline)?;
         tx.commit()?;
-        before(deadline)?;
         Ok(offered)
     }
 

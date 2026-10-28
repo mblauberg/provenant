@@ -3,6 +3,90 @@ use provenant_core::{HostId, HumanAnswerId, HumanRequestId, OperationId};
 use provenant_records::inbox::*;
 
 #[test]
+#[allow(clippy::disallowed_methods)] // Native deadlines are part of this store API.
+fn invalid_hook_candidates_do_not_block_valid_answers() {
+    use std::time::{Duration, Instant};
+    let f = Fixture::new();
+    let store = f.open();
+    let target = AnswerTarget {
+        host: HostId::from_bytes([8; 16]),
+        project: project(),
+        actor: actor(2),
+        session: "chair".into(),
+    };
+    for n in 1..=3 {
+        let id = HumanAnswerId::from_bytes([n; 16]);
+        let request = HumanRequestId::from_bytes([n; 16]);
+        let answer: HumanAnswer = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"id":id,"request_id":request,"request_revision":1,
+            "action":"reply","option_id":null,"text":"Reply","actor":actor(3),
+            "channel":"cli","answered_at":f.now(),"operation_id":format!("answer-{n}")
+        }))
+        .unwrap();
+        let delivery = AnswerDelivery {
+            schema_version: 1,
+            answer_id: id,
+            target_host: target.host,
+            target_session: target.session.clone(),
+            target_actor: target.actor,
+            transport: AnswerTransport::FabricMail,
+            message_id: message(&f, n).id,
+            state: AnswerDeliveryState::Queued,
+            attempts: 0,
+            last_attempt_at: None,
+            acknowledged_at: None,
+            error: None,
+        };
+        store
+            .db
+            .execute(
+                "INSERT INTO human_requests VALUES(?1,?2,1,'chair','answered',?3)",
+                params![project().to_string(), request.to_string(), b"{}".as_slice()],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO human_answers VALUES(?1,?2,?3,?4)",
+                params![
+                    project().to_string(),
+                    id.to_string(),
+                    request.to_string(),
+                    encode(&answer).unwrap()
+                ],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO human_answer_outbox VALUES(?1,?2,?3)",
+                params![
+                    project().to_string(),
+                    id.to_string(),
+                    encode(&delivery).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    let deadline = || Instant::now() + Duration::from_secs(1);
+    let candidates = store.read_hook_human_answers(&target, deadline()).unwrap();
+    assert_eq!(candidates.items.len(), 3);
+    store.db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.schema_version',99) AS BLOB) WHERE answer=?1",
+        [HumanAnswerId::from_bytes([1;16]).to_string()]).unwrap();
+    store.db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.attempts','invalid') AS BLOB) WHERE answer=?1",
+        [HumanAnswerId::from_bytes([2;16]).to_string()]).unwrap();
+    let valid = store.read_hook_human_answers(&target, deadline()).unwrap();
+    assert_eq!(valid.items.len(), 1);
+    assert_eq!(valid.items[0].answer.id, HumanAnswerId::from_bytes([3; 16]));
+    // Revalidate selected rows at the write boundary too: a row may have been
+    // repaired or corrupted since the read snapshot.
+    let offered =
+        Store::offer_human_answers_once(&f.root, &target, candidates, f.now(), deadline()).unwrap();
+    assert_eq!(offered.items.len(), 1);
+    assert_eq!(offered.items[0].answer.id, valid.items[0].answer.id);
+}
+
+#[test]
 fn overview_read_only_does_not_create_or_migrate() {
     let f = Fixture::new();
     assert!(matches!(

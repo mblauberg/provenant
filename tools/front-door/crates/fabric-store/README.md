@@ -55,9 +55,13 @@ previous state. Acknowledged answers never return. Pending answers remain
 eligible after restart or adapter failure. Mail read cursors stay independent.
 This uses the existing outbox without another schema migration.
 `offer_human_answers_once` instead uses bounded selected-key reads and one immediate
-transaction, with no retries, creation or migrations. Only queued records transition;
-competing hooks skip offered records. A caller must discard late results, including
-a commit that finishes after timeout; mail remains available.
+transaction, with no busy retries, creation or migrations. Only queued records
+transition; matching offered snapshots replay the committed record idempotently.
+`read_hook_human_answers` gives queued rows priority using migration 11's index,
+then falls back to migration 10's pending index when the queued page is empty.
+A late commit or failed stdout write remains re-offerable to the exact session
+until acknowledgement. Consumers deduplicate by answer ID before taking action.
+Invalid candidates are skipped with an answer-ID diagnostic.
 
 `Store::open_read_only` never creates, migrates or enables WAL. It opens the
 database, WAL and shared memory read-only (`readonly_shm=1`), starts one read
