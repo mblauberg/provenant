@@ -2868,14 +2868,28 @@ fn render_settled(
 ) -> Result<(Value, String), Fail> {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let call = request(&clock, &cancel)?;
-    let waits = session.store.lane_waits(lanes, &call);
+    let waits = settled_waits(&clock, &cancel, |call| {
+        session.store.lane_waits(lanes, call)
+    });
     Ok(render_lanes(
         lanes,
         &waits,
         None,
         session.context.state_root.as_path(),
     ))
+}
+/// Wait details are optional, and must not extend a completed wait or watch.
+fn settled_waits<T>(
+    clock: &SystemClock,
+    cancel: &CancelToken,
+    read: impl FnOnce(&run::Request<'_>) -> T,
+) -> T {
+    let call = run::Request {
+        clock,
+        budget: WaitBudget::nonblocking(clock.mono_now()),
+        cancel,
+    };
+    read(&call)
 }
 fn waited_reply(session: &Session, waited: watch::Waited) -> Result<(Value, String, bool), Fail> {
     let (mut data, human) = render_settled(session, &waited.lanes)?;
@@ -6226,6 +6240,16 @@ mod tests {
         assert_eq!(data["lanes"][0]["reason"], json!(reason));
         assert!(data["lanes"][0]["applied_route"].is_null());
         Ok(())
+    }
+    #[test]
+    fn timeout_render_reads_wait_details_without_a_retry_budget() {
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let waits: Vec<run::LaneWait> = settled_waits(&clock, &cancel, |call| {
+            assert_eq!(call.budget.remaining(call.clock.mono_now()).as_micros(), 0);
+            Vec::new()
+        });
+        assert!(waits.is_empty());
     }
     #[test]
     fn render_lanes_says_what_an_unstarted_lane_waits_for() -> Result<(), Box<dyn std::error::Error>>

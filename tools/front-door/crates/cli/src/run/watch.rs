@@ -652,7 +652,7 @@ mod tests {
             scope(&[1], None, true),
             Condition::All,
             Duration::from_millis(20),
-            POLL,
+            Duration::from_millis(1),
         )
         .expect("contention expires as a wait timeout");
         assert!(!waited.met);
