@@ -364,6 +364,10 @@ jobs:
           echo "$TOOL_DIR/bin" >> "$GITHUB_PATH"
       - name: Check spelling
         run: git ls-files | typos --file-list - --force-exclude
+      - name: Check skill and library writing style
+        run: |
+          scripts/test-check-writing
+          scripts/check-writing
       - name: Check workflows and their shell blocks
         run: actionlint
       - name: Check shell scripts

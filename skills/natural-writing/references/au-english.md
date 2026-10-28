@@ -62,7 +62,7 @@ not text you quote.
 
 ## Punctuation
 
-- No em dash (`—`, U+2014) in any output. Replace by function: an aside
+- No em dash (U+2014) in any output. Replace by function: an aside
   becomes parentheses or commas; an explanation becomes a new sentence or a
   colon before a list or definition; a contrast becomes `but`, `yet`, a
   semicolon, or a new sentence; a range becomes prose words (`from ... to`) or

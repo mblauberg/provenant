@@ -25,7 +25,7 @@ Binding limits must have a reset time and must not be advisory. Rust `credit_onl
 
 The app reads all quota data from the CLI. It does not read credentials, tokens or the Keychain. The menu shows the configured account label, plan, usage windows, and available credit or reset details; an unavailable reading keeps its reported status and is never represented as zero.
 
-For Claude, `~/.claude-pro`, `~/.claude-anese`, and `~/.claude-michael` remain signed in to their fixed accounts. Only `~/.claude` rotates between them, and the CLI selects that default profile with `CLAUDE_CONFIG_DIR` unset. The CLI matches accounts by a short hash of the authenticated identity, uses the freshest unexpired token for each account, and asks Claude Code to refresh an expired fixed-profile token before reading quota. Raw email addresses are not stored.
+Register each Claude account under a label in its required `~/.claude-LABEL` directory, for example `work` in `~/.claude-work`; see the [installation procedure](../../docs/runbooks/install.md#install). The CLI matches authenticated identities using fingerprints and selects the freshest unexpired matching credential from the registered directory or `~/.claude`. When needed, it asks Claude Code to refresh the registered directory's expired token. Raw email addresses are not stored.
 
 The menu also lists lanes that need attention under "Needs attention": input required (24 hours), failed in the last hour, lanes held in `queued`, `starting` or `settling` for over 10 minutes, and running lanes with no output for 10 minutes. It reads `provenant lanes --all --since 86400 --json` on each quota refresh, on menu open and once a minute, and shows nothing when no lane qualifies. Choosing a row opens `<state root>/runs/<run id>`.
 
@@ -51,7 +51,7 @@ The CLI command response is a versioned envelope containing the report. The watc
 
 ```bash
 .build/debug/quota-menubar --render Fixtures/current.json current.png --lanes Fixtures/lanes.json
-.build/debug/quota-menubar --render Fixtures/current.json expanded.png --dark --expand claude/anese
+.build/debug/quota-menubar --render Fixtures/current.json expanded.png --dark --expand codex/default
 .build/debug/quota-menubar --render Fixtures/tall.json tall.png
 ```
 
@@ -85,4 +85,3 @@ The supported way to start the app at login is a LaunchAgent. Adding the bare ex
 ```
 
 Load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.provenant.quota-menubar.plist`. To stop it, run `launchctl bootout gui/$(id -u)/dev.provenant.quota-menubar` and delete the file. With `KeepAlive` false, quitting from the menu keeps the app closed until the next login.
-

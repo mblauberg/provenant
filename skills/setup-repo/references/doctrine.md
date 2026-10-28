@@ -56,7 +56,7 @@ provenant worktree create <type>/<area>-<slug> [--base <REV>]
 Link every pull request to its issue with one of two keywords, chosen by
 whether merge leaves any gate open:
 
-- `Closes #<n>` only when merging leaves no user or external-action gate —
+- `Closes #<n>` only when merging leaves no user or external-action gate:
   merge auto-closes the issue.
 - `References #<n>` otherwise, and leave the issue open for the remaining
   gate.
@@ -93,7 +93,7 @@ mirror children in a checklist.
 
 ## Merge authority
 
-State this explicitly in the target project's own runbook — it is a
+State this explicitly in the target project's own runbook; it is a
 per-project decision, not something this skill can decide for a new
 repository:
 

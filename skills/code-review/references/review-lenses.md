@@ -59,19 +59,19 @@ also an inspection signal.
 The reason is mechanical, not aesthetic: a file no model can hold in context is a
 file no model can review. Past the cap, review silently degrades from "read this
 file" to "grep this file", and the defects that survive are exactly the ones that
-span the parts nobody read together. God files are not born big — they are grown
+span the parts nobody read together. God files are not born big; they are grown
 one accepted diff at a time, which is why the cap binds at review.
 
 When a file is over cap:
 
-- report it, and name the seams it should split on — an owner per module, not an
+- report it, and name the seams it should split on: an owner per module, not an
   arbitrary line-chop (`…-continued-2` is not a split);
 - reject a change that pushes a file past the cap, or that grows one already over
   it. "It was already 4,000 lines" is the mechanism, not an excuse;
 - do not demand an unrelated refactor as the price of an unrelated fix. Record the
   finding, and let the owner sequence the split.
 
-Generated files, vendored code and lockfiles are exempt — nobody reads them.
+Generated files, vendored code and lockfiles are exempt; nobody reads them.
 
 ### Design-principle probes, not verdicts
 

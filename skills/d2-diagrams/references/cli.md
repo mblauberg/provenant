@@ -1,7 +1,7 @@
 # D2 CLI Usage
 
 Assumes `d2` is installed and available on `PATH`. The examples use `diagrams/diagram.d2` as a
-placeholder path — substitute your own.
+placeholder path; substitute your own.
 
 ## Core Commands
 

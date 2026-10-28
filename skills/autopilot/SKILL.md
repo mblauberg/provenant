@@ -49,7 +49,7 @@ one-way-door decision. Keep other in-scope work moving where it is independent.
    Include authority/evidence references, verified progress, next actions,
    blockers, and a resume trigger.
 8. If the run has no eligible or active work, follow run admission and pause
-   behavior. Report the waiting condition and resume trigger. Do not label the
+   behaviour. Report the waiting condition and resume trigger. Do not label the
    mission complete or change `STATUS`; only the user can stop it.
 
 ## Mission evidence and STOP

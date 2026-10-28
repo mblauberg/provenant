@@ -34,7 +34,7 @@ resuming.
 ## Mission lifetime
 
 The mission stays open until the user sets `STATUS: STOP`. When no work is
-eligible or active, the run owns admission and pause behavior. Record the
+eligible or active, the run owns admission and pause behaviour. Record the
 condition that can resume work and stop the current invocation; do not call the
 mission complete, manufacture work, or set STOP on the user's behalf.
 

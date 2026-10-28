@@ -126,12 +126,10 @@ must print the new worktree's absolute path and nothing else on stdout.
   A refusal exits 2 with the cause on stderr and the worktree stays.
   The hook never forces removal; use `provenant worktree remove` yourself
   once the cause is cleared.
-- Ignored build output (for example `target/`) counts as dirty for removal
-  today, so Claude's cleanup of a tree that was built in exits 2 with
-  `worktree-remove: refused: ... dirty` and leaves the tree. The hook does not
-  change that policy; clearing ignored output on removal is owned by #1816.
-  Until it lands, delete the ignored output and run `provenant worktree remove
-  <name>` yourself.
+- Removal through the hook uses the same cleanup as the CLI: declared
+  regenerable output is reclaimed, and any remaining ignored files cause
+  refusal. An undeclared `target/` keeps the tree in place. Reuse during
+  creation still requires a clean tree, including ignored files.
 - The CLI inherits the hook's environment and `--state-dir`. Failures mean the
   worktree is not created; fix the cause or run `provenant install --hooks off`
   to return to Claude's own worktrees.

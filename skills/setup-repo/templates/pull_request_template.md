@@ -12,10 +12,10 @@
      gate that stays open after merge. -->
 
 <!-- Change map: add a Mermaid diagram whenever it makes the change faster to
-     review than prose — changed actors or flows, state transitions, before/after
+     review than prose: changed actors or flows, state transitions, before/after
      structure, or cross-component dependencies. GitHub renders it here. Prefer a
      visual wherever it saves reviewer attention; skip only when the diff is
-     simple enough that prose is already clear. Keep it small and captioned —
+     simple enough that prose is already clear. Keep it small and captioned:
      never decorative. -->
 
 ## Risk and rollback
@@ -32,7 +32,7 @@ rerun both against the new head.
 
 <!-- Every row must be externally verifiable: an exact command with its
      result, or a linked artifact, bound to the exact head SHA. Never
-     leave a cell empty — record a result or an N/A reason. Add rows for
+     leave a cell empty; record a result or an N/A reason. Add rows for
      change-specific gates (migration preflight, live smoke, evaluation,
      load); do not delete rows. -->
 

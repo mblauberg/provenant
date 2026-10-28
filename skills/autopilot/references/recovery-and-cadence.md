@@ -34,7 +34,7 @@ unverified result remain distinct states.
 
 ## Cadence and idle work
 
-Respect run-owned admission, wait, and pause behavior. Do not poll unchanged
+Respect run-owned admission, wait, and pause behaviour. Do not poll unchanged
 state, busy-dispatch into a known limit, or invent work to keep an iteration
 active. If no eligible or active work remains, describe the waiting condition
 and what event can resume it, then end the current invocation. This does not

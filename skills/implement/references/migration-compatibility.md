@@ -17,7 +17,7 @@ changes where old and new producers or consumers may coexist.
 4. Give every compatibility adapter, flag, dual path or deprecated field an
    expiry owner, removal condition and latest review date. Deletion requires
    usage-zero evidence across known runtime, build, registry, configuration and
-   data paths—not elapsed time or a search result alone.
+   data paths, not elapsed time or a search result alone.
 5. Separate rollback from recovery. Reversal may be unsafe after new writes or
    public consumption; define backup/restore, forward repair, traffic stop,
    feature disablement or containment, with owners and verification. Never

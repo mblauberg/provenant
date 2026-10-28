@@ -276,6 +276,7 @@ find into process changes and repeatable evaluations.
 | [Fabric hosts](docs/runbooks/fabric-hosts.md) | Peer hosts and remote dispatch |
 | [Worktrees](docs/worktrees.md) | Worktree policy and writer dispatch |
 | [Telemetry](docs/runbooks/telemetry.md) | Usage, cost and trace export |
+| [Release notes](docs/release-notes/README.md) | Released versions and pending changes |
 | [Quota menu bar](apps/quota-menubar/README.md) | Build and run the macOS app |
 | [Skills](skills/) | The workflow skills installed into each harness |
 | [Glossary](docs/glossary.md) | Terms used across the docs |

@@ -34,7 +34,7 @@ that it behaves, and the declared workflow-state owner owns delivery state.
 
 Choose `intent-and-structure` only with a drift gate named above. A second copy
 of a structure its owner also defines will diverge, and an ungated copy diverges
-silently — the reader cannot tell which of the two is current.
+silently; the reader cannot tell which of the two is current.
 
 ### Merge policy
 

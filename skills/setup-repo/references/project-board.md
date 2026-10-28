@@ -27,7 +27,7 @@ gh project field-list <number> --owner <owner> --format json \
 verb; the reliable path is the GitHub UI (Project → ⋯ → Settings → Status
 field → edit each option's name, add/remove until exactly six remain: Backlog,
 Ready, In progress, In review, Awaiting user, Done) or the `updateProjectV2Field`
-GraphQL mutation via `gh api graphql` if the UI is not available — note the
+GraphQL mutation via `gh api graphql` if the UI is not available; note the
 mutation is `updateProjectV2Field` with a `singleSelectOptions` argument, not
 `updateProjectV2SingleSelectField` (that type name exists only as the option
 input, not as a mutation field):
@@ -55,7 +55,7 @@ mutation {
 
 `description` is a required (non-empty-allowed) string on each option; omitting
 it errors. Either way, re-run `field-list` afterwards and record the resulting
-option ids — the runbook's day-to-day commands need them.
+option ids; the runbook's day-to-day commands need them.
 
 ## Moving an item (for the copied runbook)
 
@@ -67,6 +67,6 @@ gh project item-edit --project-id <PVT_id> --id "$item" \
 ```
 
 Record the project number, `PVT_` id, `Status` field id and each option id in
-the target project's own runbook once created — they are stable but
+the target project's own runbook once created; they are stable but
 per-project, and re-deriving them via `field-list` is the fallback if an id
 stops matching after an edit.

@@ -1,6 +1,6 @@
 # Orchestration contract (substrate-neutral)
 
-Any orchestrator — Claude Code, Codex, Cursor, or a future substrate — that
+Any orchestrator (Claude Code, Codex, Cursor, or a future substrate) that
 drives multi-agent work through this skill's adaptive loop realises the same
 stage/gate/recovery graph. This file is the canonical, substrate-neutral
 description of that graph, and is this skill's **public interface**: external
@@ -11,34 +11,34 @@ recovery requirements.
 
 ## Stages
 
-1. **Bootstrap** — resolve a run directory, discover repo/project
+1. **Bootstrap**: resolve a run directory, discover repo/project
    conventions, and resolve model routes for each role
    (`routing-and-tiers.md`).
-2. **Scan / Decompose** — bounded fan-out into independent, atomic
+2. **Scan / Decompose**: bounded fan-out into independent, atomic
    candidates or claims; workers write full detail to run-dir files and
    return headlines only.
-3. **Review / Verify** — per-candidate parallel review, including at least
+3. **Review / Verify**: per-candidate parallel review, including at least
    one cross-family pass where data policy and tooling allow
    (`verification.md`).
-4. **Adjudicate / Synthesise** — one reducer (never a vote) collapses all
+4. **Adjudicate / Synthesise**: one reducer (never a vote) collapses all
    candidate reviews into decisions or a report; objective checks and
    protected-path rules outrank opinion.
-5. **Apply / Escalate** — a single serial applier lands only low-risk,
+5. **Apply / Escalate**: a single serial applier lands only low-risk,
    objectively-gated changes; everything else exits as a patch or finding
    plus a written recommendation. This is the escalation boundary, not a
    pause.
-6. **Adaptive waves** — after any reduce step, choose `continue`, `narrow`,
+6. **Adaptive waves**: after any reduce step, choose `continue`, `narrow`,
    `repair`, `verify`, `document`, or `stop`; do not force every run into one
    fixed sequence.
 
 ## Gates
 
-- **Stage validation gate** — a schema or objective check (test, lint,
+- **Stage validation gate**: a schema or objective check (test, lint,
   source existence) before a stage's output feeds the next stage.
-- **Escalation boundary** — high-risk, uncertain, or protected-path items
+- **Escalation boundary**: high-risk, uncertain, or protected-path items
   exit as patches/findings with rationale; they are never auto-applied and
   never silently dropped.
-- **User gate** — the run stops for scope/spec approval, one-way doors,
+- **User gate**: the run stops for scope/spec approval, one-way doors,
   risk-tier downgrades, unresolved acceptance criteria, destructive or
   irreversible actions, external communications and production promotion.
   Final acceptance needs an explicit user only for `terminal` work or when
@@ -46,7 +46,7 @@ recovery requirements.
   than blocking on it. How a given substrate enacts that stop-and-record (live
   process pause, script termination, new invocation to resume) is adapter
   mechanics, not part of this contract; see `codex-subagents.md`.
-- **Final gate** — no untriaged P0/P1, no missing anchors, no unresolved doc
+- **Final gate**: no untriaged P0/P1, no missing anchors, no unresolved doc
   drift, and family/cross-family status recorded
   (`CROSS-FAMILY-NOT-RUN: <reason>` where applicable).
 
@@ -55,14 +55,14 @@ recovery requirements.
 - The **run directory** (`findings/`, `crossfamily/`, `traces/`, `patches/`,
   plus a manifest/receipt) is the durable ledger. Any adapter, on any
   substrate, resumes from these files rather than from conversation state.
-- **Chair/driver loss** — persist a handoff; only a generation-bound
+- **Chair/driver loss**: persist a handoff; only a generation-bound
   takeover promotes a new chair, never a silent promotion.
-- **Worker/peer loss** — preserve partial output, mark it degraded, and
+- **Worker/peer loss**: preserve partial output, mark it degraded, and
   reassign only if authority and review independence still hold. A failed,
   missing, or null result never proves that the worker made no partial write.
-- **Cross-family failure** — record `CROSS-FAMILY-NOT-RUN: <reason>`; never
+- **Cross-family failure**: record `CROSS-FAMILY-NOT-RUN: <reason>`; never
   substitute a same-family answer and call it cross-family.
-- **Tool/auth failure** — log the error to the run scratchpad and advance to
+- **Tool/auth failure**: log the error to the run scratchpad and advance to
   the next entry/tool; never silently skip a verification step.
 
 ## Worker contract
@@ -159,7 +159,7 @@ itself rather than an independent join.
 ## Non-goals
 
 This contract does not prescribe a topology (single chair, paired-primary, or
-a run-until-STOP lab loop — see `paired-primary.md` and `autopilot`),
+a run-until-STOP lab loop; see `paired-primary.md` and `autopilot`),
 a specific model/tier (`routing-and-tiers.md`), or a specific cross-family
 dispatcher (`direct-cli-fallback.md`). It fixes only the stage/gate/recovery shape
 every adapter must realise, so an external consumer can depend on the shape

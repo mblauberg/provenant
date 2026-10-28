@@ -44,7 +44,7 @@ output at 8 KiB. Reopen live task records and verify cited work after resume.
 ## Idle and STOP
 
 If the run has no eligible or active work, follow its admission and pause
-behavior, report the resume trigger, and end this invocation. Do not infer
+behaviour, report the resume trigger, and end this invocation. Do not infer
 mission completion from an empty lane list. The mission stays open until the
 user sets `STATUS: STOP`; only then reconcile current work and provide the
 final handoff.

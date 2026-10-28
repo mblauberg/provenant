@@ -23,7 +23,7 @@ prompt merely sounds serious.
 - passive mentions of tool names (`codex`, `agy`, `cursor`, `kiro`, `claude`) without delegation intent;
 - tightly coupled debugging where the next action depends on one local result;
 - concurrent shared-state writes that cannot be partitioned;
-- a standing run-until-STOP job with cross-session filesystem state — that is the
+- a standing run-until-STOP job with cross-session filesystem state; that is the
   **autopilot** skill's territory (it consumes this doctrine per iteration; this skill runs one
   engagement and finishes).
 

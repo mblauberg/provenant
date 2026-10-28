@@ -793,6 +793,41 @@ mod tests {
         invalid(&["pr", "merge", "1947", "--head", &"a".repeat(40)]);
         invalid(&["pr", "land", "1947", "--head", &"a".repeat(40)]);
     }
+    #[test]
+    fn land_accepts_a_pinned_head_and_hides_it_from_default_help() {
+        for length in [40, 64] {
+            let sha = "a".repeat(length);
+            let inv = valid(&["land", "1953", "--head", &sha]);
+            let Command::Land { number, head } = inv.command else {
+                panic!("land command");
+            };
+            assert_eq!(number, 1953);
+            assert_eq!(head.map(|head| head.to_string()), Some(sha));
+        }
+        invalid(&["land", "1953", "--head", "abc"]);
+        let mut model = command_model();
+        let Some(land) = model.find_subcommand_mut("land") else {
+            panic!("land grammar");
+        };
+        assert!(!land.render_help().to_string().contains("--head"));
+        let ParseOutcome::Help { text, .. } = parsed(&["help", "land"]) else {
+            panic!("advanced land help");
+        };
+        assert!(text.contains("--head"), "{text}");
+    }
+    #[test]
+    fn retired_disk_guard_is_absent_from_parsing_and_the_catalogue() {
+        invalid(&["disk-guard"]);
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--all"]) else {
+            panic!("full catalogue");
+        };
+        assert!(
+            !catalog
+                .commands
+                .iter()
+                .any(|entry| entry.command == "provenant disk-guard")
+        );
+    }
     fn parsed(words: &[&str]) -> ParseOutcome {
         parse(words.iter().map(OsString::from))
     }

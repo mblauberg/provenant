@@ -3,7 +3,7 @@
 ## Linking
 
 Sub-issues are the only parent relation. A blocker is a dependency
-(`blocked_by`/`blocking`), never modelled as a parent — do not force a
+(`blocked_by`/`blocking`), never modelled as a parent; do not force a
 dependency into the sub-issue tree to make it visible.
 
 For checklist epics, keep future slices in the epic until work is leased.
@@ -17,7 +17,7 @@ merging leaves no user or external-action gate, otherwise `Refs #n` (or
 `References #n`) leaving the issue open. Never put a closing keyword in a
 commit message; the pull request owns closure. A branch may serve one issue,
 several, or a slice of one (`setup-repo`'s naming doctrine covers branch
-naming) — the PR's link lines are the source of truth for which issues it
+naming); the PR's link lines are the source of truth for which issues it
 covers, not the branch name.
 
 ## Board
@@ -40,6 +40,6 @@ agents never self-approve their issues into Ready.
 The repository's priority or horizon field, when it declares one, is the
 owner's signal, not an agent's. Agents start new items at its documented
 default and may promote an item only under the repository's own documented
-promotion rule — never on judgement alone — and every promotion
+promotion rule, never on judgement alone, and every promotion
 gets a ledger entry (what moved, why, who/what rule authorised it). The same
 restraint applies to demoting: record the reason.
