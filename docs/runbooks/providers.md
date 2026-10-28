@@ -32,8 +32,9 @@ worktrees keep per-lane targets (`provenant worktree remove` and
 `provenant gc` prune the lane caches), because a target shared across
 worktrees can run another checkout's stale test binaries.
 
-On macOS, launch refuses existing hard-linked files in writable trees and
-names the first offending path. Inspect the file before removing it. If it is
+On macOS, launch refuses existing hard-linked files in writable trees, except
+inside directories Git ignores wholesale (an in-tree `target/`), and names the
+first offending path. Inspect the file before removing it. If it is
 disposable build output, remove or rebuild that output, then retry the lane.
 Keep important files and links whose ownership is unclear.
 

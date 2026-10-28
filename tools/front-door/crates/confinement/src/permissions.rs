@@ -1248,8 +1248,15 @@ fn compile_sbpl(
             Some(verify_worktree_authority(authority, anchors)?)
         }
     };
+    let ignored = anchors
+        .worktree
+        .filter(|_| worktree_grants.is_some())
+        .map(|(verified, _)| {
+            crate::ignored::ignored_directories(verified.path(), verified.repo().private_git_dir())
+        })
+        .unwrap_or_default();
     if let Some(grants) = &worktree_grants {
-        verify_writable_tree(&grants.worktree.path, anchors)?;
+        verify_worktree_tree(&grants.worktree.path, anchors, &ignored)?;
         verify_writable_tree(&grants.objects.path, anchors)?;
     }
     if let Some(read_only) = &plan.read_only {
@@ -1418,7 +1425,7 @@ fn compile_sbpl(
         verify_worktree_authority(authority, anchors)?;
     }
     if let Some(grants) = &worktree_grants {
-        verify_writable_tree(&grants.worktree.path, anchors)?;
+        verify_worktree_tree(&grants.worktree.path, anchors, &ignored)?;
         verify_writable_tree(&grants.objects.path, anchors)?;
     }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
@@ -1580,7 +1587,9 @@ fn verify_state_write(
         }
     }
     match grant.scope {
-        PathScope::Subtree => verify_writable_tree_within(&grant.path, anchors, entry_limit)?,
+        PathScope::Subtree => {
+            verify_writable_tree_within(&grant.path, anchors, entry_limit, &BTreeSet::new())?
+        }
         PathScope::Exact => anchors.verify_single_link_grant(grant)?,
     }
     Ok(())
@@ -1688,7 +1697,18 @@ fn verify_private_scratch(
 
 #[cfg(target_os = "macos")]
 fn verify_writable_tree(path: &Path, anchors: &Anchors<'_>) -> Result<(), PermissionError> {
-    verify_writable_tree_within(path, anchors, MAX_WRITABLE_TREE_ENTRIES)
+    verify_writable_tree_within(path, anchors, MAX_WRITABLE_TREE_ENTRIES, &BTreeSet::new())
+}
+
+/// The worktree census skips directories git ignores wholesale: build output
+/// such as `target/` links files inside itself and may be large.
+#[cfg(target_os = "macos")]
+fn verify_worktree_tree(
+    path: &Path,
+    anchors: &Anchors<'_>,
+    ignored: &BTreeSet<PathBuf>,
+) -> Result<(), PermissionError> {
+    verify_writable_tree_within(path, anchors, MAX_WRITABLE_TREE_ENTRIES, ignored)
 }
 
 #[cfg(target_os = "macos")]
@@ -1696,6 +1716,7 @@ fn verify_writable_tree_within(
     path: &Path,
     anchors: &Anchors<'_>,
     entry_limit: usize,
+    skip: &BTreeSet<PathBuf>,
 ) -> Result<(), PermissionError> {
     let root = anchors
         .directories
@@ -1711,7 +1732,7 @@ fn verify_writable_tree_within(
         return Err(PermissionError::AnchorMismatch);
     }
     let mut entries = 0;
-    inspect_writable_directory(&root.directory, path, 0, &mut entries, entry_limit)?;
+    inspect_writable_directory(&root.directory, path, 0, &mut entries, entry_limit, skip)?;
     let after = root
         .directory
         .metadata()
@@ -1730,6 +1751,7 @@ fn inspect_writable_directory(
     depth: usize,
     count: &mut usize,
     entry_limit: usize,
+    skip: &BTreeSet<PathBuf>,
 ) -> Result<(), PermissionError> {
     if depth > MAX_WRITABLE_TREE_DEPTH {
         return Err(PermissionError::BoundExceeded {
@@ -1740,6 +1762,9 @@ fn inspect_writable_directory(
     }
     for name in directory.entries().map_err(PermissionError::Filesystem)? {
         let name = name.map_err(PermissionError::Filesystem)?;
+        if skip.contains(&path.join(&name)) {
+            continue;
+        }
         *count += 1;
         if *count > entry_limit {
             return Err(PermissionError::BoundExceeded {
@@ -1762,7 +1787,14 @@ fn inspect_writable_directory(
             if !before.unchanged(&opened) {
                 return Err(PermissionError::AnchorMismatch);
             }
-            inspect_writable_directory(&child, &path.join(&name), depth + 1, count, entry_limit)?;
+            inspect_writable_directory(
+                &child,
+                &path.join(&name),
+                depth + 1,
+                count,
+                entry_limit,
+                skip,
+            )?;
             let after = directory
                 .metadata_at(&name, false)
                 .map_err(PermissionError::Filesystem)?;
@@ -2493,13 +2525,26 @@ mod tests {
         let alias = nested.join("object.o");
         std::fs::hard_link(&original, &alias)?;
         let directory = Directory::open_anchor(&nested)?;
-        let error =
-            inspect_writable_directory(&directory, &nested, 0, &mut 0, MAX_WRITABLE_TREE_ENTRIES)
-                .unwrap_err();
+        let error = inspect_writable_directory(
+            &directory,
+            &nested,
+            0,
+            &mut 0,
+            MAX_WRITABLE_TREE_ENTRIES,
+            &BTreeSet::new(),
+        )
+        .unwrap_err();
         assert!(matches!(&error, PermissionError::HardLinkedWritableFile(path) if path == &alias));
         assert!(error.to_string().contains("disposable build output"));
         std::fs::remove_file(alias)?;
-        inspect_writable_directory(&directory, &nested, 0, &mut 0, MAX_WRITABLE_TREE_ENTRIES)?;
+        inspect_writable_directory(
+            &directory,
+            &nested,
+            0,
+            &mut 0,
+            MAX_WRITABLE_TREE_ENTRIES,
+            &BTreeSet::new(),
+        )?;
         Ok(())
     }
 
@@ -2512,7 +2557,9 @@ mod tests {
             std::fs::write(temp.path().join(format!("file-{index}")), b"x")?;
         }
         let directory = Directory::open_anchor(temp.path())?;
-        let error = inspect_writable_directory(&directory, temp.path(), 0, &mut 0, 3).unwrap_err();
+        let error =
+            inspect_writable_directory(&directory, temp.path(), 0, &mut 0, 3, &BTreeSet::new())
+                .unwrap_err();
         assert!(matches!(
             &error,
             PermissionError::BoundExceeded { family, limit: 3, path }
@@ -2521,6 +2568,32 @@ mod tests {
         assert!(!error.to_string().contains("byte bound"));
         // The disposable lane build cache outgrows a worktree-sized census.
         const { assert!(MAX_CACHE_TREE_ENTRIES >= 5 * MAX_WRITABLE_TREE_ENTRIES) };
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_census_neither_walks_nor_counts_skipped_directories()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        std::fs::create_dir_all(root.join("target/debug"))?;
+        std::fs::write(root.join("kept"), b"x")?;
+        for index in 0..5 {
+            std::fs::write(root.join(format!("target/debug/file-{index}")), b"x")?;
+        }
+        let directory = Directory::open_anchor(&root)?;
+        let census = |skip: &BTreeSet<PathBuf>| {
+            inspect_writable_directory(&directory, &root, 0, &mut 0, 3, skip)
+        };
+        assert!(census(&BTreeSet::new()).is_err());
+        assert!(census(&BTreeSet::from([root.join("target")])).is_ok());
+        // Only the named directory is skipped, not a namesake elsewhere.
+        std::fs::create_dir_all(root.join("src/target"))?;
+        for index in 0..5 {
+            std::fs::write(root.join(format!("src/target/file-{index}")), b"x")?;
+        }
+        assert!(census(&BTreeSet::from([root.join("target")])).is_err());
         Ok(())
     }
 

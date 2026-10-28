@@ -5,6 +5,8 @@ pub mod disclosure;
 pub mod disk;
 pub mod git_evidence;
 pub mod guard;
+#[cfg(target_os = "macos")]
+mod ignored;
 pub mod output_custody;
 pub mod permissions;
 pub mod plan;

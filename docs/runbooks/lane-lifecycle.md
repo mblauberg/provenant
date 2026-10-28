@@ -63,7 +63,8 @@ top-level `integration_branch: "integration"` and `delivery: "pr"` for one
 final PR. Delivery failures block dependants or retain the graph advance error;
 `fabric graph resume --document PATH` retries final delivery.
 
-Hard-linked writable files still block macOS launch. The diagnostic names the
-file. Inspect it before removing disposable build output, then retry. The
+Hard-linked writable files outside Git-ignored directories still block macOS
+launch. The diagnostic names the file. Inspect it before removing disposable
+build output, then retry. The
 hard-link fixture remains enabled in macOS CI because lane sandboxes can deny
 the fixture's `hard_link` call before the launch check runs.
