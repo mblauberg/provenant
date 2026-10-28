@@ -33,9 +33,45 @@ pub fn resolve_delivery_target(
     })
 }
 
+/// Compose Run's host lookup with the inbox owner without a runtime dependency.
+pub fn resolve_work(
+    root: &provenant_core::StateRoot,
+    project: provenant_core::ProjectId,
+    work: &RequestWork,
+    clock: &dyn Clock,
+    budget: WaitBudget,
+    cancel: &provenant_core::CancelToken,
+) -> Result<WorkCoverage, InboxError> {
+    provenant_run::validate_work(
+        root,
+        &provenant_run::WorkSelector {
+            project,
+            run: work.run_id,
+            task: work.task_id,
+            attempt: work.attempt_id,
+            repository: work.repository.clone(),
+            head: work.head,
+        },
+        &provenant_run::Request {
+            clock,
+            budget,
+            cancel,
+        },
+    )
+    .map_err(|error| match error {
+        provenant_run::RunError::Contention => {
+            InboxError::Store(provenant_fabric_runtime::StoreError::Busy)
+        }
+        provenant_run::RunError::Cancelled => {
+            InboxError::Store(provenant_fabric_runtime::StoreError::Cancelled)
+        }
+        other => InboxError::WorkLookup(other.to_string()),
+    })
+}
+
 #[derive(Debug, Args)]
 pub struct Ask {
-    /// JSON request content; ownership comes from the current Fabric identity
+    /// JSON request content, including optional work links; ownership comes from Fabric
     #[arg(long)]
     pub file: PathBuf,
     /// Explicit originating chair session; never inferred from the agent label
@@ -252,7 +288,7 @@ impl Error {
         match self {
             Self::Inbox(error) => (
                 match error.code() {
-                    "invalid_input" | "not_found" => Outcome::Invalid,
+                    "invalid_input" | "not_found" | "work_mismatch" => Outcome::Invalid,
                     "conflict"
                     | "operation_conflict"
                     | "cursor_expired"
@@ -336,6 +372,16 @@ fn execute(
         input,
         budget,
         &provenant_core::CancelToken::new(),
+        &|work, call| {
+            resolve_work(
+                &context.roots.state,
+                context.identity.project,
+                work,
+                call.clock,
+                call.budget,
+                call.cancel,
+            )
+        },
     )?)
 }
 pub fn run(
@@ -360,6 +406,7 @@ pub fn run(
                         "Retry the same request with --operation-id {operation_id}; preserve its original content and revision."
                     )),
                     Error::Inbox(error) if matches!(error.code(),"conflict"|"operation_conflict")=>Some("Inspect `provenant inbox --state all --json` before submitting another operation; preserve the authoritative answer and its revision.".into()),
+                    Error::Inbox(error) if error.code() == "work_mismatch" => Some("Correct the work repository or head to match the selected run before retrying.".into()),
                     Error::Inbox(InboxError::CursorExpired) => {
                         Some("Restart the list without --cursor.".into())
                     }

@@ -2035,6 +2035,93 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json and
               "title": {
                 "maxLength": 256,
                 "type": "string"
+              },
+              "work": {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "attempt_id": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/Id"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "head": {
+                        "anyOf": [
+                          {
+                            "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "repository": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "relative_to_root": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "encoding": {
+                                    "enum": [
+                                      "utf8",
+                                      "native_bytes"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "path": {
+                                    "maxLength": 4096,
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "encoding",
+                                  "path"
+                                ],
+                                "type": "object"
+                              }
+                            },
+                            "required": [
+                              "relative_to_root"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "run_id": {
+                        "$ref": "#/$defs/Id"
+                      },
+                      "task_id": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/Id"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "run_id"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [

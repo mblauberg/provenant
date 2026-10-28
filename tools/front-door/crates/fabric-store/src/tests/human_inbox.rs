@@ -333,6 +333,7 @@ fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
         chair_session_id: "chair-a".into(),
         chair_actor: actor(2),
         request: RequestDraft {
+            work: None,
             kind: RequestKind::Question,
             title: "Question".into(),
             body: "What next?".into(),
@@ -341,6 +342,7 @@ fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
             recommended_option_id: None,
             proceeding_with: None,
         },
+        work_coverage: None,
         state: RequestState::Open,
         answer_id: None,
         closure_reason: None,

@@ -174,6 +174,8 @@ pub struct InboxReceipt {
     pub state: RequestState,
     pub answer_id: Option<HumanAnswerId>,
     pub delivery: Option<AnswerDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_coverage: Option<WorkCoverage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +218,10 @@ pub enum InboxError {
     UnsupportedOwner,
     #[error("human inbox owner is unavailable in this build")]
     OwnerUnavailable,
+    #[error("work membership lookup failed: {0}")]
+    WorkLookup(String),
+    #[error("work repository or head mismatch")]
+    WorkMismatch,
     #[error(
         "project has reached the 10000-request retention limit; no history or pending delivery was pruned"
     )]
@@ -237,9 +243,12 @@ pub fn execute(
     input: InboxInput,
     budget: WaitBudget,
     cancel: &CancelToken,
+    work_lookup: &WorkLookup<'_>,
 ) -> Result<InboxResult, InboxError> {
     validate_request(identity, config, in_lane, &input)?;
-    InboxService::open(root, identity, clock, budget, cancel)?.execute(input, budget, cancel)
+    InboxService::open(root, identity, clock, budget, cancel)?
+        .with_work_lookup(work_lookup)
+        .execute(input, budget, cancel)
 }
 
 /// Context-only validation runs before either transport opens a coordination store.
@@ -317,6 +326,8 @@ impl InboxError {
             Self::LaneMutation => "lane_coordination_refused",
             Self::UnsupportedOwner => "unsupported_owner",
             Self::RequestLimit => "request_limit",
+            Self::WorkLookup(_) => "work_lookup_failed",
+            Self::WorkMismatch => "work_mismatch",
             Self::Store(provenant_fabric_store::Error::NotFound) => "not_found",
             Self::Store(provenant_fabric_store::Error::Busy) => "busy",
             Self::Store(provenant_fabric_store::Error::Cancelled) => "cancelled",
@@ -345,6 +356,14 @@ impl InboxInput {
                 session, request, ..
             } => {
                 session_id(session)?;
+                if let Some(work) = &request.work
+                    && work
+                        .repository
+                        .as_ref()
+                        .is_some_and(|repo| repo.wire_path_bytes() > REQUEST_REPOSITORY_BYTES)
+                {
+                    return Err(InboxError::Invalid("work.repository"));
+                }
                 bounded(&request.title, 256, "title")?;
                 bounded(&request.body, REQUEST_BODY_BYTES, "body")?;
                 if request.options.len() > MAX_OPTIONS {
@@ -551,8 +570,13 @@ pub fn offer_until_ack(
     )?)
 }
 
+/// Supplied by the host composition edge; callers cannot supply coverage.
+pub type WorkLookup<'a> =
+    dyn Fn(&RequestWork, &Request<'_>) -> Result<WorkCoverage, InboxError> + 'a;
+
 pub struct InboxService<'a> {
     store: Store,
+    work_lookup: Option<&'a WorkLookup<'a>>,
     identity: &'a Identity,
     clock: &'a dyn Clock,
 }
@@ -572,9 +596,15 @@ impl<'a> InboxService<'a> {
         };
         Ok(Self {
             store: Store::open(root, &request)?,
+            work_lookup: None,
             identity,
             clock,
         })
+    }
+
+    pub fn with_work_lookup(mut self, lookup: &'a WorkLookup<'a>) -> Self {
+        self.work_lookup = Some(lookup);
+        self
     }
 
     pub fn execute(
@@ -610,19 +640,45 @@ impl<'a> InboxService<'a> {
                 .map_err(|_| InboxError::Invalid("operation_id"))?,
         };
         *operation = Some(id.clone());
-        self.store
-            .coordination_operation(
+        let result = (|| {
+            let frozen = ("human_inbox_v1", &input);
+            if let Some(saved) = self.store.coordination_replay(
                 self.identity.project,
                 self.identity.inbox.actor,
                 &id,
-                &("human_inbox_v1", &input),
+                &frozen,
                 &request,
-                || self.mutate(&input, &id, &request),
+            )? {
+                return Ok(saved);
+            }
+            let coverage = match &input {
+                InboxInput::Ask { request: draft, .. } => draft
+                    .work
+                    .as_ref()
+                    .map(|work| {
+                        let coverage =
+                            self.work_lookup.ok_or(InboxError::OwnerUnavailable)?(work, &request)?;
+                        if coverage == WorkCoverage::Mismatch {
+                            return Err(InboxError::WorkMismatch);
+                        }
+                        Ok(coverage)
+                    })
+                    .transpose()?,
+                _ => None,
+            };
+            self.store.coordination_operation(
+                self.identity.project,
+                self.identity.inbox.actor,
+                &id,
+                &frozen,
+                &request,
+                || self.mutate(&input, &id, coverage, &request),
             )
-            .map_err(|source| InboxError::Mutation {
-                operation_id: id,
-                source: Box::new(source),
-            })
+        })();
+        result.map_err(|source| InboxError::Mutation {
+            operation_id: id,
+            source: Box::new(source),
+        })
     }
 
     fn list(
@@ -696,6 +752,7 @@ impl<'a> InboxService<'a> {
         &self,
         input: &InboxInput,
         operation: &OperationId,
+        work_coverage: Option<WorkCoverage>,
         request: &Request<'_>,
     ) -> Result<InboxResult, InboxError> {
         let at = self.clock.wall_now().map_err(CoordinationError::from)?;
@@ -707,7 +764,7 @@ impl<'a> InboxService<'a> {
                 ..
             } => {
                 let value = HumanRequest {
-                    schema_version: 1,
+                    schema_version: if draft.work.is_some() { 2 } else { 1 },
                     id: HumanRequestId::from_bytes(entropy()?),
                     revision: 1,
                     operation_id: operation.clone(),
@@ -723,6 +780,7 @@ impl<'a> InboxService<'a> {
                     chair_session_id: session.clone(),
                     chair_actor: self.identity.inbox.actor,
                     request: draft.clone(),
+                    work_coverage,
                     state: RequestState::Open,
                     answer_id: None,
                     closure_reason: None,
@@ -877,6 +935,7 @@ impl<'a> InboxService<'a> {
                 revision: value.revision,
                 state: value.state,
                 answer_id: value.answer_id,
+                work_coverage: value.work_coverage,
                 delivery,
             },
         })

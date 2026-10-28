@@ -71,6 +71,18 @@ Source: `config/harness-knobs.json`.
 | `trade_off` | `"Lower switches sooner; higher leaves less headroom for the handoff."` |
 | `type` | `"int"` |
 
+## `domains.routing.capacity_cooldown_seconds`
+
+| Field | Value |
+|---|---|
+| `default` | `600` |
+| `effect` | `"Avoid a model and account in automatic draws for this many seconds after a provider capacity error. Zero disables new cooldowns."` |
+| `min` | `0` |
+| `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"Longer cooldowns reduce repeated capacity errors but keep affected models out of automatic draws for longer."` |
+| `type` | `"int"` |
+
 ## `fabric.accept_handoff`
 
 | Field | Value |

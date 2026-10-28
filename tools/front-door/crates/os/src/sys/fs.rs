@@ -7,6 +7,19 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
+/// Flush a regular file through the platform's strongest available sync.
+pub fn durable_sync_file(file: &File) -> io::Result<()> {
+    file.sync_all()?;
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: the descriptor is owned by `file` and remains open for the call.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 pub fn canonicalize(path: &Path) -> io::Result<std::path::PathBuf> {
     std::fs::canonicalize(path)
 }

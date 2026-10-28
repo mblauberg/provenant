@@ -85,9 +85,9 @@ duplicate keys and multiline plain scalars; only `true` and `false` resolve.
 
 ## Configuration
 
-### Cargo registry seed opt-in
+### Cargo home seed opt-in
 
-The per-host Cargo registry seed switch must default off and must have no
+The per-host Cargo home seed switch must default off and must have no
 effect outside macOS. Its scope and manual configuration are described in
 the [worktree guide](../worktrees.md).
 - Why: cloning is an optional host-specific optimisation, not a prerequisite
@@ -96,6 +96,18 @@ the [worktree guide](../worktrees.md).
   `crates/run/src/cargo_seed.rs::tests::disabled_does_not_touch_cache`;
   `::enabled_is_a_no_op_on_other_platforms`
 - Owner: `crates/fabric-runtime/src/config.rs`, `crates/run/src/cargo_seed.rs`
+
+### Cargo target seed generations
+
+The host may build a generation from the pinned `origin/main` commit in a
+scratch checkout. It publishes a read-only generation only after the build and
+manifest succeed and their contents are synced. A completion marker and frozen
+generation root distinguish finished publications from interrupted ones. GC
+reclaims incomplete generations and abandoned stages while protecting active
+builds. It holds the store lock and removes oldest generations until both the
+count and apparent-byte caps hold; a busy store is skipped.
+- Test: `src/target_seed_build.rs::tests`; `crates/run/src/target_seed_gc.rs::tests`
+- Owner: `src/target_seed_build.rs`, `crates/run/src/target_seed_gc.rs`
 
 ### Strict typed config
 
