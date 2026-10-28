@@ -453,6 +453,7 @@ dependencies = [
  "provenant-confinement",
  "provenant-core",
  "provenant-fabric-runtime",
+ "provenant-fabric-store",
  "provenant-os",
  "provenant-providers",
  "provenant-quota",

@@ -137,6 +137,30 @@ pub(super) fn exit() -> ExitObservation {
     }
 }
 #[test]
+fn overview_reads_committed_wal_and_bounds_rows() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let writer = RunStore::open(&context, &call)?;
+    let reader = RunStore::open_read_only(&context, &call)?.ok_or("missing reader")?;
+    let mut first = input();
+    first.request.tasks[0].title = Some("Review changes".into());
+    writer.create(&first, &call)?;
+    let batch = reader.overview_attempts(1, &call)?;
+    assert!(!batch.truncated);
+    assert_eq!(batch.attempts.len(), 1);
+    assert_eq!(batch.attempts[0].title.as_deref(), Some("Review changes"));
+    assert_eq!(batch.attempts[0].state, OverviewState::Queued);
+    assert_eq!(batch.attempts[0].project_id, context.project_id);
+    let empty = reader.overview_attempts(0, &call)?;
+    assert!(empty.attempts.is_empty());
+    assert!(empty.truncated);
+    Ok(())
+}
+
+#[test]
 fn read_only_data_version_detects_a_new_queued_attempt() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;

@@ -25,6 +25,21 @@ stale discovery. The registry is limited to 16,384 entries (excluding its
 lock); an invalid project entry name fails the whole catalogue. Valid
 in-progress binding stages are skipped.
 
+`console overview` combines local pending request titles and recent lane
+attention in one bounded read. Project labels use the registered Git common
+directory's parent name; unavailable labels and task titles are null. Inbox
+requests have no task association, so their task label is always null. Bodies,
+prompts and results are excluded. The inbox scan returns at most 100 requests;
+the run scan examines at most 128 recent attempts, deduplicating retries.
+Counts describe the observed rows and are partial when their source reports
+`partial`. Running includes queued, starting, running and settling attempts;
+attention includes terminal outcomes other than success or cancellation.
+Missing or unreadable owner stores report `unavailable` with null
+counts; incompatible schemas report `incompatible`. Nested run stores and
+peers are not included. The overview never creates, initialises or migrates an
+owner database. SQLite may create or update its own WAL and shared-memory
+companions when reading an existing database, and committed WAL data is visible.
+
 Session pages default to 50 rows and cap at 100. The cursor binds the selected
 project, session filter, page size and observed session records; an invalid or
 changed snapshot requires restarting without the cursor. A scan is limited to
@@ -37,6 +52,7 @@ owner records return an error rather than implying complete coverage. Directory
 paths are tagged as UTF-8 or hex-encoded native bytes.
 
 - Test: `tests/catalogue_read_only.rs::catalogue_read_only`
+- Test: `tests/overview_needs_you.rs::overview_needs_you`
 - Owner: `crates/cli/src/console.rs`, `src/console.rs`
 
 ## Parsing

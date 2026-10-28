@@ -10,6 +10,7 @@ mod git_context;
 mod holder;
 mod launch;
 mod ledger;
+mod overview;
 mod plan;
 mod reader;
 mod retention;
@@ -33,6 +34,7 @@ pub use launch::{
     Decoded, LaunchPaths, PreparedLaunch, PreparedStart, Providers, RefusalKind, Started,
     capture_plan, concurrency,
 };
+pub use overview::{OverviewAttempt, OverviewState, RunOverview};
 pub use plan::read_only_plan;
 pub use retention::{
     AttemptLogRemoval, AttemptTmpRemoval, ProviderStateGc, ProviderStateIssue, TOMBSTONE,

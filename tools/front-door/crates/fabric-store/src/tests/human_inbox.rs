@@ -3,6 +3,70 @@ use provenant_core::{HostId, HumanAnswerId, HumanRequestId, OperationId};
 use provenant_records::inbox::*;
 
 #[test]
+fn overview_read_only_does_not_create_or_migrate() {
+    let f = Fixture::new();
+    assert!(matches!(
+        Store::open_existing(&f.root, &f.request()),
+        Err(Error::NotFound)
+    ));
+    assert!(!f.root.as_path().exists());
+    std::fs::create_dir(f.root.as_path()).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(f.root.as_path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(matches!(
+        Store::open_existing(&f.root, &f.request()),
+        Err(Error::NotFound)
+    ));
+    assert!(!f.root.as_path().join("fabric").exists());
+    let writer = f.open();
+    writer.db.pragma_update(None, "user_version", 8).unwrap();
+    assert!(matches!(
+        Store::open_existing(&f.root, &f.request()),
+        Err(Error::SchemaVersion(8))
+    ));
+    let version: i64 = writer
+        .db
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 8);
+}
+
+#[test]
+fn overview_reads_committed_wal_and_limits_rows() {
+    let f = Fixture::new();
+    let writer = f.open();
+    for n in 0..2 {
+        let id = HumanRequestId::from_bytes([n + 1; 16]).to_string();
+        let project = project().to_string();
+        let record = serde_json::json!({
+            "schema_version": 1, "id": id, "project_id": project,
+            "project_key": "demo", "request": { "title": format!("Title {n}"), "body": "secret" }
+        })
+        .to_string();
+        writer
+            .db
+            .execute(
+                "INSERT INTO human_requests VALUES(?1,?2,1,'chair','open',?3)",
+                params![project, id, record.as_bytes()],
+            )
+            .unwrap();
+    }
+    let reader = Store::open_existing(&f.root, &f.request()).unwrap();
+    let page = reader.pending_human_requests(1, &f.request()).unwrap();
+    assert!(page.truncated);
+    assert_eq!(page.items[0].title, "Title 0");
+    assert_eq!(page.items[0].project_key.as_deref(), Some("demo"));
+    assert_eq!(
+        reader
+            .pending_human_requests(100, &f.request())
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+}
+
+#[test]
 fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
     let f = Fixture::new();
     let store = f.open();

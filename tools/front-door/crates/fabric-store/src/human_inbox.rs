@@ -6,6 +6,15 @@ use provenant_records::inbox::*;
 /// Preserve history and pending deliveries; refuse growth rather than pruning them.
 pub const MAX_HUMAN_REQUESTS: i64 = 10_000;
 
+/// The fields needed by an overview; request bodies never leave the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingHumanRequest {
+    pub id: String,
+    pub project_id: String,
+    pub project_key: Option<String>,
+    pub title: String,
+}
+
 pub struct HumanClosure<'a> {
     pub project: ProjectId,
     pub id: HumanRequestId,
@@ -26,6 +35,72 @@ pub struct HumanAcknowledgement<'a> {
 }
 
 impl Store {
+    /// Read a bounded batch across projects, without loading request bodies.
+    pub fn pending_human_requests(
+        &self,
+        limit: u64,
+        request: &Request<'_>,
+    ) -> Result<Page<PendingHumanRequest>> {
+        let rows_limit = page(0, limit)?;
+        request.retry(|| {
+            let mut statement = self.db.prepare(
+                "SELECT project,id, length(record),
+                 CASE WHEN length(record)<=?2 AND json_valid(CAST(record AS TEXT))
+                   THEN json_extract(CAST(record AS TEXT),'$.schema_version') END,
+                 CASE WHEN length(record)<=?2 AND json_valid(CAST(record AS TEXT))
+                   THEN json_extract(CAST(record AS TEXT),'$.project_id') END,
+                 CASE WHEN length(record)<=?2 AND json_valid(CAST(record AS TEXT))
+                   THEN json_extract(CAST(record AS TEXT),'$.id') END,
+                 CASE WHEN length(record)<=?2 AND json_valid(CAST(record AS TEXT))
+                   THEN json_extract(CAST(record AS TEXT),'$.project_key') END,
+                 CASE WHEN length(record)<=?2 AND json_valid(CAST(record AS TEXT))
+                   THEN json_extract(CAST(record AS TEXT),'$.request.title') END
+                 FROM human_requests WHERE state='open' ORDER BY project,id LIMIT ?1",
+            )?;
+            let mut rows = statement.query(params![rows_limit + 1, MAX_RECORD_BYTES as i64])?;
+            let mut items = Vec::new();
+            let mut bytes = 0;
+            let mut truncated = false;
+            while let Some(row) = rows.next()? {
+                request.check()?;
+                if items.len() == limit as usize {
+                    truncated = true;
+                    break;
+                }
+                let project_id: String = row.get(0)?;
+                let id: String = row.get(1)?;
+                let version: Option<i64> = row.get(3)?;
+                let record_project: Option<String> = row.get(4)?;
+                let record_id: Option<String> = row.get(5)?;
+                let project_key: Option<String> = row.get(6)?;
+                let title: Option<String> = row.get(7)?;
+                if version != Some(1)
+                    || record_project.as_deref() != Some(&project_id)
+                    || record_id.as_deref() != Some(&id)
+                    || title.is_none()
+                {
+                    return Err(Error::Invalid("stored request identity or version"));
+                }
+                let title = title.unwrap_or_default();
+                bytes += project_id.len()
+                    + id.len()
+                    + project_key.as_ref().map_or(0, String::len)
+                    + title.len();
+                if bytes > 512 * 1024 {
+                    truncated = true;
+                    break;
+                }
+                items.push(PendingHumanRequest {
+                    id,
+                    project_id,
+                    project_key,
+                    title,
+                });
+            }
+            Ok(Page { items, truncated })
+        })
+    }
+
     /// Atomically record bounded at-least-once offers. Overflow is untouched;
     /// reading ordinary mail never advances or acknowledges this outbox.
     pub fn offer_human_answers(
