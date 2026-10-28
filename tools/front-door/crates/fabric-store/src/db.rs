@@ -27,6 +27,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/009-run-chairs.sql"),
     include_str!("migrations/010-local-delivery.sql"),
     include_str!("migrations/011-queued-delivery.sql"),
+    include_str!("migrations/012-hook-delivery.sql"),
 ];
 // Index of 007, which may drop only the always-null legacy members and the
 // traces of an import that brought nothing over. Anything the removed import
@@ -155,6 +156,14 @@ impl Store {
         Self::open_local_delivery(root, deadline, false)
     }
 
+    /// Open an existing store for bounded hook delivery updates.
+    pub fn open_hook_delivery(
+        root: &StateRoot,
+        deadline: std::time::Instant,
+    ) -> Result<Option<Self>> {
+        Self::open_local_delivery(root, deadline, true)
+    }
+
     #[allow(clippy::disallowed_methods)]
     pub(crate) fn open_local_delivery(
         root: &StateRoot,
@@ -200,11 +209,11 @@ impl Store {
             provenant_sqlite::open_read_only_connection(&path)?
         };
         db.progress_handler(100, Some(move || std::time::Instant::now() >= deadline))?;
-        // Pin one answer snapshot, including concurrent acknowledgements.
         // Filesystem discovery was validated before this connection opened.
         if writable {
             provenant_sqlite::retain_read_only_wal(&db)?;
         } else {
+            // Pin the answer walk to one snapshot despite concurrent writes.
             db.execute_batch("BEGIN")?;
         }
         let store = Self {

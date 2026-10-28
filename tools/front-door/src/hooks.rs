@@ -228,12 +228,24 @@ fn guard_reply(
         };
         let commands = CommandPrefix::new(selected.state_dir.as_deref(), &cwd);
         let at = SystemClock::new().wall_now()?;
+        let mut oversized = Vec::new();
         let page = {
             let Some(store) = Store::open_read_only(&resolved.roots.state, deadline)? else {
                 return Ok(None);
             };
-            select_answers(&store, &target, at, &event_name, &commands, deadline)?
+            select_answers(
+                &store,
+                &target,
+                at,
+                &event_name,
+                &commands,
+                deadline,
+                &mut oversized,
+            )?
         };
+        // SQLite shares WAL memory within a process. Close the read-only
+        // snapshot before opening a writer, which otherwise inherits it read-only.
+        mark_oversized_answers(&resolved.roots.state, &target, &oversized, deadline)?;
         if page.items.is_empty() {
             return Ok(None);
         }
@@ -317,19 +329,27 @@ fn fit_answers(
         truncated: page.truncated,
     };
     for item in page.items {
-        let id = item.answer.id;
         output.items.push(item);
         if answer_output(&output, event_name, commands)
             .is_none_or(|bytes| bytes.len() > MAX_OFFER_BYTES)
         {
             output.items.pop();
             output.truncated = true;
-            diagnostic(&format!(
-                "answer delivery: answer {id} exceeds escaped hook budget; retained for Fabric mail"
-            ));
         }
     }
     output
+}
+
+// This lower bound contains only the answer, escaped exactly as it is inside
+// additionalContext. It omits delivery metadata and all envelope framing, so
+// exceeding it proves no supported prefix or event can make the answer fit.
+fn answer_exceeds_any_hook_envelope(item: &AnswerOffer) -> Result<bool, Error> {
+    let answer = serde_json::to_string(&item.answer)?
+        .replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e");
+    // The surrounding JSON quotes are not present around the embedded answer.
+    Ok(serde_json::to_vec(&answer)?.len().saturating_sub(2) > MAX_OFFER_BYTES)
 }
 
 fn select_answers(
@@ -339,13 +359,30 @@ fn select_answers(
     event_name: &str,
     commands: &CommandPrefix,
     deadline: Instant,
+    pending_marks: &mut Vec<(String, bool)>,
 ) -> Result<Page<AnswerOffer>, Error> {
     let mut truncated = false;
     for state in [AnswerDeliveryState::Queued, AnswerDeliveryState::Offered] {
         let mut after = None;
         loop {
-            let (mut page, next) =
+            let (mut page, next, mut oversized) =
                 store.read_hook_answer_page(target, state, after.as_deref(), deadline)?;
+            let page_oversized = oversized.clone();
+            for item in &page.items {
+                if answer_exceeds_any_hook_envelope(item)? {
+                    oversized.push(item.answer.id.to_string());
+                }
+            }
+            if !oversized.is_empty() {
+                pending_marks.extend(
+                    oversized
+                        .iter()
+                        .map(|id| (id.clone(), !page_oversized.contains(id))),
+                );
+                page.items
+                    .retain(|item| !oversized.contains(&item.answer.id.to_string()));
+                page.truncated = true;
+            }
             page.truncated |= truncated;
             let fitted = prepare_answers(page, at, event_name, commands)?;
             if !fitted.items.is_empty() {
@@ -360,6 +397,29 @@ fn select_answers(
         items: vec![],
         truncated,
     })
+}
+
+fn mark_oversized_answers(
+    root: &provenant_core::StateRoot,
+    target: &AnswerTarget,
+    pending: &[(String, bool)],
+    deadline: Instant,
+) -> Result<(), Error> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<_> = pending.iter().map(|(id, _)| id.clone()).collect();
+    for id in Store::mark_hook_undeliverable_once(root, target, &ids, deadline)? {
+        if pending
+            .iter()
+            .any(|(candidate, escaped)| *escaped && *candidate == id)
+        {
+            diagnostic(&format!(
+                "answer delivery: answer {id} exceeds escaped hook budget; retained for Fabric mail"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn prepare_answers(
@@ -821,6 +881,30 @@ mod answer_delivery_tests {
     }
 
     #[test]
+    fn permanent_size_check_does_not_depend_on_command_prefix() -> Result<(), Error> {
+        let short = CommandPrefix::default();
+        let path = format!("/{}", "s".repeat(350));
+        let long = CommandPrefix::new(Some(Path::new(&path)), Path::new("/"));
+        let item = (1_000..2_100)
+            .map(|size| offer(&"\"".repeat(size), 1))
+            .find(|item| {
+                let page = Page {
+                    items: vec![item.clone()],
+                    truncated: false,
+                };
+                answer_output(&page, "PreToolUse", &short).unwrap().len() <= MAX_OFFER_BYTES
+                    && answer_output(&page, "PreToolUse", &long).unwrap().len() > MAX_OFFER_BYTES
+            })
+            .ok_or("could not construct prefix-sensitive answer")?;
+        assert!(!answer_exceeds_any_hook_envelope(&item)?);
+        assert!(answer_exceeds_any_hook_envelope(&offer(
+            &"\"".repeat(3500),
+            2
+        ))?);
+        Ok(())
+    }
+
+    #[test]
     fn escaped_overflow_keeps_small_answers_deliverable() {
         let large = offer(&"\"".repeat(3500), 1);
         let small = offer(
@@ -994,6 +1078,356 @@ mod answer_delivery_tests {
     }
 
     #[test]
+    fn hook_walks_oversized_offered_head_to_retry_and_fits_mixed_page() -> Result<(), Error> {
+        use provenant_core::{ProjectId, RootInputs};
+        use provenant_fabric_store::{Request, ThreadWait};
+        use provenant_os::fs::SystemPathResolver;
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let mut inputs = RootInputs::new(base.join("home"), base.join("assets"));
+        inputs.state_dir = Some(base.join("state"));
+        let root = inputs.resolve(&SystemPathResolver)?.state;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let store = Store::open(
+            &root,
+            &Request {
+                clock: &clock,
+                cancel: &cancel,
+                backoff: &ThreadWait,
+                budget: WaitBudget::cli(clock.mono_now(), 1)?,
+            },
+        )?;
+        let db = rusqlite::Connection::open(root.as_path().join("fabric/fabric.sqlite3"))?;
+        let target = AnswerTarget {
+            host: provenant_core::HostId::from_bytes([1; 16]),
+            project: ProjectId::from_bytes([4; 16]),
+            session: "chair".into(),
+            actor: provenant_core::ActorId::from_bytes([2; 16]),
+        };
+        let insert = |item: &AnswerOffer| -> Result<(), Error> {
+            db.execute(
+                "INSERT INTO human_requests VALUES(?1,?2,1,'chair','answered',?3)",
+                rusqlite::params![
+                    target.project.to_string(),
+                    item.answer.request_id.to_string(),
+                    b"{}".as_slice()
+                ],
+            )?;
+            db.execute(
+                "INSERT INTO human_answers VALUES(?1,?2,?3,?4)",
+                rusqlite::params![
+                    target.project.to_string(),
+                    item.answer.id.to_string(),
+                    item.answer.request_id.to_string(),
+                    serde_json::to_vec(&item.answer)?
+                ],
+            )?;
+            db.execute(
+                "INSERT INTO human_answer_outbox VALUES(?1,?2,?3)",
+                rusqlite::params![
+                    target.project.to_string(),
+                    item.answer.id.to_string(),
+                    serde_json::to_vec(&item.delivery)?
+                ],
+            )?;
+            Ok(())
+        };
+        for byte in 1..=16 {
+            let mut large = offer(&"\"".repeat(3500), byte);
+            large.delivery.state = AnswerDeliveryState::Offered;
+            large.delivery.attempts = 1;
+            large.delivery.last_attempt_at = Some(clock.wall_now()?);
+            insert(&large)?;
+        }
+        let mut retry = offer("retry", 17);
+        retry.delivery.state = AnswerDeliveryState::Offered;
+        retry.delivery.attempts = 1;
+        retry.delivery.last_attempt_at = Some(clock.wall_now()?);
+        insert(&retry)?;
+        let deadline = Instant::now() + LOCAL_BUDGET;
+        let (head, next, _) =
+            store.read_hook_answer_page(&target, AnswerDeliveryState::Offered, None, deadline)?;
+        assert_eq!(head.items.len(), 16);
+        let (offered, _, _) = store.read_hook_answer_page(
+            &target,
+            AnswerDeliveryState::Offered,
+            next.as_deref(),
+            deadline,
+        )?;
+        assert_eq!(offered.items, vec![retry.clone()]);
+        let mut pending_marks = Vec::new();
+        let selected = select_answers(
+            &store,
+            &target,
+            clock.wall_now()?,
+            "PreToolUse",
+            &CommandPrefix::default(),
+            deadline,
+            &mut pending_marks,
+        )?;
+        assert_eq!(selected.items, vec![retry]);
+        assert!(selected.truncated);
+        assert!(next.is_some());
+
+        db.execute("DELETE FROM human_answer_outbox", [])?;
+        db.execute("DELETE FROM human_answers", [])?;
+        db.execute("DELETE FROM human_requests", [])?;
+        insert(&offer(&"\"".repeat(3500), 1))?;
+        let small = offer("small", 2);
+        insert(&small)?;
+        pending_marks.clear();
+        let selected = select_answers(
+            &store,
+            &target,
+            clock.wall_now()?,
+            "PreToolUse",
+            &CommandPrefix::default(),
+            Instant::now() + LOCAL_BUDGET,
+            &mut pending_marks,
+        )?;
+        assert_eq!(selected.items.len(), 1);
+        assert_eq!(selected.items[0].answer, small.answer);
+        assert!(selected.truncated);
+        mark_oversized_answers(
+            &root,
+            &target,
+            &pending_marks,
+            Instant::now() + LOCAL_BUDGET,
+        )?;
+        let (remaining, _, _) = store.read_hook_answer_page(
+            &target,
+            AnswerDeliveryState::Queued,
+            None,
+            Instant::now() + LOCAL_BUDGET,
+        )?;
+        assert_eq!(remaining.items.len(), 1);
+        assert_eq!(remaining.items[0].answer, small.answer);
+        let queued = store.read_queued_human_answers(&target, Instant::now() + LOCAL_BUDGET)?;
+        assert_eq!(queued.items.len(), 2);
+        // An acknowledgement between the page read and offer commit wins.
+        db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.state','acknowledged','$.acknowledged_at','2026-10-28T00:00:00.000000Z') AS BLOB) WHERE answer=?1", [small.answer.id.to_string()])?;
+        let committed = Store::offer_human_answers_once(
+            &root,
+            &target,
+            selected,
+            clock.wall_now()?,
+            Instant::now() + LOCAL_BUDGET,
+        )?;
+        assert!(committed.items.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn hook_open_marks_oversized_once_and_next_scan_excludes_it() -> Result<(), Error> {
+        use provenant_core::{ProjectId, RootInputs};
+        use provenant_fabric_store::{Request, ThreadWait};
+        use provenant_os::fs::SystemPathResolver;
+        const CHILD: &str = "PROVENANT_HOOK_MARK_DIAGNOSTIC_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "hooks::answer_delivery_tests::hook_open_marks_oversized_once_and_next_scan_excludes_it",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()?;
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let expected = format!(
+                "answer delivery: answer {} exceeds escaped hook budget; retained for Fabric mail",
+                offer("", 1).answer.id
+            );
+            assert_eq!(stderr.matches(&expected).count(), 1, "{stderr}");
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let mut inputs = RootInputs::new(base.join("home"), base.join("assets"));
+        inputs.state_dir = Some(base.join("state"));
+        let root = inputs.resolve(&SystemPathResolver)?.state;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let store = Store::open(
+            &root,
+            &Request {
+                clock: &clock,
+                cancel: &cancel,
+                backoff: &ThreadWait,
+                budget: WaitBudget::cli(clock.mono_now(), 1)?,
+            },
+        )?;
+        let db = rusqlite::Connection::open(root.as_path().join("fabric/fabric.sqlite3"))?;
+        let target = AnswerTarget {
+            host: provenant_core::HostId::from_bytes([1; 16]),
+            project: ProjectId::from_bytes([4; 16]),
+            session: "chair".into(),
+            actor: provenant_core::ActorId::from_bytes([2; 16]),
+        };
+        let large = offer(&"\"".repeat(3500), 1);
+        let small = offer("small", 2);
+        for item in [&large, &small] {
+            db.execute(
+                "INSERT INTO human_requests VALUES(?1,?2,1,'chair','answered',?3)",
+                rusqlite::params![
+                    target.project.to_string(),
+                    item.answer.request_id.to_string(),
+                    b"{}".as_slice()
+                ],
+            )?;
+            db.execute(
+                "INSERT INTO human_answers VALUES(?1,?2,?3,?4)",
+                rusqlite::params![
+                    target.project.to_string(),
+                    item.answer.id.to_string(),
+                    item.answer.request_id.to_string(),
+                    serde_json::to_vec(&item.answer)?
+                ],
+            )?;
+            db.execute(
+                "INSERT INTO human_answer_outbox VALUES(?1,?2,?3)",
+                rusqlite::params![
+                    target.project.to_string(),
+                    item.answer.id.to_string(),
+                    serde_json::to_vec(&item.delivery)?
+                ],
+            )?;
+        }
+        drop(store);
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        let reader = Store::open_read_only(&root, deadline)?.ok_or("missing test store")?;
+        let mut pending_marks = Vec::new();
+        let selected = select_answers(
+            &reader,
+            &target,
+            clock.wall_now()?,
+            "PreToolUse",
+            &CommandPrefix::default(),
+            deadline,
+            &mut pending_marks,
+        )?;
+        assert_eq!(selected.items.len(), 1);
+        assert_eq!(selected.items[0].answer, small.answer);
+        assert_eq!(pending_marks.len(), 1);
+        assert!(
+            reader.read_queued_human_answers(&target, deadline)?.items[0]
+                .delivery
+                .error
+                .is_none()
+        );
+        drop(reader);
+        mark_oversized_answers(&root, &target, &pending_marks, deadline)?;
+        pending_marks.clear();
+        // A new hook invocation sees the committed marker, while mail readers
+        // retain the answer in its original delivery state.
+        let reader = Store::open_read_only(&root, deadline)?.ok_or("missing test store")?;
+        let (remaining, _, _) =
+            reader.read_hook_answer_page(&target, AnswerDeliveryState::Queued, None, deadline)?;
+        assert_eq!(remaining.items.len(), 1);
+        assert_eq!(remaining.items[0].answer, small.answer);
+        let queued = reader.read_queued_human_answers(&target, deadline)?;
+        assert_eq!(queued.items.len(), 2);
+        assert_eq!(queued.items[0].delivery.state, AnswerDeliveryState::Queued);
+        let selected_again = select_answers(
+            &reader,
+            &target,
+            clock.wall_now()?,
+            "PreToolUse",
+            &CommandPrefix::default(),
+            deadline,
+            &mut pending_marks,
+        )?;
+        assert_eq!(selected_again.items.len(), 1);
+        assert_eq!(selected_again.items[0].answer, small.answer);
+        drop(reader);
+        db.execute("DELETE FROM human_answer_outbox", [])?;
+        db.execute("DELETE FROM human_answers", [])?;
+        db.execute("DELETE FROM human_requests", [])?;
+        let long_state = format!("/{}", "s".repeat(340));
+        let long = CommandPrefix::new(Some(Path::new(&long_state)), Path::new("/"));
+        assert!(long.runnable("inbox acknowledge REQUEST_ID --answer ANSWER_ID --session TARGET_SESSION --operation-id UNIQUE_ACK_ID").is_some());
+        let at = clock.wall_now()?;
+        let borderline = (1_000..4_000)
+            .map(|size| offer(&"\"".repeat(size), 3))
+            .find(|item| {
+                let singleton = Page {
+                    items: vec![item.clone()],
+                    truncated: false,
+                };
+                let fits = |commands: &CommandPrefix| {
+                    prepare_answers(singleton.clone(), at, "PreToolUse", commands)
+                        .is_ok_and(|page| !page.items.is_empty())
+                };
+                fits(&CommandPrefix::default()) && !fits(&long)
+            })
+            .ok_or("no context-dependent answer size found")?;
+        db.execute(
+            "INSERT INTO human_requests VALUES(?1,?2,1,'chair','answered',?3)",
+            rusqlite::params![
+                target.project.to_string(),
+                borderline.answer.request_id.to_string(),
+                b"{}".as_slice()
+            ],
+        )?;
+        db.execute(
+            "INSERT INTO human_answers VALUES(?1,?2,?3,?4)",
+            rusqlite::params![
+                target.project.to_string(),
+                borderline.answer.id.to_string(),
+                borderline.answer.request_id.to_string(),
+                serde_json::to_vec(&borderline.answer)?
+            ],
+        )?;
+        db.execute(
+            "INSERT INTO human_answer_outbox VALUES(?1,?2,?3)",
+            rusqlite::params![
+                target.project.to_string(),
+                borderline.answer.id.to_string(),
+                serde_json::to_vec(&borderline.delivery)?
+            ],
+        )?;
+        let reader = Store::open_read_only(&root, deadline)?.ok_or("missing test store")?;
+        assert!(
+            select_answers(
+                &reader,
+                &target,
+                at,
+                "PreToolUse",
+                &long,
+                deadline,
+                &mut pending_marks
+            )?
+            .items
+            .is_empty()
+        );
+        drop(reader);
+        let reader = Store::open_read_only(&root, deadline)?.ok_or("missing test store")?;
+        let later = select_answers(
+            &reader,
+            &target,
+            at,
+            "PreToolUse",
+            &CommandPrefix::default(),
+            deadline,
+            &mut pending_marks,
+        )?;
+        assert_eq!(later.items.len(), 1);
+        assert_eq!(later.items[0].answer, borderline.answer);
+        assert!(
+            reader.read_queued_human_answers(&target, deadline)?.items[0]
+                .delivery
+                .error
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn committed_offer_survives_worker_response_timeout() -> Result<(), Error> {
         use provenant_core::{ProjectId, RootInputs};
         use provenant_fabric_store::{Request, ThreadWait};
@@ -1048,6 +1482,7 @@ mod answer_delivery_tests {
             ],
         )?;
         let (release, stalled) = mpsc::channel();
+        let (committed, commit_observed) = mpsc::channel();
         let (done, completion) = mpsc::channel();
         let worker_root = root.clone();
         let worker_target = target.clone();
@@ -1062,10 +1497,11 @@ mod answer_delivery_tests {
                         truncated: false,
                     },
                     at,
-                    Instant::now() + LOCAL_BUDGET,
+                    Instant::now() + std::time::Duration::from_secs(30),
                 )?;
                 // Hold the response after commit until the receiver has timed out.
-                stalled.recv()?;
+                committed.send(())?;
+                stalled.recv_timeout(std::time::Duration::from_secs(30))?;
                 let _ = done.send(());
                 Ok(answer_output(
                     &offered,
@@ -1075,9 +1511,12 @@ mod answer_delivery_tests {
             })
             .is_none()
         );
+        // A slow commit must finish before the response is released. A failed
+        // commit disconnects this channel and fails the test directly.
+        commit_observed.recv_timeout(std::time::Duration::from_secs(30))?;
         release.send(())?;
-        completion.recv_timeout(LOCAL_BUDGET)?;
-        let deadline = Instant::now() + LOCAL_BUDGET;
+        completion.recv_timeout(std::time::Duration::from_secs(30))?;
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
         let retry = store.read_offered_human_answers(&target, deadline)?;
         assert_eq!(retry.items.len(), 1);
         assert_eq!(retry.items[0].delivery.state, AnswerDeliveryState::Offered);

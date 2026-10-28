@@ -37,7 +37,8 @@ their exact grants exclude `host.sqlite3` and its companions. The authoritative
 index seals project/run, request digest and optional chair. Readers ignore any
 association rows in lane-writable databases.
 Migration 10 adds the partial destination index for local answer observations.
-Migration 11 adds a queued-only hook index. Previous binaries refuse schema 11, so rollback requires restoring a pre-upgrade store backup or a forward repair;
+Migration 11 adds a queued-only index. Migration 12 adds hook indexes that
+exclude terminal hook failures. Previous binaries refuse schema 12, so rollback requires restoring a pre-upgrade store backup or a forward repair;
 do not change `user_version` by hand or delete pending answers.
 
 Requests retain history without automatic pruning, up to 10,000 items per
@@ -57,15 +58,18 @@ This uses the existing outbox without another schema migration.
 `offer_human_answers_once` instead uses bounded selected-key reads and one immediate
 transaction, with no busy retries, creation or migrations. Only queued records
 transition; matching offered snapshots replay the committed record idempotently.
-The hook gives queued rows priority using migration 11's index. When none fit
-its final output, `read_offered_human_answers` selects only committed offers
-through migration 10's pending index.
+The hook gives queued rows priority and then retries committed offers using
+migration 12's indexes.
 A late commit or failed stdout write remains re-offerable to the exact session
 until acknowledgement. Consumers deduplicate by answer ID before taking action.
-Invalid candidates are skipped with an answer-ID diagnostic.
+Invalid hook candidates are skipped with an answer-ID diagnostic; ordinary
+observation readers return an error for invalid records.
 `read_hook_answer_page` returns a continuation after the last scanned key,
 including skipped invalid or oversized rows. Hooks use it to advance past
 pages with no deliverable answer while retaining the same target and deadline.
+Answers proved too large for every hook context are marked in the delivery
+error field when it is empty and excluded from subsequent hook scans, while
+their state and Fabric mail remain. Context-dependent failures remain eligible.
 Hook replay preserves `attempts` and `last_attempt_at`: those fields record the
 queued-to-offered transition, rather than counting injections or replays.
 

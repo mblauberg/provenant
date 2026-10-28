@@ -156,8 +156,17 @@ Internal candidate pages cap at 128 KiB; adapters must fit their final protocol
 output within 8 KiB, skipping oversized candidates without hiding smaller ones.
 Within its delivery deadline, the hook advances past each scanned page that has
 no answer fitting the final output. The cursor includes invalid and oversized
-rows, so a full undeliverable head page cannot hide later answers. Oversized
-answer diagnostics name the answer ID; skipped answers keep their delivery state.
+rows, so a full undeliverable head page cannot hide later answers. An answer
+proved too large for any hook envelope is marked on its delivery record and
+excluded from later hook scans, unless the record already has an error. Its
+diagnostic names the answer ID; its delivery state and Fabric mail copy remain
+available. Answers that might fit in a different hook context remain eligible
+for later scans.
+
+The hook does not migrate the local store. After upgrading to a version with a
+new local delivery index, run a normal inbox command to migrate the store before
+the hook can offer answers. Until then the hook reports that the local delivery
+index is unavailable; Fabric mail remains available.
 
 Claude's installed `PreToolUse` hook offers answers on Bash calls. Guard denials and
 exit-2 fallback take precedence. Allowed calls may receive `additionalContext`

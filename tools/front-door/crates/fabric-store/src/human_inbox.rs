@@ -43,6 +43,54 @@ pub struct HumanAcknowledgement<'a> {
 }
 
 impl Store {
+    /// Exclude answers that cannot fit a hook envelope without consuming mail.
+    /// Re-read each row so acknowledgement and destination changes win races.
+    pub fn mark_hook_undeliverable_once(
+        root: &provenant_core::StateRoot,
+        target: &AnswerTarget,
+        ids: &[String],
+        deadline: std::time::Instant,
+    ) -> Result<Vec<String>> {
+        use crate::local_delivery::before;
+        before(deadline)?;
+        let store = Self::open_hook_delivery(root, deadline)?.ok_or(Error::NotFound)?;
+        let tx = rusqlite::Transaction::new_unchecked(
+            &store.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let mut marked = Vec::new();
+        for id in ids {
+            before(deadline)?;
+            let bytes: Option<Vec<u8>> = tx.query_row(
+                "SELECT substr(record,1,?3) FROM human_answer_outbox WHERE project=?1 AND answer=?2",
+                params![target.project.to_string(), id, MAX_RECORD_READ_BYTES],
+                |row| row.get(0),
+            ).optional()?;
+            let Some(Ok(mut delivery)) = bytes.as_deref().map(decode::<AnswerDelivery>) else {
+                continue;
+            };
+            if delivery.schema_version != 1
+                || delivery.answer_id.to_string() != *id
+                || delivery.target_host != target.host
+                || delivery.target_actor != target.actor
+                || delivery.target_session != target.session
+                || delivery.state == AnswerDeliveryState::Acknowledged
+                || delivery.error.is_some()
+            {
+                continue;
+            }
+            delivery.error = Some(crate::local_delivery::HOOK_ENVELOPE_TOO_LARGE.to_owned());
+            tx.execute(
+                "UPDATE human_answer_outbox SET record=?3 WHERE project=?1 AND answer=?2",
+                params![target.project.to_string(), id, encode(&delivery)?],
+            )?;
+            marked.push(id.clone());
+        }
+        before(deadline)?;
+        tx.commit()?;
+        Ok(marked)
+    }
+
     /// Record selected hook candidates once per exact destination. Offered
     /// snapshots can be replayed idempotently until acknowledgement, so a late
     /// commit or failed pipe write never consumes the answer. No creation,
