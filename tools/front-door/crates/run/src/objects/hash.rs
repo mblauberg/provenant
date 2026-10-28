@@ -332,7 +332,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn collision_finalization_is_a_verification_failure() {
+    fn collision_finalisation_is_a_verification_failure() {
         // First five SHA-1 blocks of the published SHAttered PDF pair, also
         // shipped as test vectors by sha1collisiondetection 0.3.4. Their collision
         // blocks trigger detection without storing the rest of either PDF.

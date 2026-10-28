@@ -180,6 +180,8 @@ specializations = "specializations"
 "center" = "center"
 "defaults_repeated_branches_and_include_normalization" = "defaults_repeated_branches_and_include_normalization"
 "finalize" = "finalize"
+# SHA-1 collision-detection upstream API.
+"finalize_cd" = "finalize_cd"
 "integer_materialization_reports_range_errors_without_float_rounding" = "integer_materialization_reports_range_errors_without_float_rounding"
 "integer_text_matches_python_decimal_parsing_and_normalization" = "integer_text_matches_python_decimal_parsing_and_normalization"
 "labeling" = "labeling"
