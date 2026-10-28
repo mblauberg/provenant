@@ -28,8 +28,12 @@ fn expected_fingerprint<'a>(
     previous: Option<&'a str>,
     live: Option<&'a str>,
 ) -> Result<&'a str, ProbeFailure> {
-    let expected = configured.or(previous).or(live).ok_or(ProbeFailure::Auth)?;
-    if live != Some(expected) {
+    let expected = configured
+        .or(previous)
+        .or(live)
+        .ok_or(ProbeFailure::Network)?;
+    let live = live.ok_or(ProbeFailure::Network)?;
+    if live != expected {
         return Err(ProbeFailure::Auth);
     }
     Ok(expected)
@@ -62,13 +66,43 @@ fn may_refresh(
     Ok(!fixed.is_some_and(|fixed| Some(fixed) == default))
 }
 
-// Missing credentials or CLI output may leave an identity unknown, but a
-// failure to prepare its private directory must reach the quota report.
+// Missing credentials may leave an identity without a token. Transient errors
+// must reach the quota report rather than masquerading as missing credentials.
 fn optional_probe<T>(result: Result<T, ProbeFailure>) -> Result<Option<T>, ProbeFailure> {
     match result {
-        Err(ProbeFailure::ProbeDirectory) => Err(ProbeFailure::ProbeDirectory),
-        other => Ok(other.ok()),
+        Ok(value) => Ok(Some(value)),
+        Err(ProbeFailure::Auth) => Ok(None),
+        Err(error) => Err(error),
     }
+}
+
+fn keychain_output(out: ExecOutcome) -> Result<Vec<u8>, ProbeFailure> {
+    if !clean(&out) {
+        return Err(ProbeFailure::Network);
+    }
+    match out.termination {
+        Termination::Exit(0) => Ok(out.stdout.bytes),
+        Termination::Exit(44) => Err(ProbeFailure::Auth),
+        _ => Err(ProbeFailure::Network),
+    }
+}
+
+fn status_fingerprint(result: Result<ExecOutcome, ProbeFailure>) -> Result<String, ProbeFailure> {
+    let out = result.map_err(|error| match error {
+        ProbeFailure::ProbeDirectory => error,
+        _ => ProbeFailure::Network,
+    })?;
+    if !clean(&out) || out.termination != Termination::Exit(0) {
+        return Err(ProbeFailure::Network);
+    }
+    let state: Value =
+        serde_json::from_slice(&out.stdout.bytes).map_err(|_| ProbeFailure::Network)?;
+    state
+        .get("email")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(|s| fingerprint(s, 16))
+        .ok_or(ProbeFailure::Network)
 }
 
 fn refresh(
@@ -117,43 +151,33 @@ impl LiveQuota {
         (dir != self.home.join(".claude")).then_some(("CLAUDE_CONFIG_DIR", dir))
     }
     fn claude_identity(&self, dir: &Path, deadline: i64) -> Result<Identity, ProbeFailure> {
-        let state = optional_probe(self.json_command(
+        let fingerprint = status_fingerprint(self.command(
             "claude",
             &["auth", "status", "--json"],
             self.claude_selector(dir),
+            None,
             deadline,
-            4,
+            10,
         ))?;
-        let fingerprint = state
-            .as_ref()
-            .and_then(|s| s.get("email").and_then(Value::as_str))
-            .map(|s| fingerprint(s, 16));
         let (token, expires) = optional_probe(self.claude_token(dir, deadline))?
             .map_or((None, None), |(t, e)| (Some(t), Some(e)));
         // The default session can rotate while a tick is in flight. Confirm
         // the identity after reading its credential before attributing it.
         if dir == self.home.join(".claude") {
-            let after = optional_probe(self.json_command(
+            let confirmed = status_fingerprint(self.command(
                 "claude",
                 &["auth", "status", "--json"],
                 None,
+                None,
                 deadline,
-                4,
+                10,
             ))?;
-            let confirmed = after
-                .as_ref()
-                .and_then(|s| s.get("email").and_then(Value::as_str))
-                .map(|s| super::fingerprint(s, 16));
             if confirmed != fingerprint {
-                return Ok(Identity {
-                    fingerprint: None,
-                    token: None,
-                    expires: None,
-                });
+                return Err(ProbeFailure::Network);
             }
         }
         Ok(Identity {
-            fingerprint,
+            fingerprint: Some(fingerprint),
             token,
             expires,
         })
@@ -165,22 +189,33 @@ impl LiveQuota {
                 service.push('-');
                 service.push_str(&crate::claude::keychain_suffix(dir.as_os_str().as_bytes()));
             }
-            let out = self.command(
-                "/usr/bin/security",
-                &["find-generic-password", "-s", &service, "-w"],
-                None,
-                None,
-                deadline,
-                3,
-            )?;
-            if !clean(&out) || out.termination != Termination::Exit(0) {
-                return Err(ProbeFailure::Auth);
-            }
-            out.stdout.bytes
+            let out = self
+                .command(
+                    "/usr/bin/security",
+                    &["find-generic-password", "-s", &service, "-w"],
+                    None,
+                    None,
+                    deadline,
+                    10,
+                )
+                .map_err(|error| match error {
+                    ProbeFailure::ProbeDirectory => error,
+                    _ => ProbeFailure::Network,
+                })?;
+            keychain_output(out)?
         } else {
-            read(&dir.join(".credentials.json"))?
+            let file =
+                fs::File::open(dir.join(".credentials.json")).map_err(|_| ProbeFailure::Network)?;
+            let mut bytes = Vec::new();
+            file.take(LIMIT as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| ProbeFailure::Network)?;
+            if bytes.len() > LIMIT {
+                return Err(ProbeFailure::Network);
+            }
+            bytes
         };
-        serde_json::from_slice(&raw).map_err(|_| ProbeFailure::Auth)
+        serde_json::from_slice(&raw).map_err(|_| ProbeFailure::Network)
     }
     fn claude_token(&self, dir: &Path, deadline: i64) -> Result<(String, i64), ProbeFailure> {
         let value = self.claude_credentials(dir, deadline)?;
@@ -325,6 +360,53 @@ impl LiveQuota {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn timed_out_keychain_read_is_transient() {
+        use super::*;
+        let out = ExecOutcome {
+            termination: Termination::Exit(44),
+            stdout: Default::default(),
+            stderr: Default::default(),
+            timed_out: true,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 0,
+        };
+        assert_eq!(keychain_output(out), Err(ProbeFailure::Network));
+        let missing = ExecOutcome {
+            termination: Termination::Exit(44),
+            stdout: Default::default(),
+            stderr: Default::default(),
+            timed_out: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 0,
+        };
+        assert_eq!(keychain_output(missing), Err(ProbeFailure::Auth));
+    }
+
+    #[test]
+    fn timed_out_auth_status_is_transient() {
+        use super::*;
+        let out = ExecOutcome {
+            termination: Termination::Exit(0),
+            stdout: Default::default(),
+            stderr: Default::default(),
+            timed_out: true,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 0,
+        };
+        assert_eq!(status_fingerprint(Ok(out)), Err(ProbeFailure::Network));
+        assert_eq!(
+            status_fingerprint(Err(ProbeFailure::Malformed)),
+            Err(ProbeFailure::Network)
+        );
+    }
+
+    #[test]
     fn quota_refresh_renews_near_expiry_file_credentials() {
         use super::*;
         struct Renew<'a>(&'a Path, std::sync::atomic::AtomicUsize);
@@ -449,6 +531,10 @@ mod tests {
         assert_eq!(
             expected_fingerprint(None, None, Some("first-login")).unwrap(),
             "first-login"
+        );
+        assert_eq!(
+            expected_fingerprint(Some("pinned"), None, None),
+            Err(ProbeFailure::Network)
         );
     }
     #[test]
