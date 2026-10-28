@@ -260,6 +260,12 @@ pub(crate) fn rust_tools(
         if developer.is_dir() {
             runtime_reads.push(subtree(developer));
             tool_exec_roots.push(subtree(developer.join("usr/bin")));
+            // `/usr/bin/python3` runs the tools' python3, a symlink into this
+            // framework, and Seatbelt checks the resolved path.
+            let python = developer.join("Library/Frameworks/Python3.framework");
+            if python.is_dir() {
+                tool_exec_roots.push(subtree(python));
+            }
             if access == Access::WorktreeWrite {
                 tool_exec_roots.push(subtree(developer.join("usr/libexec/git-core")));
             }
