@@ -104,7 +104,10 @@ bodies. The existing 1 MiB envelope must refuse oversized pages without writing
 overflow artefacts and advise reducing the limit. If one row still exceeds the
 cap at limit 1, clients must use bounded `provenant output ATTEMPT` reads; this
 surface cannot render that row. A 100-row page must meet p95 ≤1 second, including
-with at least 100,000 retained attempts.
+with at least 100,000 retained attempts. Tests measure the indexed reader at
+100,000 attempts and the full console page on a small fixture. The full board
+at 100,000 attempts, including per-row observation lookups, still needs a
+measurement on a real host before this bound counts as verified.
 
 - Why: an active board must remain pageable while work changes, without blob
   scans, invented usage or one damaged ancillary checkpoint hiding other lanes.
