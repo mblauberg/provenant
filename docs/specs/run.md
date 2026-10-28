@@ -160,7 +160,11 @@ Admission audit (#2088):
   run ID is refused, so it cannot bind a missing row or shadow another run.
   Existing legacy host rows remain readable and replayable only with their
   sealed request digest; lane stores cannot create or repair missing legacy
-  rows. Removing the version marker grants no chair association.
+  rows. Removing the version marker grants no chair association. A legacy
+  continuation whose host seal is lost is therefore refused permanently rather
+  than repaired from lane bytes.
+- New nested continuations never take a lane-supplied ID: resume derives and
+  overwrites their run and attempt IDs.
 - Host continuations given a reopened lane-local store check the replayed run ID
   against the request and operation using the same derivation before copying
   the chair binding. New inheritance also verifies the source run and attempt
@@ -176,8 +180,9 @@ Admission audit (#2088):
   retains the original immutable request. Even repair of a missing host row
   seals the original chair and digest; a conflicting row is refused.
 
-Launch validation reads `fabric-runtime::chairs::ChairIndex`; missing records
-and older runs are unbound. Display readers arrive in a later slice. Provider handles and child requests are never fallbacks. Graph and
+The chair row is sealed before handoff, so presence in the index does not imply
+that the run launched. Launch validation reads `fabric-runtime::chairs::ChairIndex`;
+for reads of existing runs, missing records and older runs are unbound. Display readers arrive in a later slice. Provider handles and child requests are never fallbacks. Graph and
 peer executions remain unbound until they retain an originating chair separately
 from the actor owning operation replay. Board and tree rendering are separate.
 
