@@ -55,6 +55,8 @@ pub struct Saved {
     pub unchanged: bool,
     /// Revisions kept after pruning, including this one.
     pub retained: usize,
+    /// Advisory discovery publication failed after the manifest was committed.
+    pub warnings: Vec<String>,
 }
 /// A retained revision's text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -209,7 +211,9 @@ pub enum SessionError {
     Deadline,
     #[error("session revision history is unreadable or does not match its recorded hash")]
     History,
-    #[error("session discovery identity does not match the registered chair")]
+    #[error(
+        "session discovery identity does not match the registered chair; save with --rebind to explicitly replace the binding"
+    )]
     DiscoveryIdentity,
 }
 
@@ -236,6 +240,7 @@ pub struct SessionStore {
     session: HostSessionId,
     keep: u64,
     chair: Option<ChairIdentity>,
+    rebind: bool,
 }
 impl SessionStore {
     pub fn new(root: StateRoot, project: ProjectId, session: HostSessionId) -> Self {
@@ -245,6 +250,7 @@ impl SessionStore {
             session,
             keep: REVISIONS_DEFAULT,
             chair: None,
+            rebind: false,
         }
     }
     /// Keep this many revisions, current included, clamped to 1 through 64.
@@ -277,8 +283,10 @@ impl SessionStore {
     }
     /// As `save`, keeping the checkpoint it replaces as a numbered revision.
     /// The previous text is stored first, then the new checkpoint is published,
-    /// then the history that names both and the discovery sidecar. A failure
-    /// between steps leaves a complete checkpoint; the next save records it.
+    /// then the history that names both and the advisory discovery sidecar.
+    /// Discovery publication failure warns after the manifest commit; the next
+    /// save repairs it. A failure before that commit leaves a complete
+    /// checkpoint; the next save records it.
     /// Revisions beyond the keep count are deleted after the history is
     /// written; a deletion that fails is retried by the next save. Unreadable
     /// revision history restarts after the highest revision file present.
@@ -289,6 +297,19 @@ impl SessionStore {
         budget: WaitBudget,
         cancel: &CancelToken,
         clock: &dyn Clock,
+    ) -> Result<Saved, SessionError> {
+        self.save_revision_with(text, budget, cancel, clock, |dir, record| {
+            self.publish_discovery(dir, record)
+        })
+    }
+
+    fn save_revision_with(
+        &self,
+        text: &[u8],
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+        publish_discovery: impl FnOnce(&Directory, &SessionDiscovery) -> Result<(), SessionError>,
     ) -> Result<Saved, SessionError> {
         if text.len() as u64 > CHECKPOINT_LIMIT {
             return Err(SessionError::TooLarge);
@@ -340,8 +361,11 @@ impl SessionStore {
         manifest.revisions = chain;
         let manifest_bytes = serde_json::to_vec(&manifest).map_err(|_| SessionError::History)?;
         publish(&dir, MANIFEST, &manifest_bytes)?;
-        if let Some(record) = self.saved_discovery(discovery, &current, now) {
-            self.publish_discovery(&dir, &record)?;
+        let mut warnings = Vec::new();
+        if let Some(record) = self.saved_discovery(discovery, &current, now)
+            && let Err(error) = publish_discovery(&dir, &record)
+        {
+            warnings.push(format!("checkpoint saved; discovery publication failed: {error}; repeat the save to repair discovery"));
         }
         // The history is durable, so these files are unreachable. A failed
         // delete leaves an orphan that the next save removes.
@@ -354,6 +378,7 @@ impl SessionStore {
             parent: current.parent,
             unchanged,
             retained: manifest.revisions.len(),
+            warnings,
         })
     }
     /// The retained revisions, oldest first; the last is the current checkpoint.
@@ -792,6 +817,52 @@ mod tests {
             .unwrap();
         assert!(worker.discovery().unwrap().is_none());
         assert!(discover_sessions(&root, project).unwrap().is_empty());
+    }
+
+    #[test]
+    fn discovery_publication_failure_warns_after_manifest_commit_and_next_save_repairs() {
+        use provenant_core::{ActorId, HostId};
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "chair")
+            .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([4; 16]));
+        for first_save in [true, false] {
+            let clock = clock(10);
+            let saved = selected
+                .save_revision_with(
+                    if first_save { b"first" } else { b"second" },
+                    WaitBudget::cli(clock.mono_now(), 1).unwrap(),
+                    &CancelToken::new(),
+                    &clock,
+                    |dir, record| {
+                        // Inject failure at the actual second publication boundary.
+                        assert_eq!(
+                            load(dir).unwrap().revisions.last(),
+                            Some(&record.checkpoint)
+                        );
+                        Err(SessionError::Deadline)
+                    },
+                )
+                .unwrap();
+            assert_eq!(saved.warnings.len(), 1);
+            assert!(saved.warnings[0].contains("checkpoint saved; discovery publication failed"));
+            let expected = if first_save { "first" } else { "second" };
+            assert_eq!(selected.read().unwrap().unwrap().markdown, expected);
+            if first_save {
+                assert!(selected.discovery().unwrap().is_none());
+            } else {
+                assert_eq!(
+                    selected.discovery().unwrap().unwrap().consistency,
+                    DiscoveryConsistency::CheckpointChanged
+                );
+            }
+            let repaired = super::tests::saved(&selected, expected);
+            assert!(repaired.unchanged);
+            assert!(repaired.warnings.is_empty());
+            assert_eq!(
+                selected.discovery().unwrap().unwrap().consistency,
+                DiscoveryConsistency::Current
+            );
+        }
     }
     #[test]
     fn enforces_utf8_and_byte_bounds_on_read_and_write() {

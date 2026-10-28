@@ -716,17 +716,20 @@ fn execute(
         HandoffReceipt::Delivered { .. } => {}
     }
     // The peer holds the hand-off: record it as this session's checkpoint.
+    let mut checkpoint_warnings = Vec::new();
     let checkpoint_error = store.as_ref().and_then(|store| {
         WaitBudget::cli(clock.mono_now(), 30)
             .map_err(|e| e.to_string())
             .and_then(|budget| {
                 store
-                    .save(prompt.as_bytes(), budget, &cancel, &clock)
+                    .save_revision(prompt.as_bytes(), budget, &cancel, &clock)
+                    .map(|saved| checkpoint_warnings = saved.warnings)
                     .map_err(|e| e.to_string())
             })
             .err()
     });
     data["checkpoint_error"] = json!(checkpoint_error);
+    data["checkpoint_warnings"] = json!(checkpoint_warnings);
     data["receipt"] = serde_json::to_value(&receipt)?;
     if let Some(failure) = launch_failure(&args.to, &receipt, args.no_launch, &mut data) {
         return Err(failure);
@@ -768,6 +771,9 @@ fn execute(
         "Handed off to {} as account {}. Prompt on the peer: {prompt_path}\n",
         args.to, args.account
     );
+    for warning in &checkpoint_warnings {
+        let _ = writeln!(human, "Warning: {warning}");
+    }
     for tree in worktrees {
         let _ = match (&tree.path, &tree.error) {
             (Some(path), Some(warning)) => {

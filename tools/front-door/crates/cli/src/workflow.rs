@@ -70,9 +70,12 @@ pub enum Session {
         /// Markdown checkpoint file, or `-` for standard input.
         #[arg(long)]
         file: String,
-        /// Bind the chair actor using this harness's MCP client default
+        /// Compatibility option; chair identity uses the configured Fabric label
         #[arg(long, value_parser = crate::install::harness_parser())]
         client: Option<provenant_records::Harness>,
+        /// Replace the registered chair binding and record its previous identity
+        #[arg(long)]
+        rebind: bool,
     },
     /// Show a session checkpoint, one of its retained revisions or their list
     Show {
@@ -153,7 +156,7 @@ pub struct Handoff {
     /// Source session ID; defaults to CLAUDE_CODE_SESSION_ID, then CLAUDE_SESSION_ID
     #[arg(long)]
     pub session_id: Option<String>,
-    /// Source chair harness, using the same actor binding as session save
+    /// Compatibility option; uses the same configured chair actor as session save
     #[arg(long, value_parser = crate::install::harness_parser())]
     pub client: Option<provenant_records::Harness>,
 }
@@ -403,16 +406,25 @@ fn execute(
     home: &Path,
     cwd: &Path,
 ) -> Result<Value, Error> {
-    let _ = globals;
     // Session reads resolve only an existing project binding. Fabric's writable
     // context would allocate host/project identity and a utility home here.
     if matches!(
         cmd,
         Workflow::Session(Session::Show { .. } | Session::Diff { .. })
     ) {
-        return read_session(cmd, &roots, cwd);
+        let selected = globals.project.as_deref().unwrap_or(cwd);
+        let selected =
+            provenant_os::fs::canonicalize(selected).map_err(crate::fabric::EdgeError::from)?;
+        return read_session(cmd, &roots, &selected);
     }
     let context = crate::fabric::Context::open(roots, home, cwd)?;
+    if context.in_lane && matches!(cmd, Workflow::Session(Session::Save { .. })) {
+        return Err(Error::Refused {
+            code: "IN_LANE",
+            message: "a lane cannot register or save a chair session".into(),
+            data: Value::Null,
+        });
+    }
     let actor = match &cmd {
         Workflow::Session(Session::Save { client, .. }) => {
             session_actor(&context, *client).map_err(|e| invalid(e.to_string()))?
@@ -455,7 +467,10 @@ fn execute(
             request(&input.request)?,
         ),
         Workflow::Session(Session::Save {
-            session_id, file, ..
+            session_id,
+            file,
+            rebind,
+            ..
         }) => {
             let id = HostSessionId::parse(&session_id).map_err(|e| invalid(e.to_string()))?;
             let text = read_input(&file)?;
@@ -464,6 +479,7 @@ fn execute(
                 .map_err(|error| invalid(error.to_string()))?;
             let saved = SessionStore::new(edge.roots.state.clone(), project, id)
                 .with_chair(host, actor)
+                .with_rebind(rebind)
                 .with_revisions(keep)
                 .save_revision(&text, edge.budget()?, &edge.cancel, &edge.clock)?;
             Ok(serde_json::json!({
@@ -474,6 +490,7 @@ fn execute(
                 "unchanged": saved.unchanged,
                 "retained": saved.retained,
                 "keep": keep,
+                "warnings": saved.warnings,
             }))
         }
         Workflow::Session(Session::Show { .. } | Session::Diff { .. }) => unreachable_read(),
@@ -487,22 +504,27 @@ fn unreachable_read() -> Result<Value, Error> {
     Err(invalid("session reads require the read-only context"))
 }
 
-/// Match the MCP client's default actor without overriding an explicit label.
+/// Chair identity is independent of transport/client defaults. Read the stored
+/// configuration so an MCP edge's client override cannot change the binding.
 pub fn session_actor(
     context: &crate::fabric::Context,
-    client: Option<provenant_records::Harness>,
-) -> Result<ActorId, provenant_fabric_runtime::identity::IdentityError> {
-    if let Some(client) = client
-        && context.config.agent_label.is_empty()
-        && std::env::var_os("PROVENANT_AGENT_LABEL").is_none_or(|v| v.is_empty())
-    {
-        return provenant_fabric_runtime::identity::Address::new(
-            context.identity.host,
-            client.spec().name,
-        )
-        .map(|address| address.actor);
-    }
-    Ok(context.identity.inbox.actor)
+    _client: Option<provenant_records::Harness>,
+) -> Result<ActorId, String> {
+    let config = provenant_config::read_with_domains(&context.roots, &crate::domains::SECTIONS)
+        .map_err(|e| e.to_string())?
+        .domains
+        .fabric;
+    let explicit = std::env::var_os("PROVENANT_AGENT_LABEL").filter(|v| !v.is_empty());
+    let label = match explicit.as_ref() {
+        Some(label) => label
+            .to_str()
+            .ok_or_else(|| "agent label must be UTF-8".to_owned())?,
+        None if !config.agent_label.is_empty() => &config.agent_label,
+        None => &config.client_label,
+    };
+    provenant_fabric_runtime::identity::Address::new(context.identity.host, label)
+        .map(|address| address.actor)
+        .map_err(|e| e.to_string())
 }
 
 fn read_session(cmd: Workflow, roots: &Roots, cwd: &Path) -> Result<Value, Error> {

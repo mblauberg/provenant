@@ -8,10 +8,21 @@ and read it with `provenant workflow session show SESSION`. Each checkpoint is
 limited to 256 KiB. Session hooks and hand-off prompts can include a shorter
 excerpt.
 
-For an MCP chair without an explicit agent label, include `--client claude` or
-`--client codex` on each save to use the same actor as its MCP inbox. Saves keep
-that host/actor binding; supply the same `--client` on handoff. A different actor
-is refused with `IDENTITY` before peer delivery.
+CLI, MCP callers, hooks and handoff derive chair identity from the host and the
+explicit agent label, falling back to the configured Fabric agent/client label.
+`--client` does not change that identity. Hooks inject the same save command
+shown above. Lanes cannot save or register chairs (`IN_LANE`).
+
+An old client-dependent binding or a changed label can return `IDENTITY`.
+Recover with `provenant workflow session save SESSION --file FILE --rebind`;
+the record keeps the previous host/actor and change time. Corrupt discovery JSON
+returns `HISTORY`; unreadable discovery files return `IO`. Restore a readable
+discovery record from backup before retrying those errors.
+
+Discovery is advisory and scoped to the host's state directory. If publication
+fails after the checkpoint and revision manifest commit, the save succeeds with
+a warning. Repeat the save to repair discovery (repeat `--rebind` if used).
+Readers report stale discovery explicitly; reads never repair it.
 
 ## Earlier saves
 

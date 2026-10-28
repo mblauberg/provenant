@@ -138,14 +138,23 @@ marks it. A revision whose text fails its hash is refused with `HISTORY`.
 
 ### Explicit chairs are discoverable
 
+**Contract for later slices:** `discovery.json` is advisory. The checkpoint and
+revision manifest commit before the separate discovery replacement. Failure of
+that replacement returns a successful save with a warning; the next save repairs
+the entry. Readers must compare its revision and hash with the manifest and
+checkpoint and explicitly report stale metadata before using it.
+
 `workflow session save SESSION` registers the caller's exact Fabric host,
 bound project, supplied host session ID and trusted actor as a chair.
-`save --client HARNESS` uses the same default actor as `fabric mcp --client
-HARNESS`, while preserving explicit environment/configured agent labels.
-Without `--client`, the normal CLI Fabric identity applies; MCP chairs without
-an explicit agent label must supply their client on each save. Source
-checkpoint saves during `session handoff` use the same optional source
-`--client` binding and validate it before peer delivery. The workflow
+Every writing edge derives the actor from the host and `PROVENANT_AGENT_LABEL`,
+then configured `fabric.agent_label`, then configured `fabric.client_label`.
+Transport defaults do not participate: `--client HARNESS` remains a source
+harness hint and does not change chair identity, including for MCP callers.
+Hooks inject `provenant workflow session save SESSION --file <checkpoint.md>`;
+this uses the same derivation as saves with `--client` and source checkpoint
+saves during `session handoff`. Handoff validates the binding before peer
+delivery. Lanes (`context.in_lane`) are refused before saving or registering a
+chair, including when they request `--rebind`. The workflow
 owner stores a per-session index entry in
 `workflow/projects/<project>/sessions/<session>/discovery.json` (at most 4 KiB):
 
@@ -153,9 +162,15 @@ owner stores a per-session index entry in
 |---|---|
 | `schema_version` | `1` |
 | `host`, `project_id`, `host_session_id` | Exact session key; host/project IDs come from their existing owners |
-| `chair_actor` | Exact Fabric actor, bound by the writing edge; later explicit saves cannot change it or the host |
-| `created_at`, `last_saved_at` | Canonical RFC3339 UTC with microseconds; first registration and latest successful save, including unchanged saves |
+| `chair_actor` | Canonical Fabric actor; only an explicit `save --rebind` may replace it or the host |
+| `created_at`, `last_saved_at` | Canonical RFC3339 UTC with microseconds; first registration and latest save whose discovery was published, including unchanged saves |
 | `checkpoint` | The complete current `Revision`: revision, parent, SHA-256, bytes and saved time |
+| `rebound_from` | Optional previous host/actor and `changed_at`; latest explicit binding change, preserved by ordinary saves |
+
+The discovery key is scoped to this host's state directory. Separate host state
+directories can contain the same project/session ID without collision. Shared
+state directories across hosts are unsupported; peer composition belongs to
+slice 16.
 
 The entry denotes role `chair` and evidence source `checkpoint_save`. No
 provider, provider session, label, title, parent, route, summary, log, lifecycle,
@@ -166,8 +181,10 @@ register chairs. Legacy manifests and bare checkpoints remain readable with no
 discovery entry; summaries remain unavailable.
 
 The save holds `checkpoint.lock` across checkpoint replacement, atomic revision
-manifest replacement, then atomic discovery replacement, in that order. A
-successful save makes all three durable. The revision manifest stays unchanged
+manifest replacement, then atomic discovery replacement, in that order. Each
+replacement is atomic; the group is not a transaction. A discovery publication
+failure is returned in `warnings` (handoff: `checkpoint_warnings`), with the
+checkpoint save still successful. The revision manifest stays unchanged
 in shape, so older binaries can read and save it without losing history; an
 older writer leaves the discovery entry stale. There is no shared index that
 can race another session's writer. If a process stops after publishing the
@@ -179,7 +196,13 @@ observations, not a lease or an assertion that the provider is alive. Unreadable
 files return an error. A crash on the first save can leave a readable checkpoint
 without registration, which remains unknown until an explicit save succeeds.
 Unreadable discovery metadata blocks a save before replacing checkpoint or
-history. An explicit host/actor mismatch is refused as `IDENTITY`.
+history. An explicit host/actor mismatch is refused as `IDENTITY`, with an error
+naming `--rebind`. To recover an older client-dependent binding or deliberately
+change labels, run `provenant workflow session save SESSION --file FILE --rebind`.
+This records the previous identity and change time under the checkpoint lock.
+If discovery publication warns, repeat that command to commit the new binding.
+For unreadable discovery, restore a readable record from backup before retrying;
+`--rebind` does not bypass corrupt metadata or a project/session key mismatch.
 The next save reconciles revisions and publishes the corresponding entry;
 identity must be supplied again when registration was never committed.
 
@@ -190,12 +213,27 @@ Discovery, `session show` (all modes) and `session diff` create no files, locks,
 directories or project/host identities, and never repair state. These CLI reads
 also skip demand-usage recording. Consumers must
 check consistency before treating cached checkpoint metadata as current.
+`show` and `diff` honour `--project` and `--state-dir`, including missing stores
+and unbound projects, without allocating state.
+
+CLI error codes: `IDENTITY` for a binding/key mismatch; `IN_LANE` for a lane's
+chair save; `HISTORY` for malformed discovery JSON or invalid revision history;
+`IO` for unreadable discovery files (permissions, symlinks, size limits or other
+filesystem failures), checkpoint encoding and pre-commit filesystem/deadline
+errors; `MISSING` for an unbound project or absent checkpoint/revision; `INVALID`
+for invalid session IDs, options or oversized checkpoint input. A post-manifest
+discovery publication failure is a warning, not an error code. Discovery library
+readers return `SessionError::History`, `DiscoveryIdentity` or `Filesystem`
+rather than claiming complete coverage of unreadable state.
 
 - Why: later delivery and catalogue readers need durable exact identities without guessing ownership.
 - Test: `crates/workflow/src/session.rs::session_save_discovery_restart`;
   `::discovery_reports_interrupted_publication_without_read_repair`;
+  `::discovery_publication_failure_warns_after_manifest_commit_and_next_save_repairs`;
   `tests/workflow.rs::session_save_discovery_restart`;
-  `::session_reads_allocate_nothing`
+  `::session_reads_allocate_nothing`;
+  `::session_show_honours_project_and_state_dir_without_allocating`;
+  `::a_lane_cannot_register_or_overwrite_a_chair`
 - Owner: `crates/workflow/src/session/discovery.rs`, `crates/cli/src/workflow.rs`
 
 ### Session hooks are advisory

@@ -25,6 +25,17 @@ pub struct SessionDiscovery {
     pub created_at: UtcMicros,
     pub last_saved_at: UtcMicros,
     pub checkpoint: Revision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebound_from: Option<ChairRebind>,
+}
+
+/// The previous binding and when an operator explicitly replaced it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChairRebind {
+    pub host: HostId,
+    pub actor: ActorId,
+    pub changed_at: UtcMicros,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -83,6 +94,13 @@ impl SessionStore {
         self
     }
 
+    /// Explicitly authorise replacing the registered host/actor on this save.
+    #[must_use]
+    pub fn with_rebind(mut self, rebind: bool) -> Self {
+        self.rebind = rebind;
+        self
+    }
+
     /// Preflight an existing chair binding without requiring readable history.
     pub fn validate_chair(&self) -> Result<(), SessionError> {
         match self.directory(false) {
@@ -122,9 +140,10 @@ impl SessionStore {
             && (record.schema_version != 1
                 || record.project_id != self.project
                 || record.host_session_id != self.session
-                || self.chair.as_ref().is_some_and(|chair| {
-                    chair.host != record.host || chair.actor != record.chair_actor
-                }))
+                || !self.rebind
+                    && self.chair.as_ref().is_some_and(|chair| {
+                        chair.host != record.host || chair.actor != record.chair_actor
+                    }))
         {
             return Err(SessionError::DiscoveryIdentity);
         }
@@ -147,8 +166,21 @@ impl SessionStore {
                 created_at: now,
                 last_saved_at: now,
                 checkpoint: checkpoint.clone(),
+                rebound_from: None,
             })
         })?;
+        if let Some(chair) = &self.chair
+            && self.rebind
+            && (record.host != chair.host || record.chair_actor != chair.actor)
+        {
+            record.rebound_from = Some(ChairRebind {
+                host: record.host,
+                actor: record.chair_actor,
+                changed_at: now,
+            });
+            record.host = chair.host;
+            record.chair_actor = chair.actor;
+        }
         record.last_saved_at = now;
         record.checkpoint = checkpoint.clone();
         Some(record)

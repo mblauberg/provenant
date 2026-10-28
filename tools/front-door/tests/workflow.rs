@@ -76,6 +76,128 @@ fn session_reads_allocate_nothing() -> Result {
 }
 
 #[test]
+fn session_show_honours_project_and_state_dir_without_allocating() -> Result {
+    let rig = TestRig::new()?;
+    let other = rig.root.join("other");
+    std::fs::create_dir(&other)?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    assert_eq!(
+        code(&rig.execute(&git, &["init", other.to_str().ok_or("project")?], None)?),
+        0
+    );
+    let file = rig.root.join("checkpoint.md");
+    std::fs::write(&file, "selected project\n")?;
+    call(
+        &rig,
+        &[
+            "--project",
+            &other.to_string_lossy(),
+            "workflow",
+            "session",
+            "save",
+            "selected",
+            "--file",
+            &file.to_string_lossy(),
+        ],
+        0,
+    )?;
+    let before = state_snapshot(&rig.state)?;
+    for mode in [vec![], vec!["--revisions"], vec!["--rev", "1"]] {
+        let mut args = vec![
+            "--project",
+            other.to_str().ok_or("project")?,
+            "workflow",
+            "session",
+            "show",
+            "selected",
+        ];
+        args.extend(mode);
+        let shown = call(&rig, &args, 0)?;
+        assert_eq!(shown["status"], "ok");
+        assert_eq!(state_snapshot(&rig.state)?, before);
+    }
+    // TestRig::command always supplies an explicit --state-dir. A different
+    // directory must not fall back to that store or allocate a new one.
+    let absent_state = rig.root.join("absent-state");
+    let output = rig.execute(
+        std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir",
+            absent_state.to_str().ok_or("state")?,
+            "--project",
+            other.to_str().ok_or("project")?,
+            "workflow",
+            "session",
+            "show",
+            "selected",
+            "--json",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&output), 1);
+    assert!(!absent_state.exists());
+    Ok(())
+}
+
+#[test]
+fn a_lane_cannot_register_or_overwrite_a_chair() -> Result {
+    let mut rig = TestRig::new()?;
+    let file = rig.root.join("checkpoint.md");
+    std::fs::write(&file, "chair\n")?;
+    call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "chair",
+            "--file",
+            &file.to_string_lossy(),
+        ],
+        0,
+    )?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
+    rig.env
+        .push(("PROVENANT_AGENT_LABEL".into(), "lane-attempt".into()));
+    rig.env.push(("PROVENANT_LANE_DEPTH".into(), "1".into()));
+    let before = state_snapshot(&rig.state.join("workflow"))?;
+    for session in ["chair", "lane"] {
+        let refused = call(
+            &rig,
+            &[
+                "workflow",
+                "session",
+                "save",
+                session,
+                "--file",
+                &file.to_string_lossy(),
+                "--rebind",
+            ],
+            1,
+        )?;
+        assert_eq!(refused["error"]["code"], "IN_LANE");
+        assert_eq!(state_snapshot(&rig.state.join("workflow"))?, before);
+    }
+    rig.env
+        .retain(|(key, _)| key != "PROVENANT_AGENT_LABEL" && key != "PROVENANT_LANE_DEPTH");
+    rig.env
+        .push(("PROVENANT_AGENT_LABEL".into(), "fixture".into()));
+    call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "chair",
+            "--file",
+            &file.to_string_lossy(),
+        ],
+        0,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn session_save_discovery_restart() -> Result {
     let mut rig = TestRig::new()?;
     rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
@@ -86,7 +208,7 @@ fn session_save_discovery_restart() -> Result {
     let replies = mcp.eof(
         &rig,
         std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &["fabric", "mcp", "--client", "codex"],
+        &["fabric", "mcp"],
     )?;
     let identity = &replies.get(&id).ok_or("MCP identity")?["result"]["structuredContent"];
     let file = rig.root.join("checkpoint.md");
@@ -98,6 +220,44 @@ fn session_save_discovery_restart() -> Result {
             "session",
             "save",
             "chair-1",
+            "--file",
+            &file.to_string_lossy(),
+            "--client",
+            "codex",
+        ],
+        0,
+    )?;
+    call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "chair-1",
+            "--file",
+            &file.to_string_lossy(),
+        ],
+        0,
+    )?;
+    call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "hook-first",
+            "--file",
+            &file.to_string_lossy(),
+        ],
+        0,
+    )?;
+    call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "hook-first",
             "--file",
             &file.to_string_lossy(),
             "--client",
@@ -135,6 +295,8 @@ fn session_save_discovery_restart() -> Result {
     )?;
     call(&rig, &["workflow", "session", "diff", "chair-1", "1"], 0)?;
     assert_eq!(state_snapshot(&rig.state)?, before);
+    rig.env
+        .push(("PROVENANT_AGENT_LABEL".into(), "changed-chair".into()));
     let refused = call(
         &rig,
         &[
@@ -154,6 +316,43 @@ fn session_save_discovery_restart() -> Result {
     // Only the attempted write's demand telemetry may change on refusal.
     let unchanged: Value = serde_json::from_slice(&std::fs::read(&discovery_path)?)?;
     assert_eq!(unchanged, discovery);
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .ok_or("message")?
+            .contains("--rebind")
+    );
+    let rebound = call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "chair-1",
+            "--file",
+            &file.to_string_lossy(),
+            "--rebind",
+        ],
+        0,
+    )?;
+    assert_eq!(rebound["data"]["warnings"], json!([]));
+    let rebound: Value = serde_json::from_slice(&std::fs::read(&discovery_path)?)?;
+    assert_ne!(rebound["chair_actor"], discovery["chair_actor"]);
+    assert_eq!(rebound["rebound_from"]["actor"], discovery["chair_actor"]);
+    assert_eq!(rebound["rebound_from"]["host"], discovery["host"]);
+    call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "chair-1",
+            "--file",
+            &file.to_string_lossy(),
+        ],
+        0,
+    )?;
+
     // A legacy manifest has no registration; showing it must not register it.
     std::fs::remove_file(discovery_path)?;
     let before = state_snapshot(&rig.state)?;
