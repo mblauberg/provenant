@@ -1,6 +1,20 @@
 //! Read-only lane-cache and worktree disk inventory.
 pub use provenant_os::fs::available_bytes_at;
 
+/// Sample the existing volume containing a prospective output path.
+/// A missing cache directory is not a failed disk observation.
+pub fn available_bytes_at_existing(path: &std::path::Path) -> std::io::Result<u64> {
+    let mut path = path;
+    loop {
+        match available_bytes_at(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                path = path.parent().ok_or(error)?;
+            }
+            result => return result,
+        }
+    }
+}
+
 use crate::cache::{
     CARGO_CACHE_OWNER, CacheGcPolicy, CacheGcReason, LEGACY_CARGO_CACHE_OWNER_PREFIX,
     cache_gc_reason_with_newest, cache_owner_fingerprint, cache_tombstone, is_cache_digest,

@@ -149,10 +149,11 @@ pub struct RunHolder<'a> {
     pub resources: &'a dyn Resources,
 }
 fn custody_error(error: RunError) -> CustodyError {
-    if matches!(error, RunError::HostClock) {
-        return CustodyError::AdmissionClock;
+    match error {
+        RunError::HostClock => CustodyError::AdmissionClock,
+        RunError::DiskFloor { free, floor } => CustodyError::AdmissionDisk { free, floor },
+        other => CustodyError::Io(std::io::Error::other(other.to_string())),
     }
-    CustodyError::Io(std::io::Error::other(error.to_string()))
 }
 impl provenant_supervisor::Holder for RunHolder<'_> {
     fn admit(&self, context: &[u8], attempt: &Directory) -> custody::Result<()> {
@@ -646,6 +647,24 @@ mod host_clock_tests {
         assert!(matches!(
             custody_error(RunError::Validation("wall clock")),
             CustodyError::Io(_)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod disk_admission_tests {
+    use super::*;
+    #[test]
+    fn disk_refusal_reaches_the_guardian_as_safe_numeric_evidence() {
+        assert!(matches!(
+            custody_error(RunError::DiskFloor {
+                free: 99,
+                floor: 100
+            }),
+            CustodyError::AdmissionDisk {
+                free: 99,
+                floor: 100
+            }
         ));
     }
 }

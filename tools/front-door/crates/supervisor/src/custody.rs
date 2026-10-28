@@ -43,6 +43,11 @@ pub enum CustodyError {
     /// it can reach the user without any path.
     #[error("startup spacing cannot be judged: host clock or boot identity unreadable")]
     AdmissionClock,
+    /// Numeric host observations are safe to publish as the lane's refusal.
+    #[error(
+        "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes; run `provenant gc --apply`"
+    )]
+    AdmissionDisk { free: u64, floor: u64 },
     #[error("custody I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]

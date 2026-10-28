@@ -34,7 +34,6 @@ pub const HOST_QUEUED: u64 = 256;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdmissionPolicy {
     pub memory_floor_basis_points: u64,
-    pub disk_floor_bytes: u64,
     /// Spacing between writer starts.
     pub startup_spacing_ms: u64,
     /// Spacing between read-only starts, kept apart from the writer clock.
@@ -42,12 +41,11 @@ pub struct AdmissionPolicy {
     pub admission_seconds: u64,
 }
 impl Default for AdmissionPolicy {
-    /// Defaults: five per cent memory, 500 MiB disk, 20 s writer spacing, 2 s
+    /// Defaults: five per cent memory, the GC disk floor, 20 s writer spacing, 2 s
     /// read-only spacing and a one-hour admission deadline.
     fn default() -> Self {
         Self {
             memory_floor_basis_points: 500,
-            disk_floor_bytes: 500 * 1024 * 1024,
             startup_spacing_ms: 20_000,
             read_only_spacing_ms: 2_000,
             admission_seconds: 3600,
@@ -92,6 +90,7 @@ impl RunStore {
         class: LaneClass,
         concurrency: u64,
         queue_seconds: u64,
+        disk_floor_bytes: u64,
     ) -> Result<()> {
         let sequence: i64 = tx.query_row(
             "SELECT sequence FROM attempts WHERE id=?1",
@@ -108,7 +107,7 @@ impl RunStore {
             holder: Some(self.context.actor_id),
             active: false,
             memory_floor_basis_points: self.policy.memory_floor_basis_points,
-            disk_floor_bytes: self.policy.disk_floor_bytes,
+            disk_floor_bytes,
             startup_spacing_ms: self.policy.spacing_ms(class),
             lane_class: class,
             run_concurrency: concurrency,
@@ -134,18 +133,17 @@ impl RunStore {
     /// names a wait only when it can see one: run concurrency, then startup
     /// spacing, then the shared host and project caps and resource floors.
     pub fn lane_waits(&self, lanes: &[AttemptRecord], call: &Request<'_>) -> Vec<LaneWait> {
-        let guard = self.disk_guard_wait();
         lanes
             .iter()
             .filter(|lane| {
                 matches!(lane.state, AttemptState::Queued | AttemptState::Starting)
-                    || (lane.state == AttemptState::Running && guard.is_some())
+                    || lane.state == AttemptState::Running
             })
             .filter_map(|lane| {
                 let ticket = call.retry(|| self.ticket(&self.db, lane.attempt_id)).ok()?;
                 let class = ticket.lane_class;
                 let waiting_for = if lane.state == AttemptState::Running {
-                    guard.clone()?
+                    self.disk_pause_wait(lane)?
                 } else if lane.state == AttemptState::Queued {
                     "launch: not yet handed to a guardian".to_owned()
                 } else {
@@ -188,29 +186,15 @@ impl RunStore {
             })
             .collect()
     }
-    /// The disk guard's saved state names its pause while it holds builds
-    /// stopped: the free bytes it last saw and the level it resumes at.
-    fn disk_guard_wait(&self) -> Option<String> {
-        let guard = Directory::open_anchor(&self.writer_registry)
-            .and_then(|root| root.open_directory("disk-guard".as_ref()))
-            .ok()?;
-        let raw = guard
-            .open_read("paused.json".as_ref())
-            .and_then(|mut file| file.read_bounded(RECORD_LIMIT))
+    /// The running guardian publishes this lane's pause in its checkpoint.
+    fn disk_pause_wait(&self, lane: &AttemptRecord) -> Option<String> {
+        let attempt = self.attempt_dir(lane.run_id, lane.attempt_id, false).ok()?;
+        let raw = attempt
+            .read_stable("process.json".as_ref(), RECORD_LIMIT)
             .ok()?;
         let state: serde_json::Value = serde_json::from_slice(&raw).ok()?;
-        if state["paused"].as_array()?.is_empty() {
-            return None;
-        }
-        let gib = |key: &str| {
-            let tenths = state[key].as_u64()? * 10 / 1024_u64.pow(3);
-            Some(format!("{}.{}", tenths / 10, tenths % 10))
-        };
-        Some(match (gib("free"), gib("resume_at")) {
-            (Some(free), Some(resume)) => {
-                format!("disk guard paused builds (free {free} GiB, resumes at {resume} GiB)")
-            }
-            _ => "disk guard paused builds".to_owned(),
+        state["disk_paused"].as_bool()?.then(|| {
+            "disk pressure paused builds below gc.free_floor; run `provenant gc --apply`".to_owned()
         })
     }
     fn ticket(&self, db: &Connection, id: AttemptId) -> Result<AdmissionTicket> {
@@ -321,6 +305,7 @@ impl RunStore {
         cancel: &CancelToken,
     ) -> Result<AttemptRecord> {
         let mut delay = Duration::from_millis(100);
+        let mut disk_refusal = None;
         loop {
             let call = Request {
                 clock,
@@ -333,7 +318,13 @@ impl RunStore {
                 .wall_now()
                 .map_err(|_| RunError::Validation("wall clock"))?;
             if now >= ticket.admission_deadline {
-                return Err(RunError::Refused);
+                return Err(match disk_refusal {
+                    Some(free) => RunError::DiskFloor {
+                        free,
+                        floor: ticket.disk_floor_bytes,
+                    },
+                    None => RunError::Refused,
+                });
             }
             // An explicit cancel before spawn ends the wait; finish records it.
             if crate::artifacts::read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some() {
@@ -341,6 +332,7 @@ impl RunStore {
             }
             let fits = match (resources.memory(), resources.disk(attempt)) {
                 (Ok(memory), Ok(disk)) => {
+                    disk_refusal = (disk < ticket.disk_floor_bytes).then_some(disk);
                     memory.total_bytes > 0
                         && u128::from(memory.available_bytes) * 10_000
                             >= u128::from(memory.total_bytes)

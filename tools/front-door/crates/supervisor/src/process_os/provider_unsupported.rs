@@ -87,6 +87,19 @@ impl ProviderGroup {
         Err(unsupported())
     }
 
+    pub(crate) fn pause_builds(
+        &mut self,
+        _census: &Census,
+        _provider: &ProcessIdentity,
+        _spared: &BTreeSet<ProcessIdentity>,
+    ) {
+        match self.never {}
+    }
+
+    pub(crate) fn resume_builds(&mut self) {
+        match self.never {}
+    }
+
     pub(crate) fn record_census(&mut self, _census: &Census) {
         match self.never {}
     }
