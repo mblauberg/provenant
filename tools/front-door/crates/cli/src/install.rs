@@ -9,13 +9,13 @@ use provenant_config::{
 use provenant_core::Roots;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, clap::Args)]
+#[derive(Debug, Clone, clap::Args)]
 pub struct Install {
     /// Release directory to install from
     #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(crate::grammar::absolute))]
     pub source: PathBuf,
-    /// Harness to install for (repeatable)
-    #[arg(long, required = true, value_parser = harness_parser())]
+    /// Harness to install for (repeatable; defaults to the receipt or detected CLIs)
+    #[arg(long, value_parser = harness_parser())]
     pub harness: Vec<Harness>,
     /// Directory for the installed binary
     #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(crate::grammar::absolute))]

@@ -375,7 +375,7 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     assert!(human_stdout.contains("links"));
     assert!(human_stdout.contains("hooks"));
     assert!(human_stdout.contains("MCP"));
-    assert!(human_stdout.contains("findings"));
+    assert!(!human_stdout.contains("findings"));
     assert!(!human_stdout.trim_start().starts_with('{'));
     assert!(!String::from_utf8_lossy(&human.stderr.bytes).contains("\"kind\":\"actions\""));
     fs::create_dir_all(&rig.state)?;
@@ -646,4 +646,107 @@ fn retired_legacy_checkout_flag_is_rejected_without_writes() -> Result {
     assert!(message.contains("--legacy-checkout"), "{message}");
     assert!(!rig.state.exists());
     rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn bare_install_detects_clis_and_claude_directories_then_replays_receipt() -> Result {
+    let mut rig = TestRig::new()?.without_state()?;
+    rig.env
+        .retain(|(key, _)| !matches!(key.to_str(), Some("CODEX_HOME" | "CLAUDE_CONFIG_DIR")));
+    let path = rig.root.join("detected-bin");
+    fs::create_dir(&path)?;
+    for cli in ["claude", "codex", "cursor-agent", "agy", "opencode"] {
+        let file = path.join(cli);
+        fs::write(&file, "#!/bin/sh\nexit 0\n")?;
+        fs::set_permissions(file, fs::Permissions::from_mode(0o755))?;
+    }
+    for label in ["work", "personal"] {
+        fs::create_dir(rig.home.join(format!(".claude-{label}")))?;
+    }
+    fs::write(rig.home.join(".claude-not-a-directory"), "ignore")?;
+    for (key, value) in &mut rig.env {
+        if key == "PATH" {
+            *value = format!("{}:/usr/bin:/bin", path.display()).into();
+        }
+    }
+    let first = staged(&rig)?;
+    let second = staged_named(&rig, "new-release", b"upgrade")?;
+    let install = |stage: &Path, dry: bool| -> Result<_> {
+        let mut arguments = vec![
+            "install".into(),
+            "--source".into(),
+            stage.into(),
+            "--json".into(),
+        ];
+        if dry {
+            arguments.push("--dry-run".into());
+        }
+        Ok(rig.execute_os(Path::new(env!("CARGO_BIN_EXE_provenant")), &arguments, None)?)
+    };
+    let dry = install(&first, true)?;
+    assert_eq!(code(&dry), 0, "{dry:?}");
+    assert!(!rig.state.exists());
+    let conflict = rig.home.join(".codex/config.toml");
+    fs::create_dir_all(conflict.parent().ok_or("config parent")?)?;
+    std::os::unix::fs::symlink(rig.home.join("foreign-config"), &conflict)?;
+    let refused = install(&first, false)?;
+    assert_ne!(code(&refused), 0);
+    assert!(!rig.state.join("install/receipt.json").exists());
+    fs::remove_file(conflict)?;
+    let installed = install(&first, false)?;
+    assert_eq!(code(&installed), 0, "{installed:?}");
+    let receipt_path = rig.state.join("install/receipt.json");
+    let before: provenant_records::InstallReceipt = provenant_records::decode_v1(
+        &*fs::read(&receipt_path)?,
+        provenant_records::Limits::CONFIG,
+    )?;
+    assert_eq!(before.harnesses.len(), 5);
+    assert_eq!(before.harness_targets.len(), 7);
+    fs::create_dir(rig.home.join(".claude-added-later"))?;
+    let upgraded = install(&second, false)?;
+    assert_eq!(code(&upgraded), 0, "{upgraded:?}");
+    let after: provenant_records::InstallReceipt =
+        provenant_records::decode_v1(&*fs::read(receipt_path)?, provenant_records::Limits::CONFIG)?;
+    assert_eq!(after.harness_targets, before.harness_targets);
+    assert_ne!(after.source_digest, before.source_digest);
+    assert!(!rig.home.join(".claude-added-later/skills").exists());
+    let checked = rig.command(&["check", "install", "--json"])?;
+    assert_eq!(code(&checked), 0, "{checked:?}");
+    Ok(())
+}
+
+#[test]
+fn bare_install_preserves_recorded_custom_paths() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    let stage = staged(&rig)?;
+    let bin = rig.root.join("custom-bin");
+    let installed = rig.command(&[
+        "install",
+        "--source",
+        stage.to_str().ok_or("stage")?,
+        "--harness",
+        "codex",
+        "--bin-dir",
+        bin.to_str().ok_or("bin")?,
+        "--json",
+    ])?;
+    assert_eq!(code(&installed), 0, "{installed:?}");
+    let upgraded = rig.command(&[
+        "install",
+        "--source",
+        stage.to_str().ok_or("stage")?,
+        "--json",
+    ])?;
+    assert_eq!(code(&upgraded), 0, "{upgraded:?}");
+    let receipt: provenant_records::InstallReceipt = provenant_records::decode_v1(
+        &*fs::read(rig.state.join("install/receipt.json"))?,
+        provenant_records::Limits::CONFIG,
+    )?;
+    assert_eq!(receipt.bin_dir.to_path_buf()?, bin);
+    assert_eq!(receipt.harness_targets.len(), 1);
+    assert_eq!(
+        receipt.harness_targets[0].skills_dir.to_path_buf()?,
+        rig.root.join("codex/skills")
+    );
+    Ok(())
 }

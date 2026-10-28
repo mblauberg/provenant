@@ -4,8 +4,8 @@ use crate::release_smoke::SystemSmoke;
 use crate::roots::{self, Product, Resolved, Workspace};
 use provenant_cli as cli;
 use provenant_config::{
-    Action, InstallContext, InstallError, InstallFinding, InstallOutcome, InstallReporter,
-    ManualInclude, Targets,
+    Action, HarnessTarget, InstallContext, InstallError, InstallFinding, InstallOutcome,
+    InstallReporter, ManualInclude, Targets,
 };
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_os::clock::SystemClock;
@@ -319,6 +319,7 @@ fn context<'a>(
 }
 fn output_install(
     command: &str,
+    summaries: &[HarnessTarget],
     result: Result<InstallOutcome, InstallError>,
     peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
     gc_agent: Option<super::gc_agent::Installed>,
@@ -327,13 +328,41 @@ fn output_install(
 ) -> u8 {
     match result {
         Ok(outcome) => {
-            let mut counts = BTreeMap::<&str, InstallCounts>::new();
+            let label = |target: &HarnessTarget| {
+                format!(
+                    "{:?} ({})",
+                    target.harness,
+                    target
+                        .skills_dir
+                        .parent()
+                        .unwrap_or(&target.skills_dir)
+                        .display()
+                )
+            };
+            let target_name = |path: &Path| {
+                summaries
+                    .iter()
+                    .find(|target| {
+                        path.starts_with(&target.skills_dir)
+                            || path == target.mcp_file
+                            || target.hook_file.as_deref() == Some(path)
+                            || target.instruction.as_deref().is_some_and(|p| {
+                                p == path || p.with_file_name("HARNESS.md") == path
+                            })
+                    })
+                    .map(label)
+                    .unwrap_or_else(|| install_target(path).to_owned())
+            };
+            let mut counts = BTreeMap::<String, InstallCounts>::new();
+            for target in summaries {
+                counts.entry(label(target)).or_default();
+            }
             for action in &outcome.actions {
                 let target = action
                     .path
                     .to_path_buf()
-                    .map(|path| install_target(&path))
-                    .unwrap_or("target");
+                    .map(|path| target_name(&path))
+                    .unwrap_or_else(|_| "target".into());
                 let selector = action.selector.to_ascii_lowercase();
                 let target_counts = counts.entry(target).or_default();
                 if selector.contains("hook") {
@@ -353,20 +382,20 @@ fn output_install(
                 let target = manual
                     .path
                     .to_path_buf()
-                    .map(|path| install_target(&path))
-                    .unwrap_or("target");
+                    .map(|path| target_name(&path))
+                    .unwrap_or_else(|_| "target".into());
                 counts.entry(target).or_default().notes += 1;
             }
             for finding in &outcome.findings {
                 let target = finding
                     .path
                     .to_path_buf()
-                    .map(|path| install_target(&path))
-                    .unwrap_or("target");
+                    .map(|path| target_name(&path))
+                    .unwrap_or_else(|_| "target".into());
                 counts.entry(target).or_default().findings += 1;
             }
             if counts.is_empty() {
-                counts.entry("target").or_default();
+                counts.entry("target".into()).or_default();
             }
             let mut human = format!("{command}:\n");
             if !outcome
@@ -415,10 +444,20 @@ fn output_install(
                     ));
                 }
             }
-            for (target, count) in counts {
+            for finding in &outcome.findings {
                 human.push_str(&format!(
-                    "  {target}: {} changed links, {} changed hooks, {} changed MCP, {} notes; {} findings; {} other\n",
-                    count.links, count.hooks, count.mcp, count.notes, count.findings, count.other
+                    "  finding: {} ({:?})\n",
+                    finding.rule,
+                    finding.path.to_path_buf().ok()
+                ));
+            }
+            for (target, count) in counts {
+                if !summaries.is_empty() && !summaries.iter().any(|item| label(item) == target) {
+                    continue;
+                }
+                human.push_str(&format!(
+                    "  {target}: {} changed links, {} changed hooks, {} changed MCP, {} notes; {} other\n",
+                    count.links, count.hooks, count.mcp, count.notes, count.other
                 ));
             }
             for manual in &outcome.manual_includes {
@@ -483,6 +522,110 @@ fn install_target(path: &Path) -> &'static str {
     }
 }
 
+fn read_install_receipt(
+    targets: &Targets,
+) -> Result<Option<provenant_records::InstallReceipt>, InstallError> {
+    let path = targets.roots.state.as_path().join("install/receipt.json");
+    match std::fs::File::open(&path) {
+        Ok(file) => provenant_records::decode_v1(file, provenant_records::Limits::CONFIG)
+            .map(Some)
+            .map_err(InstallError::ReceiptDecode),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(InstallError::Fs(provenant_os::fs::FsError::Io {
+            operation: "read install receipt",
+            path,
+            source,
+        })),
+    }
+}
+
+fn install_batches(globals: &cli::Globals, args: &cli::Install) -> Result<Vec<Targets>, EdgeError> {
+    if !args.harness.is_empty() {
+        return selected_targets(globals, &args.harness).map(|(_, targets)| vec![targets]);
+    }
+    // Resolve config and roots without validating an empty selection.
+    let (environment, base) = selected_targets(globals, &[])?;
+    if let Some(receipt) = read_install_receipt(&base).map_err(EdgeError::Install)? {
+        let bin = receipt
+            .bin_dir
+            .to_path_buf()
+            .map_err(InstallError::from)
+            .map_err(EdgeError::Install)?;
+        return receipt
+            .harness_targets
+            .into_iter()
+            .map(|record| {
+                let mut batch = base.clone();
+                batch.bin_dir = bin.clone();
+                let convert = || -> Result<HarnessTarget, InstallError> {
+                    Ok(HarnessTarget {
+                        harness: record.harness,
+                        skills_dir: record.skills_dir.to_path_buf()?,
+                        mcp_file: record.mcp_file.to_path_buf()?,
+                        hook_file: record
+                            .hook_file
+                            .map(|path| path.to_path_buf())
+                            .transpose()?,
+                        instruction: record
+                            .instruction
+                            .map(|path| path.to_path_buf())
+                            .transpose()?,
+                    })
+                };
+                batch.harnesses = vec![convert().map_err(EdgeError::Install)?];
+                Ok(batch)
+            })
+            .collect();
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut batches = Vec::new();
+    for (harness, executable) in [
+        (Harness::Claude, "claude"),
+        (Harness::Codex, "codex"),
+        (Harness::Cursor, "cursor-agent"),
+        (Harness::Agy, "agy"),
+        (Harness::Opencode, "opencode"),
+    ] {
+        if std::env::split_paths(&path)
+            .any(|dir| provenant_os::sys::is_executable(&dir.join(executable)))
+        {
+            batches.push(selected_targets(globals, &[harness])?.1);
+        }
+    }
+    let mut directories: Vec<_> = std::fs::read_dir(&environment.home)
+        .map_err(|source| EdgeError::Install(InstallError::Smoke(source)))?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .as_encoded_bytes()
+                .starts_with(b".claude-")
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        })
+        .map(|entry| entry.path())
+        .collect();
+    directories.sort();
+    for directory in directories {
+        let mut batch = base.clone();
+        let mut defaults = Targets::new(
+            environment.roots.clone(),
+            &environment.home,
+            &[Harness::Claude],
+        );
+        defaults
+            .apply_environment(Some(&directory), None)
+            .map_err(EdgeError::Install)?;
+        batch.harnesses = defaults.harnesses;
+        if !batches
+            .iter()
+            .any(|existing| existing.harnesses[0].skills_dir == batch.harnesses[0].skills_dir)
+        {
+            batches.push(batch);
+        }
+    }
+    Ok(batches)
+}
+
 pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 {
     match provenant_core::PathResolver::resolve_existing_ancestor(
         &provenant_os::fs::SystemPathResolver,
@@ -501,15 +644,32 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
             );
         }
     }
-    let (_environment, mut targets) = match selected_targets(globals, &args.harness) {
+    let mut batches = match install_batches(globals, &args) {
         Ok(value) => value,
         Err(error) => return edge_error("install", error, globals),
     };
-    targets.bin_dir = args.bin_dir.clone().unwrap_or(targets.bin_dir);
-    if let Err(error) = targets.resolve_destinations(&provenant_os::fs::SystemPathResolver) {
-        return install_error("install", &error, globals);
+    for targets in &mut batches {
+        targets.bin_dir = args
+            .bin_dir
+            .clone()
+            .unwrap_or_else(|| targets.bin_dir.clone());
+        if let Err(error) = targets.resolve_destinations(&provenant_os::fs::SystemPathResolver) {
+            return install_error("install", &error, globals);
+        }
     }
-    args.bin_dir = Some(targets.bin_dir.clone());
+    let summaries: Vec<_> = batches
+        .iter()
+        .flat_map(|batch| batch.harnesses.clone())
+        .collect();
+    let Some(mut targets) = batches.last().cloned() else {
+        return super::fail(
+            "install",
+            Outcome::Invalid,
+            "NO_HARNESSES",
+            "No harness CLIs or Claude config directories found; select --harness",
+            globals,
+        );
+    };
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let context = match context(&clock, &cancel) {
@@ -540,14 +700,83 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
     let mut reporter = PreviewReporter {
         home: Some(home.clone()),
     };
-    let result = cli::install::execute_install(
-        &args,
-        targets,
-        &context,
-        &mut reporter,
-        &smoke,
-        env!("PROVENANT_TARGET_TRIPLE"),
-    );
+    let result = (|| {
+        let mut combined = InstallOutcome {
+            actions: Vec::new(),
+            findings: Vec::new(),
+            manual_includes: Vec::new(),
+            dry_run: args.dry_run,
+        };
+        // Refuse predictable conflicts before publishing the first target's receipt.
+        for batch in &mut batches {
+            prepare_agents(batch).map_err(|error| match error {
+                EdgeError::Install(error) => error,
+                _ => InstallError::InvalidConfig("cannot prepare install agents"),
+            })?;
+        }
+        let preview = cli::Install {
+            dry_run: true,
+            ..args.clone()
+        };
+        for batch in &batches {
+            cli::install::execute_install(
+                &preview,
+                batch.clone(),
+                &context,
+                &mut reporter,
+                &smoke,
+                env!("PROVENANT_TARGET_TRIPLE"),
+            )?;
+        }
+        for mut batch in batches {
+            // Publish one receipt target at a time, using config's existing lock and ownership rules.
+            prepare_agents(&mut batch).map_err(|error| match error {
+                EdgeError::Install(error) => error,
+                _ => InstallError::InvalidConfig("cannot prepare install agents"),
+            })?;
+            let outcome = cli::install::execute_install(
+                &args,
+                batch,
+                &context,
+                &mut reporter,
+                &smoke,
+                env!("PROVENANT_TARGET_TRIPLE"),
+            )
+            .map_err(|error| {
+                let (mut completed, remaining, source) = match error {
+                    InstallError::Partial {
+                        completed,
+                        remaining,
+                        source,
+                    } => (completed, remaining, source),
+                    error => (Vec::new(), Vec::new(), Box::new(error)),
+                };
+                completed.splice(0..0, combined.actions.clone());
+                InstallError::Partial {
+                    completed,
+                    remaining,
+                    source,
+                }
+            })?;
+            combined.actions.extend(outcome.actions);
+            combined.findings.extend(outcome.findings);
+            combined.manual_includes.extend(outcome.manual_includes);
+        }
+        if !args.dry_run {
+            let inspection = provenant_config::inspect_install(
+                &targets,
+                None,
+                env!("PROVENANT_TARGET_TRIPLE"),
+                &smoke,
+                &cancel,
+            )?;
+            if let Some(error) = inspection.error {
+                return Err(error);
+            }
+            combined.findings.extend(inspection.findings);
+        }
+        Ok(combined)
+    })();
     // The release is installed first; the agent then serves the new binary.
     let peer_agent = match &result {
         Ok(outcome) if !outcome.dry_run => Some(provenant_fabric_runtime::peer_agent::install(
@@ -586,6 +815,7 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
     };
     output_install(
         "install",
+        &summaries,
         result,
         peer_agent,
         gc_agent,
@@ -615,6 +845,7 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
     };
     output_install(
         "uninstall",
+        &[],
         cli::install::execute_uninstall(&args, &targets, &context, &mut reporter),
         None,
         None,
