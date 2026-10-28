@@ -111,8 +111,7 @@ import XCTest
                                       schedule: scheduler.schedule) { count += 1 }
         XCTAssertNotNil(coverage)
         try Data("project".utf8).write(to: project.appending(path: "project.json"))
-        watcher.rebuild(notify: true) // the same pass used by the once-per-minute timer
-        scheduler.advance(to: 0.25)
+        watcher.minuteTick()
         XCTAssertEqual(count, 1)
         watcher.stop()
     }
@@ -127,9 +126,45 @@ import XCTest
         }) {}
         XCTAssertNotNil(coverage)
         fail = false
-        watcher.rebuild(notify: true)
+        watcher.minuteTick()
         XCTAssertNil(coverage)
         watcher.stop()
+    }
+
+    func testEventsCoalesceTheScanAndFailedOpensWaitForMinute() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scheduler = Scheduler()
+        var attempts: [String: Int] = [:], fail = true, minutes = 0, changes = 0
+        let watcher = OverviewWatcher(root: root, opener: { path in
+            attempts[path, default: 0] += 1
+            return fail ? -1 : open(path, O_EVTONLY)
+        }, schedule: scheduler.schedule, onMinute: { minutes += 1 }) { changes += 1 }
+        let initial = attempts[root.path, default: 0]
+        XCTAssertEqual(initial, 1)
+        try Data("one".utf8).write(to: root.appending(path: "run.sqlite3"))
+        for _ in 0..<50 { watcher.eventOccurred() }
+        XCTAssertNil(attempts[root.appending(path: "run.sqlite3").path])
+        scheduler.advance(to: 0.25)
+        XCTAssertEqual(changes, 1)
+        XCTAssertEqual(attempts[root.path], initial)
+        XCTAssertEqual(attempts[root.appending(path: "run.sqlite3").path], 1)
+        fail = false
+        for _ in 0..<50 { watcher.eventOccurred() }
+        scheduler.advance(to: 0.5)
+        XCTAssertEqual(attempts[root.path], initial)
+        XCTAssertEqual(attempts[root.appending(path: "run.sqlite3").path], 1)
+        watcher.minuteTick()
+        XCTAssertEqual(attempts[root.path], initial + 1)
+        XCTAssertEqual(attempts[root.appending(path: "run.sqlite3").path], 2)
+        XCTAssertEqual(minutes, 1)
+        watcher.eventOccurred()
+        watcher.stop()
+        scheduler.advance(to: 1)
+        XCTAssertEqual(changes, 1)
+        watcher.minuteTick()
+        XCTAssertEqual(minutes, 1)
     }
 
     func testReportWatcherMissingRoot() throws {

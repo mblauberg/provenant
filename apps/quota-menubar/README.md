@@ -27,7 +27,7 @@ The app reads all quota data from the CLI. It does not read credentials, tokens 
 
 Register each Claude account under a label in its required `~/.claude-LABEL` directory, for example `work` in `~/.claude-work`; see the [installation procedure](../../docs/runbooks/install.md#install). The CLI matches authenticated identities using fingerprints and selects the freshest unexpired matching credential from the registered directory or `~/.claude`. When needed, it asks Claude Code to refresh the registered directory's expired token. Raw email addresses are not stored.
 
-The menu shows local requests and lanes needing attention from `provenant console overview --json`. It observes local database, WAL and project registry metadata as invalidation hints, coalesces changes for 250 ms, and reads the overview through the CLI. A change during a read queues another read; a failed read retains the previous overview and shows its age and error. A once-per-minute check recovers missed events or unavailable watches. Menu opening and manual refresh also request a read.
+The menu shows local requests and lanes needing attention from `provenant console overview --json`. It observes local database, WAL and project registry metadata as invalidation hints, coalesces changes for 250 ms, and reads the overview through the CLI. Overview reads start at least two seconds apart, with one trailing read for changes during that interval or an active read. A failed read retains the previous overview and shows its age and error. A once-per-minute check recovers missed events, retries unavailable watches and retries a failed read. Menu opening and manual refresh also request a read.
 
 ## Build and run
 

@@ -32,7 +32,7 @@ final class QuotaModel {
     private(set) var overviewObservationError: String?
     private(set) var overviewUpdatedAt: Date?
     @ObservationIgnored private var overviewGate = OverviewReadGate()
-    @ObservationIgnored private var lanesReadAt: Date?
+    @ObservationIgnored private var lanesReadAt: TimeInterval?
     @ObservationIgnored private var overviewWatcher: OverviewWatcher?
     private(set) var observedRoot: URL?
     @ObservationIgnored private var overviewRerunScheduled = false
@@ -45,10 +45,12 @@ final class QuotaModel {
             completion(result)
         }
     }
-    @ObservationIgnored private var scheduleOverview: (@escaping () -> Void) -> Void = { work in
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250), execute: DispatchWorkItem(block: work))
+    @ObservationIgnored private var scheduleOverview: (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: DispatchWorkItem(block: work))
     }
     @ObservationIgnored private var overviewNow: () -> Date = { .now }
+    @ObservationIgnored private var overviewUptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    private let overviewReadInterval: TimeInterval = 2
     /// The status item's content, replaced only when it changes.
     private(set) var label = MenuLabel()
     @ObservationIgnored private var timer: Timer?
@@ -71,11 +73,12 @@ final class QuotaModel {
     }
 
     /// A controlled reader and scheduler exercise the same refresh path without a CLI or timers.
-    init(overviewReader: @escaping OverviewReader, schedule: @escaping (@escaping () -> Void) -> Void,
-         now: @escaping () -> Date = { .now }) {
+    init(overviewReader: @escaping OverviewReader, schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void,
+         now: @escaping () -> Date = { .now }, uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.overviewReader = overviewReader
         self.scheduleOverview = schedule
         self.overviewNow = now
+        self.overviewUptime = uptime
     }
 
     init() {
@@ -104,9 +107,23 @@ final class QuotaModel {
     /// One read at a time; an invalidation during the read always gets a follow-up.
     func refreshLanes(force: Bool = false) {
         guard !fixture, !stopped, !overviewRerunScheduled else { return }
-        if !force, !overviewGate.reading, let at = lanesReadAt, overviewNow().timeIntervalSince(at) < 10 { return }
+        if !force, !overviewGate.reading, let at = lanesReadAt, overviewUptime() - at < 10 { return }
+        // An in-flight read owns the scope. Remember forced changes and service them once it completes.
+        if overviewGate.reading { _ = overviewGate.begin(force: force); return }
+        if force, let at = lanesReadAt {
+            let remaining = overviewReadInterval - (overviewUptime() - at)
+            if remaining > 0 {
+                overviewRerunScheduled = true
+                scheduleOverview(remaining) { [weak self] in
+                    guard let self, !self.stopped else { return }
+                    self.overviewRerunScheduled = false
+                    self.refreshLanes(force: true)
+                }
+                return
+            }
+        }
         guard overviewGate.begin(force: force) else { return }
-        lanesReadAt = overviewNow()
+        lanesReadAt = overviewUptime()
         let cached = launcher
         overviewReader(cached) { [weak self] result in
             guard let self, !self.stopped else { return }
@@ -117,15 +134,13 @@ final class QuotaModel {
             case .success(let found): self.overview = found; self.overviewError = nil; self.overviewUpdatedAt = self.overviewNow()
             case .failure(let failure): self.overviewError = failure.message; log.error("\(failure.message, privacy: .public)")
             }
-            if rerun {
-                self.overviewRerunScheduled = true
-                self.scheduleOverview { [weak self] in
-                    guard let self, !self.stopped else { return }
-                    self.overviewRerunScheduled = false
-                    self.refreshLanes(force: true)
-                }
-            }
+            if rerun { self.refreshLanes(force: true) }
         }
+    }
+
+    /// Retry a failed read on the watcher's minute recovery tick, even if no files changed.
+    func retryFailedOverview() {
+        if overviewError != nil { refreshLanes(force: true) }
     }
 
     func observeOverviewRoot() {
@@ -137,7 +152,7 @@ final class QuotaModel {
         observedRoot = root
         overviewWatcher = OverviewWatcher(root: root, coverageChanged: { [weak self] error in
             self?.overviewObservationError = error
-        }) { [weak self] in self?.refreshLanes(force: true) }
+        }, onMinute: { [weak self] in self?.retryFailedOverview() }) { [weak self] in self?.refreshLanes(force: true) }
     }
 
     func stop() {
