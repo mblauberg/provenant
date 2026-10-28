@@ -130,10 +130,17 @@ cleared only after quiescence, quarantine and run's terminal commit, or an
 authorised reconcile decision; a missing or malformed reservation refuses
 acquisition. `SettlementCommit`, needed for scratch deletion and fence
 clearing, is issued only after the attempt inode, custody lock and both
-digests in `release.json` are verified.
+digests in `release.json` are verified. After a verified boot change, a
+reservation whose recorded device number differs from the current one (APFS
+can renumber volumes across a reboot) is still recoverable when the
+reservation and attempt shared a device, their current directories still have
+the recorded inodes, and both now share a device. Within one boot, a changed
+device number refuses recovery.
 - Why: a writer must never be freed on a partial or forged settlement.
 - Test: `crates/supervisor/src/custody_tests.rs::missing_or_malformed_reservation_does_not_reopen_a_writer`;
-  `::settlement_checks_exact_attempt_and_both_digests_before_scratch`
+  `::settlement_checks_exact_attempt_and_both_digests_before_scratch`;
+  `crates/run/src/dispatch_tests.rs::reconcile_recovers_writer_when_device_numbers_change_after_reboot`;
+  `::changed_device_numbers_on_same_boot_keep_writer_custody`
 - Owner: `crates/supervisor/src/custody.rs`
 
 ### Cancel requests from lanes
