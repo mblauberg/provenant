@@ -701,11 +701,13 @@ pub(crate) fn run(
                     roots::Workspace::Checkout,
                     roots::Product::Optional,
                 )?;
-                super::contributions::bind(&resolved, &view.branch, number, current)?;
-                if matches!(view.state.as_str(), "CLOSED" | "MERGED") {
-                    super::contributions::close(&resolved, number)?;
-                }
-                Ok(())
+                let bound = super::contributions::bind(&resolved, &view.branch, number, current);
+                let closed = if matches!(view.state.as_str(), "CLOSED" | "MERGED") {
+                    super::contributions::close(&resolved, number)
+                } else {
+                    Ok(())
+                };
+                bound.and(closed)
             })();
             if let Err(error) = binding {
                 super::contributions::warn(Some(number), &error);

@@ -129,15 +129,18 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
             if view.cross_repository {
                 return Err("cannot bind a fork PR to a local namesake branch".into());
             }
-            bind(
+            let bound = bind(
                 &resolved,
                 &view.branch,
                 number,
                 super::head(&resolved.project, &number.to_string())?,
-            )?;
-            if matches!(view.state.as_str(), "CLOSED" | "MERGED") {
-                close(&resolved, number)?;
-            }
+            );
+            let closed = if matches!(view.state.as_str(), "CLOSED" | "MERGED") {
+                close(&resolved, number)
+            } else {
+                Ok(())
+            };
+            bound.and(closed)?;
         }
         let db = Contributions::open_read_only(resolved.roots.state.as_path(), &call)?;
         let attempts = db

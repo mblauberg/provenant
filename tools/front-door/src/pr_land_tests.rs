@@ -267,6 +267,21 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     fs::remove_file(template)?;
     fs::write(landing.rig.project.join("view.json"), merged_view)?;
     db.execute_batch("CREATE TRIGGER reject_binding BEFORE INSERT ON branch_prs BEGIN SELECT RAISE(ABORT, 'fixture binding failure'); END;")?;
+    db.execute_batch("CREATE TRIGGER reject_binding_update BEFORE UPDATE OF head ON branch_prs BEGIN SELECT RAISE(ABORT, 'fixture head refresh failure'); END;")?;
+    // A failed bind/head refresh cannot prevent recording an observed closure,
+    // even when the separate CI gate refuses this land operation.
+    fs::write(landing.rig.project.join("checks-fail"), "")?;
+    let refused = command(&landing.rig, &["land", NUMBER, "--json"])?;
+    assert_ne!(code(&refused), 0);
+    assert_eq!(
+        db.query_row(
+            "SELECT min(closed) FROM branch_prs WHERE number=1668",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        1
+    );
+    fs::remove_file(landing.rig.project.join("checks-fail"))?;
     let output = command(&landing.rig, &["land", NUMBER, "--json"])?;
     assert_eq!(
         code(&output),
@@ -279,7 +294,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
             .contains("provenant pr contributions 1668 --bind")
     );
     let landed = json(&output)?;
-    db.execute_batch("DROP TRIGGER reject_binding;")?;
+    db.execute_batch("DROP TRIGGER reject_binding; DROP TRIGGER reject_binding_update;")?;
     assert_eq!(status(&landed, "worktree")?, "done", "{landed}");
     assert!(!landing.worktree.exists());
     let before = read()?;
