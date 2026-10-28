@@ -142,6 +142,25 @@ final class MenuTests: XCTestCase {
                           try XCTUnwrap(rows.firstIndex { $0.title == "Claude" }))
     }
 
+    func testInboxCountReflectsCoverageAndNull() throws {
+        func heading(_ coverage: String, _ count: Int?) -> String? {
+            let overview = ConsoleOverview(needsYou: [], lanes: [],
+                counts: .init(needsYou: count, running: 0, attention: 0),
+                coverage: .init(scope: "local", inbox: coverage, runs: "complete", nestedRuns: "unavailable"))
+            return QuotaMenu.overviewEntries(overview, error: nil, updatedAt: nil, now: Date()).compactMap {
+                if case .header(let title) = $0 { title } else { nil }
+            }.first
+        }
+        XCTAssertEqual(heading("complete", 0), "0 needs you")
+        XCTAssertEqual(heading("partial", 2), "At least 2 needs you")
+        XCTAssertEqual(heading("partial", nil), "Needs you unavailable")
+        XCTAssertEqual(heading("unavailable", nil), "Needs you unavailable")
+        XCTAssertEqual(heading("incompatible", nil), "Needs you unavailable")
+        // An inconsistent response must never make an unavailable source look complete.
+        XCTAssertEqual(heading("unavailable", 2), "Needs you unavailable")
+        XCTAssertEqual(heading("incompatible", 2), "Needs you unavailable")
+    }
+
     func testSpentAccountsAreFolded() throws {
         let rows = items(entries(try fixture()))
         let spent = try XCTUnwrap(rows.first { $0.title == "Spent accounts" })
@@ -247,10 +266,10 @@ final class MenuTests: XCTestCase {
         XCTAssertEqual(MenuLabel(report: chosen, failed: false, now: now).text, "52%")
     }
 
-    func testCustomiseSubmenuRunsTheCliCommands() throws {
+    func testSettingsSubmenuRunsTheCliCommands() throws {
         let report = try configured(global: ["headline": "weekly", "icon": "most_constrained"],
                                     rows: ["anese": ["id": "claude-anese", "name": "Work", "hidden": false]])
-        let customise = try XCTUnwrap(items(entries(report)).first { $0.title == "Customise" }?.submenu)
+        let customise = try XCTUnwrap(items(entries(report)).first { $0.title == "Settings" }?.submenu)
         let rows = items(customise)
         XCTAssertEqual(rows.filter(\.checked).map(\.title), ["Weekly", "Most constrained", "Work"])
         XCTAssertTrue(rows.contains { $0.action == .run(["quota", "display", "--headline", "5h"]) })

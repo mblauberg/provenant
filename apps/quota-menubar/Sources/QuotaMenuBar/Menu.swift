@@ -123,8 +123,12 @@ enum QuotaMenu {
     static func overviewEntries(_ overview: ConsoleOverview?, error: String?, updatedAt: Date?, now: Date) -> [MenuEntry] {
         var entries: [MenuEntry] = []
         if let overview {
-            let partial = overview.coverage.inbox == "partial"
-            let count = overview.counts.needsYou.map { "\(partial ? "At least " : "")\($0) needs you" } ?? "Needs you unavailable"
+            let count: String
+            switch (overview.coverage.inbox, overview.counts.needsYou) {
+            case ("complete", .some(let value)): count = "\(value) needs you"
+            case ("partial", .some(let value)): count = "At least \(value) needs you"
+            default: count = "Needs you unavailable"
+            }
             entries += [.separator, .header(count)]
             entries += overview.needsYou.prefix(3).map { request in
                 let context = [request.projectLabel, request.taskLabel].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
