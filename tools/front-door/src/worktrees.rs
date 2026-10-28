@@ -81,6 +81,13 @@ fn warn_fetch(error: &Error) {
 }
 
 impl Error {
+    fn repair(&self) -> Option<&'static str> {
+        match self {
+            Self::Worktree(error) => error.repair(),
+            _ => None,
+        }
+    }
+
     fn outcome(&self) -> Outcome {
         match self {
             Self::Root(roots::RootError::Checkout | roots::RootError::State(_))
@@ -93,7 +100,12 @@ impl Error {
                 | WorktreeError::IgnoredPaths(_)
                 | WorktreeError::GitOperationInProgress
                 | WorktreeError::LiveWriter
+                | WorktreeError::LiveProcess(_)
                 | WorktreeError::UnknownWriter
+                | WorktreeError::RegistrationMismatch { .. }
+                | WorktreeError::GitEntryHeld { .. }
+                | WorktreeError::ReservationPresent
+                | WorktreeError::UnreadableRecord
                 | WorktreeError::IncompleteCensus
                 | WorktreeError::Primary
                 | WorktreeError::IdentityChanged
@@ -127,7 +139,7 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
             Ok(value) => emit(
                 &CommandResult::new(name, Outcome::Ok, data),
                 globals,
-                &provenant_cli::terse(&value),
+                &human(value),
                 read_only,
             ),
             Err(_) => fail(
@@ -138,13 +150,47 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
                 globals,
             ),
         },
-        Err(error) => fail(
+        Err(error) => crate::fail_with_repair(
             name,
             error.outcome(),
             "WORKTREE",
             &error.to_string(),
+            error.repair(),
             globals,
         ),
+    }
+}
+
+/// The terse human form. `--json` keeps the structured path envelope; here a
+/// UTF-8 absolute path reads as a plain path, quoted only when it needs it.
+fn human(mut value: serde_json::Value) -> String {
+    plain_paths(&mut value);
+    provenant_cli::terse(&value)
+}
+
+fn plain_paths(value: &mut serde_json::Value) {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => {
+            if let Some(path) = map.get("path").and_then(plain_path) {
+                map.insert("path".into(), Value::String(path));
+            }
+            map.values_mut().for_each(plain_paths);
+        }
+        Value::Array(items) => items.iter_mut().for_each(plain_paths),
+        _ => {}
+    }
+}
+
+fn plain_path(wire: &serde_json::Value) -> Option<String> {
+    match wire["kind"].as_str()? {
+        "root" => Some("/".into()),
+        "path" if wire["relative"]["encoding"] == "utf8" => Some(format!(
+            "{}/{}",
+            wire["root"].as_str()?.trim_end_matches('/'),
+            wire["relative"]["path"].as_str()?
+        )),
+        _ => None,
     }
 }
 
@@ -657,7 +703,8 @@ pub(crate) fn land_cleanup(
             {
                 Some(worktrees::WorkerState::Free) => {}
                 Some(worktrees::WorkerState::Live) => {
-                    landed.kept = Some(WorktreeError::LiveWriter.to_string());
+                    landed.kept =
+                        Some(worktrees::live_refusal(context.workers, &lane.path).to_string());
                     return Ok(landed);
                 }
                 _ => {
@@ -780,7 +827,9 @@ fn clear_landed_writer(
         .get(&lane.path)
     {
         Some(worktrees::WorkerState::Free) => {}
-        Some(worktrees::WorkerState::Live) => return Err(WorktreeError::LiveWriter.into()),
+        Some(worktrees::WorkerState::Live) => {
+            return Err(worktrees::live_refusal(context.workers, &lane.path).into());
+        }
         _ => return Err(WorktreeError::IncompleteCensus.into()),
     }
     let verified = provenant_confinement::repo::verify_worktree(context.repo, &lane.path)
@@ -1303,6 +1352,62 @@ fn child(
         Err(error) => return Err(error.into()),
     }
     Ok(parent.open_verified_directory(name)?)
+}
+
+#[cfg(test)]
+mod human_tests {
+    #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
+    use super::*;
+
+    #[allow(dead_code)] // The harness=false driver compiles only the helpers.
+    fn info(path: &str) -> Result<worktrees::WorktreeInfo, Box<dyn std::error::Error>> {
+        Ok(worktrees::WorktreeInfo {
+            path: PathBuf::from(path),
+            branch: Some("refs/heads/master".into()),
+            head: GitOid::parse(&"4a".repeat(20))?,
+            dirty: worktrees::WorktreeCondition::Dirty,
+            writer: worktrees::WriterState::Live,
+        })
+    }
+
+    #[allow(dead_code)]
+    fn rendered(path: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let data = Data::Listed(vec![info(path)?]);
+        Ok(human(serde_json::to_value(&data)?))
+    }
+
+    #[allow(dead_code)]
+    type Check = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn worktree_list_line_renders_the_path_as_a_plain_path() -> Check {
+        let head = "4a".repeat(20);
+        assert_eq!(
+            rendered("/Users/user/Repos/seal/sealle-app")?,
+            format!(
+                "branch=refs/heads/master dirty=dirty head={head} \
+                 path=/Users/user/Repos/seal/sealle-app writer=live\n"
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn worktree_list_line_quotes_a_path_only_when_it_needs_it() -> Check {
+        assert!(
+            rendered("/Users/user/My Repos/app")?.contains(" path=\"/Users/user/My Repos/app\" ")
+        );
+        assert!(rendered("/")?.contains(" path=/ "));
+        Ok(())
+    }
+
+    #[test]
+    fn worktree_list_json_keeps_the_structured_path() -> Check {
+        let value = serde_json::to_value(info("/Users/user/app")?)?;
+        assert_eq!(value["path"]["kind"], "path");
+        assert_eq!(value["path"]["relative"]["path"], "Users/user/app");
+        Ok(())
+    }
 }
 
 #[cfg(test)]
