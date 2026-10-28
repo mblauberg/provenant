@@ -2398,6 +2398,54 @@ fn settle_owned_worktree(
     let Some(writer) = task.writer else {
         return Ok(());
     };
+    // Refresh before taking the collection lock and before the prune budget starts.
+    // Explicit worktrees have no owner record, so use their verified HEAD.
+    let mut tracking_ref_warning = None;
+    let mut lane_owned = false;
+    let _ = crate::worktrees::with_context(
+        roots,
+        &settled.roots.home,
+        &writer.project,
+        std::time::Duration::from_secs(15),
+        workers,
+        |context, _| {
+            use std::io::Read;
+            let tree = provenant_confinement::verify_worktree(context.repo, &writer.worktree)
+                .map_err(worktrees::WorktreeError::from)?;
+            let owner = worktrees::load_owner(&tree)?;
+            lane_owned = owner
+                .as_ref()
+                .is_some_and(|owner| owner.origin == WorktreeOrigin::Lane);
+            let branch = if let Some(owner) = owner {
+                Some(owner.branch)
+            } else {
+                let mut head = Vec::new();
+                tree.repo()
+                    .private_dir()
+                    .open_read(std::ffi::OsStr::new("HEAD"))?
+                    .take(4097)
+                    .read_to_end(&mut head)
+                    .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+                if head.len() > 4096 {
+                    None
+                } else {
+                    std::str::from_utf8(&head)
+                        .ok()
+                        .and_then(|head| head.trim().strip_prefix("ref: refs/heads/"))
+                        .map(str::to_owned)
+                }
+            };
+            if let Some(branch) = branch
+                && let Err(error) = crate::gc_support::refresh_writer_tracking_ref(context, &branch)
+            {
+                tracking_ref_warning = Some(error.to_string());
+            }
+            Ok(())
+        },
+    );
+    if !lane_owned {
+        tracking_ref_warning = None;
+    }
     let _collection = match crate::worktrees::event_collection_lock(roots) {
         Ok(lock) => lock,
         // A long-running collector still owns the pass. Leave a visible
@@ -2456,17 +2504,18 @@ fn settle_owned_worktree(
                 let Some(owner) = worktrees::load_owner(&tree)? else {
                     return Ok(None);
                 };
-                if owner.origin != WorktreeOrigin::Lane {
-                    return Ok(None);
-                }
                 // Resumed attempts share the original owner's lane. Apply the
                 // continuation proof before pruning against that owner's ID.
-                if store
-                    .check_continuation_writer(record.attempt_id, &call)
-                    .map_err(|_| worktrees::WorktreeError::UnknownWriter)?
-                    != Some(owner.clone())
+                if owner.origin == WorktreeOrigin::Lane
+                    && store
+                        .check_continuation_writer(record.attempt_id, &call)
+                        .map_err(|_| worktrees::WorktreeError::UnknownWriter)?
+                        != Some(owner.clone())
                 {
                     return Err(worktrees::WorktreeError::UnknownWriter.into());
+                }
+                if owner.origin != WorktreeOrigin::Lane {
+                    return Ok(None);
                 }
                 let owner_attempt = owner
                     .attempt_id
@@ -2585,10 +2634,13 @@ fn settle_owned_worktree(
                         .map(|_| pinned),
                     ..output_policy
                 };
-                let intent = serde_json::json!({
+                let mut intent = serde_json::json!({
                     "schema_version":1, "state":"pruning", "worktree":writer.worktree,
                     "branch":format!("refs/heads/{}", owner.branch)
                 });
+                if let Some(warning) = tracking_ref_warning.as_ref() {
+                    intent["tracking_ref_warning"] = serde_json::json!(warning);
+                }
                 record_worktree_settlement(&store, record.attempt_id, &intent)
                     .map_err(|_| worktrees::WorktreeError::RegistrationUnconfirmed)?;
                 pruning_intent = Some(intent);
@@ -2604,10 +2656,11 @@ fn settle_owned_worktree(
             },
         )?)
     })();
-    let receipt = match result {
+    let mut receipt = match result {
         Ok(None) => {
-            let Some(reason) = retention_reason else {
-                return Ok(());
+            let reason = match retention_reason {
+                Some(reason) => reason,
+                None => return Ok(()),
             };
             let reason = match collection_error.take() {
                 Some(error) => format!("{reason}; collection failed: {error}"),
@@ -2629,6 +2682,9 @@ fn settle_owned_worktree(
             }
         }
     };
+    if let Some(warning) = tracking_ref_warning {
+        receipt["tracking_ref_warning"] = serde_json::json!(warning);
+    }
     // The Git mutation has its own 120-second bound. Start a fresh storage
     // budget after it so a completed prune can always publish its receipt.
     record_worktree_settlement(&store, record.attempt_id, &receipt)?;
@@ -3743,6 +3799,9 @@ mod result_tests {
 #[allow(dead_code)] // The worktree driver includes these helpers without libtest.
 mod peer_tests {
     use super::*;
+    #[allow(unused_imports)]
+    // The worktree driver includes this module without libtest functions.
+    use provenant_confinement::worktrees;
     use provenant_core::{AttemptId, RunId, TaskId};
     use provenant_run::{AttemptState, Outcome, RunStore};
 
@@ -3762,9 +3821,18 @@ mod peer_tests {
             provenant_run::LANE_DEPTH_ENV,
             provenant_run::PARENT_ATTEMPT_ENV,
         ];
-        let environment: Vec<_> = std::env::vars_os()
-            .filter(|(key, _)| !removed.iter().any(|name| key == name))
+        let fixture_home = tempfile::tempdir()?;
+        let isolate_home = name
+            .ends_with("explicit_writer_refreshes_tracking_ref_while_collection_is_busy")
+            || name.ends_with("adopted_writer_refresh_failure_does_not_change_receipt");
+        let mut environment: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| {
+                !removed.iter().any(|name| key == name) && !(isolate_home && key == "HOME")
+            })
             .collect();
+        if isolate_home {
+            environment.push(("HOME".into(), fixture_home.path().as_os_str().to_owned()));
+        }
         let cwd = std::env::current_dir()?;
         let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(30));
         options.env = Some(&environment);
@@ -4725,6 +4793,155 @@ mod peer_tests {
             );
             assert!(orphan.exists(), "unrelated cache collected");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_writer_refreshes_tracking_ref_while_collection_is_busy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::explicit_writer_refreshes_tracking_ref_while_collection_is_busy",
+        )? {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let owner_path = worktrees::with_context(
+            &fixture.roots,
+            &fixture.rig.home,
+            &fixture.rig.project,
+            &clock,
+            &cancel,
+            |context| {
+                let tree = provenant_confinement::verify_worktree(context.repo, &fixture.worktree)?;
+                Ok(tree.repo().private_git_dir().join("provenant-owner.json"))
+            },
+        )?;
+        std::fs::remove_file(owner_path)?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let remote = fixture.rig.root.join("remote.git");
+        for args in [
+            vec!["init", "--bare", remote.to_str().ok_or("remote path")?],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().ok_or("remote path")?,
+            ],
+            vec![
+                "push",
+                "origin",
+                "refs/heads/resumed-lane:refs/heads/resumed-lane",
+            ],
+            vec!["update-ref", "-d", "refs/remotes/origin/resumed-lane"],
+        ] {
+            let output = fixture.rig.execute(&git, &args, None)?;
+            assert_eq!(
+                crate::worktree_tests::support::code(&output),
+                0,
+                "{}",
+                String::from_utf8_lossy(&output.stderr.bytes)
+            );
+        }
+        let collection = crate::worktrees::collection_lock(&fixture.roots)?;
+        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+        let output = fixture.rig.execute(
+            &git,
+            &["rev-parse", "--verify", "refs/remotes/origin/resumed-lane"],
+            None,
+        )?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        drop(collection);
+        Ok(())
+    }
+
+    #[test]
+    fn adopted_writer_refresh_failure_does_not_change_receipt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::adopted_writer_refresh_failure_does_not_change_receipt")?
+        {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        worktrees::with_context(
+            &fixture.roots,
+            &fixture.rig.home,
+            &fixture.rig.project,
+            &clock,
+            &cancel,
+            |context| {
+                let tree = provenant_confinement::verify_worktree(context.repo, &fixture.worktree)?;
+                let mut owner = provenant_confinement::worktrees::load_owner(&tree)?
+                    .ok_or(provenant_confinement::worktrees::WorktreeError::InvalidOutput)?;
+                owner.origin = provenant_confinement::worktrees::WorktreeOrigin::Adopted;
+                provenant_confinement::worktrees::save_owner(&tree, &owner)?;
+                Ok(())
+            },
+        )?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let output = fixture.rig.execute(
+            &git,
+            &["remote", "add", "origin", "/nonexistent/provenant-remote"],
+            None,
+        )?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+            budget: WaitBudget::cli(clock.mono_now(), 30)?,
+        };
+        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+        assert!(
+            fixture
+                .store
+                .worktree_settlement(fixture.settled.attempt_id, &call)?
+                .is_none()
+        );
+        let receipt = serde_json::json!({"schema_version":1, "state":"retained", "worktree":fixture.worktree, "reason":"existing reason"});
+        record_worktree_settlement(&fixture.store, fixture.settled.attempt_id, &receipt)?;
+        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+        assert_eq!(
+            fixture
+                .store
+                .worktree_settlement(fixture.settled.attempt_id, &call)?,
+            Some(receipt)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_records_tracking_ref_failure_without_failing_lane()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::settlement_records_tracking_ref_failure_without_failing_lane",
+        )? {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let output = fixture.rig.execute(
+            &git,
+            &["remote", "add", "origin", "/nonexistent/provenant-remote"],
+            None,
+        )?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+            budget: WaitBudget::cli(clock.mono_now(), 30)?,
+        };
+        let receipt = fixture
+            .store
+            .worktree_settlement(fixture.settled.attempt_id, &call)?
+            .ok_or("settlement")?;
+        assert!(receipt["tracking_ref_warning"].is_string(), "{receipt}");
+        assert_eq!(receipt["state"], "pruned", "{receipt}");
         Ok(())
     }
 

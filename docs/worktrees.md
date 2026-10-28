@@ -155,6 +155,11 @@ The worktree must have an active Provenant registration for that project.
 The primary checkout and another project's worktree are refused. Run reserves
 the worktree before compiling its writer permissions, so another writer cannot
 launch beside it. The guardian retains the lease until terminal settlement.
+At settlement the host best-effort refreshes the writer's branch tracking ref
+on `origin`, including for explicit and adopted worktrees, before pinning the
+upstream used for pruning. A missing remote or branch is silently skipped;
+other failures may be recorded as `tracking_ref_warning` in a lane-owned
+settlement receipt and do not change the lane outcome or an adopted receipt.
 
 ## Writer custody recovery
 

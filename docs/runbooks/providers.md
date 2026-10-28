@@ -102,10 +102,17 @@ profile deny rules still restrict the listed allowances.
 Run refuses an attempt whose grant list exceeds 1,024 entries or 256 KiB
 encoded. The attempt ends Rejected before launch and its siblings still start.
 
-Writers hold no Git credentials, and remote-tracking refs and shared config are
-read-only, so `git fetch` of a configured remote fails. Fetch on the host
-before dispatch, or dispatch with `--deliver-remote` and `--deliver-branch`:
-run fetches before launch and pushes the verified final commit after.
+Remote-tracking refs and shared config are read-only in writer lanes, so
+`git fetch` of a configured remote fails. Fetch on the host before dispatch,
+or dispatch with `--deliver-remote` and `--deliver-branch`: run fetches before
+launch and pushes the verified final commit after.
+
+Network-open profiles can read the existing `~/.config/gh` login and may use
+it to push; profiles deny access to `~/.ssh`. After a successful push,
+Git may report that it could not update the local remote-tracking ref or set an
+upstream with `-u`. These denials are expected and need no report. The host
+best-effort refreshes the lane branch's `origin` tracking ref at settlement;
+shared upstream configuration remains read-only.
 
 ## General guidance
 
