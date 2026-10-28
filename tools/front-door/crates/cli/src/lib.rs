@@ -508,6 +508,9 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             route_valid(&resolve.request)?
         }
         Command::Dispatch(dispatch) | Command::Run(dispatch) => {
+            if dispatch.preset.is_none() && (!dispatch.preset_set.is_empty() || dispatch.explain) {
+                return invalid("--set and --explain require --preset");
+            }
             if matches!(inv.command, Command::Dispatch(_)) && dispatch.preset.is_some() {
                 return invalid("--preset is supported by run, not dispatch");
             }
@@ -1143,6 +1146,57 @@ mod tests {
             "senior",
         ]);
         invalid(&["dispatch", "--preset", "single", "--prompt-file", "brief"]);
+        invalid(&[
+            "run",
+            "--prompt-file",
+            "brief",
+            "--route",
+            "senior",
+            "--set",
+            "parameters.route=utility",
+        ]);
+        for flag in [
+            vec!["--prompt-stdin"],
+            vec!["--manifest", "m"],
+            vec!["--model", "codex/model"],
+            vec!["--route", "senior"],
+            vec!["--effort", "high"],
+            vec!["--account", "account"],
+            vec!["--fallback", "codex/model"],
+            vec!["--mode", "read-only"],
+            vec!["--worktree", "tree"],
+            vec!["--branch", "branch"],
+            vec!["--worktree-branch", "branch"],
+            vec!["--host", "host"],
+            vec!["--deliver", "none"],
+            vec!["--deliver-remote", "host"],
+            vec!["--deliver-branch", "branch"],
+            vec!["--open-pr"],
+            vec!["--read-root", "dir"],
+            vec!["--write-root", "dir"],
+            vec!["--network", "off"],
+            vec!["--capability", "postgres"],
+            vec!["--knob", "x=y"],
+            vec!["--task-id", "0123456789abcdef0123456789abcdef"],
+            vec!["--delivery-id", "0123456789abcdef0123456789abcdef"],
+            vec!["--head", "abc"],
+            vec!["--base", "main"],
+            vec!["--title", "title"],
+            vec!["--build-heavy"],
+            vec!["--confidential"],
+            vec!["--allow-free"],
+            vec!["--provider-timeout", "1"],
+            vec!["--operation-id", "id"],
+            vec!["--wait", "1"],
+            vec!["--concurrency", "2"],
+        ] {
+            let mut args = vec!["run", "--preset", "single", "--prompt-file", "brief"];
+            args.extend(flag.iter().copied());
+            assert!(
+                matches!(parsed(&args), ParseOutcome::Invalid { .. }),
+                "accepted {flag:?}"
+            );
+        }
     }
     #[test]
     fn task_title_flags_are_optional_and_per_task() {

@@ -254,8 +254,10 @@ their `operation_id`.
 
 `provenant run --preset NAME --prompt-file FILE` expands a structural preset
 into an ordinary graph and submits it through the graph owner. `--explain`
-prints the graph and effective value origins without writing a graph or
-opening graph state. Identical expanded graphs use the same graph ID and a
+prints the graph and effective value origins without writing a graph, opening
+graph state or publishing an overflow artifact. Its output is bounded by the
+8 MiB graph document limit rather than the ordinary 1 MiB result limit.
+Identical expanded graphs use the same graph ID and a
 private, content-addressed document in project scratch, so retrying the same
 submission observes the existing graph. Use a changed prompt or parameters for
 a separate graph.
@@ -283,10 +285,15 @@ preset = "fan-out"
 width = 3
 ```
 
-Slots may name another preset and override its parameters. Expansion is static,
+Slots may name another preset and override its parameters. A named preset uses
+its own route; it does not inherit the parent's `parameters.route`. A file
+overriding an existing preset by the same name should omit `extends` and supply
+only its changes. Expansion is static,
 limited to eight levels and 512 nodes, and refuses cycles, unknown slots and
 unknown parameters. Parameter values passed on the command line use TOML
-syntax, for example `--set 'parameters.route="utility"'`. Planner fragments
+syntax, for example `--set 'parameters.route="utility"'`; unquoted bare words
+are rejected with a quoting hint. Invalid files appear in `preset list` and do
+not prevent use of unrelated presets. Planner fragments
 are not preset expansion points. Review shape parameters and the remaining
 structural presets are future work.
 

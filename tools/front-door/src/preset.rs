@@ -1,5 +1,8 @@
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 const NAMES: [&str; 4] = ["single", "chain", "fan-out", "fan-out-synthesise"];
 const DEPTH: usize = 8;
@@ -7,15 +10,22 @@ const DEPTH: usize = 8;
 #[derive(Default)]
 pub struct Layers {
     entries: BTreeMap<String, Vec<(String, Value)>>,
+    errors: BTreeMap<String, Vec<String>>,
+    repo_files: BTreeSet<String>,
 }
 
 #[derive(Debug)]
 pub struct Expansion {
     pub document: Value,
     pub origins: BTreeMap<String, String>,
+    pub repo_files: Vec<String>,
 }
 
 impl Layers {
+    #[allow(
+        clippy::expect_used,
+        reason = "bundled preset literals are built-in invariants"
+    )]
     pub fn empty() -> Self {
         let mut layers = Self::default();
         for name in NAMES {
@@ -32,9 +42,9 @@ impl Layers {
                 }
             };
             // These literals are part of the binary and are checked by golden tests.
-            if let Err(error) = layers.insert("bundled", name, text) {
-                debug_assert!(false, "invalid bundled preset: {error}");
-            }
+            layers
+                .insert("bundled", name, text)
+                .expect("valid bundled preset");
         }
         layers
     }
@@ -53,7 +63,7 @@ impl Layers {
 
     pub fn load(user: &Path, repo: &Path) -> Result<Self, String> {
         let mut layers = Self::empty();
-        for (origin, dir) in [("user", user), ("repo", repo)] {
+        for (is_repo, dir) in [(false, user), (true, repo)] {
             let entries = match std::fs::read_dir(dir) {
                 Ok(entries) => entries,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -71,24 +81,51 @@ impl Layers {
                 let name = path
                     .file_stem()
                     .and_then(|s| s.to_str())
-                    .ok_or("invalid preset filename")?;
-                let mut file = provenant_os::fs::FileHandle::open_source(&path)
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
-                let bytes = file
-                    .read_bounded(1_048_576)
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
-                let content =
-                    String::from_utf8(bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-                layers.insert(origin, name, &content)?;
+                    .unwrap_or("<invalid filename>")
+                    .to_owned();
+                let origin = path.display().to_string();
+                let result = (|| {
+                    let mut file = provenant_os::fs::FileHandle::open_source(&path)
+                        .map_err(|e| e.to_string())?;
+                    let bytes = file.read_bounded(1_048_576).map_err(|e| e.to_string())?;
+                    let content = String::from_utf8(bytes).map_err(|e| e.to_string())?;
+                    layers.insert(&origin, &name, &content)
+                })();
+                if let Err(error) = result {
+                    layers
+                        .errors
+                        .entry(name)
+                        .or_default()
+                        .push(format!("{origin}: {error}"));
+                } else if is_repo {
+                    layers.repo_files.insert(origin);
+                }
             }
         }
         Ok(layers)
     }
 
     pub fn listing(&self) -> Vec<Value> {
-        self.entries.iter().map(|(name, layers)| {
-            json!({"name": name, "layers": layers.iter().map(|(origin, _)| origin).collect::<Vec<_>>()})
-        }).collect()
+        let names: BTreeSet<_> = self.entries.keys().chain(self.errors.keys()).collect();
+        names
+            .into_iter()
+            .map(|name| {
+                let layers = self
+                    .entries
+                    .get(name)
+                    .into_iter()
+                    .flatten()
+                    .map(|(origin, _)| origin)
+                    .collect::<Vec<_>>();
+                let mut errors = self.errors.get(name).cloned().unwrap_or_default();
+                if errors.is_empty()
+                    && let Err(error) = expand(self, name, "", &[])
+                {
+                    errors.push(error);
+                }
+                json!({"name": name, "layers": layers, "errors": errors})
+            })
+            .collect()
     }
 
     pub fn resolve(&self, name: &str) -> Result<(Value, BTreeMap<String, String>), String> {
@@ -110,6 +147,9 @@ impl Layers {
             return Err(format!("preset inheritance depth exceeds {DEPTH}"));
         }
         stack.push(name.into());
+        if let Some(errors) = self.errors.get(name) {
+            return Err(errors.join("; "));
+        }
         let entries = self
             .entries
             .get(name)
@@ -117,12 +157,16 @@ impl Layers {
         let parent = entries
             .iter()
             .rev()
-            .find_map(|(_, value)| value.get("extends"));
+            .find_map(|(origin, value)| value.get("extends").map(|parent| (origin, parent)));
         let (mut value, mut origins) = match parent {
-            Some(parent) => self.resolve_inner(
-                parent.as_str().ok_or("extends must be a preset name")?,
-                stack,
-            )?,
+            Some((origin, parent)) => self
+                .resolve_inner(
+                    parent.as_str().ok_or_else(|| {
+                        format!("preset {name}: extends ({origin}): must be a preset name")
+                    })?,
+                    stack,
+                )
+                .map_err(|error| format!("preset {name}: extends ({origin}): {error}"))?,
             None => (json!({}), BTreeMap::new()),
         };
         for (origin, layer) in entries {
@@ -131,7 +175,8 @@ impl Layers {
                 .as_object_mut()
                 .ok_or("preset must be a table")?
                 .remove("extends");
-            merge(&mut value, &layer, "", origin, &mut origins)?;
+            merge(&mut value, &layer, "", origin, &mut origins)
+                .map_err(|error| format!("preset {name}: {error} ({origin})"))?;
         }
         stack.pop();
         Ok((value, origins))
@@ -242,6 +287,55 @@ fn override_value(
     Err(format!("unknown path: {path}"))
 }
 
+fn valid_paths(config: &Value, layers: &Layers) -> String {
+    let mut paths = Vec::new();
+    if let Some(params) = config.get("parameters").and_then(Value::as_object) {
+        paths.extend(params.keys().map(|key| format!("parameters.{key}")));
+    }
+    if let Some(slots) = config.get("slots").and_then(Value::as_object) {
+        for (name, slot) in slots {
+            paths.push(format!("slots.{name}.preset"));
+            if let Some(child) = slot.get("preset").and_then(Value::as_str)
+                && let Ok((child, _)) = layers.resolve(child)
+                && let Some(params) = child.get("parameters").and_then(Value::as_object)
+            {
+                paths.extend(
+                    params
+                        .keys()
+                        .map(|key| format!("slots.{name}.parameters.{key}")),
+                );
+            }
+        }
+    }
+    paths.join(", ")
+}
+
+fn invalid_config(
+    name: &str,
+    key: &str,
+    message: &str,
+    prefix: &str,
+    origins: &BTreeMap<String, String>,
+) -> String {
+    let context = if prefix.is_empty() {
+        String::new()
+    } else {
+        format!("expanded.{}.", prefix.trim_end_matches('-'))
+    };
+    let path = format!("{context}{key}");
+    let origin = origins
+        .get(&path)
+        .or_else(|| {
+            origins
+                .iter()
+                .find(|(key, _)| key.starts_with(&format!("{path}.")))
+                .map(|(_, value)| value)
+        })
+        .map(String::as_str)
+        .unwrap_or("unknown origin");
+    format!("preset {name}: {key} ({origin}): {message}")
+}
+
 pub fn expand(
     layers: &Layers,
     name: &str,
@@ -254,14 +348,19 @@ pub fn expand(
             .split_once('=')
             .ok_or_else(|| format!("expected path=value: {item}"))?;
         let parsed: Value = toml_edit::de::from_str(&format!("value = {raw}"))
-            .map_err(|e| format!("{path}: {e}"))?;
+            .map_err(|e| format!("{path}: {e}; string values need quotes, for example --set 'parameters.route=\"utility\"'"))?;
+        if parsed["value"].is_object() {
+            return Err(format!("{path}: --set requires a scalar or array value"));
+        }
+        let valid = valid_paths(&config, layers);
         override_value(
             &mut config,
             path,
             parsed["value"].clone(),
             &mut origins,
             "--set",
-        )?;
+        )
+        .map_err(|error| format!("{error}; valid parameter and slot paths: {valid}"))?;
     }
     let mut nodes = Vec::new();
     build(
@@ -280,9 +379,25 @@ pub fn expand(
     )
     .to_string();
     let id = format!("preset-{}", &digest[7..39]);
+    let document = json!({"schema_version":1,"graph_id":id,"nodes":nodes});
+    if serde_json::to_vec(&document)
+        .map_err(|e| e.to_string())?
+        .len()
+        > 8_388_608
+    {
+        return Err("expanded graph exceeds the 8 MiB graph document limit".into());
+    }
+    let repo_files = origins
+        .values()
+        .filter(|origin| layers.repo_files.contains(*origin))
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     Ok(Expansion {
-        document: json!({"schema_version":1,"graph_id":id,"nodes":nodes}),
+        document,
         origins,
+        repo_files,
     })
 }
 
@@ -311,48 +426,86 @@ fn build(
     let params = config
         .get("parameters")
         .and_then(Value::as_object)
-        .ok_or("parameters must be a table")?;
+        .ok_or_else(|| invalid_config(name, "parameters", "must be a table", prefix, origins))?;
     let slots = config
         .get("slots")
         .and_then(Value::as_object)
-        .ok_or("slots must be a table")?;
+        .ok_or_else(|| invalid_config(name, "slots", "must be a table", prefix, origins))?;
     let shape = config
         .get("structure")
         .and_then(Value::as_str)
-        .ok_or("missing preset structure; use extends")?;
+        .ok_or_else(|| {
+            invalid_config(
+                name,
+                "structure",
+                "missing structure; use extends",
+                prefix,
+                origins,
+            )
+        })?;
     let allowed: &[&str] = match shape {
         "single" => &["task"],
         "chain" => &["first", "second"],
         "fan-out" => &["branch"],
         "fan-out-synthesise" => &["branch", "synthesis"],
-        _ => return Err(format!("unknown preset structure: {shape}")),
+        _ => {
+            return Err(invalid_config(
+                name,
+                "structure",
+                &format!("unknown structure: {shape}"),
+                prefix,
+                origins,
+            ));
+        }
     };
-    if config.as_object().is_none_or(|m| {
+    if let Some(key) = config.as_object().and_then(|m| {
         m.keys()
-            .any(|k| k != "structure" && k != "parameters" && k != "slots")
+            .find(|k| *k != "structure" && *k != "parameters" && *k != "slots")
     }) {
-        return Err("unknown preset field".into());
+        return Err(invalid_config(name, key, "unknown field", prefix, origins));
     }
-    if params
+    if let Some(key) = params
         .keys()
-        .any(|k| k != "route" && !(k == "width" && shape.starts_with("fan-out")))
+        .find(|k| *k != "route" && !(*k == "width" && shape.starts_with("fan-out")))
     {
-        return Err("unknown parameter".into());
+        return Err(invalid_config(
+            name,
+            &format!("parameters.{key}"),
+            "unknown parameter",
+            prefix,
+            origins,
+        ));
     }
-    if slots.keys().any(|k| !allowed.contains(&k.as_str())) {
-        return Err("unknown slot".into());
+    if let Some(key) = slots.keys().find(|k| !allowed.contains(&k.as_str())) {
+        return Err(invalid_config(
+            name,
+            &format!("slots.{key}"),
+            "unknown slot",
+            prefix,
+            origins,
+        ));
     }
     let route = params
         .get("route")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .ok_or("parameters.route must be a nonempty string")?;
+        .ok_or_else(|| {
+            invalid_config(
+                name,
+                "parameters.route",
+                "must be a nonempty string",
+                prefix,
+                origins,
+            )
+        })?;
     let width = if shape.starts_with("fan-out") {
         params
             .get("width")
             .and_then(Value::as_u64)
             .filter(|n| (1..=32).contains(n))
-            .ok_or("parameters.width must be 1 to 32")?
+            .ok_or_else(|| {
+                invalid_config(name, "parameters.width", "must be 1 to 32", prefix, origins)
+            })?
     } else {
         1
     };
@@ -382,24 +535,57 @@ fn build(
         if id.len() > 64 {
             return Err(format!("expanded node ID exceeds 64 bytes: {id}"));
         }
-        let config_slot = slots
-            .get(slot)
-            .and_then(Value::as_object)
-            .ok_or_else(|| format!("missing slot: {slot}"))?;
-        if config_slot
+        let config_slot = slots.get(slot).and_then(Value::as_object).ok_or_else(|| {
+            invalid_config(
+                name,
+                &format!("slots.{slot}"),
+                "missing slot or slot is not a table",
+                prefix,
+                origins,
+            )
+        })?;
+        if let Some(key) = config_slot
             .keys()
-            .any(|k| k != "preset" && k != "parameters")
+            .find(|k| *k != "preset" && *k != "parameters")
         {
-            return Err(format!("unknown field in slot {slot}"));
+            return Err(invalid_config(
+                name,
+                &format!("slots.{slot}.{key}"),
+                "unknown slot field",
+                prefix,
+                origins,
+            ));
         }
         let outputs = if let Some(child) = config_slot.get("preset") {
-            let child = child.as_str().ok_or("slot preset must be a string")?;
+            if synthesis {
+                return Err(invalid_config(
+                    name,
+                    "slots.synthesis.preset",
+                    "synthesis slot cannot name a preset",
+                    prefix,
+                    origins,
+                ));
+            }
+            let child = child.as_str().ok_or_else(|| {
+                invalid_config(
+                    name,
+                    &format!("slots.{slot}.preset"),
+                    "must be a preset name",
+                    prefix,
+                    origins,
+                )
+            })?;
             let (mut child_config, mut child_origins) = layers.resolve(child)?;
             if let Some(parameters) = config_slot.get("parameters") {
-                for (key, value) in parameters
-                    .as_object()
-                    .ok_or("slot parameters must be a table")?
-                {
+                for (key, value) in parameters.as_object().ok_or_else(|| {
+                    invalid_config(
+                        name,
+                        &format!("slots.{slot}.parameters"),
+                        "must be a table",
+                        prefix,
+                        origins,
+                    )
+                })? {
                     let context = if prefix.is_empty() {
                         String::new()
                     } else {
@@ -409,13 +595,26 @@ fn build(
                         .get(&format!("{context}slots.{slot}.parameters.{key}"))
                         .map(String::as_str)
                         .unwrap_or("slot");
+                    let valid = valid_paths(&child_config, layers);
                     override_value(
                         &mut child_config,
                         &format!("parameters.{key}"),
                         value.clone(),
                         &mut child_origins,
                         origin,
-                    )?;
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "{}; valid parameter and slot paths: {valid}",
+                            invalid_config(
+                                name,
+                                &format!("slots.{slot}.parameters.{key}"),
+                                &error,
+                                prefix,
+                                origins
+                            )
+                        )
+                    })?;
                 }
             }
             for (key, origin) in child_origins {
@@ -434,7 +633,13 @@ fn build(
             )?
         } else {
             if config_slot.contains_key("parameters") {
-                return Err(format!("slot {slot} parameters require a preset"));
+                return Err(invalid_config(
+                    name,
+                    &format!("slots.{slot}.parameters"),
+                    "requires a preset",
+                    prefix,
+                    origins,
+                ));
             }
             let mut node = json!({"id":id,"access":"read_only","prompt":prompt,"route":{"alias":route},"depends_on":incoming});
             if synthesis {
@@ -449,6 +654,9 @@ fn build(
                 );
             }
             nodes.push(node);
+            if prompt.len().saturating_mul(nodes.len()) > 8_388_608 {
+                return Err("expanded graph exceeds the 8 MiB graph document limit".into());
+            }
             vec![id]
         };
         if shape == "chain" || synthesis || shape == "single" {
@@ -508,6 +716,45 @@ fn report(command: &str, result: Result<Value, String>, globals: &provenant_cli:
     }
 }
 
+// Explain is read-only and must not publish an overflow artifact. The graph
+// was already bounded by the owner's 8 MiB document limit in expand().
+fn explain(expansion: Expansion, globals: &provenant_cli::Globals) -> u8 {
+    use std::io::Write;
+    let data = json!({"graph": expansion.document, "origins": expansion.origins});
+    let output = if globals.json {
+        serde_json::to_vec(&provenant_records::CommandResult::new(
+            "run",
+            provenant_records::Outcome::Ok,
+            data,
+        ))
+    } else {
+        serde_json::to_vec_pretty(&data)
+    };
+    match output {
+        Ok(mut bytes) => {
+            bytes.push(b'\n');
+            match std::io::stdout().lock().write_all(&bytes) {
+                Ok(()) => 0,
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => 0,
+                Err(error) => crate::fail(
+                    "run",
+                    provenant_records::Outcome::Error,
+                    "IO",
+                    &error.to_string(),
+                    globals,
+                ),
+            }
+        }
+        Err(error) => crate::fail(
+            "run",
+            provenant_records::Outcome::Error,
+            "IO",
+            &error.to_string(),
+            globals,
+        ),
+    }
+}
+
 pub fn command(command: provenant_cli::Preset, globals: &provenant_cli::Globals) -> u8 {
     use provenant_cli::Preset;
     let result = (|| {
@@ -515,7 +762,10 @@ pub fn command(command: provenant_cli::Preset, globals: &provenant_cli::Globals)
         match command {
             Preset::List => Ok(json!({"presets": layers.listing()})),
             Preset::Show { name } => {
+                let expanded = expand(&layers, &name, "", &[])?;
                 let (values, origins) = layers.resolve(&name)?;
+                let mut origins = origins;
+                origins.extend(expanded.origins);
                 Ok(json!({"name":name,"values":values,"origins":origins}))
             }
         }
@@ -551,12 +801,16 @@ pub fn run(
             &error,
             globals,
         ),
-        Ok(expansion) if request.explain => report(
-            "run",
-            Ok(json!({"graph":expansion.document,"origins":expansion.origins})),
-            globals,
-        ),
+        Ok(expansion) if request.explain => explain(expansion, globals),
         Ok(expansion) => {
+            if !expansion.repo_files.is_empty() {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "Repository preset: {}",
+                    expansion.repo_files.join(", ")
+                );
+            }
             match crate::fabric::retain_preset_graph(&expansion.document, globals, workers) {
                 Ok(document) => crate::fabric::graph(
                     provenant_cli::fabric::Graph::Run { document },

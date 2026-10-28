@@ -488,7 +488,7 @@ pub struct Dispatch {
     /// Expand and run a named pipeline preset
     #[arg(long, requires = "prompt_file", conflicts_with_all = ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "worktree", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "read_root", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "confidential", "allow_free", "provider_timeout", "operation_id", "wait"])]
     pub preset: Option<String>,
-    /// Override a preset value (PATH=TOML_VALUE); repeatable
+    /// Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable
     #[arg(long = "set", requires = "preset")]
     pub preset_set: Vec<String>,
     /// Print the expanded graph and origins without running it
