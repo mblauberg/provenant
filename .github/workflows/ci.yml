@@ -91,6 +91,7 @@ jobs:
           "$RUNNER_TEMP/harness-venv/bin/pip" install PyYAML==6.0.2
           echo "$RUNNER_TEMP/harness-venv/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/harness-venv/bin/python" scripts/check-harness
+          "$RUNNER_TEMP/harness-venv/bin/python" scripts/test-check-harness
 
       - name: Check generated contract reference
         run: scripts/generate-reference --check
