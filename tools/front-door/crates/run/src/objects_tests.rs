@@ -1,7 +1,7 @@
 //! Native Git evidence for the host's private object-store import boundary.
 #![allow(clippy::disallowed_methods)]
 
-use super::{import_objects, verify_graph};
+use super::{GIB, connectivity_budget, import_objects, verification_budget, verify_graph};
 use provenant_confinement::{UtilityBudget, UtilityRuntime, VerifiedWorktree};
 use provenant_core::{CancelToken, GitOid};
 use provenant_os::{exec::SystemExecutor, fs::Directory};
@@ -1355,4 +1355,13 @@ fn large_file_digest_detects_change_across_rename() -> TestResult {
     after.metadata.changed_ns += 1;
     assert!(!super::renamed_matches(&before, &after));
     Ok(())
+}
+#[test]
+fn verification_budgets_scale_and_cap() {
+    assert_eq!(verification_budget(0), Duration::from_secs(120));
+    assert_eq!(verification_budget(1), Duration::from_secs(180));
+    assert_eq!(verification_budget(u64::MAX), Duration::from_secs(3600));
+    assert_eq!(connectivity_budget(0), Duration::from_secs(60));
+    assert_eq!(connectivity_budget(50 * GIB), Duration::from_secs(560));
+    assert_eq!(connectivity_budget(u64::MAX), Duration::from_secs(1200));
 }

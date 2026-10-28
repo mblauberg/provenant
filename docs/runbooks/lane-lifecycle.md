@@ -170,7 +170,7 @@ force-cancel running lanes.
 Object-store lock-wait timeouts leave settlement non-terminal and retain custody
 and private objects until the separate limit of 30 timeouts. Retry settlement
 with `provenant reconcile --id RUN` once the competing host verification
-finishes. Three verification deadline expiries terminally refuse import and
+finishes. Three verification retries terminally refuse import and
 release custody. Copying and indexing have a separate
 120-second budget; pack-count or import-budget refusals are terminal and keep
 the private evidence for recovery. See the

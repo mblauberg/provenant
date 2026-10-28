@@ -16,6 +16,8 @@ use std::path::PathBuf;
 // hour of contention at the normal lock budget.
 const VERIFICATION_RETRY_LIMIT: i64 = 3;
 const BUSY_RETRY_LIMIT: i64 = 30;
+const VERIFICATION_CAP_REASON: &str = "verification retry cap exceeded (3)";
+const BUSY_CAP_REASON: &str = "object store lock retry cap exceeded (30)";
 
 fn settlement_retries(
     host: &std::path::Path,
@@ -52,13 +54,9 @@ fn settlement_retries(
 
 fn retry_limit(counts: (i64, i64)) -> Option<RunError> {
     if counts.0 >= VERIFICATION_RETRY_LIMIT {
-        Some(RunError::ObjectImportLimit(
-            "verification deadline retry cap exceeded (3)",
-        ))
+        Some(RunError::ObjectImportLimit(VERIFICATION_CAP_REASON))
     } else if counts.1 >= BUSY_RETRY_LIMIT {
-        Some(RunError::ObjectImportLimit(
-            "object store lock retry cap exceeded (30)",
-        ))
+        Some(RunError::ObjectImportLimit(BUSY_CAP_REASON))
     } else {
         None
     }
@@ -748,11 +746,7 @@ impl RunStore {
                         None => return Err(error),
                     }
                 }
-                Err(
-                    error @ RunError::ObjectVerificationRetry(
-                        crate::objects::VERIFICATION_DEADLINE_REASON,
-                    ),
-                ) => {
+                Err(error @ RunError::ObjectVerificationRetry(_)) => {
                     match retry_limit(settlement_retries(
                         &self.writer_registry,
                         exit.scope,
@@ -763,13 +757,12 @@ impl RunStore {
                         None => return Err(error),
                     }
                 }
-                Err(error @ RunError::ObjectVerificationRetry(_)) => return Err(error),
                 other => other,
             };
             match check {
                 Err(error @ RunError::ObjectImportLimit(reason))
-                    if reason == "verification deadline retry cap exceeded (3)"
-                        || reason == "object store lock retry cap exceeded (30)"
+                    if reason == VERIFICATION_CAP_REASON
+                        || reason == BUSY_CAP_REASON
                         || reason == crate::objects::STAGED_BYTES_LIMIT_REASON =>
                 {
                     seal_retry_refusal(attempt, exit.scope)?;
@@ -1127,6 +1120,33 @@ mod writer_recovery_tests {
         Deadline,
         BusyCap,
         LegacyPolicy,
+    }
+
+    #[test]
+    fn settlement_retry_counts_persist_and_are_scoped_to_attempt()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let host = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let run = input();
+        let scope = custody::Scope {
+            run: run.run_id,
+            attempt: run.attempts[0].attempt_id,
+            generation: 1,
+        };
+        assert_eq!(
+            settlement_retries(host.path(), scope, &call, Some(true))?,
+            (1, 0)
+        );
+        // Each invocation opens the database again, as a restarted holder does.
+        assert_eq!(settlement_retries(host.path(), scope, &call, None)?, (1, 0));
+        let next = custody::Scope {
+            attempt: AttemptId::from_bytes([4; 16]),
+            ..scope
+        };
+        assert_ne!(next.attempt, scope.attempt);
+        assert_eq!(settlement_retries(host.path(), next, &call, None)?, (0, 0));
+        Ok(())
     }
 
     #[test]

@@ -636,11 +636,11 @@ seconds per started GiB of object files (shared plus staged for import), capped
 at one hour. Hashing staged files alone has the same size-scaled allowance;
 exhausting it immediately refuses the import. Delivery cache misses get a fresh
 verification deadline. The locked publication and connectivity check has a
-shorter deadline of 30 seconds plus 30 seconds per started GiB, capped at five
-minutes, because the unlocked full check has already hashed the objects.
+deadline of 60 seconds plus 10 seconds per started GiB, capped at 20 minutes,
+to allow for repeated staged-file hashing as well as connectivity checking.
 Exclusive or shared lock waiting has its own 120-second limit. Settlement retains
-custody and private evidence while retrying: three verification deadline
-expiries or 30 lock-wait timeouts terminally refuse the import and release
+custody and private evidence while retrying: three verification retries
+or 30 lock-wait timeouts terminally refuse the import and release
 custody. These counts are separate and persist in host-owned settlement state
 across restarts. Thirty ordinary lock waits can span up to an hour.
 Exceeding either the pack limit or the copy/index budget terminally refuses

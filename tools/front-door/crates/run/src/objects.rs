@@ -106,19 +106,25 @@ thread_local! {
     pub(crate) static TEST_VERIFICATION_BUDGET: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
 }
 
-/// The unlocked full check hashes every object. The locked pass only walks
-/// connectivity: 30 seconds plus 30 per started GiB, capped at five minutes.
+/// Publication rehashes staged files and checks connectivity under the lock.
+/// Allow 60 seconds plus 10 per started GiB, capped at 20 minutes, for
+/// repeated disk reads and traversal on large stores.
+fn connectivity_budget(bytes: u64) -> Duration {
+    Duration::from_secs(
+        60_u64
+            .saturating_add(bytes.div_ceil(GIB).saturating_mul(10))
+            .min(1200),
+    )
+}
+
 #[allow(clippy::disallowed_methods)]
 fn connectivity_deadline(generation: &[(PathBuf, Metadata)], extra: u64) -> Deadline {
     let bytes = generation
         .iter()
         .filter(|(_, m)| m.kind == FileKind::Regular)
         .fold(extra, |total, (_, m)| total.saturating_add(m.size));
-    let seconds = 30_u64
-        .saturating_add(bytes.div_ceil(GIB).saturating_mul(30))
-        .min(300);
     Deadline {
-        at: Instant::now() + Duration::from_secs(seconds),
+        at: Instant::now() + connectivity_budget(bytes),
         import: false,
     }
 }
