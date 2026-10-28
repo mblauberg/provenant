@@ -43,6 +43,14 @@ impl GithubPolicy {
         if bytes.len() > 16 * 1024 {
             return Err(ConfigError::InvalidGithubPolicy);
         }
-        serde_json::from_slice(&bytes).map_err(|_| ConfigError::InvalidGithubPolicy)
+        let mut policy: Self =
+            serde_json::from_slice(&bytes).map_err(|_| ConfigError::InvalidGithubPolicy)?;
+        policy.deny_labels = policy
+            .deny_labels
+            .into_iter()
+            .map(|label| label.trim().to_owned())
+            .filter(|label| !label.is_empty())
+            .collect();
+        Ok(policy)
     }
 }

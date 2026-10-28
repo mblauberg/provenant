@@ -2812,6 +2812,63 @@ mod tests {
                 .iter()
                 .any(|(key, value)| key == "PROVENANT_LANE_BASE" && value == review_oid.as_str())
         );
+        // Exercise the host project policy through preparation and the actual
+        // generated shim, with a fake gh so no GitHub access is needed.
+        std::fs::create_dir_all(home.join(".config/gh"))?;
+        let gh = assets.join("gh");
+        std::fs::write(&gh, b"#!/bin/sh\nprintf 'forwarded\\n'\n")?;
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700))?;
+        let policy_dir = state
+            .join("projects")
+            .join(binding.project_id().to_string());
+        std::fs::create_dir_all(&policy_dir)?;
+        std::fs::write(policy_dir.join("github.json"), r#"{"deny_labels":["ci"]}"#)?;
+        let publishing_paths = run::LaunchPaths {
+            attempt_id: paths.attempt_id,
+            operation_id: paths.operation_id.clone(),
+            task_index: paths.task_index,
+            lane_depth: paths.lane_depth,
+            run_id: paths.run_id,
+            deadline_unix_ms: paths.deadline_unix_ms,
+            scratch: attempt.join("publishing-scratch"),
+            provider_state: attempt.join("publishing-provider-state"),
+            temporary: attempt.join("publishing-tmp"),
+        };
+        for path in [
+            &publishing_paths.scratch,
+            &publishing_paths.provider_state,
+            &publishing_paths.temporary,
+        ] {
+            std::fs::DirBuilder::new().mode(0o700).create(path)?;
+        }
+        let mut publishing_task = task.clone();
+        publishing_task.profile.knobs.remove("lanes.publish");
+        let _publishing = prepare_with(
+            &registry,
+            &publishing_task,
+            "publishing policy fixture",
+            &publishing_paths,
+            None,
+            |name| {
+                Ok(if name == "gh" {
+                    gh.clone()
+                } else {
+                    executable.clone()
+                })
+            },
+            None,
+        )?;
+        let shim = publishing_paths.temporary.join("candidate-0/bin/gh");
+        let denied = std::process::Command::new(&shim)
+            .args(["pr", "create", "-l", "ci"])
+            .output()?;
+        assert!(!denied.status.success());
+        assert_eq!(denied.stderr, b"github.deny_labels\n");
+        let allowed = std::process::Command::new(&shim)
+            .args(["pr", "create", "-l", "docs"])
+            .output()?;
+        assert!(allowed.status.success());
+        assert_eq!(allowed.stdout, b"forwarded\n");
         // The preferred provider is updating, so preparation must select the
         // explicit fallback rather than just omit an unrelated busy adapter.
         let mut fallback_task = task.clone();

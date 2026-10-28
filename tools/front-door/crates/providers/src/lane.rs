@@ -128,12 +128,15 @@ fn gh_wrapper(gh: &str, gh_config: &str, policy: &provenant_config::GithubPolicy
         guard.push_str(&format!("if [ \"$#\" -ge {} ] && {conditions}; then\n  printf '%s\\n' 'github.deny_verbs' >&2; exit 1\nfi\n", words.len()));
     }
     if !policy.deny_labels.is_empty() {
-        guard.push_str("check_labels() {\n  case \"$1 $2\" in\n    'pr create'|'issue create') flag=--label ;;\n    'pr edit'|'issue edit') flag=--add-label ;;\n    *) return ;;\n  esac\n  shift 2\n  while [ \"$#\" -gt 0 ]; do\n    value=\n    case \"$1\" in\n      --) break ;;\n      \"$flag\") shift; [ \"$#\" -gt 0 ] || break; value=$1 ;;\n      \"$flag\"=*) value=${1#*=} ;;\n    esac\n");
+        guard.push_str("check_labels() {\n  short=false\n  case \"$1 $2\" in\n    'pr create'|'issue create') flag=--label; short=true ;;\n    'pr edit'|'issue edit') flag=--add-label ;;\n    *) return ;;\n  esac\n  shift 2\n  while [ \"$#\" -gt 0 ]; do\n    case \"$1\" in\n      --) break ;;\n      \"$flag\") shift; [ \"$#\" -gt 0 ] || break; value=$1 ;;\n      \"$flag\"=*) value=${1#*=} ;;\n      -l) if $short; then shift; [ \"$#\" -gt 0 ] || break; value=$1; else shift; continue; fi ;;\n      -l=*) if $short; then value=${1#-l=}; else shift; continue; fi ;;\n      -l?*) if $short; then value=${1#-l}; else shift; continue; fi ;;\n      *) shift; continue ;;\n    esac\n    while :; do\n      item=${value%%,*}\n      item=${item#\"${item%%[![:space:]]*}\"}\n      item=${item%\"${item##*[![:space:]]}\"}\n");
         for label in &policy.deny_labels {
             // Quoting the literal keeps shell metacharacters in labels inert.
-            guard.push_str(&format!("    case \",$value,\" in *,{},*) printf '%s\\n' 'github.deny_labels' >&2; exit 1 ;; esac\n", shell_quote(label)));
+            let label = label.trim();
+            if !label.is_empty() {
+                guard.push_str(&format!("      if [ \"$item\" = {} ]; then printf '%s\\n' 'github.deny_labels' >&2; exit 1; fi\n", shell_quote(label)));
+            }
         }
-        guard.push_str("    shift\n  done\n}\ncheck_labels \"$@\"\n");
+        guard.push_str("      case \"$value\" in *,*) value=${value#*,} ;; *) break ;; esac\n    done\n    shift\n  done\n}\ncheck_labels \"$@\"\n");
     }
     format!(
         "#!/bin/sh\n{guard}GH_CONFIG_DIR={gh_config}\nexport GH_CONFIG_DIR\nexec {} \"$@\"\n",
@@ -405,17 +408,28 @@ mod tests {
         use std::{fs, os::unix::fs::PermissionsExt, process::Command};
         let temp = tempfile::tempdir()?;
         let shim = temp.path().join("gh");
+        let real_gh = temp.path().join("real-gh");
+        fs::write(&real_gh, "#!/bin/sh\nprintf '<%s>\\n' \"$@\"\n")?;
+        fs::set_permissions(&real_gh, fs::Permissions::from_mode(0o700))?;
         let policy = provenant_config::GithubPolicy {
             deny_verbs: vec!["release create".into()],
-            deny_labels: vec!["ci".into()],
+            deny_labels: vec![" ci ".into(), "".into(), "needs review".into()],
         };
-        fs::write(&shim, gh_wrapper("/usr/bin/true", "'/tmp'", &policy))?;
+        fs::write(
+            &shim,
+            gh_wrapper(real_gh.to_str().unwrap(), "'/tmp'", &policy),
+        )?;
         fs::set_permissions(&shim, fs::Permissions::from_mode(0o700))?;
         for args in [
             vec!["pr", "edit", "42", "--add-label", "ci"],
             vec!["pr", "create", "--label=docs,ci"],
             vec!["issue", "edit", "42", "--add-label=ci"],
             vec!["issue", "create", "--label", "ci"],
+            vec!["pr", "create", "-l", "ci"],
+            vec!["pr", "create", "-l=ci"],
+            vec!["issue", "create", "-lci"],
+            vec!["issue", "edit", "42", "--add-label", "docs, ci"],
+            vec!["pr", "create", "--label", "docs, needs review "],
         ] {
             let output = Command::new(&shim).args(args).output()?;
             assert_eq!(output.status.code(), Some(1));
@@ -426,12 +440,26 @@ mod tests {
             .output()?;
         assert_eq!(output.status.code(), Some(1));
         assert_eq!(output.stderr, b"github.deny_verbs\n");
-        for args in [
-            vec!["release", "view"],
-            vec!["pr", "create", "--label", "docs"],
-        ] {
-            assert!(Command::new(&shim).args(args).status()?.success());
-        }
+        let output = Command::new(&shim)
+            .args(["pr", "create", "--title", "hello world", "-l", "docs"])
+            .output()?;
+        assert!(output.status.success());
+        assert_eq!(
+            output.stdout,
+            b"<pr>\n<create>\n<--title>\n<hello world>\n<-l>\n<docs>\n"
+        );
+        assert!(
+            Command::new(&shim)
+                .args(["pr", "create", "--title", "docs"])
+                .status()?
+                .success()
+        );
+        assert!(
+            Command::new(&shim)
+                .args(["release", "view"])
+                .status()?
+                .success()
+        );
         Ok(())
     }
 

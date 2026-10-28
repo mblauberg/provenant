@@ -57,12 +57,17 @@ matched to the repository's Git common directory. For example:
 
 Both lists default to empty. A denied verb matches a command token prefix. For
 pull request and issue creation and editing, label checks recognise long label
-flags with separate or `=` values, including comma-separated lists. A refusal
-exits 1 and prints `github.deny_verbs` or `github.deny_labels` on standard
-error; other commands continue to the host's GitHub CLI. This is an advisory
-guard against accidental use, not a security boundary: a lane can invoke the
-real `gh` directly or use another GitHub API client. Use GitHub permissions
-and repository rules to enforce restrictions.
+flags with separate or `=` values, including comma-separated lists. For
+creation, they also recognise `-l` with separate, `=` or attached values. A
+policy label and each value in a comma-separated list are trimmed; empty policy
+labels are ignored. A refusal exits 1 and prints `github.deny_verbs` or
+`github.deny_labels` on standard error; other commands continue to the host's
+GitHub CLI. The shim and policy are active only when publishing is available,
+so disabling publishing or running without the host's gh configuration leaves
+the policy inactive. This is an advisory guard against accidental use, not a
+security boundary: a lane can invoke the real `gh` directly or use another
+GitHub API client. Use GitHub permissions and repository rules to enforce
+restrictions.
 
 After a settled writer without delivery, run:
 

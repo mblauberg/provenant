@@ -494,12 +494,12 @@ fn github_policy_is_scoped_to_project_and_defaults_only_when_absent() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("github.json"),
-        r#"{"deny_verbs":["release create"],"deny_labels":["ci"]}"#,
+        r#"{"deny_verbs":["release create"],"deny_labels":[" ci ","", " \t ","needs review"]}"#,
     )
     .unwrap();
     let policy = GithubPolicy::read(&fixture.roots.state, project).unwrap();
     assert_eq!(policy.deny_verbs, ["release create"]);
-    assert_eq!(policy.deny_labels, ["ci"]);
+    assert_eq!(policy.deny_labels, ["ci", "needs review"]);
     assert_eq!(
         GithubPolicy::read(&fixture.roots.state, other).unwrap(),
         GithubPolicy::default()

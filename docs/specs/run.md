@@ -239,6 +239,20 @@ never serve as trusted host evidence. The host uses its own Git environment.
   `crates/providers/src/seatbelt_snapshots.rs::agy_read_only_linked_worktree_git_directories_are_not_writable`
 - Owner: `crates/providers/src/launch.rs`, `crates/confinement/src/permissions.rs`
 
+## Project GitHub policy
+
+`projects/<ProjectId>/github.json` holds an optional host-owned advisory deny
+list of GitHub CLI verb prefixes and labels for writer lanes. Missing policy
+defaults to empty. When publishing is available, the lane's `gh` shim refuses
+matching calls with the policy key on standard error. This is an accidental-use
+guard, not a security boundary: a lane can invoke the real `gh` directly.
+
+- Why: projects can reserve GitHub actions for people or workflows without
+  relying on instructions in a lane's prompt.
+- Test: `crates/config/src/tests.rs::github_policy_is_scoped_to_project_and_defaults_only_when_absent`;
+  `crates/providers/src/lane.rs::github_policy_guards_labels_and_verb_prefixes`
+- Owner: `crates/config/src/github_policy.rs`; `crates/providers/src/lane.rs`
+
 ## Writer hard-link refusal
 
 On macOS, launch refuses a writable worktree containing an existing hard-linked
