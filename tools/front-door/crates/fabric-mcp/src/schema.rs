@@ -484,11 +484,11 @@ pub fn expected(name: &str, value: &Value, path: &str) -> String {
     let normalised = path.replace('[', ".").replace(']', "");
     for segment in normalised.split('.').skip(1) {
         loop {
-            if let Some(pointer) = schema["$ref"].as_str().and_then(|p| p.strip_prefix('#')) {
-                if let Some(next) = root.pointer(pointer) {
-                    schema = next;
-                    continue;
-                }
+            if let Some(pointer) = schema["$ref"].as_str().and_then(|p| p.strip_prefix('#'))
+                && let Some(next) = root.pointer(pointer)
+            {
+                schema = next;
+                continue;
             }
             if let Some(options) = schema["oneOf"].as_array() {
                 if let Some(next) = options.iter().find(|option| {
