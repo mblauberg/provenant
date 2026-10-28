@@ -74,6 +74,25 @@ prompts.
 - Test: `crates/run/src/service_tests.rs::task_title_roundtrip`
 - Owner: `crates/run/src/service.rs`, `crates/records/src/run.rs`
 
+## PR contribution storage
+
+The run owner provides a host-state store at `pr-contributions.sqlite3` for
+explicit attempt and GitHub repository/PR links. A link is idempotent and has
+an unknown weight until a complete allocation is sealed. Weights use unsigned
+millionths and must cover every link for the attempt and sum to 1,000,000.
+Sealing and its replay are transactional; conflicting replays and new links
+after sealing are refused. Callers must establish contribution from trusted
+host facts, not transcripts. The database and its SQLite companions are part
+of host state and must be retained in backups.
+
+This is a storage primitive only. Dispatch, review, repair, PR and landing
+paths do not yet populate it, and there is no CLI reader or complete-coverage
+claim. In particular the round-trip test does not establish GC or landing
+retention. A later integration must settle how to handle a PR discovered after
+allocation is sealed and exercise those paths before using it for a study.
+- Test: `crates/run/src/pr_contribution.rs::pr_contribution_roundtrip`
+- Owner: `crates/run/src/pr_contribution.rs`
+
 ## Work correlation lookup
 
 `run::WorkIndex` owns immutable membership in `<host-state>/work-index.sqlite3`.

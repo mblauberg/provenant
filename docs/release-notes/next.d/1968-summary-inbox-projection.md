@@ -6,3 +6,4 @@
 - Add revision-guarded chair summary reads and field updates.
 - Compare retained chair summary revisions, defaulting `--to` to the current revision and reporting added and removed request IDs.
 - Reconcile summary requests with the bounded local inbox, reporting unknown references when coverage or attribution is incomplete.
+- Add a run-owned storage primitive for explicit PR contribution links and validated allocation; capture and CLI access are forthcoming.
