@@ -21,6 +21,19 @@ pub fn delivery_capabilities() -> Vec<provenant_records::inbox::DeliveryCapabili
     });
     capabilities
 }
+
+#[test]
+fn composed_matrix_reports_claude_hook_readiness() {
+    use provenant_records::inbox::AnswerTransport;
+    let capabilities = delivery_capabilities();
+    let hook = capabilities
+        .iter()
+        .find(|cap| cap.transport == AnswerTransport::ClaudeHook)
+        .unwrap();
+    assert_eq!(hook.provider, Harness::Claude);
+    assert!(hook.local_offer_reader && hook.live_injection);
+    assert_eq!(capabilities.len(), 6);
+}
 pub const PRE_COMPACT: &str = "pre-compact";
 pub const COMPACT: &str = "compact";
 pub const CHAIR_PROMPT: &str = "chair-prompt";

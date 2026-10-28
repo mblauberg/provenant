@@ -37,7 +37,7 @@ their exact grants exclude `host.sqlite3` and its companions. The authoritative
 index seals project/run, request digest and optional chair. Readers ignore any
 association rows in lane-writable databases.
 Migration 10 adds the partial destination index for local answer observations.
-Previous binaries refuse schema 10, so rollback requires restoring a pre-upgrade store backup or a forward repair;
+Migration 11 adds a queued-only hook index. Previous binaries refuse schema 11, so rollback requires restoring a pre-upgrade store backup or a forward repair;
 do not change `user_version` by hand or delete pending answers.
 
 Requests retain history without automatic pruning, up to 10,000 items per
@@ -54,6 +54,10 @@ Offers contain at most 100 answers and 8 KiB of compact JSON; overflow keeps its
 previous state. Acknowledged answers never return. Pending answers remain
 eligible after restart or adapter failure. Mail read cursors stay independent.
 This uses the existing outbox without another schema migration.
+`offer_human_answers_once` instead uses bounded selected-key reads and one immediate
+transaction, with no retries, creation or migrations. Only queued records transition;
+competing hooks skip offered records. A caller must discard late results, including
+a commit that finishes after timeout; mail remains available.
 
 `Store::open_read_only` never creates, migrates or enables WAL. It opens the
 database, WAL and shared memory read-only (`readonly_shm=1`), starts one read

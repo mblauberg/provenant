@@ -26,6 +26,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/008-human-inbox.sql"),
     include_str!("migrations/009-run-chairs.sql"),
     include_str!("migrations/010-local-delivery.sql"),
+    include_str!("migrations/011-queued-delivery.sql"),
 ];
 // Index of 007, which may drop only the always-null legacy members and the
 // traces of an import that brought nothing over. Anything the removed import
@@ -151,6 +152,15 @@ impl Store {
     /// callers needing a hard bound must run this off-thread with a timeout.
     #[allow(clippy::disallowed_methods)]
     pub fn open_read_only(root: &StateRoot, deadline: std::time::Instant) -> Result<Option<Self>> {
+        Self::open_existing(root, deadline, false)
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    pub(crate) fn open_existing(
+        root: &StateRoot,
+        deadline: std::time::Instant,
+        writable: bool,
+    ) -> Result<Option<Self>> {
         crate::local_delivery::before(deadline)?;
         let open = || -> Result<Directory> {
             let state = Directory::open_anchor(root.as_path())?;
@@ -183,11 +193,20 @@ impl Store {
             Into::into,
             |name| Error::UnsafePath(path.join(name)),
         )?;
-        let db = provenant_sqlite::open_read_only_connection(&path.join("fabric.sqlite3"))?;
+        let path = path.join("fabric.sqlite3");
+        let db = if writable {
+            provenant_sqlite::open_connection(&path, false)?
+        } else {
+            provenant_sqlite::open_read_only_connection(&path)?
+        };
         db.progress_handler(100, Some(move || std::time::Instant::now() >= deadline))?;
         // Pin one answer snapshot, including concurrent acknowledgements.
         // Filesystem discovery was validated before this connection opened.
-        db.execute_batch("BEGIN")?;
+        if writable {
+            provenant_sqlite::retain_read_only_wal(&db)?;
+        } else {
+            db.execute_batch("BEGIN")?;
+        }
         let store = Self {
             db,
             locks: None,

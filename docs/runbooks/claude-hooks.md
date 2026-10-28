@@ -5,17 +5,24 @@ Anchor: tools/front-door/tests/hooks_session.rs
 `provenant install --harness claude --hooks on` registers the hooks below in
 the Claude settings (see [install](install.md)). Rerun it after an upgrade to
 register new handlers. Every handler exits 0 on its own failure except the
-worktree hooks, prints only the protocol response on stdout and sends
+worktree hooks and the guard's exit-2 denial fallback, prints only the protocol response on stdout and sends
 diagnostics to stderr.
 
 | Event | Handler | What it does |
 |---|---|---|
+| `PreToolUse` (`Bash`) | `hook claude pre-tool-use` | Enforces the guard, then optionally offers human answers |
 | `SessionStart` (`startup`, `resume`, `clear`) | `hook claude session-start` | Reports the checkpoint status, then the state digest |
 | `SessionStart` (`compact`) | `hook claude compact` | The same report after compaction |
 | `PreCompact` | `hook claude pre-compact` | Saves the current state into the checkpoint |
 | `Stop` | `hook claude stop` | Refreshes an existing checkpoint's state if it is 10 minutes quiet |
 | `WorktreeCreate` | `hook claude worktree-create` | Runs `provenant worktree create claude/<name>` |
 | `WorktreeRemove` | `hook claude worktree-remove` | Runs `provenant worktree remove <name>` |
+
+The guard keeps its one-second deadline. Optional delivery gets at most 50 ms
+off-thread, including blocking identity reads and offer recording. Final JSON,
+escaping and newline fit 8 KiB. Only queued answers are recorded and offered once
+per session; denials take priority. Errors, timeouts, oversized candidates and
+output failures diagnose on stderr; Fabric mail remains the fallback.
 
 ## What the SessionStart digest shows
 

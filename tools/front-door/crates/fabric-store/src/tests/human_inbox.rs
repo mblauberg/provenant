@@ -249,6 +249,7 @@ fn local_delivery_open_allocates_nothing_and_observes_deadline() {
         Err(Error::Busy)
     ));
     writer.db.execute_batch("PRAGMA user_version=9").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
     assert!(matches!(
         Store::open_read_only(&f.root, deadline),
         Err(Error::Invalid(_))

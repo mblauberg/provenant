@@ -26,6 +26,69 @@ pub struct HumanAcknowledgement<'a> {
 }
 
 impl Store {
+    /// Slice-2 offer transition for selected hook candidates, once per exact
+    /// destination. No creation, migration, retries or history scan. A late
+    /// commit can still persist; callers must discard results after timeout.
+    pub fn offer_human_answers_once(
+        root: &provenant_core::StateRoot,
+        target: &AnswerTarget,
+        candidates: Page<AnswerOffer>,
+        at: WallTime,
+        deadline: std::time::Instant,
+    ) -> Result<Page<AnswerOffer>> {
+        use crate::local_delivery::before;
+        before(deadline)?;
+        if candidates.items.len() as u64 > MAX_LOCAL_OFFER_ITEMS {
+            return Err(Error::Invalid("offer count"));
+        }
+        let store = Self::open_existing(root, deadline, true)?.ok_or(Error::NotFound)?;
+        let tx = rusqlite::Transaction::new_unchecked(
+            &store.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let mut offered = Page {
+            items: Vec::new(),
+            truncated: candidates.truncated,
+        };
+        for mut candidate in candidates.items {
+            before(deadline)?;
+            let bytes: Vec<u8> = tx.query_row("SELECT substr(record,1,?3) FROM human_answer_outbox WHERE project=?1 AND answer=?2",
+                params![target.project.to_string(), candidate.answer.id.to_string(), MAX_RECORD_READ_BYTES], |row| row.get(0))?;
+            let mut delivery: AnswerDelivery = decode(&bytes)?;
+            if delivery.schema_version != 1
+                || delivery.answer_id != candidate.answer.id
+                || delivery.target_host != target.host
+                || delivery.target_actor != target.actor
+                || delivery.target_session != target.session
+            {
+                return Err(Error::Conflict);
+            }
+            if delivery.state != AnswerDeliveryState::Queued {
+                continue;
+            }
+            delivery.state = AnswerDeliveryState::Offered;
+            delivery.attempts = delivery
+                .attempts
+                .checked_add(1)
+                .ok_or(Error::Invalid("offer attempts"))?;
+            delivery.last_attempt_at = Some(at);
+            tx.execute(
+                "UPDATE human_answer_outbox SET record=?3 WHERE project=?1 AND answer=?2",
+                params![
+                    target.project.to_string(),
+                    candidate.answer.id.to_string(),
+                    encode(&delivery)?
+                ],
+            )?;
+            candidate.delivery = delivery;
+            offered.items.push(candidate);
+        }
+        before(deadline)?;
+        tx.commit()?;
+        before(deadline)?;
+        Ok(offered)
+    }
+
     /// Atomically record bounded at-least-once offers. Overflow is untouched;
     /// reading ordinary mail never advances or acknowledges this outbox.
     pub fn offer_human_answers(

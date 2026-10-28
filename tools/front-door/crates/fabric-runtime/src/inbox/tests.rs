@@ -860,3 +860,59 @@ fn inbox_remote_owner_and_worker_mutations_are_refused_without_opening_store() {
     assert_eq!(result.unwrap_err().code(), "lane_coordination_refused");
     assert!(!f.root.as_path().join("fabric").exists());
 }
+
+#[test]
+#[allow(clippy::disallowed_methods)] // The bounded hook offer API uses real deadlines.
+fn hook_offers_are_once_only_and_do_not_hide_later_queued_answers() {
+    use std::time::{Duration, Instant};
+    let f = Fixture::new();
+    for n in 0..18 {
+        let created = receipt(
+            f.call(ask(RequestKind::Decision, &format!("once-ask-{n}")))
+                .unwrap(),
+        );
+        f.call(answer(created.request_id, &format!("once-answer-{n}")))
+            .unwrap();
+    }
+    let target = AnswerTarget {
+        host: f.identity.host,
+        project: f.identity.project,
+        actor: f.identity.inbox.actor,
+        session: "session-a".into(),
+    };
+    let deadline = || Instant::now() + Duration::from_secs(2);
+    let read = || {
+        let store = Store::open_read_only(&f.root, deadline()).unwrap().unwrap();
+        store
+            .read_queued_human_answers(&target, deadline())
+            .unwrap()
+    };
+    let first = read();
+    assert_eq!(first.items.len(), 16);
+    let claim = |page, until| {
+        Store::offer_human_answers_once(&f.root, &target, page, f.clock.wall_now().unwrap(), until)
+    };
+    let barrier = std::sync::Barrier::new(2);
+    let claimed = std::thread::scope(|scope| {
+        let worker = || {
+            barrier.wait();
+            claim(first.clone(), deadline())
+        };
+        let a = scope.spawn(worker);
+        let b = scope.spawn(worker);
+        [a.join().unwrap(), b.join().unwrap()]
+            .into_iter()
+            .filter_map(Result::ok)
+            .map(|page| page.items.len())
+            .sum::<usize>()
+    });
+    assert_eq!(claimed, 16);
+    assert!(claim(first, deadline()).unwrap().items.is_empty());
+    let remaining = read();
+    assert_eq!(remaining.items.len(), 2);
+    assert!(matches!(
+        claim(remaining.clone(), Instant::now()),
+        Err(provenant_fabric_store::Error::Busy)
+    ));
+    assert_eq!(read(), remaining);
+}

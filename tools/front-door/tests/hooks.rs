@@ -370,3 +370,107 @@ fn publish_checkpoint(rig: &TestRig) -> Result {
     )?;
     Ok(())
 }
+
+fn json_command(rig: &TestRig, args: &[&str]) -> Result<serde_json::Value> {
+    let mut args = args.to_vec();
+    args.push("--json");
+    let output = rig.command(&args)?;
+    assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
+    Ok(serde_json::from_slice(&output.stdout.bytes)?)
+}
+
+#[test]
+fn queued_answer_is_injected_once_only_after_the_guard_allows() -> Result {
+    use serde_json::json;
+    let rig = TestRig::new()?;
+    let checkpoint = rig.root.join("checkpoint.md");
+    fs::write(&checkpoint, "chair checkpoint")?;
+    json_command(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "chair",
+            "--file",
+            checkpoint.to_str().ok_or("path")?,
+            "--client",
+            "claude",
+        ],
+    )?;
+    json_command(&rig, &["inbox", "--state", "all"])?;
+    let hook = |command: &str| -> Result<provenant_os::exec::ExecOutcome> {
+        rig.execute(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &["hook", "claude", "pre-tool-use"],
+            Some(&serde_json::to_vec(
+                &json!({"hook_event_name":"PreToolUse", "tool_name":"Bash",
+                "tool_input":{"command":command}, "session_id":"chair", "cwd":rig.project}),
+            )?),
+        )
+    };
+    hook("git status")?; // Warm the empty lookup; do not impose a cold-start timing assertion.
+    let draft = rig.root.join("question.json");
+    fs::write(
+        &draft,
+        serde_json::to_vec(&json!({"kind":"question","title":"Next?","body":"Choose"}))?,
+    )?;
+    let created = json_command(
+        &rig,
+        &[
+            "ask",
+            "--file",
+            draft.to_str().ok_or("path")?,
+            "--session",
+            "chair",
+        ],
+    )?;
+    let id = created["data"]["request_id"].as_str().ok_or("request")?;
+    let reply = rig.root.join("reply.txt");
+    fs::write(&reply, "Proceed carefully")?;
+    json_command(
+        &rig,
+        &[
+            "answer",
+            id,
+            "--action",
+            "reply",
+            "--text-file",
+            reply.to_str().ok_or("path")?,
+            "--expect-revision",
+            "1",
+            "--channel",
+            "console",
+        ],
+    )?;
+    let denied = hook("rm -rf /")?;
+    assert_eq!(code(&denied), 0);
+    let denial: serde_json::Value = serde_json::from_slice(&denied.stdout.bytes)?;
+    assert_eq!(denial["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(
+        denial["hookSpecificOutput"]
+            .get("additionalContext")
+            .is_none()
+    );
+    let allowed = hook("git status")?;
+    assert_eq!(code(&allowed), 0, "{:?}", allowed.stderr.bytes);
+    assert!(allowed.stdout.bytes.len() <= provenant_records::inbox::MAX_OFFER_BYTES);
+    let wire: serde_json::Value = serde_json::from_slice(&allowed.stdout.bytes)?;
+    assert!(
+        wire["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .ok_or("context")?
+            .contains("Proceed carefully")
+    );
+    assert!(
+        wire["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none()
+    );
+    assert!(hook("git status")?.stdout.bytes.is_empty());
+    let item = json_command(&rig, &["inbox", id])?;
+    assert_eq!(item["data"]["item"]["delivery"]["state"], "offered");
+    assert_eq!(item["data"]["item"]["delivery"]["attempts"], 1);
+    assert!(item["data"]["item"]["delivery"]["last_attempt_at"].is_string());
+    Ok(())
+}

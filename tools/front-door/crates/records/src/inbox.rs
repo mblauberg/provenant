@@ -8,6 +8,8 @@ pub const REQUEST_BODY_BYTES: usize = 8192;
 pub const ANSWER_TEXT_BYTES: usize = 4096;
 pub const MAX_OPTIONS: usize = 16;
 pub const MAX_OFFER_BYTES: usize = 8192;
+pub const MAX_LOCAL_OFFER_ITEMS: u64 = 16;
+pub const MAX_LOCAL_OFFER_BYTES: usize = MAX_OFFER_BYTES * MAX_LOCAL_OFFER_ITEMS as usize;
 
 /// Exact registered destination. An actor label alone never selects a session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
