@@ -174,6 +174,17 @@ final class MenuTests: XCTestCase {
         XCTAssertFalse(menu.contains(.header("0 needs you")))
     }
 
+    func testObservationShortfallAndReadFailureBothRemainVisible() {
+        let overview = ConsoleOverview(needsYou: [], lanes: [],
+            counts: .init(needsYou: 0, running: 0, attention: 0),
+            coverage: .init(scope: "local", inbox: "complete", runs: "complete", nestedRuns: "unavailable"))
+        let menu = QuotaMenu.overviewEntries(overview, error: "read failed", updatedAt: Date(timeIntervalSince1970: 0),
+                                             now: Date(timeIntervalSince1970: 60), observationError: "Watch limit reached")
+        XCTAssertTrue(menu.contains(.header("0 needs you")))
+        XCTAssertNotNil(items(menu).first { $0.title == "Overview unavailable" })
+        XCTAssertEqual(items(menu).first { $0.title == "Overview observation limited" }?.subtitle, "Watch limit reached")
+    }
+
     // MARK: Display settings
 
     /// The fixture with display blocks added: `rows` maps an account key to its row display, `global` is the top-level block.
