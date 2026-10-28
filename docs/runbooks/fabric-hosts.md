@@ -173,7 +173,8 @@ allow a graph document to request a higher value. Budget fields are optional;
 unset fields have no budget. Costs are in US dollars.
 
 A graph document can set a `limits` object with any of these fields. Values
-must be positive and no higher than the corresponding configured ceiling.
+must be positive. Values above the current configured ceiling are clamped to
+that ceiling and recorded in a note.
 When a structural limit or budget is reached, graph status reports `paused` and
 the checkpoint records the reason. A paused command exits successfully; scripts
 should inspect the status. Running attempts can finish. Resume with,
@@ -182,7 +183,9 @@ or `--extend per_graph.tokens=2000000`. Repeat `--extend` for multiple values.
 Extensions set absolute ceilings and are recorded in the checkpoint. The
 effective value is the greater of the configured value and the extension, so
 replaying an extension or retrying the same `--extend` is a no-op. Limit
-extensions must also fit the configured ceiling. Token counts and estimated
+extensions must also fit the configured ceiling. Budget extensions require
+the corresponding budget to be configured; extending concurrency requires a
+nonzero configured concurrency limit. Token counts and estimated
 cost use attempt telemetry. Missing or partial usage is reported as unknown
 in graph status and the checkpoint's usage events. By default,
 `unknown_usage = "warn"` continues with a visible warning; set it to `"pause"`

@@ -2255,7 +2255,30 @@ struct BoundGraphOwner<'a> {
     integration_base: Option<provenant_core::GitOid>,
     budget: WaitBudget,
     cancel: &'a CancelToken,
-    prices: Option<Option<provenant_telemetry::PriceTable>>,
+    prices: Option<Result<provenant_telemetry::PriceTable, String>>,
+}
+
+fn load_graph_prices(assets: &std::path::Path) -> Result<provenant_telemetry::PriceTable, String> {
+    let path = assets.join("config/telemetry-prices.toml");
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let config = toml_edit::de::from_str::<provenant_telemetry::ConfiguredPrices>(&text)
+        .map_err(|error| format!("{}: invalid price table: {error}", path.display()))?;
+    provenant_telemetry::validate_prices(&config)
+        .map_err(|error| format!("{}: invalid price table: {error}", path.display()))
+}
+
+fn graph_journal_error(error: provenant_fabric_runtime::graph::JournalError) -> FacadeError {
+    use provenant_fabric_runtime::graph::JournalError;
+    match error {
+        JournalError::TooLarge => FacadeError::DispatchRefused {
+            reason: "graph checkpoint exceeds its byte limit".into(),
+        },
+        JournalError::Filesystem(_)
+        | JournalError::Io(_)
+        | JournalError::DurabilityUnconfirmed(_) => FacadeError::io("access graph journal"),
+        _ => FacadeError::StateCorrupt,
+    }
 }
 
 pub(crate) fn advance_settled_graphs(
@@ -2865,17 +2888,20 @@ fn settle_attempt(
 }
 
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
-    fn wall_time_seconds(&self) -> u64 {
-        self.factory
-            .clock
-            .wall_now()
-            .ok()
-            .and_then(|time| u64::try_from(time.as_micros() / 1_000_000).ok())
-            .unwrap_or(0)
-    }
     type Error = FacadeError;
     fn actor(&self) -> String {
         self.factory.context.identity.inbox.actor.to_string()
+    }
+    fn cost_unknown_reason(&mut self) -> Option<String> {
+        let graph_budget = &self.factory.context.config.graph.budget;
+        if graph_budget.per_graph.cost_usd.is_none() && graph_budget.per_node.cost_usd.is_none() {
+            return None;
+        }
+        self.prices
+            .get_or_insert_with(|| load_graph_prices(&self.factory.assets))
+            .as_ref()
+            .err()
+            .cloned()
     }
     fn deliver_graph(
         &mut self,
@@ -2954,16 +2980,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 .flatten()
                 .fold(0u64, u64::saturating_add)
         });
-        let prices = self.prices.get_or_insert_with(|| {
-            std::fs::read_to_string(self.factory.assets.join("config/telemetry-prices.toml"))
-                .ok()
-                .and_then(|text| {
-                    toml_edit::de::from_str::<provenant_telemetry::ConfiguredPrices>(&text).ok()
-                })
-                .and_then(|config| provenant_telemetry::validate_prices(&config).ok())
-        });
+        let cost_unknown_reason = self.cost_unknown_reason();
+        let prices = self
+            .prices
+            .get_or_insert_with(|| load_graph_prices(&self.factory.assets));
         let cost = prices
             .as_ref()
+            .ok()
             .and_then(|prices| {
                 provenant_run::fact(record.clone()).ok().and_then(|fact| {
                     provenant_telemetry::stats([fact], prices, Default::default()).ok()
@@ -2979,6 +3002,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             wall_time_seconds: record.provider_ms.map(|ms| ms.saturating_add(999) / 1000),
             tokens_partial,
             cost_partial,
+            cost_unknown_reason,
         })
     }
     fn observe_or_start(
@@ -3239,7 +3263,7 @@ impl Factory {
                     self.context.identity.project,
                     &document.graph_id,
                 )
-                .map_err(|_| FacadeError::StateCorrupt)?
+                .map_err(graph_journal_error)?
                 .is_some();
                 for node in &document.nodes {
                     if let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
@@ -3291,18 +3315,7 @@ impl Factory {
                 self.context.identity.project,
                 id,
             )
-            .map_err(|error| {
-                use provenant_fabric_runtime::graph::JournalError;
-                match error {
-                    // Unreadable is not corrupt: a denied or vanished read stays Io.
-                    JournalError::Filesystem(_)
-                    | JournalError::Io(_)
-                    | JournalError::DurabilityUnconfirmed(_) => {
-                        FacadeError::io("access graph journal")
-                    }
-                    _ => FacadeError::StateCorrupt,
-                }
-            })?
+            .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
             let mut run = graph_snapshot(checkpoint);
             run.advance_error = FileJournal::read_advance_error(
@@ -3323,11 +3336,7 @@ impl Factory {
         )
         .map_err(|_| FacadeError::io("access graph journal"))?;
         if let Some(document) = &document {
-            let integration_base = if journal
-                .load(id)
-                .map_err(|_| FacadeError::StateCorrupt)?
-                .is_some()
-            {
+            let integration_base = if journal.load(id).map_err(graph_journal_error)?.is_some() {
                 journal.integration_base()
             } else if let Some(branch) = &document.integration_branch {
                 let reference = match branch.strip_prefix("origin/") {
@@ -3350,7 +3359,12 @@ impl Factory {
                     directory: self.cwd.clone(),
                     document: document.clone(),
                 })
-                .map_err(|_| FacadeError::Conflict)?;
+                .map_err(|error| match error {
+                    provenant_fabric_runtime::graph::JournalError::TooLarge => {
+                        graph_journal_error(error)
+                    }
+                    _ => FacadeError::Conflict,
+                })?;
             let mut owner = BoundGraphOwner {
                 factory: self,
                 integration_base,
@@ -3392,15 +3406,16 @@ impl Factory {
             };
             let run = run.map_err(|error| match error {
                 provenant_fabric_runtime::graph::GraphError::Run(error) => error,
-                provenant_fabric_runtime::graph::GraphError::Invalid(reason) => {
-                    FacadeError::DispatchRefused {
-                        reason: format!("invalid graph: {reason}"),
-                    }
+                provenant_fabric_runtime::graph::GraphError::Invalid(_) => {
+                    FacadeError::InvalidInput
                 }
                 provenant_fabric_runtime::graph::GraphError::Extension(reason) => {
                     FacadeError::DispatchRefused { reason }
                 }
                 provenant_fabric_runtime::graph::GraphError::PlanChanged => FacadeError::Conflict,
+                provenant_fabric_runtime::graph::GraphError::Journal(error) => {
+                    graph_journal_error(error)
+                }
                 _ => FacadeError::StateCorrupt,
             })?;
             // A manual advance that succeeded supersedes an earlier failure.
@@ -3415,14 +3430,12 @@ impl Factory {
         }
         let mut checkpoint = journal
             .load(id)
-            .map_err(|_| FacadeError::StateCorrupt)?
+            .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
         if matches!(input, GraphInput::Cancel { .. }) {
             // Persist the admission fence before asking the run owner to stop live attempts.
             checkpoint.cancelled = true;
-            journal
-                .save(&checkpoint)
-                .map_err(|_| FacadeError::io("access graph journal"))?;
+            journal.save(&checkpoint).map_err(graph_journal_error)?;
             let mut owner = BinaryRunOwner {
                 factory: self,
                 allow_remote: true,
@@ -3844,6 +3857,32 @@ fn read_result_to_eof(mut read: impl FnMut(u64) -> Option<(Vec<u8>, u64, bool)>)
 }
 #[cfg(test)]
 mod result_tests {
+    #[test]
+    fn missing_graph_price_table_reports_its_path_and_failure() {
+        let assets = tempfile::tempdir().unwrap();
+        let reason = super::load_graph_prices(assets.path()).unwrap_err();
+        assert!(
+            reason.contains(
+                &assets
+                    .path()
+                    .join("config/telemetry-prices.toml")
+                    .display()
+                    .to_string()
+            )
+        );
+        assert!(reason.contains("No such file") || reason.contains("not found"));
+    }
+
+    #[test]
+    fn oversized_graph_checkpoint_is_refused_with_size_reason() {
+        match super::graph_journal_error(provenant_fabric_runtime::graph::JournalError::TooLarge) {
+            super::FacadeError::DispatchRefused { reason } => {
+                assert!(reason.contains("byte limit"))
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
     #[test]
     fn result_reader_reaches_a_verdict_after_the_first_chunk() {
         let limit = usize::try_from(provenant_records::run::OUTPUT_LIMIT).unwrap();
@@ -4385,7 +4424,14 @@ mod peer_tests {
                 reference: format!("{}/{attempt}", identity.host),
                 actor: identity.inbox.actor.to_string(),
             };
-            let seeded = graph::advance(&document, &mut seed, &mut journal)?;
+            let seeded = graph::advance_with_budget(
+                &document,
+                &mut seed,
+                &mut journal,
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+            )?;
             assert_eq!(seeded.checkpoint.nodes[0].state, NodeState::Running);
         }
         // An unsafe receipt path makes settlement itself fail before the graph

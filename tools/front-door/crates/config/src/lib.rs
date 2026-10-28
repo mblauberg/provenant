@@ -45,7 +45,8 @@ use serde::{Deserialize, Serialize, Serializer};
 use std::{collections::BTreeMap, fmt, path::PathBuf};
 use thiserror::Error;
 
-/// Errors never contain TOML text, rejected values or parser input excerpts.
+/// Errors contain no TOML text or parser excerpts; only numeric graph policy
+/// values may be included when rejected.
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("cannot encode config path at {path}")]

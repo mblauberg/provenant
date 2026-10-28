@@ -494,6 +494,15 @@ fn qualify(name: &str, field: &str) -> String {
     }
 }
 
+fn numeric_rejected(item: Option<&Item>) -> String {
+    item.and_then(Item::as_value)
+        .and_then(|value| match value {
+            Value::Integer(_) | Value::Float(_) => Some(format!(" (rejected value: {value})")),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 fn domain_issue(
     name: &str,
     mut error: SectionError,
@@ -509,12 +518,7 @@ fn domain_issue(
         for key in parts {
             item = item.and_then(|value| value.get(key));
         }
-        item.and_then(Item::as_value)
-            .and_then(|value| match value {
-                Value::Integer(_) | Value::Float(_) => Some(format!(" (rejected value: {value})")),
-                _ => None,
-            })
-            .unwrap_or_default()
+        numeric_rejected(item)
     } else {
         String::new()
     };
@@ -592,9 +596,7 @@ impl Overrides<'_> {
         let graph_policy =
             path.len() >= 4 && path[0] == "domains" && path[1] == "fabric" && path[2] == "graph";
         let rejected = if graph_policy {
-            at(self.user, path)
-                .map(|item| format!(" (rejected value: {})", item.to_string().trim()))
-                .unwrap_or_default()
+            numeric_rejected(at(self.user, path))
         } else {
             String::new()
         };

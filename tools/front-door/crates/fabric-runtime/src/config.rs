@@ -490,21 +490,27 @@ mod tests {
         assert!(error.contains("graph.limits.nodes"), "{error}");
         assert!(error.contains("11"), "{error}");
 
-        for (text, key, rejected) in [
+        for (text, key, rejected, should_echo, rule) in [
             (
                 "schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 0\n",
                 "graph.limits.nodes",
-                "0",
+                "rejected value: 0",
+                true,
+                "range",
             ),
             (
-                "schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 'wrong'\n",
+                "schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 'private-sentinel'\n",
                 "graph.limits.nodes",
-                "wrong",
+                "private-sentinel",
+                false,
+                "type",
             ),
             (
                 "schema_version = 1\n[domains.fabric.graph.budget]\nunknown_usage = 'bad'\n",
                 "graph.budget.unknown_usage",
                 "bad",
+                false,
+                "range",
             ),
         ] {
             let error =
@@ -513,7 +519,8 @@ mod tests {
                     .unwrap()
                     .to_string();
             assert!(error.contains(key), "{error}");
-            assert!(error.contains(rejected), "{error}");
+            assert_eq!(error.contains(rejected), should_echo, "{error}");
+            assert!(error.contains(rule), "{error}");
         }
     }
 }

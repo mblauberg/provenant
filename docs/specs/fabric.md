@@ -191,7 +191,7 @@ their `operation_id`.
 ## Bounded graphs and route fallback
 
 A graph must obey the configured structural limits and budgets. Each attempt
-is also bounded by `limits.graph_timeout_seconds`. The [host runbook](../runbooks/fabric-hosts.md#local-graphs)
+is also bounded by `limits.graph_timeout_seconds`. The [host runbook](../runbooks/fabric-hosts.md#configure-hosts)
 describes defaults, ceilings, budget telemetry and resuming a paused graph.
 
 Each node has an optional task `title`, defaulting to its ID; titles use the
