@@ -214,7 +214,10 @@ fn opencode_dispatch_observes_v2_wal_session() -> Result {
                     "{lane}"
                 );
             } else {
-                assert_eq!(lane["reason"], "Model unavailable: opencode/misspelt-free");
+                assert_eq!(
+                    lane["reason"],
+                    "provider model unavailable: Model unavailable: opencode/misspelt-free"
+                );
             }
         }
         rig.assert_legacy_unchanged()?;
