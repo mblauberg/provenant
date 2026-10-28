@@ -1,7 +1,6 @@
 //! Local board metadata read in one SQLite snapshot, without artifact I/O.
 use crate::{db::decode, *};
 use provenant_core::ProjectId;
-use provenant_records::CanonicalV1;
 use rusqlite::params;
 use sha2::{Digest as _, Sha256};
 
@@ -51,14 +50,16 @@ impl RunStore {
                 if call.cancel.is_cancelled() {
                     return Err(RunError::Cancelled);
                 }
-                let entry = (
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, Vec<u8>>(3)?,
-                );
-                let bytes = CanonicalV1::bytes(&entry)?;
-                hash.update(bytes.as_bytes());
+                hash.update(row.get::<_, i64>(0)?.to_le_bytes());
+                hash.update(row.get::<_, i64>(2)?.to_le_bytes());
+                for column in [1, 3] {
+                    let bytes = row
+                        .get_ref(column)?
+                        .as_bytes()
+                        .map_err(|_| RunError::Validation("board generation column"))?;
+                    hash.update((bytes.len() as u64).to_le_bytes());
+                    hash.update(bytes);
+                }
             }
             let generation = provenant_core::hex(&hash.finalize());
             let mut statement = tx.prepare(
@@ -107,6 +108,7 @@ mod tests {
     use provenant_core::{AttemptId, CancelToken, RunId};
 
     #[test]
+    #[allow(clippy::disallowed_methods, clippy::print_stderr)] // Explicit benchmark boundary.
     fn board_paging_snapshot_and_metadata() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let context = context(temp.path())?;
@@ -164,6 +166,28 @@ mod tests {
             store.board_page(None, true, 101, 0, &call),
             Err(RunError::Validation("board page bounds"))
         ));
+        let history = store.record(AttemptId::from_bytes([1; 16]), &call)?;
+        store.write(&call, |tx| {
+            for n in 1000..11_000u128 {
+                let mut record = history.clone();
+                record.attempt_id = AttemptId::from_bytes(n.to_le_bytes());
+                record.attempt_number = n as u64;
+                tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES(?1,?2,?3,?4,?5,?6,1,?7)",
+                    params![record.attempt_id.to_string(), record.run_id.to_string(), record.project_id.to_string(), record.task_id.to_string(), n as i64, record.revision as i64, crate::db::bytes(&record)?])?;
+            }
+            Ok(())
+        })?;
+        let mut samples = Vec::new();
+        for _ in 0..20 {
+            let start = std::time::Instant::now();
+            let page = reopened.board_page(None, true, 100, 0, &call)?;
+            assert_eq!(page.lanes.len(), 100);
+            let _ = serde_json::to_vec(&page.lanes)?;
+            samples.push(start.elapsed());
+        }
+        samples.sort();
+        eprintln!("board_paging 10k-history 100-row p95: {:?}", samples[18]);
+        assert!(samples[18] <= std::time::Duration::from_secs(1));
         Ok(())
     }
 }

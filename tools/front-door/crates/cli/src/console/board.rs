@@ -96,7 +96,7 @@ pub(super) fn read(
         .as_ref()
         .and_then(|page| page.next)
         .map(|offset| format!("{snapshot}:{offset}"));
-    if let Some(page) = page {
+    if let Some(mut page) = page {
         let attempts: Vec<_> = page.lanes.iter().map(|lane| lane.attempt.clone()).collect();
         let mut waits = Vec::new();
         let projects: std::collections::BTreeSet<_> =
@@ -107,6 +107,15 @@ pub(super) fn read(
                 ..context.clone()
             };
             if let Some(store) = RunStore::open_read_only(&context, &call)? {
+                for lane in &mut page.lanes {
+                    if lane.attempt.project_id == project_id {
+                        let observed = store.record(lane.attempt.attempt_id, &call)?;
+                        if observed.generation == lane.attempt.generation {
+                            lane.attempt.last_output_at = observed.last_output_at;
+                            lane.attempt.priority = observed.priority;
+                        }
+                    }
+                }
                 let selected: Vec<_> = attempts
                     .iter()
                     .filter(|a| a.project_id == project_id)
@@ -240,6 +249,27 @@ mod tests {
         );
         assert!(!serde_json::to_string(&first)?.contains("private body"));
         assert!(!roots.state.as_path().join("fabric").exists());
+        use std::os::unix::fs::PermissionsExt;
+        let id = AttemptId::from_bytes([101; 16]);
+        let checkpoint = roots.state.as_path().join(format!(
+            "runs/{}/attempts/{id}/process.json",
+            RunId::from_bytes([101; 16])
+        ));
+        let observed_at = clock.wall_now()?;
+        std::fs::write(
+            &checkpoint,
+            serde_json::to_vec(
+                &json!({"schema_version":1,"scope":{"run":RunId::from_bytes([101;16]),"attempt":id,"generation":0},"last_output_at":observed_at,"priority":15}),
+            )?,
+        )?;
+        std::fs::set_permissions(checkpoint, std::fs::Permissions::from_mode(0o600))?;
+        let observed = read(&roots, None, false, 50, None)?;
+        assert_eq!(observed["lanes"][0]["metadata"]["attempt"]["priority"], 15);
+        assert_eq!(
+            observed["lanes"][0]["metadata"]["attempt"]["last_output_at"],
+            json!(observed_at)
+        );
+        assert_eq!(observed["snapshot"], first["snapshot"]);
         let chair_call = ChairRequest {
             clock: &clock,
             budget: call.budget,
@@ -252,16 +282,16 @@ mod tests {
             &request,
             &chair_call,
         )?;
-        let _index = ChairIndex::open_read_only(
-            &roots.state,
-            std::time::Instant::now() + std::time::Duration::from_secs(1),
-        )?
-        .ok_or("missing host index")?;
         assert_eq!(
             read(&roots, None, false, 50, None)?["coverage"]["chairs"],
             "complete"
         );
         let cursor = first["next_cursor"].as_str().ok_or("missing cursor")?;
+        for malformed in ["", "junk", "g:0", "g:-1", "g:18446744073709551615"] {
+            let error = read(&roots, None, false, 50, Some(malformed)).unwrap_err();
+            assert!(matches!(error, Error::BoardCursor));
+            assert!(error.to_string().contains("without --cursor"));
+        }
         let second = read(&roots, None, false, 50, Some(cursor))?;
         assert_ne!(first["lanes"][0]["lane_id"], second["lanes"][0]["lane_id"]);
         for (selected, all, limit) in [
@@ -301,25 +331,5 @@ mod tests {
             Err(Error::BoardCursor)
         ));
         Ok(())
-    }
-
-    #[test]
-    fn board_paging_cursor_binds_every_filter_and_generation() {
-        let filters = json!({"host":"h","project_id":null,"all":false,"limit":50});
-        let snapshot = binding("g1", &filters).unwrap();
-        for changed in [
-            json!({"host":"h2","project_id":null,"all":false,"limit":50}),
-            json!({"host":"h","project_id":"p","all":false,"limit":50}),
-            json!({"host":"h","project_id":null,"all":true,"limit":50}),
-            json!({"host":"h","project_id":null,"all":false,"limit":100}),
-        ] {
-            assert_ne!(snapshot, binding("g1", &changed).unwrap());
-        }
-        assert_ne!(snapshot, binding("g2", &filters).unwrap());
-        for cursor in ["", "junk", "g:0", "g:-1", "g:18446744073709551615"] {
-            let error = cursor_offset(Some(cursor)).unwrap_err();
-            assert!(matches!(error, Error::BoardCursor));
-            assert!(error.to_string().contains("without --cursor"));
-        }
     }
 }

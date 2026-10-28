@@ -42,15 +42,16 @@ Each row contains:
   their owners expose these facts. Worktree delivery metadata stays in the
   attempt delivery receipt; no Git probing or inferred issue/PR links.
 
-One SQLite read transaction supplies run/attempt records and their content
-generation. Generation hashes every retained attempt identity/revision and run
-record in the project scope, including rows outside the current page or state
-filter. It survives reopening the same store and changes when those facts
-change. Generation discovery scans metadata within a five-second call budget;
-only the selected page's attempt records are decoded. No snapshot cache or
-new durable state is written. SQLite may maintain WAL/shared-memory companions,
-as with the run owner's existing read-only path. Chair bindings are immutable; live wait reasons
-and observation time are ancillary observations outside the SQLite snapshot.
+One SQLite read transaction supplies records and their content generation,
+hashing every retained attempt identity/revision and run record in the project
+scope, including rows outside the page or state filter. Generation survives
+reopening and changes with these facts. The metadata scan has a five-second
+budget; only selected attempt records are decoded. No cache or durable state
+is written, apart from SQLite WAL/shared-memory bookkeeping as in existing run
+readers. Chair bindings are immutable;
+wait reasons, process-checkpoint last-output time/priority and observation time
+are ancillary observations outside the SQLite snapshot. Process observations
+must match the attempt generation; they do not replace snapshot execution facts.
 
 Cursors are opaque version 1 tokens binding the generation, host, project,
 state filter and page size to an exclusive sequence position. A changed
@@ -68,8 +69,10 @@ locators, not proof that files still exist. No prompt, result, transcript or
 artifact body is read or returned. The existing 1 MiB response cap refuses
 oversized metadata pages without writing overflow artifacts; retry with a
 smaller limit. `board_paging_end_to_end_and_100_row_p95` measures 20 local
-100-row reads plus JSON encoding, excluding fixture setup, and asserts p95
-at most one second. CI retains the full integration gate.
+100-row reads plus JSON encoding; `board_paging_snapshot_and_metadata` measures
+the metadata reader with 10,000 retained terminal attempts. Both exclude setup
+and assert p95 ≤1 second. Generation hashing streams length-prefixed raw bytes
+without decoding run blobs. Full integration checks run in CI.
 
 ### Project and session catalogue
 
