@@ -91,28 +91,30 @@ fn summarise_ci(checks: Option<Vec<Check>>) -> provenant_fabric_runtime::graph::
             summary: "checks unavailable".into(),
         };
     };
-    let passed = checks
-        .iter()
-        .filter(|c| matches!(c.bucket.as_str(), "pass" | "skipping"))
-        .count();
+    let passed = checks.iter().filter(|c| c.bucket == "pass").count();
+    let skipped = checks.iter().filter(|c| c.bucket == "skipping").count();
     let failed = checks
         .iter()
         .filter(|c| matches!(c.bucket.as_str(), "fail" | "cancel"))
         .count();
     let pending = checks.iter().filter(|c| c.bucket == "pending").count();
     let total = checks.len();
-    let state = if total == 0 || passed + failed + pending != total {
+    let state = if total == 0 || passed + skipped + failed + pending != total {
         CiState::Unavailable
     } else if failed > 0 {
         CiState::Failed
     } else if pending > 0 {
         CiState::Pending
+    } else if passed == 0 {
+        CiState::Unavailable
     } else {
         CiState::Passed
     };
     CiObservation {
         state,
-        summary: format!("checks={passed}/{total} fail={failed} pending={pending}"),
+        summary: format!(
+            "checks={passed}/{total} fail={failed} pending={pending} skipped={skipped}"
+        ),
     }
 }
 fn open_numbers(project: &Path) -> Result<Vec<u64>> {
@@ -235,11 +237,12 @@ mod tests {
         assert_eq!(observe(&["pass", "pending"]).state, CiState::Pending);
         assert_eq!(observe(&["pending", "fail"]).state, CiState::Failed);
         assert_eq!(observe(&[]).state, CiState::Unavailable);
+        assert_eq!(observe(&["skipping"]).state, CiState::Unavailable);
         assert_eq!(observe(&["pass", "unexpected"]).state, CiState::Unavailable);
         assert_eq!(summarise_ci(None).state, CiState::Unavailable);
         assert_eq!(
             observe(&["pass", "pending"]).summary,
-            "checks=1/2 fail=0 pending=1"
+            "checks=1/2 fail=0 pending=1 skipped=0"
         );
     }
 }
