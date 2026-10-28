@@ -17,6 +17,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+/// Sync file data and metadata, including the storage-device flush on macOS.
+pub fn durable_sync_file(file: &File) -> io::Result<()> {
+    os::durable_sync_file(file)
+}
+
 #[derive(Debug, Error)]
 pub enum FsError {
     #[error("expected one normal relative path component: {name:?}")]
@@ -1144,6 +1149,19 @@ impl FileHandle {
         self.file
             .sync_all()
             .map_err(error("fsync file", &self.path))
+    }
+    /// Give the owner write permission through the open descriptor.
+    pub fn make_owner_writable(&self) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = self
+            .file
+            .metadata()
+            .map_err(error("fstat file", &self.path))?
+            .permissions()
+            .mode();
+        self.file
+            .set_permissions(std::fs::Permissions::from_mode(mode | 0o200))
+            .map_err(error("fchmod file", &self.path))
     }
     /// Give the owner execute permission through the open descriptor.
     pub fn make_owner_executable(&self) -> Result<()> {

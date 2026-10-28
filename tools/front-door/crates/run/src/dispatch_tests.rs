@@ -1309,6 +1309,7 @@ impl Providers for Confined {
             writer: None,
             home: "/fixture/home".into(),
             cargo_registry_seed: false,
+            state_root: std::path::PathBuf::from("/fixture/state"),
         });
         Ok(launch)
     }
