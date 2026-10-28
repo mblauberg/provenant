@@ -21,6 +21,13 @@
       "effect": "Minimum time between update attempts, checked on existing housekeeping events. Failed and interrupted attempts and result-write errors wait the same interval."
     }
   },
+  "host_lane_build_settings": {
+    "path": "domains.fabric.lanes",
+    "settings": {
+      "max_concurrent_builds": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "1 at 16 GiB or less, otherwise 2", "effect": "Maximum active worktree-write lanes across the host."},
+      "cargo_build_jobs": {"type": "int", "min": 1, "max": 1024, "auto_value": -1, "default": "Half the available cores, at least 1", "effect": "Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence."}
+    }
+  },
   "knobs": {
     "domains.routing.capacity_cooldown_seconds": {
       "type": "int", "min": 0, "default": 600, "status": "wired",

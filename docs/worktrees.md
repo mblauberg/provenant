@@ -62,6 +62,14 @@ replaces a stale registration. It still refuses a held writer lock, a
 reservation and a live process, and names the process by pid and command, as
 `pr land` does.
 
+When a filesystem renumbers its device, a registered tree can refresh that
+number under the worktree registry lock. Its recorded root inode, path, branch
+and project must still match, and Git must confirm the linked worktree and its
+common directory and backlink. New registrations and refreshed legacy records
+also retain the common and private Git directory identities for later checks.
+The registration records the number of device refreshes. Other identity
+changes remain stale and require adoption.
+
 `worktree list` prints one terse line per tree. The path is a plain path,
 quoted only when it needs it; `--json` keeps the structured path object.
 

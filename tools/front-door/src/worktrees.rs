@@ -168,8 +168,17 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
 /// The terse human form. `--json` keeps the structured path envelope; here a
 /// UTF-8 absolute path reads as a plain path, quoted only when it needs it.
 fn human(mut value: serde_json::Value) -> String {
+    let stale = value["retained"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item["reason"] == "stale_registration")
+    });
     plain_paths(&mut value);
-    provenant_cli::terse(&value)
+    let mut output = provenant_cli::terse(&value);
+    if stale {
+        output.push_str("\nrun `provenant worktree adopt PATH --owner NAME` from outside the tree to replace the stale registration");
+    }
+    output
 }
 
 fn plain_paths(value: &mut serde_json::Value) {
@@ -488,6 +497,9 @@ fn gc_data_summary(data: &GcData) -> String {
                     "kept worktree {} ({:?})\n",
                     kept.branch, kept.reason
                 ));
+                if kept.reason == RetainReason::StaleRegistration {
+                    human.push_str("run `provenant worktree adopt PATH --owner NAME` from outside the tree to replace the stale registration\n");
+                }
             }
         }
         for output in project
@@ -520,6 +532,7 @@ fn retained_exception(reason: RetainReason) -> bool {
         RetainReason::Dirty
             | RetainReason::GitOperationInProgress
             | RetainReason::UnknownWriter
+            | RetainReason::StaleRegistration
             | RetainReason::Changed
             | RetainReason::GitFailure
             | RetainReason::LockedOrPrunable
@@ -816,9 +829,15 @@ pub(crate) fn land_cleanup(
                     landed.kept = outcome
                         .retained
                         .first()
-                        .map(|kept| format!("branch {} kept: {:?}", kept.branch, kept.reason));
+                        .map(|kept| {
+                            let mut message = format!("branch {} kept: {:?}", kept.branch, kept.reason);
+                            if kept.reason == RetainReason::StaleRegistration {
+                                message.push_str("; run `provenant worktree adopt PATH --owner NAME` from outside the tree to replace the stale registration");
+                            }
+                            message
+                        });
                 }
-                Err(error) => landed.kept = Some(error.to_string()),
+                Err(error) => landed.kept = Some(error.with_repair()),
             }
             Ok(landed)
         },
@@ -1452,6 +1471,23 @@ mod human_tests {
 mod gc_preview_tests {
     #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
     use super::*;
+    #[test]
+    fn stale_registration_reports_adopt_in_prune_and_gc_output() {
+        let mut outcome = worktrees::RemoveOutcome::default();
+        outcome.retained.push(worktrees::RetainedBranch {
+            branch: "stale".into(),
+            reason: RetainReason::StaleRegistration,
+        });
+        let output = human(serde_json::to_value(&outcome).unwrap_or_default());
+        assert!(output.contains("provenant worktree adopt PATH --owner NAME"));
+
+        let mut data = GcData::default();
+        data.worktree_cleanup.push(worktrees::WorktreeGcReport {
+            worktrees: outcome,
+            ..Default::default()
+        });
+        assert!(gc_data_summary(&data).contains("provenant worktree adopt PATH --owner NAME"));
+    }
     #[test]
     fn gc_summary_reports_event_expiry_in_preview_and_applied_mode() {
         let mut data = GcData::default();

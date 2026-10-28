@@ -1033,6 +1033,7 @@ fn start_writer(
             )
         },
         None,
+        None,
         call,
     )?)
 }
@@ -2523,7 +2524,7 @@ fn re_added_worktree_is_adopted_then_dispatchable() -> Result {
     let message = refused["error"]["message"].as_str().ok_or("message")?;
     assert!(message.contains("registration is stale"), "{message}");
     assert!(
-        message.contains("provenant worktree adopt <path>"),
+        message.contains("provenant worktree adopt PATH --owner NAME"),
         "{message}"
     );
 
@@ -3096,11 +3097,13 @@ fn lane_prepare_isolates_nested_state() -> Result {
                 executable_search_path: Vec::new(),
                 git: selected_git.clone(),
                 codex_home: None,
+                cargo_build_jobs: None,
                 fixture_state_write: true,
             }),
             sealed: Some(provenant_run::SealedTask {
                 request_digest: prepared.request.digest()?,
                 task_id: task.task_id,
+                effective_network: task.access.network(task.writer.is_some()),
             }),
         };
         verify_lane_profile(

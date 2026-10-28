@@ -1336,6 +1336,29 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
             command.access.worktree = None;
         }
     }
+    if command.route.effort.is_none()
+        && let Some(model) = command.route.model.as_ref()
+        && !model.0.contains('@')
+        && let Ok(id) = ModelId::parse(&model.0)
+    {
+        let config =
+            match provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS) {
+                Ok(config) => config,
+                Err(error) => {
+                    return reply(
+                        "run",
+                        Err(Fail::new(
+                            Status::Error,
+                            ErrorKind::Config,
+                            error.to_string(),
+                        )),
+                    );
+                }
+            };
+        if let Ok(catalogue) = provenant_routing::Catalogue::bundled() {
+            command.route.effort = catalogue.model_default_effort(&config.domains.routing, &id);
+        }
+    }
     render_run(dispatch(command, edge), edge)
 }
 
@@ -1371,11 +1394,19 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
         };
         let state = row["state"].as_str().unwrap_or("unknown");
         human.push_str(&format!(
-            "{} {state} {}\n",
+            "{} {state} {} (effort: {}, network: {})\n",
             &id[..id.len().min(8)],
             row["applied_route"]["model"]
                 .as_str()
-                .unwrap_or("unresolved")
+                .unwrap_or("unresolved"),
+            row["applied_route"]["effort"].as_str().unwrap_or(
+                if row["applied_route"].is_object() {
+                    "provider default"
+                } else {
+                    "unresolved"
+                }
+            ),
+            row["network"].as_str().unwrap_or("unknown")
         ));
         if let Some(reason) = row["reason"].as_str() {
             human.push_str(&format!("{}\n", plain_text(reason, usize::MAX)));
@@ -2547,6 +2578,17 @@ fn check_chair_run_id(
     Ok(())
 }
 
+fn seal_launch_task(
+    request_digest: provenant_core::Digest,
+    task: &run::TaskRequest,
+) -> run::SealedTask {
+    run::SealedTask {
+        request_digest,
+        task_id: task.task_id,
+        effective_network: task.access.network(task.writer.is_some()),
+    }
+}
+
 /// A child carries the request `validate_child` returned, which is the only
 /// copy launched from. The store carries its parent's sealed requester.
 fn launch_on_host(
@@ -2555,7 +2597,7 @@ fn launch_on_host(
     edge: &Edge<'_>,
     call: &run::Request<'_>,
     host: Option<&run::HostLaunchContext>,
-    validated: Option<&run::CanonicalRequest>,
+    validated: Option<&run::ValidatedChild>,
     ready: Option<&run::PreparedStart>,
 ) -> Result<Vec<run::Started>, Fail> {
     let inherited_host = host.is_some();
@@ -2575,13 +2617,14 @@ fn launch_on_host(
             git: provenant_os::git::git_executable()
                 .ok_or_else(|| Fail::new(Status::Refused, ErrorKind::Git, "Git unavailable"))?,
             codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+            cargo_build_jobs: std::env::var("CARGO_BUILD_JOBS").ok(),
             #[cfg(feature = "fixture")]
             fixture_state_write: false,
         },
     };
     let read;
     let request = match validated {
-        Some(request) => request,
+        Some(request) => &**request,
         None => {
             read = session.store.request(run, call)?;
             &read
@@ -2657,6 +2700,13 @@ fn launch_on_host(
         state_root: session.context.state_root.as_path().into(),
     };
     let holder = |attempt: &run::AttemptRecord, requester| {
+        let task = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == attempt.task_id)
+            .ok_or(run::RunError::Validation(
+                "attempt task missing from request",
+            ))?;
         let mut host = host.clone();
         if !inherited_host {
             // Called after preparation, while its selected provider lease is held.
@@ -2712,10 +2762,12 @@ fn launch_on_host(
                 .and_then(|task| task.deliver.as_ref())
                 .map(|_| run::HostDeliveryContext::capture()),
             launch: Some(host),
-            sealed: Some(run::SealedTask {
+            sealed: Some(seal_launch_task(
                 request_digest,
-                task_id: attempt.task_id,
-            }),
+                &session
+                    .store
+                    .effective_launch_task(request, task, validated),
+            )),
         }
         .encode()
     };
@@ -2754,6 +2806,7 @@ fn launch_on_host(
                 )
             },
             validated,
+            Some(request),
             call,
         )?;
         check_launch_policy(&started)?;
@@ -2761,7 +2814,7 @@ fn launch_on_host(
     }
     let started = session
         .service()
-        .start(run, &providers, &holder, validated, call)?;
+        .start(run, &providers, &holder, validated, request, call)?;
     check_launch_policy(&started)?;
     Ok(started)
 }
@@ -2839,6 +2892,18 @@ fn report(
             (data, human, false)
         }
     };
+    let canonical = session.store.request(record.run_id, call)?;
+    if let Some(rows) = data["lanes"].as_array_mut() {
+        for row in rows {
+            if let Some(task) = canonical
+                .tasks
+                .iter()
+                .find(|task| row["task_id"] == task.task_id.to_string())
+            {
+                row["network"] = json!(task.access.network(task.writer.is_some()));
+            }
+        }
+    }
     data["run_id"] = json!(record.run_id);
     data["operation_id"] = json!(record.operation_id);
     let unknown = launch_unknown(started);
@@ -5636,6 +5701,18 @@ mod lane_depth_tests {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn unsafe_store_path_reason_survives_cli_conversion() {
+        let failure = super::Fail::from(provenant_run::RunError::UnsafePath {
+            path: "runs/example/process.json".into(),
+            check: provenant_run::PathCheck::Links,
+        });
+        assert_eq!(
+            failure.message,
+            "run-store path runs/example/process.json is not private or contained: link count"
+        );
+    }
+
+    #[test]
     fn stats_summary_reports_cost_coverage() {
         use provenant_telemetry::{CostTotal, Money, Totals};
         let mut totals = Totals {
@@ -5692,7 +5769,7 @@ mod tests {
                 serde_json::json!({
                     "operation_id": "timeout",
                     "lanes": [
-                        {"attempt_id":"01010101010101010101010101010101", "state":"running"},
+                        {"attempt_id":"01010101010101010101010101010101", "state":"running", "applied_route":{"model":"codex/test", "effort":"high"}, "network":"open"},
                         {"attempt_id":"02020202020202020202020202020202", "state":"succeeded"},
                         {"attempt_id":"03030303030303030303030303030303", "state":"input_required"}
                     ]
@@ -5702,6 +5779,11 @@ mod tests {
             )),
         );
         let report = super::render_run(result, &edge);
+        assert!(
+            report
+                .human
+                .contains("codex/test (effort: high, network: open)")
+        );
         assert_eq!(report.result.status, Status::Timeout);
         assert_eq!(
             report.human.matches("keep waiting:").count(),
@@ -7848,6 +7930,7 @@ mod tests {
             executable_search_path: Vec::new(),
             git: PathBuf::from("/usr/bin/git"),
             codex_home: None,
+            cargo_build_jobs: None,
             #[cfg(feature = "fixture")]
             fixture_state_write: false,
         });

@@ -871,6 +871,39 @@ impl Catalogue {
     pub fn has_pool(&self, name: &str) -> bool {
         self.pools.contains_key(name)
     }
+    /// Use a model default only when its applicable sources agree.
+    pub fn model_default_effort(&self, config: &RoutingConfig, model: &ModelId) -> Option<String> {
+        let configured: std::collections::BTreeSet<_> = config
+            .routes
+            .values()
+            .filter(|route| &route.model == model)
+            .filter_map(|route| route.effort.as_deref())
+            .chain(
+                config
+                    .pools
+                    .values()
+                    .flatten()
+                    .filter(|member| &member.model == model)
+                    .filter_map(|member| member.effort.as_deref()),
+            )
+            .collect();
+        if !configured.is_empty() {
+            return (configured.len() == 1)
+                .then(|| configured.first().map(|s| (*s).to_owned()))
+                .flatten();
+        }
+        let bundled: std::collections::BTreeSet<_> = self
+            .pools
+            .iter()
+            .filter(|(name, _)| !config.pools.contains_key(*name))
+            .flat_map(|(_, members)| members)
+            .filter(|member| &member.model == model)
+            .filter_map(|member| member.effort.as_deref())
+            .collect();
+        (bundled.len() == 1)
+            .then(|| bundled.first().map(|s| (*s).to_owned()))
+            .flatten()
+    }
     /// Whether the bundled pool evidence marks this exact model as free.
     pub fn is_free_model(&self, id: &ModelId) -> bool {
         self.pools

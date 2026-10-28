@@ -5,6 +5,105 @@ use std::{
     path::{Component, Path},
 };
 
+/// Host-wide build limits, read independently by admission guardians.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LaneBuildSettings {
+    #[serde(default, deserialize_with = "deserialize_auto")]
+    pub max_concurrent_builds: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_auto")]
+    pub cargo_build_jobs: Option<u64>,
+}
+/// The asset's -1 sentinel selects the host-dependent default.
+pub fn deserialize_auto<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    use serde::de::Error;
+    let value = Option::<i64>::deserialize(deserializer)?;
+    match value {
+        None | Some(-1) => Ok(None),
+        Some(value) => u64::try_from(value).map(Some).map_err(D::Error::custom),
+    }
+}
+impl LaneBuildSettings {
+    pub fn read(state: &Path) -> std::io::Result<Self> {
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Root {
+            domains: Domains,
+        }
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Domains {
+            fabric: Fabric,
+        }
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Fabric {
+            lanes: LaneBuildSettings,
+        }
+        let read = provenant_os::fs::Directory::open_anchor(state).and_then(|directory| {
+            directory.read_bounded(
+                "config.toml".as_ref(),
+                provenant_records::Limits::CONFIG.max_bytes,
+            )
+        });
+        let settings = match read {
+            Ok(bytes) => {
+                let text = std::str::from_utf8(&bytes)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+                let document = text
+                    .parse::<toml_edit::DocumentMut>()
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+                toml_edit::de::from_document::<Root>(document)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+                    .domains
+                    .fabric
+                    .lanes
+            }
+            Err(error) if error.is_not_found() => Self::default(),
+            Err(error) => return Err(std::io::Error::other(error)),
+        };
+        if !settings.invalid_keys().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid lane build settings",
+            ));
+        }
+        Ok(settings)
+    }
+    /// Invalid host build setting names, shared with the Fabric reader.
+    pub fn invalid_keys(&self) -> Vec<&'static str> {
+        let mut invalid = Vec::new();
+        if self
+            .max_concurrent_builds
+            .is_some_and(|n| !(1..=64).contains(&n))
+        {
+            invalid.push("max_concurrent_builds");
+        }
+        if self
+            .cargo_build_jobs
+            .is_some_and(|n| !(1..=1024).contains(&n))
+        {
+            invalid.push("cargo_build_jobs");
+        }
+        invalid
+    }
+    pub fn build_limit(&self, total_bytes: u64) -> u64 {
+        self.max_concurrent_builds
+            .unwrap_or(if total_bytes <= 16 * 1024_u64.pow(3) {
+                1
+            } else {
+                2
+            })
+    }
+    pub fn jobs(&self) -> u64 {
+        self.cargo_build_jobs.unwrap_or_else(|| {
+            std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1) as u64)
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GcSettings {
@@ -224,5 +323,37 @@ mod tests {
         for size in ["-1", "1.5G", "20GB", "", "G", "18446744073709551615G"] {
             assert!(super::parse_cache_size(size).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod build_tests {
+    use super::LaneBuildSettings;
+    #[test]
+    fn automatic_and_invalid_build_values() {
+        let automatic: LaneBuildSettings =
+            toml_edit::de::from_str("max_concurrent_builds = -1\ncargo_build_jobs = -1").unwrap();
+        assert_eq!(automatic, LaneBuildSettings::default());
+        let invalid: LaneBuildSettings =
+            toml_edit::de::from_str("max_concurrent_builds = 0\ncargo_build_jobs = 1025").unwrap();
+        assert_eq!(
+            invalid.invalid_keys(),
+            ["max_concurrent_builds", "cargo_build_jobs"]
+        );
+        assert!(toml_edit::de::from_str::<LaneBuildSettings>("cargo_build_jobs = -2").is_err());
+    }
+    #[test]
+    fn defaults_and_overrides() {
+        let settings = LaneBuildSettings::default();
+        let boundary = 16 * 1024_u64.pow(3);
+        assert_eq!(settings.build_limit(boundary), 1);
+        assert_eq!(settings.build_limit(boundary + 1), 2);
+        assert!(settings.jobs() >= 1);
+        let settings = LaneBuildSettings {
+            max_concurrent_builds: Some(3),
+            cargo_build_jobs: Some(7),
+        };
+        assert_eq!(settings.build_limit(boundary), 3);
+        assert_eq!(settings.jobs(), 7);
     }
 }

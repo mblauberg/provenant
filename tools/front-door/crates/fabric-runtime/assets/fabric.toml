@@ -3,6 +3,9 @@ client_label = "agent"
 ssh_executable = "" # empty selects shared system SSH discovery
 home_hosts = {}
 peers = {}
+[lanes]
+max_concurrent_builds = -1 # automatic: 1 at or below 16 GiB, otherwise 2
+cargo_build_jobs = -1 # automatic: half the available cores, at least 1
 [lanes.cargo_seed]
 enabled = false
 max_generations = 3

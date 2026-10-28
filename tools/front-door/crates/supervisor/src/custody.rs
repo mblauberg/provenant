@@ -43,11 +43,23 @@ pub enum CustodyError {
     /// it can reach the user without any path.
     #[error("startup spacing cannot be judged: host clock or boot identity unreadable")]
     AdmissionClock,
+    #[error(
+        "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds and domains.fabric.lanes.cargo_build_jobs"
+    )]
+    AdmissionBuildSettings,
+    #[error("guardian process identity unavailable; retry when process observation is available")]
+    AdmissionGuardianIdentity,
     /// Numeric host observations are safe to publish as the lane's refusal.
     #[error(
         "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes; run `provenant gc --apply`"
     )]
     AdmissionDisk { free: u64, floor: u64 },
+    #[error("memory pressure is {level}; wait for host memory pressure to fall")]
+    AdmissionMemoryPressure { level: String },
+    #[error(
+        "writer build slots full: {active} of {limit} active; wait for a writer to finish or adjust lanes.max_concurrent_builds"
+    )]
+    AdmissionBuildSlots { active: u64, limit: u64 },
     #[error("custody I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -1302,6 +1314,11 @@ pub fn acquire_reboot_recovery(
     )
 }
 
+/// Whether two directories remain on the same filesystem across a device renumbering.
+pub fn same_device_rebinding(old_a: u64, old_b: u64, new_a: u64, new_b: u64) -> bool {
+    old_a == old_b && new_a == new_b
+}
+
 pub(crate) fn acquire_reboot_recovery_with(
     directory: Directory,
     attempt: &Directory,
@@ -1330,8 +1347,14 @@ pub(crate) fn acquire_reboot_recovery_with(
         || reservation.scope != scope
         || reservation.reservation_inode != slot.inode
         || reservation.attempt_inode != Some(target.inode)
-        || reservation.attempt_device != Some(reservation.reservation_device)
-        || slot.device != target.device
+        || !reservation.attempt_device.is_some_and(|device| {
+            same_device_rebinding(
+                reservation.reservation_device,
+                device,
+                slot.device,
+                target.device,
+            )
+        })
     {
         return Err(CustodyError::InvalidRecord);
     }
@@ -1480,8 +1503,14 @@ impl Recovery {
         if self.reservation.attempt_device != Some(metadata.device) {
             let slot = self.directory.metadata()?;
             if self.reservation.reservation_inode != slot.inode
-                || self.reservation.attempt_device != Some(self.reservation.reservation_device)
-                || slot.device != metadata.device
+                || !self.reservation.attempt_device.is_some_and(|device| {
+                    same_device_rebinding(
+                        self.reservation.reservation_device,
+                        device,
+                        slot.device,
+                        metadata.device,
+                    )
+                })
             {
                 return Ok(None);
             }

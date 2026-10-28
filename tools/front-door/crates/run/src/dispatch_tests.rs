@@ -441,7 +441,10 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
         if valid && case == "read-only default child of a quiet writer" {
             let validated = result.as_ref().unwrap();
             assert_eq!(
-                validated.tasks[0].access.network(false),
+                validated
+                    .effective_task(&validated.tasks[0])
+                    .access
+                    .network(false),
                 NetworkAccess::Provider,
                 "{case}: expected Provider network"
             );
@@ -996,7 +999,7 @@ fn host_refuses_writer_child_after_request_rewrite() -> TestResult {
 
     // Rewrite both lane-writable copies so the host's validated digest is
     // the remaining boundary against adding writer authority before launch.
-    let mut swapped = validated.clone();
+    let mut swapped = (*validated).clone();
     swapped.tasks[0].writer = Some(WriterRequest {
         project: "/project".into(),
         worktree: "/project/.worktrees/child".into(),
@@ -1048,6 +1051,70 @@ fn rewrite_child_request(
 }
 
 #[test]
+fn lane_continuation_respects_sealed_parent_or_provider_fallback() -> TestResult {
+    for (bound, expected) in [
+        (None, NetworkAccess::Provider),
+        (Some(NetworkAccess::Local), NetworkAccess::Local),
+        (Some(NetworkAccess::Provider), NetworkAccess::Provider),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?
+            .with_writer_registry(&temp.path().join("host"));
+        let store = if let Some(network) = bound {
+            store.with_sealed_parent_network(network)
+        } else {
+            store
+        };
+        let prior = input();
+        store.create(&prior, &call)?;
+        let mut proposal = input();
+        proposal.run_id = RunId::from_bytes([35; 16]);
+        proposal.operation_id = "lane-continuation".parse()?;
+        proposal.attempts[0].attempt_id = AttemptId::from_bytes([36; 16]);
+        proposal.request.parent = Some(prior.attempts[0].attempt_id);
+        proposal.request.tasks[0].access.network = Some(NetworkAccess::Provider);
+        let mut narrower = proposal.request.tasks[0].clone();
+        narrower.access.network = Some(NetworkAccess::Provider);
+        assert_eq!(
+            store
+                .effective_launch_task(&proposal.request, &narrower, None)
+                .access
+                .network(false),
+            NetworkAccess::Provider
+        );
+        // A lane-writable request cannot bypass the check by omitting its parent lane.
+        proposal.request.parent_attempt = None;
+        let run = store.create(&proposal, &call)?;
+        let expected_request = proposal.request.clone();
+        proposal.request.tasks[0].access.network = Some(NetworkAccess::Open);
+        proposal.request.parent = None;
+        rewrite_child_request(&store, run.run_id, &proposal.request, &call)?;
+        let fake = Fake {
+            refuse: true,
+            ..Default::default()
+        };
+        assert!(matches!(
+            store.start_checked(
+                run.run_id,
+                &expected_request,
+                &fake,
+                &|_, _| unreachable!(),
+                &call
+            ),
+            Err(RunError::Validation(
+                "request changed after launch validation"
+            ))
+        ));
+        assert_eq!(fake.prepared.get(), 0);
+        store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
+        assert_eq!(fake.network.get(), Some(expected));
+    }
+    Ok(())
+}
+
+#[test]
 fn host_launches_only_the_validated_child_request() -> TestResult {
     let parent = AttemptId::from_bytes([9; 16]);
     let temp = tempfile::tempdir()?;
@@ -1055,7 +1122,8 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?
         .with_sealed_requester(provenant_core::ActorId::from_bytes([7; 16]));
-    let parent_task = input().request.tasks[0].clone();
+    let mut parent_task = input().request.tasks[0].clone();
+    parent_task.access.network = Some(NetworkAccess::Provider);
     let mut nested = input();
     nested.request.lane_depth = Some(2);
     nested.request.parent_attempt = Some(parent);
@@ -1063,7 +1131,7 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     let validated = store.validate_child(record.run_id, parent, &parent_task, 1, 2, &call)?;
 
     // The lane swaps its sealed request and the recorded digest together.
-    let mut swapped = validated.clone();
+    let mut swapped = (*validated).clone();
     swapped.tasks[0].access.network = Some(NetworkAccess::Open);
     store.run_dir(record.run_id, false)?.atomic_write(
         std::ffi::OsStr::new("request.json"),
@@ -1079,6 +1147,18 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     )?;
     assert_eq!(store.request(record.run_id, &call)?, swapped);
     let fake = Fake::default();
+    assert!(matches!(
+        store.start_checked(
+            record.run_id,
+            &validated,
+            &fake,
+            &|_, _| unreachable!(),
+            &call
+        ),
+        Err(RunError::Validation(
+            "request changed after launch validation"
+        ))
+    ));
     assert!(matches!(
         store.start_child(
             record.run_id,
@@ -1100,7 +1180,7 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     };
     store.start_child(
         record.run_id,
-        &swapped,
+        &ValidatedChild::fixture(swapped),
         &refuse,
         &|_, _| unreachable!(),
         &call,
@@ -1124,6 +1204,12 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
             "a child run cannot continue an attempt"
         ))
     ));
+    let fake = Fake {
+        refuse: true,
+        ..Default::default()
+    };
+    store.start(continued.run_id, &fake, &|_, _| unreachable!(), &call)?;
+    assert_eq!(fake.network.get(), Some(NetworkAccess::Provider));
     Ok(())
 }
 
@@ -1726,7 +1812,7 @@ fn host_view_holds_the_scope_it_hands_to_a_guardian() -> TestResult {
     assert!(store.held_attempts().is_empty());
     store.start_child(
         run.run_id,
-        &run.request,
+        &ValidatedChild::fixture(run.request.clone()),
         &Ready,
         &|_, _| Ok(Vec::new()),
         &call,
@@ -1780,7 +1866,7 @@ fn held_children_reclaim_exited_custody_across_sequential_launches() -> TestResu
         store.create(&run, &call)?;
         store.start_child(
             run.run_id,
-            &run.request,
+            &ValidatedChild::fixture(run.request.clone()),
             &Ready,
             &|_, _| {
                 handoffs.set(handoffs.get() + 1);
@@ -1977,7 +2063,7 @@ fn held_children_are_bounded_and_superseded_handles_are_dropped() -> TestResult 
 
     let started = store.start_child(
         run.run_id,
-        &run.request,
+        &ValidatedChild::fixture(run.request.clone()),
         &Ready,
         &|_, _| {
             Err(RunError::Validation(
@@ -2122,7 +2208,7 @@ fn deferral_stops_the_scan_after_the_first_attempt() -> TestResult {
     let fake = Fake::default();
     let started = store.start_child(
         run.run_id,
-        &run.request,
+        &ValidatedChild::fixture(run.request.clone()),
         &fake,
         &|_, _| unreachable!(),
         &call,
@@ -2259,6 +2345,323 @@ fn host_view_refuses_a_launched_child_renamed_after_start() -> TestResult {
 struct Host {
     available: u64,
 }
+
+#[test]
+fn memory_pressure_defers_even_when_available_memory_is_high() -> TestResult {
+    use provenant_os::sys::resources::MemoryPressure;
+    struct Pressured(MemoryPressure);
+    impl Resources for Pressured {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            Host { available: 100 }.memory()
+        }
+        fn pressure(
+            &self,
+        ) -> std::io::Result<Option<provenant_os::sys::resources::MemoryPressure>> {
+            Ok(Some(self.0))
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            Ok(u64::MAX)
+        }
+    }
+    for (level, writer) in [
+        (MemoryPressure::Warning, true),
+        (MemoryPressure::Critical, false),
+        (MemoryPressure::Normal, true),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            admission_seconds: 1,
+            ..AdmissionPolicy::default()
+        });
+        let run = lane(54, writer);
+        let id = starting(&store, &run, &call)?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        if level != MemoryPressure::Normal {
+            let waits = store.lane_waits_with_resources(
+                &[store.record(id, &call)?],
+                &call,
+                &Pressured(level),
+            );
+            assert!(
+                waits[0]
+                    .waiting_for
+                    .contains(&format!("memory pressure {level:?}"))
+            );
+        }
+        let result = store.admit(id, &attempt, &Pressured(level), &clock, &cancel);
+        if level == MemoryPressure::Normal {
+            assert_eq!(result?.state, AttemptState::Running);
+        } else {
+            assert!(
+                matches!(result, Err(RunError::MemoryPressure { level: actual }) if actual == format!("{level:?}"))
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn pressure_errors_fall_back_and_normal_still_obeys_floor() -> TestResult {
+    struct Probe {
+        available: u64,
+        error: bool,
+    }
+    impl Resources for Probe {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            Host {
+                available: self.available,
+            }
+            .memory()
+        }
+        fn pressure(
+            &self,
+        ) -> std::io::Result<Option<provenant_os::sys::resources::MemoryPressure>> {
+            if self.error {
+                Err(std::io::Error::other("unavailable"))
+            } else {
+                Ok(Some(provenant_os::sys::resources::MemoryPressure::Normal))
+            }
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            Ok(u64::MAX)
+        }
+    }
+    for (available, error, admitted) in [(100, true, true), (4, false, false)] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            admission_seconds: 1,
+            ..AdmissionPolicy::default()
+        });
+        let run = lane(58, true);
+        let id = starting(&store, &run, &call)?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let result = store.admit(id, &attempt, &Probe { available, error }, &clock, &cancel);
+        assert_eq!(result.is_ok(), admitted);
+    }
+    Ok(())
+}
+
+#[test]
+fn writer_build_limit_is_shared_across_runs() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (Stepped::up(0), CancelToken::new());
+    let call = stepped_call(&clock, &cancel);
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 0,
+        ..AdmissionPolicy::default()
+    });
+    let first = starting(&store, &lane(55, true), &call)?;
+    let second = starting(&store, &lane(56, true), &call)?;
+    let third = starting(&store, &lane(57, true), &call)?;
+    assert!(
+        store
+            .claim_with_build_limit(first, 2, &clock, &call)?
+            .is_some()
+    );
+    assert!(
+        store
+            .claim_with_build_limit(second, 2, &clock, &call)?
+            .is_some()
+    );
+    assert!(
+        store
+            .claim_with_build_limit(third, 2, &clock, &call)?
+            .is_none()
+    );
+    Ok(())
+}
+#[test]
+fn invalid_build_settings_refuse_without_waiting() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = lane(69, true);
+    let id = starting(&store, &run, &call)?;
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    for assignment in [
+        "max_concurrent_builds = 0",
+        "cargo_build_jobs = -2",
+        "cargo_build_jobs = 'invalid'",
+    ] {
+        std::fs::write(
+            store.writer_registry.join("config.toml"),
+            format!("[domains.fabric.lanes]\n{assignment}\n"),
+        )?;
+        let now = clock.wall_now()?;
+        assert!(
+            matches!(
+                store.admit(id, &attempt, &Host { available: 100 }, &clock, &cancel),
+                Err(RunError::BuildSettings)
+            ),
+            "{assignment}"
+        );
+        assert_eq!(clock.wall_now()?, now);
+    }
+    Ok(())
+}
+
+#[test]
+fn guardian_identity_unknown_retries_and_names_expiry() -> TestResult {
+    struct Observation {
+        remaining: Cell<u32>,
+    }
+    impl Resources for Observation {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            Host { available: 100 }.memory()
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            Ok(u64::MAX)
+        }
+        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+            let remaining = self.remaining.get();
+            if remaining > 0 {
+                self.remaining.set(remaining - 1);
+                None
+            } else {
+                SystemResources.guardian_identity()
+            }
+        }
+    }
+    for (failures, admitted) in [(2, true), (100, false)] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            startup_spacing_ms: 0,
+            admission_seconds: 1,
+            ..AdmissionPolicy::default()
+        });
+        let run = lane(70, true);
+        let id = starting(&store, &run, &call)?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let result = store.admit(
+            id,
+            &attempt,
+            &Observation {
+                remaining: Cell::new(failures),
+            },
+            &clock,
+            &cancel,
+        );
+        if admitted {
+            assert_eq!(result?.state, AttemptState::Running);
+        } else {
+            assert!(matches!(result, Err(RunError::GuardianIdentityUnavailable)));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn configured_build_limit_controls_host_leases() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 0,
+        admission_seconds: 1,
+        ..AdmissionPolicy::default()
+    });
+    std::fs::write(
+        store.writer_registry.join("config.toml"),
+        "[domains.fabric.lanes]\nmax_concurrent_builds = 2\n",
+    )?;
+    let first_run = lane(63, true);
+    let second_run = lane(64, true);
+    let third_run = lane(65, true);
+    for run in [&first_run, &second_run] {
+        let id = starting(&store, run, &call)?;
+        let dir = store.attempt_dir(run.run_id, id, false)?;
+        assert_eq!(
+            store
+                .admit(id, &dir, &Host { available: 100 }, &clock, &cancel)?
+                .state,
+            AttemptState::Running
+        );
+    }
+    let id = starting(&store, &third_run, &call)?;
+    let dir = store.attempt_dir(third_run.run_id, id, false)?;
+    assert!(matches!(
+        store.admit(id, &dir, &Host { available: 100 }, &clock, &cancel),
+        Err(RunError::BuildSlots {
+            active: 2,
+            limit: 2
+        })
+    ));
+    Ok(())
+}
+
+#[test]
+fn writer_slot_refusal_and_release() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 0,
+        admission_seconds: 1,
+        ..AdmissionPolicy::default()
+    });
+    let first_run = lane(60, true);
+    let first = starting(&store, &first_run, &call)?;
+    assert!(
+        store
+            .claim_with_build_limit(first, 1, &clock, &call)?
+            .is_some()
+    );
+    let blocked_run = lane(61, true);
+    let blocked = starting(&store, &blocked_run, &call)?;
+    let waits = store.lane_waits_with_resources(
+        &[store.record(blocked, &call)?],
+        &call,
+        &Host { available: 100 },
+    );
+    assert_eq!(
+        waits[0].waiting_for,
+        "host capacity: 1 of 1 writer build slots active"
+    );
+    let attempt = store.attempt_dir(blocked_run.run_id, blocked, false)?;
+    assert!(matches!(
+        store.admit(blocked, &attempt, &Host { available: 100 }, &clock, &cancel),
+        Err(RunError::BuildSlots {
+            active: 1,
+            limit: 1
+        })
+    ));
+    let next = starting(&store, &lane(62, true), &call)?;
+    assert!(
+        store
+            .claim_with_build_limit(next, 1, &clock, &call)?
+            .is_none()
+    );
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(first, &call)?);
+    seal_exit(&store, &observed)?;
+    let revision = store.record(first, &call)?.revision;
+    store.publish_terminal(
+        first,
+        revision,
+        &super::tests::publication(),
+        &observed,
+        &call,
+    )?;
+    assert!(
+        store
+            .claim_with_build_limit(next, 1, &clock, &call)?
+            .is_some()
+    );
+    Ok(())
+}
 impl Resources for Host {
     fn memory(&self) -> std::io::Result<MemorySample> {
         Ok(MemorySample {
@@ -2272,6 +2675,7 @@ impl Resources for Host {
 }
 #[derive(Default)]
 struct Fake {
+    network: Cell<Option<NetworkAccess>>,
     refuse: bool,
     policy_task: Option<TaskId>,
     observed: Option<RouteRecord>,
@@ -2320,11 +2724,13 @@ impl Providers for Fake {
 
     fn prepare(
         &self,
-        _: &TaskRequest,
+        task: &TaskRequest,
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String> {
+        self.network
+            .set(Some(task.access.network(task.writer.is_some())));
         self.prepared.set(self.prepared.get() + 1);
         assert!(paths.temporary.ends_with("tmp"));
         assert!(paths.temporary.is_dir());
@@ -3181,6 +3587,11 @@ fn a_delayed_admission_cannot_start_inside_a_newer_start_or_rewind_it() -> TestR
     let (clock, cancel) = (Stepped::up(0), CancelToken::new());
     let call = stepped_call(&clock, &cancel);
     let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    // Keep the writer slot limit from masking the startup-spacing behaviour.
+    std::fs::write(
+        store.writer_registry.join("config.toml"),
+        "[domains.fabric.lanes]\nmax_concurrent_builds = 2\n",
+    )?;
     store.set_admission_policy(AdmissionPolicy {
         admission_seconds: 1,
         ..AdmissionPolicy::default()
@@ -3198,10 +3609,11 @@ fn a_delayed_admission_cannot_start_inside_a_newer_start_or_rewind_it() -> TestR
         call: &call,
         started: Cell::new(false),
     };
-    assert!(matches!(
-        store.admit(delayed_id, &attempt, &probe, &clock, &cancel),
-        Err(RunError::Refused)
-    ));
+    let admission = store.admit(delayed_id, &attempt, &probe, &clock, &cancel);
+    assert!(
+        matches!(&admission, Err(RunError::Refused)),
+        "admission: {admission:?}"
+    );
     assert!(probe.started.get());
     assert_eq!(
         store.record(delayed_id, &call)?.state,
@@ -3427,7 +3839,7 @@ fn lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for() -> TestRes
 }
 
 #[test]
-fn legacy_rows_without_a_class_are_treated_as_writers() -> TestResult {
+fn legacy_tickets_without_a_class_are_treated_as_writers() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -3463,12 +3875,6 @@ fn legacy_rows_without_a_class_are_treated_as_writers() -> TestResult {
     let reader = starting(&store, &lane(82, false), &call)?;
 
     assert!(store.claim(old, &at(11_000), &call)?.is_some());
-    let ledger = crate::ledger::open(&store.writer_registry, &call)?;
-    let class: String =
-        ledger.query_row("SELECT class FROM leases WHERE attempt='legacy'", [], |r| {
-            r.get(0)
-        })?;
-    assert_eq!(class, "writer", "a lease from before classes is a writer's");
     assert!(
         store.claim(writer, &at(11_001), &call)?.is_none(),
         "a ticket with no class is a writer, spaced 20 s from the last writer start"
@@ -4174,6 +4580,65 @@ fn rejected_resume_remains_visible_and_addressable() -> TestResult {
         &call,
     )?;
     assert!(output.bytes.is_empty());
+    Ok(())
+}
+
+#[test]
+fn resumed_starting_lane_has_private_directories_before_checkpoint() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let original = input();
+    store.create(&original, &call)?;
+    let prior = original.attempts[0].attempt_id;
+    let fake = Fake {
+        refuse: true,
+        ..Fake::default()
+    };
+    store.start(original.run_id, &fake, &|_, _| unreachable!(), &call)?;
+    let resumed = Resume {
+        prior,
+        expected_generation: 0,
+        operation_id: provenant_core::OperationId::parse("resume-private")?,
+        run_id: RunId::from_bytes([50; 16]),
+        attempt_id: AttemptId::from_bytes([51; 16]),
+        prompt: "answer".into(),
+        created_at: WallTime::from_micros(100)?,
+    };
+    store.resume(&resumed, &call)?;
+    let record = store.record(resumed.attempt_id, &call)?;
+    store.mark_starting(&record, &route(), &[], &Default::default(), None, &call)?;
+    let directory = store.attempt_dir(resumed.run_id, resumed.attempt_id, false)?;
+    assert!(
+        matches!(directory.metadata_at("process.json".as_ref(), false), Err(error) if error.is_not_found())
+    );
+    let reader = RunStore::open_read_only(&context, &call)?.ok_or(RunError::NotFound)?;
+    assert_eq!(
+        reader.record(resumed.attempt_id, &call)?.state,
+        AttemptState::Starting
+    );
+    let state = context.state_root.as_path();
+    for path in [
+        state.join("runs"),
+        state.join("runs").join(resumed.run_id.to_string()),
+        state
+            .join("runs")
+            .join(resumed.run_id.to_string())
+            .join("attempts"),
+        state
+            .join("runs")
+            .join(resumed.run_id.to_string())
+            .join("attempts")
+            .join(resumed.attempt_id.to_string()),
+    ] {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::symlink_metadata(path)?.permissions().mode() & 0o077,
+            0
+        );
+    }
     Ok(())
 }
 

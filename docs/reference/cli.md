@@ -1931,10 +1931,59 @@ bounds are null. Positional arguments have no long flag.
 }
 ```
 
+## `provenant preset`
+
+| Argument | Contract |
+|---|---|
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant preset list`
+
+| Argument | Contract |
+|---|---|
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant preset show`
+
+| Argument | Contract |
+|---|---|
+| `name` | `{"name": "name", "positional": true, "required": true}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "name"
+      ],
+      "multiple": true,
+      "name": "Show",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant run`
 
 | Argument | Contract |
 |---|---|
+| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "worktree", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "read_root", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "confidential", "allow_free", "provider_timeout", "operation_id", "wait"], "name": "preset"}` |
+| `--set` | `{"name": "preset_set", "repeatable": true}` |
+| `--explain` | `{"defaults": ["false"], "name": "explain", "values": ["true", "false"]}` |
 | `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
@@ -2145,6 +2194,9 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "worktree", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "read_root", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "confidential", "allow_free", "provider_timeout", "operation_id", "wait"], "name": "preset"}` |
+| `--set` | `{"name": "preset_set", "repeatable": true}` |
+| `--explain` | `{"defaults": ["false"], "name": "explain", "values": ["true", "false"]}` |
 | `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
@@ -2717,6 +2769,66 @@ bounds are null. Positional arguments have no long flag.
 | `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
+
+## `provenant console tree`
+
+| Argument | Contract |
+|---|---|
+| `--max-depth` | `{"defaults": ["8"], "name": "max_depth"}` |
+| `--max-nodes` | `{"defaults": ["100"], "name": "max_nodes"}` |
+| `--detail` | `{"defaults": ["false"], "name": "detail", "values": ["true", "false"]}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "max_depth",
+        "max_nodes",
+        "detail"
+      ],
+      "multiple": true,
+      "name": "Tree",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant console board`
+
+| Argument | Contract |
+|---|---|
+| `--all` | `{"defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
+| `--cursor` | `{"name": "cursor"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "all",
+        "limit",
+        "cursor"
+      ],
+      "multiple": true,
+      "name": "Board",
+      "required": false
+    }
+  ]
+}
+```
 
 ## `provenant console overview`
 

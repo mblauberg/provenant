@@ -212,3 +212,11 @@ fn published_disk_admission_refusal_names_figures_and_repair() {
         "insufficient disk space: 99 bytes available, gc.free_floor 100 bytes; run `provenant gc --apply`"
     );
 }
+
+#[test]
+fn admission_configuration_and_guardian_failures_are_named() {
+    let configuration = super::admission_refusal(&super::CustodyError::AdmissionBuildSettings);
+    assert!(configuration.contains("domains.fabric.lanes.max_concurrent_builds"));
+    let guardian = super::admission_refusal(&super::CustodyError::AdmissionGuardianIdentity);
+    assert!(guardian.contains("guardian process identity unavailable"));
+}

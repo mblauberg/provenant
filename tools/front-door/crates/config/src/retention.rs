@@ -1,5 +1,6 @@
 //! Retention of terminal attempts' provider state and closed-run captures.
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -8,6 +9,8 @@ pub struct RetentionSettings {
     pub logs_days: u64,
     /// Revisions a session checkpoint keeps, the current one included.
     pub session_revisions: u64,
+    /// Checkpoint advisory settings keyed by project ID.
+    pub projects: BTreeMap<String, ProjectRetentionSettings>,
     pub chair_log_days: u64,
     /// Replay horizon in days; absent means the payload age limit with a seven-day floor.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -22,6 +25,7 @@ impl Default for RetentionSettings {
             provider_state_days: 7,
             logs_days: 30,
             session_revisions: 8,
+            projects: BTreeMap::new(),
             chair_log_days: 30,
             chair_log_replay_days: None,
             chair_log_entries: 10_000,
@@ -47,6 +51,13 @@ impl RetentionSettings {
         if !(1..=64).contains(&self.session_revisions) {
             return Err("session_revisions_range");
         }
+        if self
+            .projects
+            .values()
+            .any(|p| !(1..=262_144).contains(&p.checkpoint_soft_bytes))
+        {
+            return Err("checkpoint_soft_bytes_range");
+        }
         if !(1..=3650).contains(&self.chair_log_days) {
             return Err("chair_log_days_range");
         }
@@ -66,9 +77,41 @@ impl RetentionSettings {
     }
 }
 
+/// Project-specific checkpoint advisory budget in bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProjectRetentionSettings {
+    pub checkpoint_soft_bytes: u64,
+}
+
+impl Default for ProjectRetentionSettings {
+    fn default() -> Self {
+        Self {
+            checkpoint_soft_bytes: 2048,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn project_checkpoint_budget_defaults_and_is_validated() {
+        assert_eq!(
+            ProjectRetentionSettings::default().checkpoint_soft_bytes,
+            2048
+        );
+        let mut settings: RetentionSettings =
+            toml_edit::de::from_str("[projects.project]\ncheckpoint_soft_bytes = 4096\n").unwrap();
+        assert_eq!(settings.projects["project"].checkpoint_soft_bytes, 4096);
+        assert!(settings.validate().is_ok());
+        settings
+            .projects
+            .get_mut("project")
+            .unwrap()
+            .checkpoint_soft_bytes = 0;
+        assert_eq!(settings.validate(), Err("checkpoint_soft_bytes_range"));
+    }
     #[test]
     fn log_retention_defaults_to_thirty_days_and_rejects_invalid_windows() {
         assert_eq!(RetentionSettings::default().logs_days, 30);

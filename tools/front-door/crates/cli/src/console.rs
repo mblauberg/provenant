@@ -7,12 +7,38 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::os::unix::ffi::OsStrExt;
 
+mod board;
 mod overview;
+mod tree;
 
 pub use overview::summary_comparison;
 
 #[derive(Debug, Subcommand)]
 pub enum Console {
+    /// Read a bounded local tree of nested runs
+    Tree {
+        /// Maximum store depth, including the host store
+        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u64).range(1..=16))]
+        max_depth: u64,
+        /// Maximum attempts to include
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u64).range(1..=100))]
+        max_nodes: u64,
+        /// Include complete run and attempt records
+        #[arg(long)]
+        detail: bool,
+    },
+    /// Read a local board snapshot without artifact bodies
+    Board {
+        /// Include retained terminal attempts
+        #[arg(long)]
+        all: bool,
+        /// Maximum rows in a page
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u64).range(1..=100))]
+        limit: u64,
+        /// Continue the same filters and attempt high-water mark
+        #[arg(long)]
+        cursor: Option<String>,
+    },
     /// Summarise local attention and running work
     Overview,
     /// List registered local projects
@@ -32,6 +58,12 @@ pub enum Console {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    Run(#[from] provenant_run::RunError),
+    #[error(
+        "invalid or stale board cursor; restart console board with the same filters and without --cursor"
+    )]
+    BoardCursor,
     #[error(transparent)]
     Project(#[from] provenant_config::ConfigError),
     #[error(transparent)]
@@ -81,8 +113,21 @@ fn read_with_budget(
     command: &Console,
     budget: usize,
 ) -> Result<Value, Error> {
+    if let Console::Board { all, limit, cursor } = command {
+        return board::read(roots, selected, *all, *limit, cursor.as_deref());
+    }
+    if let Console::Tree {
+        max_depth,
+        max_nodes,
+        detail,
+    } = command
+    {
+        return tree::read(roots, selected, *max_depth, *max_nodes, *detail);
+    }
     let projects = projects(roots, selected)?;
     let (session, limit, cursor) = match command {
+        Console::Board { .. } => unreachable!("board handled above"),
+        Console::Tree { .. } => unreachable!("tree handled above"),
         Console::Overview => return overview::read(roots, &projects),
         Console::Projects => {
             return Ok(json!({"projects":projects, "coverage":{"scope":"local"}}));

@@ -13,6 +13,11 @@ stores chair associations, with execution facts owned by Run ([fabric](fabric.md
 itself. Grammar and bounds are in the generated [CLI
 reference](../reference/cli.md). Paths are relative to `tools/front-door/`.
 
+`run` accepts the same effort and network controls as `dispatch`. An explicit
+model without an effort uses its configured route or pool default when those
+defaults agree; conflicting defaults leave the provider default in place.
+The receipt reports the applied effort and effective network access.
+
 ## Cargo home seed
 
 An opted-in macOS writer may seed its private Cargo registry and Git store from
@@ -87,10 +92,15 @@ launch before membership capture, so rewriting a queued child ID cannot claim
 a sibling's membership or poison its launch. A lane cannot claim a historical
 run namespace by choosing its run ID and recomputing the public attempt hash.
 
-Nested continuations created by the host also use version 1, retaining the
-original parent-attempt namespace and including their continuation parent in
-the canonical digest. Replays retain the original scheme, including legacy
-prepared operations whose request was not yet published.
+Nested continuation requests use version 1, retaining the original
+parent-attempt namespace and including their continuation parent in the
+canonical digest. Replays retain the original scheme, including legacy
+prepared operations whose request was not yet published. A child-store
+continuation uses its requesting parent's sealed network bound, or the same
+provider-only profile as other provider-only lanes when that context is
+unavailable. On macOS that profile currently permits outbound TCP 443 beyond
+provider endpoints ([#2118](https://github.com/mblauberg/provenant/issues/2118));
+see [child launch policy](routing.md#the-host-validates-and-launches-children).
 
 This scheme avoids rekeying lane-published records and IDs already returned to
 callers. There is no migration of existing child records: an absent version
@@ -182,7 +192,8 @@ Admission audit (#2088):
 
 The chair row is sealed before handoff, so presence in the index does not imply
 that the run launched. Launch validation reads `fabric-runtime::chairs::ChairIndex`;
-for reads of existing runs, missing records and older runs are unbound. Display readers arrive in a later slice. Provider handles and child requests are never fallbacks. Graph and
+for reads of existing runs, missing records and older runs are unbound. `console board` reads existing host associations
+without initialising the index. Provider handles and child requests are never fallbacks. Graph and
 peer executions remain unbound until they retain an originating chair separately
 from the actor owning operation replay. Board and tree rendering are separate.
 
@@ -207,6 +218,28 @@ supervisor call happens inside a transaction. Admission bounds active lanes
 at 64 per host and 32 per project and queued lanes at 256 per host, with
 memory and disk floors, startup spacing and a deadline.
 
+On macOS, Warning or Critical kernel memory pressure defers both classes.
+Normal pressure still requires the memory floor. An unavailable or unknown
+pressure sample is logged and falls back to the floor; Linux uses the floor.
+Disk and memory floors apply to both classes. Writers also require a host-wide
+build slot, defaulting to one at or below 16 GiB of RAM and two above that;
+read-only lanes do not consume one. At expiry, disk floor, known pressure and
+full build slots have distinct refusal reasons. Disk-floor refusal takes precedence
+when disk and pressure are both insufficient; otherwise Warning or Critical
+pressure is named before build-slot contention. A failed memory sample or a
+floor-only memory shortage retains the generic admission refusal. The ledger associates new leases
+with the boot and guardian identity; a different boot, a definitely absent
+guardian or an admission row proven absent from the same readable owner store
+releases a lease. A busy, missing, replaced or unreadable store retains the
+lease until the guardian is confirmed absent or the boot changes. The ledger
+records the owner file's device and inode to detect replacement. Malformed
+lease evidence is retained unless independent evidence proves release.
+A parsed host configuration with invalid build settings fails immediately with a named configuration error. An unreadable or syntactically incomplete configuration is retried, so an unavailable current disk floor never admits unchecked.
+An unavailable guardian identity is retried until the admission deadline, then
+reported as a typed refusal.
+Both identity fields are required on every lease. Earlier lease schemas were
+never installed; upgrades retain spacing but discard their lease rows.
+
 Each ticket and host ledger lease records a lane class: `writer` for a
 `worktree-write` lane, `read_only` for every other. Startup spacing is per
 class and measured only against the last start of that class: writers wait 20 s
@@ -230,8 +263,8 @@ one spacing. If the clock or the boot identity cannot be read the claim is refus
 judged: host clock or boot identity unreadable`), which the guardian publishes
 as the lane's never-spawned reason, rather than judged on the wall clock;
 `lanes` then names no spacing wait. The wall clock is kept only as the `started_at` a lane displays. The
-memory floor (5 %) and disk floor (500 MiB) refuse both classes. A ledger row
-or ticket with no class is a writer; opening a version 1 ledger upgrades it in
+memory floor (5 %) and the live `gc.free_floor` disk floor refuse both classes.
+The disk default is 10 % of the state volume, with a 50 GiB minimum. A ticket with no class is a writer; opening a version 1 ledger upgrades it in
 place, in one transaction, carrying any wall-time start across as a start of now under the current boot
 for each class, whatever its age and without reading the wall clock, so the
 one-time upgrade holds each class for one spacing (a version 1 ledger with no
@@ -249,21 +282,26 @@ has.
 `lanes` shows each queued or starting lane's `lane_class` and `waiting_for`,
 and uses the latter as its reason: launch not yet handed to a guardian, run
 concurrency, the class's remaining startup spacing, or otherwise host
-capacity. It reads the store and the host's ledger without locking, from a nested
-lane too, and names only a wait it can see. `lanes --host` and the other peer
+capacity. It reads the store and host ledger, from a nested lane too, and names only a wait it can see. `lanes --host` and the other peer
 listings show the same two fields: the peer derives them from its own store and
 ledger (peer action `lane_waits`) and an older peer that does not know the
 action simply shows none.
 - Why: an accepted receipt must mean durable admission, and read-only lanes
   must not queue behind writer spacing that exists to pace worktree and
   provider startup.
-- Test: `crates/run/src/dispatch_tests.rs::admission_holds_run_concurrency_spacing_floors_and_deadline`;
+- Test: `crates/run/src/ledger.rs::tests::{live_guardian_fences_busy_replaced_and_corrupt_store, cross_boot_malformed_and_readable_row_removal_release}`;
+  `crates/run/src/dispatch_tests.rs::{memory_pressure_defers_even_when_available_memory_is_high, pressure_errors_fall_back_and_normal_still_obeys_floor, writer_slot_refusal_and_release}`;
+  `crates/providers/src/lane.rs::tests::claude_shell_restores_jobs_after_scrub`;
+  `crates/config/src/gc.rs::build_tests::{defaults_and_overrides, automatic_and_invalid_build_values}`;
+  `crates/run/src/dispatch_tests.rs::{configured_build_limit_controls_host_leases, invalid_build_settings_refuse_without_waiting, guardian_identity_unknown_retries_and_names_expiry}`;
+  `crates/fabric-runtime/src/config.rs::tests::lane_build_settings_validate_shared_bounds_and_auto`;
+  `crates/run/src/dispatch_tests.rs::admission_holds_run_concurrency_spacing_floors_and_deadline`;
   `::read_only_lane_is_admitted_inside_a_writers_spacing_window`;
   `::writers_stay_20_seconds_apart_and_read_only_starts_do_not_reset_the_clock`;
   `::read_only_lanes_are_spaced_2_seconds_apart`;
   `::memory_floor_refuses_both_lane_classes`;
   `::project_cap_allows_up_to_32_active_lanes`;
-  `::legacy_rows_without_a_class_are_treated_as_writers`;
+  `::legacy_tickets_without_a_class_are_treated_as_writers`;
   `::batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins`;
   `::sixteen_read_only_lanes_run_in_one_batch_two_seconds_apart`;
   `::the_store_accepts_run_concurrency_above_the_task_count_up_to_sixteen`;

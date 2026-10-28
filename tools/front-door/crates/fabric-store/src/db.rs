@@ -171,13 +171,31 @@ impl Store {
         deadline: std::time::Instant,
         writable: bool,
     ) -> Result<Option<Self>> {
+        Self::open_bounded_database(root, deadline, writable, "fabric.sqlite3", true)
+    }
+
+    pub(crate) fn open_read_only_host(
+        root: &StateRoot,
+        deadline: std::time::Instant,
+    ) -> Result<Option<Self>> {
+        Self::open_bounded_database(root, deadline, false, "host.sqlite3", false)
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    fn open_bounded_database(
+        root: &StateRoot,
+        deadline: std::time::Instant,
+        writable: bool,
+        database: &str,
+        read_only_wal: bool,
+    ) -> Result<Option<Self>> {
         crate::local_delivery::before(deadline)?;
         let open = || -> Result<Directory> {
             let state = Directory::open_anchor(root.as_path())?;
             private(&state, root.as_path())?;
             let fabric = state.open_verified_directory(OsStr::new("fabric"))?;
             private(&fabric, &root.as_path().join("fabric"))?;
-            fabric.open_read(OsStr::new("fabric.sqlite3"))?;
+            fabric.open_read(OsStr::new(database))?;
             Ok(fabric)
         };
         let fabric = match open() {
@@ -186,13 +204,8 @@ impl Store {
             Err(error) => return Err(error),
         };
         let path = root.as_path().join("fabric");
-        let names = [
-            "fabric.sqlite3",
-            "fabric.sqlite3-wal",
-            "fabric.sqlite3-shm",
-            "fabric.sqlite3-journal",
-        ]
-        .map(OsString::from);
+        let names = ["", "-wal", "-shm", "-journal"]
+            .map(|suffix| OsString::from(format!("{database}{suffix}")));
         provenant_sqlite::check_companions(
             &fabric,
             &names,
@@ -203,11 +216,13 @@ impl Store {
             Into::into,
             |name, _| Error::UnsafePath(path.join(name)),
         )?;
-        let path = path.join("fabric.sqlite3");
+        let path = path.join(database);
         let db = if writable {
             provenant_sqlite::open_connection(&path, false)?
-        } else {
+        } else if read_only_wal {
             provenant_sqlite::open_read_only_connection(&path)?
+        } else {
+            provenant_sqlite::open_connection(&path, true)?
         };
         db.progress_handler(100, Some(move || std::time::Instant::now() >= deadline))?;
         // Filesystem discovery was validated before this connection opened.

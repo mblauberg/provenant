@@ -4087,6 +4087,78 @@ fn graph_operation(
     provenant_core::OperationId::parse(&format!("graph-{}", provenant_core::hex(digest.as_bytes())))
         .map_err(|_| FacadeError::InvalidInput)
 }
+/// Retain a content-addressed preset graph in the same verified scratch area
+/// consumed by the graph owner. Repeated publication must match byte for byte.
+pub(crate) fn retain_preset_graph(
+    document: &serde_json::Value,
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let factory = factory(globals, workers)?;
+    if factory.context.in_lane {
+        return Err(CoordinationError::LaneMutation.into());
+    }
+    let cancel = CancelToken::new();
+    let scratch = provenant_confinement::worktrees::with_context(
+        &factory.context.roots,
+        &factory.home,
+        &factory.cwd,
+        &factory.clock,
+        &cancel,
+        |context| {
+            let repo = context.utility.open_repo(
+                context.executor,
+                &factory.cwd,
+                context.utility_budget,
+                &cancel,
+            )?;
+            provenant_confinement::scratch::ensure(&repo, &factory.clock, &cancel)
+        },
+    )?;
+    publish_preset_graph(&scratch, document)
+}
+
+pub(crate) fn publish_preset_graph(
+    scratch: &std::path::Path,
+    document: &serde_json::Value,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    use provenant_os::fs::{Directory, PublishMode};
+    use std::ffi::OsStr;
+    let bytes = serde_json::to_vec(document)?;
+    let digest = provenant_records::CanonicalV1::file_digest(&bytes).to_string();
+    let filename = format!("preset-{}.json", &digest[7..]);
+    let dir = Directory::open_anchor(&scratch.join("graphs"))?;
+    let directory_metadata = dir.metadata()?;
+    if directory_metadata.uid != provenant_os::fs::effective_uid()
+        || directory_metadata.mode & 0o077 != 0
+    {
+        return Err("preset graph directory must be private to the current user".into());
+    }
+    match dir.atomic_write(
+        OsStr::new(&filename),
+        ".preset-",
+        &bytes,
+        PublishMode::NoReplace,
+    ) {
+        Ok(publication) => publication.require_durable()?,
+        Err(error) if error.is_exists() => {
+            let metadata = dir.metadata_at(OsStr::new(&filename), false)?;
+            if metadata.uid != provenant_os::fs::effective_uid()
+                || metadata.mode & 0o077 != 0
+                || metadata.links != 1
+                || dir.read_stable(OsStr::new(&filename), 8_388_608)? != bytes
+            {
+                return Err(
+                    "existing preset graph is not private or does not match its content hash"
+                        .into(),
+                );
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(scratch.join("graphs").join(filename))
+}
+
 pub fn graph(
     input: provenant_cli::fabric::Graph,
     globals: &provenant_cli::Globals,
@@ -5353,6 +5425,7 @@ mod peer_tests {
             executable_search_path: Vec::new(),
             git: provenant_os::git::git_executable().ok_or("git")?,
             codex_home: None,
+            cargo_build_jobs: None,
             fixture_state_write: false,
         });
         let error = advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)

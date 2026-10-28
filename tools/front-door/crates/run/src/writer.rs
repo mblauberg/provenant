@@ -202,14 +202,28 @@ pub fn prepare_writer(
         .open_verified_directory(OsStr::new(&project.to_string()))
         .map_err(unregistered)?;
     let (directory, binding) =
-        worktrees::writer_custody(&project_state, project, &worktree, &branch, base).map_err(
-            |error| match error {
-                worktrees::WorktreeError::NotFound => {
-                    RunError::WorktreeUnregistered(request.worktree.clone())
-                }
-                other => other.into(),
-            },
-        )?;
+        worktrees::writer_custody(&project_state, project, &worktree, &branch, base, || {
+            let outcome = provenant_confinement::run_utility(
+                &executor,
+                provenant_confinement::GitRead::WorktreeList,
+                &repo,
+                &utility,
+                budget().map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                &CancelToken::new(),
+            )?;
+            if outcome.termination != provenant_os::exec::Termination::Exit(0)
+                || outcome.stdout.truncated
+            {
+                return Err(worktrees::WorktreeError::InvalidOutput);
+            }
+            Ok(outcome.stdout.bytes)
+        })
+        .map_err(|error| match error {
+            worktrees::WorktreeError::NotFound => {
+                RunError::WorktreeUnregistered(request.worktree.clone())
+            }
+            other => other.into(),
+        })?;
     Ok(WriterLaunch {
         worktree,
         branch,

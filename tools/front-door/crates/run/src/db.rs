@@ -77,6 +77,7 @@ pub struct RunStore {
     pub(crate) writer_registry: std::path::PathBuf,
     pub(crate) policy: crate::admission::AdmissionPolicy,
     pub(crate) sealed_requester: Option<ActorId>,
+    pub(crate) sealed_parent_network: Option<NetworkAccess>,
     /// This host's ID, stamped on new attempts when the edge supplies it.
     pub(crate) host: Option<provenant_core::HostId>,
     /// Scopes and bounded custody handles this host view handed to a guardian.
@@ -151,6 +152,11 @@ impl RunStore {
         self.sealed_requester = Some(requester);
         self
     }
+    /// Network bound verified from the live parent holder's sealed task.
+    pub fn with_sealed_parent_network(mut self, network: NetworkAccess) -> Self {
+        self.sealed_parent_network = Some(network);
+        self
+    }
     /// Stamp new attempts and their events with this host. Supplied by the host
     /// composition edge; absent, the host stays unknown in the trace.
     pub fn with_host(mut self, host: provenant_core::HostId) -> Self {
@@ -206,7 +212,7 @@ impl RunStore {
                 root = opened;
             }
         }
-        private(&root)?;
+        private_root(&root)?;
         let root = root.into_anchor()?;
         match root.metadata_at(OsStr::new("run.sqlite3"), false) {
             Ok(_) => {}
@@ -238,6 +244,7 @@ impl RunStore {
             writer_registry: context.state_root.as_path().to_owned(),
             policy: Default::default(),
             sealed_requester: None,
+            sealed_parent_network: None,
             host: None,
             launched: Default::default(),
             launched_tasks: Default::default(),
@@ -257,6 +264,7 @@ impl RunStore {
             writer_registry: context.state_root.as_path().to_owned(),
             policy: Default::default(),
             sealed_requester: None,
+            sealed_parent_network: None,
             host: None,
             launched: Default::default(),
             launched_tasks: Default::default(),
@@ -363,7 +371,7 @@ pub(crate) fn open_database(
             root = provenant_sqlite::checked_directory(&root, part, None)?;
         }
     }
-    private(&root)?;
+    private_root(&root)?;
     let root = root.into_anchor()?;
     // SQLite serialises transactions, but first-file and WAL setup precede them.
     let lock_name = format!("{name}.lock");
@@ -420,6 +428,13 @@ pub(crate) fn private(directory: &Directory) -> Result<()> {
     let m = directory.metadata()?;
     if let Some(check) = PathCheck::directory(m) {
         return Err(RunError::unsafe_path(directory.anchored_path(), check));
+    }
+    Ok(())
+}
+/// The state root has not been anchored yet, so name it relative to itself.
+fn private_root(directory: &Directory) -> Result<()> {
+    if let Some(check) = PathCheck::directory(directory.metadata()?) {
+        return Err(RunError::unsafe_path(".", check));
     }
     Ok(())
 }
