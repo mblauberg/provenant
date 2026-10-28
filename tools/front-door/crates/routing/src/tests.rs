@@ -1232,6 +1232,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     for invalid in [
         "schema_version=1\n[domains.routing.review.select]\ntypo=true\n",
         "schema_version=1\n[domains.routing.review.shapes.quick]\ntypo=true\n",
+        "schema_version=1\n[domains.routing.review.shapes.custom]\nreviewers=[{pool='junior',count=1}]\ntypo=true\n",
         "schema_version=1\n[domains.routing.review.shapes.custom]\nreviewers='wrong'\n",
     ] {
         assert!(

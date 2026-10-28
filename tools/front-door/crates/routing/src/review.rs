@@ -92,7 +92,12 @@ impl ReviewConfig {
             .select
             .by_paths
             .iter()
-            .find(|(pattern, _)| paths.iter().any(|path| path_matches(pattern, path)))
+            .filter(|(pattern, _)| paths.iter().any(|path| path_matches(pattern, path)))
+            .max_by(|(a, _), (b, _)| {
+                path_specificity(a)
+                    .cmp(&path_specificity(b))
+                    .then_with(|| b.cmp(a))
+            })
         {
             (name.as_str(), "by_paths")
         } else if let Some(name) = risk.and_then(|r| self.select.by_risk.get(r)) {
@@ -128,6 +133,14 @@ impl ReviewConfig {
                 error(prefix.clone(), "selector");
             }
             if shape.reviewers.is_empty() || shape.reviewers.len() > 32 {
+                error(format!("{prefix}.reviewers"), "limit");
+            }
+            if shape
+                .reviewers
+                .iter()
+                .fold(0_usize, |total, row| total.saturating_add(row.count))
+                > 64
+            {
                 error(format!("{prefix}.reviewers"), "limit");
             }
             for (index, reviewer) in shape.reviewers.iter().enumerate() {
@@ -167,6 +180,15 @@ impl ReviewConfig {
             }
         }
     }
+}
+// Prefer patterns with more literal bytes, then fewer wildcards. Lexical order
+// breaks ties, independently of the order in which config layers were merged.
+fn path_specificity(pattern: &str) -> (usize, std::cmp::Reverse<usize>) {
+    let wildcards = pattern
+        .bytes()
+        .filter(|byte| matches!(byte, b'*' | b'?'))
+        .count();
+    (pattern.len() - wildcards, std::cmp::Reverse(wildcards))
 }
 // * and ? stay within one path component; ** also matches slashes.
 fn path_matches(pattern: &str, path: &str) -> bool {
@@ -245,6 +267,19 @@ mod tests {
         assert!(path_matches("src/**/test?.rs", "src/test1.rs"));
         assert!(path_matches("src/**/test?.rs", "src/a/b/test1.rs"));
         assert!(!path_matches("src/*.rs", "src/a/test.rs"));
+        review
+            .select
+            .by_paths
+            .insert("src/**".into(), "standard".into());
+        review
+            .select
+            .by_paths
+            .insert("src/auth/**".into(), "deep".into());
+        let paths = vec!["src/auth/login.rs".into()];
+        assert_eq!(
+            review.select_shape(None, None, None, &paths).unwrap().name,
+            "deep"
+        );
     }
 
     #[test]
@@ -260,5 +295,31 @@ mod tests {
         let errors = invalid.validate();
         assert!(errors.iter().any(|e| e.code == "unknown_pool"));
         assert!(errors.iter().any(|e| e.code == "invalid_lenses"));
+        invalid.review.shapes.get_mut("standard").unwrap().reviewers = vec![
+            ReviewReviewer {
+                pool: "junior".into(),
+                count: 32,
+                lenses: vec![],
+                distinct_families: false,
+            },
+            ReviewReviewer {
+                pool: "junior".into(),
+                count: 32,
+                lenses: vec![],
+                distinct_families: false,
+            },
+            ReviewReviewer {
+                pool: "junior".into(),
+                count: 1,
+                lenses: vec![],
+                distinct_families: false,
+            },
+        ];
+        assert!(
+            invalid
+                .validate()
+                .iter()
+                .any(|e| e.field == "review.shapes.standard.reviewers" && e.code == "limit")
+        );
     }
 }

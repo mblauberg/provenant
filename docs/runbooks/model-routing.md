@@ -101,22 +101,40 @@ provenant --json review HEAD --brief-file review-brief.md --shape quick
 ```
 
 The target must resolve to a commit. `--range` supplies changed paths for
-selection; without it no path rules match. `--shape` overrides selection.
+selection; without it no path rules match. Renames are treated as a deletion
+and an addition, so rules can match either path. `--shape` overrides selection.
 `--wait` sets the overall wait limit, defaulting to one hour, and accepts
 seconds or durations such as `30m`, from one second to four hours.
 
-Selection uses an explicit shape first, then the first matching `by_paths`
-pattern in lexicographic order, then `by_risk`, `by_kind` and finally `default`.
+Selection uses an explicit shape first, then the most specific matching `by_paths`
+pattern, then `by_risk`, `by_kind` and finally `default`. Specificity is the
+number of literal bytes, followed by fewer wildcards; lexical order breaks ties.
 In path patterns, `*` and `?` do not cross directory separators; `**` does.
 The selected shape and its source appear in the review summary. Family
 distinctness is requested within each group; the summary records a substitution
-when the pool cannot provide another family. Each reviewer goes through normal
-dispatch, so pacing and quota apply independently. The summary collates each
-run's route, state, verdict and full output path without merging findings. A
-reviewer is asked to begin with `Verdict: approve`, `Verdict: request_changes`
-or `Verdict: inconclusive`; any other first line is reported as `unknown`.
-The command reports a failed reviewer or timeout, and a verdict does not itself
-decide delivery acceptance.
+when the pool cannot provide another family. Independent reviewers are submitted
+without waiting for one another; a distinct-family group waits for each earlier
+member's route before submitting its next member. Each reviewer goes through
+normal dispatch, so pacing and quota apply per reviewer.
+
+The summary collates each reviewer's run, route, state, verdict and full output
+path without merging findings. A reviewer is asked to begin with
+`Verdict: approve`, `Verdict: request_changes` or `Verdict: inconclusive`.
+Leading blank lines, case and Markdown emphasis are accepted; an unrecognised
+or unreadable result is `unknown`. JSON includes verdict counts. The command
+exits successfully only when every reviewer succeeds and approves; a failed,
+inconclusive, change-requesting or unknown verdict is non-zero. This result
+does not itself decide delivery acceptance.
+
+Retries use deterministic reviewer operation IDs derived from the resolved
+commit, selected shape and its configuration, brief and reviewer position.
+Run the same review again to reattach to existing runs and submit any remaining
+reviewers. Keep the commit, shape configuration and brief unchanged; a changed
+`HEAD`, shape or brief starts a different review. On timeout or error, the
+summary lists all planned reviewers, including `not_submitted` entries, and
+prints commands to collect or cancel active runs. Active runs are not cancelled
+automatically. Use `provenant lanes --id RUN --wait 4m` to collect one, or
+`provenant cancel RUN` to cancel it.
 
 ## Per-account pacing
 

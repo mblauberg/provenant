@@ -620,12 +620,8 @@ pub(crate) fn resolve_dispatch(
         .models()
         .iter()
         .filter(|model| {
-            excluded_families.is_some_and(|families| {
-                model
-                    .family
-                    .as_ref()
-                    .is_none_or(|family| families.contains(family))
-            })
+            excluded_families
+                .is_some_and(|families| review_family_excluded(model.family.as_deref(), families))
         })
         .map(|model| model.model.clone())
         .collect();
@@ -639,10 +635,8 @@ pub(crate) fn resolve_dispatch(
         host,
         &excluded,
     );
-    let exhausted = match &selected {
-        Ok(route) => !matches!(route.readiness, RouteReadiness::Ready { .. }),
-        Err(error) => error.starts_with("no eligible pool member:"),
-    };
+    let exhausted =
+        matches!(&selected, Err(error) if error.starts_with("no eligible pool member:"));
     if !excluded.is_empty() && exhausted {
         resolve_dispatch_excluding(
             request,
@@ -657,6 +651,10 @@ pub(crate) fn resolve_dispatch(
     } else {
         selected
     }
+}
+
+fn review_family_excluded(family: Option<&str>, families: &[String]) -> bool {
+    !families.is_empty() && family.is_none_or(|family| families.iter().any(|used| used == family))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2021,6 +2019,12 @@ mod route_tests {
     }
     #[test]
     fn review_uses_unused_families_and_substitutes_when_exhausted() -> Result<(), Box<dyn Error>> {
+        assert!(!super::review_family_excluded(None, &[]));
+        assert!(super::review_family_excluded(None, &["openai".into()]));
+        assert!(!super::review_family_excluded(
+            Some("anthropic"),
+            &["openai".into()]
+        ));
         use std::os::unix::fs::PermissionsExt;
         struct Resolver;
         impl provenant_core::PathResolver for Resolver {
@@ -2117,6 +2121,23 @@ mod route_tests {
         assert!(matches!(
             fallback.readiness,
             provenant_records::RouteReadiness::Ready { .. }
+        ));
+        // The unused family remains selected when its availability is stale,
+        // instead of silently relaxing to the ready, already-used family.
+        let deferred = super::resolve_dispatch(
+            &request,
+            &roots,
+            None,
+            ("fixture", 0),
+            &availability[..1],
+            &access,
+            "fixture",
+            Some(&["openai".into()]),
+        )?;
+        assert_eq!(deferred.adapter, "claude");
+        assert!(matches!(
+            deferred.readiness,
+            provenant_records::RouteReadiness::Unavailable { .. }
         ));
         Ok(())
     }

@@ -121,7 +121,12 @@ fn fixture() -> Result {
             .lines()
             .find(|line| line.starts_with("Lens: "))
             .unwrap_or("Lens: unknown");
-        format!("Verdict: approve\n{lens}")
+        let denied = fs::write("review-write-sentinel", b"forbidden").is_err();
+        if prompt.contains("fixture unknown verdict") {
+            format!("No recognised verdict\n{lens}\nwrite denied: {denied}")
+        } else {
+            format!("Verdict: approve\n{lens}\nwrite denied: {denied}")
+        }
     } else {
         "OK".into()
     };
@@ -160,7 +165,7 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         OpenOptions::new()
             .append(true)
             .open(rig.state.join("config.toml"))?,
-        "\n[domains.routing.pools]\nreview-fixture = [{{ model = 'codex/gpt-6-luna', effort = 'low' }}]\n[domains.routing.review.shapes.fixture]\nreviewers = [{{ pool = 'review-fixture', count = 2, lenses = ['correctness', 'tests'], distinct_families = true }}]"
+        "\n[domains.routing.pools]\nreview-fixture = [{{ model = 'codex/gpt-6-luna', effort = 'low' }}]\n[domains.routing.review.shapes.fixture]\nreviewers = [{{ pool = 'review-fixture', count = 2, lenses = ['correctness', 'tests'], distinct_families = true }}]\n[domains.routing.review.select.by_paths]\n'.github/workflows/**' = 'fixture'"
     )?;
     let git = std::env::var_os("PROVENANT_GIT")
         .map(PathBuf::from)
@@ -181,7 +186,31 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
     )?;
     assert_eq!(code(&commit), 0);
     let brief = rig.root.join("review-brief.txt");
-    fs::write(&brief, "Check this change")?;
+    fs::write(&brief, "Check this change; fixture slow result")?;
+    let timed = rig.command(&[
+        "review",
+        "HEAD",
+        "--brief-file",
+        brief.to_str().ok_or("brief")?,
+        "--shape",
+        "fixture",
+        "--wait",
+        "1s",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&timed),
+        124,
+        "{}",
+        String::from_utf8_lossy(&timed.stdout.bytes)
+    );
+    let timed: Value = serde_json::from_slice(&timed.stdout.bytes)?;
+    let timed_rows = timed["data"]["reviewers"]
+        .as_array()
+        .ok_or("timed reviewers")?;
+    assert_eq!(timed_rows.len(), 2);
+    assert!(timed_rows[0]["run_id"].is_string());
+    assert!(timed_rows.iter().all(|row| row["state"].is_string()));
     let out = rig.command(&[
         "review",
         "HEAD",
@@ -205,6 +234,7 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
     assert_eq!(result["data"]["selection_source"], "override");
     let reviewers = result["data"]["reviewers"].as_array().ok_or("reviewers")?;
     assert_eq!(reviewers.len(), 2);
+    assert_eq!(reviewers[0]["run_id"], timed_rows[0]["run_id"]);
     for (index, lens) in ["correctness", "tests"].iter().enumerate() {
         let row = &reviewers[index];
         assert_eq!(row["state"], "succeeded", "{row}");
@@ -215,7 +245,117 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         assert_eq!(row["applied_route"]["model"], "codex/gpt-6-luna");
         let output = fs::read_to_string(row["result_path"].as_str().ok_or("result path")?)?;
         assert!(output.contains(&format!("Lens: {lens}")), "{output}");
+        assert!(output.contains("write denied: true"), "{output}");
     }
+    assert!(!rig.project.join("review-write-sentinel").exists());
+    fs::write(&brief, "fixture unknown verdict")?;
+    let unknown = rig.command(&[
+        "review",
+        "HEAD",
+        "--brief-file",
+        brief.to_str().ok_or("brief")?,
+        "--shape",
+        "fixture",
+        "--wait",
+        "60s",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&unknown),
+        1,
+        "{}",
+        String::from_utf8_lossy(&unknown.stdout.bytes)
+    );
+    let unknown: Value = serde_json::from_slice(&unknown.stdout.bytes)?;
+    assert_eq!(unknown["data"]["verdicts"]["unknown"], 2);
+    fs::create_dir_all(rig.project.join(".github/workflows"))?;
+    fs::write(rig.project.join(".github/workflows/check.yml"), "fixture")?;
+    let added = rig.execute(&git, &["add", ".github/workflows/check.yml"], None)?;
+    assert_eq!(code(&added), 0);
+    let saved = rig.execute(
+        &git,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "-qm",
+            "workflow",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&saved), 0);
+    fs::create_dir_all(rig.project.join("docs"))?;
+    let moved = rig.execute(
+        &git,
+        &["mv", ".github/workflows/check.yml", "docs/check.yml"],
+        None,
+    )?;
+    assert_eq!(code(&moved), 0);
+    let saved = rig.execute(
+        &git,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "-qm",
+            "move workflow",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&saved), 0);
+    fs::write(&brief, "check renamed path")?;
+    let renamed = rig.command(&[
+        "review",
+        "HEAD",
+        "--brief-file",
+        brief.to_str().ok_or("brief")?,
+        "--risk",
+        "low",
+        "--range",
+        "HEAD~1..HEAD",
+        "--wait",
+        "60s",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&renamed),
+        0,
+        "{}",
+        String::from_utf8_lossy(&renamed.stdout.bytes)
+    );
+    let renamed: Value = serde_json::from_slice(&renamed.stdout.bytes)?;
+    assert_eq!(renamed["data"]["shape"], "fixture");
+    assert_eq!(renamed["data"]["selection_source"], "by_paths");
+    fs::write(&brief, "fixture capacity")?;
+    let failed = rig.command(&[
+        "review",
+        "HEAD",
+        "--brief-file",
+        brief.to_str().ok_or("brief")?,
+        "--shape",
+        "fixture",
+        "--wait",
+        "60s",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&failed),
+        1,
+        "{}",
+        String::from_utf8_lossy(&failed.stdout.bytes)
+    );
+    let failed: Value = serde_json::from_slice(&failed.stdout.bytes)?;
+    assert!(
+        failed["data"]["reviewers"]
+            .as_array()
+            .ok_or("failed reviewers")?
+            .iter()
+            .any(|row| row["state"] != "succeeded")
+    );
     cleanup.disarm();
     Ok(())
 }

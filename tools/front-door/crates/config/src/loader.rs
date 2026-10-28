@@ -629,6 +629,8 @@ impl Overrides<'_> {
             path.push(key.into());
             let expected = at(self.defaults, path);
             if expected.is_none() {
+                // The aggregate's closed serde types (deny_unknown_fields for
+                // structs) distinguish an added map key from a field typo.
                 let candidate = probe(&Item::Table(self.defaults.clone()), path, value)
                     .and_then(|item| item.into_table().ok());
                 if candidate.as_ref().is_some_and(decodes::<T>) {
