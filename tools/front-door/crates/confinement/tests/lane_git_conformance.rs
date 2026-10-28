@@ -373,9 +373,21 @@ fn linked_lane_uses_private_objects_and_cannot_mutate_shared_objects() -> Result
         fs::read(repo_git.join("config"))?,
     )?;
     fs::write(private_common.join("HEAD"), b"ref: refs/heads/lane/test\n")?;
+    // Include newer loose tracking refs as the host's production snapshot does.
+    let refs = ok(git(
+        &git_path,
+        &repo_git,
+        &repo,
+        &home,
+        &[
+            "for-each-ref",
+            "--sort=refname",
+            "--format=%(objectname) %(refname)",
+        ],
+    ));
     fs::write(
         private_common.join("packed-refs"),
-        fs::read(repo_git.join("packed-refs"))?,
+        format!("# pack-refs with: sorted\n{refs}"),
     )?;
     fs::write(private_common.join("refs/heads/lane/test"), &oid)?;
     let mut paths = required_anchors(&plan, &profile, Some((&linked, &selected)));
