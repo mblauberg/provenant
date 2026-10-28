@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "graph_id": "loop-exhausts",
+  "nodes": [
+    {
+      "id": "revise",
+      "kind": "loop",
+      "access": "read_only",
+      "loop": {
+        "max_rounds": 2,
+        "until": "approved",
+        "body": [
+          {
+            "id": "review",
+            "access": "read_only",
+            "prompt": "Review changes; use previous findings for delta review.",
+            "route": {
+              "adapter": "fixture",
+              "model": "fixture/model"
+            },
+            "inputs": [
+              {
+                "node": "previous.review",
+                "outputs": [
+                  "verdict",
+                  "findings"
+                ]
+              }
+            ]
+          },
+          {
+            "id": "approved",
+            "kind": "gate",
+            "access": "read_only",
+            "depends_on": [
+              "review"
+            ],
+            "inputs": [
+              {
+                "node": "review",
+                "outputs": [
+                  "verdict"
+                ]
+              }
+            ],
+            "condition": {
+              "type": "verdict",
+              "expected": "VERDICT: PASS",
+              "threshold": "all"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
