@@ -13,6 +13,12 @@ pub fn delivery_capabilities() -> Vec<provenant_records::inbox::DeliveryCapabili
         // Library readiness only; live injection requires the hook adapter.
         capability.local_offer_reader = capability.provider == Harness::Claude;
     }
+    capabilities.push(provenant_records::inbox::DeliveryCapability {
+        provider: Harness::Claude,
+        transport: provenant_records::inbox::AnswerTransport::ClaudeHook,
+        live_injection: true,
+        local_offer_reader: true,
+    });
     capabilities
 }
 pub const PRE_COMPACT: &str = "pre-compact";

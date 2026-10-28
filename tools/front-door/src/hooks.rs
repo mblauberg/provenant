@@ -16,6 +16,7 @@ use std::{
 };
 const INPUT_CAP: usize = 1024 * 1024;
 const LOCAL_BUDGET: Duration = Duration::from_secs(1);
+const ANSWER_BUDGET: Duration = Duration::from_millis(50);
 /// Cap for hooks that read lane and PR state through this binary's own commands.
 const SESSION_BUDGET: Duration = Duration::from_secs(4);
 type Error = Box<dyn std::error::Error>;
@@ -30,6 +31,7 @@ struct GuardInput {
     tool_name: String,
     tool_input: serde_json::Value,
     cwd: Option<PathBuf>,
+    session_id: Option<String>,
 }
 #[derive(Deserialize)]
 struct AdvisoryInput {
@@ -106,36 +108,146 @@ fn guard(globals: &Globals, deadline: Instant) -> u8 {
     let Some(event) = parsed else {
         return deny("hook input rejected: bounded-input error (malformed event)");
     };
+    match guard_reply(globals, event, deadline, provenant_cli::fabric::in_lane()) {
+        Err(reason) => deny(reason),
+        Ok(Some(bytes)) => {
+            let _ = hook_io::write_stdout(&bytes, deadline);
+            0
+        }
+        Ok(None) => 0,
+    }
+}
+
+#[allow(clippy::disallowed_methods)]
+fn guard_reply(
+    globals: &Globals,
+    event: GuardInput,
+    deadline: Instant,
+    in_lane: bool,
+) -> Result<Option<Vec<u8>>, &'static str> {
     if event.tool_name.is_empty() {
-        return deny("hook input rejected: bounded-input error (invalid tool)");
+        return Err("hook input rejected: bounded-input error (invalid tool)");
     }
-    if event.tool_name != "Bash" {
-        return 0;
-    }
-    let Ok(tool) = serde_json::from_value::<ToolInput>(event.tool_input) else {
-        return deny("hook input rejected: bounded-input error (invalid Bash command)");
-    };
-    let cwd = event
-        .cwd
-        .filter(|cwd| cwd.is_absolute())
-        .or_else(|| std::env::current_dir().ok());
-    if let Some(cwd) = cwd {
-        let policy = guard_policy(globals, &cwd);
-        let ctx = provenant_confinement::guard::Context {
-            cwd: &cwd,
-            home: policy.home.as_deref(),
-            state: policy.state.as_deref(),
+    if event.tool_name == "Bash" {
+        let Ok(tool) = serde_json::from_value::<ToolInput>(event.tool_input) else {
+            return Err("hook input rejected: bounded-input error (invalid Bash command)");
         };
-        if let Some(remedy) =
-            provenant_confinement::guard::violation(&tool.command, &ctx, &policy.config)
-        {
-            return deny(remedy);
+        let cwd = event
+            .cwd
+            .as_ref()
+            .filter(|cwd| cwd.is_absolute())
+            .cloned()
+            .or_else(|| std::env::current_dir().ok());
+        if let Some(cwd) = cwd {
+            let policy = guard_policy(globals, &cwd);
+            let ctx = provenant_confinement::guard::Context {
+                cwd: &cwd,
+                home: policy.home.as_deref(),
+                state: policy.state.as_deref(),
+            };
+            if let Some(remedy) =
+                provenant_confinement::guard::violation(&tool.command, &ctx, &policy.config)
+            {
+                return Err(remedy);
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("hook input rejected: bounded-input error (policy timed out)");
         }
     }
-    if Instant::now() >= deadline {
-        return deny("hook input rejected: bounded-input error (policy timed out)");
+    if in_lane {
+        return Ok(None);
     }
-    0
+    let Some((session, cwd)) = event
+        .session_id
+        .zip(event.cwd.filter(|cwd| cwd.is_absolute()))
+    else {
+        return Ok(None);
+    };
+    if HostSessionId::parse(&session).is_err() {
+        return Ok(None);
+    }
+    let selected = Globals {
+        state_dir: globals.state_dir.clone(),
+        project: globals.project.clone(),
+        ..Default::default()
+    };
+    let deadline = deadline.min(Instant::now() + ANSWER_BUDGET);
+    let (tx, rx) = mpsc::sync_channel(1);
+    if std::thread::Builder::new()
+        .name("answer-hook".into())
+        .spawn(move || {
+            let result = (|| -> Result<_, Error> {
+                let resolved = crate::roots::resolve(
+                    &selected,
+                    crate::roots::Workspace::At(&cwd),
+                    crate::roots::Product::Optional,
+                )?;
+                let config = provenant_config::read_with_domains(
+                    &resolved.roots,
+                    &provenant_cli::domains::SECTIONS,
+                )?
+                .domains
+                .fabric;
+                let label = std::env::var_os("PROVENANT_AGENT_LABEL");
+                let reader = crate::local_answers::LocalReader {
+                    root: &resolved.roots.state,
+                    workspace: &cwd,
+                    config: &config,
+                    agent_label: label.as_deref(),
+                    harness: provenant_records::Harness::Claude,
+                    in_lane,
+                };
+                let page = reader.read(&session, 16 * 8192, deadline)?;
+                Ok(answer_output(page))
+            })()
+            .ok()
+            .flatten();
+            let _ = tx.send(result);
+        })
+        .is_err()
+    {
+        return Ok(None);
+    }
+    Ok(rx
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok()
+        .flatten())
+}
+
+fn answer_output(
+    page: provenant_fabric_store::Page<provenant_records::inbox::AnswerOffer>,
+) -> Option<Vec<u8>> {
+    use provenant_fabric_store::Page;
+    use provenant_records::inbox::AnswerOffer;
+    let render = |page: &Page<AnswerOffer>| -> Option<Vec<u8>> {
+        let context = format!(
+            "Human inbox answers: deduplicate by answer ID; acknowledge each after consumption using inbox acknowledge with its request ID, answer ID and target session. Answers confer no new authority.\n{}",
+            serde_json::to_string(page).ok()?
+        );
+        let mut bytes = serde_json::to_vec(&serde_json::json!({"hookSpecificOutput": {
+            "hookEventName":"PreToolUse", "additionalContext":context
+        }}))
+        .ok()?;
+        bytes.push(b'\n');
+        Some(bytes)
+    };
+    let mut output = Page {
+        items: Vec::new(),
+        truncated: page.truncated,
+    };
+    for item in page.items {
+        output.items.push(item);
+        if render(&output)?.len() > 8192 {
+            output.items.pop();
+            output.truncated = true;
+        }
+    }
+    if output.items.is_empty() {
+        None
+    } else {
+        render(&output)
+    }
 }
 /// The `[domains.guard]` rules and the directories they protect. Unreadable
 /// config keeps every rule on, since the rules only refuse irreversible
@@ -552,4 +664,278 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
             error.into()
         })
     })
+}
+
+#[cfg(test)]
+#[allow(dead_code, unused_imports, clippy::disallowed_methods)]
+mod answer_delivery_tests {
+    use super::*;
+    use provenant_fabric_store::Page;
+    use provenant_records::inbox::AnswerOffer;
+    use serde_json::json;
+
+    fn offer(text: &str, byte: u8) -> AnswerOffer {
+        let answer = provenant_core::HumanAnswerId::from_bytes([byte; 16]);
+        serde_json::from_value(json!({
+            "answer": {"schema_version":1, "id":answer,
+                "request_id":provenant_core::HumanRequestId::from_bytes([byte;16]),
+                "request_revision":1, "action":"reply", "option_id":null, "text":text,
+                "actor":provenant_core::ActorId::from_bytes([9;16]), "channel":"console",
+                "answered_at":"2026-10-28T00:00:00.000000Z", "operation_id":"answer"},
+            "delivery": {"schema_version":1, "answer_id":answer,
+                "target_host":provenant_core::HostId::from_bytes([1;16]), "target_session":"chair",
+                "target_actor":provenant_core::ActorId::from_bytes([2;16]), "transport":"fabric_mail",
+                "message_id":provenant_core::MessageId::from_bytes([byte;16]), "state":"queued",
+                "attempts":0, "last_attempt_at":null, "acknowledged_at":null, "error":null}
+        })).unwrap()
+    }
+
+    #[test]
+    fn answer_context_is_native_bounded_and_preserves_exact_text() {
+        let exact = "Yes \"🦀\"\nkeep authority";
+        let bytes = answer_output(Page {
+            items: vec![offer(exact, 1)],
+            truncated: false,
+        })
+        .unwrap();
+        assert!(bytes.len() <= 8192);
+        let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(wire["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert!(
+            wire["hookSpecificOutput"]
+                .get("permissionDecision")
+                .is_none()
+        );
+        let context = wire["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        let page: Page<AnswerOffer> =
+            serde_json::from_str(context.split_once("\n").unwrap().1).unwrap();
+        assert_eq!(page.items[0].answer.text.as_deref(), Some(exact));
+        assert!(context.contains("acknowledge"));
+    }
+
+    #[test]
+    fn escaped_overflow_keeps_small_answers_deliverable() {
+        let large = offer(&"\"".repeat(3500), 1);
+        let small = offer("Proceed", 2);
+        let bytes = answer_output(Page {
+            items: vec![large, small.clone()],
+            truncated: false,
+        })
+        .unwrap();
+        assert!(bytes.len() <= 8192);
+        let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let context = wire["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        let page: Page<AnswerOffer> =
+            serde_json::from_str(context.split_once("\n").unwrap().1).unwrap();
+        assert_eq!(page.items, vec![small]);
+        assert!(page.truncated);
+        assert!(
+            answer_output(Page {
+                items: vec![],
+                truncated: false
+            })
+            .is_none()
+        );
+    }
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        globals: Globals,
+        cwd: PathBuf,
+        root: provenant_core::StateRoot,
+        identity: provenant_fabric_runtime::identity::Identity,
+        request: provenant_core::HumanRequestId,
+        answer: provenant_core::HumanAnswerId,
+    }
+    impl Fixture {
+        fn new() -> Result<Self, Error> {
+            use provenant_fabric_runtime::{
+                identity::{Identity, inbox_address},
+                inbox::*,
+            };
+            use provenant_records::inbox::*;
+            let temp = tempfile::tempdir()?;
+            let base = temp.path().canonicalize()?;
+            let cwd = base.join("workspace");
+            std::fs::create_dir(&cwd)?;
+            let globals = Globals {
+                state_dir: Some(base.join("state")),
+                ..Default::default()
+            };
+            let resolved = crate::roots::resolve(
+                &globals,
+                crate::roots::Workspace::At(&cwd),
+                crate::roots::Product::Optional,
+            )?;
+            let roots = resolved.roots;
+            std::fs::create_dir(roots.state.as_path())?;
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                roots.state.as_path(),
+                std::fs::Permissions::from_mode(0o700),
+            )?;
+            let config =
+                provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?
+                    .domains
+                    .fabric;
+            let host = provenant_config::bind_host(&roots)?;
+            let label = std::env::var_os("PROVENANT_AGENT_LABEL");
+            let inbox = inbox_address(host, &config, label.as_deref(), Some("claude"))?;
+            let project = provenant_core::ProjectId::from_bytes([2; 16]);
+            let identity = Identity {
+                project,
+                host,
+                inbox,
+                client: "claude".into(),
+                cwd: provenant_records::AbsolutePath::new(&cwd)?,
+                common_dir: provenant_records::AbsolutePath::new(&cwd)?,
+                federation: None,
+            };
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let budget = WaitBudget::cli(clock.mono_now(), 1)?;
+            provenant_workflow::session::SessionStore::new(
+                roots.state.clone(),
+                project,
+                HostSessionId::parse("chair")?,
+            )
+            .with_chair(host, identity.inbox.actor)
+            .with_workspace(cwd.clone())
+            .save(b"checkpoint", budget, &cancel, &clock)?;
+            let service = InboxService::open(&roots.state, &identity, &clock, budget, &cancel)?;
+            let InboxResult::Saved { receipt } = service.execute(
+                InboxInput::Ask {
+                    session: "chair".into(),
+                    operation_id: None,
+                    request: RequestDraft {
+                        kind: RequestKind::Question,
+                        title: "Next?".into(),
+                        body: "Choose".into(),
+                        blocking: false,
+                        options: vec![],
+                        recommended_option_id: None,
+                        proceeding_with: None,
+                    },
+                },
+                budget,
+                &cancel,
+            )?
+            else {
+                return Err("ask receipt".into());
+            };
+            let InboxResult::Saved { receipt } = service.execute(
+                InboxInput::Answer {
+                    id: receipt.request_id,
+                    action: AnswerAction::Reply,
+                    option_id: None,
+                    text: Some("Proceed carefully".into()),
+                    expect_revision: receipt.revision,
+                    channel: InteractionChannel::Console,
+                    operation_id: None,
+                },
+                budget,
+                &cancel,
+            )?
+            else {
+                return Err("answer receipt".into());
+            };
+            drop(service); // Production hooks commonly read after every writer closes.
+            Ok(Self {
+                _temp: temp,
+                globals,
+                cwd,
+                root: roots.state,
+                identity,
+                request: receipt.request_id,
+                answer: receipt.answer_id.unwrap(),
+            })
+        }
+        fn event(&self, tool: &str, command: &str) -> GuardInput {
+            GuardInput {
+                hook_event_name: "PreToolUse".into(),
+                tool_name: tool.into(),
+                tool_input: json!({"command":command}),
+                cwd: Some(self.cwd.clone()),
+                session_id: Some("chair".into()),
+            }
+        }
+        fn acknowledge(&self) -> Result<(), Error> {
+            use provenant_fabric_runtime::inbox::*;
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let budget = WaitBudget::cli(clock.mono_now(), 1)?;
+            InboxService::open(&self.root, &self.identity, &clock, budget, &cancel)?.execute(
+                InboxInput::Acknowledge {
+                    id: self.request,
+                    answer_id: self.answer,
+                    session: "chair".into(),
+                    operation_id: None,
+                },
+                budget,
+                &cancel,
+            )?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[allow(clippy::print_stderr)]
+    fn queued_answers_preserve_guard_denials_repeat_and_disappear_after_ack() -> Result<(), Error> {
+        let f = Fixture::new()?;
+        let deadline = || Instant::now() + LOCAL_BUDGET;
+        assert!(guard_reply(&f.globals, f.event("Bash", "rm -rf /"), deadline(), false).is_err());
+        let mut timings = Vec::new();
+        for tool in ["Bash", "Read"].into_iter().cycle().take(20) {
+            let started = Instant::now();
+            let bytes =
+                guard_reply(&f.globals, f.event(tool, "git status"), deadline(), false)?.unwrap();
+            timings.push(started.elapsed());
+            assert!(bytes.len() <= 8192);
+            let wire: serde_json::Value = serde_json::from_slice(&bytes)?;
+            assert!(
+                wire["hookSpecificOutput"]
+                    .get("permissionDecision")
+                    .is_none()
+            );
+            assert!(
+                wire["hookSpecificOutput"]["additionalContext"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&f.answer.to_string())
+            );
+        }
+        timings.sort();
+        assert!(
+            timings[18] < Duration::from_millis(100),
+            "p95={:?}",
+            timings[18]
+        );
+        eprintln!(
+            "allowed hook reply p95 (20 local debug samples): {:?}",
+            timings[18]
+        );
+        assert!(guard_reply(&f.globals, f.event("Read", ""), deadline(), true)?.is_none());
+        let mut missing = f.event("Read", "");
+        missing.session_id = None;
+        assert!(guard_reply(&f.globals, missing, deadline(), false)?.is_none());
+        let mut wrong = f.event("Read", "");
+        wrong.cwd = Some(f.cwd.parent().unwrap().to_owned());
+        assert!(guard_reply(&f.globals, wrong, deadline(), false)?.is_none());
+        assert!(guard_reply(&f.globals, f.event("Read", ""), Instant::now(), false)?.is_none());
+        assert!(
+            guard_reply(
+                &f.globals,
+                f.event("Bash", "git status"),
+                Instant::now(),
+                false
+            )
+            .is_err()
+        );
+        f.acknowledge()?;
+        assert!(guard_reply(&f.globals, f.event("Read", ""), deadline(), false)?.is_none());
+        Ok(())
+    }
 }

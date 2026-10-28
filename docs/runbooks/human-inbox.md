@@ -114,6 +114,7 @@ The records-level matrix supplies Fabric mail fallback:
 | Provider | Transport | Local offer reader | Live injection |
 |---|---|---|---|
 | Claude | Fabric mail | Library API | Unavailable |
+| Claude | Claude PreToolUse hook | Available | Tool-call boundary |
 | Codex | Fabric mail | Unavailable | Unavailable |
 | Cursor | Fabric mail | Unavailable | Unavailable |
 | Agy | Fabric mail | Unavailable | Unavailable |
@@ -126,8 +127,15 @@ Configured Fabric home mappings defer to mail; no remote I/O runs in the reader.
 Internal candidate pages cap at 128 KiB; adapters must fit their final protocol
 output within 8 KiB, skipping oversized candidates without hiding smaller ones.
 
-This slice adds the service API. CLI/MCP syntax is unchanged. Hook composition,
-remote delivery and provider input adapters remain separate work. Both apps may
+Claude's installed `PreToolUse` hook offers answers on Bash calls. Guard denials and
+exit-2 fallback take precedence. Allowed calls may receive `additionalContext`
+within a 50 ms local delivery budget and the existing one-second hook deadline.
+The final JSON, escaping and newline fit 8 KiB. Skipped answers stay pending;
+delivery failure is advisory and grants no permission. Hooks never acknowledge
+answers, so consume and deduplicate by answer ID, then explicitly acknowledge.
+
+CLI/MCP syntax is unchanged. Remote delivery and other provider input adapters
+remain separate work. Both apps may
 stay closed; there is no background polling or provider launch.
 
 Use `inbox close` with a reason and expected revision to withdraw, supersede or
