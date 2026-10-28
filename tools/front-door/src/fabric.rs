@@ -3370,6 +3370,13 @@ fn settle_attempt(
 }
 
 impl provenant_fabric_runtime::graph::CiStatus for BoundGraphOwner<'_> {
+    fn now_seconds(&self) -> Option<u64> {
+        self.factory
+            .clock
+            .wall_now()
+            .ok()
+            .and_then(|time| u64::try_from(time.as_micros() / 1_000_000).ok())
+    }
     fn observe_ci(&mut self, target: &str) -> provenant_fabric_runtime::graph::CiObservation {
         crate::pr::status::observe_ci(&self.factory.cwd, target)
     }

@@ -634,6 +634,7 @@ pub struct NodeInput<'a> {
 
 /// Narrow read-only host interface for CI checks.
 pub trait CiStatus {
+    fn now_seconds(&self) -> Option<u64>;
     fn observe_ci(&mut self, target: &str) -> CiObservation;
 }
 
@@ -1611,16 +1612,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 ..
             } = condition
             {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
+                let mut host = owner.ci_status();
+                let sampled = host.as_ref().and_then(|host| host.now_seconds());
+                let now = sampled.unwrap_or_default();
                 let prior = checkpoint.nodes[node_index].ci.as_ref();
                 let first = prior.map_or(now, |e| e.first_observed_seconds);
                 if prior.is_some() && now.saturating_sub(first) >= *timeout_seconds {
                     Some("timeout".into())
                 } else {
-                    let observation = owner.ci_status().map_or_else(
+                    let observation = host.as_mut().filter(|_| sampled.is_some()).map_or_else(
                         || CiObservation {
                             state: CiState::Unavailable,
                             summary: "CI status unavailable".into(),

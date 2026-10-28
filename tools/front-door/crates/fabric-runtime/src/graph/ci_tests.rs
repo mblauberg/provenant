@@ -23,6 +23,9 @@ struct Owner {
     deliveries: usize,
 }
 impl CiStatus for Owner {
+    fn now_seconds(&self) -> Option<u64> {
+        Some(10_000)
+    }
     fn observe_ci(&mut self, target: &str) -> CiObservation {
         self.targets.push(target.into());
         self.observations
