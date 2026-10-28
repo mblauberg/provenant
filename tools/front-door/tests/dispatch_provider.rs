@@ -165,7 +165,7 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         OpenOptions::new()
             .append(true)
             .open(rig.state.join("config.toml"))?,
-        "\n[domains.routing.pools]\nreview-fixture = [{{ model = 'codex/gpt-6-luna', effort = 'low' }}]\n[domains.routing.review.shapes.fixture]\nreviewers = [{{ pool = 'review-fixture', count = 2, lenses = ['correctness', 'tests'], distinct_families = true }}]\n[domains.routing.review.select.by_paths]\n'.github/workflows/**' = 'fixture'"
+        "\n[domains.routing.pools]\nreview-fixture = [{{ model = 'codex/gpt-6-luna', effort = 'low', efforts = ['low'] }}]\n[domains.routing.review.shapes.fixture]\nreviewers = [{{ pool = 'review-fixture', count = 2, lenses = ['correctness', 'tests'], distinct_families = true }}]\n[domains.routing.review.select.by_paths]\n'.github/workflows/**' = 'fixture'"
     )?;
     let git = std::env::var_os("PROVENANT_GIT")
         .map(PathBuf::from)
@@ -218,6 +218,8 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         brief.to_str().ok_or("brief")?,
         "--shape",
         "fixture",
+        "--range",
+        "missing-ref..HEAD",
         "--wait",
         "60s",
         "--json",

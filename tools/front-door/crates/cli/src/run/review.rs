@@ -53,8 +53,9 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
                 String::from_utf8_lossy(&output.stderr.bytes).trim()
             )));
         }
-        String::from_utf8(output.stdout.bytes)
-            .map_err(|_| invalid("git output is not UTF-8".into()))
+        String::from_utf8(output.stdout.bytes).map_err(|_| {
+            invalid("Git output is not UTF-8; use --shape to bypass changed-path selection".into())
+        })
     };
     let head = git(&[
         "rev-parse",
@@ -64,22 +65,16 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
     ])?
     .trim()
     .to_owned();
-    if command
-        .range
-        .as_deref()
-        .is_some_and(|range| range.starts_with('-'))
-    {
-        return Err(invalid("git range must not begin with -".into()));
-    }
-    let paths: Vec<String> = if let Some(range) = &command.range {
-        git(&["diff", "--no-renames", "--name-only", "-z", range, "--"])?
-            .split('\0')
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-            .collect()
-    } else {
-        vec![]
-    };
+    let paths: Vec<String> =
+        if let Some(range) = selection_range(command.shape.as_deref(), command.range.as_deref())? {
+            git(&["diff", "--no-renames", "--name-only", "-z", range, "--"])?
+                .split('\0')
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect()
+        } else {
+            vec![]
+        };
     let brief = read_bounded(&command.brief_file)?;
     let domains = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|e| invalid(e.to_string()))?
@@ -135,11 +130,12 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
                 &brief,
                 group_index,
                 index,
+                0,
             )?;
             data["reviewers"].as_array_mut().ok_or_else(|| invalid("invalid review result".into()))?.push(json!({
                 "operation_id": operation_id, "run_id": null, "attempt_id": null, "pool": group.pool,
                 "lens": lens, "group": group_index, "distinct_families": group.distinct_families,
-                "state": "not_submitted", "applied_route": null, "family": null,
+                "state": "not_submitted", "ordinal": 0, "applied_route": null, "family": null,
                 "substitution": false, "verdict": "unknown", "result_path": null
             }));
             slots.push(ReviewSlot {
@@ -147,6 +143,8 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
                 pool: group.pool.clone(),
                 lens,
                 distinct: group.distinct_families,
+                index,
+                ordinal: 0,
                 operation_id,
                 task_id,
                 run: None,
@@ -160,87 +158,33 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
     // a timed-out retry still reports lanes created by an earlier invocation.
     for (i, slot) in slots.iter_mut().enumerate() {
         let call = request(&clock, &cancel)?;
-        if let Some(op) = session.store.operation(&slot.operation_id, &call)? {
-            match session.store.request(op.run_id, &call) {
-                Ok(_) => {
-                    slot.run = Some(op.run_id);
-                    data["reviewers"][i]["run_id"] = json!(op.run_id);
-                    data["reviewers"][i]["state"] = json!("submitted");
-                    launch(&session, op.run_id, edge, &call)?;
-                }
-                Err(run::RunError::NotFound) if op.state == run::OperationState::Prepared => {}
-                Err(error) => return Err(error.into()),
-            }
+        let choice = recover_slot(
+            &head,
+            selected.name,
+            selected.shape,
+            &brief,
+            slot.group,
+            slot.index,
+            |id| inspect_slot(&session, id, &call),
+        )?;
+        slot.ordinal = choice.ordinal;
+        slot.operation_id = choice.operation_id;
+        slot.task_id = choice.task_id;
+        data["reviewers"][i]["operation_id"] = json!(slot.operation_id);
+        data["reviewers"][i]["ordinal"] = json!(slot.ordinal);
+        if let Some(id) = choice.run {
+            slot.run = Some(id);
+            data["reviewers"][i]["run_id"] = json!(id);
+            data["reviewers"][i]["state"] = json!("submitted");
+            launch(&session, id, edge, &call)?;
         }
     }
     // Each pass admits all independent slots before waiting for a distinct
     // group's preceding route. Other groups continue even when one is paced.
     loop {
         let mut progressed = false;
-        for i in 0..slots.len() {
-            if !can_submit(&slots, i) {
-                continue;
-            }
-            let families: Vec<String> = slots[..i]
-                .iter()
-                .filter(|s| s.group == slots[i].group)
-                .filter_map(|s| s.family.clone())
-                .collect();
-            let slot = &slots[i];
-            let call = request(&clock, &cancel)?;
-            // A published operation owns its immutable request. Launch any
-            // still-queued work without reconstructing changing exclusions.
-            let existing = session.store.operation(&slot.operation_id, &call)?;
-            let published = if let Some(op) = existing {
-                match session.store.request(op.run_id, &call) {
-                    Ok(_) => Some(op),
-                    Err(run::RunError::NotFound) if op.state == run::OperationState::Prepared => {
-                        None
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            } else {
-                None
-            };
-            let run_id = if let Some(op) = published {
-                data["reviewers"][i]["run_id"] = json!(op.run_id);
-                data["reviewers"][i]["state"] = json!("submitted");
-                launch(&session, op.run_id, edge, &call)?;
-                op.run_id
-            } else {
-                let submitted = submit(
-                    &session,
-                    edge,
-                    Submission {
-                        chair: chair.clone(),
-                        operation_id: slot.operation_id.clone(),
-                        concurrency: Some(1),
-                        knobs: vec![],
-                        tasks: vec![review_task(slot, &head, &brief, families)],
-                    },
-                    &call,
-                );
-                match submitted {
-                    Ok((record, _)) => record.run_id,
-                    Err(error) => {
-                        if let Ok(Some(operation)) =
-                            session.store.operation(&slot.operation_id, &call)
-                        {
-                            data["reviewers"][i]["run_id"] = json!(operation.run_id);
-                            data["reviewers"][i]["state"] = json!("submitted");
-                        }
-                        return Err(error);
-                    }
-                }
-            };
-            slots[i].run = Some(run_id);
-            data["reviewers"][i]["run_id"] = json!(run_id);
-            data["reviewers"][i]["state"] = json!("submitted");
-            progressed = true;
-        }
-        if slots.iter().all(|s| s.run.is_some()) {
-            break;
-        }
+        // Observe recovered siblings before replacing a failed earlier slot,
+        // so the replacement avoids families already used later in the group.
         for slot in &mut slots {
             if !slot.distinct || slot.ready {
                 continue;
@@ -272,6 +216,68 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
                 }
             }
         }
+        for i in 0..slots.len() {
+            if !can_submit(&slots, i) {
+                continue;
+            }
+            let families: Vec<String> = slots
+                .iter()
+                .enumerate()
+                .filter(|(j, s)| *j != i && s.group == slots[i].group)
+                .filter_map(|(_, s)| s.family.clone())
+                .collect();
+            let slot = &slots[i];
+            let call = request(&clock, &cancel)?;
+            // A published operation owns its immutable request. Launch any
+            // still-queued work without reconstructing changing exclusions.
+            let published = published_operation(&session, &slot.operation_id, &call)?;
+            let run_id = if let Some(id) = published {
+                data["reviewers"][i]["run_id"] = json!(id);
+                data["reviewers"][i]["state"] = json!("submitted");
+                launch(&session, id, edge, &call)?;
+                id
+            } else {
+                let submitted = submit(
+                    &session,
+                    edge,
+                    Submission {
+                        chair: chair.clone(),
+                        operation_id: slot.operation_id.clone(),
+                        concurrency: Some(1),
+                        knobs: vec![],
+                        tasks: vec![review_task(slot, &head, &brief, families)],
+                    },
+                    &call,
+                );
+                match submitted {
+                    Ok((record, _)) => record.run_id,
+                    Err(error) => {
+                        if let Ok(Some(id)) =
+                            published_operation(&session, &slot.operation_id, &call)
+                        {
+                            data["reviewers"][i]["run_id"] = json!(id);
+                            data["reviewers"][i]["state"] = json!("submitted");
+                            // A concurrent retry may have sealed this same slot
+                            // with different route exclusions. Attach to it.
+                            if error.kind == ErrorKind::OperationConflict {
+                                launch(&session, id, edge, &call)?;
+                                slots[i].run = Some(id);
+                                progressed = true;
+                                continue;
+                            }
+                        }
+                        return Err(error);
+                    }
+                }
+            };
+            slots[i].run = Some(run_id);
+            data["reviewers"][i]["run_id"] = json!(run_id);
+            data["reviewers"][i]["state"] = json!("submitted");
+            progressed = true;
+        }
+        if slots.iter().all(|s| s.run.is_some()) {
+            break;
+        }
         if Instant::now() >= deadline {
             return Ok(true);
         }
@@ -293,7 +299,7 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
         &session,
         &targets,
         Condition::All,
-        deadline.saturating_duration_since(Instant::now()).as_secs(),
+        deadline.saturating_duration_since(Instant::now()),
         edge,
     )?;
     Ok(timed_out)
@@ -301,6 +307,8 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
 
 struct ReviewSlot {
     group: usize,
+    index: usize,
+    ordinal: u64,
     pool: String,
     lens: Option<String>,
     distinct: bool,
@@ -317,7 +325,133 @@ fn can_submit(slots: &[ReviewSlot], index: usize) -> bool {
         && (!slot.distinct
             || !slots[..index]
                 .iter()
-                .any(|s| s.group == slot.group && !s.ready))
+                .any(|s| s.group == slot.group && !s.ready)
+                && !slots[index + 1..]
+                    .iter()
+                    .any(|s| s.group == slot.group && s.run.is_some() && !s.ready))
+}
+
+/// Return only sealed operations. A prepared reservation without its request
+/// is not a submitted run and must be repaired through the normal create path.
+fn sealed_operation(
+    operation: Option<run::OperationRecord>,
+    request: impl FnOnce(RunId) -> Result<(), run::RunError>,
+) -> Result<Option<RunId>, run::RunError> {
+    let Some(operation) = operation else {
+        return Ok(None);
+    };
+    match request(operation.run_id) {
+        Ok(()) => Ok(Some(operation.run_id)),
+        Err(run::RunError::NotFound) if operation.state == run::OperationState::Prepared => {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn published_operation(
+    session: &Session,
+    id: &OperationId,
+    call: &run::Request<'_>,
+) -> Result<Option<RunId>, Fail> {
+    Ok(sealed_operation(
+        session.store.operation(id, call)?,
+        |run| session.store.request(run, call).map(|_| ()),
+    )?)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SlotProbe {
+    Vacant,
+    Reattach(RunId),
+    Failed,
+}
+
+fn inspect_slot(
+    session: &Session,
+    id: &OperationId,
+    call: &run::Request<'_>,
+) -> Result<SlotProbe, Fail> {
+    let Some(id) = published_operation(session, id, call)? else {
+        return Ok(SlotProbe::Vacant);
+    };
+    let target = Target {
+        selection: None,
+        run: Some(id),
+        task: None,
+        attempt: None,
+    };
+    let page = session
+        .service()
+        .lanes(&lane_query(session, &[target], true, 100, 0, call)?, call)?;
+    let lane = page
+        .lanes
+        .first()
+        .ok_or_else(|| Fail::new(Status::Error, ErrorKind::NotFound, "review run has no lane"))?;
+    Ok(probe_state(id, &lane.state))
+}
+
+fn probe_state(id: RunId, state: &run::AttemptState) -> SlotProbe {
+    match state {
+        run::AttemptState::Terminal { outcome, .. }
+            if !matches!(
+                outcome,
+                run::Outcome::Succeeded
+                    | run::Outcome::ReviewRequired
+                    | run::Outcome::InputRequired
+            ) =>
+        {
+            SlotProbe::Failed
+        }
+        _ => SlotProbe::Reattach(id),
+    }
+}
+
+struct SlotRecovery {
+    ordinal: u64,
+    operation_id: OperationId,
+    task_id: TaskId,
+    run: Option<RunId>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recover_slot(
+    head: &str,
+    name: &str,
+    shape: &provenant_routing::ReviewShape,
+    brief: &str,
+    group: usize,
+    index: usize,
+    mut probe: impl FnMut(&OperationId) -> Result<SlotProbe, Fail>,
+) -> Result<SlotRecovery, Fail> {
+    for ordinal in 0..=1024 {
+        let (operation_id, task_id) =
+            review_identity(head, name, shape, brief, group, index, ordinal)?;
+        match probe(&operation_id)? {
+            SlotProbe::Failed => continue,
+            SlotProbe::Vacant => {
+                return Ok(SlotRecovery {
+                    ordinal,
+                    operation_id,
+                    task_id,
+                    run: None,
+                });
+            }
+            SlotProbe::Reattach(run) => {
+                return Ok(SlotRecovery {
+                    ordinal,
+                    operation_id,
+                    task_id,
+                    run: Some(run),
+                });
+            }
+        }
+    }
+    Err(Fail::new(
+        Status::Error,
+        ErrorKind::Conflict,
+        "review retry limit exceeded",
+    ))
 }
 
 fn review_identity(
@@ -327,10 +461,18 @@ fn review_identity(
     brief: &str,
     group: usize,
     index: usize,
+    ordinal: u64,
 ) -> Result<(OperationId, TaskId), Fail> {
-    let digest = CanonicalV1::record_digest("review-slot", 1, &json!({
+    let mut identity = json!({
         "head": head, "name": name, "shape": shape, "brief": brief, "group": group, "index": index,
-    })).map_err(|e| Fail::new(Status::Invalid, ErrorKind::Invalid, e.to_string()))?;
+    });
+    // Keep the original digest for ordinal zero so previously submitted slots
+    // remain recoverable after upgrading.
+    if ordinal > 0 {
+        identity["ordinal"] = json!(ordinal);
+    }
+    let digest = CanonicalV1::record_digest("review-slot", 1, &identity)
+        .map_err(|e| Fail::new(Status::Invalid, ErrorKind::Invalid, e.to_string()))?;
     let operation = OperationId::parse(&format!(
         "review-{}",
         provenant_core::hex(digest.as_bytes())
@@ -370,6 +512,23 @@ fn review_task(slot: &ReviewSlot, head: &str, brief: &str, families: Vec<String>
         worktree: None,
         access: run::LaneAccess::default(),
     }
+}
+
+fn selection_range<'a>(
+    shape: Option<&str>,
+    range: Option<&'a str>,
+) -> Result<Option<&'a str>, Fail> {
+    if shape.is_some() {
+        return Ok(None);
+    }
+    if range.is_some_and(|range| range.starts_with('-')) {
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            "git range must not begin with -",
+        ));
+    }
+    Ok(range)
 }
 
 fn review_collect(edge: &Edge<'_>, data: &mut Value) -> Result<(), Fail> {
@@ -426,8 +585,7 @@ fn review_collect(edge: &Edge<'_>, data: &mut Value) -> Result<(), Fail> {
         }
         let verdict = row["result_path"]
             .as_str()
-            .and_then(|p| read_bounded(Path::new(p)).ok())
-            .map(|s| review_verdict(&s))
+            .and_then(|p| review_verdict_file(Path::new(p)))
             .unwrap_or("unknown");
         if let (Some(target), Some(source)) = (reviewer.as_object_mut(), row.as_object()) {
             target.extend(source.clone());
@@ -437,6 +595,31 @@ fn review_collect(edge: &Edge<'_>, data: &mut Value) -> Result<(), Fail> {
         reviewer["verdict"] = json!(verdict);
     }
     Ok(())
+}
+// Verdicts are at the beginning; the rest of a large result need not be read.
+fn review_verdict_file(path: &Path) -> Option<&'static str> {
+    const LIMIT: u64 = 8192;
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let truncated = bytes.len() as u64 > LIMIT;
+    bytes.truncate(LIMIT as usize);
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if truncated && !line.ends_with(b"\n") {
+            return None;
+        }
+        let line = std::str::from_utf8(line).ok()?;
+        if !line.trim().is_empty() {
+            return Some(review_verdict(line));
+        }
+    }
+    None
 }
 fn review_verdict(output: &str) -> &'static str {
     let Some(line) = output.lines().map(str::trim).find(|line| !line.is_empty()) else {
@@ -467,13 +650,17 @@ fn review_verdict(output: &str) -> &'static str {
     }
 }
 fn aggregate_verdicts(data: &Value) -> Value {
-    let mut counts = json!({"approve": 0, "request_changes": 0, "inconclusive": 0, "unknown": 0});
+    let mut counts = json!({"approve": 0, "request_changes": 0, "inconclusive": 0, "unknown": 0, "not_submitted": 0});
     if let Some(rows) = data["reviewers"].as_array() {
         for row in rows {
             let verdict = row["verdict"].as_str().unwrap_or("unknown");
-            let key = match verdict {
-                "approve" | "request_changes" | "inconclusive" => verdict,
-                _ => "unknown",
+            let key = if row["state"] == "not_submitted" {
+                "not_submitted"
+            } else {
+                match verdict {
+                    "approve" | "request_changes" | "inconclusive" => verdict,
+                    _ => "unknown",
+                }
             };
             counts[key] = json!(counts[key].as_u64().unwrap_or(0) + 1);
         }
@@ -526,6 +713,29 @@ fn review_text(data: &Value) -> String {
     {
         text.push_str("  Retry the same review command to submit remaining reviewers and reattach to existing runs.\n");
     }
+    if data["reviewers"].as_array().is_some_and(|rows| {
+        rows.iter().any(|row| {
+            matches!(
+                row["state"].as_str(),
+                Some(
+                    "failed"
+                        | "rejected"
+                        | "cancelled"
+                        | "timed_out"
+                        | "rate_limited"
+                        | "quota_limited"
+                        | "auth_required"
+                        | "model_unavailable"
+                        | "permission_denied"
+                        | "quarantined"
+                        | "lost"
+                        | "uncommitted"
+                )
+            )
+        })
+    }) {
+        text.push_str("  Retry the same review command to resubmit failed or cancelled reviewers and reattach to the others.\n");
+    }
     text
 }
 
@@ -550,18 +760,126 @@ mod review_shape_tests {
     #[test]
     fn identity_is_stable_and_changes_with_review_inputs() -> Result<(), Fail> {
         let shape = &provenant_routing::ReviewConfig::default().shapes["quick"];
-        let first = review_identity("head", "quick", shape, "brief", 0, 0)?;
+        let first = review_identity("head", "quick", shape, "brief", 0, 0, 0)?;
         assert_eq!(
             first,
-            review_identity("head", "quick", shape, "brief", 0, 0)?
+            review_identity("head", "quick", shape, "brief", 0, 0, 0)?
         );
         assert_ne!(
             first,
-            review_identity("head", "quick", shape, "changed", 0, 0)?
+            review_identity("head", "quick", shape, "changed", 0, 0, 0)?
         );
         assert_ne!(
             first,
-            review_identity("head", "quick", shape, "brief", 0, 1)?
+            review_identity("head", "quick", shape, "brief", 0, 1, 0)?
+        );
+        assert_ne!(
+            first,
+            review_identity("head", "quick", shape, "brief", 0, 0, 1)?
+        );
+        Ok(())
+    }
+    #[test]
+    fn prepared_partial_retry_reuses_ordinal_and_sealed_bypasses_resubmission()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let shape = &provenant_routing::ReviewConfig::default().shapes["standard"];
+        let (id, _) =
+            review_identity("head", "standard", shape, "brief", 0, 0, 0).map_err(|e| e.message)?;
+        let run_id = RunId::from_bytes([9; 16]);
+        let mut prepared = run::OperationRecord {
+            schema_version: 1,
+            project_id: provenant_core::ProjectId::from_bytes([1; 16]),
+            actor_id: ActorId::from_bytes([2; 16]),
+            operation_id: id.clone(),
+            kind: run::OperationKind::Dispatch,
+            request_digest: provenant_core::Digest::from_bytes([3; 32]),
+            run_id,
+            state: run::OperationState::Prepared,
+        };
+        let missing = sealed_operation(Some(prepared.clone()), |_| Err(run::RunError::NotFound))?;
+        assert_eq!(missing, None);
+        let unsealed = recover_slot("head", "standard", shape, "brief", 0, 0, |candidate| {
+            assert_eq!(*candidate, id);
+            Ok(if missing.is_some() {
+                SlotProbe::Reattach(run_id)
+            } else {
+                SlotProbe::Vacant
+            })
+        })
+        .map_err(|e| e.message)?;
+        assert_eq!(unsealed.ordinal, 0);
+        assert_eq!(unsealed.operation_id, id);
+        assert_eq!(unsealed.run, None); // submit repairs the original prepared operation
+        // Once sealed, even a differently constructed request must bypass submit.
+        let sealed = sealed_operation(Some(prepared.clone()), |_| Ok(()))?;
+        let replayed = recover_slot("head", "standard", shape, "brief", 0, 0, |_| {
+            Ok(SlotProbe::Reattach(sealed.ok_or_else(|| {
+                Fail::new(Status::Error, ErrorKind::NotFound, "missing")
+            })?))
+        })
+        .map_err(|e| e.message)?;
+        assert_eq!(replayed.run, Some(run_id));
+        assert_eq!(replayed.ordinal, 0);
+        prepared.state = run::OperationState::Accepted;
+        assert!(matches!(
+            sealed_operation(Some(prepared), |_| Err(run::RunError::NotFound)),
+            Err(run::RunError::NotFound)
+        ));
+        let next = recover_slot("head", "standard", shape, "brief", 0, 0, |candidate| {
+            Ok(if *candidate == id {
+                SlotProbe::Failed
+            } else {
+                SlotProbe::Vacant
+            })
+        })
+        .map_err(|e| e.message)?;
+        assert_eq!(next.ordinal, 1);
+        assert_ne!(next.operation_id, id);
+        let retry = recover_slot("head", "standard", shape, "brief", 0, 0, |candidate| {
+            Ok(if *candidate == id {
+                SlotProbe::Failed
+            } else {
+                SlotProbe::Reattach(run_id)
+            })
+        })
+        .map_err(|e| e.message)?;
+        assert_eq!(retry.ordinal, 1);
+        assert_eq!(retry.run, Some(run_id));
+        Ok(())
+    }
+    #[test]
+    fn retries_failed_and_cancelled_but_reattaches_succeeded_and_running()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let id = RunId::from_bytes([4; 16]);
+        let terminal = |outcome| run::AttemptState::Terminal {
+            outcome,
+            exit_code: None,
+            finished_at: WallTime::from_micros(1).unwrap(),
+            reason: None,
+        };
+        assert_eq!(
+            probe_state(id, &terminal(run::Outcome::Failed)),
+            SlotProbe::Failed
+        );
+        assert_eq!(
+            probe_state(id, &terminal(run::Outcome::Cancelled)),
+            SlotProbe::Failed
+        );
+        assert_eq!(
+            probe_state(id, &terminal(run::Outcome::QuotaLimited)),
+            SlotProbe::Failed
+        );
+        assert_eq!(
+            probe_state(id, &terminal(run::Outcome::Succeeded)),
+            SlotProbe::Reattach(id)
+        );
+        assert_eq!(
+            probe_state(id, &run::AttemptState::Running),
+            SlotProbe::Reattach(id)
+        );
+        assert_eq!(
+            probe_state(id, &terminal(run::Outcome::InputRequired)),
+            SlotProbe::Reattach(id)
         );
         Ok(())
     }
@@ -569,6 +887,8 @@ mod review_shape_tests {
     fn review_has_no_extra_write_grants() {
         let slot = ReviewSlot {
             group: 0,
+            index: 0,
+            ordinal: 0,
             pool: "junior".into(),
             lens: None,
             distinct: false,
@@ -587,6 +907,8 @@ mod review_shape_tests {
     fn blocked_family_group_does_not_block_other_reviewers() {
         let make = |group, distinct, run| ReviewSlot {
             group,
+            index: 0,
+            ordinal: 0,
             pool: "junior".into(),
             lens: None,
             distinct,
@@ -610,10 +932,37 @@ mod review_shape_tests {
     }
     #[test]
     fn verdict_summary_counts_unparsed_and_not_submitted() {
-        let data = json!({"reviewers":[{"verdict":"approve"},{"verdict":"request_changes"},{"verdict":"unknown"},{}]});
+        let data = json!({"reviewers":[{"verdict":"approve"},{"verdict":"request_changes"},{"verdict":"unknown"},{"state":"not_submitted"}]});
         assert_eq!(
             aggregate_verdicts(&data),
-            json!({"approve":1,"request_changes":1,"inconclusive":0,"unknown":2})
+            json!({"approve":1,"request_changes":1,"inconclusive":0,"unknown":1,"not_submitted":1})
+        );
+    }
+    #[test]
+    fn verdict_reads_only_a_complete_bounded_prefix() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("result");
+        std::fs::write(
+            &path,
+            format!("\nVerdict: approve\n{}", "x".repeat(1_100_000)),
+        )?;
+        assert_eq!(review_verdict_file(&path), Some("approve"));
+        std::fs::write(&path, format!("Verdict: approve{}", " ".repeat(9000)))?;
+        assert_eq!(review_verdict_file(&path), None);
+        std::fs::write(&path, b"Verdict: approve")?;
+        assert_eq!(review_verdict_file(&path), Some("approve"));
+        Ok(())
+    }
+    #[test]
+    fn explicit_shape_skips_range_validation() {
+        assert_eq!(
+            selection_range(Some("quick"), Some("-invalid")).unwrap(),
+            None
+        );
+        assert!(selection_range(None, Some("-invalid")).is_err());
+        assert_eq!(
+            selection_range(None, Some("main..HEAD")).unwrap(),
+            Some("main..HEAD")
         );
     }
     #[test]
@@ -628,6 +977,7 @@ mod review_shape_tests {
             "verdict=unknown",
             "/output",
             "family substitution",
+            "resubmit failed or cancelled",
         ] {
             assert!(text.contains(expected), "{text}");
         }

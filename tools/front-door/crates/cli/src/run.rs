@@ -2760,7 +2760,13 @@ fn report(
         attempt: None,
     };
     let (mut data, human, timed_out) = match wait {
-        Some(seconds) => wait_lanes(session, &[target], Condition::All, seconds, edge)?,
+        Some(seconds) => wait_lanes(
+            session,
+            &[target],
+            Condition::All,
+            Duration::from_secs(seconds),
+            edge,
+        )?,
         None => {
             let page = session
                 .service()
@@ -3260,7 +3266,7 @@ fn wait_lanes(
     session: &Session,
     targets: &[Target],
     condition: Condition,
-    seconds: u64,
+    duration: Duration,
     _edge: &Edge<'_>,
 ) -> Result<(Value, String, bool), Fail> {
     let picks = Picks {
@@ -3278,7 +3284,7 @@ fn wait_lanes(
         candidates(session, &picks, None),
         scope,
         condition,
-        Duration::from_secs(seconds),
+        duration,
         LOCAL_POLL,
     )?;
     waited_reply(session, waited)
@@ -4333,8 +4339,13 @@ fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                 }
             }
             if let Some(seconds) = command.wait {
-                let (lanes, rendered, timed_out) =
-                    wait_lanes(&session, &targets, Condition::All, seconds, edge)?;
+                let (lanes, rendered, timed_out) = wait_lanes(
+                    &session,
+                    &targets,
+                    Condition::All,
+                    Duration::from_secs(seconds),
+                    edge,
+                )?;
                 if timed_out && status == Status::Ok {
                     status = Status::Timeout;
                 }

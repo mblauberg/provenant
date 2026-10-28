@@ -102,7 +102,9 @@ provenant --json review HEAD --brief-file review-brief.md --shape quick
 
 The target must resolve to a commit. `--range` supplies changed paths for
 selection; without it no path rules match. Renames are treated as a deletion
-and an addition, so rules can match either path. `--shape` overrides selection.
+and an addition, so rules can match either path. `--shape` overrides selection
+and skips the range lookup. A changed path that is not UTF-8 is rejected; use
+an explicit shape when path selection cannot represent it.
 `--wait` sets the overall wait limit, defaulting to one hour, and accepts
 seconds or durations such as `30m`, from one second to four hours.
 
@@ -121,16 +123,21 @@ The summary collates each reviewer's run, route, state, verdict and full output
 path without merging findings. A reviewer is asked to begin with
 `Verdict: approve`, `Verdict: request_changes` or `Verdict: inconclusive`.
 Leading blank lines, case and Markdown emphasis are accepted; an unrecognised
-or unreadable result is `unknown`. JSON includes verdict counts. The command
+or unreadable result is `unknown`. JSON includes verdict counts, with planned
+but `not_submitted` reviewers counted separately. The command
 exits successfully only when every reviewer succeeds and approves; a failed,
 inconclusive, change-requesting or unknown verdict is non-zero. This result
 does not itself decide delivery acceptance.
 
 Retries use deterministic reviewer operation IDs derived from the resolved
 commit, selected shape and its configuration, brief and reviewer position.
-Run the same review again to reattach to existing runs and submit any remaining
-reviewers. Keep the commit, shape configuration and brief unchanged; a changed
-`HEAD`, shape or brief starts a different review. On timeout or error, the
+Run the same review again to reattach to running or successful runs, resubmit
+failed or cancelled runs, and submit any remaining reviewers. Keep the commit,
+shape configuration, brief and actor identity unchanged. The actor depends on
+`PROVENANT_AGENT_LABEL` or the configured agent label; using a different label
+starts a separate review. A changed `HEAD`, shape or brief also starts a
+different review. A successful run with an unknown verdict is reattached, so
+retrying alone does not replace its output. On timeout or error, the
 summary lists all planned reviewers, including `not_submitted` entries, and
 prints commands to collect or cancel active runs. Active runs are not cancelled
 automatically. Use `provenant lanes --id RUN --wait 4m` to collect one, or
