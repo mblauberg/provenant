@@ -316,7 +316,7 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
         nested_confinement: false,
     };
     let mut paths = required_anchors(&plan, &profile, Some((&linked, &selected)));
-    paths.insert(push);
+    paths.insert(push.clone());
     let directories = paths
         .iter()
         .map(AnchoredDirectory::open_canonical)
@@ -393,6 +393,22 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
         "origin",
         "HEAD:refs/heads/lane/test",
     ]));
+    assert_eq!(
+        ok(git(
+            &git_path,
+            &push_git,
+            &push,
+            &home,
+            &["rev-parse", "refs/heads/lane/test"]
+        )),
+        ok(git(
+            &git_path,
+            private,
+            &lane,
+            &home,
+            &["rev-parse", "HEAD"]
+        ))
+    );
     assert!(!run(&["pack-refs", "--all"]).status.success());
     assert_eq!(fs::read(repo_git.join("packed-refs"))?, packed_before);
     assert!(
@@ -429,7 +445,6 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
     ] {
         assert!(!run(&["update-ref", reference, "HEAD"]).status.success());
     }
-    let link_path = repo_git.join("refs/remotes/origin/lane/test.lock");
     let control_link = scratch.join("link-control");
     let control = Command::new("/usr/bin/sandbox-exec")
         .args(["-p", sbpl, "/bin/ln", "-s"])
@@ -442,16 +457,21 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
         "link probe could not execute: {}",
         String::from_utf8_lossy(&control.stderr)
     );
-    let output = Command::new("/usr/bin/sandbox-exec")
-        .args(["-p", sbpl, "/bin/ln", "-s"])
-        .current_dir(&lane)
-        .arg(repo_git.join("config"))
-        .arg(&link_path)
-        .output()?;
-    assert!(
-        !output.status.success(),
-        "sandbox permitted a link to Git config"
-    );
+    for relative in [
+        "refs/remotes/origin/lane/test.lock",
+        "logs/refs/remotes/origin/lane/test",
+    ] {
+        let output = Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", sbpl, "/bin/ln", "-s"])
+            .current_dir(&lane)
+            .arg(repo_git.join("config"))
+            .arg(repo_git.join(relative))
+            .output()?;
+        assert!(
+            !output.status.success(),
+            "sandbox permitted a link at {relative}"
+        );
+    }
     assert!(private.join("FETCH_HEAD").is_file());
     assert_eq!(
         tracking_before,
