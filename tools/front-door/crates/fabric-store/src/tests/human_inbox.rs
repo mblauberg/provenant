@@ -6,6 +6,33 @@ use provenant_records::inbox::*;
 #[allow(clippy::disallowed_methods)] // Native deadlines are part of this store API.
 fn invalid_hook_candidates_do_not_block_valid_answers() {
     use std::time::{Duration, Instant};
+    const CHILD: &str = "PROVENANT_INVALID_ANSWER_DIAGNOSTIC_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::human_inbox::invalid_hook_candidates_do_not_block_valid_answers",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for n in [1, 2] {
+            let diagnostic = format!(
+                "answer delivery: skipping invalid answer {}",
+                HumanAnswerId::from_bytes([n; 16])
+            );
+            // Both the observation and transaction boundaries diagnose the row.
+            assert_eq!(stderr.matches(&diagnostic).count(), 2, "{stderr}");
+        }
+        return;
+    }
     let f = Fixture::new();
     let store = f.open();
     let target = AnswerTarget {
@@ -73,6 +100,17 @@ fn invalid_hook_candidates_do_not_block_valid_answers() {
         .read_queued_human_answers(&target, deadline())
         .unwrap();
     assert_eq!(candidates.items.len(), 3);
+    let other_session = AnswerTarget {
+        session: "another-chair".into(),
+        ..target.clone()
+    };
+    assert!(
+        store
+            .read_queued_human_answers(&other_session, deadline())
+            .unwrap()
+            .items
+            .is_empty()
+    );
     store.db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.schema_version',99) AS BLOB) WHERE answer=?1",
         [HumanAnswerId::from_bytes([1;16]).to_string()]).unwrap();
     store.db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.attempts','invalid') AS BLOB) WHERE answer=?1",
@@ -88,6 +126,21 @@ fn invalid_hook_candidates_do_not_block_valid_answers() {
         Store::offer_human_answers_once(&f.root, &target, candidates, f.now(), deadline()).unwrap();
     assert_eq!(offered.items.len(), 1);
     assert_eq!(offered.items[0].answer.id, valid.items[0].answer.id);
+    assert_eq!(
+        store
+            .read_offered_human_answers(&target, deadline())
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .read_offered_human_answers(&other_session, deadline())
+            .unwrap()
+            .items
+            .is_empty()
+    );
 }
 
 #[test]

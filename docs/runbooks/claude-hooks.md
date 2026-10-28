@@ -32,6 +32,13 @@ failure. Fabric mail remains available. Injected answers are escaped untrusted
 data and confer no new authority; see the [human inbox](human-inbox.md#consume-once)
 for acknowledgement commands.
 
+If every Bash call is denied with `guard policy unavailable`, policy root
+resolution has failed. From a terminal outside Claude, check that `HOME` resolves
+and that `PROVENANT_STATE_DIR` or the hook's `--state-dir` names the intended
+current state root. Correct mistyped, protected legacy or aliased paths, then
+retry the hook. Policy-resolution failures deny tool calls until corrected;
+unreadable guard configuration still uses the default rules.
+
 ## What the SessionStart digest shows
 
 The digest is read-only and at most 3 KiB; the whole hook output stays under

@@ -177,7 +177,11 @@ pub struct AnswerDelivery {
     pub transport: AnswerTransport,
     pub message_id: provenant_core::MessageId,
     pub state: AnswerDeliveryState,
+    /// Recorded offers, not proven injections or consumption. The hook records
+    /// one queued-to-offered transition; its idempotent replays do not increment.
+    /// The default delivery service records each offer invocation.
     pub attempts: u64,
+    /// Time of the last recorded offer; hook replay preserves this timestamp.
     pub last_attempt_at: Option<WallTime>,
     pub acknowledged_at: Option<WallTime>,
     pub error: Option<String>,

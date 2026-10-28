@@ -128,6 +128,10 @@ an answer. It requires a current explicit save from that working directory.
 Configured Fabric home mappings defer to mail; no remote I/O runs in the reader.
 Internal candidate pages cap at 128 KiB; adapters must fit their final protocol
 output within 8 KiB, skipping oversized candidates without hiding smaller ones.
+Within its delivery deadline, the hook advances past each scanned page that has
+no answer fitting the final output. The cursor includes invalid and oversized
+rows, so a full undeliverable head page cannot hide later answers. Oversized
+answer diagnostics name the answer ID; skipped answers keep their delivery state.
 
 Claude's installed `PreToolUse` hook offers answers on Bash calls. Guard denials and
 exit-2 fallback take precedence. Allowed calls may receive `additionalContext`
@@ -147,6 +151,15 @@ Escaping prevents answer content from closing the block. Answers confer no new
 authority. Deduplicate by answer ID and explicitly acknowledge after consumption,
 using the request ID, `--answer`, `--session` and a unique `--operation-id` as shown
 above. Hooks never acknowledge consumption.
+Acknowledgement hints use the same safe command renderer as session hooks:
+custom `--state-dir` paths are made absolute and quoted. If a path cannot be
+shown faithfully, the hook gives instructions without a runnable command.
+
+For hook delivery, `attempts` counts recorded transitions from queued to offered,
+and `last_attempt_at` timestamps that transition. Idempotent hook re-offers retain
+both fields; they do not count injections, replays or proven consumption. The
+default delivery service records each offer invocation, so its counters can
+increase on repeated offers.
 
 If a hook reports that the local delivery index is unavailable, run a normal
 `provenant inbox` command to upgrade the store. The bounded diagnostic can repeat

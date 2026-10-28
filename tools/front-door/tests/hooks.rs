@@ -380,7 +380,7 @@ fn json_command(rig: &TestRig, args: &[&str]) -> Result<serde_json::Value> {
 }
 
 #[test]
-fn queued_answer_survives_failed_recording_and_stdout_until_acknowledged() -> Result {
+fn hook_recovers_committed_offers_and_advances_past_an_oversized_head_page() -> Result {
     use serde_json::json;
     let rig = TestRig::new()?;
     let checkpoint = rig.root.join("checkpoint.md");
@@ -402,7 +402,13 @@ fn queued_answer_survives_failed_recording_and_stdout_until_acknowledged() -> Re
     let hook = |command: &str| -> Result<provenant_os::exec::ExecOutcome> {
         rig.execute(
             Path::new(env!("CARGO_BIN_EXE_provenant")),
-            &["hook", "claude", "pre-tool-use"],
+            &[
+                "--state-dir",
+                rig.state.to_str().ok_or("state")?,
+                "hook",
+                "claude",
+                "pre-tool-use",
+            ],
             Some(&serde_json::to_vec(
                 &json!({"hook_event_name":"PreToolUse", "tool_name":"Bash",
                 "tool_input":{"command":command}, "session_id":"chair", "cwd":rig.project}),
@@ -508,38 +514,49 @@ fn queued_answer_survives_failed_recording_and_stdout_until_acknowledged() -> Re
     })?;
     let committed = json_command(&rig, &["inbox", id])?;
     assert_eq!(committed["data"]["item"]["delivery"]["state"], "offered");
-    // A new answer can fit the inbox's JSON boundary yet exceed the escaped
-    // hook boundary. It must not suppress recovery of the earlier small offer.
-    let oversized = json_command(
-        &rig,
-        &[
-            "ask",
-            "--file",
-            draft.to_str().ok_or("draft")?,
-            "--session",
-            "chair",
-        ],
-    )?;
-    let oversized_id = oversized["data"]["request_id"]
+    // The entire first page is individually too large for the hook envelope.
+    // A seventeenth queued answer must still be delivered before offered retries.
+    let project = committed["data"]["item"]["request"]["project_id"]
         .as_str()
-        .ok_or("oversized request")?;
-    let large_reply = rig.root.join("large-reply.txt");
-    fs::write(&large_reply, "\"".repeat(3500))?;
-    json_command(
-        &rig,
-        &[
-            "answer",
-            oversized_id,
-            "--action",
-            "reply",
-            "--text-file",
-            large_reply.to_str().ok_or("large reply")?,
-            "--expect-revision",
-            "1",
-            "--channel",
-            "console",
-        ],
-    )?;
+        .ok_or("project")?;
+    db.execute_batch("BEGIN IMMEDIATE")?;
+    let mut tail_request = String::new();
+    let mut tail_answer = String::new();
+    for n in 1..=17 {
+        let request_id = provenant_core::HumanRequestId::from_bytes([n; 16]).to_string();
+        let answer_id = provenant_core::HumanAnswerId::from_bytes([n; 16]).to_string();
+        let mut request = committed["data"]["item"]["request"].clone();
+        request["id"] = request_id.clone().into();
+        request["answer_id"] = answer_id.clone().into();
+        let mut answer = committed["data"]["item"]["answer"].clone();
+        answer["id"] = answer_id.clone().into();
+        answer["request_id"] = request_id.clone().into();
+        answer["text"] = if n == 17 {
+            "Deliver the queued tail".into()
+        } else {
+            "\"".repeat(3500).into()
+        };
+        let mut delivery = committed["data"]["item"]["delivery"].clone();
+        delivery["answer_id"] = answer_id.clone().into();
+        delivery["state"] = "queued".into();
+        delivery["attempts"] = 0.into();
+        delivery["last_attempt_at"] = serde_json::Value::Null;
+        db.execute(
+            "INSERT INTO human_requests VALUES(?1,?2,2,'chair','answered',?3)",
+            rusqlite::params![project, request_id, serde_json::to_vec(&request)?],
+        )?;
+        db.execute(
+            "INSERT INTO human_answers VALUES(?1,?2,?3,?4)",
+            rusqlite::params![project, answer_id, request_id, serde_json::to_vec(&answer)?],
+        )?;
+        db.execute(
+            "INSERT INTO human_answer_outbox VALUES(?1,?2,?3)",
+            rusqlite::params![project, answer_id, serde_json::to_vec(&delivery)?],
+        )?;
+        tail_request = request_id;
+        tail_answer = answer_id;
+    }
+    db.execute_batch("COMMIT")?;
     let allowed = hook("git status")?;
     assert_eq!(code(&allowed), 0, "{:?}", allowed.stderr.bytes);
     assert!(allowed.stdout.bytes.len() <= provenant_records::inbox::MAX_OFFER_BYTES);
@@ -548,13 +565,37 @@ fn queued_answer_survives_failed_recording_and_stdout_until_acknowledged() -> Re
         wire["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .ok_or("context")?
-            .contains("Proceed carefully")
+            .contains("Deliver the queued tail")
     );
     assert!(
         wire["hookSpecificOutput"]
             .get("permissionDecision")
             .is_none()
     );
+    let context = wire["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .ok_or("context")?;
+    assert!(
+        context.contains(&format!(
+            "provenant --state-dir '{}' inbox acknowledge",
+            rig.state.display()
+        )),
+        "{context}"
+    );
+    json_command(
+        &rig,
+        &[
+            "inbox",
+            "acknowledge",
+            &tail_request,
+            "--answer",
+            &tail_answer,
+            "--session",
+            "chair",
+            "--operation-id",
+            "ack-tail-test",
+        ],
+    )?;
     assert!(!hook("git status")?.stdout.bytes.is_empty());
     let item = json_command(&rig, &["inbox", id])?;
     assert_eq!(item["data"]["item"]["delivery"]["state"], "offered");

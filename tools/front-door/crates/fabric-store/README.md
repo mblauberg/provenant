@@ -63,6 +63,11 @@ through migration 10's pending index.
 A late commit or failed stdout write remains re-offerable to the exact session
 until acknowledgement. Consumers deduplicate by answer ID before taking action.
 Invalid candidates are skipped with an answer-ID diagnostic.
+`read_hook_answer_page` returns a continuation after the last scanned key,
+including skipped invalid or oversized rows. Hooks use it to advance past
+pages with no deliverable answer while retaining the same target and deadline.
+Hook replay preserves `attempts` and `last_attempt_at`: those fields record the
+queued-to-offered transition, rather than counting injections or replays.
 
 `Store::open_read_only` never creates, migrates or enables WAL. It opens the
 database, WAL and shared memory read-only (`readonly_shm=1`), starts one read

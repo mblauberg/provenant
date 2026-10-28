@@ -28,7 +28,15 @@ impl Store {
         max_bytes: usize,
         deadline: Instant,
     ) -> Result<Page<AnswerOffer>> {
-        self.read_candidates(target, limit, max_bytes, deadline, Candidates::Pending)
+        self.read_candidates(
+            target,
+            limit,
+            max_bytes,
+            deadline,
+            Candidates::Pending,
+            None,
+        )
+        .map(|(page, _)| page)
     }
 
     pub fn read_queued_human_answers(
@@ -42,7 +50,9 @@ impl Store {
             MAX_LOCAL_OFFER_BYTES,
             deadline,
             Candidates::Queued,
+            None,
         )
+        .map(|(page, _)| page)
     }
 
     /// Read only committed offers for recovery after final protocol fitting.
@@ -57,6 +67,35 @@ impl Store {
             MAX_LOCAL_OFFER_BYTES,
             deadline,
             Candidates::Offered,
+            None,
+        )
+        .map(|(page, _)| page)
+    }
+
+    /// A hook can advance past an undeliverable page without changing delivery
+    /// state. The cursor tracks scanned keys, including invalid or oversized
+    /// rows, and must be reused only with the same target and state.
+    pub fn read_hook_answer_page(
+        &self,
+        target: &AnswerTarget,
+        state: AnswerDeliveryState,
+        after: Option<&str>,
+        deadline: Instant,
+    ) -> Result<(Page<AnswerOffer>, Option<String>)> {
+        let candidates = match state {
+            AnswerDeliveryState::Queued => Candidates::Queued,
+            AnswerDeliveryState::Offered => Candidates::Offered,
+            AnswerDeliveryState::Acknowledged => {
+                return Err(Error::Invalid("hook candidate state"));
+            }
+        };
+        self.read_candidates(
+            target,
+            MAX_LOCAL_OFFER_ITEMS,
+            MAX_LOCAL_OFFER_BYTES,
+            deadline,
+            candidates,
+            after,
         )
     }
 
@@ -67,7 +106,8 @@ impl Store {
         max_bytes: usize,
         deadline: Instant,
         candidates: Candidates,
-    ) -> Result<Page<AnswerOffer>> {
+        after: Option<&str>,
+    ) -> Result<(Page<AnswerOffer>, Option<String>)> {
         let rows_limit = page(0, limit)?;
         // Internal candidates may exceed a provider's output budget so one
         // heavily escaped answer cannot hide smaller deliverable answers.
@@ -91,20 +131,23 @@ impl Store {
              WHERE o.project=?4 AND json_extract(CAST(o.record AS TEXT),'$.target_host')=?1
              AND json_extract(CAST(o.record AS TEXT),'$.target_session')=?2
              AND json_extract(CAST(o.record AS TEXT),'$.target_actor')=?3
-             AND json_extract(CAST(o.record AS TEXT),'$.state') {states} ORDER BY o.answer LIMIT ?6"))?;
+             AND json_extract(CAST(o.record AS TEXT),'$.state') {states}
+             AND (?7 IS NULL OR o.answer>?7) ORDER BY o.answer LIMIT ?6"))?;
         let mut rows = statement.query(params![
             target.host.to_string(),
             target.session,
             target.actor.to_string(),
             target.project.to_string(),
             MAX_RECORD_READ_BYTES,
-            rows_limit + 1
+            rows_limit + 1,
+            after,
         ])?;
         let mut batch = Page {
             items: Vec::new(),
             truncated: false,
         };
         let mut candidates = 0;
+        let mut last_scanned = None;
         while let Some(row) = rows.next()? {
             before(deadline)?;
             candidates += 1;
@@ -113,6 +156,7 @@ impl Store {
                 break;
             }
             let key: String = row.get(0)?;
+            last_scanned = Some(key.clone());
             let delivery = row
                 .get::<_, Vec<u8>>(1)
                 .map_err(Error::from)
@@ -143,7 +187,8 @@ impl Store {
             }
         }
         before(deadline)?;
-        Ok(batch)
+        let next = batch.truncated.then_some(last_scanned).flatten();
+        Ok((batch, next))
     }
 }
 
