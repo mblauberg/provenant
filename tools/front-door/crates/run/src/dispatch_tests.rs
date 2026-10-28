@@ -4335,7 +4335,7 @@ fn nested_continuation_preflight_does_not_reuse_crashed_staging() -> TestResult 
         .state_root
         .as_path()
         .join(format!("runs/{expected}"));
-    std::fs::create_dir(&stale)?;
+    std::fs::DirBuilder::new().mode(0o700).create(&stale)?;
     std::fs::write(stale.join("retained"), "stale staging")?;
     let (continued, _) = store.resume_fresh_prepared(&resume, "fixture", None, &Ready, &call)?;
     assert_eq!(continued.run_id, expected);
