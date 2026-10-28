@@ -2547,6 +2547,20 @@ fn check_chair_run_id(
     Ok(())
 }
 
+fn seal_launch_task(
+    request_digest: provenant_core::Digest,
+    task: &run::TaskRequest,
+    validated: Option<&run::ValidatedChild>,
+) -> run::SealedTask {
+    let effective = validated.map(|child| child.effective_task(task));
+    let task = effective.as_ref().unwrap_or(task);
+    run::SealedTask {
+        request_digest,
+        task_id: task.task_id,
+        effective_network: task.access.network(task.writer.is_some()),
+    }
+}
+
 /// A child carries the request `validate_child` returned, which is the only
 /// copy launched from. The store carries its parent's sealed requester.
 fn launch_on_host(
@@ -2657,6 +2671,13 @@ fn launch_on_host(
         state_root: session.context.state_root.as_path().into(),
     };
     let holder = |attempt: &run::AttemptRecord, requester| {
+        let task = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == attempt.task_id)
+            .ok_or(run::RunError::Validation(
+                "attempt task missing from request",
+            ))?;
         let mut host = host.clone();
         if !inherited_host {
             // Called after preparation, while its selected provider lease is held.
@@ -2712,22 +2733,7 @@ fn launch_on_host(
                 .and_then(|task| task.deliver.as_ref())
                 .map(|_| run::HostDeliveryContext::capture()),
             launch: Some(host),
-            sealed: Some(run::SealedTask {
-                request_digest,
-                task_id: attempt.task_id,
-                effective_network: validated.and_then(|child| {
-                    request
-                        .tasks
-                        .iter()
-                        .find(|task| task.task_id == attempt.task_id)
-                        .map(|task| {
-                            child
-                                .effective_task(task)
-                                .access
-                                .network(task.writer.is_some())
-                        })
-                }),
-            }),
+            sealed: Some(seal_launch_task(request_digest, task, validated)),
         }
         .encode()
     };

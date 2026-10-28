@@ -724,6 +724,18 @@ impl RunStore {
             }
             None => self.run(run, call)?.actor_id,
         };
+        // A lane-owned store does not retain the host-sealed network of the
+        // prior attempt. Its canonical request may omit an inherited bound.
+        if request.parent.is_some()
+            && (request.parent_attempt.is_some()
+                || self.sealed_requester.is_some()
+                || self.context.state_root.as_path() != self.writer_registry())
+        {
+            return Err(RunError::Input {
+                kind: ErrorKind::ContinuationUnsupported,
+                message: "child continuation cannot recover its host-sealed network; dispatch a new child instead".into(),
+            });
+        }
         let resume = request
             .parent
             .filter(|_| request.fresh_continuation.is_none())

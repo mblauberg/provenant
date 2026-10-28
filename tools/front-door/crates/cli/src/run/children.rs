@@ -673,6 +673,38 @@ mod tests {
     }
 
     #[test]
+    fn launch_seal_records_root_network_and_legacy_defaults_restrictively()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::permissions::NetworkAccess;
+        let temp = tempfile::tempdir()?;
+        let (_, child) = child_fixture(temp.path(), &SystemClock::new())?;
+        let mut task = child.request.tasks[0].clone();
+        assert_eq!(
+            seal_launch_task(child.request.digest()?, &task, None).effective_network,
+            NetworkAccess::Open
+        );
+        for network in [
+            NetworkAccess::Provider,
+            NetworkAccess::Local,
+            NetworkAccess::Open,
+        ] {
+            task.access.network = Some(network);
+            let sealed = seal_launch_task(child.request.digest()?, &task, None);
+            assert_eq!(sealed.effective_network, network);
+        }
+        let mut json =
+            serde_json::to_value(seal_launch_task(child.request.digest()?, &task, None))?;
+        json.as_object_mut()
+            .ok_or("sealed task")?
+            .remove("effective_network");
+        let old: run::SealedTask = serde_json::from_value(json.clone())?;
+        assert_eq!(old.effective_network, NetworkAccess::Provider);
+        json["effective_network"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<run::SealedTask>(json).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn inherited_network_survives_holder_context_for_grandchildren()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_confinement::permissions::NetworkAccess;
@@ -693,15 +725,11 @@ mod tests {
             3,
             &call,
         )?;
-        let effective = validated.effective_task(&validated.tasks[0]);
-        let sealed = run::SealedTask {
-            request_digest: validated.digest()?,
-            task_id: effective.task_id,
-            effective_network: Some(effective.access.network(false)),
-        };
+        let sealed = seal_launch_task(validated.digest()?, &validated.tasks[0], Some(&validated));
         let sealed: run::SealedTask = serde_json::from_slice(&serde_json::to_vec(&sealed)?)?;
         let mut next_parent = validated.tasks[0].clone();
         sealed.apply_network(&mut next_parent);
+        assert_eq!(sealed.effective_network, NetworkAccess::Provider);
         child.run_id = RunId::from_bytes([11; 16]);
         child.operation_id = OperationId::parse("grandchild")?;
         child.request.parent_attempt = Some(child.attempts[0].attempt_id);
@@ -969,8 +997,10 @@ mod tests {
                     assets: &cwd,
                     cwd: &cwd,
                 };
-                launch_on_host(&session, honest.run_id, &edge, &call, None, None, None)
-                    .map_err(|f| f.message)?;
+                let failure =
+                    launch_on_host(&session, honest.run_id, &edge, &call, None, None, None)
+                        .unwrap_err();
+                assert_eq!(failure.kind, run::ErrorKind::ContinuationUnsupported);
                 with_chair_index(&roots, &call, |index, c| {
                     assert_eq!(
                         index
@@ -1185,7 +1215,7 @@ mod tests {
             )
         })
         .map_err(|f| f.message)?;
-        let (replayed, _) = continue_attempt(
+        let failure = continue_attempt(
             &session,
             &edge,
             prior,
@@ -1194,8 +1224,8 @@ mod tests {
             0,
             &call,
         )
-        .map_err(|f| f.message)?;
-        assert_eq!(replayed.run_id, child.run_id);
+        .unwrap_err();
+        assert_eq!(failure.kind, run::ErrorKind::ContinuationUnsupported);
         assert_eq!(session.store.request(child.run_id, &call)?, child.request);
         with_chair_index(&roots, &call, |index, c| {
             let binding = index

@@ -293,10 +293,23 @@ launches them. No lane may propose a writer or delivering child. A child's
 network and roots must stay within the parent's, and it cannot continue an
 attempt. The host launches only the request it validated, refuses one whose
 digest changed, and launches at most one attempt per child task.
+The digest and derived IDs identify the canonical request submitted by the
+requester. The host applies inherited network restrictions as launch policy,
+validates the effective access against the parent, and checks the original
+digest again before launch. Every attempt's effective network is sealed in
+its holder context, so grandchildren inherit the bound. Older live contexts
+without this field default to provider-only network. A continuation in a child
+store is refused with `CONTINUATION_UNSUPPORTED` because the prior host-sealed
+network cannot be recovered reliably; dispatch a new child instead.
 - Why: a writer child could leave scripts that run unconfined, and child
   storage is lane-writable, so only the host's sealed view counts.
 - Test: `crates/run/src/dispatch_tests.rs::host_refuses_writer_child_after_request_rewrite`;
-  `::host_refuses_child_access_beyond_its_parent_task`
+  `::host_refuses_child_access_beyond_its_parent_task`;
+  `::host_launches_only_the_validated_child_request`;
+  `::lane_store_refuses_continuation_without_sealed_network`;
+  `crates/cli/src/run/children.rs::tests::restricted_parent_launches_child_with_inherited_chair`;
+  `::inherited_network_survives_holder_context_for_grandchildren`;
+  `::launch_seal_records_root_network_and_legacy_defaults_restrictively`
 - Owner: `crates/cli/src/run/children.rs`, `crates/run/src/admission.rs`
 
 ### Children run as the parent's requester

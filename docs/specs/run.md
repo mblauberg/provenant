@@ -87,10 +87,12 @@ launch before membership capture, so rewriting a queued child ID cannot claim
 a sibling's membership or poison its launch. A lane cannot claim a historical
 run namespace by choosing its run ID and recomputing the public attempt hash.
 
-Nested continuations created by the host also use version 1, retaining the
-original parent-attempt namespace and including their continuation parent in
-the canonical digest. Replays retain the original scheme, including legacy
-prepared operations whose request was not yet published.
+Nested continuation requests use version 1, retaining the original
+parent-attempt namespace and including their continuation parent in the
+canonical digest. Replays retain the original scheme, including legacy
+prepared operations whose request was not yet published. Launch from a child
+store is refused until the prior attempt's effective network can be recovered;
+see [child launch policy](routing.md#the-host-validates-and-launches-children).
 
 This scheme avoids rekeying lane-published records and IDs already returned to
 callers. There is no migration of existing child records: an absent version
@@ -185,14 +187,6 @@ that the run launched. Launch validation reads `fabric-runtime::chairs::ChairInd
 for reads of existing runs, missing records and older runs are unbound. Display readers arrive in a later slice. Provider handles and child requests are never fallbacks. Graph and
 peer executions remain unbound until they retain an originating chair separately
 from the actor owning operation replay. Board and tree rendering are separate.
-
-A child request's digest and derived run and attempt IDs describe the canonical
-request submitted by its requester. Inherited network restrictions are host
-launch policy, not changes to that request. The host validates the effective
-network against the parent, compares the original request digest again at
-launch, and applies the restriction to provider preparation. The effective
-network travels in the host-sealed holder context so that the same bound also
-applies to the child's own children.
 
 Association rows live as long as run metadata. Current GC removes provider
 payloads, logs, events and worktrees; it never removes run/attempt metadata.

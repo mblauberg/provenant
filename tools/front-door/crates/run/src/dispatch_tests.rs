@@ -1051,6 +1051,35 @@ fn rewrite_child_request(
 }
 
 #[test]
+fn lane_store_refuses_continuation_without_sealed_network() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?
+        .with_writer_registry(&temp.path().join("host"));
+    let prior = input();
+    store.create(&prior, &call)?;
+    let mut proposal = input();
+    proposal.run_id = RunId::from_bytes([35; 16]);
+    proposal.operation_id = "lane-continuation".parse()?;
+    proposal.attempts[0].attempt_id = AttemptId::from_bytes([36; 16]);
+    proposal.request.parent = Some(prior.attempts[0].attempt_id);
+    // A lane-writable request cannot bypass the check by omitting its parent lane.
+    proposal.request.parent_attempt = None;
+    let run = store.create(&proposal, &call)?;
+    let fake = Fake::default();
+    assert!(matches!(
+        store.start(run.run_id, &fake, &|_, _| unreachable!(), &call),
+        Err(RunError::Input {
+            kind: ErrorKind::ContinuationUnsupported,
+            ..
+        })
+    ));
+    assert_eq!(fake.prepared.get(), 0);
+    Ok(())
+}
+
+#[test]
 fn host_launches_only_the_validated_child_request() -> TestResult {
     let parent = AttemptId::from_bytes([9; 16]);
     let temp = tempfile::tempdir()?;
@@ -1058,7 +1087,8 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?
         .with_sealed_requester(provenant_core::ActorId::from_bytes([7; 16]));
-    let parent_task = input().request.tasks[0].clone();
+    let mut parent_task = input().request.tasks[0].clone();
+    parent_task.access.network = Some(NetworkAccess::Provider);
     let mut nested = input();
     nested.request.lane_depth = Some(2);
     nested.request.parent_attempt = Some(parent);
@@ -1126,6 +1156,13 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
         Err(RunError::Validation(
             "a child run cannot continue an attempt"
         ))
+    ));
+    assert!(matches!(
+        store.start(continued.run_id, &Ready, &|_, _| unreachable!(), &call),
+        Err(RunError::Input {
+            kind: ErrorKind::ContinuationUnsupported,
+            ..
+        })
     ));
     Ok(())
 }
