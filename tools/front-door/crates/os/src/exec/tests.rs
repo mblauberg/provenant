@@ -3,10 +3,10 @@ use std::sync::Mutex;
 struct Decoder(Mutex<Vec<Vec<u8>>>);
 
 #[test]
-fn inherited_update_lease_survives_the_callers_handle() -> Result<(), Box<dyn std::error::Error>> {
+fn inherited_lane_lease_survives_the_callers_handle() -> Result<(), Box<dyn std::error::Error>> {
     use crate::fs::LockMode;
     let temp = tempfile::tempdir()?;
-    let lease = crate::provider_fence::acquire(temp.path(), "codex", LockMode::Exclusive)?;
+    let lease = crate::provider_fence::acquire(temp.path(), "codex", LockMode::Shared)?;
     let reaper = Reaper::new(1)?;
     let permit = reaper.reserve().ok_or("missing executor permit")?;
     let argv = [
@@ -23,13 +23,14 @@ fn inherited_update_lease_survives_the_callers_handle() -> Result<(), Box<dyn st
             input: true,
             secret_input: None,
             inherited_lease: Some(&lease),
+            process_group: false,
             capture_stdout: false,
             capture_stderr: false,
         },
     )?;
     drop(lease);
     assert!(matches!(
-        crate::provider_fence::acquire(temp.path(), "codex", LockMode::Shared),
+        crate::provider_fence::acquire(temp.path(), "codex", LockMode::Exclusive),
         Err(crate::fs::FsError::LockTimeout { .. })
     ));
     child
@@ -43,7 +44,7 @@ fn inherited_update_lease_survives_the_callers_handle() -> Result<(), Box<dyn st
     let _available = crate::provider_fence::wait(
         temp.path(),
         "codex",
-        LockMode::Shared,
+        LockMode::Exclusive,
         provenant_core::WaitBudget::cli(clock.mono_now(), 5)?,
         &CancelToken::new(),
         &clock,
@@ -118,6 +119,7 @@ fn post_spawn_setup_failure_kills_child_and_releases_unknown_wait_slot() {
             input: false,
             secret_input: None,
             inherited_lease: None,
+            process_group: false,
             capture_stdout: false,
             capture_stderr: false,
         },

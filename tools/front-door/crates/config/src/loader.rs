@@ -386,7 +386,11 @@ fn inspect<T: DeserializeOwned + Serialize>(
     origins.insert("retention.logs_days".into(), compiled.clone());
     origins.insert("retention.session_revisions".into(), compiled.clone());
     for provider in providers.keys() {
-        for field in ["update", "update_interval_seconds"] {
+        for field in [
+            "update",
+            "update_interval_seconds",
+            "update_timeout_seconds",
+        ] {
             origins.insert(format!("providers.{provider}.{field}"), compiled.clone());
         }
     }

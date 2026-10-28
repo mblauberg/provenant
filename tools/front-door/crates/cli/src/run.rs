@@ -2278,44 +2278,19 @@ fn launch_on_host(
     validated: Option<&run::CanonicalRequest>,
     ready: Option<&run::PreparedStart>,
 ) -> Result<Vec<run::Started>, Fail> {
+    let inherited_host = host.is_some();
     let host = match host {
         Some(host) => host.clone(),
-        None => {
-            let mut executables = std::collections::BTreeMap::new();
-            for registration in REGISTRY {
-                let name = registration.adapter.id();
-                let budget = WaitBudget::cli(call.clock.mono_now(), 30)
-                    .map_err(|e| Fail::new(Status::Error, ErrorKind::Invalid, e.to_string()))?;
-                let _lease = provenant_os::provider_fence::wait(
-                    edge.roots.state.as_path(),
-                    name,
-                    provenant_os::fs::LockMode::Shared,
-                    budget,
-                    call.cancel,
-                    call.clock,
-                )
-                .map_err(|e| {
-                    Fail::new(
-                        Status::Refused,
-                        ErrorKind::Invalid,
-                        format!("provider {name} update busy: {e}; retry the lane"),
-                    )
-                })?;
-                if let Ok(path) = provider::find_executable(name) {
-                    executables.insert(name.into(), path);
-                }
-            }
-            run::HostLaunchContext {
-                configuration_root: edge.roots.state.as_path().into(),
-                cwd: edge.cwd.into(),
-                executables,
-                git: provenant_os::git::git_executable()
-                    .ok_or_else(|| Fail::new(Status::Refused, ErrorKind::Git, "Git unavailable"))?,
-                codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
-                #[cfg(feature = "fixture")]
-                fixture_state_write: false,
-            }
-        }
+        None => run::HostLaunchContext {
+            configuration_root: edge.roots.state.as_path().into(),
+            cwd: edge.cwd.into(),
+            executables: std::collections::BTreeMap::new(),
+            git: provenant_os::git::git_executable()
+                .ok_or_else(|| Fail::new(Status::Refused, ErrorKind::Git, "Git unavailable"))?,
+            codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+            #[cfg(feature = "fixture")]
+            fixture_state_write: false,
+        },
     };
     let read;
     let request = match validated {
@@ -2333,6 +2308,15 @@ fn launch_on_host(
     };
     let holder = |attempt: &run::AttemptRecord, requester| {
         let mut host = host.clone();
+        if !inherited_host {
+            // Called after preparation, while its selected provider lease is held.
+            for registration in REGISTRY {
+                let name = registration.adapter.id();
+                if let Ok(path) = provider::find_executable(name) {
+                    host.executables.insert(name.into(), path);
+                }
+            }
+        }
         if let Some(writer) = request
             .tasks
             .iter()
@@ -2392,7 +2376,9 @@ fn launch_on_host(
         cwd: Some(edge.cwd),
         state_root: Some(session.context.state_root.as_path()),
         project_id: Some(session.context.project_id),
-        host: Some(&host),
+        // Top-level discovery runs in prepare under its lease. Child launches
+        // continue to use their sealed host executable authority.
+        host: inherited_host.then_some(&host),
     };
     let providers = PreparedProvider {
         fallback: &registry,

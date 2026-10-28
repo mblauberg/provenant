@@ -19,61 +19,92 @@ pub fn housekeep(roots: &Roots, home: &Path, cwd: &Path) -> Result<(), String> {
         .as_timestamp()
         .as_second();
     let executor = SystemExecutor::new(1).map_err(|e| e.to_string())?;
-    // At most one native update per event keeps the menu's existing tick bounded.
+    let mut errors = Vec::new();
+    // Stop after a completed attempt; provider errors do not suppress later providers.
     for (provider, settings) in &config.providers {
         let Ok(executable) = crate::run::provider_executable(provider) else {
             continue;
         };
-        let Some(record) = provenant_providers::update::check(
+        let result = provenant_providers::update::check(
             roots.state.as_path(),
             provider,
             &executable,
             settings,
             &executor,
             now,
-        )?
-        else {
-            continue;
+        );
+        let (record, failed) = match result {
+            Ok(Some(record)) => (record, false),
+            Ok(None) => continue,
+            Err(error) => {
+                errors.push(format!("{provider}: {error}"));
+                (
+                    provenant_providers::update::UpdateRecord {
+                        checked_unix_seconds: now,
+                        old_version: None,
+                        new_version: None,
+                        outcome: format!("failed: {error}"),
+                    },
+                    true,
+                )
+            }
         };
-        let ctx =
-            crate::fabric::Context::open(roots.clone(), home, cwd).map_err(|e| e.to_string())?;
-        let cancel = CancelToken::new();
-        let budget = WaitBudget::cli(clock.mono_now(), 2).map_err(|e| e.to_string())?;
-        let service = LocalCoordination::open(
-            &ctx.roots.state,
-            ctx.identity.project,
-            ctx.identity.inbox.actor,
-            &clock,
-            &ThreadWait,
+        if let Err(error) = note_update(roots, home, cwd, &clock, provider, &record) {
+            errors.push(format!("{provider} activity: {error}"));
+        }
+        if !failed && record.outcome != "unknown install method" {
+            break;
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn note_update(
+    roots: &Roots,
+    home: &Path,
+    cwd: &Path,
+    clock: &SystemClock,
+    provider: &str,
+    record: &provenant_providers::update::UpdateRecord,
+) -> Result<(), String> {
+    let ctx = crate::fabric::Context::open(roots.clone(), home, cwd).map_err(|e| e.to_string())?;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 2).map_err(|e| e.to_string())?;
+    let service = LocalCoordination::open(
+        &ctx.roots.state,
+        ctx.identity.project,
+        ctx.identity.inbox.actor,
+        clock,
+        &ThreadWait,
+        budget,
+        &cancel,
+    )
+    .map_err(|e| e.to_string())?;
+    let operation = OperationId::parse(&format!(
+        "provider-update-{provider}-{}",
+        record.checked_unix_seconds
+    ))
+    .map_err(|e| e.to_string())?;
+    let note = format!(
+        "Provider {provider} update: {}; old version: {}; new version: {}",
+        record.outcome,
+        record.old_version.as_deref().unwrap_or("unknown"),
+        record.new_version.as_deref().unwrap_or("unknown"),
+    );
+    service
+        .mutate(
+            Mutation::Events(EventsInput::Note {
+                note,
+                dedup_key: None,
+            }),
+            &operation,
             budget,
             &cancel,
         )
         .map_err(|e| e.to_string())?;
-        let operation = OperationId::parse(&format!(
-            "provider-update-{provider}-{}",
-            record.checked_unix_seconds
-        ))
-        .map_err(|e| e.to_string())?;
-        let note = format!(
-            "Provider {provider} update: {}; old version: {}; new version: {}",
-            record.outcome,
-            record.old_version.as_deref().unwrap_or("unknown"),
-            record.new_version.as_deref().unwrap_or("unknown"),
-        );
-        service
-            .mutate(
-                Mutation::Events(EventsInput::Note {
-                    note,
-                    dedup_key: None,
-                }),
-                &operation,
-                budget,
-                &cancel,
-            )
-            .map_err(|e| e.to_string())?;
-        if record.outcome != "unknown install method" {
-            break;
-        }
-    }
     Ok(())
 }

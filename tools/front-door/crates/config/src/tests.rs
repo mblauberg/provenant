@@ -34,7 +34,7 @@ fn provider_update_settings_defaults_opt_out_commands_and_validation() {
     );
     assert_eq!(defaults.providers["claude"].update_interval_seconds, 86_400);
     test_support::assert_leaf_origins(&defaults);
-    let text = "schema_version=1\n[providers.codex]\nupdate=false\n[providers.claude]\nupdate='claude update'\nupdate_interval_seconds=3600";
+    let text = "schema_version=1\n[providers.codex]\nupdate=false\n[providers.claude]\nupdate={command=['claude','update']}\nupdate_interval_seconds=3600\nupdate_timeout_seconds=600";
     let config = load(&roots(), Some(text.as_bytes())).unwrap();
     assert_eq!(
         config.providers["codex"].update,
@@ -42,14 +42,27 @@ fn provider_update_settings_defaults_opt_out_commands_and_validation() {
     );
     assert_eq!(
         config.providers["claude"].update,
-        ProviderUpdate::Command("claude update".into())
+        ProviderUpdate::Command {
+            command: vec!["claude".into(), "update".into()]
+        }
     );
     assert_eq!(config.providers["claude"].update_interval_seconds, 3600);
+    assert_eq!(config.providers["claude"].update_timeout_seconds, 600);
+    assert_eq!(defaults.providers["claude"].update_timeout_seconds, 300);
     assert_eq!(config.providers["opencode"], ProviderSettings::default());
     test_support::assert_leaf_origins(&config);
     for (section, setting, rule) in [
         ("codex", "update=42", "type"),
-        ("codex", "update=''", "provider_update_command"),
+        ("codex", "update='shell string'", "type"),
+        ("codex", "update={command=[],typo=1}", "type"),
+        ("codex", "update={command=[]}", "provider_update_command"),
+        ("codex", "update={command=['']}", "provider_update_command"),
+        (
+            "codex",
+            "update_timeout_seconds=0",
+            "update_timeout_seconds_range",
+        ),
+        ("codex", "update_timeout_seconds=-1", "type"),
         (
             "codex",
             "update_interval_seconds=0",

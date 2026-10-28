@@ -41,6 +41,46 @@ pub(super) fn prepare(
     )
 }
 
+// Try every candidate before waiting. One shared deadline applies only while
+// all candidates are updating; an unrelated busy provider never delays a lane.
+fn available_provider_leases(
+    state: &Path,
+    providers: &[&str],
+    budget: provenant_core::WaitBudget,
+    clock: &dyn provenant_core::Clock,
+) -> Result<std::collections::BTreeMap<String, provenant_os::fs::LockGuard>, String> {
+    loop {
+        let mut leases = std::collections::BTreeMap::new();
+        for provider in providers {
+            match provenant_os::provider_fence::acquire(
+                state,
+                provider,
+                provenant_os::fs::LockMode::Shared,
+            ) {
+                Ok(lease) => {
+                    leases.insert((*provider).to_owned(), lease);
+                }
+                Err(FsError::LockTimeout { .. }) => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        if !leases.is_empty() || providers.is_empty() {
+            return Ok(leases);
+        }
+        let now = clock.mono_now();
+        let remaining = budget.remaining(now).as_micros();
+        if remaining == 0 {
+            return Err("all candidate providers are updating; retry the lane".into());
+        }
+        let next = now
+            .checked_add(provenant_core::DurationMicros::from_micros(
+                remaining.min(50_000),
+            ))
+            .map_err(|e| e.to_string())?;
+        clock.wait_until(next).map_err(|e| e.to_string())?;
+    }
+}
+
 fn prepare_with(
     registry: &Registry<'_>,
     task: &run::TaskRequest,
@@ -131,23 +171,14 @@ fn prepare_with(
     // Resolve and probe only while updates are excluded. Keep the selected
     // lease through handoff, including for fallback and prepared continuations.
     let clock = provenant_os::clock::SystemClock::new();
-    let mut provider_leases = std::collections::BTreeMap::new();
-    for spec in &eligible {
-        use provenant_core::Clock;
-        let budget =
-            provenant_core::WaitBudget::cli(clock.mono_now(), 30).map_err(|e| e.to_string())?;
-        let lease = provenant_os::provider_fence::wait(
-            roots.state.as_path(),
-            spec.name,
-            provenant_os::fs::LockMode::Shared,
-            budget,
-            &provenant_core::CancelToken::new(),
-            &clock,
-        )
-        .map_err(|e| format!("provider {} update busy: {e}; retry the lane", spec.name))?;
-        provider_leases.insert(spec.name.to_owned(), lease);
-    }
-    let eligible = |name: &str| eligible.iter().any(|spec| spec.name == name);
+    use provenant_core::Clock;
+    let mut provider_leases = available_provider_leases(
+        roots.state.as_path(),
+        &eligible.iter().map(|spec| spec.name).collect::<Vec<_>>(),
+        provenant_core::WaitBudget::cli(clock.mono_now(), 30).map_err(|e| e.to_string())?,
+        &clock,
+    )?;
+    let eligible = |name: &str| provider_leases.contains_key(name);
     let settings = config.domains.accounts;
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
@@ -232,18 +263,22 @@ fn prepare_with(
             )),
         }
     }
-    let attempt_dir =
-        Directory::open_anchor(paths.scratch.parent().ok_or("attempt path unavailable")?)
-            .map_err(|e| e.to_string())?;
-    attempt_dir
-        .atomic_write(
-            std::ffi::OsStr::new("availability.json"),
-            "availability",
-            &serde_json::to_vec(&availability).map_err(|e| e.to_string())?,
-            PublishMode::Replace,
-        )
-        .and_then(|p| p.require_durable())
-        .map_err(|e| e.to_string())?;
+    // Availability is diagnostic evidence; admission uses the in-memory records.
+    // A failed publication must not prevent a correctly prepared lane launching.
+    let _ = (|| -> Result<(), String> {
+        let attempt_dir =
+            Directory::open_anchor(paths.scratch.parent().ok_or("attempt path unavailable")?)
+                .map_err(|e| e.to_string())?;
+        attempt_dir
+            .atomic_write(
+                std::ffi::OsStr::new("availability.json"),
+                "availability",
+                &serde_json::to_vec(&availability).map_err(|e| e.to_string())?,
+                PublishMode::Replace,
+            )
+            .and_then(|p| p.require_durable())
+            .map_err(|e| e.to_string())
+    })();
     let digest = task.authority_digest.to_string();
     let mut access = Vec::new();
     let mut plan_errors = std::collections::BTreeMap::new();
@@ -2307,6 +2342,81 @@ mod tests {
     }
 
     #[test]
+    fn candidate_leases_skip_busy_providers_and_share_one_deadline()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::{Clock, WaitBudget};
+        use provenant_os::fs::LockMode;
+        let temp = tempfile::tempdir()?;
+        let _a = provenant_os::provider_fence::acquire(temp.path(), "codex", LockMode::Exclusive)?;
+        let clock = provenant_core::TestClock::new(
+            provenant_core::WallTime::from_micros(0)?,
+            provenant_core::MonoTime::from_micros(0),
+        );
+        let leases = available_provider_leases(
+            temp.path(),
+            &["codex", "cursor"],
+            WaitBudget::cli(clock.mono_now(), 30)?,
+            &clock,
+        )?;
+        assert!(leases.contains_key("cursor"));
+        assert!(!leases.contains_key("codex"));
+        assert_eq!(clock.mono_now().as_micros(), 0);
+        drop(leases);
+        let _b = provenant_os::provider_fence::acquire(temp.path(), "cursor", LockMode::Exclusive)?;
+        let error = available_provider_leases(
+            temp.path(),
+            &["codex", "cursor"],
+            WaitBudget::cli(clock.mono_now(), 30)?,
+            &clock,
+        )
+        .err()
+        .ok_or("busy providers admitted")?;
+        assert!(error.contains("all candidate providers"));
+        assert_eq!(clock.mono_now().as_micros(), 30_000_000);
+        Ok(())
+    }
+
+    #[test]
+    fn executable_discovery_after_wait_observes_the_completed_update()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::{Clock, DurationMicros, WaitBudget};
+        use provenant_os::fs::LockMode;
+        let temp = tempfile::tempdir()?;
+        let executable = temp.path().join("cursor");
+        let updating =
+            provenant_os::provider_fence::acquire(temp.path(), "cursor", LockMode::Exclusive)?;
+        let clock = provenant_os::clock::SystemClock::new();
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            let executable = &executable;
+            let clock = &clock;
+            let update = scope.spawn(move || -> Result<(), String> {
+                clock
+                    .wait_until(
+                        clock
+                            .mono_now()
+                            .checked_add(DurationMicros::from_micros(50_000))
+                            .map_err(|e| e.to_string())?,
+                    )
+                    .map_err(|e| e.to_string())?;
+                std::fs::write(executable, "new provider").map_err(|e| e.to_string())?;
+                drop(updating);
+                Ok(())
+            });
+            let leases = available_provider_leases(
+                temp.path(),
+                &["cursor"],
+                WaitBudget::cli(clock.mono_now(), 2)?,
+                clock,
+            )?;
+            assert!(leases.contains_key("cursor"));
+            assert_eq!(canonical(executable)?, executable.canonicalize()?);
+            assert_eq!(std::fs::read_to_string(executable)?, "new provider");
+            update.join().expect("update thread")?;
+            Ok(())
+        })
+    }
+
+    #[test]
     fn writer_plan_stages_scratch_in_private_temporary_directory()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
@@ -2448,7 +2558,11 @@ mod tests {
                 effort: None,
             },
             account: None,
-            fallback: vec![],
+            fallback: vec![run::RouteRecord {
+                provider: Some("codex".into()),
+                model: Some("codex/gpt-5.3-codex".into()),
+                ..Default::default()
+            }],
             authority_digest: Digest::from_bytes([4; 32]),
             writer: Some(run::WriterRequest {
                 project: project.clone(),
@@ -2512,6 +2626,28 @@ mod tests {
             ),
         )?;
         let full = format!("Durable output instructions\n\n{prompt}");
+        let failed_update = provenant_providers::update::check(
+            &state,
+            "cursor",
+            &executable,
+            &provenant_config::ProviderSettings {
+                update: provenant_config::ProviderUpdate::Command {
+                    command: vec!["/usr/bin/false".into()],
+                },
+                ..Default::default()
+            },
+            &executor,
+            100,
+        )?
+        .ok_or("no failed update record")?;
+        assert_eq!(failed_update.outcome, "failed");
+        let _updating = provenant_os::provider_fence::acquire(
+            &state,
+            "codex",
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        // A failed diagnostic write must not fail an otherwise valid launch.
+        std::fs::create_dir(attempt.join("availability.json"))?;
         let launch = prepare_with(
             &registry,
             &task,
@@ -2524,6 +2660,13 @@ mod tests {
             },
             None,
         )?;
+        let executed = executor.execute(ExecOptions::new(
+            &launch.argv,
+            &project,
+            Duration::from_secs(2),
+        ))?;
+        assert_eq!(executed.termination, Termination::Exit(0));
+        assert!(launch.provider_lease.is_some());
         assert_eq!(launch.route.provider.as_deref(), Some("cursor"));
         assert_eq!(
             launch.route.model.as_deref(),

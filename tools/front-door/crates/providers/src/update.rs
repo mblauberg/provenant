@@ -36,8 +36,8 @@ fn save(dir: &Directory, name: &std::ffi::OsStr, value: &impl Serialize) -> Resu
 fn command(provider: &str, executable: &Path, setting: &ProviderUpdate) -> Option<Vec<OsString>> {
     match setting {
         ProviderUpdate::Enabled(false) => return None,
-        ProviderUpdate::Command(command) => {
-            return Some(vec!["/bin/sh".into(), "-c".into(), command.into()]);
+        ProviderUpdate::Command { command } => {
+            return Some(command.iter().map(OsString::from).collect());
         }
         ProviderUpdate::Enabled(true) => {}
     }
@@ -102,19 +102,12 @@ pub fn check(
     if matches!(settings.update, ProviderUpdate::Enabled(false)) {
         return Ok(None);
     }
-    let lease = match provenant_os::provider_fence::acquire(state, provider, LockMode::Exclusive) {
+    let _lease = match provenant_os::provider_fence::acquire(state, provider, LockMode::Exclusive) {
         Ok(lease) => lease,
         Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
     let dir = Directory::open_anchor(&state.join("provider-updates")).map_err(|e| e.to_string())?;
-    // A free kernel lease proves any leftover marker stale, including after SIGKILL.
-    let fence_name: OsString = format!("{provider}.fence.json").into();
-    match dir.unlink(&fence_name) {
-        Ok(()) => {}
-        Err(error) if error.is_not_found() => {}
-        Err(error) => return Err(error.to_string()),
-    }
     let previous = latest(state, provider);
     let argv = command(provider, executable, &settings.update);
     if previous.as_ref().is_some_and(|record| {
@@ -140,18 +133,19 @@ pub fn check(
         checked_unix_seconds: now,
         old_version: old_version.clone(),
         new_version: old_version,
-        outcome: "interrupted".into(),
+        outcome: "failed (interrupted)".into(),
     };
     save(&dir, &record_name(provider), &record)?;
-    save(
-        &dir,
-        &fence_name,
-        &serde_json::json!({"pid": std::process::id(), "started_unix_seconds": now}),
-    )?;
-    let mut options = ExecOptions::new(&argv, state, Duration::from_secs(20));
+    let mut options = ExecOptions::new(
+        &argv,
+        state,
+        Duration::from_secs(settings.update_timeout_seconds),
+    );
     options.stdout = StreamPolicy::Discard;
     options.stderr = StreamPolicy::Discard;
-    options.inherited_lease = Some(&lease);
+    // Only housekeeping owns the exclusive lease. Updater descendants must
+    // never retain it after timeout; the executor kills their private group.
+    options.process_group = true;
     let result = executor.execute(options);
     let succeeded =
         result.is_ok_and(|out| out.termination == Termination::Exit(0) && !out.timed_out);
@@ -159,7 +153,6 @@ pub fn check(
         version(executor, executable, state).or_else(|| record.old_version.clone());
     record.outcome = if succeeded { "updated" } else { "failed" }.into();
     save(&dir, &record_name(provider), &record)?;
-    dir.unlink(&fence_name).map_err(|e| e.to_string())?;
     Ok(Some(record))
 }
 
@@ -184,7 +177,9 @@ mod tests {
             let version = options.argv[1] == "--version";
             if !version {
                 assert_eq!(options.argv[1], "update");
-                assert!(options.inherited_lease.is_some());
+                assert_eq!(options.timeout, Duration::from_secs(300));
+                assert!(options.inherited_lease.is_none());
+                assert!(options.process_group);
                 assert!(matches!(
                     provenant_os::provider_fence::acquire(self.state, "claude", LockMode::Shared),
                     Err(provenant_os::fs::FsError::LockTimeout { .. })
@@ -218,14 +213,9 @@ mod tests {
     }
 
     #[test]
-    fn version_change_is_recorded_and_stale_fence_removed() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn version_change_is_recorded() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
-        let lease = provenant_os::provider_fence::acquire(root, "claude", LockMode::Exclusive)?;
-        let fence = root.join("provider-updates/claude.fence.json");
-        std::fs::write(&fence, br#"{"pid":2147483647,"started_unix_seconds":1}"#)?;
-        drop(lease);
         let fake = Fake {
             state: root,
             updated: AtomicBool::new(false),
@@ -245,7 +235,6 @@ mod tests {
         assert_eq!(record.new_version.as_deref(), Some("2.0"));
         assert_eq!(record.outcome, "updated");
         assert_eq!(latest(root, "claude"), Some(record));
-        assert!(!fence.exists());
         assert!(
             check(
                 root,
@@ -347,10 +336,11 @@ mod tests {
         }
         impl Executor for Replace<'_> {
             fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
-                let bytes = if options.argv[1] == "--version" {
+                let bytes = if options.argv.get(1).is_some_and(|arg| arg == "--version") {
                     std::fs::read(&options.argv[0]).unwrap()
                 } else {
-                    assert!(options.inherited_lease.is_some());
+                    assert!(options.inherited_lease.is_none());
+                    assert!(options.process_group);
                     std::fs::remove_file(self.alias).unwrap();
                     std::os::unix::fs::symlink(self.new, self.alias).unwrap();
                     std::fs::remove_file(self.old).unwrap();
@@ -384,13 +374,136 @@ mod tests {
             new: &new,
         };
         let settings = ProviderSettings {
-            update: ProviderUpdate::Command("fake".into()),
+            update: ProviderUpdate::Command {
+                command: vec!["fake".into()],
+            },
             ..ProviderSettings::default()
         };
         let record =
             check(temp.path(), "codex", &alias, &settings, &fake, 100)?.ok_or("no update")?;
         assert_eq!(record.old_version.as_deref(), Some("1.0"));
         assert_eq!(record.new_version.as_deref(), Some("2.0"));
+        Ok(())
+    }
+
+    #[test]
+    fn argv_override_is_literal_and_failed_update_does_not_block_lanes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::exec::SystemExecutor;
+        let temp = tempfile::tempdir()?;
+        let executable = temp.path().join("provider");
+        std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\nprintf '%s' \"$1\" > argument\nexit 1\n")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        let literal = "$(touch injected); * quoted argument";
+        let settings = ProviderSettings {
+            update: ProviderUpdate::Command {
+                command: vec![executable.to_string_lossy().into_owned(), literal.into()],
+            },
+            ..ProviderSettings::default()
+        };
+        let executor = SystemExecutor::new(1)?;
+        let record = check(
+            temp.path(),
+            "claude",
+            &executable,
+            &settings,
+            &executor,
+            100,
+        )?
+        .ok_or("no update")?;
+        assert_eq!(record.outcome, "failed");
+        assert_eq!(record.old_version.as_deref(), Some("1.0"));
+        assert_eq!(record.old_version, record.new_version);
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("argument"))?,
+            literal
+        );
+        assert!(!temp.path().join("injected").exists());
+        let _lane = provenant_os::provider_fence::acquire(temp.path(), "claude", LockMode::Shared)?;
+        let argv = [executable.into_os_string(), "--version".into()];
+        let result =
+            executor.execute(ExecOptions::new(&argv, temp.path(), Duration::from_secs(2)))?;
+        assert_eq!(result.termination, Termination::Exit(0));
+        assert!(
+            check(
+                temp.path(),
+                "claude",
+                Path::new("/unused"),
+                &settings,
+                &executor,
+                101
+            )?
+            .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hung_updater_kills_background_descendant_and_releases_lease()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::exec::SystemExecutor;
+        let temp = tempfile::tempdir()?;
+        let executable = temp.path().join("provider");
+        std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n(trap '' TERM; echo ready > descendant.ready; /bin/sleep 2; echo survived > descendant.survived) &\nwait\n")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        let settings = ProviderSettings {
+            update: ProviderUpdate::Command {
+                command: vec![executable.to_string_lossy().into_owned()],
+            },
+            update_timeout_seconds: 1,
+            ..ProviderSettings::default()
+        };
+        struct Observe(SystemExecutor);
+        impl Executor for Observe {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                let update = options.process_group;
+                let result = self.0.execute(options);
+                if update {
+                    assert!(
+                        matches!(&result, Ok(outcome) if outcome.timed_out),
+                        "updater timeout result: {result:?}"
+                    );
+                }
+                result
+            }
+        }
+        let executor = Observe(SystemExecutor::new(1)?);
+        let record = check(
+            temp.path(),
+            "claude",
+            &executable,
+            &settings,
+            &executor,
+            100,
+        )?
+        .ok_or("no update")?;
+        assert_eq!(record.outcome, "failed");
+        let _lane = provenant_os::provider_fence::acquire(temp.path(), "claude", LockMode::Shared)?;
+        assert!(
+            temp.path().join("descendant.ready").exists(),
+            "descendant never started"
+        );
+        // The descendant would write after its sleep if only the leader died.
+        // Wait past that point without ps, which some contributor sandboxes deny.
+        let argv = ["/bin/sleep".into(), "2".into()];
+        let outcome =
+            executor.execute(ExecOptions::new(&argv, temp.path(), Duration::from_secs(3)))?;
+        assert_eq!(outcome.termination, Termination::Exit(0));
+        assert!(
+            !temp.path().join("descendant.survived").exists(),
+            "background updater survived"
+        );
+        assert!(
+            check(
+                temp.path(),
+                "claude",
+                &executable,
+                &settings,
+                &executor,
+                101
+            )?
+            .is_none()
+        );
         Ok(())
     }
 
@@ -436,14 +549,12 @@ mod tests {
             command(
                 "claude",
                 &binary,
-                &ProviderUpdate::Command("custom update".into())
+                &ProviderUpdate::Command {
+                    command: vec!["custom".into(), "update".into()]
+                }
             )
             .ok_or("override")?,
-            vec![
-                OsString::from("/bin/sh"),
-                "-c".into(),
-                "custom update".into()
-            ]
+            vec![OsString::from("custom"), "update".into()]
         );
         Ok(())
     }

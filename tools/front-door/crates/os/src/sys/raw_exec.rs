@@ -35,6 +35,7 @@ pub struct OwnedPid {
     child: Option<Child>,
     permit: Option<Permit>,
     reaped: bool,
+    process_group: bool,
     pub stdin: Option<ChildStdin>,
     pub stdout: Option<ChildStdout>,
     pub stderr: Option<ChildStderr>,
@@ -46,6 +47,7 @@ pub struct SpawnSpec<'a> {
     pub input: bool,
     pub secret_input: Option<&'a crate::exec::SecretInput>,
     pub inherited_lease: Option<&'a crate::fs::LockGuard>,
+    pub process_group: bool,
     pub capture_stdout: bool,
     pub capture_stderr: bool,
 }
@@ -125,13 +127,19 @@ impl OwnedPid {
             environment = pipe.environment(input, &environment);
             pass.push(pipe.fd());
         }
-        super::child::configure_command(&mut command, &pass, Some(&environment), false)?;
+        super::child::configure_command(
+            &mut command,
+            &pass,
+            Some(&environment),
+            spec.process_group,
+        )?;
         let child = command.spawn()?;
         drop(secret);
         let mut result = Self {
             child: Some(child),
             permit: Some(permit),
             reaped: false,
+            process_group: spec.process_group,
             stdin: None,
             stdout: None,
             stderr: None,
@@ -147,6 +155,11 @@ impl OwnedPid {
         }
         Ok(result)
     }
+    fn signal_target(&self, child: &Child) -> i32 {
+        let pid = child.id() as i32;
+        // The unreaped session leader reserves this PID and its private PGID.
+        if self.process_group { -pid } else { pid }
+    }
     fn kill_direct(&self) {
         if self.reaped {
             return;
@@ -157,7 +170,7 @@ impl OwnedPid {
         // SAFETY: the Child handle retains this unreaped PID, so it cannot be
         // reused while the signal is sent. The direct child was just spawned
         // by this executor. kill borrows no memory and reports through errno.
-        if unsafe { libc::kill(child.id() as i32, libc::SIGKILL) } == 0 {
+        if unsafe { libc::kill(self.signal_target(child), libc::SIGKILL) } == 0 {
             return;
         }
         // ESRCH means it has already exited; any other failure remains owned
@@ -219,7 +232,7 @@ impl OwnedPid {
         // SAFETY: this unreaped direct child reserves its PID. No other handle
         // can wait it through this API; concurrent OS death leaves a zombie,
         // never a recycled PID. kill borrows no memory, errno is thread-local.
-        if unsafe { libc::kill(child.id() as i32, sig) } == 0 {
+        if unsafe { libc::kill(self.signal_target(child), sig) } == 0 {
             return Ok(true);
         }
         let error = io::Error::last_os_error();

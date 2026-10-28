@@ -1224,6 +1224,7 @@ impl Driver<'_> {
                             input: !input.is_empty(),
                             secret_input: self.secret_input.as_ref(),
                             inherited_lease: provider_lease,
+                            process_group: false,
                             capture_stdout: plan.stdout.piped(),
                             capture_stderr: plan.stderr.piped(),
                         },

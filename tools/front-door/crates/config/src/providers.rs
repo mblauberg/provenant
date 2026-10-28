@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum ProviderUpdate {
     Enabled(bool),
-    Command(String),
+    Command { command: Vec<String> },
 }
 
 impl Default for ProviderUpdate {
@@ -20,6 +20,7 @@ impl Default for ProviderUpdate {
 pub struct ProviderSettings {
     pub update: ProviderUpdate,
     pub update_interval_seconds: u64,
+    pub update_timeout_seconds: u64,
 }
 
 impl Default for ProviderSettings {
@@ -27,6 +28,7 @@ impl Default for ProviderSettings {
         Self {
             update: ProviderUpdate::default(),
             update_interval_seconds: 24 * 60 * 60,
+            update_timeout_seconds: 300,
         }
     }
 }
@@ -46,8 +48,15 @@ pub(crate) fn validate(providers: &BTreeMap<String, ProviderSettings>) -> Result
         if settings.update_interval_seconds == 0 {
             return Err("update_interval_seconds_range");
         }
-        if let ProviderUpdate::Command(command) = &settings.update
-            && (command.trim().is_empty() || command.len() > 4096 || command.contains('\0'))
+        if settings.update_timeout_seconds == 0 {
+            return Err("update_timeout_seconds_range");
+        }
+        if let ProviderUpdate::Command { command } = &settings.update
+            && (command.is_empty()
+                || command[0].trim().is_empty()
+                || command
+                    .iter()
+                    .any(|arg| arg.len() > 4096 || arg.contains('\0')))
         {
             return Err("provider_update_command");
         }

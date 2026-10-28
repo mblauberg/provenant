@@ -1075,6 +1075,7 @@ mod tests {
                 input: false,
                 secret_input: None,
                 inherited_lease: None,
+                process_group: false,
                 capture_stdout: true,
                 capture_stderr: false,
             },

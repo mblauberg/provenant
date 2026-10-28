@@ -1,7 +1,8 @@
 //! Shared lane leases and exclusive updater custody for one provider.
 //!
 //! Lock files are stable and never unlinked: the kernel releases their leases
-//! when the last holder exits, including a native updater inheriting the lease.
+//! when the last holder exits. Provider children inherit shared lane leases;
+//! housekeeping alone holds exclusive updater leases.
 use crate::fs::{self, Directory, LockGuard, LockMode};
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use std::{ffi::OsStr, path::Path};

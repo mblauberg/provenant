@@ -18,12 +18,18 @@ Source: `config/harness-knobs.json`.
   ],
   "update": {
     "default": true,
-    "effect": "Run the detected native updater between lanes. false opts out; a non-empty string overrides the updater command through /bin/sh -c.",
-    "type": "bool_or_string"
+    "effect": "Run the detected native updater between lanes. false opts out; {command: [program, argument, ...]} overrides the updater directly without a shell.",
+    "type": "bool_or_command_argv"
   },
   "update_interval_seconds": {
     "default": 86400,
-    "effect": "Minimum time between update attempts, checked on existing housekeeping events. A failed attempt waits the same interval.",
+    "effect": "Minimum time between update attempts, checked on existing housekeeping events. Failed and interrupted attempts wait the same interval.",
+    "min": 1,
+    "type": "int"
+  },
+  "update_timeout_seconds": {
+    "default": 300,
+    "effect": "Maximum native updater duration in housekeeping. Timeout kills the updater process group, records failure and retries after the interval.",
     "min": 1,
     "type": "int"
   }
