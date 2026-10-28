@@ -987,7 +987,25 @@ fn admissible<'c>(
         !crate::request::effort_valid(e)
             || entry.is_none_or(|row| !row.efforts.iter().any(|v| v == e))
     }) {
-        return Err(RoutingError::UnsupportedEffort);
+        let support = match entry {
+            Some(row) if row.efforts.is_empty() => "this model takes no effort".to_owned(),
+            Some(row) => format!("supported efforts: {}", row.efforts.join(", ")),
+            None => {
+                let nearest = context.catalogue.nearest_models(model);
+                if nearest.is_empty() {
+                    "model is not in the catalogue; no effort controls are recorded".to_owned()
+                } else {
+                    format!(
+                        "model is not in the catalogue; nearest catalogued IDs: {}",
+                        nearest.join(", ")
+                    )
+                }
+            }
+        };
+        return Err(RoutingError::UnsupportedEffort {
+            model: model.as_str().to_owned(),
+            support,
+        });
     }
     Ok(entry)
 }
@@ -1410,7 +1428,7 @@ fn classify_pool(
                     option = Some(resolved);
                     None
                 }
-                Err(RoutingError::UnsupportedEffort) => {
+                Err(RoutingError::UnsupportedEffort { .. }) => {
                     classified.exclusions.push("unsupported effort".into());
                     Some("effort".into())
                 }

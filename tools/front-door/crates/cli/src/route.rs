@@ -10,7 +10,7 @@ use provenant_routing::{
     RouteChoice, RouteName, RoutePoolMember, RoutingContext, RoutingError,
 };
 use serde::Serialize;
-use std::{collections::BTreeSet, io, str::FromStr};
+use std::{collections::BTreeSet, io, io::Write, str::FromStr};
 
 #[derive(Debug, Subcommand)]
 pub enum Route {
@@ -346,6 +346,8 @@ enum EdgeError {
     Pacing(&'static str),
     #[error("{0}")]
     GoAllowance(String),
+    #[error("{0}")]
+    AccountProfile(String),
 }
 impl From<provenant_config::ConfigError> for EdgeError {
     fn from(error: provenant_config::ConfigError) -> Self {
@@ -373,6 +375,8 @@ pub enum Data {
 pub struct RoutePreview {
     #[serde(flatten)]
     pub route: provenant_records::ResolvedRoute,
+    pub supported_efforts: Option<Vec<String>>,
+    pub nearest_models: Vec<String>,
     pub pacing: Vec<provenant_routing::PacingPreview>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota: Option<provenant_quota::QuotaSnapshot>,
@@ -452,6 +456,60 @@ fn quota_observations(
     }
     Ok(observations)
 }
+// Resolve configured labels once, so all routing paths use the same account keys.
+fn resolve_pacing_accounts(
+    config: &mut provenant_routing::RoutingConfig,
+    settings: &provenant_providers::accounts::Settings,
+) -> Result<(), EdgeError> {
+    let settings = settings.with_derived_accounts();
+    let valid = settings
+        .entries
+        .iter()
+        .map(|(id, entry)| format!("{} (key: {}, entry: {})", entry.label, entry.key, id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let resolve = |name: &str, field: &str| -> Result<String, EdgeError> {
+        if settings.entries.values().any(|entry| entry.key == name) {
+            return Ok(name.to_owned());
+        }
+        let id = crate::accounts::resolve(&settings, name).map_err(|error| {
+            EdgeError::AccountProfile(format!(
+                "{field}: {error}; valid account labels and keys: {}",
+                if valid.is_empty() {
+                    "(none registered)"
+                } else {
+                    &valid
+                }
+            ))
+        })?;
+        Ok(settings.entries[&id].key.clone())
+    };
+    let mut accounts = std::collections::BTreeMap::new();
+    for (name, mut profile) in std::mem::take(&mut config.pacing.accounts) {
+        let key = resolve(&name, &format!("pacing.accounts.{name}"))?;
+        if let Some(provenant_routing::PacingDeadline::ResetOf(reference)) = &mut profile.deadline {
+            reference.reset_of = resolve(
+                &reference.reset_of,
+                &format!("pacing.accounts.{name}.deadline.reset_of"),
+            )?;
+        }
+        if accounts.insert(key.clone(), profile).is_some() {
+            return Err(EdgeError::AccountProfile(format!(
+                "multiple pacing profiles resolve to account key `{key}`"
+            )));
+        }
+    }
+    config.pacing.accounts = accounts;
+    for (provider, profile) in &mut config.pacing.free {
+        if let Some(provenant_routing::PacingDeadline::ResetOf(reference)) = &mut profile.deadline {
+            reference.reset_of = resolve(
+                &reference.reset_of,
+                &format!("pacing.free.{provider}.deadline.reset_of"),
+            )?;
+        }
+    }
+    Ok(())
+}
 fn with_context<T>(
     roots: &Roots,
     availability: &[AvailabilityRecord],
@@ -461,7 +519,8 @@ fn with_context<T>(
     action: impl FnOnce(&RoutingContext<'_>, &[provenant_quota::AccountRecord]) -> Result<T, EdgeError>,
 ) -> Result<T, EdgeError> {
     let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?.domains;
-    let config = domains.routing;
+    let mut config = domains.routing;
+    resolve_pacing_accounts(&mut config, &domains.accounts)?;
     let catalogue = Catalogue::bundled()?;
     // A lane holds no grant on the shared quota store: route without a
     // snapshot there rather than refusing the nested dispatch.
@@ -607,6 +666,18 @@ pub(crate) fn resolve_dispatch(
                     continue;
                 }
                 break;
+            }
+            let model = ModelId::parse(&format!("{}/{}", resolved.adapter, resolved.model))?;
+            if context.catalogue.model(&model).is_none() {
+                let nearest = context.catalogue.nearest_models(&model);
+                if !nearest.is_empty() {
+                    let _ = writeln!(
+                        io::stderr().lock(),
+                        "provenant: model {} is not in the catalogue; nearest catalogued IDs: {}",
+                        model.as_str(),
+                        nearest.join(", ")
+                    );
+                }
             }
             Ok(resolved)
         },
@@ -1055,8 +1126,15 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
                     })
                     .and_then(|r| r.snapshot.clone());
                 let pacing = provenant_routing::pacing_preview(&model, context);
+                let entry = context.catalogue.model(&model);
                 Ok(Data::Resolved(Box::new(RoutePreview {
                     route,
+                    supported_efforts: entry.map(|entry| entry.efforts.clone()),
+                    nearest_models: if entry.is_none() {
+                        context.catalogue.nearest_models(&model)
+                    } else {
+                        Vec::new()
+                    },
                     pacing,
                     quota,
                 })))
@@ -1131,7 +1209,9 @@ pub fn run(
                 EdgeError::Routing(_) | EdgeError::Unresolved { .. } | EdgeError::Pacing(_) => {
                     (Outcome::Invalid, "INVALID")
                 }
-                EdgeError::Config(_) | EdgeError::PacingConfig(_) => (Outcome::Invalid, "CONFIG"),
+                EdgeError::Config(_)
+                | EdgeError::PacingConfig(_)
+                | EdgeError::AccountProfile(_) => (Outcome::Invalid, "CONFIG"),
                 _ => (Outcome::Error, "IO"),
             };
             let mut result = CommandResult::new(name, status, None);
@@ -1245,6 +1325,25 @@ pub fn run(
                         }),
                     diagnostics
                 );
+                match &preview.supported_efforts {
+                    Some(efforts) if efforts.is_empty() => {
+                        text.push_str("supported efforts: none\n")
+                    }
+                    Some(efforts) => {
+                        text.push_str(&format!("supported efforts: {}\n", efforts.join(", ")))
+                    }
+                    None => {
+                        text.push_str(
+                            "model is not in the catalogue; effort support is unrecorded\n",
+                        );
+                        if !preview.nearest_models.is_empty() {
+                            text.push_str(&format!(
+                                "nearest catalogued IDs: {}\n",
+                                preview.nearest_models.join(", ")
+                            ));
+                        }
+                    }
+                }
                 if let Some(details) = preview.quota.as_ref().and_then(|q| q.details.as_ref())
                     && let (Some(source), Some(coverage)) = (&details.source, &details.coverage)
                 {

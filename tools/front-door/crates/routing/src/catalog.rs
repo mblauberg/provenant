@@ -738,6 +738,39 @@ impl Catalogue {
     pub fn revision(&self) -> &str {
         &self.revision
     }
+    /// Nearest recorded model IDs for the same adapter, ordered by edit distance.
+    pub fn nearest_models(&self, model: &ModelId) -> Vec<String> {
+        fn distance(a: &str, b: &str) -> usize {
+            let b: Vec<char> = b.chars().collect();
+            let mut row: Vec<usize> = (0..=b.len()).collect();
+            for (i, ca) in a.chars().enumerate() {
+                let mut diagonal = row[0];
+                row[0] = i + 1;
+                for (j, cb) in b.iter().enumerate() {
+                    let above = row[j + 1];
+                    row[j + 1] = (diagonal + usize::from(ca != *cb))
+                        .min(row[j] + 1)
+                        .min(above + 1);
+                    diagonal = above;
+                }
+            }
+            row[b.len()]
+        }
+        let mut matches: Vec<_> = self
+            .models
+            .iter()
+            .filter(|entry| entry.model.adapter() == model.adapter())
+            .map(|entry| {
+                (
+                    distance(model.model(), entry.model.model()),
+                    entry.model.as_str().to_owned(),
+                )
+            })
+            .collect();
+        matches.sort();
+        matches.into_iter().take(3).map(|(_, id)| id).collect()
+    }
+
     pub fn models(&self) -> &[ModelEntry] {
         &self.models
     }

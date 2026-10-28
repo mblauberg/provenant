@@ -524,6 +524,27 @@ impl run::Providers for Registry<'_> {
                 jiff::Timestamp::now().as_second(),
             );
         }
+        if decoded.outcome != run::Outcome::Succeeded
+            && let Some(model) = route
+                .model
+                .as_deref()
+                .and_then(|id| ModelId::parse(id).ok())
+            && let Ok(catalogue) = provenant_routing::Catalogue::bundled()
+            && catalogue.model(&model).is_none()
+        {
+            let nearest = catalogue.nearest_models(&model);
+            if !nearest.is_empty() {
+                let note = format!(
+                    "model {} is not in the catalogue; nearest catalogued IDs: {}",
+                    model.as_str(),
+                    nearest.join(", ")
+                );
+                decoded.reason = Some(match decoded.reason.take() {
+                    Some(reason) => format!("{reason}; {note}"),
+                    None => note,
+                });
+            }
+        }
         Ok(decoded)
     }
 }
@@ -6477,11 +6498,26 @@ mod tests {
             )
             .unwrap();
         assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
-        assert_eq!(
-            decoded.reason.as_deref(),
-            Some("Model unavailable: opencode/misspelt-free")
-        );
+        let reason = decoded.reason.as_deref().unwrap();
+        assert!(reason.starts_with("Model unavailable: opencode/misspelt-free;"));
+        assert!(reason.contains("nearest catalogued IDs:"));
         assert!(decoded.observed_route.is_none());
+    }
+
+    #[test]
+    fn unlisted_codex_failure_suggests_catalogued_models() {
+        let route = run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6.1-luna".into()),
+            ..Default::default()
+        };
+        let mut exit = clean_exit();
+        exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+        let decoded = Registry::default()
+            .decode(&route, b"", &exit, Path::new("/nonexistent"))
+            .unwrap();
+        assert_ne!(decoded.outcome, run::Outcome::Succeeded);
+        assert!(decoded.reason.unwrap().contains("codex/gpt-6-luna"));
     }
 
     #[test]

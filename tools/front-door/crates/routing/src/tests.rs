@@ -34,6 +34,34 @@ fn request(model: &str) -> Result<RouteRequest, RoutingError> {
     })
 }
 #[test]
+fn effort_errors_report_recorded_controls_and_nearest_models()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let context = context(&catalogue, &config, now()?);
+    for (model, expected) in [
+        ("codex/gpt-6.1-luna", "codex/gpt-6-luna"),
+        ("codex/gpt-6-luna", "supported efforts: low"),
+        ("opencode/opencode-go/glm-5.2", "takes no effort"),
+    ] {
+        let mut query = request(model)?;
+        query.effort = Some("unsupported".into());
+        let message = resolve(&query, &context)
+            .expect_err("effort must be refused")
+            .to_string();
+        assert!(message.contains(model), "{message}");
+        assert!(message.contains(expected), "{message}");
+    }
+    assert_eq!(
+        catalogue
+            .nearest_models(&ModelId::parse("codex/gpt-6.1-luna")?)
+            .first()
+            .map(String::as_str),
+        Some("codex/gpt-6-luna")
+    );
+    Ok(())
+}
+#[test]
 fn opus_advisory_uses_the_applied_pool_tier() -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
@@ -216,7 +244,7 @@ fn explicit_unlisted_model_is_ready_without_provider_listing()
     with_effort.effort = Some("high".into());
     assert!(matches!(
         resolve(&with_effort, &context),
-        Err(RoutingError::UnsupportedEffort)
+        Err(RoutingError::UnsupportedEffort { .. })
     ));
     let mut confidential = query;
     confidential.confidential = true;
@@ -294,7 +322,7 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
     query.effort = Some("invented".into());
     assert!(matches!(
         resolve(&query, &context),
-        Err(RoutingError::UnsupportedEffort)
+        Err(RoutingError::UnsupportedEffort { .. })
     ));
     query.choice = RouteChoice::NamedRoute(RouteName::parse("typo")?);
     assert!(matches!(
@@ -960,23 +988,23 @@ fn candidate_errors_and_fallback_effort_match_request_fixtures()
     let fixtures = [
         (
             r#"{"choice":{"kind":"model","value":"invented/id"},"effort":"bad effort"}"#,
-            Err(RoutingError::UnknownAdapter),
+            Err("unknown adapter"),
         ),
         (
             r#"{"choice":{"kind":"model","value":"codex/unlisted"},"effort":"high"}"#,
-            Err(RoutingError::UnsupportedEffort),
+            Err("unsupported effort"),
         ),
         (
             r#"{"choice":{"kind":"model","value":"codex/gpt-6.1-sol"},"effort":"bad effort"}"#,
-            Err(RoutingError::UnsupportedEffort),
+            Err("unsupported effort"),
         ),
         (
             r#"{"choice":{"kind":"model","value":"codex/gpt-6.1-sol"},"effort":null,"fallback":{"kind":"models","models":["invented/id"]}}"#,
-            Err(RoutingError::UnknownAdapter),
+            Err("unknown adapter"),
         ),
         (
             r#"{"choice":{"kind":"named_route","value":"review"},"effort":null,"fallback":{"kind":"models","models":["codex/gpt-6-luna"]}}"#,
-            Err(RoutingError::UnsupportedEffort),
+            Err("unsupported effort"),
         ),
         (
             r#"{"choice":{"kind":"named_route","value":"review"},"effort":"high","fallback":{"kind":"models","models":["codex/gpt-6-luna"]}}"#,
@@ -1000,10 +1028,13 @@ fn candidate_errors_and_fallback_effort_match_request_fixtures()
                 }
                 route.effort
             })
-            .map_err(|error| error.to_string());
+            .map_err(|error| match error {
+                RoutingError::UnsupportedEffort { .. } => "unsupported effort".to_owned(),
+                error => error.to_string(),
+            });
         let expected = expected
             .map(|effort| effort.map(str::to_owned))
-            .map_err(|error| error.to_string());
+            .map_err(str::to_owned);
         assert_eq!(actual, expected, "{wire}");
     }
     let context = RoutingContext {
@@ -1042,7 +1073,7 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
     query.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse("agy/unknown")?])?);
     assert!(matches!(
         resolve(&query, &context),
-        Err(RoutingError::UnsupportedEffort)
+        Err(RoutingError::UnsupportedEffort { .. })
     ));
     Ok(())
 }

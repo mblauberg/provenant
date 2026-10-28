@@ -60,12 +60,44 @@ fn call(rig: &TestRig, args: &[&str], expected: i64) -> Result<Value> {
     Ok(value)
 }
 #[test]
+fn resolve_reports_effort_controls_and_nearby_models() -> Result {
+    let rig = rig()?;
+    let known = call(&rig, &["route", "resolve", "codex/gpt-6-luna"], 0)?;
+    assert_eq!(
+        known["data"]["supported_efforts"],
+        serde_json::json!(["low", "medium", "high", "xhigh"])
+    );
+    let none = call(
+        &rig,
+        &["route", "resolve", "opencode/opencode-go/glm-5.2"],
+        0,
+    )?;
+    assert_eq!(none["data"]["supported_efforts"], serde_json::json!([]));
+    let unknown = call(&rig, &["route", "resolve", "codex/gpt-6.1-luna"], 0)?;
+    assert!(unknown["data"]["supported_efforts"].is_null());
+    assert_eq!(unknown["data"]["nearest_models"][0], "codex/gpt-6-luna");
+    let refused = call(
+        &rig,
+        &["route", "resolve", "codex/gpt-6.1-luna", "--effort", "high"],
+        2,
+    )?;
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .ok_or("message")?
+            .contains("codex/gpt-6-luna")
+    );
+    let output = rig.command(&["route", "resolve", "opencode/opencode-go/glm-5.2"])?;
+    assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("supported efforts: none"));
+    Ok(())
+}
+#[test]
 fn pacing_override_persists_replaces_and_clears() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version = 1\n[domains.routing.pacing.accounts.pro]\npolicy = 'pace'\nwindows = ['five_hour']\nreserve = { five_hour = 15 }\n",
+        "schema_version = 1\n[domains.accounts.entries.claude-pro]\nadapter='claude'\nlabel='pro'\nkey='pro'\ndirectory='/tmp/pro'\n[domains.routing.pacing.accounts.pro]\npolicy = 'pace'\nwindows = ['five_hour']\nreserve = { five_hour = 15 }\n",
     )?;
     let list = call(&rig, &["route", "list"], 0)?;
     assert_eq!(list["data"]["configured_accounts"]["pro"]["policy"], "pace");
@@ -134,14 +166,14 @@ fn cached_account_pacing_is_visible_without_probing() -> Result {
     use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus, QuotaWindow};
     let rig = rig()?;
     let at = jiff::Timestamp::now().as_second();
-    let directory = rig.state.join("quota/michael");
+    let directory = rig.state.join("quota/opaque-one");
     fs::create_dir_all(&directory)?;
     for path in [&rig.state, &rig.state.join("quota"), &directory] {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
     let account = AccountScope {
         adapter: "claude".into(),
-        account_key: "michael".into(),
+        account_key: "opaque-one".into(),
         label: "michael".into(),
     };
     let mut record = AccountRecord::empty(account.clone());
@@ -167,10 +199,10 @@ fn cached_account_pacing_is_visible_without_probing() -> Result {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version=1\n[domains.routing.pacing.accounts.michael]\npolicy='pace'\nwindows=['seven_day']\nreserve={seven_day=15}\ndeadline={reset_of='anese'}\n",
+        "schema_version=1\n[domains.accounts.entries.claude-michael]\nadapter='claude'\nlabel='michael'\nkey='opaque-one'\ndirectory='/tmp/michael'\n[domains.accounts.entries.claude-anese]\nadapter='claude'\nlabel='anese'\nkey='opaque-two'\ndirectory='/tmp/anese'\n[domains.routing.pacing.accounts.michael]\npolicy='pace'\nwindows=['seven_day']\nreserve={seven_day=15}\ndeadline={reset_of='anese'}\n",
     )?;
     let list = call(&rig, &["route", "list", "--adapter", "claude"], 0)?;
-    assert_eq!(list["data"]["account_pacing"][0]["account"], "michael");
+    assert_eq!(list["data"]["account_pacing"][0]["account"], "opaque-one");
     assert_eq!(list["data"]["account_pacing"][0]["source"], "account");
     let resolved = call(&rig, &["route", "resolve", "claude/claude-haiku-5-5"], 0)?;
     let detail = resolved["data"]["pacing"][0]["detail"]
@@ -186,7 +218,7 @@ fn cached_account_pacing_is_visible_without_probing() -> Result {
             "pacing",
             "override",
             "--account",
-            "michael",
+            "opaque-one",
             "--policy",
             "spend",
             "--until",
@@ -201,6 +233,71 @@ fn cached_account_pacing_is_visible_without_probing() -> Result {
             .as_str()
             .ok_or("override detail")?
             .contains("source=override")
+    );
+    Ok(())
+}
+
+#[test]
+fn pacing_profile_account_labels_resolve_and_unknown_names_fail() -> Result {
+    let rig = rig()?;
+    fs::create_dir_all(&rig.state)?;
+    let registrations = "schema_version=1\n[domains.accounts.entries.claude-michael]\nadapter='claude'\nlabel='michael'\nkey='opaque-one'\ndirectory='/tmp/michael'\n[domains.accounts.entries.claude-anese]\nadapter='claude'\nlabel='anese'\nkey='opaque-two'\ndirectory='/tmp/anese'\n";
+    let config = rig.state.join("config.toml");
+    fs::write(
+        &config,
+        format!(
+            "{registrations}[domains.routing.pacing.accounts.michael]\npolicy='pace'\ndeadline={{reset_of='anese'}}\n[domains.routing.pacing.free.opencode]\ndeadline={{reset_of='michael'}}\n"
+        ),
+    )?;
+    let list = call(&rig, &["route", "list"], 0)?;
+    assert_eq!(
+        list["data"]["configured_accounts"]["opaque-one"]["deadline"]["reset_of"],
+        "opaque-two"
+    );
+    assert_eq!(
+        list["data"]["configured_free"]["opencode"]["deadline"]["reset_of"],
+        "opaque-one"
+    );
+    for profile in [
+        "[domains.routing.pacing.accounts.missing]\npolicy='pace'\n",
+        "[domains.routing.pacing.accounts.opaque-one]\ndeadline={reset_of='missing'}\n",
+        "[domains.routing.pacing.free.opencode]\ndeadline={reset_of='missing'}\n",
+    ] {
+        fs::write(&config, format!("{registrations}{profile}"))?;
+        let result = call(&rig, &["route", "list"], 2)?;
+        let message = result["error"]["message"].as_str().ok_or("error")?;
+        assert!(
+            message.contains("missing")
+                && message.contains("michael")
+                && message.contains("opaque-one"),
+            "{message}"
+        );
+    }
+    fs::write(
+        &config,
+        format!(
+            "{registrations}[domains.routing.pacing.accounts.michael]\npolicy='pace'\n[domains.routing.pacing.accounts.opaque-one]\npolicy='spend'\n"
+        ),
+    )?;
+    let duplicate = call(&rig, &["route", "list"], 2)?;
+    assert!(
+        duplicate["error"]["message"]
+            .as_str()
+            .ok_or("error")?
+            .contains("multiple pacing profiles")
+    );
+    fs::write(
+        &config,
+        format!(
+            "{registrations}[domains.accounts.entries.codex-michael]\nadapter='codex'\nlabel='michael'\nkey='opaque-three'\ndirectory='/tmp/codex'\n[domains.routing.pacing.accounts.michael]\npolicy='pace'\n"
+        ),
+    )?;
+    let ambiguous = call(&rig, &["route", "list"], 2)?;
+    assert!(
+        ambiguous["error"]["message"]
+            .as_str()
+            .ok_or("error")?
+            .contains("ambiguous")
     );
     Ok(())
 }

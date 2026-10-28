@@ -47,6 +47,10 @@ support effort, so an explicit value is refused before launch.
 `--confidential` excludes training or unclassified members and fallbacks.
 There is no classifier or route-synonym inference. Effort is set only when the
 catalogue contains an exact recorded control; unsupported effort is refused.
+`route resolve MODEL` reports the recorded supported efforts, including when a
+model takes none. Uncatalogued exact IDs remain available as unverified models;
+resolution and dispatch suggest nearby catalogue IDs, and an explicit effort
+is refused because no controls are recorded for the unlisted ID.
 
 The bundled Rust catalogue (`tools/front-door/crates/routing/assets/catalogue.toml`)
 owns default pool membership, weights, pacing and effort controls. Override a
@@ -128,6 +132,11 @@ These profiles illustrate how different accounts can share a provider:
 | agy | Set host-specific deadlines to stagger accounts, or pace both to their weekly limits. Gemini and Claude pools apply on both. |
 
 For example, in the selected state's `config.toml`:
+
+Account profile keys and `reset_of` accept registered account keys, entry IDs,
+or labels unique across adapters. Register the accounts before using the example;
+unknown or ambiguous names are reported with the available labels and keys.
+Do not configure multiple profiles for the same account under different names.
 
 ```toml
 [domains.routing.pacing.accounts.codex]
