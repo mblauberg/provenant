@@ -12,6 +12,16 @@ lists every leaf, flag and bound. Paths are relative to `tools/front-door/`.
 
 ## Local console catalogue
 
+The board composition helper accepts bounded host-owned peer pages and retains
+the local page and cursor. It qualifies deduplication by host, project and
+attempt, validates the host on each peer row, and reports duplicate, invalid
+and truncated observations as partial coverage. Unreachable and unsupported
+peers remain explicit. This helper is not yet connected to a peer transport or
+the console commands; the catalogue described below remains local.
+
+- Test: `crates/cli/src/console/peer.rs::tests::peer_board_coverage`
+- Owner: `crates/cli/src/console/peer.rs`
+
 ### Nested tree
 
 `console tree` reads host-local attempts, including retained terminal attempts,

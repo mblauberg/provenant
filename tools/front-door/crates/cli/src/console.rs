@@ -9,6 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 
 mod board;
 mod overview;
+pub mod peer;
 mod tree;
 
 pub use overview::summary_comparison;
