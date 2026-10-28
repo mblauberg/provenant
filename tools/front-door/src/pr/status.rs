@@ -161,15 +161,15 @@ pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
     })();
     match result {
         Ok(lines) => {
+            let attribution = std::cell::OnceCell::new();
             for line in &lines {
                 if matches!(line.state.as_str(), "CLOSED" | "MERGED") {
                     let closed = (|| -> Result<()> {
-                        let resolved = roots::resolve(
-                            globals,
-                            roots::Workspace::Checkout,
-                            roots::Product::Optional,
-                        )?;
-                        super::contributions::close(&resolved, line.number)
+                        let tracker = attribution
+                            .get_or_init(|| super::contributions::Tracker::resolve(globals))
+                            .as_ref()
+                            .map_err(|error| error.to_string())?;
+                        tracker.close(line.number)
                     })();
                     if let Err(error) = closed {
                         super::contributions::warn(Some(line.number), &error);

@@ -105,18 +105,28 @@ in `runs/<run>/pr-contribution-diagnostic.txt`, with a warning on stderr.
 
 Bindings belong to a project/branch generation. Landing and observed
 `CLOSED`/`MERGED` PRs (`pr status`, `land`, or `pr contributions N --bind`)
-close existing bindings. Every newly observed closure advances the generation;
+close existing bindings. Before binding, including after `pr open`, sweep every
+other locally open binding on the branch with one GitHub state lookup per PR.
+Close bindings GitHub reports as `CLOSED` or `MERGED` before inserting the new
+binding. A failed lookup warns and retains the existing binding behaviour.
+Every newly observed closure advances the generation;
 replays cannot reopen it or advance twice. PRs still open at the boundary retain
 bindings in the old generation and span into the new one. A newly bound PR only
 receives attempts from the current generation, even when an older PR remains
 open. Capture resolves only attempts and open PRs sharing a generation. Continuations and validated children inherit their
 parent's generation unless an authorised replacement changes branches.
-After external closure, observe the old PR with `pr status N` or
-`pr contributions N --bind` before reusing its branch. Historical links remain
+Capture stays offline. The sweep protects attempts captured after the next
+binding; it cannot retrospectively distinguish attempts captured between an
+external closure and that observation. To establish the boundary before new
+work, use `pr status N` or `pr contributions N --bind` on the old PR first.
+A closed-then-reopened PR is not re-tracked, even with `--bind`: closure is an
+immutable generation boundary and replay cannot reopen its binding. Open a new
+PR to track subsequent work. Historical links remain
 when the branch is removed. Links describe branch participation, not commit
 authorship. Automatic capture leaves weights unknown and never seals an
-allocation. An explicit sealed allocation continues to refuse a newly
-discovered link transactionally.
+allocation. Explicit links continue to refuse a newly discovered link after
+sealing. Automatic resolution skips sealed attempts without changing their
+allocation, continues binding other attempts and reports `coverage.skipped_sealed`.
 
 Multiple open PRs on one branch retain their links. An attempt linked to more
 than one PR without a sealed allocation is `ambiguous`; consumers must exclude
@@ -125,7 +135,7 @@ cost. The link cap is 256 per attempt. Additional links are skipped and
 coverage becomes `truncated`, including for a PR whose link was skipped. This
 does not block further dispatch, binding or landing. A study must count an
 attempt once per merged PR, keyed by host, repository, PR number and attempt,
-and exclude unbound, ambiguous, truncated or missing coverage until resolved.
+and exclude unbound, ambiguous, truncated, skipped or missing coverage until resolved.
 
 `provenant pr contributions N [--json]` reads retained local links without
 creating or migrating a store; GitHub's repository lookup supplies the
@@ -173,9 +183,10 @@ Coverage fields are always present and non-null:
 
 | Field | Values |
 |---|---|
-| `local_attempts` | `unbound` when the project is unregistered, the store is absent, or this PR has neither binding nor legacy links; otherwise `truncated` when any associated attempt lost a link, `ambiguous` when any row is ambiguous, or `captured`. The precedence is unbound, truncated, ambiguous, captured. An empty captured list is possible for a successfully bound PR with no captured attempts. |
+| `local_attempts` | `unbound` when the project is unregistered, the store is absent, or this PR has neither binding nor legacy links; otherwise `truncated` when any associated attempt lost a link, `skipped` when a sealed allocation prevented a link, `ambiguous` when any row is ambiguous, or `captured`. The precedence is unbound, truncated, skipped, ambiguous, captured. An empty captured list is possible for a successfully bound PR with no captured attempts. |
 | `ambiguous` | Boolean indicating any returned row has ambiguous allocation, independently of the coverage precedence. |
 | `truncated` | Boolean indicating omitted links, including attempts absent from the returned rows. |
+| `skipped_sealed` | Non-negative integer count of distinct branch attempts omitted from this PR because their allocation was already sealed, including attempts absent from the returned rows. Legacy schemas return zero. |
 | `peer_attempts` | Always `unknown`. |
 | `known_peer_hosts` | Array of configured peer host labels, sorted and deduplicated; empty when none are configured. |
 

@@ -42,29 +42,121 @@ fn project_id(resolved: &roots::Resolved) -> Result<Option<ProjectId>> {
     )
 }
 
-pub(super) fn bind(
-    resolved: &roots::Resolved,
-    branch: &str,
-    number: u64,
-    head: GitOid,
-) -> Result<()> {
-    let Some(project) = project_id(resolved)? else {
-        return Err("project is unbound; register the project before binding contributions".into());
-    };
-    let pr = PullRequest {
-        repository: repository(&resolved.project)?,
-        number,
-    };
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = Request {
-        clock: &clock,
-        cancel: &cancel,
-        budget: WaitBudget::cli(clock.mono_now(), 30)?,
-    };
-    Contributions::open(resolved.roots.state.as_path(), &call)?
-        .bind(project, branch, &pr, head, &call)?;
-    Ok(())
+/// One command owns one repository lookup, including bind and close retries.
+pub(super) struct Tracker {
+    resolved: roots::Resolved,
+    project: Option<ProjectId>,
+    repository: String,
+}
+
+impl Tracker {
+    pub(super) fn resolve(globals: &Globals) -> Result<Self> {
+        Self::new(roots::resolve(
+            globals,
+            roots::Workspace::Checkout,
+            roots::Product::Optional,
+        )?)
+    }
+
+    pub(super) fn new(resolved: roots::Resolved) -> Result<Self> {
+        Ok(Self {
+            project: project_id(&resolved)?,
+            repository: repository(&resolved.project)?,
+            resolved,
+        })
+    }
+
+    fn pr(&self, number: u64) -> PullRequest {
+        PullRequest {
+            repository: self.repository.clone(),
+            number,
+        }
+    }
+
+    pub(super) fn bind(&self, branch: &str, number: u64, head: GitOid) -> Result<()> {
+        let project = self
+            .project
+            .ok_or("project is unbound; register the project before binding contributions")?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = Request {
+            clock: &clock,
+            cancel: &cancel,
+            budget: WaitBudget::cli(clock.mono_now(), 30)?,
+        };
+        let db = Contributions::open(self.resolved.roots.state.as_path(), &call)?;
+        let pr = self.pr(number);
+        for candidate in db.open_bindings(project, branch, &call)? {
+            if candidate == pr {
+                continue;
+            }
+            let swept = (|| -> Result<()> {
+                #[derive(serde::Deserialize)]
+                struct State {
+                    state: String,
+                }
+                let bytes = successful(execute(
+                    &self.resolved.project,
+                    &[
+                        "gh",
+                        "pr",
+                        "view",
+                        &candidate.number.to_string(),
+                        "--repo",
+                        &candidate.repository,
+                        "--json",
+                        "state",
+                    ],
+                    false,
+                )?)?;
+                let state = serde_json::from_slice::<State>(&bytes)?.state;
+                if matches!(state.as_str(), "CLOSED" | "MERGED") {
+                    db.close(project, &candidate, &call)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = swept {
+                warn(
+                    Some(candidate.number),
+                    &format!("stale binding sweep failed: {error}"),
+                );
+            }
+        }
+        db.bind(project, branch, &pr, head, &call)?;
+        Ok(())
+    }
+
+    pub(super) fn close(&self, number: u64) -> Result<()> {
+        let project = self
+            .project
+            .ok_or("project is unbound; register the project before binding contributions")?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = Request {
+            clock: &clock,
+            cancel: &cancel,
+            budget: WaitBudget::cli(clock.mono_now(), 30)?,
+        };
+        // A status observation must never create a store.
+        let closed = if Contributions::open_read_only(self.resolved.roots.state.as_path(), &call)?
+            .is_some()
+        {
+            Contributions::open(self.resolved.roots.state.as_path(), &call)?.close(
+                project,
+                &self.pr(number),
+                &call,
+            )?
+        } else {
+            false
+        };
+        if !closed {
+            warn(
+                Some(number),
+                &"no open contribution binding to close; the binding is missing or was already closed",
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Workflow success must not depend on optional attribution storage.
@@ -77,28 +169,6 @@ pub(super) fn warn(number: Option<u64>, error: &dyn std::fmt::Display) {
     );
 }
 
-pub(super) fn close(resolved: &roots::Resolved, number: u64) -> Result<()> {
-    let Some(project) = project_id(resolved)? else {
-        return Err("project is unbound; register the project before binding contributions".into());
-    };
-    let pr = PullRequest {
-        repository: repository(&resolved.project)?,
-        number,
-    };
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = Request {
-        clock: &clock,
-        cancel: &cancel,
-        budget: WaitBudget::cli(clock.mono_now(), 30)?,
-    };
-    // A status observation must never create a store.
-    if Contributions::open_read_only(resolved.roots.state.as_path(), &call)?.is_some() {
-        Contributions::open(resolved.roots.state.as_path(), &call)?.close(project, &pr, &call)?;
-    }
-    Ok(())
-}
-
 pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
     const LEAF: &str = "pr contributions";
     let result = (|| -> Result<_> {
@@ -107,10 +177,9 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
             roots::Workspace::Checkout,
             roots::Product::Optional,
         )?;
-        let pr = PullRequest {
-            repository: repository(&resolved.project)?,
-            number,
-        };
+        let tracker = Tracker::new(resolved)?;
+        let resolved = &tracker.resolved;
+        let pr = tracker.pr(number);
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let call = Request {
@@ -118,7 +187,7 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
             cancel: &cancel,
             budget: WaitBudget::cli(clock.mono_now(), 30)?,
         };
-        let project_bound = project_id(&resolved)?.is_some();
+        let project_bound = tracker.project.is_some();
         if bind_requested {
             if !project_bound {
                 return Err(
@@ -129,14 +198,13 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
             if view.cross_repository {
                 return Err("cannot bind a fork PR to a local namesake branch".into());
             }
-            let bound = bind(
-                &resolved,
+            let bound = tracker.bind(
                 &view.branch,
                 number,
                 super::head(&resolved.project, &number.to_string())?,
             );
             let closed = if matches!(view.state.as_str(), "CLOSED" | "MERGED") {
-                close(&resolved, number)
+                tracker.close(number)
             } else {
                 Ok(())
             };
@@ -153,6 +221,11 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
             .map(|db| db.truncated_for_pr(&pr, &call))
             .transpose()?
             .unwrap_or(false);
+        let skipped_sealed = db
+            .as_ref()
+            .map(|db| db.skipped_sealed_for_pr(&pr, &call))
+            .transpose()?
+            .unwrap_or(0);
         let ambiguous = attempts.iter().any(|row| row.ambiguous);
         let bound = project_bound
             && db
@@ -164,6 +237,8 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
             "unbound"
         } else if truncated {
             "truncated"
+        } else if skipped_sealed > 0 {
+            "skipped"
         } else if ambiguous {
             "ambiguous"
         } else {
@@ -216,7 +291,9 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
                 attempt.pr_count, attempt.ambiguous, attempt.truncated
             ));
         }
-        text.push_str(&format!("local_attempts: {coverage}\n"));
+        text.push_str(&format!(
+            "local_attempts: {coverage}\nskipped_sealed: {skipped_sealed}\n"
+        ));
         text.push_str(&format!(
             "peer_attempts: unknown (known hosts: {})\n",
             if peers.is_empty() {
@@ -227,7 +304,7 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
         ));
         Ok((
             json!({"pull_request":pr,"attempts":attempts,
-            "coverage":{"local_attempts":coverage, "ambiguous":ambiguous,"truncated":truncated, "peer_attempts":"unknown","known_peer_hosts":peers}}),
+            "coverage":{"local_attempts":coverage, "ambiguous":ambiguous,"truncated":truncated,"skipped_sealed":skipped_sealed, "peer_attempts":"unknown","known_peer_hosts":peers}}),
             text,
         ))
     })();

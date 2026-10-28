@@ -378,14 +378,16 @@ impl Contributions {
                  ON CONFLICT(project,branch,repository,number,generation) DO UPDATE SET head=excluded.head",
                 params![project.to_string(), branch, pr.repository, number, head.to_string(), generation],
             )?;
-            tx.execute("UPDATE branch_prs SET head=?5 WHERE project=?1 AND branch=?2 AND repository=?3 AND number=?4", params![project.to_string(), branch, pr.repository, number, head.to_string()])?;
+            // A still-open PR can span generations; refresh each open binding.
+            tx.execute("UPDATE branch_prs SET head=?5 WHERE project=?1 AND branch=?2 AND repository=?3 AND number=?4 AND closed=0", params![project.to_string(), branch, pr.repository, number, head.to_string()])?;
             Self::resolve(tx, project, branch)
         })
     }
 
     /// Each observed closure ends a generation. Still-open PRs span the boundary.
     /// Replays never reopen the PR or advance the generation a second time.
-    pub fn close(&self, project: ProjectId, pr: &PullRequest, call: &Request<'_>) -> Result<()> {
+    /// Returns false when no open binding was available to close.
+    pub fn close(&self, project: ProjectId, pr: &PullRequest, call: &Request<'_>) -> Result<bool> {
         pr.validate()?;
         immediate(&self.0, call, |tx| {
             let bindings = {
@@ -411,6 +413,7 @@ impl Contributions {
                         .map_err(|_| RunError::Validation("PR number too large"))?
                 ],
             )?;
+            let closed = !bindings.is_empty();
             for branch in bindings {
                 let generation = Self::generation(tx, project, &branch)?;
                 // Retain old generations for inherited repairs and children.
@@ -424,7 +427,35 @@ impl Contributions {
                 )?;
                 tx.execute("INSERT INTO branch_generations VALUES (?1,?2,?3) ON CONFLICT(project,branch) DO UPDATE SET generation=excluded.generation", params![project.to_string(), branch, generation+1])?;
             }
-            Ok(())
+            Ok(closed)
+        })
+    }
+
+    /// Offline candidates for the command layer's GitHub state sweep.
+    pub fn open_bindings(
+        &self,
+        project: ProjectId,
+        branch: &str,
+        call: &Request<'_>,
+    ) -> Result<Vec<PullRequest>> {
+        if self.1 < 3 {
+            return Ok(Vec::new());
+        }
+        call.retry(|| {
+            let mut query = self.0.prepare(
+                "SELECT DISTINCT repository,number FROM branch_prs
+                 WHERE project=?1 AND branch=?2 AND closed=0 ORDER BY repository,number",
+            )?;
+            let rows = query.query_map(params![project.to_string(), branch], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            rows.map(|row| {
+                let (repository, number) = row?;
+                let number = u64::try_from(number)
+                    .map_err(|_| RunError::Validation("invalid contribution PR number"))?;
+                Ok(PullRequest { repository, number })
+            })
+            .collect()
         })
     }
 
@@ -436,6 +467,7 @@ impl Contributions {
                  JOIN branch_prs p USING(project,branch,generation)
                  LEFT JOIN links l ON l.attempt=a.attempt AND l.repository=p.repository AND l.number=p.number
                  WHERE a.project=?1 AND a.branch=?2 AND p.closed=0 AND l.attempt IS NULL
+                 AND NOT EXISTS(SELECT 1 FROM allocations s WHERE s.attempt=a.attempt)
                  ORDER BY a.attempt,p.repository,p.number")?;
             query
                 .query_map(params![project.to_string(), branch], |row| {
@@ -628,6 +660,31 @@ impl Contributions {
         })
     }
 
+    /// Sealed allocations omitted by automatic resolution, including absent rows.
+    pub fn skipped_sealed_for_pr(&self, pr: &PullRequest, call: &Request<'_>) -> Result<u64> {
+        pr.validate()?;
+        if self.1 < 3 {
+            return Ok(0);
+        }
+        call.retry(|| {
+            let count: i64 = self.0.query_row(
+                "SELECT count(DISTINCT a.attempt) FROM branch_attempts a
+                 JOIN branch_prs p USING(project,branch,generation)
+                 JOIN allocations s ON s.attempt=a.attempt
+                 WHERE p.repository=?1 AND p.number=?2 AND NOT EXISTS(
+                     SELECT 1 FROM links l WHERE l.attempt=a.attempt
+                     AND l.repository=p.repository AND l.number=p.number)",
+                params![
+                    pr.repository,
+                    i64::try_from(pr.number)
+                        .map_err(|_| RunError::Validation("PR number too large"))?
+                ],
+                |row| row.get(0),
+            )?;
+            u64::try_from(count).map_err(|_| RunError::Validation("invalid contribution count"))
+        })
+    }
+
     /// Read linked attempts once, preserving unknown weights.
     pub fn for_pr(&self, pr: &PullRequest, call: &Request<'_>) -> Result<Vec<Contribution>> {
         pr.validate()?;
@@ -732,16 +789,23 @@ mod tests {
         let head = GitOid::parse(&"a".repeat(40))?;
         db.capture(&attempt, "feat/x", "worker", &call)?;
         db.bind(context.project_id, "feat/x", &first, head, &call)?;
-        db.close(context.project_id, &first, &call)?;
-        db.close(context.project_id, &first, &call)?;
+        assert!(db.close(context.project_id, &first, &call)?);
+        assert!(!db.close(context.project_id, &first, &call)?);
         attempt.attempt_id = AttemptId::from_bytes([20; 16]);
         db.capture(&attempt, "feat/x", "worker", &call)?;
         assert_eq!(db.for_pr(&first, &call)?.len(), 1);
         db.bind(context.project_id, "feat/x", &second, head, &call)?;
         // Late capture/bind replays cannot move an old attempt or reopen a PR.
         db.capture(&old, "feat/x", "worker", &call)?;
-        db.bind(context.project_id, "feat/x", &first, head, &call)?;
+        db.bind(
+            context.project_id,
+            "feat/x",
+            &first,
+            GitOid::parse(&"b".repeat(40))?,
+            &call,
+        )?;
         assert_eq!(db.for_pr(&first, &call)?[0].attempt, old.attempt_id);
+        assert_eq!(db.for_pr(&first, &call)?[0].head, Some(head));
         assert_eq!(db.for_pr(&second, &call)?[0].attempt, attempt.attempt_id);
         // Simultaneously open PRs retain links, with explicit ambiguity.
         db.bind(context.project_id, "feat/x", &third, head, &call)?;
@@ -900,15 +964,21 @@ mod tests {
             number: 43,
             ..pr.clone()
         };
-        assert!(matches!(
-            db.bind(context.project_id, "feat", &other, head, &call),
-            Err(RunError::Validation("attempt allocation already sealed"))
-        ));
-        assert!(db.for_pr(&other, &call)?.is_empty());
+        let mut unsealed = queued.clone();
+        unsealed.attempt_id = AttemptId::from_bytes([11; 16]);
+        db.capture(&unsealed, "feat", "worker", &call)?;
+        db.bind(context.project_id, "feat", &other, head, &call)?;
+        db.bind(context.project_id, "feat", &other, head, &call)?;
+        let other_rows = db.for_pr(&other, &call)?;
+        assert_eq!(other_rows.len(), 1);
+        assert_eq!(other_rows[0].attempt, unsealed.attempt_id);
+        assert_eq!(db.skipped_sealed_for_pr(&other, &call)?, 1);
+        assert_eq!(db.skipped_sealed_for_pr(&pr, &call)?, 0);
         db.bind(context.project_id, "feat", &pr, head, &call)?;
         let rows = Contributions::open_read_only(context.state_root.as_path(), &call)?
             .ok_or("missing store")?
             .for_pr(&pr, &call)?;
+        let rows: Vec<_> = rows.into_iter().filter(|row| row.attempt == id).collect();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].model.as_deref(), Some("fixture/model"));
         assert_eq!(rows[0].account.as_deref(), Some("work"));
@@ -933,7 +1003,7 @@ mod tests {
         store.capture_child_contribution(id, &child, &call)?;
         store.capture_child_contribution(id, &child, &call)?;
         let rows = db.for_pr(&pr, &call)?;
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         let row = rows
             .iter()
             .find(|row| row.attempt == child.attempt_id)

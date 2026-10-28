@@ -247,7 +247,11 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
                 .ok_or_else(|| "opened PR but its number could not be read".to_owned())
                 .map_err(Into::into)
                 .and_then(|number| {
-                    super::contributions::bind(&resolved, &plan.branch, number, plan.head)
+                    super::contributions::Tracker::new(resolved)?.bind(
+                        &plan.branch,
+                        number,
+                        plan.head,
+                    )
                 });
             if let Err(error) = captured {
                 super::contributions::warn(number, &error);

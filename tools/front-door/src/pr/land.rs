@@ -694,16 +694,16 @@ pub(crate) fn run(
             return Err(format!("pull request head moved to {current}").into());
         }
         let view = pull(&project, &text)?;
+        let attribution = std::cell::OnceCell::new();
         if !view.cross_repository {
             let binding = (|| -> Result<()> {
-                let resolved = roots::resolve(
-                    globals,
-                    roots::Workspace::Checkout,
-                    roots::Product::Optional,
-                )?;
-                let bound = super::contributions::bind(&resolved, &view.branch, number, current);
+                let tracker = attribution
+                    .get_or_init(|| super::contributions::Tracker::resolve(globals))
+                    .as_ref()
+                    .map_err(|error| error.to_string())?;
+                let bound = tracker.bind(&view.branch, number, current);
                 let closed = if matches!(view.state.as_str(), "CLOSED" | "MERGED") {
-                    super::contributions::close(&resolved, number)
+                    tracker.close(number)
                 } else {
                     Ok(())
                 };
@@ -720,12 +720,11 @@ pub(crate) fn run(
         merged = view.state == "MERGED";
         if matches!(view.state.as_str(), "CLOSED" | "MERGED") && !view.cross_repository {
             let closed = (|| -> Result<()> {
-                let resolved = roots::resolve(
-                    globals,
-                    roots::Workspace::Checkout,
-                    roots::Product::Optional,
-                )?;
-                super::contributions::close(&resolved, number)
+                let tracker = attribution
+                    .get_or_init(|| super::contributions::Tracker::resolve(globals))
+                    .as_ref()
+                    .map_err(|error| error.to_string())?;
+                tracker.close(number)
             })();
             if let Err(error) = closed {
                 super::contributions::warn(Some(number), &error);
