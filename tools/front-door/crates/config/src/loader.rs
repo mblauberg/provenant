@@ -629,9 +629,24 @@ impl Overrides<'_> {
             path.push(key.into());
             let expected = at(self.defaults, path);
             if expected.is_none() {
-                self.issue(path, "unknown_key");
-            } else if let Some(table) = value.as_table().filter(|_| {
-                expected.and_then(Item::as_table).is_some_and(|table| {
+                // The aggregate's closed serde types (deny_unknown_fields for
+                // structs) distinguish an added map key from a field typo.
+                let candidate = probe(&Item::Table(self.defaults.clone()), path, value)
+                    .and_then(|item| item.into_table().ok());
+                if candidate.as_ref().is_some_and(decodes::<T>) {
+                    let dotted = path.join(".");
+                    copy_sites(value, &dotted, &dotted, self.sites, self.semantic_sites);
+                    set(effective, path, value.clone());
+                    walk_item(value, &dotted, None, &mut |key, _, _| {
+                        if let Some(site) = self.semantic_sites.get(key) {
+                            self.origins.insert(key.into(), site.value.origin.clone());
+                        }
+                    });
+                } else {
+                    self.issue(path, "unknown_key");
+                }
+            } else if let Some(table) = table(value).filter(|_| {
+                expected.and_then(table).is_some_and(|table| {
                     !table.is_empty()
                         || !probe(&Item::Table(self.defaults.clone()), path, value)
                             .and_then(|item| item.into_table().ok())
@@ -639,7 +654,7 @@ impl Overrides<'_> {
                             .is_some_and(decodes::<T>)
                 })
             }) {
-                self.apply::<T>(effective, table, path);
+                self.apply::<T>(effective, &table, path);
             } else {
                 let before = self.issues.len();
                 self.check::<T>(expected, value, path);
@@ -871,7 +886,11 @@ fn probe(base: &Item, path: &[String], leaf: &Item) -> Option<Item> {
         return Some(leaf.clone());
     };
     if let Some(mut table) = table(base) {
-        let child = probe(table.get(first)?, tail, leaf)?;
+        let child = if tail.is_empty() && table.get(first).is_none() {
+            leaf.clone()
+        } else {
+            probe(table.get(first)?, tail, leaf)?
+        };
         table.insert(first, child);
         Some(Item::Table(table))
     } else if let Some(items) = array(base) {

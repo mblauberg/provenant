@@ -28,12 +28,14 @@ use std::{
 mod children;
 mod provider;
 mod remote;
+mod review;
 mod targets;
 mod watch;
 pub use children::HostHolder;
 pub(crate) use provider::find_executable as provider_executable;
 #[cfg(feature = "fixture")]
 pub use provider::{prepare_fixture, writer_fixture_plan};
+pub use review::review;
 
 const PROMPT_LIMIT: u64 = 1024 * 1024;
 
@@ -663,7 +665,8 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
         run::RequestedRoute::Model {
             model: id, effort, ..
         } => (RouteChoice::Model(model(id)?), effort.clone()),
-        run::RequestedRoute::Named { name, effort } => (
+        run::RequestedRoute::Named { name, effort }
+        | run::RequestedRoute::Review { name, effort, .. } => (
             RouteChoice::NamedRoute(RouteName::parse(name).map_err(|error| error.to_string())?),
             effort.clone(),
         ),
@@ -2757,7 +2760,13 @@ fn report(
         attempt: None,
     };
     let (mut data, human, timed_out) = match wait {
-        Some(seconds) => wait_lanes(session, &[target], Condition::All, seconds, edge)?,
+        Some(seconds) => wait_lanes(
+            session,
+            &[target],
+            Condition::All,
+            Duration::from_secs(seconds),
+            edge,
+        )?,
         None => {
             let page = session
                 .service()
@@ -3257,7 +3266,7 @@ fn wait_lanes(
     session: &Session,
     targets: &[Target],
     condition: Condition,
-    seconds: u64,
+    duration: Duration,
     _edge: &Edge<'_>,
 ) -> Result<(Value, String, bool), Fail> {
     let picks = Picks {
@@ -3275,7 +3284,7 @@ fn wait_lanes(
         candidates(session, &picks, None),
         scope,
         condition,
-        Duration::from_secs(seconds),
+        duration,
         LOCAL_POLL,
     )?;
     waited_reply(session, waited)
@@ -3674,7 +3683,9 @@ fn route_label(record: &run::AttemptRecord) -> String {
         .or(record.resolved_route.as_ref());
     let (requested_model, requested_effort) = match &record.requested_route {
         run::RequestedRoute::Model { model, effort, .. } => (Some(model.clone()), effort.clone()),
-        run::RequestedRoute::Named { effort, .. } => (None, effort.clone()),
+        run::RequestedRoute::Named { effort, .. } | run::RequestedRoute::Review { effort, .. } => {
+            (None, effort.clone())
+        }
     };
     let Some(model) = ran
         .and_then(|route| {
@@ -4328,8 +4339,13 @@ fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                 }
             }
             if let Some(seconds) = command.wait {
-                let (lanes, rendered, timed_out) =
-                    wait_lanes(&session, &targets, Condition::All, seconds, edge)?;
+                let (lanes, rendered, timed_out) = wait_lanes(
+                    &session,
+                    &targets,
+                    Condition::All,
+                    Duration::from_secs(seconds),
+                    edge,
+                )?;
                 if timed_out && status == Status::Ok {
                     status = Status::Timeout;
                 }

@@ -2043,6 +2043,44 @@ bounds are null. Positional arguments have no long flag.
 }
 ```
 
+## `provenant review`
+
+| Argument | Contract |
+|---|---|
+| `target` | `{"name": "target", "positional": true, "required": true}` |
+| `--brief-file` | `{"name": "brief_file", "required": true}` |
+| `--shape` | `{"name": "shape"}` |
+| `--risk` | `{"name": "risk"}` |
+| `--kind` | `{"name": "kind"}` |
+| `--range` | `{"name": "range"}` |
+| `--wait` | `{"bounds": [1, 14400], "defaults": ["3600"], "name": "wait"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "target",
+        "brief_file",
+        "shape",
+        "risk",
+        "kind",
+        "range",
+        "wait"
+      ],
+      "multiple": true,
+      "name": "Review",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant status`
 
 | Argument | Contract |
