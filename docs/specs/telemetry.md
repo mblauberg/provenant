@@ -2,7 +2,7 @@
 
 Owner: `crates/telemetry` (reducer, prices, trace, usage log)
 Anchor: `crates/telemetry/src/tests.rs`, `crates/telemetry/src/usage/tests.rs`,
-`tests/usage.rs`
+`crates/telemetry/src/native.rs`, `tests/usage.rs`, `tests/telemetry_native.rs`
 
 Telemetry summarises run's terminal attempt records into per-route outcomes,
 usage and API-equivalent cost (the cost of the same tokens at published API
@@ -65,10 +65,17 @@ regex or alias. Cost is an estimate, not a bill.
 An explicit `--claude-subagents PATH` report reads usage metadata from one
 Claude session's `subagents` directory and groups usage and estimated cost by
 model. Message bodies are not used. Message IDs are deduplicated. These records
-remain separate from supervised attempts, and the option cannot be combined
-with attempt filters or `--usage`.
+are a standalone report, independent of the project and run store, and the
+option cannot be combined with attempt filters or `--usage`. The report must
+count and skip an incomplete, unterminated final JSON record while rejecting
+malformed interior records. Native model costs use the same money object as
+other telemetry costs and identify the reviewed price table. Pricing uses
+exact model identities, including dated snapshots present in the table;
+unknown or incomplete prices remain unknown.
 - Why: native sub-agent usage should be visible without counting it as a
   Provenant attempt or collecting conversation content.
+- Test: `crates/telemetry/src/native.rs::tests::imports_metadata_once_per_message_and_prices_exact_model`;
+  `tests/telemetry_native.rs::native_stats_runs_without_a_project_or_store_and_sanitises_output`
 - Owner: `crates/telemetry/src/`
 
 ## Trace export

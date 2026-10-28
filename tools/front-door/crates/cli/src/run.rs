@@ -4475,6 +4475,45 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
             provenant_telemetry::validate_prices(&config).map_err(|error| error.to_string())
         })
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error))?;
+    if let Some(path) = command.claude_subagents.as_deref() {
+        let native =
+            provenant_telemetry::claude_subagents(path, &prices).map_err(|error| match error {
+                provenant_telemetry::NativeError::Input(message) => {
+                    Fail::new(Status::Invalid, ErrorKind::Invalid, message)
+                }
+                provenant_telemetry::NativeError::Io(message) => {
+                    Fail::new(Status::Error, ErrorKind::Io, message)
+                }
+            })?;
+        let mut human = format!("{} native Claude subagents\n", native.agents);
+        if native.skipped_incomplete_lines > 0 {
+            human.push_str(&format!(
+                "{} incomplete final lines skipped\n",
+                native.skipped_incomplete_lines
+            ));
+        }
+        for row in &native.models {
+            let cost = row.cost_usd.as_ref().map_or_else(
+                || "unknown".to_owned(),
+                |cost| format!("est. API-equivalent ${}", cost.usd),
+            );
+            let billing = match row.price_table_billing {
+                Some(provenant_telemetry::BillingKind::Subscription) => {
+                    " (price-table subscription model)"
+                }
+                _ => "",
+            };
+            human.push_str(&format!(
+                "  {}: {} agents, {} messages, cost {}{}\n",
+                plain_text(&row.model, usize::MAX),
+                row.agents,
+                row.messages,
+                cost,
+                billing
+            ));
+        }
+        return Ok((json!({ "native_claude_subagents": native }), human));
+    }
     let instant = |time: Option<jiff::Timestamp>| {
         time.map(|t| WallTime::from_micros(t.as_microsecond()))
             .transpose()
@@ -4511,40 +4550,9 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         .unwrap_or_default();
     let report = provenant_telemetry::stats(facts, &prices, window)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
-    let mut human = stats_summary(&report.totals);
-    let native = command
-        .claude_subagents
-        .as_deref()
-        .map(|path| {
-            provenant_telemetry::claude_subagents(path, &prices)
-                .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))
-        })
-        .transpose()?;
-    if let Some(native) = &native {
-        human.push_str(&format!("{} native Claude subagents\n", native.agents));
-        for row in &native.models {
-            let cost = row.cost_usd.as_ref().map_or_else(
-                || "unknown".to_owned(),
-                |cost| format!("est. API-equivalent ${cost}"),
-            );
-            let billing = match row.price_table_billing {
-                Some(provenant_telemetry::BillingKind::Subscription) => {
-                    " (price-table subscription model)"
-                }
-                _ => "",
-            };
-            human.push_str(&format!(
-                "  {}: {} agents, {} messages, cost {}{}\n",
-                row.model, row.agents, row.messages, cost, billing
-            ));
-        }
-    }
-    let mut data = serde_json::to_value(&report)
+    let human = stats_summary(&report.totals);
+    let data = serde_json::to_value(&report)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
-    if let Some(native) = native {
-        data["native_claude_subagents"] = serde_json::to_value(native)
-            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
-    }
     Ok((data, human))
 }
 

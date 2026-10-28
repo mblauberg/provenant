@@ -52,9 +52,23 @@ output_excluding_reasoning = 50000000
 provider = "claude"
 model = "claude/claude-haiku-4-5"
 billing = "subscription"
-sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only; no verified price)"]
-# The Anthropic reference used here does not state Haiku 4.5 prices.
+sources = ["https://platform.claude.com/docs/en/models/haiku-4-5/overview"]
 [models.rates]
+uncached_input = 1000000
+cache_read = 100000
+cache_write = 1250000
+output_excluding_reasoning = 5000000
+
+[[models]]
+provider = "claude"
+model = "claude/claude-haiku-4-5-20251001"
+billing = "subscription"
+sources = ["https://platform.claude.com/docs/en/models/haiku-4-5/overview"]
+[models.rates]
+uncached_input = 1000000
+cache_read = 100000
+cache_write = 1250000
+output_excluding_reasoning = 5000000
 
 [[models]]
 provider = "claude"

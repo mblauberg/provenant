@@ -8,7 +8,7 @@ mod prices;
 mod reducer;
 mod trace;
 pub mod usage;
-pub use native::{NativeModel, NativeReport, claude_subagents};
+pub use native::{NativeError, NativeModel, NativeReport, claude_subagents};
 pub use prices::{
     BillingKind, Categories, ConfiguredModel, ConfiguredPrices, PriceError, PriceIdentity,
     PriceTable, Rates, validate_prices,

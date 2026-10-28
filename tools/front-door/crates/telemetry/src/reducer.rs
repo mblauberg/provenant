@@ -127,7 +127,7 @@ pub struct Money {
     pub usd: String,
 }
 impl Money {
-    fn from_numerator(numerator: u128) -> Result<Self, TelemetryError> {
+    pub(crate) fn from_numerator(numerator: u128) -> Result<Self, TelemetryError> {
         // Quotient/remainder avoids overflowing the numerator when rounding.
         let rounded = (numerator / 1_000_000)
             .checked_add(u128::from(numerator % 1_000_000 >= 500_000))

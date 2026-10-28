@@ -55,19 +55,34 @@ pub struct NativeModel {
     pub messages: u64,
     pub usage: Categories<TokenTotal>,
     /// API-equivalent USD estimate, absent if usage or prices are incomplete.
-    pub cost_usd: Option<String>,
+    pub cost_usd: Option<crate::Money>,
     pub cost_basis: &'static str,
 }
 #[derive(Serialize)]
 pub struct NativeReport {
     pub scope: &'static str,
     pub agents: u64,
+    pub skipped_incomplete_lines: u64,
+    pub prices: crate::PriceIdentity,
     pub models: Vec<NativeModel>,
 }
 
 /// Read only assistant IDs, model and usage metadata; other JSON fields are ignored.
-/// Fail on malformed transcripts rather than silently undercounting.
-pub fn claude_subagents(path: &Path, prices: &PriceTable) -> Result<NativeReport, String> {
+/// Reject malformed transcripts except a final incomplete JSON append, which is counted.
+#[derive(Debug, thiserror::Error)]
+pub enum NativeError {
+    #[error("{0}")]
+    Input(String),
+    #[error("{0}")]
+    Io(String),
+}
+impl From<&str> for NativeError {
+    fn from(value: &str) -> Self {
+        Self::Input(value.into())
+    }
+}
+
+pub fn claude_subagents(path: &Path, prices: &PriceTable) -> Result<NativeReport, NativeError> {
     let home = std::env::var_os("HOME").ok_or("cannot determine home directory")?;
     import_subagents(path, Path::new(&home), prices)
 }
@@ -76,8 +91,14 @@ const MAX_FILES: usize = 10_000;
 const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_MODELS: usize = 10_000;
+const MAX_MODEL_KEY_BYTES: usize = 1024 * 1024;
 
-fn import_subagents(path: &Path, home: &Path, prices: &PriceTable) -> Result<NativeReport, String> {
+fn import_subagents(
+    path: &Path,
+    home: &Path,
+    prices: &PriceTable,
+) -> Result<NativeReport, NativeError> {
     let home = home
         .canonicalize()
         .map_err(|_| "cannot resolve home directory")?;
@@ -98,17 +119,24 @@ fn import_subagents(path: &Path, home: &Path, prices: &PriceTable) -> Result<Nat
     {
         return Err("expected ~/.claude*/projects/<project>/<session>/subagents".into());
     }
-    let entries =
-        std::fs::read_dir(&path).map_err(|e| format!("cannot read subagents directory: {e}"))?;
+    let entries = std::fs::read_dir(&path)
+        .map_err(|e| NativeError::Io(format!("cannot read subagents directory: {e}")))?;
     let mut files = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|e| format!("cannot read subagents directory: {e}"))?;
+        let entry =
+            entry.map_err(|e| NativeError::Io(format!("cannot read subagents directory: {e}")))?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
+        if !name.ends_with(".jsonl") {
+            continue;
+        }
         if !name.starts_with("agent-")
             || !name.ends_with(".jsonl")
             || name.len() <= "agent-.jsonl".len()
-            || !entry.file_type().map_err(|e| e.to_string())?.is_file()
+            || !entry
+                .file_type()
+                .map_err(|e| NativeError::Io(e.to_string()))?
+                .is_file()
         {
             return Err(
                 "subagents directory contains an invalid or non-regular agent transcript".into(),
@@ -122,6 +150,7 @@ fn import_subagents(path: &Path, home: &Path, prices: &PriceTable) -> Result<Nat
     files.sort();
     let mut messages: BTreeMap<String, (String, Usage, BTreeSet<usize>)> = BTreeMap::new();
     let mut bytes = 0u64;
+    let mut skipped_incomplete_lines = 0u64;
     for (agent, path) in files.iter().enumerate() {
         let mut options = std::fs::OpenOptions::new();
         options.read(true);
@@ -132,8 +161,12 @@ fn import_subagents(path: &Path, home: &Path, prices: &PriceTable) -> Result<Nat
         }
         let file = options
             .open(path)
-            .map_err(|e| format!("cannot open subagent transcript: {e}"))?;
-        if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+            .map_err(|e| NativeError::Io(format!("cannot open subagent transcript: {e}")))?;
+        if !file
+            .metadata()
+            .map_err(|e| NativeError::Io(e.to_string()))?
+            .is_file()
+        {
             return Err("subagent transcript is not a regular file".into());
         }
         let allowance = MAX_FILE_BYTES.min(MAX_TOTAL_BYTES - bytes);
@@ -142,9 +175,9 @@ fn import_subagents(path: &Path, home: &Path, prices: &PriceTable) -> Result<Nat
         loop {
             let mut line = Vec::new();
             let read = (&mut reader)
-                .take(MAX_LINE_BYTES + 1)
+                .take(MAX_LINE_BYTES + 2)
                 .read_until(b'\n', &mut line)
-                .map_err(|e| format!("cannot read subagent transcript: {e}"))?
+                .map_err(|e| NativeError::Io(format!("cannot read subagent transcript: {e}")))?
                 as u64;
             if read == 0 {
                 break;
@@ -157,11 +190,18 @@ fn import_subagents(path: &Path, home: &Path, prices: &PriceTable) -> Result<Nat
             if bytes > MAX_TOTAL_BYTES {
                 return Err("native transcripts exceed 64 MiB".into());
             }
-            if read > MAX_LINE_BYTES {
+            let terminated = line.last() == Some(&b'\n');
+            if read - u64::from(terminated) > MAX_LINE_BYTES {
                 return Err("subagent transcript line exceeds 4 MiB".into());
             }
-            let record: Record =
-                serde_json::from_slice(&line).map_err(|_| "invalid subagent transcript JSON")?;
+            let record: Record = match serde_json::from_slice(&line) {
+                Ok(record) => record,
+                Err(error) if !terminated && error.is_eof() => {
+                    skipped_incomplete_lines += 1;
+                    break;
+                }
+                Err(_) => return Err("invalid subagent transcript JSON".into()),
+            };
             if record.kind.as_deref() != Some("assistant") {
                 continue;
             }
@@ -195,7 +235,16 @@ fn import_subagents(path: &Path, home: &Path, prices: &PriceTable) -> Result<Nat
         }
     }
     let mut by_model: BTreeMap<String, (BTreeSet<usize>, Vec<Usage>)> = BTreeMap::new();
+    let mut model_key_bytes = 0usize;
     for (model, usage, agents) in messages.into_values() {
+        if !by_model.contains_key(&model) {
+            model_key_bytes = model_key_bytes
+                .checked_add(model.len())
+                .ok_or("too many native models")?;
+            if by_model.len() == MAX_MODELS || model_key_bytes > MAX_MODEL_KEY_BYTES {
+                return Err("too many native models".into());
+            }
+        }
         let row = by_model.entry(model).or_default();
         row.0.extend(agents);
         row.1.push(usage);
@@ -242,9 +291,6 @@ fn import_subagents(path: &Path, home: &Path, prices: &PriceTable) -> Result<Nat
                 }
             }
         }
-        let micro = (numerator / 1_000_000)
-            .checked_add(u128::from(numerator % 1_000_000 >= 500_000))
-            .ok_or("native cost overflow")?;
         models.push(NativeModel {
             model,
             price_table_billing: billing,
@@ -252,12 +298,18 @@ fn import_subagents(path: &Path, home: &Path, prices: &PriceTable) -> Result<Nat
             messages: messages.len() as u64,
             usage: totals,
             cost_basis: "api_equivalent_estimate",
-            cost_usd: complete.then(|| format!("{}.{:06}", micro / 1_000_000, micro % 1_000_000)),
+            cost_usd: if complete {
+                Some(crate::Money::from_numerator(numerator).map_err(|_| "native cost overflow")?)
+            } else {
+                None
+            },
         });
     }
     Ok(NativeReport {
-        scope: "claude_native_subagents",
+        scope: "native_claude_subagents",
         agents: files.len() as u64,
+        skipped_incomplete_lines,
+        prices: prices.identity.clone(),
         models,
     })
 }
@@ -310,11 +362,48 @@ output_excluding_reasoning = 2000000
         assert_eq!(report.models[0].agents, 2);
         assert_eq!(report.models[0].messages, 1);
         assert_eq!(report.models[0].usage.output_excluding_reasoning.known, 5);
-        assert_eq!(report.models[0].cost_usd.as_deref(), Some("0.000020"));
+        assert_eq!(
+            report.models[0].cost_usd.as_ref().map(|m| m.usd.as_str()),
+            Some("0.000020")
+        );
         assert_eq!(
             serde_json::to_value(&report)?["models"][0]["cost_basis"],
             "api_equivalent_estimate"
         );
+        assert_eq!(
+            serde_json::to_value(&report)?["models"][0]["cost_usd"]["microdollars"],
+            20
+        );
+        assert_eq!(serde_json::to_value(&report)?["prices"]["id"], "test");
+        std::fs::write(session.join(".DS_Store"), "ignored")?;
+        std::fs::write(session.join("agent-a.jsonl.meta.json"), "ignored")?;
+        std::fs::write(session.join("agent-torn.jsonl"), b"{\"type\":\"assistant\"")?;
+        let report = import_subagents(&session, dir.path(), &validate_prices(&config)?)?;
+        assert_eq!(report.skipped_incomplete_lines, 1);
+        std::fs::write(session.join("agent-torn.jsonl"), b"{invalid}\n")?;
+        assert!(
+            import_subagents(&session, dir.path(), &validate_prices(&config)?)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("invalid subagent transcript JSON")
+        );
+        std::fs::remove_file(session.join("agent-torn.jsonl"))?;
+        std::fs::write(session.join("unexpected.jsonl"), "{}\n")?;
+        assert!(
+            import_subagents(&session, dir.path(), &validate_prices(&config)?)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("invalid or non-regular")
+        );
+        std::fs::remove_file(session.join("unexpected.jsonl"))?;
+        let mut max_line = b"{}".to_vec();
+        max_line.resize(MAX_LINE_BYTES as usize, b' ');
+        max_line.push(b'\n');
+        std::fs::write(session.join("agent-max.jsonl"), max_line)?;
+        assert!(import_subagents(&session, dir.path(), &validate_prices(&config)?).is_ok());
+        std::fs::remove_file(session.join("agent-max.jsonl"))?;
         assert!(import_subagents(dir.path(), dir.path(), &validate_prices(&config)?).is_err());
         std::fs::write(
             session.join("agent-too-long.jsonl"),
@@ -324,6 +413,7 @@ output_excluding_reasoning = 2000000
             import_subagents(&session, dir.path(), &validate_prices(&config)?)
                 .err()
                 .unwrap()
+                .to_string()
                 .contains("line exceeds")
         );
         std::fs::remove_file(session.join("agent-too-long.jsonl"))?;
@@ -334,9 +424,43 @@ output_excluding_reasoning = 2000000
                 import_subagents(&session, dir.path(), &validate_prices(&config)?)
                     .err()
                     .unwrap()
+                    .to_string()
                     .contains("non-regular")
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn limits_model_groups_and_prices_recorded_haiku_snapshot()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config: ConfiguredPrices =
+            toml_edit::de::from_str(include_str!("../../../../../config/telemetry-prices.toml"))?;
+        let prices = validate_prices(&config)?;
+        let dir = tempfile::tempdir()?;
+        let session = dir
+            .path()
+            .join(".claude/projects/project/session/subagents");
+        std::fs::create_dir_all(&session)?;
+        let path = session.join("agent-a.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"assistant\",\"message\":{\"id\":\"m\",\"model\":\"claude-haiku-4-5-20251001\",\"usage\":{\"input_tokens\":1000000,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0,\"output_tokens\":0}}}\n",
+        )?;
+        let report = import_subagents(&session, dir.path(), &prices)?;
+        assert_eq!(report.models[0].cost_usd.as_ref().unwrap().usd, "1.000000");
+        let mut records = String::new();
+        for i in 0..=MAX_MODELS {
+            records.push_str(&format!("{{\"type\":\"assistant\",\"message\":{{\"id\":\"{i}\",\"model\":\"model-{i}\",\"usage\":{{}}}}}}\n"));
+        }
+        std::fs::write(&path, records)?;
+        assert!(
+            import_subagents(&session, dir.path(), &prices)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("too many native models")
+        );
         Ok(())
     }
 }
