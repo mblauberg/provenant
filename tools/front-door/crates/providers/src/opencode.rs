@@ -26,6 +26,39 @@ crate::adapter!(OpenCode, "opencode", prepare);
 /// The JSON run stream carries no answering-model position.
 const MODEL_ON_WIRE: bool = false;
 
+/// The answering model from OpenCode's own session record, keyed by the
+/// stream's session id. Missing, ambiguous or unreadable records are unknown.
+pub fn observe_model(data: &std::path::Path, session: &str) -> Result<String, ProviderError> {
+    use rusqlite::{Connection, OpenFlags};
+    let db = Connection::open_with_flags(
+        data.join("opencode.db"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| ProviderError::UnknownIdentity)?;
+    db.busy_timeout(std::time::Duration::from_millis(250))
+        .map_err(|_| ProviderError::UnknownIdentity)?;
+    let mut statement = db
+        .prepare(
+            "SELECT DISTINCT json_extract(data,'$.providerID'), json_extract(data,'$.modelID') \
+             FROM message WHERE session_id=? AND json_extract(data,'$.role')='assistant' LIMIT 2",
+        )
+        .map_err(|_| ProviderError::UnknownIdentity)?;
+    let models = statement
+        .query_map([session], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(|_| ProviderError::UnknownIdentity)?;
+    match models.as_slice() {
+        [] => Err(ProviderError::UnknownIdentity),
+        [(Some(provider), Some(model))] => Ok(format!("opencode/{provider}/{model}")),
+        _ => Err(ProviderError::IdentityMismatch),
+    }
+}
+
 /// OpenCode uses the user's configuration and stored provider accounts.
 /// Inline permissions deny edits and shell commands for read-only runs.
 fn prepare(
@@ -409,6 +442,56 @@ crate::quota_source!(OpenCode, "opencode");
 mod tests {
     use super::*;
     use crate::Adapter;
+
+    fn store(rows: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let db = rusqlite::Connection::open(dir.path().join("opencode.db")).unwrap();
+        db.execute_batch("CREATE TABLE message (id TEXT, session_id TEXT, data TEXT)")
+            .unwrap();
+        for (index, (session, data)) in rows.iter().enumerate() {
+            db.execute(
+                "INSERT INTO message VALUES (?, ?, ?)",
+                (format!("m{index}"), session, data),
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    const GLM: &str =
+        r#"{"role":"assistant","providerID":"opencode","modelID":"glm-5.3-flash-free"}"#;
+    const OTHER: &str = r#"{"role":"assistant","providerID":"opencode","modelID":"other"}"#;
+
+    #[test]
+    fn model_comes_from_the_session_record() {
+        let dir = store(&[
+            ("ses_a", r#"{"role":"user"}"#),
+            ("ses_a", GLM),
+            ("ses_a", GLM),
+            ("ses_b", OTHER),
+        ]);
+        assert_eq!(
+            observe_model(dir.path(), "ses_a").unwrap(),
+            "opencode/opencode/glm-5.3-flash-free"
+        );
+    }
+
+    #[test]
+    fn missing_or_conflicting_records_stay_unknown() {
+        let dir = store(&[("ses_a", GLM), ("ses_a", OTHER)]);
+        assert!(matches!(
+            observe_model(dir.path(), "ses_a"),
+            Err(ProviderError::IdentityMismatch)
+        ));
+        assert!(matches!(
+            observe_model(dir.path(), "ses_none"),
+            Err(ProviderError::UnknownIdentity)
+        ));
+        assert!(matches!(
+            observe_model(&dir.path().join("absent"), "ses_a"),
+            Err(ProviderError::UnknownIdentity)
+        ));
+    }
 
     // Reduced from #1891: three tool steps, then final text without step_finish.
     const FINAL_TEXT_WITHOUT_FINISH: &str = concat!(

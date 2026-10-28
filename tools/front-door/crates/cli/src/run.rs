@@ -292,14 +292,37 @@ impl run::Providers for Registry<'_> {
                 .and_then(|thread| provider::observe_codex_rollout(provider_state, thread))
         });
         // The typed reason survives into the terminal record for diagnosis.
-        let rollout_error = rollout
+        let mut rollout_error = rollout
             .as_ref()
             .and_then(|observed| observed.as_ref().err())
             .map(|error| format!("Codex rollout identity: {error}"));
+        // OpenCode's stream names no model; its session record does.
+        let opencode_model = (adapter.id() == "opencode").then(|| {
+            let data = std::env::var_os("XDG_DATA_HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .or_else(|| self.home.map(|home| home.join(".local/share")))
+                .map(|data| data.join("opencode"))
+                .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
+            let session = outcome
+                .session()
+                .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
+            provenant_providers::opencode::observe_model(&data, session)
+        });
+        let opencode_model = match opencode_model {
+            Some(Ok(model)) => Some(model),
+            Some(Err(error)) => {
+                rollout_error = Some(format!("OpenCode session identity: {error}"));
+                None
+            }
+            None => None,
+        };
         let rollout = rollout.and_then(Result::ok);
         let observed_model = if adapter.id() == "codex" {
             // Missing or invalid rollout evidence cannot fall back to another source.
             rollout.as_ref().map(|turn| turn.model.as_str())
+        } else if adapter.id() == "opencode" {
+            opencode_model.as_deref()
         } else {
             outcome.model()
         };
@@ -322,6 +345,8 @@ impl run::Providers for Registry<'_> {
                 source: Some(
                     if rollout.is_some() {
                         "codex_rollout"
+                    } else if opencode_model.is_some() {
+                        "opencode_session"
                     } else {
                         "provider_stream"
                     }
@@ -5928,6 +5953,35 @@ mod tests {
         assert_eq!(
             decoded.reason.as_deref(),
             Some("Codex rollout identity: provider continuation identity is unknown")
+        );
+    }
+
+    #[test]
+    fn opencode_without_a_session_record_observes_no_model() {
+        let route = run::RouteRecord {
+            provider: Some("opencode".into()),
+            model: Some("opencode/opencode/glm-5.3-flash-free".into()),
+            ..Default::default()
+        };
+        let registry = Registry::default();
+        let stream = [
+            json!({"type":"text","sessionID":"ses_a","part":{"text":"OK"}}),
+            json!({"type":"step_finish","sessionID":"ses_a","part":{"reason":"stop"}}),
+        ]
+        .map(|frame| format!("{frame}\n"))
+        .concat();
+        let decoded = registry
+            .decode(
+                &route,
+                stream.as_bytes(),
+                &clean_exit(),
+                Path::new("/nonexistent"),
+            )
+            .unwrap();
+        assert!(decoded.observed_route.is_none());
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("OpenCode session identity: provider continuation identity is unknown")
         );
     }
 
