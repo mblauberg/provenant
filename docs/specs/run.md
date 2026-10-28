@@ -105,9 +105,11 @@ in `runs/<run>/pr-contribution-diagnostic.txt`, with a warning on stderr.
 
 Bindings belong to a project/branch generation. Landing and observed
 `CLOSED`/`MERGED` PRs (`pr status`, `land`, or `pr contributions N --bind`)
-close existing bindings. Closing the last open binding advances the generation;
-replays cannot reopen it. Capture and binding resolve only attempts and open
-PRs in the same generation. Continuations and validated children inherit their
+close existing bindings. Every newly observed closure advances the generation;
+replays cannot reopen it or advance twice. PRs still open at the boundary retain
+bindings in the old generation and span into the new one. A newly bound PR only
+receives attempts from the current generation, even when an older PR remains
+open. Capture resolves only attempts and open PRs sharing a generation. Continuations and validated children inherit their
 parent's generation unless an authorised replacement changes branches.
 After external closure, observe the old PR with `pr status N` or
 `pr contributions N --bind` before reusing its branch. Historical links remain

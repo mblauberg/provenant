@@ -278,8 +278,16 @@ impl Contributions {
                     ALTER TABLE branch_attempts ADD COLUMN queued_at INTEGER;
                     ALTER TABLE branch_attempts ADD COLUMN outcome TEXT;
                     ALTER TABLE branch_attempts ADD COLUMN finished_at INTEGER;
-                    ALTER TABLE branch_prs ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
-                    ALTER TABLE branch_prs ADD COLUMN closed INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE branch_prs RENAME TO branch_prs_v2;
+                    CREATE TABLE branch_prs (
+                        project TEXT NOT NULL, branch TEXT NOT NULL, repository TEXT NOT NULL,
+                        number INTEGER NOT NULL, head TEXT NOT NULL,
+                        generation INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(project,branch,repository,number,generation)
+                    ) STRICT;
+                    INSERT INTO branch_prs(project,branch,repository,number,head,generation)
+                        SELECT project,branch,repository,number,head,0 FROM branch_prs_v2;
+                    DROP TABLE branch_prs_v2;
                     CREATE TABLE branch_generations (
                         project TEXT NOT NULL, branch TEXT NOT NULL, generation INTEGER NOT NULL,
                         PRIMARY KEY(project,branch)
@@ -364,21 +372,24 @@ impl Contributions {
         immediate(&self.0, call, |tx| {
             let generation = Self::generation(tx, project, branch)?;
             tx.execute(
-                "INSERT INTO branch_prs(project,branch,repository,number,head,generation) VALUES (?1,?2,?3,?4,?5,?6)
-                 ON CONFLICT(project,branch,repository,number) DO UPDATE SET head=excluded.head",
+                "INSERT INTO branch_prs(project,branch,repository,number,head,generation)
+                 SELECT ?1,?2,?3,?4,?5,?6 WHERE NOT EXISTS(
+                    SELECT 1 FROM branch_prs WHERE project=?1 AND branch=?2 AND repository=?3 AND number=?4 AND closed=1)
+                 ON CONFLICT(project,branch,repository,number,generation) DO UPDATE SET head=excluded.head",
                 params![project.to_string(), branch, pr.repository, number, head.to_string(), generation],
             )?;
+            tx.execute("UPDATE branch_prs SET head=?5 WHERE project=?1 AND branch=?2 AND repository=?3 AND number=?4", params![project.to_string(), branch, pr.repository, number, head.to_string()])?;
             Self::resolve(tx, project, branch)
         })
     }
 
-    /// Close an observed binding. The last open PR ends this branch generation.
+    /// Each observed closure ends a generation. Still-open PRs span the boundary.
     /// Replays never reopen the PR or advance the generation a second time.
     pub fn close(&self, project: ProjectId, pr: &PullRequest, call: &Request<'_>) -> Result<()> {
         pr.validate()?;
         immediate(&self.0, call, |tx| {
             let bindings = {
-                let mut query = tx.prepare("SELECT branch,generation FROM branch_prs WHERE project=?1 AND repository=?2 AND number=?3 AND closed=0")?;
+                let mut query = tx.prepare("SELECT DISTINCT branch FROM branch_prs WHERE project=?1 AND repository=?2 AND number=?3 AND closed=0")?;
                 query
                     .query_map(
                         params![
@@ -387,7 +398,7 @@ impl Contributions {
                             i64::try_from(pr.number)
                                 .map_err(|_| RunError::Validation("PR number too large"))?
                         ],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                        |row| row.get::<_, String>(0),
                     )?
                     .collect::<std::result::Result<Vec<_>, _>>()?
             };
@@ -400,11 +411,18 @@ impl Contributions {
                         .map_err(|_| RunError::Validation("PR number too large"))?
                 ],
             )?;
-            for (branch, generation) in bindings {
-                let open: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM branch_prs WHERE project=?1 AND branch=?2 AND generation=?3 AND closed=0)", params![project.to_string(), branch, generation], |row| row.get(0))?;
-                if !open {
-                    tx.execute("INSERT INTO branch_generations VALUES (?1,?2,?3) ON CONFLICT(project,branch) DO UPDATE SET generation=MAX(generation,excluded.generation)", params![project.to_string(), branch, generation+1])?;
-                }
+            for branch in bindings {
+                let generation = Self::generation(tx, project, &branch)?;
+                // Retain old generations for inherited repairs and children.
+                // Only PRs already open at the boundary span into the new one.
+                tx.execute(
+                    "INSERT INTO branch_prs(project,branch,repository,number,head,generation)
+                     SELECT project,branch,repository,number,head,?3+1 FROM branch_prs
+                     WHERE project=?1 AND branch=?2 AND generation=?3 AND closed=0
+                     ON CONFLICT DO NOTHING",
+                    params![project.to_string(), branch, generation],
+                )?;
+                tx.execute("INSERT INTO branch_generations VALUES (?1,?2,?3) ON CONFLICT(project,branch) DO UPDATE SET generation=excluded.generation", params![project.to_string(), branch, generation+1])?;
             }
             Ok(())
         })
@@ -626,11 +644,12 @@ impl Contributions {
             let joins = if self.1 == 1 { "" } else {
                 "LEFT JOIN branch_attempts a USING(attempt) LEFT JOIN branch_prs p ON p.project=a.project AND p.branch=a.branch AND p.repository=l.repository AND p.number=l.number"
             };
+            let generation_join = if self.1 < 3 { "" } else { " AND p.generation=a.generation" };
             let truncated = if self.1 < 3 { "0" } else { "EXISTS(SELECT 1 FROM truncations t WHERE t.attempt=l.attempt)" };
             let sql = format!("SELECT l.attempt,l.weight,{metadata},
                 (SELECT count(*) FROM links c WHERE c.attempt=l.attempt),
                 NOT EXISTS(SELECT 1 FROM allocations s WHERE s.attempt=l.attempt),{truncated}
-                FROM links l {joins} WHERE l.repository=?1 AND l.number=?2 ORDER BY 10,l.attempt LIMIT 10001");
+                FROM links l {joins}{generation_join} WHERE l.repository=?1 AND l.number=?2 ORDER BY 10,l.attempt LIMIT 10001");
             let mut query = self.0.prepare(&sql)?;
             let mut rows = query.query(params![pr.repository, number])?;
             let mut result = Vec::new();
@@ -739,6 +758,18 @@ mod tests {
         db.capture(&attempt, "feat/x", "worker", &call)?;
         assert_eq!(db.for_pr(&second, &call)?.len(), 1);
         assert_eq!(db.for_pr(&third, &call)?.len(), 2);
+        let overlapping = PullRequest {
+            number: 14,
+            ..first.clone()
+        };
+        db.bind(context.project_id, "feat/x", &overlapping, head, &call)?;
+        let rows = db.for_pr(&overlapping, &call)?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].attempt, attempt.attempt_id);
+        // PR 12 spans the boundary, but PR 14 cannot absorb the earlier
+        // generation's attempt even while PR 12 is still open.
+        assert_eq!(db.for_pr(&third, &call)?.len(), 2);
+        db.close(context.project_id, &overlapping, &call)?;
         db.close(context.project_id, &third, &call)?;
         attempt.attempt_id = AttemptId::from_bytes([22; 16]);
         db.capture(&attempt, "feat/x", "worker", &call)?;
