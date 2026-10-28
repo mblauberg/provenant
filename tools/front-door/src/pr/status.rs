@@ -83,13 +83,25 @@ pub(crate) fn observe_ci(
     target: &str,
     names: &[String],
 ) -> provenant_fabric_runtime::graph::CiObservation {
+    observe_ci_with(
+        names,
+        || required_checks(project, target),
+        || counts(project, target),
+    )
+}
+
+fn observe_ci_with(
+    names: &[String],
+    resolve: impl FnOnce() -> Option<Vec<String>>,
+    read_checks: impl FnOnce() -> Option<Vec<Check>>,
+) -> provenant_fabric_runtime::graph::CiObservation {
     let required = if names.is_empty() {
-        required_checks(project, target).map(|names| ("branch-required", names))
+        resolve().map(|names| ("branch-required", names))
     } else {
         Some(("configured", names.to_vec()))
     };
     summarise_ci(
-        counts(project, target),
+        read_checks(),
         required
             .as_ref()
             .map(|(policy, names)| (*policy, names.as_slice())),
@@ -295,7 +307,7 @@ fn line(project: &Path, number: u64) -> Result<Line> {
         false,
     )?)?;
     let view: View = serde_json::from_slice(&bytes)?;
-    let checks = counts(project, &text);
+    let checks = counts(project, &text).filter(|checks| !checks.is_empty());
     let passed = checks.as_ref().map(|checks| {
         checks
             .iter()
@@ -365,6 +377,30 @@ pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_policy_lookup_uses_all_reported_checks() {
+        use super::*;
+        use provenant_fabric_runtime::graph::CiState;
+        for (bucket, expected) in [("fail", CiState::Failed), ("pending", CiState::Pending)] {
+            let observation = observe_ci_with(
+                &[],
+                || None,
+                || {
+                    Some(vec![Check {
+                        name: "build".into(),
+                        bucket: bucket.into(),
+                    }])
+                },
+            );
+            assert_eq!(observation.state, expected);
+            assert!(observation.summary.contains("policy=all-reported"));
+        }
+        assert_eq!(
+            observe_ci_with(&[], || None, || Some(vec![])).state,
+            CiState::Unavailable
+        );
+    }
+
     #[test]
     fn branch_requirements_merge_protection_and_paginated_rulesets() {
         use super::*;

@@ -213,11 +213,13 @@ fn pr_status_prints_one_compact_line_per_pull_request() -> Result {
              #1669 OPEN {OTHER} checks=2/4 fail=1 pending=1 merge=blocked review=none draft\n"
         )
     );
-    // An explicit empty JSON array is a genuine zero-check result.
+    // Empty check data is unavailable, rather than a passing result.
     fs::write(rig.project.join("checks.json"), "[]")?;
     let output = rig.command(&["pr", "status", "1668", "--json"])?;
     let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(report["data"][0]["checks_total"], 0);
+    assert!(report["data"][0]["checks_total"].is_null());
+    let output = rig.command(&["pr", "status", "1668"])?;
+    assert!(String::from_utf8(output.stdout.bytes)?.contains("checks=unavailable"));
     // A failed lookup is distinct and still returns the PR's other facts.
     fs::write(rig.project.join("checks-fail"), "")?;
     let output = rig.command(&["pr", "status", "1668", "--json"])?;
@@ -258,13 +260,13 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 return Ok(1);
             }
         }
-        "pr checks 1668 --json bucket" => {
+        "pr checks 1668 --json bucket" | "pr checks 1668 --json name,bucket" => {
             if Path::new("checks-fail").exists() {
                 return Ok(8);
             }
             io::stdout().write_all(&fs::read("checks.json")?)?;
         }
-        "pr checks 1669 --json bucket" => {
+        "pr checks 1669 --json name,bucket" => {
             // Like gh: the JSON still prints, and pending or failing checks exit non-zero.
             let checks = fs::read_to_string("checks-1669.json")?;
             write!(io::stdout(), "{checks}")?;
