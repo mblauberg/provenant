@@ -251,9 +251,15 @@ fn named_routes_reject_unlisted_models_even_when_provider_observed()
     context.access = &access;
     let mut query = request("codex/test")?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("review")?);
+    assert!(
+        config
+            .validate()
+            .iter()
+            .any(|error| { error.field == "routes.review.model" && error.code == "unknown_model" })
+    );
     assert!(matches!(
         resolve(&query, &context),
-        Err(RoutingError::Catalogue)
+        Err(RoutingError::InvalidValue)
     ));
     Ok(())
 }
@@ -261,15 +267,8 @@ fn named_routes_reject_unlisted_models_even_when_provider_observed()
 #[test]
 fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut catalogue = Catalogue::bundled()?;
-    let model = ModelId::parse("codex/fixture-model")?;
-    catalogue.models.push(ModelEntry {
-        model: model.clone(),
-        efforts: vec!["low".into(), "high".into()],
-        evidence_ref: "synthetic-controls".into(),
-        family: None,
-        trains_on_prompts: None,
-    });
+    let catalogue = Catalogue::bundled()?;
+    let model = ModelId::parse("codex/gpt-6.1-sol")?;
     let config = RoutingConfig {
         routes: BTreeMap::from([(
             "review".into(),
@@ -291,7 +290,7 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
     assert_eq!(resolve(&query, &context)?.effort.as_deref(), Some("low"));
     query.effort = Some("high".into());
     assert_eq!(resolve(&query, &context)?.effort.as_deref(), Some("high"));
-    query.effort = Some("max".into());
+    query.effort = Some("invented".into());
     assert!(matches!(
         resolve(&query, &context),
         Err(RoutingError::UnsupportedEffort)
@@ -1110,7 +1109,10 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     let roots = inputs.resolve(&Resolver)?;
     let cfg = provenant_config::load_with_domains(
         &roots,
-        Some("schema_version=1\n[domains.routing.routes.review]\nmodel='codex/exact'\n".as_bytes()),
+        Some(
+            "schema_version=1\n[domains.routing.routes.review]\nmodel='codex/gpt-6.1-sol'\n"
+                .as_bytes(),
+        ),
         &sections,
     )?;
     assert_eq!(
@@ -1119,14 +1121,15 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
             .routes
             .get("review")
             .map(|r| r.model.model()),
-        Some("exact")
+        Some("gpt-6.1-sol")
     );
-    let cfg: RoutingConfig =
-        toml_edit::de::from_str("[routes.review]\nmodel = 'opencode/openrouter/vendor/model'\n")?;
+    let cfg: RoutingConfig = toml_edit::de::from_str(
+        "[routes.review]\nmodel = 'opencode/opencode/glm-5.3-flash-free'\n",
+    )?;
     assert!(cfg.validate().is_empty());
     assert_eq!(
         cfg.routes.get("review").map(|r| r.model.model()),
-        Some("openrouter/vendor/model")
+        Some("opencode/glm-5.3-flash-free")
     );
     assert!(toml_edit::de::from_str::<RoutingConfig>("preferences = true\n[routes]").is_err());
     Ok(())

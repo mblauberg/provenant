@@ -70,7 +70,7 @@ fn config_and_install_defects_are_findings_but_escape_is_an_error() -> Result {
 
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version=1\n[domains.routing.routes.review]\nmodel='codex/exact'\n",
+        "schema_version=1\n[domains.routing.routes.review]\nmodel='codex/gpt-6-luna'\n",
     )?;
     let routing = rig.command(&["check", "config", "--json"])?;
     assert_eq!(code(&routing), 0);

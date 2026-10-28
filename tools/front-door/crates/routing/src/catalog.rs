@@ -99,6 +99,16 @@ impl DomainConfig for RoutingConfig {
         }
         let catalogue = Catalogue::bundled().ok();
         for (name, route) in &self.routes {
+            if catalogue
+                .as_ref()
+                .and_then(|value| value.model(&route.model))
+                .is_none()
+            {
+                errors.push(SectionError {
+                    field: format!("routes.{name}.model"),
+                    code: "unknown_model",
+                });
+            }
             let collides_with_pool = catalogue.as_ref().is_some_and(|value| value.has_pool(name));
             if !identifier(name)
                 || collides_with_pool

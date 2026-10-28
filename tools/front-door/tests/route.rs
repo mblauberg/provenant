@@ -327,10 +327,13 @@ fn route_config_verbs_edit_inline_domain_tables() -> Result {
 fn named_routes_are_read_only_and_fail_closed() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;
-    let config = "schema_version=1\n[domains.routing.routes.review]\nmodel='opencode/openrouter/vendor/exact'\n";
+    let config = "schema_version=1\n[domains.routing.routes.review]\nmodel='opencode/openrouter/~anthropic/claude-haiku-latest'\n";
     fs::write(rig.state.join("config.toml"), config)?;
     let resolved = call(&rig, &["route", "resolve", "--route", "review"], 0)?;
-    assert_eq!(resolved["data"]["model"], "openrouter/vendor/exact");
+    assert_eq!(
+        resolved["data"]["model"],
+        "openrouter/~anthropic/claude-haiku-latest"
+    );
     assert_eq!(fs::read_to_string(rig.state.join("config.toml"))?, config);
     // Only the usage counter may appear beside the config.
     let names = fs::read_dir(&rig.state)?

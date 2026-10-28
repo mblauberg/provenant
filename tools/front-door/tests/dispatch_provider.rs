@@ -181,7 +181,7 @@ fn opencode_dispatch_observes_v2_wal_session() -> Result {
             let lane = &lanes["data"]["lanes"][0];
             assert_eq!(lane["state"], expected, "{lane}");
             if expected == "succeeded" {
-                assert_eq!(lane["session"], "ses_x");
+                assert_eq!(lane["transcript"]["session"], "ses_x");
                 assert_eq!(
                     lane["observed_route"]["model"],
                     "opencode/opencode-go/beam-free"
