@@ -196,6 +196,14 @@ pub enum InboxResult {
     },
 }
 
+/// Owner response, including domain refusals without losing their stable code.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum InboxReply {
+    Ok { result: Box<InboxResult> },
+    Error { code: String, message: String },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum InboxError {
     #[error("inbox operation {operation_id}: {source}")]
@@ -282,21 +290,13 @@ pub fn validate_request(
 }
 
 fn validate_edge(
-    identity: &Identity,
-    config: &crate::config::FabricConfig,
+    _identity: &Identity,
+    _config: &crate::config::FabricConfig,
     in_lane: bool,
     mutation: bool,
 ) -> Result<(), InboxError> {
     if in_lane && mutation {
         return Err(InboxError::LaneMutation);
-    }
-    if identity
-        .federation
-        .as_ref()
-        .and_then(|project| config.home_hosts.get(project.key.as_str()))
-        .is_some_and(|host| *host != identity.host)
-    {
-        return Err(InboxError::UnsupportedOwner);
     }
     Ok(())
 }
@@ -337,6 +337,28 @@ impl InboxError {
     }
 }
 impl InboxInput {
+    pub fn operation_id(&self) -> Option<&OperationId> {
+        match self {
+            Self::Ask { operation_id, .. }
+            | Self::Answer { operation_id, .. }
+            | Self::Close { operation_id, .. }
+            | Self::Acknowledge { operation_id, .. } => operation_id.as_ref(),
+            Self::List { .. } => None,
+        }
+    }
+
+    /// Freeze a mutation ID before transport so a lost reply is identifiable.
+    pub fn freeze_operation(&mut self) -> Result<(), InboxError> {
+        if let Some(operation) = self.operation_mut()
+            && operation.is_none()
+        {
+            *operation = Some(
+                OperationId::parse(&provenant_core::hex(&entropy()?))
+                    .map_err(|_| InboxError::Invalid("operation_id"))?,
+            );
+        }
+        Ok(())
+    }
     pub fn is_mutation(&self) -> bool {
         !matches!(self, Self::List { .. })
     }
@@ -837,6 +859,8 @@ impl<'a> InboxService<'a> {
                     option_id: option_id.clone(),
                     text: text.clone(),
                     actor: self.identity.inbox.actor,
+                    source_host: (self.identity.inbox.host != self.identity.host)
+                        .then_some(self.identity.inbox.host),
                     channel: *channel,
                     answered_at: timestamp,
                     operation_id: operation.clone(),

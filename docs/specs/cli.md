@@ -217,6 +217,13 @@ rows and 10,000 summary baselines per project; the project also has a combined
 limit of 100,000 viewer rows. New rows are refused at capacity, preserving
 existing baselines; forget an unneeded baseline to free space.
 
+The console may list, show and answer requests on a configured owner host
+using the inbox CLI's `--host` or a `host:request` ID. Answers are human acts
+recorded by the owner with source host and peer actor provenance. Operation IDs
+bind retries and changed content conflicts. Close and acknowledgement remain
+owner-local operations and remote attempts return `owner_local_only`; run them
+on the owner or in the owning chair session. No delegation is implied.
+
 `console overview` combines local pending request titles and recent lane
 attention in one bounded read. Project labels use the registered Git common
 directory's parent name; unavailable labels and task titles are null. Inbox

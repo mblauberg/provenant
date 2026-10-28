@@ -207,6 +207,9 @@ pub struct HumanAnswer {
     /// Exact submitted text, including whitespace.
     pub text: Option<String>,
     pub actor: ActorId,
+    /// Source host for a federated answer; absent for local and legacy answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_host: Option<HostId>,
     pub channel: InteractionChannel,
     pub answered_at: WallTime,
     pub operation_id: OperationId,

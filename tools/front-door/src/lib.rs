@@ -518,12 +518,12 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             globals,
         ),
         Command::Inbox(args) => human_inbox(
-            provenant_cli::inbox::HumanCommand::Inbox(args),
+            provenant_cli::inbox::HumanCommand::Inbox(*args),
             &inv.leaf,
             globals,
         ),
         Command::Answer(args) => human_inbox(
-            provenant_cli::inbox::HumanCommand::Answer(args),
+            provenant_cli::inbox::HumanCommand::Answer(*args),
             &inv.leaf,
             globals,
         ),

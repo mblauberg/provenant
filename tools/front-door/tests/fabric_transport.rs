@@ -2531,6 +2531,211 @@ fn json_command(rig: &TestRig, args: &[&str]) -> Result<(i64, Value)> {
 }
 
 #[test]
+fn remote_inbox_owner() -> Result {
+    let mut rig = TestRig::new()?;
+    let peer = loopback_peer(&mut rig)?;
+    let (_, local_identity) = json_command(&rig, &["fabric", "identity", "--json"])?;
+    let draft = rig.root.join("inbox-draft.json");
+    std::fs::write(
+        &draft,
+        serde_json::to_vec(&json!({
+            "kind":"question", "title":"Question", "body":"Please reply", "blocking":false,
+            "options":[], "recommended_option_id":null, "proceeding_with":null
+        }))?,
+    )?;
+    let peer_state = rig.root.join("peer-state");
+    let create = |operation: &str| -> Result<String> {
+        let output = rig.execute_os(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &[
+                "--state-dir".into(),
+                peer_state.clone().into(),
+                "--json".into(),
+                "ask".into(),
+                "--file".into(),
+                draft.clone().into(),
+                "--session".into(),
+                "chair-a".into(),
+                "--operation-id".into(),
+                operation.into(),
+            ],
+            None,
+        )?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        Ok(value["data"]["request_id"]
+            .as_str()
+            .ok_or("request id")?
+            .into())
+    };
+    let id = create("remote-ask")?;
+    let other = create("remote-close-ask")?;
+    let qualified = format!("{peer}:{id}");
+    let (status, listed) = json_command(
+        &rig,
+        &["inbox", "--host", "workshop", "--state", "all", "--json"],
+    )?;
+    assert_eq!(status, 0, "{listed}");
+    assert!(
+        listed["data"]["items"]
+            .as_array()
+            .ok_or("items")?
+            .iter()
+            .any(|item| item["id"] == id && item["owner_host"] == peer.to_string())
+    );
+    let reply_file = rig.root.join("reply.txt");
+    std::fs::write(&reply_file, "Yes")?;
+    let reply_path = reply_file.to_str().ok_or("reply path")?;
+    let args = [
+        "answer",
+        &qualified,
+        "--action",
+        "reply",
+        "--text-file",
+        reply_path,
+        "--expect-revision",
+        "1",
+        "--channel",
+        "console",
+        "--operation-id",
+        "remote-answer",
+        "--json",
+    ];
+    let (status, answer) = json_command(&rig, &args)?;
+    assert_eq!(status, 0, "{answer}");
+    assert_eq!(answer["data"]["operation_id"], "remote-answer");
+    let (status, replay) = json_command(&rig, &args)?;
+    assert_eq!(status, 0, "{replay}");
+    assert_eq!(answer["data"], replay["data"]);
+    std::fs::write(&reply_file, "Different")?;
+    let (status, conflict) = json_command(&rig, &args)?;
+    assert_ne!(status, 0);
+    assert_eq!(conflict["error"]["code"], "operation_conflict");
+    let mut new_operation = args;
+    new_operation[11] = "another-answer";
+    let (status, conflict) = json_command(&rig, &new_operation)?;
+    assert_ne!(status, 0);
+    assert_eq!(conflict["error"]["code"], "conflict");
+    let (_, before_answered) = json_command(&rig, &["inbox", &qualified, "--json"])?;
+    let (_, before_open) = json_command(&rig, &["inbox", &format!("{peer}:{other}"), "--json"])?;
+    // Bypass CLI routing and send forged mutations directly to the owner.
+    let answer_id = answer["data"]["answer_id"].as_str().ok_or("answer id")?;
+    let key = local_identity["data"]["federation"]["key"]
+        .as_str()
+        .ok_or("project key")?;
+    for (input, expected) in [
+        (
+            json!({"op":"close","id":other,"state":"withdrawn","reason":"forged","expect_revision":1,"operation_id":"forged-close"}),
+            "owner_local_only",
+        ),
+        (
+            json!({"op":"acknowledge","id":id,"answer_id":answer_id,"session":"chair-a","operation_id":"forged-ack"}),
+            "owner_local_only",
+        ),
+        (
+            json!({"op":"ask","session":"chair-a","request":{"kind":"question","title":"Forged","body":"No","blocking":false,"options":[],"recommended_option_id":null,"proceeding_with":null},"operation_id":"forged-ask"}),
+            "invalid_input",
+        ),
+        (
+            json!({"op":"answer","id":other,"action":"reply","option_id":null,"text":"No ID","expect_revision":1,"channel":"console","operation_id":null}),
+            "invalid_input",
+        ),
+    ] {
+        let request = json!({
+            "version":1, "protocol":provenant_fabric_runtime::hosts::INBOX_PROTOCOL,
+            "target_host":peer.to_string(), "source_host":local_identity["data"]["host"],
+            "agent":"fixture", "project":{"key":key,"common_dir":"repo/.git"},
+            "action":{"action":"inbox","input":input}
+        });
+        let output = rig.execute_os(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &[
+                "--state-dir".into(),
+                peer_state.clone().into(),
+                "fabric".into(),
+                "peer".into(),
+                "--in-process".into(),
+            ],
+            Some(&serde_json::to_vec(&request)?),
+        )?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(response["result"]["data"]["code"], expected, "{response}");
+    }
+    let (status, close) = json_command(
+        &rig,
+        &[
+            "inbox",
+            "close",
+            &other,
+            "--host",
+            "workshop",
+            "--state",
+            "withdrawn",
+            "--reason",
+            "obsolete",
+            "--expect-revision",
+            "1",
+            "--operation-id",
+            "remote-close",
+            "--json",
+        ],
+    )?;
+    assert_ne!(status, 0);
+    assert_eq!(close["error"]["code"], "owner_local_only");
+    let (status, ack) = json_command(
+        &rig,
+        &[
+            "inbox",
+            "acknowledge",
+            &qualified,
+            "--answer",
+            answer_id,
+            "--session",
+            "chair-a",
+            "--operation-id",
+            "remote-ack",
+            "--json",
+        ],
+    )?;
+    assert_ne!(status, 0);
+    assert_eq!(ack["error"]["code"], "owner_local_only");
+    let (status, shown) = json_command(&rig, &["inbox", &qualified, "--json"])?;
+    assert_eq!(status, 0, "{shown}");
+    assert_eq!(
+        shown["data"]["item"]["answer"]["source_host"],
+        local_identity["data"]["host"]
+    );
+    assert_eq!(
+        shown["data"]["item"]["answer"]["actor"],
+        local_identity["data"]["inbox"]["actor"]
+    );
+    assert_eq!(shown["data"], before_answered["data"]);
+    assert_eq!(shown["data"]["item"]["delivery"]["state"], "queued");
+    let (status, untouched) = json_command(&rig, &["inbox", &format!("{peer}:{other}"), "--json"])?;
+    assert_eq!(status, 0, "{untouched}");
+    assert_eq!(untouched["data"], before_open["data"]);
+    assert_eq!(untouched["data"]["item"]["request"]["state"], "open");
+    assert!(!rig.state.join("fabric").exists());
+    std::fs::write(rig.root.join("ssh"), "#!/bin/sh\nexit 1\n")?;
+    let (status, offline) = json_command(&rig, &["inbox", "--host", "workshop", "--json"])?;
+    assert_ne!(status, 0);
+    assert_eq!(offline["error"]["code"], "owner_unavailable");
+    assert!(!rig.state.join("fabric").exists());
+    Ok(())
+}
+
+#[test]
 fn writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch() -> Result {
     let rig = TestRig::new()?;
     let commit = rig.execute(

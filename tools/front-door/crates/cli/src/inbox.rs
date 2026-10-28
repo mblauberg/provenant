@@ -9,6 +9,29 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// A request ID may be qualified with the owning host ID, separated by ':'.
+#[derive(Debug, Clone)]
+pub struct RequestRef {
+    host: Option<provenant_core::HostId>,
+    id: HumanRequestId,
+}
+impl std::str::FromStr for RequestRef {
+    type Err = &'static str;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (host, id) = match value.split_once(':') {
+            Some((host, id)) => (
+                Some(provenant_core::HostId::parse(host).map_err(|_| "invalid owner host ID")?),
+                id,
+            ),
+            None => (None, value),
+        };
+        Ok(Self {
+            host,
+            id: HumanRequestId::parse(id).map_err(|_| "invalid request ID")?,
+        })
+    }
+}
+
 /// Resolve a delivery target from the workflow owner's registered chair.
 pub fn resolve_delivery_target(
     root: &provenant_core::StateRoot,
@@ -82,7 +105,10 @@ pub struct Ask {
 }
 #[derive(Debug, Args)]
 pub struct Answer {
-    pub id: HumanRequestId,
+    pub id: RequestRef,
+    /// Owner host label or host ID
+    #[arg(long)]
+    pub host: Option<String>,
     #[arg(long, value_enum)]
     pub action: Action,
     #[arg(long)]
@@ -105,12 +131,12 @@ pub struct Answer {
 pub struct Inbox {
     #[command(subcommand)]
     pub command: Option<InboxCommand>,
-    pub id: Option<HumanRequestId>,
+    pub id: Option<RequestRef>,
     #[arg(long, value_enum, default_value = "open")]
     pub state: Filter,
     #[arg(long)]
     pub session: Option<String>,
-    /// This slice supports the local owner only; remote targets are refused
+    /// Owner host label or host ID
     #[arg(long)]
     pub host: Option<String>,
     #[arg(long,default_value="50",value_parser=clap::value_parser!(u64).range(1..=100))]
@@ -122,7 +148,10 @@ pub struct Inbox {
 pub enum InboxCommand {
     /// Close without treating silence as approval
     Close {
-        id: HumanRequestId,
+        id: RequestRef,
+        /// Owner host label or host ID
+        #[arg(long)]
+        host: Option<String>,
         #[arg(long, value_enum)]
         state: Closure,
         #[arg(long)]
@@ -134,7 +163,10 @@ pub enum InboxCommand {
     },
     /// Record consumption by the exact owning chair session and actor
     Acknowledge {
-        id: HumanRequestId,
+        id: RequestRef,
+        /// Owner host label or host ID
+        #[arg(long)]
+        host: Option<String>,
         #[arg(long)]
         answer: HumanAnswerId,
         #[arg(long)]
@@ -193,7 +225,7 @@ impl HumanCommand {
                 operation_id: args.operation_id,
             },
             Self::Answer(args) => InboxInput::Answer {
-                id: args.id,
+                id: args.id.id,
                 action: match args.action {
                     Action::Choose => AnswerAction::Choose,
                     Action::Reply => AnswerAction::Reply,
@@ -225,12 +257,13 @@ impl HumanCommand {
             }) => match command {
                 InboxCommand::Close {
                     id,
+                    host: _,
                     state,
                     reason,
                     expect_revision,
                     operation_id,
                 } => InboxInput::Close {
-                    id,
+                    id: id.id,
                     state: match state {
                         Closure::Withdrawn => RequestState::Withdrawn,
                         Closure::Superseded => RequestState::Superseded,
@@ -242,18 +275,19 @@ impl HumanCommand {
                 },
                 InboxCommand::Acknowledge {
                     id,
+                    host: _,
                     answer,
                     session,
                     operation_id,
                 } => InboxInput::Acknowledge {
-                    id,
+                    id: id.id,
                     answer_id: answer,
                     session,
                     operation_id: Some(operation_id),
                 },
             },
             Self::Inbox(args) => InboxInput::List {
-                id: args.id,
+                id: args.id.map(|reference| reference.id),
                 session: args.session,
                 state: match args.state {
                     Filter::Open => provenant_fabric_runtime::inbox::InboxFilter::Open,
@@ -282,10 +316,35 @@ enum Error {
     Time(#[from] provenant_core::TimeError),
     #[error("{0}")]
     Input(&'static str),
+    #[error("{message}")]
+    Remote {
+        code: String,
+        message: String,
+        operation_id: Option<OperationId>,
+    },
 }
 impl Error {
     fn outcome_code(&self) -> (Outcome, &'static str) {
         match self {
+            Self::Remote { code, .. } => (
+                Outcome::Error,
+                match code.as_str() {
+                    "owner_local_only" => "owner_local_only",
+                    "unsupported_owner" => "unsupported_owner",
+                    "owner_unavailable" => "owner_unavailable",
+                    "ambiguous_outcome" => "ambiguous_outcome",
+                    "conflict" => "conflict",
+                    "operation_conflict" => "operation_conflict",
+                    "not_found" => "not_found",
+                    "invalid_input" => "invalid_input",
+                    "cursor_expired" => "cursor_expired",
+                    "request_limit" => "request_limit",
+                    "busy" => "busy",
+                    "cancelled" => "cancelled",
+                    "work_mismatch" => "work_mismatch",
+                    _ => "inbox_unavailable",
+                },
+            ),
             Self::Inbox(error) => (
                 match error.code() {
                     "invalid_input" | "not_found" | "work_mismatch" => Outcome::Invalid,
@@ -341,28 +400,134 @@ fn read_text_file(path: &Path) -> Result<String, Error> {
     }
     String::from_utf8(bytes).map_err(|_| Error::Input("answer file must be UTF-8"))
 }
+fn is_local_host(name: &str, own: Option<provenant_core::HostId>) -> bool {
+    name == "local" || own.is_some_and(|id| name == id.to_string())
+}
+
+fn remote_error(code: String, message: String, operation_id: Option<OperationId>) -> Error {
+    let operation_id =
+        operation_id.filter(|_| matches!(code.as_str(), "ambiguous_outcome" | "owner_unavailable"));
+    let message = match &operation_id {
+        Some(id) => format!("inbox operation {id}: {message}"),
+        None => message,
+    };
+    Error::Remote {
+        code,
+        message,
+        operation_id,
+    }
+}
+
 fn execute(
     command: HumanCommand,
     roots: provenant_core::Roots,
     home: &Path,
     cwd: &Path,
 ) -> Result<InboxResult, Error> {
-    // Refuse remote selection before opening any local store.
     let host = match &command {
-        HumanCommand::Inbox(args) => args.host.clone(),
+        HumanCommand::Answer(args) => args.host.clone(),
+        HumanCommand::Inbox(args) => match &args.command {
+            Some(InboxCommand::Close { host, .. } | InboxCommand::Acknowledge { host, .. }) => {
+                host.clone()
+            }
+            None => args.host.clone(),
+        },
         _ => None,
     };
-    let input = command.input()?;
+    let qualified = match &command {
+        HumanCommand::Answer(args) => args.id.host,
+        HumanCommand::Inbox(args) => match &args.command {
+            Some(InboxCommand::Close { id, .. } | InboxCommand::Acknowledge { id, .. }) => id.host,
+            None => args.id.as_ref().and_then(|id| id.host),
+        },
+        _ => None,
+    };
+    let mut input = command.input()?;
     if input.is_mutation() && crate::fabric::in_lane() {
         return Err(InboxError::LaneMutation.into());
     }
     input.validate()?;
-    let context = Context::open(roots, home, cwd)?;
-    if host.is_some_and(|host| host != context.identity.host.to_string()) {
-        return Err(InboxError::UnsupportedOwner.into());
+    let own = provenant_config::lookup_host(&roots).map_err(crate::fabric::EdgeError::from)?;
+    let selected = host.clone().or_else(|| qualified.map(|id| id.to_string()));
+    let context = if selected
+        .as_deref()
+        .is_some_and(|name| !is_local_host(name, own))
+    {
+        Context::open_read_only(roots, home, cwd)?
+    } else {
+        Context::open(roots, home, cwd)?
+    };
+    if let (Some(name), Some(qualified)) = (&host, qualified) {
+        let selected = if is_local_host(name, Some(context.identity.host)) {
+            Some(context.identity.host)
+        } else {
+            context.peer_host(name)
+        };
+        if selected != Some(qualified) {
+            return Err(Error::Input("request owner does not match --host"));
+        }
     }
+    let host = host.or_else(|| qualified.map(|host| host.to_string()));
     let clock = provenant_os::clock::SystemClock;
     let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+    if let Some(host) = host.filter(|host| !is_local_host(host, Some(context.identity.host))) {
+        if matches!(
+            input,
+            InboxInput::Close { .. } | InboxInput::Acknowledge { .. }
+        ) {
+            return Err(Error::Remote {
+                code: "owner_local_only".into(),
+                message: format!(
+                    "inbox owner {host}: run this operation on the owner host or from the owning chair session"
+                ),
+                operation_id: None,
+            });
+        }
+        input.freeze_operation()?;
+        let operation_id = input.operation_id().cloned();
+        let target = context.peer_host(&host).ok_or_else(|| {
+            remote_error(
+                "owner_unavailable".into(),
+                format!("inbox owner {host} is not configured"),
+                operation_id.clone(),
+            )
+        })?;
+        let reply = context.peer(
+            &clock,
+            target,
+            provenant_fabric_runtime::hosts::PeerAction::Inbox { input },
+            budget,
+            &provenant_core::CancelToken::new(),
+        );
+        return match reply {
+            Ok(provenant_fabric_runtime::hosts::PeerResult::Inbox(
+                provenant_fabric_runtime::inbox::InboxReply::Ok { result },
+            )) => Ok(*result),
+            Ok(provenant_fabric_runtime::hosts::PeerResult::Inbox(
+                provenant_fabric_runtime::inbox::InboxReply::Error { code, message },
+            )) => Err(remote_error(code, message, operation_id.clone())),
+            Ok(_) => Err(Error::Remote {
+                code: "unsupported_owner".into(),
+                message: "peer does not support inbox operations".into(),
+                operation_id: None,
+            }),
+            Err(failure) => {
+                use provenant_fabric_runtime::coordination::facade::FacadeError;
+                let code = match failure.error {
+                    FacadeError::LaunchUnknown { .. } => "ambiguous_outcome",
+                    FacadeError::PeerVersion | FacadeError::PeerProtocolMismatch { .. } => {
+                        "unsupported_owner"
+                    }
+                    _ => "owner_unavailable",
+                };
+                Err(remote_error(
+                    code.into(),
+                    failure.detail.unwrap_or_else(|| failure.error.to_string()),
+                    operation_id,
+                ))
+            }
+        };
+    }
     Ok(provenant_fabric_runtime::inbox::execute(
         &context.roots.state,
         &context.identity,
@@ -402,6 +567,9 @@ pub fn run(
                 message: error.to_string(),
                 cause: None,
                 repair: match &error {
+                    Error::Remote { operation_id: Some(operation_id), .. } => Some(format!(
+                        "Retry the same request with --operation-id {operation_id}; preserve its original content and revision."
+                    )),
                     Error::Inbox(InboxError::Mutation { operation_id, source }) if matches!(source.code(),"busy"|"cancelled"|"inbox_unavailable") => Some(format!(
                         "Retry the same request with --operation-id {operation_id}; preserve its original content and revision."
                     )),
@@ -445,5 +613,22 @@ pub fn run(
     ) {
         Ok(status) => crate::exit_status(&status),
         Err(_) => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_uncertain_answer_retains_operation_id() {
+        let operation = OperationId::parse("retry-answer").expect("valid operation");
+        for code in ["ambiguous_outcome", "owner_unavailable"] {
+            let error = remote_error(code.into(), "peer failed".into(), Some(operation.clone()));
+            assert!(error.to_string().contains("retry-answer"));
+            assert!(
+                matches!(error, Error::Remote { operation_id: Some(id), .. } if id == operation)
+            );
+        }
     }
 }
