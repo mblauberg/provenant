@@ -127,7 +127,6 @@ pub struct GraphNode {
     pub on_fail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<provenant_records::run::DeliveryMode>,
-    #[serde(default)]
     pub access: AccessMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
@@ -218,6 +217,8 @@ pub enum OutputKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeOutputs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_error: Option<String>,
     pub schema_version: u64,
     pub result: Option<ResultOutput>,
     pub verdict: Option<String>,
@@ -1455,7 +1456,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         attempt.outcome = Some(outcome);
                         progress.outputs = Some(make_outputs(
                             result.as_ref(),
-                            node.required_verdict.as_deref(),
                             result_warning,
                             result_path,
                             branch,
@@ -1576,6 +1576,7 @@ fn dependency_state(
 
 fn gate_outputs(passed: bool) -> NodeOutputs {
     NodeOutputs {
+        verdict_error: None,
         schema_version: 2,
         result: None,
         verdict: Some(if passed { "PASS" } else { "FAIL" }.to_owned()),
@@ -1598,6 +1599,15 @@ fn gate_failure(
             expected,
             threshold,
         } => {
+            for input in &node.inputs {
+                if let Some(error) = checkpoint.nodes[positions[&input.node]]
+                    .outputs
+                    .as_ref()
+                    .and_then(|outputs| outputs.verdict_error.as_ref())
+                {
+                    return Some(format!("input {}: {error}", input.node));
+                }
+            }
             let matched = node
                 .inputs
                 .iter()
@@ -2359,7 +2369,6 @@ fn bounded(text: &str, max: usize) -> String {
 
 fn make_outputs(
     result: Option<&crate::result_capture::CapturedResult>,
-    required_verdict: Option<&str>,
     result_warning: Option<String>,
     path: Option<String>,
     branch: Option<String>,
@@ -2385,22 +2394,10 @@ fn make_outputs(
     if let Some(warning) = result_warning {
         warnings.push(warning);
     }
-    let matched = result.is_some_and(|capture| capture.matched_required);
-    let verdict = required_verdict
-        .filter(|_| matched)
-        .map(|line| line.trim().to_owned())
-        .or_else(|| {
-            windows
-                .as_ref()
-                .and_then(|windows| {
-                    windows
-                        .iter()
-                        .rev()
-                        .flat_map(|text| text.lines().rev())
-                        .find(|line| line.trim().starts_with("VERDICT:"))
-                })
-                .map(|line| bounded(line.trim(), OUTPUT_FIELD_BYTES))
-        });
+    let verdict = result
+        .filter(|capture| !capture.source_truncated)
+        .and_then(|capture| capture.verdict.as_deref())
+        .map(str::to_owned);
     let parsed = windows
         .as_ref()
         .and_then(|windows| {
@@ -2438,6 +2435,9 @@ fn make_outputs(
         valid
     });
     NodeOutputs {
+        verdict_error: result
+            .filter(|capture| capture.verdict_invalid || capture.source_truncated)
+            .map(|_| "verdict malformed, repeated, not final or incomplete".to_owned()),
         schema_version: 2,
         result: result.map(|capture| ResultOutput {
             digest: capture.digest.clone(),
@@ -2773,7 +2773,7 @@ mod tests {
             "schema_version": 1, "graph_id": "g-test", "nodes": [
                 {"id": "review", "prompt": "Review", "access": "read_only",
                  "route": {"adapter": "fixture", "model": "fixture/model"}},
-                {"id": "gate", "kind": "gate", "depends_on": ["review"],
+                {"id": "gate", "kind": "gate", "access": "read_only", "depends_on": ["review"],
                  "inputs": [{"node": "review", "outputs": ["verdict"]}],
                  "condition": {"type": "verdict", "expected": "VERDICT: PASS", "threshold": "all"}}
             ]
@@ -2949,6 +2949,234 @@ mod tests {
             .unwrap();
             assert_eq!(replay.checkpoint.nodes, run.checkpoint.nodes);
             assert_eq!(owner.calls.len(), 1);
+        }
+    }
+
+    #[test]
+    fn gate_budget_overrides_warn_only_for_configured_metrics() {
+        use crate::config::{BudgetLimit, GraphBudget, UnknownUsage};
+        for policy in [UnknownUsage::Warn, UnknownUsage::Pause] {
+            for (tokens, limit, passed) in [
+                (None, Some(10), false),
+                (Some(9), Some(10), true),
+                (None, None, true),
+            ] {
+                let mut gate = gate_node(GateCondition::Budget);
+                gate.depends_on.push("review".into());
+                let document = graph(vec![node("review", route("fixture")), gate]);
+                let mut observation = terminal(AttemptOutcome::Succeeded);
+                if let AttemptObservation::Terminal { attempt_ref, .. } = &mut observation {
+                    *attempt_ref = Some("host/attempt".into());
+                }
+                let mut owner = FakeOwner {
+                    observations: VecDeque::from([observation]),
+                    usage: AttemptUsage {
+                        tokens,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let budget = GraphBudget {
+                    unknown_usage: policy,
+                    per_graph: BudgetLimit {
+                        tokens: limit,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let run = advance_with_budget(
+                    &document,
+                    &mut owner,
+                    &mut MemoryJournal::default(),
+                    &Default::default(),
+                    &Default::default(),
+                    &budget,
+                )
+                .unwrap();
+                assert_eq!(
+                    run.checkpoint.nodes[1].gate.as_ref().unwrap().passed,
+                    passed
+                );
+                assert_eq!(run.status, GraphStatus::Complete);
+            }
+        }
+    }
+
+    #[test]
+    fn agent_json_still_requires_explicit_access() {
+        for kind in [None, Some(NodeKind::Task), Some(NodeKind::Synthesise)] {
+            let mut agent = node("agent", route("fixture"));
+            agent.kind = kind;
+            let mut wire = serde_json::to_value(graph(vec![agent])).unwrap();
+            wire["nodes"][0].as_object_mut().unwrap().remove("access");
+            assert!(
+                serde_json::from_value::<GraphDocument>(wire)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("missing field `access`")
+            );
+        }
+    }
+
+    #[test]
+    fn gate_skipped_chain_replays_every_save_after_the_gate_decision() {
+        #[derive(Default)]
+        struct RecordingJournal {
+            current: MemoryJournal,
+            saves: Vec<GraphCheckpoint>,
+        }
+        impl GraphJournal for RecordingJournal {
+            type Error = Infallible;
+            fn load(&mut self, graph_id: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+                self.current.load(graph_id)
+            }
+            fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+                self.saves.push(checkpoint.clone());
+                self.current.save(checkpoint)
+            }
+        }
+        let mut gate = gate_node(GateCondition::Budget);
+        gate.on_fail = Some("recovery".into());
+        let mut nodes = vec![gate];
+        for (id, parent) in [
+            ("recovery", "gate"),
+            ("child", "recovery"),
+            ("grandchild", "child"),
+        ] {
+            let mut child = node(id, route("fixture"));
+            child.depends_on.push(parent.into());
+            nodes.push(child);
+        }
+        let document = graph(nodes);
+        let mut journal = RecordingJournal::default();
+        let settled = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+        assert!(
+            settled.checkpoint.nodes[1..]
+                .iter()
+                .all(|node| node.state == NodeState::Skipped
+                    && node.attempts.is_empty()
+                    && node.outputs.is_none())
+        );
+        let snapshots: Vec<_> = journal
+            .saves
+            .into_iter()
+            .filter(|checkpoint| checkpoint.nodes[0].gate.is_some())
+            .collect();
+        assert_eq!(snapshots.len(), 4);
+        for checkpoint in snapshots {
+            let mut replay = MemoryJournal(Some(
+                serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap(),
+            ));
+            let mut owner = FakeOwner::default();
+            assert_eq!(
+                advance(&document, &mut owner, &mut replay).unwrap(),
+                settled
+            );
+            assert!(owner.calls.is_empty());
+        }
+    }
+
+    #[test]
+    fn gate_reachability_handles_two_gates_and_deep_paths() {
+        let mut nodes = Vec::new();
+        for id in ["first", "second"] {
+            let mut gate = gate_node(GateCondition::Budget);
+            gate.id = id.into();
+            gate.on_fail = Some(format!("{id}-recovery"));
+            nodes.push(gate);
+            for path in ["success", "recovery"] {
+                let mut parent = id.to_owned();
+                for depth in 0..4 {
+                    let name = if depth == 0 {
+                        format!("{id}-{path}")
+                    } else {
+                        format!("{id}-{path}-{depth}")
+                    };
+                    let mut child = node(&name, route("fixture"));
+                    child.depends_on.push(parent);
+                    parent = name;
+                    nodes.push(child);
+                }
+            }
+        }
+        let mut join = node("join", route("fixture"));
+        join.depends_on = vec!["first-success-3".into(), "second-success-3".into()];
+        nodes.push(join);
+        let mut document = graph(nodes);
+        assert!(validate_plan(&document).is_ok());
+        document
+            .nodes
+            .last_mut()
+            .unwrap()
+            .depends_on
+            .push("first-recovery-3".into());
+        document.nodes.reverse();
+        assert_eq!(
+            validate_plan(&document).unwrap_err(),
+            "node requires both gate outcomes"
+        );
+    }
+
+    #[test]
+    fn gate_reachability_accepts_a_limit_sized_graph_and_rejects_lower_limits() {
+        let limits = crate::config::GraphLimits::default();
+        let mut nodes = Vec::new();
+        for index in 0..limits.nodes / 2 {
+            let mut gate = gate_node(GateCondition::Budget);
+            gate.id = format!("gate-{index}");
+            let mut recovery = node(&format!("recovery-{index}"), route("fixture"));
+            recovery.depends_on.push(gate.id.clone());
+            gate.on_fail = Some(recovery.id.clone());
+            nodes.extend([gate, recovery]);
+        }
+        let document = graph(nodes);
+        assert_eq!(document.nodes.len(), limits.nodes);
+        assert!(validate_plan_with_limits(&document, &limits).is_ok());
+        let mut smaller = limits.clone();
+        smaller.nodes -= 1;
+        assert_eq!(
+            validate_plan_with_limits(&document, &smaller).unwrap_err(),
+            "node count"
+        );
+        smaller = limits;
+        smaller.edges = document.nodes.len() / 2 - 1;
+        assert_eq!(
+            validate_plan_with_limits(&document, &smaller).unwrap_err(),
+            "edge count"
+        );
+    }
+
+    #[test]
+    fn gate_verdict_rejects_spoofed_multiple_and_malformed_lines() {
+        for text in [
+            "VERDICT: FAIL\nVERDICT: PASS".to_owned(),
+            "VERDICT: PASS\nVERDICT: PASS".to_owned(),
+            "VERDICT: PASS\nmore explanation".to_owned(),
+            "VERDICT: PASS x".to_owned(),
+            "verdict: pass".to_owned(),
+            format!("VERDICT: PASS{}", " ".repeat(1024)),
+            format!(
+                "{}\nVERDICT: FAIL\n{}\nVERDICT: PASS",
+                "x".repeat(5000),
+                "x".repeat(20000)
+            ),
+        ] {
+            for threshold in [
+                VerdictThreshold::All,
+                VerdictThreshold::Any,
+                VerdictThreshold::Majority,
+                VerdictThreshold::Count(1),
+            ] {
+                let (document, mut owner) =
+                    verdict_fixture(threshold, &[Some("PASS"), Some("PASS"), Some("PASS")]);
+                owner.observations[0] = terminal_with_result(AttemptOutcome::Succeeded, &text);
+                let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+                assert_eq!(run.checkpoint.nodes[3].state, NodeState::Failed, "{text:?}");
+                assert_eq!(
+                    run.checkpoint.nodes[0].outputs.as_ref().unwrap().verdict,
+                    None
+                );
+            }
         }
     }
 
@@ -3864,7 +4092,7 @@ mod tests {
     }
 
     #[test]
-    fn matched_required_verdict_takes_precedence_even_in_middle() {
+    fn matched_required_contract_cannot_override_ambiguous_verdict_evidence() {
         let mut review = node("review", route("fixture"));
         review.required_verdict = Some("VERDICT: FAIL".into());
         let text = format!(
@@ -3896,7 +4124,7 @@ mod tests {
                 .unwrap()
                 .verdict
                 .as_deref(),
-            Some("VERDICT: FAIL")
+            None
         );
     }
 
@@ -3945,6 +4173,11 @@ mod tests {
             "pull_request",
             "integration_branch",
             "delivery",
+            "kind",
+            "condition",
+            "on_fail",
+            "gate",
+            "verdict_error",
         ] {
             assert!(!fixture.contains(&format!("\"{field}\"")));
         }
@@ -3964,6 +4197,16 @@ mod tests {
         let result = advance(&stored.execution.document, &mut owner, &mut journal)
             .expect("resume legacy graph");
         assert_eq!(result.status, GraphStatus::Complete);
+        assert_eq!(
+            result.checkpoint.plan_digest,
+            "sha256:2f7f01c7804da30a4f2c2f8ed9dc458e8b239bf79ad491babe15c9c82bb9b014"
+        );
+        let mut explicit_task = stored.execution.document.clone();
+        explicit_task.nodes[0].kind = Some(NodeKind::Task);
+        assert_eq!(
+            advance(&explicit_task, &mut owner, &mut journal).unwrap(),
+            result
+        );
         assert!(owner.calls.is_empty());
         let mut corrupt: serde_json::Value = serde_json::from_str(fixture).expect("fixture JSON");
         corrupt["execution"]["document"]["nodes"][0]["prompt"] = serde_json::json!("tampered");
@@ -4516,7 +4759,7 @@ mod tests {
             outputs: vec![OutputKind::Result, OutputKind::Findings],
         });
         let document = graph(vec![child, node("parent", route("fixture"))]);
-        let text = "answer\nVERDICT: PASS\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"f1\",\"severity\":\"low\",\"file\":\"x.rs\",\"line\":7,\"summary\":\"issue\",\"status\":\"open\"}]}\n```";
+        let text = "answer\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"f1\",\"severity\":\"low\",\"file\":\"x.rs\",\"line\":7,\"summary\":\"issue\",\"status\":\"open\"}]}\n```\nVERDICT: PASS";
         let mut owner = FakeOwner {
             observations: VecDeque::from([
                 terminal_with_result(AttemptOutcome::Succeeded, text),
@@ -4540,7 +4783,7 @@ mod tests {
 
     #[test]
     fn output_parsing_is_lenient_and_rendering_fails_instead_of_omitting() {
-        let failed = make_outputs(Some(&capture("no findings")), None, None, None, None, None);
+        let failed = make_outputs(Some(&capture("no findings")), None, None, None, None);
         assert!(failed.findings.is_empty());
         assert_eq!(failed.warnings, ["findings block missing or invalid"]);
         let oversized = format!(
@@ -4548,7 +4791,7 @@ mod tests {
             "x".repeat(8192)
         );
         assert!(
-            make_outputs(Some(&capture(&oversized)), None, None, None, None, None)
+            make_outputs(Some(&capture(&oversized)), None, None, None, None)
                 .findings
                 .is_empty()
         );
@@ -4593,11 +4836,11 @@ mod tests {
     #[test]
     fn findings_and_verdict_at_the_end_of_a_large_result_are_parsed() {
         let text = format!(
-            "{}\nVERDICT: PASS\n```findings\n{{\"schema_version\":1,\"findings\":[{{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a\",\"line\":1,\"summary\":\"issue\",\"status\":\"open\"}}]}}\n```\n",
+            "{}\n```findings\n{{\"schema_version\":1,\"findings\":[{{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a\",\"line\":1,\"summary\":\"issue\",\"status\":\"open\"}}]}}\n```\nVERDICT: PASS\n",
             "x".repeat(25000)
         );
         let captured = capture(&text);
-        let outputs = make_outputs(Some(&captured), None, None, None, None, None);
+        let outputs = make_outputs(Some(&captured), None, None, None, None);
         assert_eq!(outputs.verdict.as_deref(), Some("VERDICT: PASS"));
         assert_eq!(outputs.findings[0].id, "F1");
         assert!(outputs.result.unwrap().truncated);
@@ -4672,6 +4915,7 @@ mod tests {
         let mut journal = MemoryJournal::default();
         let run = advance(&document, &mut owner, &mut journal).unwrap();
         let prompt = &owner.prompts[3];
+        assert!(prompt.contains("Deduplicate overlapping findings"));
         for id in ["one", "two", "three"] {
             assert!(prompt.contains(&format!("{id} findings:")));
         }
@@ -4691,6 +4935,46 @@ mod tests {
             validate_plan(&graph(vec![synthesis])).unwrap_err(),
             "synthesise requires selected inputs"
         );
+    }
+
+    #[test]
+    fn synthesise_json_preserves_purpose_and_rejects_unknown_configuration() {
+        let wire = serde_json::json!({"schema_version": 1, "graph_id": "g-test", "nodes": [
+            {"id": "review", "access": "read_only", "prompt": "Review", "route": {"alias": "senior"}},
+            {"id": "synthesis", "kind": "synthesise", "access": "read_only", "prompt": "Rank and deduplicate findings", "route": {"alias": "senior"},
+             "depends_on": ["review"], "inputs": [{"node": "review", "outputs": ["findings"]}]}
+        ]});
+        let document: GraphDocument = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            validate_plan(&document).unwrap().0.nodes[1].kind,
+            Some(NodeKind::Synthesise)
+        );
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                terminal(AttemptOutcome::Succeeded),
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..Default::default()
+        };
+        advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert!(owner.prompts[1].starts_with("Rank and deduplicate findings"));
+        for (field, value, error) in [
+            ("kind", serde_json::json!("synthesis"), "unknown variant"),
+            (
+                "config",
+                serde_json::json!({"purpose": "rank"}),
+                "unknown field",
+            ),
+        ] {
+            let mut invalid = wire.clone();
+            invalid["nodes"][1][field] = value;
+            assert!(
+                serde_json::from_value::<GraphDocument>(invalid)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(error)
+            );
+        }
     }
 
     #[test]
@@ -5019,14 +5303,15 @@ mod tests {
     }
 
     #[test]
-    fn final_verdict_and_final_findings_take_precedence() {
-        let good = "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"first\",\"severity\":\"low\",\"file\":\"a\",\"line\":1,\"summary\":\"x\",\"status\":\"open\"}]}\n```";
+    fn ambiguous_verdict_is_rejected_and_final_findings_take_precedence() {
+        let good = "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"first\",\"severity\":\"low\",\"file\":\"a\",\"line\":1,\"summary\":\"x\",\"status\":\"open\"}]}\n```\nVERDICT: PASS";
         let text = format!(
             "VERDICT: PASS\n{good}\n{}\nVERDICT: FAIL\n```findings\ninvalid\n```",
             "x".repeat(25000)
         );
-        let outputs = make_outputs(Some(&capture(&text)), None, None, None, None, None);
-        assert_eq!(outputs.verdict.as_deref(), Some("VERDICT: FAIL"));
+        let outputs = make_outputs(Some(&capture(&text)), None, None, None, None);
+        assert_eq!(outputs.verdict, None);
+        assert!(outputs.verdict_error.is_some());
         assert!(outputs.findings.is_empty());
         assert!(
             outputs
@@ -5036,13 +5321,13 @@ mod tests {
         );
         let final_block = good.replace("first", "last");
         let text = format!("{good}\n{}\n{final_block}", "x".repeat(25000));
-        let outputs = make_outputs(Some(&capture(&text)), None, None, None, None, None);
+        let outputs = make_outputs(Some(&capture(&text)), None, None, None, None);
         assert_eq!(outputs.findings[0].id, "last");
         let incomplete = format!(
             "{good}\n{}\n```findings\n{{\"schema_version\":1",
             "x".repeat(25000)
         );
-        let outputs = make_outputs(Some(&capture(&incomplete)), None, None, None, None, None);
+        let outputs = make_outputs(Some(&capture(&incomplete)), None, None, None, None);
         assert!(outputs.findings.is_empty());
         assert!(
             outputs
@@ -5051,7 +5336,7 @@ mod tests {
                 .any(|warning| warning.contains("findings"))
         );
         assert!(
-            make_outputs(None, None, None, None, None, None)
+            make_outputs(None, None, None, None, None)
                 .warnings
                 .is_empty()
         );

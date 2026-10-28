@@ -73,21 +73,37 @@ Add a deterministic check after a review with a gate such as:
 {
   "id": "accept-review",
   "kind": "gate",
+  "access": "read_only",
   "depends_on": ["review"],
   "inputs": [{"node": "review", "outputs": ["verdict"]}],
   "condition": {"type": "verdict", "expected": "VERDICT: PASS", "threshold": "all"}
 }
 ```
 
-The review must emit the exact verdict line beginning with `VERDICT:`.
-Leave `required_verdict` unset on reviewers when a negative verdict should
-count as a non-match; a failed required-verdict contract blocks the gate.
+Ask each reviewer to put its findings first and finish with exactly one
+standalone verdict, for example `VERDICT: PASS` or `VERDICT: FAIL`. The token
+must contain only uppercase ASCII letters, digits, underscores or hyphens;
+the entire line must fit within 1024 bytes. Do not quote or repeat verdict
+markers in prose. Multiple markers, malformed lines, a non-final verdict or an
+incomplete result fail the gate, even if other inputs satisfy its threshold.
+
+For threshold decisions, let reviewers report either verdict without a
+`required_verdict` contract. A valid negative verdict then counts as a
+non-match, so `any` or `majority` can tolerate it. A failed required-verdict
+contract fails the reviewer and blocks its dependants before the gate can
+evaluate; such contracts cannot express a tolerated negative review and do
+not make ambiguous typed verdicts safe.
 Thresholds are `all`, `any`, `majority` or `{"count": 2}`.
 A gate has no route, prompt, writer worktree or
 delivery configuration. Use `condition: {"type": "budget"}` without `inputs`
 to check settled usage against the host's configured per-node and graph
-budgets. Reaching a budget or missing telemetry fails that check; without a
-configured budget it passes. Checks do not reserve future budget.
+budgets. This is a point-in-time check over settled attempts; it excludes
+still-running branches and does not reserve future budget. Make the gate
+depend on all nodes whose settled usage it should check before admitting the
+work it guards. Reaching a budget or missing telemetry for a configured
+metric fails that check; without a configured budget it passes.
+
+CI-state and confined argv-command gates are deferred to [#2075](https://github.com/mblauberg/provenant/issues/2075).
 
 Set `on_fail` to a recovery node ID and include the gate in that node's
 `depends_on`. The recovery path runs only on failure; the ordinary dependants
@@ -125,6 +141,22 @@ limit is lowered. Increase the limit within the host ceiling and start a new gra
 retry a failed node. A document prompt over a structural limit instead pauses
 the graph, which can be resumed after the limit is extended. Inspect node
 outputs with `provenant fabric graph status --json`.
+
+To combine outputs with an agent configured for synthesis, set
+`"kind": "synthesise"`, give its prompt the purpose, and select at least one
+dependency. For example:
+
+```json
+{
+  "id": "synthesis", "kind": "synthesise", "access": "read_only",
+  "prompt": "Deduplicate and rank the review findings.",
+  "route": {"alias": "senior"}, "depends_on": ["review"],
+  "inputs": [{"node": "review", "outputs": ["findings"]}]
+}
+```
+
+Omitting `kind` or using `"task"` keeps task behaviour. All nodes require an
+explicit `access`; gates require `"read_only"`.
 
 To report findings, include a fenced `findings` block in the result containing
 JSON with `schema_version: 1` and a `findings` array. Each finding has `id`,

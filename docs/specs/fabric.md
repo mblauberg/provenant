@@ -211,23 +211,28 @@ specify a single `route` or an ordered `routes` list for agent work. A route can
 with just `alias`, resolved as for `dispatch --route`, or supply an explicit
 adapter. Routes require an adapter or alias and may mix these forms in a list.
 
-An agent node may set `kind` to `synthesise` and select one or more direct
+### Synthesise agents
+
+An agent node may set `kind` to `synthesise` and must select one or more direct
 dependencies with `inputs`. Its configured prompt states the synthesis purpose.
 The runtime uses the same bounded, untrusted-data handoff and typed settlement
 as a task. Omitting `kind`, or setting it to `task`, preserves task behaviour.
 
-Why: one configurable agent can combine results for different purposes without
-adding a node kind for each purpose.
-Test: `synthesise_receives_selected_reviewer_findings_and_emits_typed_output`.
-Owner: Fabric runtime.
+- Why: one configurable agent can combine results for different purposes without
+  adding a node kind for each purpose.
+- Test: `crates/fabric-runtime/src/graph.rs::synthesise_receives_selected_reviewer_findings_and_emits_typed_output`;
+  `crates/fabric-runtime/src/graph.rs::synthesise_requires_selected_inputs`;
+  `crates/fabric-runtime/src/graph.rs::synthesise_json_preserves_purpose_and_rejects_unknown_configuration`.
+- Owner: `crates/fabric-runtime/src/graph.rs`
 
 ### Deterministic gates
 
 A `gate` must evaluate its condition without a model or attempt. Verdict gates
 must compare selected direct dependencies' verdicts exactly, with missing
-verdicts counting as non-matches. Majority requires strictly more than half;
+verdicts counting as non-matches. Malformed, repeated or non-final verdicts
+must fail the gate regardless of its threshold. Majority requires strictly more than half;
 count requires at least the configured positive count. Budget gates must check
-settled attempt usage against the effective host budgets, including saved
+settled attempt usage at evaluation time against the effective host budgets, including saved
 extensions, and fail on unknown or partial usage for a configured metric.
 Gates must save their decision before dependants run and retain it on replay,
 even if budgets change. Gates expose `PASS` or `FAIL` as their typed verdict.
@@ -248,7 +253,15 @@ recorded in the final PR body.
   `::gate_inactive_path_waits_for_other_parents_before_settling`;
   `::gate_checkpoint_rejects_attempts_inconsistent_results_and_forged_skips`;
   `::gate_validation_rejects_agent_fields_bad_thresholds_and_failure_cycles`;
-  `::gate_rejects_unreachable_joins_of_mutually_exclusive_paths`.
+  `::gate_rejects_unreachable_joins_of_mutually_exclusive_paths`;
+  `::gate_only_graph_obeys_structural_limits_before_evaluating`;
+  `::gate_verdict_rejects_spoofed_multiple_and_malformed_lines`;
+  `::gate_budget_overrides_warn_only_for_configured_metrics`;
+  `::agent_json_still_requires_explicit_access`;
+  `::legacy_checkpoint_keeps_its_digest_without_delivery_fields`;
+  `::gate_skipped_chain_replays_every_save_after_the_gate_decision`;
+  `::gate_reachability_handles_two_gates_and_deep_paths`;
+  `::gate_reachability_accepts_a_limit_sized_graph_and_rejects_lower_limits`.
 - Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`
 
 ### Typed node outputs
@@ -265,14 +278,22 @@ stored result or redacted text exceeded that window. A local attempt may also
 have a run-file path. The runtime retains only the excerpt and a 16 KiB tail
 of the redacted text for parsing.
 
-When `required_verdict` matches, the recorded verdict is that exact trimmed
-line. Otherwise the optional verdict is the last `VERDICT:` line in the tail
-window, falling back to the last such line in the head window, and may be
-absent. Findings use a fenced `findings` JSON block with `schema_version: 1`
+The optional typed verdict must be the final non-empty standalone line of the
+complete redacted stream. Its syntax is `VERDICT: TOKEN`, with an uppercase
+ASCII token containing only letters, digits, underscores or hyphens. The line
+must fit within 1024 bytes, including surrounding whitespace. Repeated verdict
+markers anywhere in the stream, even in quotations or outside the retained
+windows, invalidate the evidence. Case differences, trailing text, an overlong
+line or an incomplete source also invalidate it. Invalid evidence is recorded
+in `verdict_error` and must fail any consuming verdict gate. A missing verdict
+is a non-match; a matched `required_verdict` contract must not override invalid
+typed evidence.
+
+Findings use a fenced `findings` JSON block with `schema_version: 1`
 and a `findings` array; each item has string fields `id`, `severity`, `file`, `summary` and
 `status`, and an optional non-negative integer `line` (which may be null).
 Unknown fields or a different schema version make the block invalid. Parsing
-only uses complete lines and blocks within a window, so content in the middle
+of findings only uses complete lines and blocks within a window, so content in the middle
 of a large result may not be captured. A block may contain at most 32 findings
 and 8 KiB of JSON, and text fields are
 limited to 1024 bytes each; a block with an overlong field is invalid. Missing
@@ -303,7 +324,7 @@ briefs.
 - Test: `crates/fabric-runtime/src/graph.rs::outputs_feed_direct_dependants_and_survive_replay`;
   `::output_parsing_is_lenient_and_rendering_fails_instead_of_omitting`;
   `::findings_and_verdict_at_the_end_of_a_large_result_are_parsed`;
-  `::matched_required_verdict_takes_precedence_even_in_middle`;
+  `::matched_required_contract_cannot_override_ambiguous_verdict_evidence`;
   `::upstream_data_boundary_cannot_be_closed_by_result_content`;
   `crates/records/src/result_capture.rs::hashes_all_bytes_and_keeps_bounded_windows`;
   `crates/run/src/tests.rs::streamed_result_is_verified_and_redacted_across_chunks`;
