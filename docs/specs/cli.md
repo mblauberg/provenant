@@ -26,7 +26,11 @@ stale discovery.
 Session pages default to 50 rows and cap at 100. The cursor binds the selected
 project, session filter, page size and observed session records; an invalid or
 changed snapshot requires restarting without the cursor. A scan is limited to
-16,384 sessions, and an oversized project list returns an error. Unreadable
+16,384 directory entries across projects, including invalid or unregistered
+names. Exhaustion conservatively sets `scan_truncated` and `truncated`; it does
+not provide a cursor beyond the scanned subset. Directory iteration order is not
+guaranteed, so a repeated truncated scan can invalidate its cursor. An oversized
+result is refused without publishing an artefact. Unreadable
 owner records return an error rather than implying complete coverage. Directory
 paths are tagged as UTF-8 or hex-encoded native bytes.
 

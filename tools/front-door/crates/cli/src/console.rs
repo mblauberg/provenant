@@ -2,7 +2,7 @@
 use clap::Subcommand;
 use provenant_core::{ProjectId, Roots};
 use provenant_records::CanonicalV1;
-use provenant_workflow::session::{HostSessionId, discover_sessions};
+use provenant_workflow::session::{HostSessionId, discover_sessions_bounded};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::os::unix::ffi::OsStrExt;
@@ -22,6 +22,66 @@ pub enum Console {
         #[arg(long)]
         cursor: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provenant_core::RootInputs;
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn scan_budget_counts_invalid_entries_across_projects() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let home = base.join("home");
+        let state = base.join("state");
+        let checkout = base.join("checkout");
+        for path in [&home, &state, &checkout] {
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut inputs = RootInputs::new(home, checkout);
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .unwrap();
+        for name in ["one", "two"] {
+            let common = base.join(name).join(".git");
+            fs::create_dir_all(&common).unwrap();
+            let binding = provenant_config::bind_project(
+                &roots,
+                provenant_config::ProjectLocation::new(common).unwrap(),
+            )
+            .unwrap();
+            let sessions = state
+                .join("workflow/projects")
+                .join(binding.project_id().to_string())
+                .join("sessions");
+            fs::create_dir_all(&sessions).unwrap();
+            for name in ["!", "?"] {
+                fs::write(sessions.join(name), b"").unwrap();
+            }
+        }
+        assert_eq!(
+            provenant_config::registered_projects(&roots).unwrap().len(),
+            2
+        );
+        let command = Console::Sessions {
+            session: None,
+            limit: 50,
+            cursor: None,
+        };
+        let truncated = read_with_budget(&roots, None, &command, 3).unwrap();
+        assert_eq!(truncated["sessions"], json!([]));
+        assert_eq!(truncated["scan_truncated"], true);
+        assert_eq!(truncated["truncated"], true);
+        assert!(truncated["next_cursor"].is_null());
+        let complete = read_with_budget(&roots, None, &command, 5).unwrap();
+        assert_eq!(complete["scan_truncated"], false);
+        assert_eq!(complete["truncated"], false);
+        assert_ne!(truncated["snapshot"], complete["snapshot"]);
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -68,6 +128,15 @@ fn projects(roots: &Roots, selected: Option<ProjectId>) -> Result<Vec<Project>, 
 
 /// Compose existing owners without allocating, creating or repairing state.
 pub fn read(roots: &Roots, selected: Option<ProjectId>, command: &Console) -> Result<Value, Error> {
+    read_with_budget(roots, selected, command, 16_384)
+}
+
+fn read_with_budget(
+    roots: &Roots,
+    selected: Option<ProjectId>,
+    command: &Console,
+    budget: usize,
+) -> Result<Value, Error> {
     let projects = projects(roots, selected)?;
     let (session, limit, cursor) = match command {
         Console::Projects => {
@@ -92,12 +161,12 @@ pub fn read(roots: &Roots, selected: Option<ProjectId>, command: &Console) -> Re
     }
     let mut sessions = Vec::new();
     let mut scanned = 0usize;
+    let mut scan_truncated = false;
     for project in &projects {
-        for found in discover_sessions(&roots.state, project.project_id)? {
-            scanned += 1;
-            if scanned > 16_384 {
-                return Err(Error::Limit);
-            }
+        let (found, examined, truncated) =
+            discover_sessions_bounded(&roots.state, project.project_id, budget - scanned)?;
+        scanned += examined;
+        for found in found {
             if session
                 .as_ref()
                 .is_none_or(|id| id == found.record.host_session_id.as_str())
@@ -109,11 +178,15 @@ pub fn read(roots: &Roots, selected: Option<ProjectId>, command: &Console) -> Re
                 );
             }
         }
+        if truncated {
+            scan_truncated = true;
+            break;
+        }
     }
     let snapshot = CanonicalV1::record_digest(
         "console-sessions",
         1,
-        &(selected, session, limit, &sessions),
+        &(selected, session, limit, scan_truncated, &sessions),
     )
     .map_err(|_| Error::Encode)?
     .to_string();
@@ -134,6 +207,7 @@ pub fn read(roots: &Roots, selected: Option<ProjectId>, command: &Console) -> Re
     let next_cursor = (end < sessions.len()).then(|| format!("{snapshot}:{end}"));
     Ok(
         json!({"snapshot":snapshot, "sessions":&sessions[offset..end], "next_cursor":next_cursor,
-        "truncated":end < sessions.len(), "coverage":{"scope":"local"}}),
+        "truncated":scan_truncated || end < sessions.len(), "scan_truncated":scan_truncated,
+        "coverage":{"scope":"local"}}),
     )
 }

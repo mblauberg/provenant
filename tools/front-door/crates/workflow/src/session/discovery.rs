@@ -110,6 +110,45 @@ pub fn discover_sessions(
     Ok(found)
 }
 
+/// Scan at most `budget` directory entries, including invalid and unregistered
+/// names. Exhausting the budget conservatively reports truncation without
+/// examining another entry. Reads do not repair or create records.
+pub fn discover_sessions_bounded(
+    root: &StateRoot,
+    project: ProjectId,
+    budget: usize,
+) -> Result<(Vec<DiscoveredSession>, usize, bool), SessionError> {
+    if budget == 0 {
+        return Ok((Vec::new(), 0, true));
+    }
+    let open = || -> Result<Directory, FsError> {
+        let mut dir = Directory::open_anchor(root.as_path())?;
+        for name in ["workflow", "projects", &project.to_string(), "sessions"] {
+            dir = dir.open_verified_directory(OsStr::new(name))?;
+        }
+        Ok(dir)
+    };
+    let dir = match open() {
+        Ok(dir) => dir,
+        Err(error) if error.is_not_found() => return Ok((Vec::new(), 0, false)),
+        Err(error) => return Err(error.into()),
+    };
+    let mut names = dir.entries()?.take(budget).collect::<Result<Vec<_>, _>>()?;
+    let examined = names.len();
+    names.sort();
+    let mut found = Vec::new();
+    for name in names {
+        if let Some(session) = name
+            .to_str()
+            .and_then(|name| HostSessionId::parse(name).ok())
+            && let Some(record) = SessionStore::new(root.clone(), project, session).discovery()?
+        {
+            found.push(record);
+        }
+    }
+    Ok((found, examined, examined == budget))
+}
+
 impl SessionStore {
     /// Only an edge with explicit chair identity opts a session into discovery.
     /// A later save cannot silently transfer its host or actor ownership.
