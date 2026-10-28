@@ -1,5 +1,3 @@
-<!-- Modified for Provenant. -->
-
 # Surfaces
 
 Identify the surface's job before applying visual doctrine.

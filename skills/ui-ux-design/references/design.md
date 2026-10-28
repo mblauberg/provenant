@@ -1,5 +1,3 @@
-<!-- Modified for Provenant. -->
-
 # Design
 
 Start from the approved outcome and the project's current visual language.

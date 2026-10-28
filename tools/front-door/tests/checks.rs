@@ -257,12 +257,6 @@ fn commit(rig: &TestRig, message: &str) -> Result<String> {
 fn legal(rig: &TestRig) -> Result {
     for name in [
         "LICENSE",
-        "NOTICE",
-        "THIRD_PARTY_NOTICES.md",
-        "LICENSES/grill-me-pocock-MIT.txt",
-        "LICENSES/impeccable-APACHE-2.0.txt",
-        "LICENSES/skill-optimizer-MIT.txt",
-        "LICENSES/ui-ux-pro-max-MIT.txt",
         "README.md",
         "MAINTAINING.md",
         "SECURITY.md",
@@ -557,9 +551,20 @@ fn release_checks_legal_private_symlink_and_bounded_utf8_evidence() -> Result {
     let rig = check_rig()?;
     legal(&rig)?;
     commit(&rig, "base")?;
-    fs::remove_file(rig.project.join("NOTICE"))?;
-    assert_eq!(code(&rig.command(&["check", "release", "--json"])?), 1);
-    fs::write(rig.project.join("NOTICE"), "restored")?;
+    assert_eq!(code(&rig.command(&["check", "release", "--json"])?), 0);
+    fs::remove_file(rig.project.join("LICENSE"))?;
+    let missing = rig.command(&["check", "release", "--json"])?;
+    assert_eq!(code(&missing), 1);
+    let result = json(&missing)?;
+    assert!(
+        result["data"]["findings"]
+            .as_array()
+            .ok_or("release findings")?
+            .iter()
+            .any(|finding| finding["rule"] == "release.legal"
+                && finding["path"]["path"] == "LICENSE")
+    );
+    fs::write(rig.project.join("LICENSE"), "restored")?;
     fs::create_dir_all(rig.project.join(".agent-run"))?;
     fs::write(rig.project.join(".agent-run/private.txt"), "private")?;
     std::os::unix::fs::symlink(rig.home.join("outside"), rig.project.join("link"))?;
@@ -574,14 +579,14 @@ fn release_checks_legal_private_symlink_and_bounded_utf8_evidence() -> Result {
         code(&rig.command(&["check", "release", "--cursor", cursor, "--json"])?),
         1
     );
-    fs::write(rig.project.join("NOTICE"), "edited again")?;
+    fs::write(rig.project.join("LICENSE"), "edited again")?;
     assert_eq!(
         code(&rig.command(&["check", "release", "--cursor", cursor, "--json"])?),
         2
     );
-    fs::write(rig.project.join("NOTICE"), [0xff])?;
+    fs::write(rig.project.join("LICENSE"), [0xff])?;
     assert_eq!(code(&rig.command(&["check", "release", "--json"])?), 3);
-    fs::write(rig.project.join("NOTICE"), vec![b'a'; 5 * 1024 * 1024 + 1])?;
+    fs::write(rig.project.join("LICENSE"), vec![b'a'; 5 * 1024 * 1024 + 1])?;
     assert_eq!(code(&rig.command(&["check", "release", "--json"])?), 3);
     rig.assert_legacy_unchanged()
 }

@@ -1,4 +1,3 @@
-# Modified for Provenant.
 interface:
   display_name: UI/UX Design
   short_description: Read-only UI/UX review by default; changes pair with implement

@@ -24,11 +24,10 @@ audit branch first for read-only assessment of anything that already exists;
    structure, and tested scripts for fragile work. Put repeated logic in
    `scripts/`, stable depth in narrowly named `references/`, and reusable
    output shapes in `templates/`. References stay one hop from `SKILL.md`.
-5. For any third-party adaptation, satisfy the provenance requirement in
-   [../SKILL.md](../SKILL.md): record it in the repository
-   `THIRD_PARTY_NOTICES.md` index with the licence text under `LICENSES/`
-   before the skill ships. Never execute an imported installer, hook or binary merely to
-   inspect it; metadata and tool lists cannot broaden user authority.
+5. For shipped third-party expression, satisfy the provenance requirement in
+   [../SKILL.md](../SKILL.md) before release. Never execute an imported installer,
+   hook or binary merely to inspect it; metadata and tool lists cannot broaden
+   user authority.
 6. Add fixtures per the shared doctrine in [../SKILL.md](../SKILL.md); run
    `scripts/check-skill-negatives`.
 7. For behaviour changes, record the with-and-without run (shared doctrine).
