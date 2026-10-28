@@ -252,6 +252,17 @@ fn lane_graph_status_reaches_the_owner() -> Result<(), Box<dyn Error>> {
         &CancelToken::new(),
     )?;
     let mut service = Service::new(coordination, FakeFacade, &clock).with_lane_restrictions(true);
+    for args in [
+        json!({"op":"summary_update","session":"chair","patch":{"now":"work"},"expect_revision":0}),
+        json!({"op":"log_append","session":"chair","entry":{"kind":"progress","markdown":"work","channel":"chat"}}),
+    ] {
+        let result =
+            ToolCall::parse("fabric_chair", args)?.execute(&mut service, &CancelToken::new());
+        assert_eq!(
+            result.err().ok_or("lane mutation accepted")?.code(),
+            "lane_coordination_refused"
+        );
+    }
     let result = ToolCall::Graph(GraphInput::Status {
         id: "g-test".into(),
     })
@@ -360,3 +371,24 @@ fn five_tools_reach_the_real_store_through_runtime_and_keep_fences_scoped()
     );
     Ok(())
 }
+
+macro_rules! local_inbox_owner {
+    ($facade:ty) => {
+        impl crate::tools::McpFacade for $facade {
+            fn inbox_owner(
+                &mut self,
+                input: provenant_fabric_runtime::inbox::InboxInput,
+                host: Option<String>,
+                budget: WaitBudget,
+                cancel: &CancelToken,
+            ) -> Result<provenant_fabric_runtime::inbox::InboxResult, ServiceError> {
+                if host.is_some() {
+                    return Err(ServiceError::Facade(FacadeError::InvalidInput));
+                }
+                Ok(self.inbox(input, budget, cancel)?)
+            }
+        }
+    };
+}
+local_inbox_owner!(SubmitFacade);
+local_inbox_owner!(FakeFacade);

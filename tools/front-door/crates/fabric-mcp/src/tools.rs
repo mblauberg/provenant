@@ -9,15 +9,145 @@ pub use provenant_fabric_runtime::coordination::{
     MailInput, Mutation, TaskInput,
 };
 use provenant_fabric_runtime::inbox::{InboxError, InboxInput};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+
+fn page_default() -> u64 {
+    50
+}
+fn depth_default() -> u64 {
+    8
+}
+fn nodes_default() -> u64 {
+    100
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConsoleInput {
+    Projects,
+    Overview,
+    Sessions {
+        session: Option<String>,
+        #[serde(default = "page_default")]
+        limit: u64,
+        cursor: Option<String>,
+    },
+    Board {
+        #[serde(default)]
+        all: bool,
+        #[serde(default = "page_default")]
+        limit: u64,
+        cursor: Option<String>,
+        hosts: Option<String>,
+    },
+    Tree {
+        #[serde(default = "depth_default")]
+        max_depth: u64,
+        #[serde(default = "nodes_default")]
+        max_nodes: u64,
+        #[serde(default)]
+        detail: bool,
+        hosts: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ChairInput {
+    SummaryShow {
+        session: String,
+    },
+    SummaryDiff {
+        session: String,
+        from: u64,
+        to: Option<u64>,
+    },
+    SummaryUpdate {
+        session: String,
+        patch: Value,
+        expect_revision: u64,
+    },
+    LogList {
+        session: String,
+        after: Option<u64>,
+        #[serde(default = "page_default")]
+        limit: u64,
+    },
+    LogAppend {
+        session: String,
+        entry: Value,
+        operation_id: Option<String>,
+        issued_at: Option<i64>,
+    },
+}
+
+impl ConsoleInput {
+    fn validate(&self) -> Result<(), InputError> {
+        let bad = |path: &str| InputError { path: path.into() };
+        match self {
+            Self::Sessions { limit, .. } | Self::Board { limit, .. }
+                if !(1..=100).contains(limit) =>
+            {
+                Err(bad("limit"))
+            }
+            Self::Tree { max_depth, .. } if !(1..=16).contains(max_depth) => Err(bad("max_depth")),
+            Self::Tree { max_nodes, .. } if !(1..=100).contains(max_nodes) => Err(bad("max_nodes")),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl ChairInput {
+    fn validate(&self) -> Result<(), InputError> {
+        let bad = |path: &str| InputError { path: path.into() };
+        match self {
+            Self::SummaryDiff { from, .. } if *from == 0 => Err(bad("from")),
+            Self::SummaryDiff { to: Some(0), .. } => Err(bad("to")),
+            Self::LogList { limit, .. } if !(1..=100).contains(limit) => Err(bad("limit")),
+            Self::LogAppend {
+                operation_id: Some(id),
+                ..
+            } if OperationId::parse(id).is_err() => Err(bad("operation_id")),
+            _ => Ok(()),
+        }
+    }
+}
+
+pub trait McpFacade: F3Facade {
+    fn inbox_owner(
+        &mut self,
+        input: InboxInput,
+        host: Option<String>,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<provenant_fabric_runtime::inbox::InboxResult, ServiceError>;
+    fn console(
+        &mut self,
+        _input: ConsoleInput,
+        _budget: WaitBudget,
+        _cancel: &CancelToken,
+    ) -> Result<Value, ServiceError> {
+        Err(ServiceError::Facade(FacadeError::InvalidInput))
+    }
+    fn chair(
+        &mut self,
+        _input: ChairInput,
+        _budget: WaitBudget,
+        _cancel: &CancelToken,
+    ) -> Result<Value, ServiceError> {
+        Err(ServiceError::Facade(FacadeError::InvalidInput))
+    }
+}
 
 /// Parsed tool request. Coordination inputs are the runtime's exact serde
 /// contracts; the execution facade contracts also live in runtime for F3.
 pub enum ToolCall {
     Discover,
-    Inbox(InboxInput),
+    Inbox(InboxInput, Option<String>),
+    Console(ConsoleInput),
+    Chair(ChairInput),
     Identity(IdentityInput),
     Mail(MailInput, Option<OperationId>),
     Task(TaskInput, Option<OperationId>),
@@ -49,7 +179,9 @@ impl ToolCall {
     fn kind(&self) -> schema::ToolKind {
         match self {
             Self::Discover => schema::ToolKind::Discover,
-            Self::Inbox(_) => schema::ToolKind::Inbox,
+            Self::Inbox(..) => schema::ToolKind::Inbox,
+            Self::Console(_) => schema::ToolKind::Console,
+            Self::Chair(_) => schema::ToolKind::Chair,
             Self::Identity(_) => schema::ToolKind::Identity,
             Self::Mail(..) => schema::ToolKind::Mail,
             Self::Task(..) => schema::ToolKind::Task,
@@ -109,12 +241,15 @@ impl ToolCall {
         };
 
         match self {
-            Self::Inbox(InboxInput::Ask { request, .. }) => body(&request.body, "request.body"),
-            Self::Inbox(InboxInput::List { limit, .. }) => page(*limit),
-            Self::Inbox(InboxInput::Answer {
-                text: Some(text), ..
-            }) => body(text, "text"),
-            Self::Inbox(InboxInput::Close { reason, .. }) => body(reason, "reason"),
+            Self::Inbox(InboxInput::Ask { request, .. }, _) => body(&request.body, "request.body"),
+            Self::Inbox(InboxInput::List { limit, .. }, _) => page(*limit),
+            Self::Inbox(
+                InboxInput::Answer {
+                    text: Some(text), ..
+                },
+                _,
+            ) => body(text, "text"),
+            Self::Inbox(InboxInput::Close { reason, .. }, _) => body(reason, "reason"),
             Self::Mail(MailInput::Send { body: value, .. }, _) => body(value, "body"),
             Self::Mail(MailInput::Read { limit, .. }, _) => page(*limit),
             Self::Task(TaskInput::Create { objective, note }, _)
@@ -158,7 +293,7 @@ impl ToolCall {
     }
 
     fn is_mutation(&self) -> bool {
-        if let Self::Inbox(input) = self {
+        if let Self::Inbox(input, _) = self {
             return input.is_mutation();
         }
         matches!(
@@ -185,6 +320,7 @@ impl ToolCall {
                         | LandingInput::Release { .. },
                     _
                 )
+                | Self::Chair(ChairInput::SummaryUpdate { .. } | ChairInput::LogAppend { .. })
                 | Self::Graph(
                     GraphInput::Run { .. } | GraphInput::Cancel { .. } | GraphInput::Resume { .. }
                 )
@@ -271,6 +407,27 @@ impl ToolCall {
                     .or_insert(serde_json::json!(16_384));
             }
         }
+        let host = if schema::tool_kind(name) == Some(schema::ToolKind::Inbox) {
+            let host = arguments.as_object_mut().and_then(|o| o.remove("host"));
+            if host.is_some() && operation == "ask" {
+                return Err(InvalidInput::Arguments {
+                    path: "arguments.host".into(),
+                });
+            }
+            match host {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) if !s.is_empty() && s.len() <= 128 && !s.contains('\0') => {
+                    Some(s)
+                }
+                _ => {
+                    return Err(InvalidInput::Arguments {
+                        path: "arguments.host".into(),
+                    });
+                }
+            }
+        } else {
+            None
+        };
         let operation_id =
             match schema::tool_kind(name) {
                 Some(
@@ -333,7 +490,20 @@ impl ToolCall {
                 }
             }
             Some(schema::ToolKind::Identity) if operation == "hosts" => parse!(HostsInput, Hosts),
-            Some(schema::ToolKind::Inbox) => parse!(InboxInput, Inbox),
+            Some(schema::ToolKind::Inbox) => parse!(InboxInput, Inbox, host),
+            Some(schema::ToolKind::Console | schema::ToolKind::Chair) => {
+                if let Some(path) = schema::invalid_path(name, &arguments) {
+                    return Err(InvalidInput::Arguments { path });
+                }
+                if schema::tool_kind(name) == Some(schema::ToolKind::Console) {
+                    serde_json::from_value(arguments.clone()).map(Self::Console)
+                } else {
+                    serde_json::from_value(arguments.clone()).map(Self::Chair)
+                }
+                .map_err(|_| InvalidInput::Arguments {
+                    path: "arguments".into(),
+                })
+            }
             Some(schema::ToolKind::Identity) => parse!(IdentityInput, Identity),
             Some(schema::ToolKind::Mail) => parse!(MailInput, Mail, operation_id.clone()),
             Some(schema::ToolKind::Task) => parse!(TaskInput, Task, operation_id.clone()),
@@ -351,6 +521,14 @@ impl ToolCall {
             Some(schema::ToolKind::Graph) => parse!(GraphInput, Graph),
             None => Err(InvalidInput::UnknownTool),
         }?;
+        let validation = match &call {
+            Self::Console(input) => input.validate(),
+            Self::Chair(input) => input.validate(),
+            _ => Ok(()),
+        };
+        validation.map_err(|error| InvalidInput::Arguments {
+            path: format!("arguments.{}", error.path),
+        })?;
         if operation_id.is_some() && !call.is_mutation() {
             return Err(InvalidInput::Arguments {
                 path: "arguments.operation_id".to_owned(),
@@ -361,16 +539,36 @@ impl ToolCall {
 
     /// A single match composes the runtime and the F3 seam. Cancellation only
     /// abandons the observation; run cancellation remains an explicit call.
-    pub fn execute<F: F3Facade>(
+    pub fn execute<F: McpFacade>(
         mut self,
         service: &mut Service<'_, F>,
         cancel: &CancelToken,
     ) -> Result<ToolResponse, ServiceError> {
+        if let Self::Chair(ChairInput::LogAppend {
+            operation_id,
+            issued_at,
+            ..
+        }) = &mut self
+        {
+            if operation_id.is_none() {
+                let timestamp = match *issued_at {
+                    Some(timestamp) => timestamp,
+                    None => service.clock.wall_now()?.as_timestamp().as_second(),
+                };
+                *operation_id = Some(format!("mcp-log-{timestamp}-{}", new_operation_id()?));
+                *issued_at = Some(timestamp);
+            } else if issued_at.is_none() {
+                *issued_at = operation_id
+                    .as_deref()
+                    .and_then(|id| id.strip_prefix("mcp-log-")?.split_once('-')?.0.parse().ok());
+            }
+        }
         if let Self::Inbox(
             InboxInput::Ask { operation_id, .. }
             | InboxInput::Answer { operation_id, .. }
             | InboxInput::Close { operation_id, .. }
             | InboxInput::Acknowledge { operation_id, .. },
+            _,
         ) = &mut self
             && operation_id.is_none()
         {
@@ -397,7 +595,12 @@ impl ToolCall {
                 | InboxInput::Answer { operation_id, .. }
                 | InboxInput::Close { operation_id, .. }
                 | InboxInput::Acknowledge { operation_id, .. },
+                _,
             ) => operation_id.clone(),
+            Self::Chair(ChairInput::LogAppend {
+                operation_id: Some(id),
+                ..
+            }) => OperationId::parse(id).ok(),
             Self::Submit(SubmitInput::Submit { operation_id, .. })
             | Self::SubmitWait(SubmitInput::Submit { operation_id, .. }, ..)
             | Self::Run(
@@ -410,7 +613,7 @@ impl ToolCall {
         }
     }
 
-    fn execute_inner<F: F3Facade>(
+    fn execute_inner<F: McpFacade>(
         self,
         service: &mut Service<'_, F>,
         cancel: &CancelToken,
@@ -419,7 +622,9 @@ impl ToolCall {
         // same transport cap before any coordination or facade side effects.
         match &self {
             Self::Discover => Ok(()),
-            Self::Inbox(input) => input.validate_input(WaitTransport::Mcp),
+            Self::Inbox(input, _) => input.validate_input(WaitTransport::Mcp),
+            Self::Console(input) => input.validate(),
+            Self::Chair(input) => input.validate(),
             Self::Identity(input) => input.validate_input(WaitTransport::Mcp),
             Self::Mail(input, _) => input.validate_input(WaitTransport::Mcp),
             Self::Task(input, _) => input.validate_input(WaitTransport::Mcp),
@@ -444,6 +649,7 @@ impl ToolCall {
             && matches!(
                 &self,
                 Self::Inbox(..)
+                    | Self::Chair(..)
                     | Self::Mail(..)
                     | Self::Task(..)
                     | Self::Events(..)
@@ -475,7 +681,14 @@ impl ToolCall {
             ($owner:ident, $method:ident, $input:ident) => {{ response(tool_name, service.$owner.$method($input, budget, cancel)?) }};
         }
         let result = match self {
-            Self::Inbox(input) => call!(facade, inbox, input),
+            Self::Inbox(input, host) => response(
+                tool_name,
+                service.facade.inbox_owner(input, host, budget, cancel)?,
+            ),
+            Self::Console(input) => {
+                response(tool_name, service.facade.console(input, budget, cancel)?)
+            }
+            Self::Chair(input) => response(tool_name, service.facade.chair(input, budget, cancel)?),
             Self::Discover => response(
                 tool_name,
                 serde_json::json!({"tools": schema::advanced_catalogue()}),
@@ -810,8 +1023,16 @@ impl ToolCall {
 /// sources while the protocol exposes a stable domain code.
 #[derive(Debug, Error)]
 pub enum ServiceError {
+    #[error("{message}")]
+    Cli {
+        code: String,
+        message: String,
+        data: Value,
+    },
     #[error(transparent)]
     Inbox(#[from] InboxError),
+    #[error("{message}")]
+    InboxOwner { code: String, message: String },
     #[error("{source}")]
     Mutation {
         operation_id: OperationId,
@@ -833,10 +1054,11 @@ pub enum ServiceError {
 }
 
 impl ServiceError {
-    pub fn code(&self) -> &'static str {
+    pub fn code(&self) -> &str {
         match self {
             Self::Mutation { source, .. } => source.code(),
             Self::Inbox(error) => error.code(),
+            Self::InboxOwner { code, .. } | Self::Cli { code, .. } => code,
             Self::Invalid(_) => "invalid_input",
             Self::Coordination(error) => error.code(),
             Self::Facade(error) => error.code(),
@@ -859,6 +1081,12 @@ impl ServiceError {
             return detail;
         }
         let mut detail = match self {
+            Self::Cli { data, .. } => {
+                let mut detail = data.as_object().cloned().unwrap_or_default();
+                detail.insert("data".into(), data.clone());
+                detail.insert("code".into(), Value::String(self.code().into()));
+                Value::Object(detail)
+            }
             Self::Invalid(error) => serde_json::json!({"code":self.code(),"path":error.path}),
             Self::Coordination(CoordinationError::LaneMutation) => {
                 serde_json::json!({"code":self.code(),"message":self.to_string()})

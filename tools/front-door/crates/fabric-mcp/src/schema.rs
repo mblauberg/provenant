@@ -21,9 +21,11 @@ pub(crate) enum ToolKind {
     Graph,
     Discover,
     Inbox,
+    Console,
+    Chair,
 }
 
-pub(crate) const TOOL_NAMES: [(ToolKind, &str); 10] = [
+pub(crate) const TOOL_NAMES: [(ToolKind, &str); 12] = [
     (ToolKind::Identity, "fabric_context"),
     (ToolKind::Mail, "fabric_mail"),
     (ToolKind::Task, "fabric_task"),
@@ -34,6 +36,8 @@ pub(crate) const TOOL_NAMES: [(ToolKind, &str); 10] = [
     (ToolKind::Output, "fabric_output"),
     (ToolKind::Discover, "fabric_discover"),
     (ToolKind::Inbox, "fabric_inbox"),
+    (ToolKind::Console, "fabric_console"),
+    (ToolKind::Chair, "fabric_chair"),
 ];
 
 pub(crate) fn tool_name(kind: ToolKind) -> &'static str {
@@ -176,7 +180,7 @@ fn build_strict() -> Vec<Value> {
         "options?":array(object(json!({"id":reference("OperationId"),"label":text(256),"description":text(1024)})),0,16),
         "recommended_option_id?":nullable(reference("OperationId")),"proceeding_with?":nullable(text(1024))
     }));
-    let tools: [(&str, Value); 10] = [
+    let tools: [(&str, Value); 12] = [
         (
             "Inspect the authenticated Fabric identity or list peer hosts.",
             json!({"inspect":{},"hosts":{"after?":nullable(reference("Id")),"limit":page.clone()}}),
@@ -240,17 +244,36 @@ fn build_strict() -> Vec<Value> {
             }),
         ),
         (
-            "Discover inbox, graph, task, lease and event tools. Call discovered tools by name.",
+            "Discover inbox, console, chair, graph, task, lease and event tools. Call discovered tools by name.",
             json!({"discover":{}}),
         ),
         (
-            "Post human requests, list the local inbox, answer, close or acknowledge. Fabric mail is queued, not live injection; peers are unsupported.",
+            "Post human requests, list, answer, close or acknowledge; route to an owner host when needed.",
             json!({
                 "ask":{"session":inbox_session.clone(),"request":inbox_request,"operation_id?":nullable(reference("OperationId"))},
-                "list":{"id?":nullable(reference("Id")),"session?":nullable(inbox_session.clone()),"state?":choices(&["open","all"]),"limit?":integer(1,100),"cursor?":nullable(pattern(r"^[0-9a-f]{32}\.sha256:[0-9a-f]{64}\.[0-9]{1,20}$"))},
-                "answer":{"id":reference("Id"),"action":choices(&["choose","reply","confirm","override"]),"option_id?":nullable(reference("OperationId")),"text?":nullable(text(provenant_records::inbox::ANSWER_TEXT_BYTES)),"expect_revision":integer(1,u64::MAX),"channel":choices(&["chat","console","phone_remote","cli","unknown"]),"operation_id?":nullable(reference("OperationId"))},
-                "close":{"id":reference("Id"),"state":choices(&["withdrawn","superseded","expired"]),"reason":text(1024),"expect_revision":integer(1,u64::MAX),"operation_id?":nullable(reference("OperationId"))},
-                "acknowledge":{"id":reference("Id"),"answer_id":reference("Id"),"session":inbox_session,"operation_id?":nullable(reference("OperationId"))}
+                "list":{"host?":nullable(text(128)),"id?":nullable(reference("Id")),"session?":nullable(inbox_session.clone()),"state?":choices(&["open","all"]),"limit?":integer(1,100),"cursor?":nullable(pattern(r"^[0-9a-f]{32}\.sha256:[0-9a-f]{64}\.[0-9]{1,20}$"))},
+                "answer":{"host?":nullable(text(128)),"id":reference("Id"),"action":choices(&["choose","reply","confirm","override"]),"option_id?":nullable(reference("OperationId")),"text?":nullable(text(provenant_records::inbox::ANSWER_TEXT_BYTES)),"expect_revision":integer(1,u64::MAX),"channel":choices(&["chat","console","phone_remote","cli","unknown"]),"operation_id?":nullable(reference("OperationId"))},
+                "close":{"host?":nullable(text(128)),"id":reference("Id"),"state":choices(&["withdrawn","superseded","expired"]),"reason":text(1024),"expect_revision":integer(1,u64::MAX),"operation_id?":nullable(reference("OperationId"))},
+                "acknowledge":{"host?":nullable(text(128)),"id":reference("Id"),"answer_id":reference("Id"),"session":inbox_session.clone(),"operation_id?":nullable(reference("OperationId"))}
+            }),
+        ),
+        (
+            "Read projects, sessions, board, tree and overview; board and tree can include peers.",
+            json!({
+                "projects":{}, "overview":{},
+                "sessions":{"session?":nullable(inbox_session.clone()),"limit?":integer(1,100),"cursor?":nullable(pattern(r"^sha256:[0-9a-f]{64}:[0-9]{1,20}$"))},
+                "board":{"all?":{"type":"boolean"},"limit?":integer(1,100),"cursor?":nullable(pattern(r"^2\.[0-9]{1,20}\.[0-9]{1,20}\.sha256:[0-9a-f]{64}$")),"hosts?":nullable(text(1024))},
+                "tree":{"max_depth?":integer(1,16),"max_nodes?":integer(1,100),"detail?":{"type":"boolean"},"hosts?":nullable(text(1024))}
+            }),
+        ),
+        (
+            "Read and update chair summaries and append or list chair logs.",
+            json!({
+                "summary_show":{"session":inbox_session.clone()},
+                "summary_diff":{"session":inbox_session.clone(),"from":integer(1,u64::MAX),"to?":nullable(integer(1,u64::MAX))},
+                "summary_update":{"session":inbox_session.clone(),"patch":object(json!({"now?":nullable(text(256 * 1024)),"next?":nullable(text(256 * 1024)),"needs_you?":nullable(json!({"type":"array","items":text(256 * 1024)})),"risk?":nullable(text(256 * 1024))})),"expect_revision":integer(0,u64::MAX)},
+                "log_list":{"session":inbox_session.clone(),"after?":nullable(integer(0,u64::MAX)),"limit?":integer(1,100)},
+                "log_append":{"session":inbox_session,"entry":object(json!({"kind":text(16 * 1024),"markdown":text(256 * 1024),"channel":text(16 * 1024),"request_ids?":json!({"type":"array","items":text(256 * 1024)}),"attempt_ids?":json!({"type":"array","items":text(256 * 1024)}),"issue_ids?":json!({"type":"array","items":text(256 * 1024)}),"pr_ids?":json!({"type":"array","items":text(256 * 1024)}),"correction_of?":nullable(integer(0,u64::MAX))})),"operation_id?":nullable(reference("OperationId")),"issued_at?":nullable(json!({"type":"integer"}))}
             }),
         ),
     ];
@@ -457,7 +480,15 @@ pub fn catalogue() -> &'static [Value] {
 fn is_advanced(name: &Value) -> bool {
     matches!(
         name.as_str(),
-        Some("fabric_task" | "fabric_events" | "fabric_lease" | "fabric_graph" | "fabric_inbox")
+        Some(
+            "fabric_task"
+                | "fabric_events"
+                | "fabric_lease"
+                | "fabric_graph"
+                | "fabric_inbox"
+                | "fabric_console"
+                | "fabric_chair"
+        )
     )
 }
 
@@ -633,6 +664,7 @@ fn structural_path(root: &Value, schema: &Value, value: &Value, path: &str) -> O
         Some("array") => value.is_array(),
         Some("string") => value.is_string(),
         Some("integer") => value.is_u64() || value.is_i64(),
+        Some("boolean") => value.is_boolean(),
         Some("null") => value.is_null(),
         _ => true,
     };
@@ -645,6 +677,15 @@ fn structural_path(root: &Value, schema: &Value, value: &Value, path: &str) -> O
         return Some(path.to_owned());
     }
     if let Some(text) = value.as_str() {
+        let length = text.chars().count() as u64;
+        if schema["minLength"].as_u64().is_some_and(|min| length < min)
+            || schema["maxLength"].as_u64().is_some_and(|max| length > max)
+            || schema["x-provenant-maxUtf8Bytes"]
+                .as_u64()
+                .is_some_and(|max| text.len() as u64 > max)
+        {
+            return Some(path.to_owned());
+        }
         let pattern_ok = match schema["pattern"].as_str() {
             Some("^[0-9a-f]{32}$") => provenant_core::ActorId::parse(text).is_ok(),
             Some("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$") => {
@@ -652,10 +693,36 @@ fn structural_path(root: &Value, schema: &Value, value: &Value, path: &str) -> O
             }
             Some("^(?:[0-9a-f]{40}|[0-9a-f]{64})$") => provenant_core::GitOid::parse(text).is_ok(),
             Some("^sha256:[0-9a-f]{64}$") => provenant_core::Digest::parse(text).is_ok(),
+            Some(r"^[a-z0-9]([a-z0-9_-]|\.[a-z0-9_-])*\.?$") => {
+                let mut chars = text.chars();
+                chars
+                    .next()
+                    .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+                    && !text.contains("..")
+                    && chars.all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-' | '.')
+                    })
+            }
             Some(_) => !text.contains('\0'),
             None => true,
         };
         if !pattern_ok {
+            return Some(path.to_owned());
+        }
+    }
+    if let Some(n) = value
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| value.as_u64().map(i128::from))
+    {
+        let number = |v: &Value| {
+            v.as_i64()
+                .map(i128::from)
+                .or_else(|| v.as_u64().map(i128::from))
+        };
+        if number(&schema["minimum"]).is_some_and(|min| n < min)
+            || number(&schema["maximum"]).is_some_and(|max| n > max)
+        {
             return Some(path.to_owned());
         }
     }
@@ -684,6 +751,15 @@ fn structural_path(root: &Value, schema: &Value, value: &Value, path: &str) -> O
         }
     }
     if let Some(items) = value.as_array() {
+        if schema["minItems"]
+            .as_u64()
+            .is_some_and(|n| (items.len() as u64) < n)
+            || schema["maxItems"]
+                .as_u64()
+                .is_some_and(|n| items.len() as u64 > n)
+        {
+            return Some(path.to_owned());
+        }
         return items.iter().enumerate().find_map(|(index, item)| {
             structural_path(root, &schema["items"], item, &format!("{path}[{index}]"))
         });

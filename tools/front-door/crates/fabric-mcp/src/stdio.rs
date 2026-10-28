@@ -1,6 +1,6 @@
 //! Bounded newline framing and a four-worker synchronous MCP transport.
 use crate::protocol::{self, Action, Id, MAX_FRAME, Protocol};
-use crate::tools::{self, F3Facade, Service, ServiceError, ToolCall};
+use crate::tools::{self, McpFacade, Service, ServiceError, ToolCall};
 use provenant_core::CancelToken;
 use serde_json::{Value, json};
 use std::{
@@ -47,7 +47,7 @@ pub trait Output {
 }
 /// Open each worker's service on that worker, so SQLite never crosses threads.
 pub trait Factory: Send + Sync + 'static {
-    type Facade<'a>: F3Facade
+    type Facade<'a>: McpFacade
     where
         Self: 'a;
     fn open(&self) -> Result<Service<'_, Self::Facade<'_>>, ServiceError>;

@@ -37,8 +37,9 @@ from the run record.
 
 The default Fabric MCP tools are `fabric_run`, `fabric_output`, `fabric_mail`
 and `fabric_context`. Call `fabric_discover` with `{}` to inspect the schemas
-for `fabric_graph`, `fabric_lease`, `fabric_task` and `fabric_events`, then call
-those tools by name. Mail, identity and activity use `fabric_mail`,
+for `fabric_graph`, `fabric_lease`, `fabric_task`, `fabric_events`,
+`fabric_inbox`, `fabric_console` and `fabric_chair`, then call those tools by
+name. Mail, identity and activity use `fabric_mail`,
 `fabric_context` (`op: inspect`) and `fabric_events`. Advanced CLI recovery uses
 `provenant lanes` for waits, `output ATTEMPT --part events|result|prompt|stderr
 --tail N` for retained bytes, `reconcile --id RUN` and `fabric landing
