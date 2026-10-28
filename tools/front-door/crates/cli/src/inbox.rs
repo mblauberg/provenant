@@ -65,7 +65,7 @@ pub fn resolve_work(
         provenant_run::RunError::Cancelled => {
             InboxError::Store(provenant_fabric_runtime::StoreError::Cancelled)
         }
-        _ => InboxError::OwnerUnavailable,
+        other => InboxError::WorkLookup(other.to_string()),
     })
 }
 

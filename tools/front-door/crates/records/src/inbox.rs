@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub const REQUEST_BODY_BYTES: usize = 8192;
 pub const ANSWER_TEXT_BYTES: usize = 4096;
+pub const REQUEST_REPOSITORY_BYTES: usize = 4096;
 pub const MAX_OPTIONS: usize = 16;
 pub const MAX_OFFER_BYTES: usize = 8192;
 
@@ -153,11 +154,21 @@ pub struct HumanRequest {
     pub chair_session_id: String,
     pub chair_actor: ActorId,
     pub request: RequestDraft,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_coverage: Option<WorkCoverage>,
     pub state: RequestState,
     pub answer_id: Option<HumanAnswerId>,
     pub closure_reason: Option<String>,
+}
+
+impl HumanRequest {
+    /// `request.work` is always a claim. Only this accessor exposes a verified
+    /// creation-preparation snapshot; other coverage must never become work links.
+    pub fn verified_work(&self) -> Option<&RequestWork> {
+        (self.work_coverage == Some(WorkCoverage::Verified))
+            .then_some(self.request.work.as_ref())
+            .flatten()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

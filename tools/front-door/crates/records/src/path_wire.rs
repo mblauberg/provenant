@@ -94,6 +94,15 @@ impl PathWire {
         Ok(self.path.clone())
     }
 
+    pub(crate) fn encoded_len(&self) -> usize {
+        let bytes = self.path.as_path().as_os_str().len();
+        if self.encoding == PathEncoding::NativeBytes {
+            bytes.saturating_mul(2)
+        } else {
+            bytes
+        }
+    }
+
     pub fn as_path_text(&self) -> Option<&str> {
         self.path.as_path().to_str()
     }

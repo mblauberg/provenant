@@ -22,6 +22,10 @@ impl AbsolutePath {
             relative_to_root: PathWire::from_relative(&relative)?,
         })
     }
+    /// UTF-8 bytes of relative_to_root.path, including native-byte hex encoding.
+    pub fn wire_path_bytes(&self) -> usize {
+        self.relative_to_root.encoded_len()
+    }
     pub fn to_path_buf(&self) -> Result<PathBuf, crate::PathWireError> {
         Ok(Path::new("/").join(self.relative_to_root.to_relative_path()?.as_path()))
     }

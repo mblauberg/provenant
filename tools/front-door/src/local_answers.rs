@@ -169,6 +169,7 @@ mod tests {
                 session: "chair-a".into(),
                 operation_id: None,
                 request: RequestDraft {
+                    work: None,
                     kind: RequestKind::Question,
                     title: "Next?".into(),
                     body: "Choose".into(),

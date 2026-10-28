@@ -111,12 +111,16 @@ impl WorkIndex {
             for n in 0..=ROW_LIMIT {
                 let Some(row) = rows.next()? else {
                     if !qualified {
-                        return Ok(WorkCoverage::Partial);
+                        return Ok(coverage.max(WorkCoverage::Partial));
                     }
                     return Ok(coverage);
                 };
                 if n == ROW_LIMIT {
-                    return Ok(WorkCoverage::Limit);
+                    return Ok(if coverage == WorkCoverage::Mismatch {
+                        coverage
+                    } else {
+                        WorkCoverage::Limit
+                    });
                 }
                 let raw: Vec<u8> = row.get(0)?;
                 if raw.len() > MEMBER_BYTES {
@@ -273,6 +277,13 @@ mod tests {
         selection.head = value.head;
         selection.repository = Some(AbsolutePath::new(Path::new("/other/.git"))?);
         assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Mismatch);
+        let mut unqualified = selection.clone();
+        unqualified.task = None;
+        unqualified.attempt = None;
+        assert_eq!(index.validate(&unqualified, &call)?, WorkCoverage::Mismatch);
+        unqualified.repository = value.repository.clone();
+        unqualified.head = Some(GitOid::parse(&"b".repeat(40))?);
+        assert_eq!(index.validate(&unqualified, &call)?, WorkCoverage::Mismatch);
         selection.repository = value.repository.clone();
         for field in 0..4 {
             let mut foreign = selection.clone();
@@ -342,6 +353,7 @@ mod tests {
             index.validate(&selection, &call)?,
             WorkCoverage::HeadUnavailable
         );
+        value.repository = Some(AbsolutePath::new(Path::new("/repo/.git"))?);
         for n in 1..=64_u8 {
             value.attempt = AttemptId::from_bytes([n; 16]);
             if value.attempt == input.attempts[0].attempt_id {
@@ -353,6 +365,10 @@ mod tests {
         index.seal(&value, &call)?;
         selection.task = None;
         assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Limit);
+        selection.head = None;
+        selection.repository = Some(AbsolutePath::new(Path::new("/other/.git"))?);
+        assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Mismatch);
+        selection.repository = None;
         selection.attempt = Some(value.attempt);
         selection.head = None;
         assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Verified);

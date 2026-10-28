@@ -99,7 +99,7 @@ impl Store {
                 let title: Option<String> = row.get(8)?;
                 let chair_session_id: Option<String> = row.get(9)?;
                 let session_type: Option<String> = row.get(10)?;
-                if version != Some(1)
+                if !matches!(version, Some(1 | 2))
                     || record_project.as_deref() != Some(&project_id)
                     || record_id.as_deref() != Some(&id)
                     || title.is_none()
@@ -264,7 +264,7 @@ impl Store {
                     truncated = true;
                     break;
                 }
-                let value: HumanRequest = decode(&record)?;
+                let value = request_record(&record)?;
                 if value.project_id != project { return Err(Error::Invalid("stored request identity")); }
                 bytes += record.len();
                 items.push(value);
@@ -431,8 +431,8 @@ fn load(db: &rusqlite::Connection, project: ProjectId, id: HumanRequestId) -> Re
         )
         .optional()?
         .ok_or(Error::NotFound)?;
-    let value: HumanRequest = decode(&bytes)?;
-    if value.project_id != project || value.id != id || value.schema_version != 1 {
+    let value = request_record(&bytes)?;
+    if value.project_id != project || value.id != id {
         return Err(Error::Invalid("stored request identity or version"));
     }
     Ok(value)
@@ -470,7 +470,7 @@ fn item(db: &rusqlite::Connection, project: ProjectId, id: HumanRequestId) -> Re
         |r| r.get::<_, Vec<u8>>(0),
     )?;
     let history = rows
-        .map(|r| decode(&r?))
+        .map(|r| request_record(&r?))
         .collect::<Result<Vec<HumanRequest>>>()?;
     if history.len() > 3 {
         return Err(Error::Invalid("request history limit"));
@@ -521,4 +521,12 @@ fn update(tx: &rusqlite::Connection, value: &HumanRequest) -> Result<()> {
 }
 fn revision(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| Error::Invalid("revision"))
+}
+
+fn request_record(bytes: &[u8]) -> Result<HumanRequest> {
+    let value: HumanRequest = decode(bytes)?;
+    if !matches!(value.schema_version, 1 | 2) {
+        return Err(Error::Invalid("stored request version"));
+    }
+    Ok(value)
 }

@@ -77,13 +77,18 @@ an exact 40- or 64-character Git object ID observed at launch.
 Creation validates these claims through Run's host-sealed membership lookup for
 the current project. A lookup result of `mismatch` is refused. The saved
 `work_coverage` reports the lookup result: `verified`, `partial`, `unindexed`,
-`repository_unavailable`, `head_unavailable` or `limit`. It is null when no work
-was supplied. Run-only selection is partial even when indexed facts differ; a capped lookup
-reports limit. Neither result rules out mismatches. Nested, historical and unprepared
+`repository_unavailable`, `head_unavailable` or `limit`. It is omitted when no work
+was supplied. Run-only selection is at best partial. Observed contradictions are refused,
+including run-only and capped lookups. A limit without an observed contradiction
+leaves remaining candidates unknown. Nested, historical and unprepared
 work may be unindexed. Neither case establishes membership or grants authority.
 No Git probes, child-store traversal or later promotion of coverage occurs.
 Item, history and list JSON preserve the links and creation-time coverage;
-callers cannot supply coverage. Task labels remain a future overview concern.
+callers cannot supply coverage. `request.work` always contains claims; only
+`verified` coverage permits a work link or task-label join. Other results must be
+labelled unverified and must not become navigable work. Use the records owner's
+`verified_work()` accessor and the binding [Fabric contract](../specs/fabric.md#human-requests).
+Task labels remain a future overview concern.
 
 ## Consume once
 
