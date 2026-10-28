@@ -655,6 +655,12 @@ fn graph_settlement_advances_writer_and_account_routed_review() -> Result {
     }
     let rig = claude_fixture()?;
     let cleanup = rig.process_cleanup();
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.pools]\ngraph-test = [{{ model = 'claude/claude-sonnet-5-5' }}]"
+    )?;
     let git = std::env::var_os("PROVENANT_GIT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/usr/bin/git"));
@@ -709,8 +715,8 @@ fn graph_settlement_advances_writer_and_account_routed_review() -> Result {
     fs::write(
         rig.project.join("graph.json"),
         serde_json::to_vec(&json!({"schema_version":1,"graph_id":"settlement","nodes":[
-            {"id":"write","prompt":"reply OK","access":"worktree_write","worktree":".worktrees/graph-writer","delivery":"none","route":route},
-            {"id":"review","prompt":"reply OK","access":"read_only","depends_on":["write"],"route":route}
+            {"id":"write","title":"Write changes","prompt":"reply OK","access":"worktree_write","worktree":".worktrees/graph-writer","delivery":"none","route":route},
+            {"id":"review","prompt":"reply OK","access":"read_only","depends_on":["write"],"route":{"alias":"graph-test","account":"pro"}}
         ]}))?,
     )?;
     let started = rig.command(&[
@@ -771,6 +777,13 @@ fn graph_settlement_advances_writer_and_account_routed_review() -> Result {
         assert_eq!(lane["state"], "succeeded", "{lane}");
         assert_eq!(lane["account"], "pro", "{lane}");
     }
+    let pool_lane = lanes
+        .iter()
+        .find(|lane| lane["applied_route"]["pool_selection"]["pool"] == "graph-test")
+        .ok_or("pool route receipt")?;
+    assert_eq!(pool_lane["applied_route"]["provider"], "claude");
+    assert_eq!(pool_lane["title"], "review");
+    assert!(lanes.iter().any(|lane| lane["title"] == "Write changes"));
     // Recreate a checkpoint saved before the terminal observation, after the
     // successful writer's checkout has already been pruned.
     assert_eq!(

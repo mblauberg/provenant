@@ -2900,7 +2900,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     fn observe_or_start(
         &mut self,
         key: &provenant_fabric_runtime::graph::AttemptKey,
-        prompt: &str,
+        node: provenant_fabric_runtime::graph::NodeInput<'_>,
         route: &provenant_fabric_runtime::graph::GraphRoute,
         access: provenant_fabric_runtime::graph::AccessMode,
         worktree: Option<&str>,
@@ -2956,18 +2956,22 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     account: route.account.clone(),
                     access,
                     worktree: worktree.map(str::to_owned),
-                    prompt: prompt.into(),
-                    title: None,
+                    prompt: node.prompt.into(),
+                    title: Some(node.title.to_owned()),
                     route: match &route.model {
-                        Some(model) => provenant_records::run::RequestedRoute::Model {
-                            provider: route.adapter.clone(),
-                            model: if model.contains('/') {
-                                model.clone()
-                            } else {
-                                format!("{}/{model}", route.adapter)
-                            },
-                            effort: route.effort.clone(),
-                        },
+                        Some(model) => {
+                            let adapter =
+                                route.adapter.as_ref().ok_or(FacadeError::InvalidInput)?;
+                            provenant_records::run::RequestedRoute::Model {
+                                provider: adapter.clone(),
+                                model: if model.contains('/') {
+                                    model.clone()
+                                } else {
+                                    format!("{adapter}/{model}")
+                                },
+                                effort: route.effort.clone(),
+                            }
+                        }
                         None => provenant_records::run::RequestedRoute::Named {
                             name: route.alias.clone().ok_or(FacadeError::InvalidInput)?,
                             effort: route.effort.clone(),
@@ -4192,7 +4196,7 @@ mod peer_tests {
             fn observe_or_start(
                 &mut self,
                 _: &AttemptKey,
-                _: &str,
+                _: graph::NodeInput<'_>,
                 _: &GraphRoute,
                 _: graph::AccessMode,
                 _: Option<&str>,
