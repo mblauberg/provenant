@@ -30,6 +30,12 @@ allocating identity. `chair summary update SESSION --file PATCH.json
 --expect-revision N` applies selected fields under the checkpoint save lock.
 Revision 0 creates a summary; stale edits return `SUMMARY_STALE` with the
 current summary revision. The returned checkpoint includes publication warnings.
+`chair summary diff SESSION --from N [--to N]` compares retained summary revision
+numbers, defaulting to the current revision and reporting unavailable revisions
+if pruned. Summary show includes a
+bounded inbox comparison for the local host, project and chair. Coverage marks
+incomplete scans and unavailable host identity; references attributed elsewhere
+or not accounted for by an incomplete scan are unknown.
 
 `console overview` combines local pending request titles and recent lane
 attention in one bounded read. Project labels use the registered Git common
@@ -278,7 +284,10 @@ branch. Removal carries that head and refuses, under the worktree lock, if the
 worktree's HEAD has moved since it was checked. When the selected project is
 that worktree, cleanup uses the verified primary checkout as its repository
 anchor, process cwd and output project. Canonical paths and NUL-delimited Git
-inventory handle symlink aliases and quoted paths. The landing worker census
+inventory handle symlink aliases and quoted paths. When Git lists a separate
+administrative directory instead of the primary checkout, `land` also checks
+`core.worktree` or a containing checkout. If neither identifies the primary
+checkout, landing reports an inventory error. The landing worker census
 ignores itself and only its ancestor chain through the session leader; other
 observable live processes inside the lane refuse removal. An incomplete census
 or unknown ancestor hop refuses landing with a retry message; each exempted

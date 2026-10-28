@@ -54,6 +54,17 @@ path and reason. A writer that succeeded but left edits uncommitted with no
 new commit ends `uncommitted`, and its reason names the dirty paths.
 No force removal is offered.
 
+A custody refusal names its reason (a stale registration names the recorded
+field that differs, as a tree re-added with `git worktree add` at a registered
+path does; a locked or prunable Git entry; a reservation; an unreadable record)
+and a repair. `worktree adopt PATH --owner NAME`, run from outside the tree,
+replaces a stale registration. It still refuses a held writer lock, a
+reservation and a live process, and names the process by pid and command, as
+`pr land` does.
+
+`worktree list` prints one terse line per tree. The path is a plain path,
+quoted only when it needs it; `--json` keeps the structured path object.
+
 ## Ownership and cleanup
 
 One writer owns each worktree. Removing an authorised merged worktree uses
@@ -152,8 +163,13 @@ an idle delay, even when the worktree stays for delivery pickup. Successful
 settlement, delivery integration and `land` prune eligible worktrees and
 caches. When landing from the merged linked worktree, `land` uses the main
 checkout for cleanup and output so it can remove the selected worktree and its
-branch. It ignores its own caller ancestors through the session leader in the
-worker census, while other observable live processes inside the lane retain it.
+branch. The primary checkout comes from Git's worktree inventory. When Git
+lists a separate administrative directory instead, `land` checks `core.worktree`
+or a containing checkout. An out-of-tree lane needs `core.worktree` set if
+the inventory does not name the primary checkout; otherwise landing reports
+the inventory problem. It ignores its own caller ancestors through the session
+leader in the worker census, while other observable live processes inside the
+lane retain it.
 An incomplete census or unproved ancestor hop refuses landing with a retry
 message; ancestor identities require strictly older native start stamps. The
 land process changes cwd before removal and prints a notice when the invoking

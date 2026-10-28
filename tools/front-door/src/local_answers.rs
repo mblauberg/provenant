@@ -30,18 +30,29 @@ impl LocalReader<'_> {
         max_bytes: usize,
         deadline: Instant,
     ) -> Result<Page<AnswerOffer>, Error> {
-        let empty = || Page {
+        let empty = Page {
             items: Vec::new(),
             truncated: false,
         };
+        let Some(target) = self.target(session, deadline)? else {
+            return Ok(empty);
+        };
+        let Some(store) = Store::open_read_only(self.root, deadline)? else {
+            return Ok(empty);
+        };
+        Ok(store.read_human_answers(&target, MAX_LOCAL_OFFER_ITEMS, max_bytes, deadline)?)
+    }
+
+    /// Resolve the registered target with the same cooperative deadline as read.
+    pub fn target(&self, session: &str, deadline: Instant) -> Result<Option<AnswerTarget>, Error> {
         check(deadline)?;
         if self.in_lane {
-            return Ok(empty());
+            return Ok(None);
         }
         let session = HostSessionId::parse(session)?;
         let Some(found) = discover_session_at(self.root, self.workspace, &session, deadline)?
         else {
-            return Ok(empty());
+            return Ok(None);
         };
         let host =
             Directory::open_anchor(self.root.as_path())?.read_bounded(OsStr::new("host-id"), 32)?;
@@ -53,24 +64,19 @@ impl LocalReader<'_> {
             Some(self.harness.spec().name),
         )?;
         if found.record.host != host || found.record.chair_actor != address.actor {
-            return Ok(empty());
+            return Ok(None);
         }
         // Without the regular federation context, defer configured remote homes
         // to Fabric mail rather than guessing whether a local mirror is current.
         if !self.config.home_hosts.is_empty() {
-            return Ok(empty());
+            return Ok(None);
         }
-        let target = AnswerTarget {
+        Ok(Some(AnswerTarget {
             host,
             project: found.record.project_id,
             session: session.as_str().into(),
             actor: address.actor,
-        };
-        let Some(store) = Store::open_read_only(self.root, deadline)? else {
-            return Ok(empty());
-        };
-        check(deadline)?;
-        Ok(store.read_human_answers(&target, 16, max_bytes, deadline)?)
+        }))
     }
 }
 

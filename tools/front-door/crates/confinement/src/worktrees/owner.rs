@@ -122,7 +122,7 @@ pub fn save_lane_owner_when_free(
         .get(tree.path())
         != Some(&WorkerState::Free)
     {
-        return Err(WorktreeError::LiveWriter);
+        return Err(live_refusal(context.workers, tree.path()));
     }
     if load_owner(&tree)?.is_some_and(|prior| prior.origin != WorktreeOrigin::Lane) {
         return Err(WorktreeError::UnknownWriter);
@@ -247,12 +247,20 @@ pub fn adopt(
         .find(|entry| canonicalize(&entry.path).ok().as_deref() == Some(&path))
         .ok_or(WorktreeError::NotFound)?;
     let branch = entry.branch.as_ref().ok_or(WorktreeError::InvalidRequest)?;
-    if branch.as_str() != format!("refs/heads/{}", owner.branch) || entry.locked || entry.prunable {
+    if entry.locked || entry.prunable {
+        return Err(WorktreeError::GitEntryHeld {
+            locked: entry.locked,
+        });
+    }
+    if branch.as_str() != format!("refs/heads/{}", owner.branch) {
         return Err(WorktreeError::InvalidRequest);
     }
+    // Adoption replaces any earlier registration at this path, so a stale or
+    // mismatched record is repaired here. It still needs the writer lock and
+    // an observed-free tree, and never takes either from a live writer.
     let observed = context.workers.observe_roots(std::slice::from_ref(&path));
     if observed.get(&path) != Some(&WorkerState::Free) {
-        return Err(WorktreeError::LiveWriter);
+        return Err(live_refusal(context.workers, &path));
     }
     let name = state_dir_name(&path);
     match context.project_state.mkdir(&name, 0o700) {
@@ -261,13 +269,17 @@ pub fn adopt(
         Err(error) => return Err(error.into()),
     }
     let state = context.project_state.open_verified_directory(&name)?;
-    let _writer = state.lock(
+    let _writer = match state.lock(
         OsStr::new(WRITER_LOCK),
         LockMode::Exclusive,
         WaitBudget::nonblocking(context.clock.mono_now()),
         cancel,
         context.clock,
-    )?;
+    ) {
+        Ok(guard) => guard,
+        Err(FsError::LockTimeout { .. }) => return Err(WorktreeError::LiveWriter),
+        Err(error) => return Err(error.into()),
+    };
     ensure_unreserved(&state)?;
     worktree.repo().revalidate()?;
     save_owner(&worktree, owner)?;

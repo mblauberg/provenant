@@ -14,6 +14,7 @@ pub struct PendingHumanRequest {
     pub project_key: Option<String>,
     pub title: String,
     pub chair_session_id: Option<String>,
+    pub owner_host: Option<String>,
 }
 
 pub struct PendingHumanRequests {
@@ -42,6 +43,78 @@ pub struct HumanAcknowledgement<'a> {
 }
 
 impl Store {
+    /// Record selected hook candidates once per exact destination. Offered
+    /// snapshots can be replayed idempotently until acknowledgement, so a late
+    /// commit or failed pipe write never consumes the answer. No creation,
+    /// migration, busy retries or history scan.
+    pub fn offer_human_answers_once(
+        root: &provenant_core::StateRoot,
+        target: &AnswerTarget,
+        candidates: Page<AnswerOffer>,
+        at: WallTime,
+        deadline: std::time::Instant,
+    ) -> Result<Page<AnswerOffer>> {
+        use crate::local_delivery::before;
+        before(deadline)?;
+        if candidates.items.len() as u64 > MAX_LOCAL_OFFER_ITEMS {
+            return Err(Error::Invalid("offer count"));
+        }
+        let store = Self::open_local_delivery(root, deadline, true)?.ok_or(Error::NotFound)?;
+        let tx = rusqlite::Transaction::new_unchecked(
+            &store.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let mut offered = Page {
+            items: Vec::new(),
+            truncated: candidates.truncated,
+        };
+        for mut candidate in candidates.items {
+            before(deadline)?;
+            let bytes: Option<Vec<u8>> = tx.query_row("SELECT substr(record,1,?3) FROM human_answer_outbox WHERE project=?1 AND answer=?2",
+                params![target.project.to_string(), candidate.answer.id.to_string(), MAX_RECORD_READ_BYTES], |row| row.get(0)).optional()?;
+            let delivery = bytes.as_deref().map(decode::<AnswerDelivery>);
+            let Some(Ok(mut delivery)) = delivery else {
+                crate::local_delivery::invalid_answer(&candidate.answer.id.to_string());
+                continue;
+            };
+            if delivery.schema_version != 1
+                || delivery.answer_id != candidate.answer.id
+                || delivery.target_host != target.host
+                || delivery.target_actor != target.actor
+                || delivery.target_session != target.session
+            {
+                crate::local_delivery::invalid_answer(&candidate.answer.id.to_string());
+                continue;
+            }
+            if delivery.state == AnswerDeliveryState::Offered && candidate.delivery == delivery {
+                offered.items.push(candidate);
+                continue;
+            }
+            if delivery.state != AnswerDeliveryState::Queued {
+                continue;
+            }
+            delivery.state = AnswerDeliveryState::Offered;
+            delivery.attempts = delivery
+                .attempts
+                .checked_add(1)
+                .ok_or(Error::Invalid("offer attempts"))?;
+            delivery.last_attempt_at = Some(at);
+            tx.execute(
+                "UPDATE human_answer_outbox SET record=?3 WHERE project=?1 AND answer=?2",
+                params![
+                    target.project.to_string(),
+                    candidate.answer.id.to_string(),
+                    encode(&delivery)?
+                ],
+            )?;
+            candidate.delivery = delivery;
+            offered.items.push(candidate);
+        }
+        before(deadline)?;
+        tx.commit()?;
+        Ok(offered)
+    }
+
     /// Read a bounded batch across projects, without loading request bodies.
     /// The session column is authoritative for routing and this projection.
     pub fn pending_human_requests(
@@ -70,7 +143,10 @@ impl Store {
                  CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
                    THEN r.session END,
                  CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
-                   THEN json_type(CAST(r.record AS TEXT),'$.chair_session_id') END
+                   THEN json_type(CAST(r.record AS TEXT),'$.chair_session_id') END,
+                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+                   AND json_type(CAST(r.record AS TEXT),'$.owner_host')='text'
+                   THEN json_extract(CAST(r.record AS TEXT),'$.owner_host') END
                  FROM sized s JOIN human_requests r ON r.project=s.project AND r.id=s.id ORDER BY s.project,s.id",
             )?;
             let mut rows = statement.query(params![rows_limit + 1, MAX_RECORD_BYTES as i64, max_bytes.min(1_048_576) as i64])?;
@@ -99,6 +175,7 @@ impl Store {
                 let title: Option<String> = row.get(8)?;
                 let chair_session_id: Option<String> = row.get(9)?;
                 let session_type: Option<String> = row.get(10)?;
+                let owner_host: Option<String> = row.get(11)?;
                 if version != Some(1)
                     || record_project.as_deref() != Some(&project_id)
                     || record_id.as_deref() != Some(&id)
@@ -115,6 +192,7 @@ impl Store {
                     project_key,
                     title,
                     chair_session_id,
+                    owner_host,
                 });
             }
             Ok(PendingHumanRequests { items, truncated, bytes_read })

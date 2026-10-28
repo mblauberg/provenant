@@ -20,6 +20,7 @@ pub struct OverviewItem {
     pub project_id: String,
     pub title: String,
     pub chair_session_id: Option<String>,
+    pub owner_host: Option<String>,
 }
 
 pub struct OverviewBatch {
@@ -64,6 +65,7 @@ pub fn overview(
                 project_id: item.project_id,
                 title: item.title,
                 chair_session_id: item.chair_session_id,
+                owner_host: item.owner_host,
             })
             .collect(),
         truncated: page.truncated,

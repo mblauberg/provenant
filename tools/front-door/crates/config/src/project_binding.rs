@@ -497,25 +497,9 @@ pub fn bind_host(roots: &Roots) -> Result<provenant_core::HostId, ConfigError> {
         &clock,
     )?;
     let name = OsStr::new("host-id");
-    match state.metadata_at(name, false) {
-        Ok(meta) => {
-            if meta.kind != FileKind::Regular
-                || meta.links != 1
-                || meta.uid != effective_uid()
-                || meta.mode & 0o077 != 0
-                || meta.size != 32
-            {
-                return Err(ConfigError::InvalidProjectBinding);
-            }
-            let bytes = read_record(&state, name, &meta, 32)?;
-            if bytes.len() != 32 {
-                return Err(ConfigError::InvalidProjectBinding);
-            }
-            let text =
-                std::str::from_utf8(&bytes).map_err(|_| ConfigError::InvalidProjectBinding)?;
-            text.parse().map_err(|_| ConfigError::InvalidProjectBinding)
-        }
-        Err(error) if error.is_not_found() => {
+    match read_host(&state, name) {
+        Ok(Some(host)) => Ok(host),
+        Ok(None) => {
             let id = provenant_core::HostId::from_bytes(provenant_os::fs::entropy_128()?);
             state
                 .atomic_write_with_permissions(
@@ -529,6 +513,42 @@ pub fn bind_host(roots: &Roots) -> Result<provenant_core::HostId, ConfigError> {
                 .map_err(|_| ConfigError::InvalidProjectBinding)?;
             Ok(id)
         }
+        Err(error) => Err(error),
+    }
+}
+
+/// Read an existing host identity without creating state or a lock.
+pub fn lookup_host(roots: &Roots) -> Result<Option<provenant_core::HostId>, ConfigError> {
+    let state = provenant_os::fs::Directory::open_anchor(roots.state.as_path())?;
+    verify_directory(&state, true)?;
+    read_host(&state, OsStr::new("host-id"))
+}
+
+fn read_host(
+    state: &Directory,
+    name: &OsStr,
+) -> Result<Option<provenant_core::HostId>, ConfigError> {
+    match state.metadata_at(name, false) {
+        Ok(meta) => {
+            if meta.kind != FileKind::Regular
+                || meta.links != 1
+                || meta.uid != effective_uid()
+                || meta.mode & 0o077 != 0
+                || meta.size != 32
+            {
+                return Err(ConfigError::InvalidProjectBinding);
+            }
+            let bytes = read_record(state, name, &meta, 32)?;
+            if bytes.len() != 32 {
+                return Err(ConfigError::InvalidProjectBinding);
+            }
+            let text =
+                std::str::from_utf8(&bytes).map_err(|_| ConfigError::InvalidProjectBinding)?;
+            text.parse()
+                .map(Some)
+                .map_err(|_| ConfigError::InvalidProjectBinding)
+        }
+        Err(error) if error.is_not_found() => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
