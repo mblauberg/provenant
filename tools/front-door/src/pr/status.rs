@@ -161,28 +161,39 @@ fn required_checks(project: &Path, target: &str) -> Option<Vec<String>> {
     };
     let branch_info: serde_json::Value =
         serde_json::from_slice(&get(&format!("{repo}/branches/{branch}"), false)?).ok()?;
-    let mut names = Vec::new();
-    if branch_info.get("protected")?.as_bool()? {
-        let protection: serde_json::Value = serde_json::from_slice(&get(
-            &format!("{repo}/branches/{branch}/protection"),
-            false,
-        )?)
-        .ok()?;
-        if let Some(checks) = protection
-            .get("required_status_checks")
-            .filter(|v| !v.is_null())
-        {
-            for name in checks.get("contexts")?.as_array()? {
-                names.push(name.as_str()?.to_owned());
-            }
-        }
-    }
+    let protection = if branch_info.get("protected")?.as_bool()? {
+        Some(
+            serde_json::from_slice(&get(
+                &format!("{repo}/branches/{branch}/protection"),
+                false,
+            )?)
+            .ok()?,
+        )
+    } else {
+        None
+    };
     let pages: Vec<Vec<serde_json::Value>> = serde_json::from_slice(&get(
         &format!("{repo}/rules/branches/{branch}?per_page=100"),
         true,
     )?)
     .ok()?;
-    for rule in pages.into_iter().flatten() {
+    parse_required_checks(protection.as_ref(), &pages)
+}
+
+fn parse_required_checks(
+    protection: Option<&serde_json::Value>,
+    pages: &[Vec<serde_json::Value>],
+) -> Option<Vec<String>> {
+    let mut names = Vec::new();
+    if let Some(protection) = protection {
+        let checks = protection.get("required_status_checks")?;
+        if !checks.is_null() {
+            for name in checks.get("contexts")?.as_array()? {
+                names.push(name.as_str()?.to_owned());
+            }
+        }
+    }
+    for rule in pages.iter().flatten() {
         if rule.get("type")?.as_str()? == "required_status_checks" {
             for check in rule
                 .get("parameters")?
@@ -354,6 +365,69 @@ pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn branch_requirements_merge_protection_and_paginated_rulesets() {
+        use super::*;
+        use provenant_fabric_runtime::graph::CiState;
+        use serde_json::json;
+        let protection = json!({"required_status_checks": {"contexts": ["build", "lint"]}});
+        let pages = vec![
+            vec![json!({"type": "required_status_checks", "parameters": {
+                "required_status_checks": [{"context": "lint"}, {"context": "integration"}]
+            }})],
+            vec![
+                json!({"type": "required_status_checks", "parameters": {
+                    "required_status_checks": [{"context": "deploy"}]
+                }}),
+                json!({"type": "pull_request"}),
+            ],
+        ];
+        let names = parse_required_checks(Some(&protection), &pages).unwrap();
+        assert_eq!(names, ["build", "deploy", "integration", "lint"]);
+        let checks = ["build", "deploy", "integration", "lint"]
+            .into_iter()
+            .map(|name| Check {
+                name: name.into(),
+                bucket: if name == "integration" {
+                    "skipping"
+                } else {
+                    "pass"
+                }
+                .into(),
+            })
+            .collect();
+        let observation = summarise_ci(Some(checks), Some(("branch-required", &names)));
+        assert_eq!(observation.state, CiState::Unavailable);
+        assert!(observation.summary.contains("policy=branch-required"));
+    }
+
+    #[test]
+    fn branch_requirements_reject_incomplete_data_and_empty_sets() {
+        use super::*;
+        use serde_json::json;
+        let no_protection = json!({"required_status_checks": null});
+        assert_eq!(parse_required_checks(Some(&no_protection), &[]), None);
+        assert_eq!(parse_required_checks(Some(&json!({})), &[]), None);
+        assert_eq!(
+            parse_required_checks(
+                None,
+                &[vec![
+                    json!({"type": "required_status_checks", "parameters": {}})
+                ]]
+            ),
+            None
+        );
+        let rules = vec![vec![
+            json!({"type": "required_status_checks", "parameters": {
+                "required_status_checks": [{"context": "build"}]
+            }}),
+        ]];
+        assert_eq!(
+            parse_required_checks(Some(&no_protection), &rules),
+            Some(vec!["build".into()])
+        );
+    }
+
     #[test]
     fn gate_check_buckets_fail_closed() {
         use super::*;
