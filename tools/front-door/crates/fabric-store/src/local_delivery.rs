@@ -3,6 +3,10 @@ use crate::*;
 use provenant_records::inbox::*;
 use std::time::Instant;
 
+// Keep this value in sync with the partial index predicates in migration 012.
+pub(crate) const HOOK_ENVELOPE_TOO_LARGE: &str = "hook_envelope_too_large";
+
+#[derive(Clone, Copy)]
 enum Candidates {
     Pending,
     Queued,
@@ -35,8 +39,9 @@ impl Store {
             deadline,
             Candidates::Pending,
             None,
+            false,
         )
-        .map(|(page, _)| page)
+        .map(|(page, _, _)| page)
     }
 
     pub fn read_queued_human_answers(
@@ -51,8 +56,9 @@ impl Store {
             deadline,
             Candidates::Queued,
             None,
+            false,
         )
-        .map(|(page, _)| page)
+        .map(|(page, _, _)| page)
     }
 
     /// Read only committed offers for recovery after final protocol fitting.
@@ -68,8 +74,9 @@ impl Store {
             deadline,
             Candidates::Offered,
             None,
+            false,
         )
-        .map(|(page, _)| page)
+        .map(|(page, _, _)| page)
     }
 
     /// A hook can advance past an undeliverable page without changing delivery
@@ -81,7 +88,7 @@ impl Store {
         state: AnswerDeliveryState,
         after: Option<&str>,
         deadline: Instant,
-    ) -> Result<(Page<AnswerOffer>, Option<String>)> {
+    ) -> Result<(Page<AnswerOffer>, Option<String>, Vec<String>)> {
         let candidates = match state {
             AnswerDeliveryState::Queued => Candidates::Queued,
             AnswerDeliveryState::Offered => Candidates::Offered,
@@ -96,9 +103,11 @@ impl Store {
             deadline,
             candidates,
             after,
+            true,
         )
     }
 
+    #[allow(clippy::too_many_arguments)] // Shared bounded reader for the public and hook APIs.
     fn read_candidates(
         &self,
         target: &AnswerTarget,
@@ -107,7 +116,8 @@ impl Store {
         deadline: Instant,
         candidates: Candidates,
         after: Option<&str>,
-    ) -> Result<(Page<AnswerOffer>, Option<String>)> {
+        tolerate_invalid: bool,
+    ) -> Result<(Page<AnswerOffer>, Option<String>, Vec<String>)> {
         let rows_limit = page(0, limit)?;
         // Internal candidates may exceed a provider's output budget so one
         // heavily escaped answer cannot hide smaller deliverable answers.
@@ -123,6 +133,20 @@ impl Store {
                 "IN ('queued','offered') AND json_extract(CAST(o.record AS TEXT),'$.state')='offered'",
             ),
         };
+        let (index, hook_filter) = if tolerate_invalid {
+            (
+                match candidates {
+                    Candidates::Queued => "human_hook_queued",
+                    Candidates::Offered => "human_hook_pending",
+                    Candidates::Pending => unreachable!(),
+                },
+                format!(
+                    "AND coalesce(json_extract(CAST(o.record AS TEXT),'$.error'),'') != '{HOOK_ENVELOPE_TOO_LARGE}'"
+                ),
+            )
+        } else {
+            (index, String::new())
+        };
         // An absent index is an error, never a fallback scan.
         let mut statement = self.db.prepare(&format!(
             "SELECT o.answer,substr(o.record,1,?5),
@@ -132,7 +156,7 @@ impl Store {
              AND json_extract(CAST(o.record AS TEXT),'$.target_session')=?2
              AND json_extract(CAST(o.record AS TEXT),'$.target_actor')=?3
              AND json_extract(CAST(o.record AS TEXT),'$.state') {states}
-             AND (?7 IS NULL OR o.answer>?7) ORDER BY o.answer LIMIT ?6"))?;
+             {hook_filter} AND (?7 IS NULL OR o.answer>?7) ORDER BY o.answer LIMIT ?6"))?;
         let mut rows = statement.query(params![
             target.host.to_string(),
             target.session,
@@ -148,6 +172,7 @@ impl Store {
         };
         let mut candidates = 0;
         let mut last_scanned = None;
+        let mut oversized = Vec::new();
         while let Some(row) = rows.next()? {
             before(deadline)?;
             candidates += 1;
@@ -156,7 +181,7 @@ impl Store {
                 break;
             }
             let key: String = row.get(0)?;
-            last_scanned = Some(key.clone());
+            let previous_scanned = last_scanned.replace(key.clone());
             let delivery = row
                 .get::<_, Vec<u8>>(1)
                 .map_err(Error::from)
@@ -165,9 +190,13 @@ impl Store {
                 .get::<_, Vec<u8>>(2)
                 .map_err(Error::from)
                 .and_then(|bytes| decode::<HumanAnswer>(&bytes));
-            let (Ok(delivery), Ok(answer)) = (delivery, answer) else {
-                invalid_answer(&key);
-                continue;
+            let (delivery, answer) = match (delivery, answer) {
+                (Ok(delivery), Ok(answer)) => (delivery, answer),
+                (Err(error), _) | (_, Err(error)) if !tolerate_invalid => return Err(error),
+                _ => {
+                    invalid_answer(&key);
+                    continue;
+                }
             };
             if delivery.schema_version != 1
                 || answer.schema_version != 1
@@ -177,18 +206,40 @@ impl Store {
                 || delivery.target_actor != target.actor
                 || delivery.target_session != target.session
             {
+                if !tolerate_invalid {
+                    return Err(Error::Invalid("answer identity or schema version"));
+                }
                 invalid_answer(&key);
                 continue;
             }
             batch.items.push(AnswerOffer { answer, delivery });
-            if encode(&batch)?.len() > max_bytes {
-                batch.items.pop();
+            // A page can temporarily exceed the record-size limit even though
+            // each stored answer is valid. Measure it without that limit.
+            if CanonicalV1::bytes(&batch)?.as_bytes().len() > max_bytes {
+                let candidate = batch
+                    .items
+                    .pop()
+                    .ok_or(Error::Invalid("empty answer page"))?;
                 batch.truncated = true;
+                if tolerate_invalid {
+                    let single = Page {
+                        items: vec![candidate],
+                        truncated: false,
+                    };
+                    if CanonicalV1::bytes(&single)?.as_bytes().len() > max_bytes {
+                        oversized_answer(&key);
+                        oversized.push(key);
+                    } else {
+                        // Revisit a candidate that fits alone on the next page.
+                        last_scanned = previous_scanned;
+                        break;
+                    }
+                }
             }
         }
         before(deadline)?;
         let next = batch.truncated.then_some(last_scanned).flatten();
-        Ok((batch, next))
+        Ok((batch, next, oversized))
     }
 }
 
@@ -199,5 +250,14 @@ pub(crate) fn invalid_answer(id: &str) {
     let _ = writeln!(
         std::io::stderr().lock(),
         "answer delivery: skipping invalid answer {id}"
+    );
+}
+
+fn oversized_answer(id: &str) {
+    use std::io::Write;
+    let id: String = id.chars().take(64).flat_map(char::escape_default).collect();
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "answer delivery: answer {id} exceeds internal page limit; retained for Fabric mail"
     );
 }

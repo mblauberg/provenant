@@ -49,7 +49,7 @@ pub struct Page<T> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("SQLite operation failed")]
+    #[error("SQLite operation failed: {}", sqlite_diagnostic(.0))]
     Sqlite(#[from] rusqlite::Error),
     #[error("safe filesystem operation failed")]
     Filesystem(#[from] provenant_os::fs::FsError),
@@ -102,6 +102,19 @@ pub enum Error {
          archive the store as docs/runbooks/fabric-hosts.md (Legacy import data) describes"
     )]
     LegacyImportData { table: &'static str, rows: i64 },
+}
+
+// SQLite's detailed message can contain SQL values, paths, or other private
+// data. The result code is bounded and provides a safe, useful diagnosis.
+fn sqlite_diagnostic(error: &rusqlite::Error) -> String {
+    match error {
+        rusqlite::Error::SqliteFailure(code, _) => code.to_string(),
+        rusqlite::Error::QueryReturnedNoRows => "query returned no rows".into(),
+        rusqlite::Error::QueryReturnedMoreThanOneRow => "query returned more than one row".into(),
+        rusqlite::Error::ExecuteReturnedResults => "execute returned results".into(),
+        rusqlite::Error::InvalidQuery => "query is not read-only".into(),
+        _ => "rusqlite error".into(),
+    }
 }
 
 fn encode<T: Serialize>(record: &T) -> Result<Vec<u8>> {

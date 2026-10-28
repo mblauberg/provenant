@@ -419,8 +419,10 @@ fn delivery_capabilities_publish_only_tested_fabric_fallback_for_each_provider()
 fn ask(kind: RequestKind, id: &str) -> InboxInput {
     InboxInput::Ask {
         session: "session-a".into(),
-        request: RequestDraft {
+        request: Box::new(RequestDraft {
             work: None,
+            deadline: None,
+            supersedes: None,
             kind,
             title: "Select repair".into(),
             body: "Which repair should proceed?".into(),
@@ -432,7 +434,7 @@ fn ask(kind: RequestKind, id: &str) -> InboxInput {
             }],
             recommended_option_id: Some("repair".into()),
             proceeding_with: (kind == RequestKind::Assumption).then(|| "Repair the check".into()),
-        },
+        }),
         operation_id: op(id),
     }
 }
@@ -1126,6 +1128,259 @@ fn request_correlation_repository_bound_counts_encoded_wire_bytes() {
             });
         }
         assert_eq!(input.validate().is_ok(), valid);
+    }
+}
+
+fn extended_ask(operation: &str, fields: serde_json::Value) -> InboxInput {
+    let mut value = serde_json::to_value(ask(RequestKind::Decision, operation)).unwrap();
+    value["request"]
+        .as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().unwrap().clone());
+    serde_json::from_value(value).unwrap()
+}
+fn replacement(id: HumanRequestId, revision: u64, operation: &str) -> InboxInput {
+    extended_ask(
+        operation,
+        serde_json::json!({"supersedes":{"id":id,"expect_revision":revision}}),
+    )
+}
+fn item(f: &Fixture, id: HumanRequestId) -> InboxItem {
+    match f.call(show(id)).unwrap() {
+        InboxResult::Item { item } => *item,
+        _ => panic!("item"),
+    }
+}
+
+#[test]
+fn replacement_work_mismatch_leaves_original_open_and_unindexed_is_saved() {
+    let f = Fixture::new();
+    let old = receipt(f.call(ask(RequestKind::Decision, "original-work")).unwrap());
+    let original = item(&f, old.request_id);
+    let mut input = replacement(old.request_id, 1, "replace-work");
+    if let InboxInput::Ask { request, .. } = &mut input {
+        request.work = Some(RequestWork {
+            run_id: provenant_core::RunId::from_bytes([3; 16]),
+            task_id: None,
+            attempt_id: None,
+            repository: None,
+            head: None,
+        });
+    }
+    assert_eq!(
+        f.service()
+            .with_work_lookup(&|_, _| Ok(WorkCoverage::Mismatch))
+            .execute(input.clone(), f.budget(), &f.cancel)
+            .unwrap_err()
+            .code(),
+        "work_mismatch"
+    );
+    assert_eq!(item(&f, old.request_id), original);
+    let saved = receipt(
+        f.service()
+            .with_work_lookup(&|_, _| Ok(WorkCoverage::Unindexed))
+            .execute(input, f.budget(), &f.cancel)
+            .unwrap(),
+    );
+    assert_eq!(saved.work_coverage, Some(WorkCoverage::Unindexed));
+    assert_eq!(
+        item(&f, old.request_id).request.state,
+        RequestState::Superseded
+    );
+}
+
+#[test]
+fn request_correlation_supersession_preserves_answer_and_checks_owner_revision() {
+    let mut f = Fixture::new();
+    let old = receipt(f.call(ask(RequestKind::Decision, "original")).unwrap());
+    let answered = receipt(f.call(answer(old.request_id, "answer")).unwrap());
+    let original = item(&f, old.request_id);
+    assert_eq!(
+        f.call(replacement(old.request_id, 1, "stale"))
+            .unwrap_err()
+            .code(),
+        "conflict"
+    );
+    let input = replacement(old.request_id, 2, "replace");
+    let identity = f.identity.clone();
+    for n in 0..3 {
+        match n {
+            0 => f.identity.host = HostId::from_bytes([9; 16]),
+            1 => {
+                f.identity.inbox = crate::identity::Address::new(f.identity.host, "other").unwrap()
+            }
+            _ => f.identity.project = ProjectId::from_bytes([9; 16]),
+        }
+        assert_eq!(
+            f.call(input.clone()).unwrap_err().code(),
+            if n == 2 { "not_found" } else { "conflict" }
+        );
+        f.identity = identity.clone();
+    }
+    let mut other_session = input.clone();
+    if let InboxInput::Ask { session, .. } = &mut other_session {
+        *session = "other".into();
+    }
+    assert_eq!(f.call(other_session).unwrap_err().code(), "conflict");
+    let saved = receipt(f.call(input.clone()).unwrap());
+    assert_eq!(receipt(f.call(input).unwrap()), saved);
+    let closed = item(&f, old.request_id);
+    assert_eq!(closed.request.state, RequestState::Superseded);
+    assert_eq!(closed.request.revision, 3);
+    assert_eq!(closed.answer, original.answer);
+    assert_eq!(closed.delivery, original.delivery);
+    assert_eq!(closed.request.answer_id, answered.answer_id);
+    assert_eq!(closed.history.len(), 3);
+    assert!(
+        closed
+            .request
+            .closure_reason
+            .unwrap()
+            .contains(&saved.request_id.to_string())
+    );
+    assert_eq!(
+        f.call(replacement(old.request_id, 3, "again"))
+            .unwrap_err()
+            .code(),
+        "conflict"
+    );
+}
+
+#[test]
+fn request_correlation_supersession_is_atomic_with_receipt_and_concurrent_replacements() {
+    let f = Fixture::new();
+    let old = receipt(f.call(ask(RequestKind::Decision, "original")).unwrap());
+    let db = rusqlite::Connection::open(f.root.as_path().join("fabric/fabric.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_receipt BEFORE INSERT ON coordination_operations WHEN NEW.id='replace' BEGIN SELECT RAISE(ABORT,'receipt failure'); END;").unwrap();
+    let input = replacement(old.request_id, 1, "replace");
+    assert!(
+        matches!(f.call(input.clone()), Err(InboxError::Mutation { source, .. }) if matches!(*source, InboxError::Store(provenant_fabric_store::Error::Sqlite(_))))
+    );
+    assert_eq!(item(&f, old.request_id).history.len(), 1);
+    assert_eq!(item(&f, old.request_id).request.state, RequestState::Open);
+    let count: i64 = db
+        .query_row("SELECT count(*) FROM human_requests", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+    db.execute_batch("DROP TRIGGER fail_receipt").unwrap();
+    let barrier = std::sync::Barrier::new(2);
+    let results = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            let service = f.service();
+            barrier.wait();
+            service.execute(input, f.budget(), &f.cancel)
+        });
+        let second = scope.spawn(|| {
+            let service = f.service();
+            barrier.wait();
+            service.execute(
+                replacement(old.request_id, 1, "second"),
+                f.budget(),
+                &f.cancel,
+            )
+        });
+        vec![first.join().unwrap(), second.join().unwrap()]
+    });
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .find_map(|r| r.as_ref().err())
+            .unwrap()
+            .code(),
+        "conflict"
+    );
+    assert_eq!(
+        item(&f, old.request_id).request.state,
+        RequestState::Superseded
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM human_requests", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn request_correlation_deadline_expires_on_read_without_rewriting_answers_or_history() {
+    use provenant_core::DurationMicros;
+    let mut f = Fixture::new();
+    let deadline = f
+        .clock
+        .wall_now()
+        .unwrap()
+        .checked_add(DurationMicros::from_micros(10))
+        .unwrap();
+    let input = extended_ask("deadline", serde_json::json!({"deadline":deadline}));
+    let open = receipt(f.call(input.clone()).unwrap());
+    assert_eq!(item(&f, open.request_id).request.schema_version, 2);
+    let resolved = receipt(
+        f.call(extended_ask(
+            "answered-deadline",
+            serde_json::json!({"deadline":deadline}),
+        ))
+        .unwrap(),
+    );
+    f.call(answer(resolved.request_id, "answer")).unwrap();
+    let before = item(&f, resolved.request_id);
+    assert_eq!(item(&f, open.request_id).request.state, RequestState::Open);
+    f.clock.advance(DurationMicros::from_micros(10)).unwrap();
+    let expired = item(&f, open.request_id);
+    assert_eq!(expired.request.state, RequestState::Expired);
+    assert_eq!(
+        expired.request.closure_reason.as_deref(),
+        Some("deadline elapsed")
+    );
+    assert_eq!(expired.history[0].closure_reason, None);
+    assert_eq!(expired.request.revision, 1);
+    assert_eq!(expired.history.len(), 1);
+    assert_eq!(expired.history[0].state, RequestState::Open);
+    assert_eq!(receipt(f.call(input).unwrap()), open);
+    assert_eq!(
+        f.call(answer(open.request_id, "late")).unwrap_err().code(),
+        "conflict"
+    );
+    assert_eq!(item(&f, resolved.request_id), before);
+    for all in [false, true] {
+        let result = f
+            .call(InboxInput::List {
+                id: None,
+                session: None,
+                state: if all {
+                    InboxFilter::All
+                } else {
+                    InboxFilter::Open
+                },
+                limit: 1,
+                cursor: None,
+            })
+            .unwrap();
+        let InboxResult::Listed {
+            items, truncated, ..
+        } = result
+        else {
+            panic!("list")
+        };
+        if all {
+            assert_eq!(items.len(), 1);
+            assert!(truncated);
+        } else {
+            assert!(items.is_empty());
+            assert!(!truncated);
+        }
+    }
+    let replaceable = receipt(f.call(ask(RequestKind::Decision, "replaceable")).unwrap());
+    let original = item(&f, replaceable.request_id);
+    for fields in [
+        serde_json::json!({"deadline":deadline}),
+        serde_json::json!({"deadline":deadline,"supersedes":{"id":replaceable.request_id,"expect_revision":1}}),
+    ] {
+        assert_eq!(
+            f.call(extended_ask("elapsed", fields)).unwrap_err().code(),
+            "invalid_input"
+        );
+        assert_eq!(item(&f, replaceable.request_id), original);
     }
 }
 

@@ -123,10 +123,22 @@ pub enum WorkCoverage {
     Limit,
 }
 
+/// Explicit replacement of a viewed request revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestReplacement {
+    pub id: HumanRequestId,
+    pub expect_revision: u64,
+}
+
 /// Caller-authored content only. The service binds project, host and actor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequestDraft {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<RequestReplacement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<WallTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<RequestWork>,
     pub kind: RequestKind,
@@ -164,6 +176,16 @@ pub struct HumanRequest {
 }
 
 impl HumanRequest {
+    /// Expiry is a read-time projection of unresolved work, never an answer.
+    pub fn state_at(&self, at: WallTime) -> RequestState {
+        if self.state == RequestState::Open && self.request.deadline.is_some_and(|time| time <= at)
+        {
+            RequestState::Expired
+        } else {
+            self.state
+        }
+    }
+
     /// `request.work` is always a claim. Only this accessor exposes a verified
     /// creation-preparation snapshot; other coverage must never become work links.
     pub fn verified_work(&self) -> Option<&RequestWork> {

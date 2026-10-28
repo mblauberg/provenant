@@ -8,6 +8,18 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Barrier},
 };
+
+#[test]
+fn sqlite_diagnostic_reports_code_without_private_details() {
+    let error = Error::Sqlite(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_READONLY),
+        Some("private SQL value".into()),
+    ));
+    let message = error.to_string();
+    assert!(message.contains("Error code 8: attempt to write a readonly database"));
+    assert!(!message.contains("private SQL value"));
+}
+
 struct Resolver;
 impl PathResolver for Resolver {
     fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
@@ -1346,7 +1358,7 @@ fn run_chair_migration_preserves_mail_and_rejects_older_readers() {
     store
         .db
         .execute_batch(
-            "DROP INDEX human_queued_delivery; DROP INDEX human_local_delivery; DROP TABLE run_chairs; PRAGMA user_version=8;",
+            "DROP INDEX human_hook_queued; DROP INDEX human_hook_pending; DROP INDEX human_queued_delivery; DROP INDEX human_local_delivery; DROP TABLE run_chairs; PRAGMA user_version=8;",
         )
         .unwrap();
     drop(store);

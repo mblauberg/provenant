@@ -78,7 +78,7 @@ pub fn overview(
 pub enum InboxInput {
     Ask {
         session: String,
-        request: RequestDraft,
+        request: Box<RequestDraft>,
         operation_id: Option<OperationId>,
     },
     List {
@@ -305,6 +305,7 @@ impl From<provenant_fabric_store::Error> for InboxError {
     fn from(error: provenant_fabric_store::Error) -> Self {
         match error {
             provenant_fabric_store::Error::Conflict => Self::Conflict,
+            provenant_fabric_store::Error::Invalid("deadline") => Self::Invalid("deadline"),
             provenant_fabric_store::Error::Invalid(
                 "operation ID reused with a different request",
             ) => Self::OperationConflict,
@@ -363,6 +364,13 @@ impl InboxInput {
                         .is_some_and(|repo| repo.wire_path_bytes() > REQUEST_REPOSITORY_BYTES)
                 {
                     return Err(InboxError::Invalid("work.repository"));
+                }
+                if request
+                    .supersedes
+                    .as_ref()
+                    .is_some_and(|replacement| replacement.expect_revision == 0)
+                {
+                    return Err(InboxError::Invalid("supersedes.expect_revision"));
                 }
                 bounded(&request.title, 256, "title")?;
                 bounded(&request.body, REQUEST_BODY_BYTES, "body")?;
@@ -764,7 +772,14 @@ impl<'a> InboxService<'a> {
                 ..
             } => {
                 let value = HumanRequest {
-                    schema_version: if draft.work.is_some() { 2 } else { 1 },
+                    schema_version: if draft.work.is_some()
+                        || draft.deadline.is_some()
+                        || draft.supersedes.is_some()
+                    {
+                        2
+                    } else {
+                        1
+                    },
                     id: HumanRequestId::from_bytes(entropy()?),
                     revision: 1,
                     operation_id: operation.clone(),
@@ -779,7 +794,7 @@ impl<'a> InboxService<'a> {
                     owner_host: self.identity.host,
                     chair_session_id: session.clone(),
                     chair_actor: self.identity.inbox.actor,
-                    request: draft.clone(),
+                    request: draft.as_ref().clone(),
                     work_coverage,
                     state: RequestState::Open,
                     answer_id: None,
@@ -933,7 +948,7 @@ impl<'a> InboxService<'a> {
                 operation_id: operation.clone(),
                 request_id: value.id,
                 revision: value.revision,
-                state: value.state,
+                state: value.state_at(at),
                 answer_id: value.answer_id,
                 work_coverage: value.work_coverage,
                 delivery,

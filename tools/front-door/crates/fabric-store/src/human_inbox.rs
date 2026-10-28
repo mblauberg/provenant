@@ -43,6 +43,54 @@ pub struct HumanAcknowledgement<'a> {
 }
 
 impl Store {
+    /// Exclude answers that cannot fit a hook envelope without consuming mail.
+    /// Re-read each row so acknowledgement and destination changes win races.
+    pub fn mark_hook_undeliverable_once(
+        root: &provenant_core::StateRoot,
+        target: &AnswerTarget,
+        ids: &[String],
+        deadline: std::time::Instant,
+    ) -> Result<Vec<String>> {
+        use crate::local_delivery::before;
+        before(deadline)?;
+        let store = Self::open_hook_delivery(root, deadline)?.ok_or(Error::NotFound)?;
+        let tx = rusqlite::Transaction::new_unchecked(
+            &store.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let mut marked = Vec::new();
+        for id in ids {
+            before(deadline)?;
+            let bytes: Option<Vec<u8>> = tx.query_row(
+                "SELECT substr(record,1,?3) FROM human_answer_outbox WHERE project=?1 AND answer=?2",
+                params![target.project.to_string(), id, MAX_RECORD_READ_BYTES],
+                |row| row.get(0),
+            ).optional()?;
+            let Some(Ok(mut delivery)) = bytes.as_deref().map(decode::<AnswerDelivery>) else {
+                continue;
+            };
+            if delivery.schema_version != 1
+                || delivery.answer_id.to_string() != *id
+                || delivery.target_host != target.host
+                || delivery.target_actor != target.actor
+                || delivery.target_session != target.session
+                || delivery.state == AnswerDeliveryState::Acknowledged
+                || delivery.error.is_some()
+            {
+                continue;
+            }
+            delivery.error = Some(crate::local_delivery::HOOK_ENVELOPE_TOO_LARGE.to_owned());
+            tx.execute(
+                "UPDATE human_answer_outbox SET record=?3 WHERE project=?1 AND answer=?2",
+                params![target.project.to_string(), id, encode(&delivery)?],
+            )?;
+            marked.push(id.clone());
+        }
+        before(deadline)?;
+        tx.commit()?;
+        Ok(marked)
+    }
+
     /// Record selected hook candidates once per exact destination. Offered
     /// snapshots can be replayed idempotently until acknowledgement, so a late
     /// commit or failed pipe write never consumes the answer. No creation,
@@ -125,6 +173,7 @@ impl Store {
     ) -> Result<PendingHumanRequests> {
         let rows_limit = page(0, limit)?;
         request.retry(|| {
+            let at = request.clock.wall_now()?;
             let mut statement = self.db.prepare(
                 "WITH recent AS (SELECT project,id,length(record) AS bytes FROM human_requests
                    WHERE state='open' ORDER BY project,id LIMIT ?1),
@@ -146,19 +195,23 @@ impl Store {
                    THEN json_type(CAST(r.record AS TEXT),'$.chair_session_id') END,
                  CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
                    AND json_type(CAST(r.record AS TEXT),'$.owner_host')='text'
-                   THEN json_extract(CAST(r.record AS TEXT),'$.owner_host') END
+                   THEN json_extract(CAST(r.record AS TEXT),'$.owner_host') END,
+                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+                   THEN json_extract(CAST(r.record AS TEXT),'$.request.deadline') END
                  FROM sized s JOIN human_requests r ON r.project=s.project AND r.id=s.id ORDER BY s.project,s.id",
             )?;
             let mut rows = statement.query(params![rows_limit + 1, MAX_RECORD_BYTES as i64, max_bytes.min(1_048_576) as i64])?;
             let mut items = Vec::new();
             let mut bytes_read = 0;
             let mut truncated = false;
+            let mut scanned = 0;
             while let Some(row) = rows.next()? {
                 request.check()?;
-                if items.len() == limit as usize {
+                if scanned == limit as usize {
                     truncated = true;
                     break;
                 }
+                scanned += 1;
                 let size: i64 = row.get(2)?;
                 let total: i64 = row.get(3)?;
                 if size < 0 || total < 0 || size > MAX_RECORD_BYTES as i64 || total > max_bytes.min(1_048_576) as i64 {
@@ -184,6 +237,14 @@ impl Store {
                     || !matches!(session_type.as_deref(), None | Some("text"))
                 {
                     return Err(Error::Invalid("stored request identity or version"));
+                }
+                // Expired candidates consume the scan/byte budget, so later
+                // unread rows retain partial coverage rather than appearing empty.
+                let deadline: Option<String> = row.get(12)?;
+                if let Some(deadline) = deadline
+                    && WallTime::parse(&deadline)? <= at
+                {
+                    continue;
                 }
                 let title = title.unwrap_or_default();
                 items.push(PendingHumanRequest {
@@ -302,7 +363,12 @@ impl Store {
         id: HumanRequestId,
         request: &Request<'_>,
     ) -> Result<HumanRequest> {
-        request.retry(|| load(&self.db, project, id))
+        request.retry(|| {
+            Ok(view(
+                load(&self.db, project, id)?,
+                request.clock.wall_now()?,
+            ))
+        })
     }
 
     pub fn human_item(
@@ -314,7 +380,8 @@ impl Store {
         request.retry(|| {
             // One SQLite snapshot for the request, answer, outbox and history.
             let tx = self.db.unchecked_transaction()?;
-            let item = item(&tx, project, id)?;
+            let mut item = item(&tx, project, id)?;
+            item.request = view(item.request, request.clock.wall_now()?);
             tx.commit()?;
             Ok(item)
         })
@@ -331,8 +398,11 @@ impl Store {
     ) -> Result<Page<HumanRequest>> {
         let rows_limit = page(0, limit)?;
         request.retry(|| {
-            let mut statement = self.db.prepare("SELECT substr(record,1,?6) FROM human_requests WHERE project=?1 AND (?2 IS NULL OR session=?2) AND (?3 OR state='open') AND (?4 IS NULL OR id>?4) ORDER BY id LIMIT ?5")?;
-            let mut rows = statement.query(params![project.to_string(),session,all,after.map(|id|id.to_string()),rows_limit + 1,MAX_RECORD_READ_BYTES])?;
+            let at = request.clock.wall_now()?;
+            // Canonical UTC timestamps sort chronologically. Filter before LIMIT
+            // so expired rows cannot hide a later open item or break pagination.
+            let mut statement = self.db.prepare("SELECT substr(record,1,?6) FROM human_requests WHERE project=?1 AND (?2 IS NULL OR session=?2) AND (?3 OR (state='open' AND (json_extract(CAST(record AS TEXT),'$.request.deadline') IS NULL OR json_extract(CAST(record AS TEXT),'$.request.deadline') > ?7))) AND (?4 IS NULL OR id>?4) ORDER BY id LIMIT ?5")?;
+            let mut rows = statement.query(params![project.to_string(),session,all,after.map(|id|id.to_string()),rows_limit + 1,MAX_RECORD_READ_BYTES,at.to_string()])?;
             let mut items = Vec::new();
             let mut bytes = 0;
             let mut truncated = false;
@@ -345,7 +415,7 @@ impl Store {
                 let value = request_record(&record)?;
                 if value.project_id != project { return Err(Error::Invalid("stored request identity")); }
                 bytes += record.len();
-                items.push(value);
+                items.push(view(value, at));
             }
             Ok(Page { items, truncated })
         })
@@ -354,6 +424,11 @@ impl Store {
     /// Called inside coordination_operation so the effect and replay receipt commit together.
     pub fn create_human_request(&self, value: &HumanRequest, request: &Request<'_>) -> Result<()> {
         self.write(request, |tx| {
+            if let Some(deadline) = value.request.deadline
+                && deadline <= request.clock.wall_now()?
+            {
+                return Err(Error::Invalid("deadline"));
+            }
             let count: i64 = tx.query_row(
                 "SELECT count(*) FROM human_requests WHERE project=?1",
                 [value.project_id.to_string()],
@@ -361,6 +436,27 @@ impl Store {
             )?;
             if count >= MAX_HUMAN_REQUESTS {
                 return Err(Error::Invalid("human request retention limit"));
+            }
+            if let Some(replacement) = &value.request.supersedes {
+                let mut prior = load(tx, value.project_id, replacement.id)?;
+                if replacement.expect_revision == 0
+                    || prior.id == value.id
+                    || prior.revision != replacement.expect_revision
+                    || prior.chair_actor != value.chair_actor
+                    || prior.chair_session_id != value.chair_session_id
+                    || prior.owner_host != value.owner_host
+                    || matches!(
+                        prior.state,
+                        RequestState::Withdrawn | RequestState::Superseded | RequestState::Expired
+                    )
+                {
+                    return Err(Error::Conflict);
+                }
+                prior.state = RequestState::Superseded;
+                prior.revision += 1;
+                prior.updated_at = value.created_at;
+                prior.closure_reason = Some(format!("superseded by {}", value.id));
+                update(tx, &prior)?;
             }
             tx.execute(
                 "INSERT INTO human_requests VALUES(?1,?2,?3,?4,?5,?6)",
@@ -387,7 +483,9 @@ impl Store {
     ) -> Result<HumanRequest> {
         self.write(request, |tx| {
             let mut value = load(tx, message.project, answer.request_id)?;
-            if value.revision != answer.request_revision || value.state != RequestState::Open {
+            if value.revision != answer.request_revision
+                || value.state_at(request.clock.wall_now()?) != RequestState::Open
+            {
                 return Err(Error::Conflict);
             }
             value.revision += 1;
@@ -599,6 +697,15 @@ fn update(tx: &rusqlite::Connection, value: &HumanRequest) -> Result<()> {
 }
 fn revision(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| Error::Invalid("revision"))
+}
+
+fn view(mut value: HumanRequest, at: WallTime) -> HumanRequest {
+    let state = value.state_at(at);
+    if state != value.state {
+        value.closure_reason = Some("deadline elapsed".into());
+    }
+    value.state = state;
+    value
 }
 
 fn request_record(bytes: &[u8]) -> Result<HumanRequest> {

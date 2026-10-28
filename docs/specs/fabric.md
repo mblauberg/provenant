@@ -115,9 +115,10 @@ Repository limits count at most 4096 UTF-8 bytes of `relative_to_root.path`,
 including hexadecimal expansion for `native_bytes`, excluding the root slash.
 
 Unlinked requests omit absent correlation fields and retain the version-1 wire
-shape. Newly correlated records declare version 2 and require a version-2 reader.
-An older reader that rejects a record fails the entire list page, so an inbox
-list or console overview can be unavailable even when other records are readable.
+shape. Requests using work, deadlines or replacement links declare version 2 and
+require a version-2 reader. An older reader that rejects a record fails the entire
+list page, so an inbox list or console overview can be unavailable even when other
+records are readable.
 Current readers accept both record versions, including retained history and the
 bounded overview projection; the database schema is unchanged. Existing version-1
 records and immutable receipts remain readable and retain their original shape.
