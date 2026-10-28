@@ -731,6 +731,10 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "offline fixture runs isolated git and cargo"
+    )]
     fn seeded_git_dependency_builds_offline() {
         use std::process::Command;
         let tmp = tempfile::tempdir().unwrap();

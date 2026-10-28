@@ -184,6 +184,9 @@ impl Resources for LaneResources<'_> {
     fn pressure(&self) -> std::io::Result<Option<provenant_os::sys::resources::MemoryPressure>> {
         self.resources.pressure()
     }
+    fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+        self.resources.guardian_identity()
+    }
     fn memory(&self) -> std::io::Result<provenant_os::sys::resources::MemorySample> {
         self.resources.memory()
     }
@@ -194,6 +197,8 @@ impl Resources for LaneResources<'_> {
 fn custody_error(error: RunError) -> CustodyError {
     match error {
         RunError::HostClock => CustodyError::AdmissionClock,
+        RunError::BuildSettings => CustodyError::AdmissionBuildSettings,
+        RunError::GuardianIdentityUnavailable => CustodyError::AdmissionGuardianIdentity,
         RunError::DiskFloor { free, floor } => CustodyError::AdmissionDisk { free, floor },
         RunError::MemoryPressure { level } => CustodyError::AdmissionMemoryPressure { level },
         RunError::BuildSlots { active, limit } => {
@@ -776,6 +781,18 @@ impl RunStore {
 #[cfg(test)]
 mod host_clock_tests {
     use super::*;
+
+    #[test]
+    fn admission_failures_reach_guardian_as_typed_causes() {
+        assert!(matches!(
+            custody_error(RunError::BuildSettings),
+            CustodyError::AdmissionBuildSettings
+        ));
+        assert!(matches!(
+            custody_error(RunError::GuardianIdentityUnavailable),
+            CustodyError::AdmissionGuardianIdentity
+        ));
+    }
 
     #[test]
     fn an_unreadable_host_clock_reaches_the_guardian_as_itself() {

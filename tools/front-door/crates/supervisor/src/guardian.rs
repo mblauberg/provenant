@@ -511,6 +511,8 @@ impl provenant_os::capture::DecodedEventSink for Events {
 fn admission_refusal(error: &CustodyError) -> String {
     match error {
         CustodyError::AdmissionClock
+        | CustodyError::AdmissionBuildSettings
+        | CustodyError::AdmissionGuardianIdentity
         | CustodyError::AdmissionDisk { .. }
         | CustodyError::AdmissionMemoryPressure { .. }
         | CustodyError::AdmissionBuildSlots { .. } => error.to_string(),

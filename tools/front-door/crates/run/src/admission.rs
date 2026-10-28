@@ -67,6 +67,16 @@ pub use provenant_records::run::LaneWait;
 /// Resource probes. A failed probe queues; it never admits unchecked.
 pub trait Resources {
     fn memory(&self) -> std::io::Result<MemorySample>;
+    fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+        match provenant_supervisor::census::SystemProcessObserver
+            .observe(i64::from(std::process::id()))
+        {
+            provenant_supervisor::census::ProcessObservation::Present(fact) if !fact.zombie => {
+                Some(fact.identity)
+            }
+            _ => None,
+        }
+    }
     fn pressure(&self) -> std::io::Result<Option<resources::MemoryPressure>> {
         Ok(None)
     }
@@ -407,14 +417,15 @@ impl RunStore {
                 eprintln!("admission: memory pressure probe failed: {error}");
                 None
             });
+            let settings = provenant_config::LaneBuildSettings::read(&self.writer_registry)
+                .map_err(|_| RunError::BuildSettings)?;
             let fits = match (
                 resources.memory(),
                 pressure,
                 resources.disk(attempt),
                 disk_floor_bytes,
-                provenant_config::LaneBuildSettings::read(&self.writer_registry),
             ) {
-                (Ok(memory), pressure, Ok(disk), Ok(floor), Ok(settings)) => {
+                (Ok(memory), pressure, Ok(disk), Ok(floor)) => {
                     refusal = if disk < floor {
                         Some(RunError::DiskFloor { free: disk, floor })
                     } else if let Some(
@@ -447,7 +458,9 @@ impl RunStore {
                 }
             };
             if let Some(limit) = fits {
-                match self.claim_with_build_limit(id, limit, clock, &call) {
+                match self.claim_with_build_limit_observed(id, limit, clock, &call, &|| {
+                    resources.guardian_identity()
+                }) {
                     Ok(Some(record)) => return Ok(record),
                     // A busy store is transient; keep waiting to the deadline.
                     Ok(None) => {
@@ -458,6 +471,9 @@ impl RunStore {
                         {
                             refusal = Some(RunError::BuildSlots { active, limit });
                         }
+                    }
+                    Err(RunError::GuardianIdentityUnavailable) => {
+                        refusal = Some(RunError::GuardianIdentityUnavailable);
                     }
                     Err(RunError::Contention) => {}
                     Err(error) => return Err(error),
@@ -495,12 +511,25 @@ impl RunStore {
     ) -> Result<Option<AttemptRecord>> {
         self.claim_with_build_limit(id, HOST_ACTIVE, clock, call)
     }
+    #[cfg(test)]
     pub(crate) fn claim_with_build_limit(
         &self,
         id: AttemptId,
         max_builds: u64,
         clock: &dyn Clock,
         call: &Request<'_>,
+    ) -> Result<Option<AttemptRecord>> {
+        self.claim_with_build_limit_observed(id, max_builds, clock, call, &|| {
+            SystemResources.guardian_identity()
+        })
+    }
+    fn claim_with_build_limit_observed(
+        &self,
+        id: AttemptId,
+        max_builds: u64,
+        clock: &dyn Clock,
+        call: &Request<'_>,
+        observe: &dyn Fn() -> Option<provenant_supervisor::census::ProcessIdentity>,
     ) -> Result<Option<AttemptRecord>> {
         // Avoid the ledger and store write locks when this run is already full.
         // The transaction below repeats the count to decide the claim.
@@ -541,6 +570,7 @@ impl RunStore {
                 max_builds,
                 clock,
                 call,
+                observe,
             )?
             else {
                 return Ok(None);

@@ -218,8 +218,14 @@ when disk and pressure are both insufficient; otherwise Warning or Critical
 pressure is named before build-slot contention. A failed memory sample or a
 floor-only memory shortage retains the generic admission refusal. The ledger associates new leases
 with the boot and guardian identity; a different boot, a definitely absent
-guardian, a removed admission row, or an unreadable owner store releases a
-lease. Unreadable owner stores and malformed identities are logged and released.
+guardian or an admission row proven absent from the same readable owner store
+releases a lease. A busy, missing, replaced or unreadable store retains the
+lease until the guardian is confirmed absent or the boot changes. The ledger
+records the owner file's device and inode to detect replacement. Malformed
+lease evidence is retained unless independent evidence proves release.
+Invalid host build settings fail immediately with a named configuration error.
+An unavailable guardian identity is retried until the admission deadline, then
+reported as a typed refusal.
 Both identity fields are required on every lease. Earlier lease schemas were
 never installed; upgrades retain spacing but discard their lease rows.
 
@@ -246,7 +252,8 @@ one spacing. If the clock or the boot identity cannot be read the claim is refus
 judged: host clock or boot identity unreadable`), which the guardian publishes
 as the lane's never-spawned reason, rather than judged on the wall clock;
 `lanes` then names no spacing wait. The wall clock is kept only as the `started_at` a lane displays. The
-memory floor (5 %) and disk floor (500 MiB) refuse both classes. A ticket with no class is a writer; opening a version 1 ledger upgrades it in
+memory floor (5 %) and the live `gc.free_floor` disk floor refuse both classes.
+The disk default is 10 % of the state volume, with a 50 GiB minimum. A ticket with no class is a writer; opening a version 1 ledger upgrades it in
 place, in one transaction, carrying any wall-time start across as a start of now under the current boot
 for each class, whatever its age and without reading the wall clock, so the
 one-time upgrade holds each class for one spacing (a version 1 ledger with no
@@ -271,11 +278,11 @@ action simply shows none.
 - Why: an accepted receipt must mean durable admission, and read-only lanes
   must not queue behind writer spacing that exists to pace worktree and
   provider startup.
-- Test: `crates/run/src/ledger.rs::tests::prune_releases_old_boot_and_unreadable_owners`;
+- Test: `crates/run/src/ledger.rs::tests::{live_guardian_fences_busy_replaced_and_corrupt_store, cross_boot_malformed_and_readable_row_removal_release}`;
   `crates/run/src/dispatch_tests.rs::{memory_pressure_defers_even_when_available_memory_is_high, pressure_errors_fall_back_and_normal_still_obeys_floor, writer_slot_refusal_and_release}`;
   `crates/providers/src/lane.rs::tests::claude_shell_restores_jobs_after_scrub`;
   `crates/config/src/gc.rs::build_tests::{defaults_and_overrides, automatic_and_invalid_build_values}`;
-  `crates/run/src/dispatch_tests.rs::configured_build_limit_controls_host_leases`;
+  `crates/run/src/dispatch_tests.rs::{configured_build_limit_controls_host_leases, invalid_build_settings_refuse_without_waiting, guardian_identity_unknown_retries_and_names_expiry}`;
   `crates/fabric-runtime/src/config.rs::tests::lane_build_settings_validate_shared_bounds_and_auto`;
   `crates/run/src/dispatch_tests.rs::admission_holds_run_concurrency_spacing_floors_and_deadline`;
   `::read_only_lane_is_admitted_inside_a_writers_spacing_window`;

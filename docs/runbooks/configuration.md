@@ -67,7 +67,10 @@ max_concurrent_builds = 2
 cargo_build_jobs = 5
 ```
 
-Use `-1` for either build setting to select its host-dependent default.
+Omit either build setting from `config.toml` to select its host-dependent default.
+The host settings are not workflow knobs managed by `provenant config set`;
+edit the `[domains.fabric.lanes]` table directly. The value `-1` also selects
+automatic behaviour.
 
 
 Higher values can reduce waiting but increase peak memory and CPU demand.

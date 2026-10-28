@@ -102,9 +102,11 @@ def config_reference(data):
     host = data.get("host_lane_build_settings")
     if host:
         text += (f"## Host lane build settings\n\nSet these in `[{host['path']}]` in the host configuration. "
-                 "Use -1 for the host-dependent default.\n\n| Key | Default | Effect |\n|---|---|---|\n")
+                 "Omit a key for its host-dependent default; -1 also selects automatic behaviour.\n\n| Key | Default | Effect |\n|---|---|---|\n")
         for name, setting in host["settings"].items():
-            text += f"| `{name}` | {setting['default']} | {setting['effect']} ({setting['min']} to {setting['max']}). |\n"
+            auto = setting.get("auto_value")
+            allowed = f"{setting['min']} to {setting['max']}" + (f" or {auto} for auto" if auto is not None else "")
+            text += f"| `{name}` | {setting['default']} | {setting['effect']} ({allowed}). |\n"
         text += "\n"
     provider_updates = data.get("provider_updates")
     if provider_updates:

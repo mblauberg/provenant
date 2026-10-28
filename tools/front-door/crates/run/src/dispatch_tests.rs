@@ -2392,6 +2392,81 @@ fn writer_build_limit_is_shared_across_runs() -> TestResult {
     Ok(())
 }
 #[test]
+fn invalid_build_settings_refuse_without_waiting() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    std::fs::write(
+        store.writer_registry.join("config.toml"),
+        "[domains.fabric.lanes]\nmax_concurrent_builds = 0\n",
+    )?;
+    let run = lane(69, true);
+    let id = starting(&store, &run, &call)?;
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let now = clock.wall_now()?;
+    assert!(matches!(
+        store.admit(id, &attempt, &Host { available: 100 }, &clock, &cancel),
+        Err(RunError::BuildSettings)
+    ));
+    assert_eq!(clock.wall_now()?, now);
+    Ok(())
+}
+
+#[test]
+fn guardian_identity_unknown_retries_and_names_expiry() -> TestResult {
+    struct Observation {
+        remaining: Cell<u32>,
+    }
+    impl Resources for Observation {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            Host { available: 100 }.memory()
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            Ok(u64::MAX)
+        }
+        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+            let remaining = self.remaining.get();
+            if remaining > 0 {
+                self.remaining.set(remaining - 1);
+                None
+            } else {
+                SystemResources.guardian_identity()
+            }
+        }
+    }
+    for (failures, admitted) in [(2, true), (100, false)] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            startup_spacing_ms: 0,
+            admission_seconds: 1,
+            ..AdmissionPolicy::default()
+        });
+        let run = lane(70, true);
+        let id = starting(&store, &run, &call)?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let result = store.admit(
+            id,
+            &attempt,
+            &Observation {
+                remaining: Cell::new(failures),
+            },
+            &clock,
+            &cancel,
+        );
+        if admitted {
+            assert_eq!(result?.state, AttemptState::Running);
+        } else {
+            assert!(matches!(result, Err(RunError::GuardianIdentityUnavailable)));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn configured_build_limit_controls_host_leases() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -2451,6 +2526,15 @@ fn writer_slot_refusal_and_release() -> TestResult {
     );
     let blocked_run = lane(61, true);
     let blocked = starting(&store, &blocked_run, &call)?;
+    let waits = store.lane_waits_with_resources(
+        &[store.record(blocked, &call)?],
+        &call,
+        &Host { available: 100 },
+    );
+    assert_eq!(
+        waits[0].waiting_for,
+        "host capacity: 1 of 1 writer build slots active"
+    );
     let attempt = store.attempt_dir(blocked_run.run_id, blocked, false)?;
     assert!(matches!(
         store.admit(blocked, &attempt, &Host { available: 100 }, &clock, &cancel),

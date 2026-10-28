@@ -5,7 +5,7 @@
 //!
 //! A lease names its owning store, boot and guardian. Terminal publication
 //! deletes the store admission row; pruning also releases leases after a boot
-//! change, confirmed guardian death, or unreadable owner evidence.
+//! change, confirmed guardian death, or a verified owner row removal.
 use crate::{
     admission::{HOST_ACTIVE, PROJECT_ACTIVE},
     db::{immediate, open_database, sql_int},
@@ -14,7 +14,11 @@ use crate::{
 use provenant_core::{Clock, ProjectId, WallTime};
 use provenant_supervisor::census::{ProcessIdentity, ProcessObservation, SystemProcessObserver};
 use rusqlite::{Connection, OptionalExtension, params};
-use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
+use std::{
+    ffi::OsStr,
+    os::unix::{ffi::OsStrExt, fs::MetadataExt},
+    path::Path,
+};
 
 const FILE: &str = "admission.sqlite3";
 /// Each lease carries the lane class. Version 1 had no class: every lease read
@@ -23,7 +27,7 @@ const LEASES: &str = "
 CREATE TABLE leases (
  attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL,
  class TEXT NOT NULL DEFAULT 'writer' CHECK(class IN ('writer','read_only')),
- boot TEXT NOT NULL, guardian TEXT NOT NULL
+ boot TEXT NOT NULL, guardian TEXT NOT NULL, owner_id TEXT NOT NULL
 ) STRICT;
 CREATE INDEX lease_projects ON leases(project);
 ";
@@ -45,7 +49,7 @@ CREATE TABLE spacing (
 /// last, so a crash leaves the old ledger whole or the new one.
 pub(crate) fn open(host: &Path, request: &Request<'_>) -> Result<Connection> {
     let (_, db, _initialisation) = open_database(host, FILE, request)?;
-    if request.retry(|| version(&db))? < 4 || !request.retry(|| timed_spacing(&db))? {
+    if request.retry(|| version(&db))? < 5 || !request.retry(|| timed_spacing(&db))? {
         immediate(&db, request, |tx| {
             let current_version = version(tx)?;
             match current_version {
@@ -75,12 +79,12 @@ pub(crate) fn open(host: &Path, request: &Request<'_>) -> Result<Connection> {
                 }
                 _ => {}
             }
-            if current_version > 0 && current_version < 4 {
+            if current_version > 0 && current_version < 5 {
                 // Old lease schemas were never installed; retain only spacing history.
                 tx.execute_batch("DROP TABLE leases;")?;
                 tx.execute_batch(LEASES)?;
             }
-            tx.execute_batch("PRAGMA user_version=4;")?;
+            tx.execute_batch("PRAGMA user_version=5;")?;
             Ok(())
         })?;
     }
@@ -113,7 +117,7 @@ fn timed_spacing(db: &Connection) -> Result<bool> {
     )?)
 }
 fn version(db: &Connection) -> Result<i64> {
-    match provenant_sqlite::read_version(db, 4) {
+    match provenant_sqlite::read_version(db, 5) {
         Ok(version) => Ok(version as i64),
         Err(provenant_sqlite::VersionError::Unsupported(version)) => {
             Err(RunError::Version(version))
@@ -138,6 +142,7 @@ pub(crate) fn lease(
     max_builds: u64,
     time: &dyn Clock,
     request: &Request<'_>,
+    observe: &dyn Fn() -> Option<ProcessIdentity>,
 ) -> Result<Option<WallTime>> {
     let (project, class) = (ticket.project_id, ticket.lane_class);
     let spacing = spacing_micros(ticket.startup_spacing_ms)?;
@@ -179,20 +184,20 @@ pub(crate) fn lease(
             "INSERT INTO spacing(class,boot,last_start) VALUES (?1,?2,?3) ON CONFLICT(class) DO UPDATE SET boot=excluded.boot, last_start=excluded.last_start",
             params![class.as_str(), &host.boot, sql_int(host.micros)?],
         )?;
-        let identity = match SystemProcessObserver.observe(i64::from(std::process::id())) {
-            ProcessObservation::Present(fact) if !fact.zombie => fact.identity,
-            _ => return Err(RunError::Refused),
-        };
+        let identity = observe().ok_or(RunError::GuardianIdentityUnavailable)?;
         let identity = serde_json::to_string(&identity).map_err(|_| RunError::Refused)?;
+        let owner_id = store_identity(&store.join("run.sqlite3"))
+            .ok_or(RunError::GuardianIdentityUnavailable)?;
         tx.execute(
-            "INSERT INTO leases(attempt,project,store,class,boot,guardian) VALUES (?1,?2,?3,?4,?5,?6)",
+            "INSERT INTO leases(attempt,project,store,class,boot,guardian,owner_id) VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![
                 id,
                 project.to_string(),
                 store.as_os_str().as_bytes(),
                 class.as_str(),
                 host.boot,
-                identity
+                identity,
+                owner_id
             ],
         )?;
         Ok(Some(now))
@@ -210,7 +215,7 @@ pub(crate) fn writer_count(host: &Path, request: &Request<'_>) -> Option<u64> {
     let db = provenant_sqlite::open_connection(&host.join(FILE), true).ok()?;
     let boot = request.clock.boot_identity().ok()?;
     let mut statement = db
-        .prepare("SELECT rowid, CAST(store AS BLOB), CAST(attempt AS BLOB), CAST(boot AS BLOB), CAST(guardian AS BLOB) FROM leases WHERE class='writer'")
+        .prepare("SELECT rowid, CAST(store AS BLOB), CAST(attempt AS BLOB), CAST(boot AS BLOB), CAST(guardian AS BLOB), CAST(owner_id AS BLOB) FROM leases WHERE class='writer'")
         .ok()?;
     let rows = statement
         .query_map([], |r| {
@@ -223,18 +228,32 @@ pub(crate) fn writer_count(host: &Path, request: &Request<'_>) -> Option<u64> {
                     .and_then(|bytes| String::from_utf8(bytes).ok()),
                 r.get::<_, Option<Vec<u8>>>(4)?
                     .and_then(|bytes| String::from_utf8(bytes).ok()),
+                r.get::<_, Option<Vec<u8>>>(5)?
+                    .and_then(|bytes| String::from_utf8(bytes).ok()),
             ))
         })
         .ok()?;
     let mut count = 0;
     for row in rows {
-        let (rowid, store, attempt, lease_boot, guardian) = row.ok()?;
+        let (rowid, store, attempt, lease_boot, guardian, owner_id) = row.ok()?;
         let (Some(store), Some(attempt)) = (store, attempt.filter(|value| !value.is_empty()))
         else {
             malformed_row(rowid);
+            if !released(
+                &Owner::Unreadable,
+                "",
+                lease_boot.as_deref(),
+                guardian.as_deref(),
+                &boot,
+            ) {
+                count += 1;
+            }
             continue;
         };
-        let owner = Owner::open(&Path::new(OsStr::from_bytes(&store)).join("run.sqlite3"));
+        let owner = Owner::open(
+            &Path::new(OsStr::from_bytes(&store)).join("run.sqlite3"),
+            owner_id.as_deref(),
+        );
         if !released(
             &owner,
             &attempt,
@@ -324,7 +343,7 @@ fn prune(tx: &Connection, time: &dyn Clock) -> Result<()> {
     let boot = time.boot_identity().map_err(|_| RunError::HostClock)?;
     let leases = {
         let mut statement = tx.prepare(
-            "SELECT rowid, CAST(store AS BLOB), CAST(attempt AS BLOB), CAST(boot AS BLOB), CAST(guardian AS BLOB) FROM leases ORDER BY rowid LIMIT 256",
+            "SELECT rowid, CAST(store AS BLOB), CAST(attempt AS BLOB), CAST(boot AS BLOB), CAST(guardian AS BLOB), CAST(owner_id AS BLOB) FROM leases ORDER BY rowid LIMIT 256",
         )?;
         statement
             .query_map([], |r| {
@@ -337,22 +356,31 @@ fn prune(tx: &Connection, time: &dyn Clock) -> Result<()> {
                         .and_then(|bytes| String::from_utf8(bytes).ok()),
                     r.get::<_, Option<Vec<u8>>>(4)?
                         .and_then(|bytes| String::from_utf8(bytes).ok()),
+                    r.get::<_, Option<Vec<u8>>>(5)?
+                        .and_then(|bytes| String::from_utf8(bytes).ok()),
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
-    let mut current: Option<(Vec<u8>, Owner)> = None;
-    for (rowid, store, attempt, lease_boot, guardian) in leases {
+    for (rowid, store, attempt, lease_boot, guardian, owner_id) in leases {
         let (Some(store), Some(attempt)) = (store, attempt.filter(|value| !value.is_empty()))
         else {
             malformed_row(rowid);
-            tx.execute("DELETE FROM leases WHERE rowid=?1", [rowid])?;
+            if released(
+                &Owner::Unreadable,
+                "",
+                lease_boot.as_deref(),
+                guardian.as_deref(),
+                &boot,
+            ) {
+                tx.execute("DELETE FROM leases WHERE rowid=?1", [rowid])?;
+            }
             continue;
         };
-        let owner = match current.take() {
-            Some((path, owner)) if path == store => owner,
-            _ => Owner::open(&Path::new(OsStr::from_bytes(&store)).join("run.sqlite3")),
-        };
+        let owner = Owner::open(
+            &Path::new(OsStr::from_bytes(&store)).join("run.sqlite3"),
+            owner_id.as_deref(),
+        );
         if released(
             &owner,
             &attempt,
@@ -362,13 +390,12 @@ fn prune(tx: &Connection, time: &dyn Clock) -> Result<()> {
         ) {
             tx.execute("DELETE FROM leases WHERE rowid=?1", [rowid])?;
         }
-        current = Some((store, owner));
     }
     Ok(())
 }
 #[allow(clippy::print_stderr)]
 fn malformed_row(rowid: i64) {
-    eprintln!("admission: releasing malformed lease row {rowid}");
+    eprintln!("admission: malformed lease row {rowid}");
 }
 #[allow(clippy::print_stderr)]
 fn released(
@@ -378,61 +405,68 @@ fn released(
     guardian: Option<&str>,
     boot: &str,
 ) -> bool {
-    let Some(lease_boot) = lease_boot.filter(|value| !value.is_empty()) else {
-        eprintln!("admission: releasing lease {attempt}: invalid boot identity");
+    if lease_boot.is_some_and(|lease_boot| !lease_boot.is_empty() && lease_boot != boot) {
         return true;
-    };
-    let Some(identity) = guardian
+    }
+    let identity = guardian
         .and_then(|raw| serde_json::from_str::<ProcessIdentity>(raw).ok())
-        .filter(|value| !value.boot.is_empty() && value.pid > 0 && value.native_start > 0)
-    else {
-        eprintln!("admission: releasing lease {attempt}: invalid guardian identity");
-        return true;
-    };
-    lease_boot != boot
-        || match SystemProcessObserver.observe(identity.pid) {
-            ProcessObservation::Absent => true,
-            ProcessObservation::Present(fact) => fact.identity != identity || fact.zombie,
-            ProcessObservation::Unknown(_) => false,
-        }
-        || owner.released(attempt)
+        .filter(|value| !value.boot.is_empty() && value.pid > 0 && value.native_start > 0);
+    let guardian_gone =
+        identity.is_some_and(
+            |identity| match SystemProcessObserver.observe(identity.pid) {
+                ProcessObservation::Absent => true,
+                ProcessObservation::Present(fact) => fact.identity != identity || fact.zombie,
+                ProcessObservation::Unknown(_) => false,
+            },
+        );
+    guardian_gone || owner.released(attempt)
 }
-/// The lease's owning store. Only a definite answer frees a lease: a store
-/// file that is gone, or a readable store without the admission row.
+/// Store file identity fences replacements before trusting row absence.
+fn store_identity(path: &Path) -> Option<String> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+    Some(format!("{}:{}", metadata.dev(), metadata.ino()))
+}
 enum Owner {
-    Gone,
-    Store(Connection),
+    Store {
+        db: Box<Connection>,
+        path: std::path::PathBuf,
+        identity: String,
+    },
     Unreadable,
 }
 impl Owner {
-    fn open(path: &Path) -> Self {
-        match std::fs::symlink_metadata(path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::Gone,
-            Err(_) => return Self::Unreadable,
-            Ok(_) => {}
+    fn open(path: &Path, expected: Option<&str>) -> Self {
+        let Some(identity) = expected.filter(|id| !id.is_empty()) else {
+            return Self::Unreadable;
+        };
+        if store_identity(path).as_deref() != Some(identity) {
+            return Self::Unreadable;
         }
-        provenant_sqlite::open_connection(path, true).map_or(Self::Unreadable, Self::Store)
+        match provenant_sqlite::open_connection(path, true) {
+            Ok(db) if store_identity(path).as_deref() == Some(identity) => Self::Store {
+                db: Box::new(db),
+                path: path.to_owned(),
+                identity: identity.to_owned(),
+            },
+            _ => Self::Unreadable,
+        }
     }
-    #[allow(clippy::print_stderr)]
     fn released(&self, attempt: &str) -> bool {
         match self {
-            Self::Gone => true,
-            Self::Unreadable => {
-                eprintln!("admission: releasing lease {attempt}: owner store is unreadable");
-                true
+            Self::Unreadable => false,
+            Self::Store { db, path, identity } => {
+                let gone = db
+                    .query_row(
+                        "SELECT NOT EXISTS(SELECT 1 FROM admission WHERE attempt=?1)",
+                        [attempt],
+                        |r| r.get::<_, bool>(0),
+                    )
+                    .unwrap_or(false);
+                gone && store_identity(path).as_deref() == Some(identity.as_str())
             }
-            Self::Store(db) => db
-                .query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM admission WHERE attempt=?1)",
-                    [attempt],
-                    |r| r.get(0),
-                )
-                .unwrap_or_else(|error| {
-                    eprintln!(
-                        "admission: releasing lease {attempt}: owner store query failed: {error}"
-                    );
-                    true
-                }),
         }
     }
 }
@@ -443,62 +477,109 @@ mod tests {
     use provenant_core::{MonoTime, TestClock};
 
     #[test]
-    fn prune_releases_old_boot_and_unreadable_owners() {
+    fn live_guardian_fences_busy_replaced_and_corrupt_store() {
         let dir = tempfile::tempdir().unwrap();
-        let good = dir.path().join("good");
-        let bad = dir.path().join("bad");
-        std::fs::create_dir(&good).unwrap();
-        std::fs::create_dir(&bad).unwrap();
-        let owner = Connection::open(good.join("run.sqlite3")).unwrap();
-        owner.execute_batch("CREATE TABLE admission (attempt TEXT); INSERT INTO admission VALUES ('old'), ('dead'), ('live');").unwrap();
-        std::fs::write(bad.join("run.sqlite3"), b"not sqlite").unwrap();
+        let path = dir.path().join("run.sqlite3");
+        let original = Connection::open(&path).unwrap();
+        original.execute_batch("PRAGMA journal_mode=DELETE; CREATE TABLE admission (attempt TEXT); INSERT INTO admission VALUES ('live');").unwrap();
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(LEASES).unwrap();
-        let store = good.as_os_str().as_bytes();
         let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
+        let boot = clock.boot_identity().unwrap();
         let live = match SystemProcessObserver.observe(i64::from(std::process::id())) {
             ProcessObservation::Present(fact) => fact.identity,
             _ => panic!("current guardian unavailable"),
         };
-        let encoded = serde_json::to_string(&live).unwrap();
-        let boot = clock.boot_identity().unwrap();
+        let identity = serde_json::to_string(&live).unwrap();
+        let owner_id = store_identity(&path).unwrap();
         db.execute(
-            "INSERT INTO leases VALUES ('old','p',?1,'writer','another boot',?2)",
-            params![store, encoded],
+            "INSERT INTO leases VALUES ('live','p',?1,'writer',?2,?3,?4)",
+            params![dir.path().as_os_str().as_bytes(), boot, identity, owner_id],
         )
         .unwrap();
-        db.execute(
-            "INSERT INTO leases VALUES ('bad','p',?1,'writer',?2,?3)",
-            params![bad.as_os_str().as_bytes(), boot, encoded],
-        )
-        .unwrap();
-        let mut dead = live.clone();
+        original.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        prune(&db, &clock).unwrap();
+        assert!(
+            writers_full(&db, 1).unwrap(),
+            "busy store retains a live lease"
+        );
+        original.execute_batch("ROLLBACK").unwrap();
+        drop(original);
+        std::fs::write(&path, b"corrupt").unwrap();
+        prune(&db, &clock).unwrap();
+        assert!(
+            writers_full(&db, 1).unwrap(),
+            "corrupt original store retains a live lease"
+        );
+        std::fs::rename(&path, dir.path().join("original.sqlite3")).unwrap();
+        prune(&db, &clock).unwrap();
+        assert!(
+            writers_full(&db, 1).unwrap(),
+            "missing store retains a live lease"
+        );
+        let replacement = Connection::open(&path).unwrap();
+        replacement
+            .execute_batch("CREATE TABLE admission (attempt TEXT)")
+            .unwrap();
+        drop(replacement);
+        prune(&db, &clock).unwrap();
+        assert!(
+            writers_full(&db, 1).unwrap(),
+            "replacement cannot prove row removal"
+        );
+        let mut dead = live;
         dead.native_start = dead.native_start.saturating_add(1);
         db.execute(
-            "INSERT INTO leases VALUES ('dead','p',?1,'writer',?2,?3)",
-            params![store, boot, serde_json::to_string(&dead).unwrap()],
+            "UPDATE leases SET guardian=?1",
+            [serde_json::to_string(&dead).unwrap()],
+        )
+        .unwrap();
+        prune(&db, &clock).unwrap();
+        assert!(
+            !writers_full(&db, 1).unwrap(),
+            "absent guardian releases the lease"
+        );
+    }
+
+    #[test]
+    fn cross_boot_malformed_and_readable_row_removal_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.sqlite3");
+        let owner = Connection::open(&path).unwrap();
+        owner.execute_batch("CREATE TABLE admission (attempt TEXT); INSERT INTO admission VALUES ('old'), ('live');").unwrap();
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(LEASES).unwrap();
+        let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
+        let boot = clock.boot_identity().unwrap();
+        let live = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+            ProcessObservation::Present(fact) => fact.identity,
+            _ => panic!("current guardian unavailable"),
+        };
+        let guardian = serde_json::to_string(&live).unwrap();
+        let store = dir.path().as_os_str().as_bytes();
+        let owner_id = store_identity(&path).unwrap();
+        db.execute(
+            "INSERT INTO leases VALUES ('old','p',?1,'writer','old boot',?2,?3)",
+            params![store, guardian, owner_id],
         )
         .unwrap();
         db.execute(
-            "INSERT INTO leases VALUES ('malformed','p',?1,'writer',?2,'invalid')",
-            params![store, boot],
+            "INSERT INTO leases VALUES ('live','p',?1,'writer',?2,?3,?4)",
+            params![store, boot, guardian, owner_id],
         )
         .unwrap();
         db.execute(
-            "INSERT INTO leases VALUES ('live','p',?1,'writer',?2,?3)",
-            params![store, boot, encoded],
+            "INSERT INTO leases VALUES ('malformed','p',?1,'writer',?2,'bad',?3)",
+            params![store, boot, owner_id],
         )
         .unwrap();
-        db.execute(
-            "INSERT INTO leases VALUES (CAST(x'ff' AS TEXT),'p',?1,'writer',?2,?3)",
-            params![store, boot, encoded],
-        )
-        .unwrap();
-        assert!(writers_full(&db, 6).unwrap());
         prune(&db, &clock).unwrap();
         assert!(writers_full(&db, 1).unwrap());
         assert!(!writers_full(&db, 2).unwrap());
-        assert!(Owner::Gone.released("gone"));
-        assert!(Owner::Unreadable.released("bad"));
+        owner
+            .execute("DELETE FROM admission WHERE attempt='live'", [])
+            .unwrap();
+        prune(&db, &clock).unwrap();
+        assert!(!writers_full(&db, 1).unwrap());
     }
 }

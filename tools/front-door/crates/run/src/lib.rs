@@ -212,6 +212,12 @@ pub enum RunError {
         "writer build slots full: {active} of {limit} active; wait for a writer to finish or adjust lanes.max_concurrent_builds"
     )]
     BuildSlots { active: u64, limit: u64 },
+    #[error(
+        "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds and domains.fabric.lanes.cargo_build_jobs"
+    )]
+    BuildSettings,
+    #[error("guardian process identity unavailable; retry when process observation is available")]
+    GuardianIdentityUnavailable,
     #[error("operation refused by the execution context")]
     Refused,
     #[error("nested lane depth {depth} exceeds configured maximum {max_depth}")]
