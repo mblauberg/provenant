@@ -1500,6 +1500,7 @@ mod tests {
     #[test]
     fn peer_lanes_do_not_show_local_capacity_cooldowns() -> Result {
         let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
         let route = run::RouteRecord {
             provider: Some("codex".into()),
             model: Some("codex/model".into()),
@@ -1510,8 +1511,8 @@ mod tests {
             pool_selection: None,
         };
         let now = SystemClock::new().wall_now()?.as_timestamp().as_second();
-        crate::quota::persist_capacity_cooldown(temp.path(), &route, now, 600)?;
-        let (data, human) = render_with_waits(&[], &[], &[], temp.path());
+        crate::quota::persist_capacity_cooldown(&state, &route, now, 600)?;
+        let (data, human) = render_with_waits(&[], &[], &[], &state);
         assert_eq!(data["capacity_cooldowns"], json!([]));
         assert!(!human.contains("capacity cooldown"));
         Ok(())

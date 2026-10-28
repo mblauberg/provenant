@@ -6653,6 +6653,7 @@ mod tests {
     #[test]
     fn local_lanes_read_and_show_capacity_cooldowns() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
         let route = run::RouteRecord {
             provider: Some("codex".into()),
             model: Some("codex/model".into()),
@@ -6663,10 +6664,9 @@ mod tests {
             pool_selection: None,
         };
         let now = SystemClock::new().wall_now()?.as_timestamp().as_second();
-        crate::quota::persist_capacity_cooldown(temp.path(), &route, now, 600)?;
-        let cooldowns = read_lane_cooldowns(temp.path());
-        let (data, human) =
-            render_lanes(&[], &[], None, temp.path(), lane_cooldown_view(&cooldowns));
+        crate::quota::persist_capacity_cooldown(&state, &route, now, 600)?;
+        let cooldowns = read_lane_cooldowns(&state);
+        let (data, human) = render_lanes(&[], &[], None, &state, lane_cooldown_view(&cooldowns));
         assert_eq!(data["capacity_cooldowns"][0]["model"], "model");
         assert_eq!(data["capacity_cooldowns"][0]["account"]["label"], "work");
         assert!(
@@ -7699,9 +7699,10 @@ mod tests {
     #[test]
     fn capacity_guardian_context_records_and_reports_config_failure()
     -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::DirBuilderExt;
         let temp = tempfile::tempdir()?;
         let state = temp.path().join("state");
-        std::fs::create_dir_all(&state)?;
+        std::fs::DirBuilder::new().mode(0o700).create(&state)?;
         let context = run::HolderContext {
             schema_version: 1,
             roots: run::RootSeed {
