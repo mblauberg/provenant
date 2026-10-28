@@ -14,6 +14,178 @@ struct PrepareFixture {
 }
 
 #[test]
+fn integration_refreshes_forged_tracking_ref_and_fails_closed()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.git(&["push", "origin", "HEAD:refs/heads/integration"])?;
+    fixture.request = HostDeliveryContext::destination(
+        DeliveryMode::Integrate("origin/integration".into()),
+        "lane",
+    )?
+    .ok_or("destination")?;
+    let host = fixture.prepare()?;
+    fixture.commit(&fixture.writer.worktree, "lane change")?;
+    let head = host.head(&fixture.writer)?;
+    fixture.git(&[
+        "update-ref",
+        "refs/remotes/origin/integration",
+        &head.to_string(),
+    ])?;
+    host.integrate(&fixture.writer, &fixture.request, head)?;
+    let remote = host.command(
+        &fixture.writer.worktree,
+        "git",
+        &[
+            "ls-remote",
+            "--exit-code",
+            "origin",
+            "refs/heads/integration",
+        ],
+        WriterDeliveryStage::Integrate,
+    )?;
+    assert!(remote.starts_with(&head.to_string()));
+
+    fixture.commit(&fixture.writer.worktree, "another lane change")?;
+    let next = host.head(&fixture.writer)?;
+    fixture.git(&["push", "origin", &format!("{next}:refs/heads/integration")])?;
+    // Restore the stale local value so fetch must update the locked ref.
+    fixture.git(&[
+        "update-ref",
+        "refs/remotes/origin/integration",
+        &head.to_string(),
+    ])?;
+    let remote = host.command(
+        &fixture.writer.worktree,
+        "git",
+        &[
+            "ls-remote",
+            "--exit-code",
+            "origin",
+            "refs/heads/integration",
+        ],
+        WriterDeliveryStage::Integrate,
+    )?;
+    let lock = fixture
+        .writer
+        .project
+        .join(".git/refs/remotes/origin/integration.lock");
+    std::fs::write(lock, "stale lock")?;
+    assert!(
+        host.integrate(&fixture.writer, &fixture.request, next)
+            .is_err()
+    );
+    assert_eq!(
+        remote,
+        host.command(
+            &fixture.writer.worktree,
+            "git",
+            &[
+                "ls-remote",
+                "--exit-code",
+                "origin",
+                "refs/heads/integration"
+            ],
+            WriterDeliveryStage::Integrate
+        )?
+    );
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let project = root.join("project");
+    let home = root.join("home");
+    let remote = root.join("remote.git");
+    std::fs::create_dir(&project)?;
+    std::fs::create_dir(&home)?;
+    let git_dir = project.join(".git");
+    let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
+    let run = |directory: &Path,
+               args: &[&str]|
+     -> std::result::Result<String, Box<dyn std::error::Error>> {
+        let output = std::process::Command::new(&git)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_DIR", directory)
+            .env("GIT_WORK_TREE", &project)
+            .current_dir(&project)
+            .args(args)
+            .output()?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+        }
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    };
+    run(&git_dir, &["init", "-q"])?;
+    run(
+        &git_dir,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+    )?;
+    run(&remote, &["init", "-q"])?;
+    run(&remote, &["config", "--local", "core.bare", "true"])?;
+    run(
+        &git_dir,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().ok_or("remote path")?,
+        ],
+    )?;
+    run(&git_dir, &["push", "-q", "origin", "HEAD:refs/heads/main"])?;
+    let expected = run(&git_dir, &["rev-parse", "HEAD"])?;
+    run(&git_dir, &["update-ref", "-d", "refs/remotes/origin/main"])?;
+    let writer = WriterRequest {
+        project: project.clone(),
+        worktree: project.clone(),
+    };
+    let host = || {
+        HostDeliveryContext::new(vec![
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("HOME".into(), home.as_os_str().to_owned()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ])
+    };
+    host().refresh_origin_with(&writer, &git_dir)?;
+    assert_eq!(
+        run(&git_dir, &["rev-parse", "refs/remotes/origin/main"])?,
+        expected
+    );
+    run(
+        &git_dir,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            root.join("missing.git").to_str().ok_or("missing path")?,
+        ],
+    )?;
+    assert!(host().refresh_origin_with(&writer, &git_dir).is_err());
+    assert_eq!(
+        run(&git_dir, &["rev-parse", "refs/remotes/origin/main"])?,
+        expected
+    );
+    Ok(())
+}
+
+#[test]
 fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
@@ -425,6 +597,72 @@ fn graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes()
             && !body.contains("Unrelated primary checkout")
             && !body.contains("Initial"),
         "{body}"
+    );
+    Ok(())
+}
+
+#[test]
+fn graph_pr_refreshes_forged_target_and_refuses_failed_fetch()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    let base = fixture.prepare()?.head(&fixture.writer)?;
+    fixture.commit(&fixture.writer.worktree, "Graph work")?;
+    fixture.git(&["push", "origin", "lane:refs/heads/integration"])?;
+    fixture.git(&[
+        "update-ref",
+        "refs/remotes/origin/integration",
+        &base.to_string(),
+    ])?;
+    fixture.git(&[
+        "config",
+        &format!(
+            "url.{}.insteadOf",
+            fixture.root.join("remote.git").display()
+        ),
+        "https://github.com/fixture/repo.git",
+    ])?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let wrapper = fixture.root.join("git-wrapper");
+    fixture.executable(&wrapper, &format!("#!/bin/sh\nif [ \"$5\" = remote ] && [ \"$6\" = get-url ]; then printf 'https://github.com/fixture/repo.git\\n'; exit 0; fi\nexec '{}' \"$@\"\n", git.display()))?;
+    let gh = fixture.root.join("gh");
+    fixture.executable(&gh, "#!/bin/sh\nif [ \"$2\" = view ]; then exit 1; fi\ncd \"$(dirname \"$0\")\" || exit 1\ncat > graph-body\nprintf 'https://github.com/fixture/repo/pull/1\\n'\n")?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    fixture.environment.retain(|(key, _)| key != "PATH");
+    fixture.environment.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", fixture.root.display()).into(),
+    ));
+    HostDeliveryContext::new(fixture.environment.clone()).deliver_graph_pr(
+        &fixture.writer.project,
+        "origin/integration",
+        base,
+        "Graph fixture",
+    )?;
+    assert!(std::fs::read_to_string(fixture.root.join("graph-body"))?.contains("Graph work"));
+
+    fixture.git(&[
+        "update-ref",
+        "refs/remotes/origin/integration",
+        &base.to_string(),
+    ])?;
+    std::fs::write(
+        fixture
+            .writer
+            .project
+            .join(".git/refs/remotes/origin/integration.lock"),
+        "stale lock",
+    )?;
+    assert!(
+        HostDeliveryContext::new(fixture.environment.clone())
+            .deliver_graph_pr(
+                &fixture.writer.project,
+                "origin/integration",
+                base,
+                "Graph fixture",
+            )
+            .is_err()
     );
     Ok(())
 }
@@ -1426,6 +1664,23 @@ fn prepare_labels_unsupported_ssh_command() -> std::result::Result<(), Box<dyn s
 }
 
 #[test]
+fn delivery_diagnostics_redact_url_userinfo() {
+    for (input, expected) in [
+        ("https://u:pa/ss@h/repo", "https://[REDACTED]@h/repo"),
+        ("https://u:pa?ss@h/repo", "https://[REDACTED]@h/repo"),
+        ("https://u:a@b@h/repo", "https://[REDACTED]@h/repo"),
+        ("u:pa/ss@h:repo", "[REDACTED]@h:repo"),
+        ("u:pa?ss@h:repo", "[REDACTED]@h:repo"),
+        ("u:a@b@h:repo", "[REDACTED]@h:repo"),
+        ("https://truncated-secret/path", "https://[REDACTED]/path"),
+    ] {
+        assert_eq!(super::delivery::redact_url_userinfo(input), expected);
+        let error = super::delivery::prepare_error("test", input).to_string();
+        assert!(error.ends_with(expected), "{error}");
+    }
+}
+
+#[test]
 fn prepare_refuses_remote_urls_with_embedded_credentials()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
@@ -1550,13 +1805,13 @@ fn prepare_failures_name_step_and_bound_git_stderr()
         ("symbolic-ref --quiet", "HEAD"),
         ("rev-parse --absolute-git-dir", "git dir"),
         ("config --get-regexp", "credential helper"),
-        ("fetch --no-tags", "fetch"),
+        ("fetch --no-auto-maintenance", "fetch"),
     ] {
         let mut fixture = PrepareFixture::new()?;
         let git = fixture.root.join("git");
         let real_git = provenant_os::git::git_executable().ok_or("git executable")?;
         fixture.executable(&git, &format!(
-            "#!/bin/sh\ncase \"$*\" in\n*'{pattern}'*)\nprintf '%s' 'fixture git failure: private-token https://user:password@example.invalid/ {}' >&2\nexit 2;;\nesac\nexec '{}' \"$@\"\n", "é".repeat(5000), real_git.display()))?;
+            "#!/bin/sh\ncase \"$*\" in\n*'{pattern}'*)\nprintf '%s' 'fixture git failure: private-token https://user:password@example.invalid/ https://secret-user@example.invalid/ scp-secret@example.invalid:repo https://malformed-secret:password/ {}' >&2\nexit 2;;\nesac\nexec '{}' \"$@\"\n", "é".repeat(5000), real_git.display()))?;
         fixture
             .environment
             .push(("PROVENANT_GIT".into(), git.into_os_string()));
@@ -1569,6 +1824,9 @@ fn prepare_failures_name_step_and_bound_git_stderr()
         assert!(reason.contains("fixture git failure"), "{reason}");
         assert!(!reason.contains("private-token"), "{reason}");
         assert!(!reason.contains("user:password"), "{reason}");
+        assert!(!reason.contains("secret-user"), "{reason}");
+        assert!(!reason.contains("scp-secret"), "{reason}");
+        assert!(!reason.contains("malformed-secret"), "{reason}");
         assert!(!reason.contains("receipt"), "{reason}");
         assert!(reason.len() < 1400, "diagnostic has {} bytes", reason.len());
     }
@@ -1671,6 +1929,15 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
             "+refs/heads/base:refs/remotes/origin/base",
         ],
     )?;
+    git(
+        &project,
+        &[
+            "config",
+            "--add",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/heads/injected/*",
+        ],
+    )?;
     git(&project, &["push", "-q", "origin", "HEAD:refs/heads/base"])?;
     let initial = git(&project, &["rev-parse", "HEAD"])?;
     git(&project, &["update-ref", "-d", "refs/remotes/origin/base"])?;
@@ -1695,6 +1962,13 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         open_pr: false,
     };
     let host = host.prepare(&writer, &request)?;
+    assert!(
+        !git(
+            &lane,
+            &["for-each-ref", "--format=%(refname)", "refs/heads/injected"]
+        )?
+        .contains("injected")
+    );
     assert_eq!(
         git(&lane, &["rev-parse", "refs/remotes/origin/base"])?,
         initial

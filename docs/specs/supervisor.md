@@ -226,10 +226,10 @@ Literal discovery grants accept absent entries or real directories through
 ### Git write set
 
 Writers may change only their linked tree, its private index, HEAD and merge
-state, objects, exactly their branch ref with its lock and reflog, and
-`FETCH_HEAD`. Other refs, packed refs, common and worktree config, gitfiles,
-remote-tracking refs, provider configuration and protected instructions stay
-immutable. Read-only lanes never write the common Git directory.
+state, objects, exactly their branch ref with its lock and reflog, and private
+`FETCH_HEAD`. Remote-tracking refs and reflogs, other refs, packed refs,
+common and worktree config, gitfiles, provider configuration and protected
+instructions stay immutable. Read-only lanes never write the common Git directory.
 - Why: a writer that could move another ref or config could rewrite history
   or plant hooks.
 - Test: `crates/confinement/src/permissions.rs::linked_worktree_grants_derive_from_verified_git_paths_and_ref`;

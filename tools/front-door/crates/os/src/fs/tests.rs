@@ -268,6 +268,31 @@ fn refuses_every_non_normal_component_before_effects() {
     assert!(names(&dir).is_empty());
 }
 #[test]
+fn git_ref_lock_publication_requires_the_held_single_link_inode() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    let mut lock = dir.create_new(OsStr::new("branch.lock")).unwrap();
+    lock.write_all(b"oid\n").unwrap();
+    let other = dir.create_new(OsStr::new("other")).unwrap();
+    assert!(matches!(
+        dir.publish_git_ref_lock(OsStr::new("branch"), &other),
+        Err(FsError::RaceRefused { .. })
+    ));
+    std::fs::hard_link(temp.path().join("branch.lock"), temp.path().join("alias")).unwrap();
+    assert!(matches!(
+        dir.discard_git_ref_lock(OsStr::new("branch"), &lock),
+        Err(FsError::RaceRefused { .. })
+    ));
+    std::fs::remove_file(temp.path().join("alias")).unwrap();
+    dir.publish_git_ref_lock(OsStr::new("branch"), &lock)
+        .unwrap();
+    assert_eq!(
+        dir.read_bounded(OsStr::new("branch"), 10).unwrap(),
+        b"oid\n"
+    );
+}
+
+#[test]
 fn creates_reads_syncs_duplicates_and_preserves_non_utf8_names() {
     let temp = tempfile::tempdir().unwrap();
     let dir = Directory::open_anchor(temp.path()).unwrap();

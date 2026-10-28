@@ -147,7 +147,6 @@
 (allow file-write* (literal "/fixture/repo/.git/worktrees/lane/index.lock"))
 (allow file-write* (literal "/fixture/repo/.git/packed-refs.lock"))
 (allow file-write* (literal "/fixture/repo/.git/worktrees/lane/FETCH_HEAD"))
-(allow file-write* (literal "/fixture/repo/.git/FETCH_HEAD"))
 (allow file-write* (literal "/fixture/repo/.git/worktrees/lane/HEAD"))
 (allow file-write* (literal "/fixture/repo/.git/worktrees/lane/HEAD.lock"))
 (allow file-write* (literal "/fixture/repo/.git/worktrees/lane/logs/HEAD"))

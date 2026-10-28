@@ -248,6 +248,11 @@ pub(crate) enum GitMutation {
     WorktreeRemove {
         path: PathBuf,
     },
+    SetBranchConfig {
+        branch: GitRefName,
+        key: &'static str,
+        value: String,
+    },
     DeleteRef {
         name: GitRefName,
         expected_old_oid: GitOid,
@@ -1203,6 +1208,43 @@ pub(crate) fn execute_git_mutation(
     )
 }
 
+/// Set one lane upstream key. Reopen the repository after each call because
+/// Git replaces the common config file.
+pub fn set_lane_upstream_key(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    branch: &GitRefName,
+    merge: bool,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<(), UtilityError> {
+    if branch.short_name().is_empty() {
+        return Err(UtilityError::InvalidOperationValue);
+    }
+    let (key, value) = if merge {
+        ("merge", branch.as_str().to_owned())
+    } else {
+        ("remote", "origin".to_owned())
+    };
+    let result = execute_git_mutation(
+        executor,
+        repo,
+        runtime,
+        GitMutation::SetBranchConfig {
+            branch: branch.clone(),
+            key,
+            value,
+        },
+        budget,
+        cancel,
+    )?;
+    if result.termination != Termination::Exit(0) {
+        return Err(UtilityError::InvalidOperationValue);
+    }
+    Ok(())
+}
+
 /// Inspect only Git config key names, without following include directives or
 /// exposing values. Attribute-selected filters can execute only when a driver
 /// is configured; includes are refused because later Git commands would follow
@@ -1359,6 +1401,16 @@ fn mutation_args(mutation: GitMutation) -> Result<(Vec<OsString>, Option<Vec<u8>
             let path = validate_absolute_mutation_path(&path)?;
             args.extend(["worktree".into(), "remove".into(), "--".into()]);
             args.push(path.into_os_string());
+            None
+        }
+        GitMutation::SetBranchConfig { branch, key, value } => {
+            args.extend([
+                "config".into(),
+                "--local".into(),
+                "--replace-all".into(),
+                format!("branch.{}.{key}", branch.short_name()).into(),
+                value.into(),
+            ]);
             None
         }
         GitMutation::DeleteRef {

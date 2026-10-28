@@ -587,6 +587,9 @@ pub struct AttemptRecord {
     /// Writers only; concrete Git paths stay out of the record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_grants_digest: Option<Digest>,
+    /// Compatibility with records from earlier development versions; never used as authority.
+    #[serde(default, skip_serializing)]
+    pub granted_tracking_ref: Option<String>,
     pub subject: Option<GitOid>,
     pub head: Option<GitOid>,
     #[serde(default)]
