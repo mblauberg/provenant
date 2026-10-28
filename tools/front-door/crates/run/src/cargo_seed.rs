@@ -732,7 +732,22 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn seeded_git_dependency_builds_offline() {
-        use std::process::Command;
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use std::ffi::OsString;
+        use std::time::Duration;
+
+        let run = |argv: &[OsString], cwd: &std::path::Path, overrides: &[(&str, OsString)]| {
+            let mut env: Vec<_> = std::env::vars_os().collect();
+            for (key, value) in overrides {
+                env.retain(|(existing, _)| existing != key);
+                env.push(((*key).into(), value.clone()));
+            }
+            let mut options = ExecOptions::new(argv, cwd, Duration::from_secs(120));
+            options.env = Some(&env);
+            let outcome = SystemExecutor::new(1).unwrap().execute(options).unwrap();
+            assert_eq!(outcome.termination, Termination::Exit(0));
+            assert!(!outcome.timed_out);
+        };
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("host");
         let cache = tmp.path().join("lane");
@@ -761,14 +776,11 @@ mod tests {
                 "fixture",
             ][..],
         ] {
-            assert!(
-                Command::new("git")
-                    .args(args)
-                    .current_dir(&dep)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
+            let argv: Vec<OsString> = std::iter::once("git")
+                .chain(args.iter().copied())
+                .map(Into::into)
+                .collect();
+            run(&argv, &dep, &[]);
         }
         std::fs::write(app.join("Cargo.toml"), format!("[package]\nname = \"seed_app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nseed_fixture = {{ git = \"file://{}\" }}\n", dep.display())).unwrap();
         std::fs::write(
@@ -776,27 +788,23 @@ mod tests {
             "pub fn value() -> u8 { seed_fixture::value() }\n",
         )
         .unwrap();
-        assert!(
-            Command::new("cargo")
-                .arg("fetch")
-                .current_dir(&app)
-                .env("CARGO_HOME", home.join(".cargo"))
-                .env("CARGO_NET_GIT_FETCH_WITH_CLI", "true")
-                .status()
-                .unwrap()
-                .success()
+        run(
+            &["cargo".into(), "fetch".into()],
+            &app,
+            &[
+                ("CARGO_HOME", home.join(".cargo").into()),
+                ("CARGO_NET_GIT_FETCH_WITH_CLI", "true".into()),
+            ],
         );
         assert_eq!(seed_git(true, &home, &cache).status, "seeded");
-        assert!(
-            Command::new("cargo")
-                .args(["check", "--offline"])
-                .current_dir(&app)
-                .env("CARGO_HOME", cache.join("cargo-home"))
-                .env("CARGO_TARGET_DIR", cache.join("target"))
-                .env("CARGO_BUILD_BUILD_DIR", cache.join("target"))
-                .status()
-                .unwrap()
-                .success()
+        run(
+            &["cargo".into(), "check".into(), "--offline".into()],
+            &app,
+            &[
+                ("CARGO_HOME", cache.join("cargo-home").into()),
+                ("CARGO_TARGET_DIR", cache.join("target").into()),
+                ("CARGO_BUILD_BUILD_DIR", cache.join("target").into()),
+            ],
         );
     }
 
