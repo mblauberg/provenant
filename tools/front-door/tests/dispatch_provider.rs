@@ -176,7 +176,9 @@ fn opencode_dispatch_observes_v2_wal_session() -> Result {
                 "--json",
             ])?;
             assert_eq!(code(&out), 0, "{out:?}");
-            let lanes = rig.command(&["lanes", "--all", "--json"])?;
+            let dispatched: Value = serde_json::from_slice(&out.stdout.bytes)?;
+            let run = dispatched["data"]["run_id"].as_str().ok_or("run")?;
+            let lanes = rig.command(&["lanes", "--id", run, "--all", "--json"])?;
             let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
             let lane = &lanes["data"]["lanes"][0];
             assert_eq!(lane["state"], expected, "{lane}");
