@@ -85,6 +85,43 @@ an explicit consumption acknowledgement can move `queued` directly to
 resolution. Repeated acknowledgement is harmless and never repeats an action.
 Neither the answer nor acknowledgement grants new authority or replaces review.
 
+## Delivery service
+
+The local `offer_until_ack` API is available to delivery adapters. Adapters must resolve the target using authoritative session discovery and fail closed on missing or unreadable registration. Identity mismatches return `conflict`; discovery failures return `inbox_unavailable`.
+It selects one explicitly registered checkpoint session using its exact host,
+project and chair actor. Missing registration or a different binding is refused;
+a similarly labelled session does not receive the answer. Discovery identifies
+the chair, not provider liveness. A changed or missing checkpoint does not
+transfer its registered identity. Explicit rebinding does not retarget old
+answers: those stay addressed to their original host/session/actor.
+
+Each batch contains immutable answers and delivery records, with request and
+answer IDs. Batches cap at 100 answers and 8 KiB of compact JSON, including the
+envelope and escaping. Adapters may request smaller limits and must reserve
+space for their own protocol envelope. `truncated` identifies overflow; omitted
+answers keep their previous delivery state. An answer that does not fit a smaller requested budget is skipped and remains queued; use the full 8 KiB boundary to offer it. Answers that cannot fit that boundary are refused when submitted, including JSON escaping and envelope overhead.
+
+Offers atomically set `offered`, increment `attempts` and set `last_attempt_at`.
+Newly queued answers start at zero offers. Offers repeat across service restarts
+until explicit acknowledgement by the exact target; acknowledgement retains
+its original timestamp on retries. Neither offering nor mail-read success proves
+model consumption. Deduplicate by answer ID before taking action. An adapter
+failure after an offer commits leaves it eligible to be offered again.
+
+`delivery_capabilities()` publishes the implemented fallback matrix:
+
+| Provider | Transport | Live injection |
+|---|---|---|
+| Claude | Fabric mail | Unavailable |
+| Codex | Fabric mail | Unavailable |
+| Cursor | Fabric mail | Unavailable |
+| Agy | Fabric mail | Unavailable |
+| OpenCode | Fabric mail | Unavailable |
+
+This slice adds the service API. CLI/MCP syntax is unchanged. Hook composition,
+remote delivery and provider input adapters remain separate work. Both apps may
+stay closed; there is no background polling or provider launch.
+
 Use `inbox close` with a reason and expected revision to withdraw, supersede or
 expire an item. Closure grants no approval and does not discard its answer or
 pending delivery. Expiry is an explicit operation; no timer infers it.

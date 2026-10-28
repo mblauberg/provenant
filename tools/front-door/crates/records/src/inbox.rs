@@ -7,6 +7,44 @@ use serde::{Deserialize, Serialize};
 pub const REQUEST_BODY_BYTES: usize = 8192;
 pub const ANSWER_TEXT_BYTES: usize = 4096;
 pub const MAX_OPTIONS: usize = 16;
+pub const MAX_OFFER_BYTES: usize = 8192;
+
+/// Exact registered destination. An actor label alone never selects a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnswerTarget {
+    pub host: HostId,
+    pub project: ProjectId,
+    pub session: String,
+    pub actor: ActorId,
+}
+
+/// A local service offer is not proof of provider injection or consumption.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnswerOffer {
+    pub answer: HumanAnswer,
+    pub delivery: AnswerDelivery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DeliveryCapability {
+    pub provider: crate::Harness,
+    pub transport: AnswerTransport,
+    pub live_injection: bool,
+}
+
+/// Implemented local fallback only. Provider hook/input adapters are separate work.
+pub fn delivery_capabilities() -> Vec<DeliveryCapability> {
+    crate::ADAPTER_SPECS
+        .iter()
+        .map(|spec| DeliveryCapability {
+            provider: spec.id,
+            transport: AnswerTransport::FabricMail,
+            live_injection: false,
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
