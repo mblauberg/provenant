@@ -113,6 +113,9 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<crate::quota::Quota>,
     },
+    /// Read the local console catalogue
+    #[command(subcommand)]
+    Console(crate::console::Console),
     /// Manage the chair session
     #[command(subcommand)]
     Chair(Chair),

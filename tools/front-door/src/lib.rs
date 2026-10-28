@@ -7,6 +7,7 @@ mod chair;
 mod checks;
 #[cfg(test)]
 mod compose_tests;
+mod console;
 mod disk;
 mod disk_guard;
 mod fabric;
@@ -647,6 +648,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             })
         }
         Command::Chair(cmd) => chair::run(cmd, globals),
+        Command::Console(cmd) => console::run(cmd, globals),
         Command::Quota { command } => {
             let cmd = command.unwrap_or(provenant_cli::Quota::Show(provenant_cli::quota::Filter {
                 adapter: None,
@@ -772,11 +774,11 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     };
     let verb = verb.to_owned();
     // No product installation, Git probe or provider access is needed to count.
-    // Checkpoint observation must remain allocation-free through the whole CLI
-    // path, including demand telemetry, even on an otherwise empty state root.
+    // Read-only catalogue and checkpoint observation must not record demand
+    // telemetry, including on an otherwise empty state root.
     let usage_roots = if matches!(
         verb.as_str(),
-        "workflow session show" | "workflow session diff"
+        "workflow session show" | "workflow session diff" | "console projects" | "console sessions"
     ) {
         None
     } else {

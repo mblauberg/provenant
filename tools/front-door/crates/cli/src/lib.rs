@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod bench;
 pub mod check;
+pub mod console;
 pub mod domains;
 pub mod fabric;
 pub mod quota;
