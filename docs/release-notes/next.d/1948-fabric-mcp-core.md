@@ -1,4 +1,4 @@
-## Improvements
+## Behaviour changes
 
 - Fabric MCP exposes a compact core catalogue, with graph, lease, task and
   event schemas available through discovery. Submit and wait in one bounded
