@@ -780,7 +780,9 @@ fn schema_catalogue_is_fixed_order_and_has_no_legacy_aliases() {
             "fabric_events",
             "fabric_lease",
             "fabric_graph",
-            "fabric_inbox"
+            "fabric_inbox",
+            "fabric_console",
+            "fabric_chair"
         ]
     );
     assert!(ToolCall::parse("fabric_not_a_tool", json!({"op":"inspect"})).is_err());

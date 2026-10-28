@@ -80,6 +80,7 @@ fn prepare(
         secret_input: None,
         cwd: input.cwd.to_owned(),
         setup: vec![SetupStep::CreateDir(chats.clone())],
+        git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
