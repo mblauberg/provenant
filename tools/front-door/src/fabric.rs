@@ -3370,15 +3370,18 @@ fn settle_attempt(
 }
 
 impl provenant_fabric_runtime::graph::CiStatus for BoundGraphOwner<'_> {
-    fn now_seconds(&self) -> Option<u64> {
-        self.factory
-            .clock
-            .wall_now()
-            .ok()
-            .and_then(|time| u64::try_from(time.as_micros() / 1_000_000).ok())
+    fn host_stamp(&self) -> Option<provenant_fabric_runtime::graph::CiHostStamp> {
+        Some(provenant_fabric_runtime::graph::CiHostStamp {
+            boot_identity: self.factory.clock.boot_identity().ok()?,
+            host_monotonic_micros: self.factory.clock.host_monotonic_micros().ok()?,
+        })
     }
-    fn observe_ci(&mut self, target: &str) -> provenant_fabric_runtime::graph::CiObservation {
-        crate::pr::status::observe_ci(&self.factory.cwd, target)
+    fn observe_ci(
+        &mut self,
+        target: &str,
+        checks: &[String],
+    ) -> provenant_fabric_runtime::graph::CiObservation {
+        crate::pr::status::observe_ci(&self.factory.cwd, target, checks)
     }
 }
 
@@ -3809,29 +3812,6 @@ impl Factory {
                 }
                 Some(document)
             }
-            GraphInput::Status { id } => {
-                let checkpoint = FileJournal::read_checkpoint(
-                    &self.context.roots.state,
-                    self.context.identity.project,
-                    id,
-                )
-                .map_err(graph_journal_error)?
-                .ok_or(FacadeError::NotFound)?;
-                if checkpoint.nodes.iter().any(|node| {
-                    node.state == provenant_fabric_runtime::graph::NodeState::Running
-                        && node.ci.is_some()
-                }) {
-                    FileJournal::pending_execution(
-                        &self.context.roots.state,
-                        self.context.identity.project,
-                        id,
-                    )
-                    .map_err(graph_journal_error)?
-                    .map(|execution| execution.document)
-                } else {
-                    None
-                }
-            }
             _ => None,
         };
         let id = match &input {
@@ -3842,7 +3822,7 @@ impl Factory {
                 .graph_id
                 .as_str(),
         };
-        if matches!(input, GraphInput::Status { .. }) && document.is_none() {
+        if matches!(input, GraphInput::Status { .. }) {
             let checkpoint = FileJournal::read_checkpoint(
                 &self.context.roots.state,
                 self.context.identity.project,
@@ -3887,20 +3867,18 @@ impl Factory {
             } else {
                 None
             };
-            if !matches!(input, GraphInput::Status { .. }) {
-                journal
-                    .bind(provenant_fabric_runtime::graph::GraphExecution {
-                        integration_base,
-                        directory: self.cwd.clone(),
-                        document: document.clone(),
-                    })
-                    .map_err(|error| match error {
-                        provenant_fabric_runtime::graph::JournalError::TooLarge => {
-                            graph_journal_error(error)
-                        }
-                        _ => FacadeError::Conflict,
-                    })?;
-            }
+            journal
+                .bind(provenant_fabric_runtime::graph::GraphExecution {
+                    integration_base,
+                    directory: self.cwd.clone(),
+                    document: document.clone(),
+                })
+                .map_err(|error| match error {
+                    provenant_fabric_runtime::graph::JournalError::TooLarge => {
+                        graph_journal_error(error)
+                    }
+                    _ => FacadeError::Conflict,
+                })?;
             let mut owner = BoundGraphOwner {
                 factory: self,
                 integration_base,

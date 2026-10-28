@@ -21,12 +21,18 @@ struct Owner {
     targets: Vec<String>,
     attempts: usize,
     deliveries: usize,
+    wall_seconds: i64,
+    monotonic_micros: u64,
+    boot: String,
 }
 impl CiStatus for Owner {
-    fn now_seconds(&self) -> Option<u64> {
-        Some(10_000)
+    fn host_stamp(&self) -> Option<CiHostStamp> {
+        Some(CiHostStamp {
+            boot_identity: self.boot.clone(),
+            host_monotonic_micros: self.monotonic_micros,
+        })
     }
-    fn observe_ci(&mut self, target: &str) -> CiObservation {
+    fn observe_ci(&mut self, target: &str, _: &[String]) -> CiObservation {
         self.targets.push(target.into());
         self.observations
             .pop_front()
@@ -74,7 +80,7 @@ impl AttemptOwner for Owner {
 
 fn document() -> GraphDocument {
     serde_json::from_value(serde_json::json!({ "schema_version": 1, "graph_id": "g-ci", "nodes": [{
-        "id": "ci", "kind": "gate", "access": "read_only", "condition": {"type": "ci", "target": "feature/example", "required": "passed"}
+        "id": "ci", "kind": "gate", "access": "read_only", "condition": {"type": "ci", "target": "feature/example"}
     }] })).unwrap()
 }
 fn observation(state: CiState, summary: &str) -> CiObservation {
@@ -135,7 +141,7 @@ fn ci_pending_checkpoint_replays_then_passes() {
     assert_eq!(node.ci.as_ref().unwrap().summary, "1 check running");
     assert_eq!(owner.attempts, 0);
     assert_eq!(owner.deliveries, 0);
-    let first = node.ci.as_ref().unwrap().first_observed_seconds;
+    let first = node.ci.as_ref().unwrap().first_observed_stamp.clone();
     let encoded = serde_json::to_vec(&waiting.checkpoint).unwrap();
     let restored: GraphCheckpoint = serde_json::from_slice(&encoded).unwrap();
     assert_eq!(restored, waiting.checkpoint);
@@ -143,7 +149,7 @@ fn ci_pending_checkpoint_replays_then_passes() {
     let finished = advance(&document(), &mut owner, &mut journal).unwrap();
     assert_eq!(finished.checkpoint.nodes[0].state, NodeState::Succeeded);
     let evidence = finished.checkpoint.nodes[0].ci.as_ref().unwrap();
-    assert_eq!(evidence.first_observed_seconds, first);
+    assert_eq!(evidence.first_observed_stamp, first);
     assert_eq!(evidence.state, CiState::Passed);
     assert_eq!(evidence.summary, "1 check passed");
     assert_eq!(owner.attempts, 0);
@@ -165,11 +171,7 @@ fn ci_pending_times_out_using_original_observation_time() {
             .status,
         GraphStatus::Pending
     );
-    journal.0.as_mut().unwrap().nodes[0]
-        .ci
-        .as_mut()
-        .unwrap()
-        .first_observed_seconds = 0;
+    owner.monotonic_micros = 7_200_000_000;
     let timed_out = advance(&document(), &mut owner, &mut journal).unwrap();
     let node = &timed_out.checkpoint.nodes[0];
     assert_eq!(node.state, NodeState::Failed);
@@ -179,6 +181,113 @@ fn ci_pending_times_out_using_original_observation_time() {
     );
     assert_eq!(node.ci.as_ref().unwrap().summary, "waiting");
     assert_eq!(owner.targets.len(), 1);
+}
+
+#[test]
+fn ci_timeout_ignores_wall_clock_steps_and_reanchors_after_boot() {
+    let mut owner = Owner {
+        observations: VecDeque::from([
+            observation(CiState::Pending, "first"),
+            observation(CiState::Pending, "forward wall step"),
+            observation(CiState::Pending, "backward wall step"),
+            observation(CiState::Pending, "new boot"),
+        ]),
+        boot: "boot-a".into(),
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    advance(&document(), &mut owner, &mut journal).unwrap();
+    owner.wall_seconds = 1_000_000;
+    owner.monotonic_micros = 1_000_000;
+    assert_eq!(
+        advance(&document(), &mut owner, &mut journal)
+            .unwrap()
+            .status,
+        GraphStatus::Pending
+    );
+    owner.wall_seconds = -1_000_000;
+    owner.monotonic_micros = 2_000_000;
+    assert_eq!(
+        advance(&document(), &mut owner, &mut journal)
+            .unwrap()
+            .status,
+        GraphStatus::Pending
+    );
+    owner.boot = "boot-b".into();
+    owner.monotonic_micros = 8_000_000_000;
+    let result = advance(&document(), &mut owner, &mut journal).unwrap();
+    assert_eq!(result.status, GraphStatus::Pending);
+    let evidence = result.checkpoint.nodes[0].ci.as_ref().unwrap();
+    assert_eq!(
+        evidence.clock_reanchor_reason.as_deref(),
+        Some("host boot changed")
+    );
+    assert_eq!(
+        evidence
+            .first_observed_stamp
+            .as_ref()
+            .unwrap()
+            .boot_identity,
+        "boot-b"
+    );
+    owner.monotonic_micros += 7_200_000_000;
+    let result = advance(&document(), &mut owner, &mut journal).unwrap();
+    assert_eq!(
+        result.checkpoint.nodes[0]
+            .gate
+            .as_ref()
+            .unwrap()
+            .reason
+            .as_deref(),
+        Some("timeout")
+    );
+}
+
+#[test]
+fn ci_check_names_are_validated() {
+    for checks in [vec![""], vec![" build"], vec!["build", "build"]] {
+        let mut doc = document();
+        let Some(GateCondition::Ci { checks: names, .. }) = &mut doc.nodes[0].condition else {
+            unreachable!()
+        };
+        *names = checks.into_iter().map(str::to_owned).collect();
+        assert_eq!(
+            validate_plan(&doc).err(),
+            Some("invalid CI gate check names")
+        );
+    }
+}
+
+#[test]
+fn pending_ci_does_not_consume_attempt_concurrency() {
+    let mut doc = document();
+    doc.nodes.push(
+        serde_json::from_value(serde_json::json!({
+            "id": "task", "prompt": "work", "access": "read_only",
+            "route": {"adapter": "fixture", "model": "fixture/model"}
+        }))
+        .unwrap(),
+    );
+    let mut owner = Owner {
+        observations: VecDeque::from([observation(CiState::Pending, "waiting")]),
+        ..Default::default()
+    };
+    let limits = crate::config::GraphLimits {
+        concurrency: Some(1),
+        ..Default::default()
+    };
+    let result = advance_with_budget(
+        &doc,
+        &mut owner,
+        &mut Journal::default(),
+        &limits,
+        &Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(result.checkpoint.nodes[0].state, NodeState::Running);
+    assert_eq!(result.checkpoint.nodes[1].state, NodeState::Succeeded);
+    assert_eq!(owner.attempts, 1);
 }
 
 #[test]
@@ -210,7 +319,7 @@ fn ci_validation_rejects_bad_targets_and_timeouts() {
         let mut doc = document();
         doc.nodes[0].condition = Some(GateCondition::Ci {
             target: target.into(),
-            required: CiRequired::Passed,
+            checks: vec![],
             timeout_seconds: timeout,
         });
         assert_eq!(

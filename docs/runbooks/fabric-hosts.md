@@ -111,7 +111,7 @@ Use a CI gate to wait for the checks on a pull request or branch:
   "id": "ci",
   "kind": "gate",
   "access": "read_only",
-  "condition": {"type": "ci", "target": "123", "required": "passed", "timeout_seconds": 7200}
+  "condition": {"type": "ci", "target": "123", "checks": ["build", "test"], "timeout_seconds": 7200}
 }
 ```
 
@@ -121,16 +121,19 @@ The `condition` fields for this gate are:
 | --- | --- |
 | `type` | `ci` |
 | `target` | Non-empty pull request number or branch name, as a string |
-| `required` | Required outcome, `passed` |
+| `checks` | Optional array of required check names |
 | `timeout_seconds` | Optional timeout from 1 to 604800 seconds; defaults to 7200 |
 
-A passed check set passes the gate;
-failed checks fail it. Missing checks, an unknown pull request or an API error
-fail with reason `unavailable`. Pending checks leave the gate waiting until
+Every explicitly named check must pass. When `checks` is omitted, the host
+uses required checks from branch protection or rulesets if it can resolve them.
+Otherwise every reported check must pass or be skipped, with at least one pass.
+The gate records the policy it applied with its evidence. Failed checks fail
+the gate. Missing checks, an unknown pull request or an API error fail with
+reason `unavailable`. Pending checks leave the gate waiting until
 they settle or the timeout expires. The checkpoint records the first observation,
-last state and check summary. Pending gates are re-evaluated when the graph
-advances, including through status and advance commands; no background timer
-advances them automatically.
+last state and check summary. Pending gates are re-evaluated by `fabric graph run`
+or `fabric graph resume` and when an attempt settles. Graph status reads the saved
+snapshot; it does not advance the graph. No background timer re-checks the gate.
 
 Set `on_fail` to a recovery node ID and include the gate in that node's
 `depends_on`. The recovery path runs only on failure; the ordinary dependants

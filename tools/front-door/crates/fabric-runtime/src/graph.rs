@@ -214,7 +214,8 @@ pub enum GateCondition {
     Budget,
     Ci {
         target: String,
-        required: CiRequired,
+        #[serde(default)]
+        checks: Vec<String>,
         #[serde(default = "default_ci_timeout")]
         timeout_seconds: u64,
     },
@@ -222,12 +223,6 @@ pub enum GateCondition {
 
 fn default_ci_timeout() -> u64 {
     7200
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CiRequired {
-    Passed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,8 +243,20 @@ pub struct CiObservation {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CiHostStamp {
+    pub boot_identity: String,
+    pub host_monotonic_micros: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CiEvidence {
-    pub first_observed_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_observed_seconds: Option<u64>,
+    #[serde(default)]
+    pub first_observed_stamp: Option<CiHostStamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_reanchor_reason: Option<String>,
     pub state: CiState,
     pub summary: String,
 }
@@ -634,8 +641,8 @@ pub struct NodeInput<'a> {
 
 /// Narrow read-only host interface for CI checks.
 pub trait CiStatus {
-    fn now_seconds(&self) -> Option<u64>;
-    fn observe_ci(&mut self, target: &str) -> CiObservation;
+    fn host_stamp(&self) -> Option<CiHostStamp>;
+    fn observe_ci(&mut self, target: &str, checks: &[String]) -> CiObservation;
 }
 
 /// `observe_or_start` must be idempotent by `AttemptKey`. It starts the run
@@ -1609,27 +1616,58 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             let reason = if let GateCondition::Ci {
                 target,
                 timeout_seconds,
-                ..
+                checks,
             } = condition
             {
                 let mut host = owner.ci_status();
-                let sampled = host.as_ref().and_then(|host| host.now_seconds());
-                let now = sampled.unwrap_or_default();
+                let sampled = host.as_ref().and_then(|host| host.host_stamp());
                 let prior = checkpoint.nodes[node_index].ci.as_ref();
-                let first = prior.map_or(now, |e| e.first_observed_seconds);
-                if prior.is_some() && now.saturating_sub(first) >= *timeout_seconds {
+                let mut anchor = prior.and_then(|e| e.first_observed_stamp.clone());
+                let mut reanchor_reason = prior.and_then(|e| e.clock_reanchor_reason.clone());
+                if let Some(now) = &sampled {
+                    match &anchor {
+                        Some(first) if first.boot_identity != now.boot_identity => {
+                            anchor = Some(now.clone());
+                            reanchor_reason = Some("host boot changed".into());
+                        }
+                        Some(first) if now.host_monotonic_micros < first.host_monotonic_micros => {
+                            anchor = Some(now.clone());
+                            reanchor_reason = Some("host monotonic clock moved backwards".into());
+                        }
+                        None => {
+                            anchor = Some(now.clone());
+                            if prior.is_some() {
+                                reanchor_reason =
+                                    Some("previous checkpoint lacked a host stamp".into());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let timed_out = prior.is_some()
+                    && sampled
+                        .as_ref()
+                        .zip(anchor.as_ref())
+                        .is_some_and(|(now, first)| {
+                            now.host_monotonic_micros
+                                .saturating_sub(first.host_monotonic_micros)
+                                >= timeout_seconds.saturating_mul(1_000_000)
+                        });
+                if timed_out {
                     Some("timeout".into())
                 } else {
                     let observation = host.as_mut().filter(|_| sampled.is_some()).map_or_else(
                         || CiObservation {
                             state: CiState::Unavailable,
-                            summary: "CI status unavailable".into(),
+                            summary: "CI status or host clock unavailable".into(),
                         },
-                        |host| host.observe_ci(target),
+                        |host| host.observe_ci(target, checks),
                     );
                     let state = observation.state;
                     checkpoint.nodes[node_index].ci = Some(CiEvidence {
-                        first_observed_seconds: first,
+                        first_observed_seconds: prior.and_then(|e| e.first_observed_seconds),
+                        first_observed_stamp: anchor,
+                        clock_reanchor_reason: reanchor_reason,
                         state,
                         summary: observation.summary,
                     });
@@ -1713,7 +1751,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         .iter()
                         .enumerate()
                         .filter(|(index, node)| {
-                            *index != node_index && node.state == NodeState::Running
+                            *index != node_index
+                                && node.state == NodeState::Running
+                                && !node.attempts.is_empty()
                         })
                         .count()
                         >= cap
@@ -2629,8 +2669,18 @@ fn validate_flat_plan(
             Some(GateCondition::Ci {
                 target,
                 timeout_seconds,
-                ..
+                checks,
             }) => {
+                let mut seen = std::collections::HashSet::new();
+                if checks.iter().any(|name| {
+                    name.trim().is_empty()
+                        || name.trim() != name
+                        || name.contains(['\n', '\r'])
+                        || name.len() > 1024
+                        || !seen.insert(name)
+                }) {
+                    return Err("invalid CI gate check names");
+                }
                 if target.trim().is_empty()
                     || target.trim() != target
                     || target.starts_with('-')
