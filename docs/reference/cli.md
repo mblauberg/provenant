@@ -1449,7 +1449,7 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `--source` | `{"name": "source", "required": true}` |
-| `--harness` | `{"name": "harness", "repeatable": true, "required": true, "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
+| `--harness` | `{"name": "harness", "repeatable": true, "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
 | `--bin-dir` | `{"name": "bin_dir"}` |
 | `--hooks` | `{"name": "hooks", "values": ["on", "off"]}` |
 | `--adopt-existing` | `{"defaults": ["false"], "name": "adopt_existing", "values": ["true", "false"]}` |
@@ -1474,6 +1474,34 @@ bounds are null. Positional arguments have no long flag.
       ],
       "multiple": true,
       "name": "Install",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant upgrade`
+
+| Argument | Contract |
+|---|---|
+| `--from-source` | `{"name": "from_source"}` |
+| `--hosts` | `{"defaults": ["all"], "name": "hosts", "values": ["all"]}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "from_source",
+        "hosts"
+      ],
+      "multiple": true,
+      "name": "Upgrade",
       "required": false
     }
   ]

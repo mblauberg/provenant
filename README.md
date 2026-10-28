@@ -120,77 +120,28 @@ fit.
 
 ## Install
 
-Provenant is built from source; there are no prebuilt releases. These steps
-build the binary, stage a release, install it for Claude Code and register one
-Claude account.
+```sh
+curl -fsSL https://raw.githubusercontent.com/mblauberg/provenant/main/install.sh | sh
+```
 
-1. **Build and stage a release.**
+The installer verifies the release checksum, sets up detected harnesses and
+Claude account directories, and checks the installation. A rerun upgrades the
+recorded selection. Output includes one line per harness target, for example:
 
-   ```sh
-   cd tools/front-door
-   export PATH="$HOME/.cargo/bin:$PATH"
-   CARGO_PARENT="$(mktemp -d)"
-   export CARGO_TARGET_DIR="$CARGO_PARENT/cargo-target"
-   RELEASE="$(mktemp -d)/release"
-   cargo build --release --locked --bin provenant
-   cargo run --locked --example package-release -- --out "$RELEASE"
-   rm -rf -- "$CARGO_PARENT"
-   unset CARGO_TARGET_DIR CARGO_PARENT
-   ```
+```text
+install:
+  Claude (/Users/you/.claude): 42 changed links, 0 changed hooks, 1 changed MCP, 0 notes; 0 other
+  Codex (/Users/you/.codex): 42 changed links, 0 changed hooks, 1 changed MCP, 0 notes; 0 other
+```
 
-2. **Preview, then apply, the install.** Repeat `--harness` for each of
-   `claude`, `codex`, `cursor`, `agy` and `opencode` you use.
+Counts depend on the release and installed harnesses. Findings appear only when
+there are any.
 
-   > [!IMPORTANT]
-   > Quit Claude Code and the other selected harnesses first. Claude Code
-   > rewrites `~/.claude.json` while it runs.
-
-   ```sh
-   PROVENANT="$RELEASE/bin/provenant"
-   STATE="$HOME/.local/share/provenant/v1"
-   "$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" \
-     --harness claude --bin-dir "$HOME/.local/bin" --dry-run
-   "$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" \
-     --harness claude --bin-dir "$HOME/.local/bin"
-   "$PROVENANT" --state-dir "$STATE" check install --source "$RELEASE"
-   ```
-
-3. **Register your accounts.** Each Claude account lives in its own
-   `~/.claude-<label>` directory, signed in separately. Repeat for every
-   account, with `--adapter codex` for Codex accounts.
-
-   ```sh
-   CLAUDE_CONFIG_DIR=~/.claude-work claude        # sign in, then exit
-   provenant accounts register work --adapter claude --directory ~/.claude-work
-   provenant quota tick
-   ```
-
-<details>
-<summary><strong>What the install changes in each harness</strong></summary>
-
-<br>
-
-| Harness | Fabric MCP | Skills | Instructions | Hooks |
-| --- | --- | --- | --- | --- |
-| Claude Code | `~/.claude.json` | `~/.claude/skills/` | `~/.claude/CLAUDE.md` | `~/.claude/settings.json`, opt-in |
-| Codex | `~/.codex/config.toml` | `~/.codex/skills/` | `~/.codex/AGENTS.md` | none |
-| Cursor | `~/.cursor/mcp.json` | `~/.cursor/skills/` | none | none |
-| Agy | `~/.gemini/config/mcp_config.json` | `~/.gemini/skills/` | `~/.gemini/GEMINI.md` | none |
-| OpenCode | `~/.config/opencode/opencode.jsonc` | `~/.config/opencode/skills/` | `~/.config/opencode/AGENTS.md` | none |
-
-Instruction files point each harness at [`HARNESS.md`](HARNESS.md), the runtime
-rules agents follow. Managed hooks exist for Claude Code only: they guard risky
-shell commands, keep context across compaction and drive account switching. They
-are off on first install; `--hooks on` enables them, and a reinstall without
-`--hooks` keeps their current state. On macOS the install also manages two
-LaunchAgents: one that serves requests from peer hosts and a six-hourly lane
-cache clean-up. Remove an integration with `provenant uninstall --harness
-<name>`.
-
-The [install runbook](docs/runbooks/install.md) covers release contents,
-receipts, migration and recovery.
-
-</details>
+**Installing with a coding agent.** In a checkout, ask the agent to run
+`./install.sh --yes`. Use `./install.sh --from-source --yes` to build locally.
+Run `sh install.sh` in a terminal for guided first-time setup. The
+[install runbook](docs/runbooks/install.md) covers manual installation,
+packages and upgrades.
 
 ## Quick start
 
