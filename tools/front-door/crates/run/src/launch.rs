@@ -809,7 +809,7 @@ impl RunStore {
             use std::io::Write;
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "warning: parent network unavailable; child-store launch uses provider-only network"
+                "warning: parent network unavailable; child-store launch uses the same provider-only profile as other provider-only lanes (macOS egress limitation: #2118)"
             );
         }
         let resume = request

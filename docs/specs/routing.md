@@ -298,11 +298,14 @@ requester. The host applies inherited network restrictions as launch policy,
 validates the effective access against the parent, and checks the original
 digest again before launch. Every attempt's effective network is sealed in
 its holder context, so grandchildren inherit the bound. Older live contexts
-without this field default to provider-only network. A child-store continuation
+without this field use the same provider-only profile as other provider-only
+lanes. A child-store continuation
 is bounded by the requesting parent's host-sealed effective network, intersected
 with the requested access. Without a live sealed parent, the host uses
-provider-only network and emits a diagnostic. The prior lane's writable
-records do not supply the bound.
+the same provider-only profile as other provider-only lanes and emits a
+diagnostic. On macOS that profile currently permits outbound TCP 443 beyond
+provider endpoints; see [#2118](https://github.com/mblauberg/provenant/issues/2118).
+The prior lane's writable records do not supply the bound.
 - Why: a writer child could leave scripts that run unconfined, and child
   storage is lane-writable, so only the host's sealed view counts.
 - Test: `crates/run/src/dispatch_tests.rs::host_refuses_writer_child_after_request_rewrite`;
