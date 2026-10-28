@@ -161,7 +161,7 @@ Admission audit (#2088):
   Existing legacy host rows remain readable and replayable only with their
   sealed request digest; lane stores cannot create or repair missing legacy
   rows. Removing the version marker grants no chair association.
-- Host continuations reopening a lane-local store check the replayed run ID
+- Host continuations given a reopened lane-local store check the replayed run ID
   against the request and operation using the same derivation before copying
   the chair binding. New inheritance also verifies the source run and attempt
   derivations and requires the source's host seal. Copying another run's

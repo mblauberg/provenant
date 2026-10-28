@@ -930,6 +930,10 @@ mod tests {
                 out.termination == Termination::Exit(0) && !out.timed_out,
                 "{out:?}"
             );
+            assert!(
+                String::from_utf8_lossy(&out.stdout.bytes).contains("test result: ok. 1 passed;"),
+                "host subprocess must execute the regression: {out:?}"
+            );
             return Ok(());
         }
         let temp = tempfile::tempdir()?;
@@ -960,7 +964,8 @@ mod tests {
         child.operation_id = OperationId::parse("forged-continuation-replay")?;
         child.attempts[0].attempt_id = AttemptId::from_bytes([91; 16]);
         session.store.create(&child, &call)?;
-        // Reopen just as the host's resume target resolver does.
+        // Defensively exercise a host continuation given a reopened lane
+        // store, without the scanner's in-memory sealed requester.
         let session = Session {
             store: run::RunStore::open(&session.context, &call)?
                 .with_writer_registry(roots.state.as_path()),
