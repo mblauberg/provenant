@@ -8,6 +8,75 @@ the full contract. A staged release contains a verified manifest and immutable
 assets. Installation publishes its receipt last, and exact desired bytes and
 links are no-ops, including after a crash before receipt publication.
 
+## Bootstrap and upgrade
+
+`./install.sh` downloads the release matching an exact checkout tag, or the
+latest release otherwise. `--tag vX.Y.Z` selects a release explicitly. Packages
+are named `provenant-<target>.tar.gz` with a matching `.tar.gz.sha256` file;
+the script verifies SHA-256 before unpacking and running the packaged binary.
+The release workflow publishes only `aarch64-apple-darwin`; other hosts fail
+before downloading. Build a checkout with `./install.sh --source --yes`
+(`--from-source` is also accepted).
+
+`--from-source [DIR]` uses that checkout's pinned Rust toolchain and asks before
+installing a missing toolchain through rustup. `--yes` authorises this step
+without a prompt. Cargo's target and build directories live in a temporary
+directory that is removed on completion or failure. Manual builds are described
+below.
+
+The defaults are `~/.local/share/provenant/v1` for state and `~/.local/bin`
+for the binary. `PROVENANT_STATE_DIR`, `--state-dir` and `--bin-dir` support
+other paths. Existing install configuration still applies.
+
+On a terminal, a first install without `--yes` offers provider selection,
+pre-selecting detected CLIs and Claude account directories. It asks whether to
+replace, append to or skip each instruction file, enable Claude hooks and
+register the discovered Claude accounts. Append copies the release's instruction
+text into the existing file; later upgrades preserve that user-owned text.
+Skip preserves existing text or creates an empty user-owned file. Replace lets
+the installer create its managed link. Prompts read the controlling terminal,
+including when the script is piped into `sh`; `--yes` and receipt reruns skip
+guided setup. A truncated script runs nothing, and child commands cannot consume
+the shell's input. After the first successful install, a later account failure
+preserves the published instruction links and receipt.
+
+A bare `provenant install --source "$RELEASE"` detects executable `claude`,
+`codex`, `cursor-agent`, `agy` and `opencode` commands on PATH and every
+`~/.claude-*` directory. It reports each target, emits findings only when
+present, and inspects the installed release at the end. `--dry-run` previews
+without writing; `--json` keeps one result envelope. Explicit `--harness`
+selects particular clients. Without it, an existing receipt determines the
+exact targets and binary directory, ignoring newly detected clients and
+environment overrides. Hook ownership is retained when `--hooks` is omitted.
+
+```sh
+provenant upgrade
+provenant upgrade --from-source /absolute/path/to/provenant --hosts all
+```
+
+Upgrade requires a receipt. It downloads one release tag for this host and all
+registered Fabric peers, or builds the selected source checkout on every host.
+It uses Fabric's SSH executable, destination and connection timeout, and each
+host's own receipt settings. Release upgrades verify each host's package checksum
+before running its bundled `scripts/install.sh`. Source transfers contain tracked
+working files; peers build a temporary indexed checkout. Keep source changes stable during
+the upgrade. Every host needs build tools for a source upgrade. Peer receipts
+must be in their default state directory or selected by the peer's login
+environment. Results identify each host; any failure makes the command fail.
+Hosts are upgraded sequentially, so a failure can leave different versions.
+Fix the reported failure and rerun; there is no distributed rollback.
+
+Bootstrap exits 2 for invalid arguments or interrupted prompts, 3 when a
+missing toolchain needs consent, 4 for a failed download or checksum, and 5
+for a failed build or package. Installation errors retain the CLI's exit code.
+
+Tags matching `v*` trigger `.github/workflows/release.yml`. The tag commit must
+be reachable from `origin/main`. A job with read access builds and ad-hoc signs
+the arm64 binary, runs `package-release`, and checksums the archive. A separate
+publish job verifies the transferred bytes and publishes the archive and checksum;
+only its publish step receives `GITHUB_TOKEN`. Before tagging, commit
+`docs/release-notes/<tag>.md`; that file becomes the GitHub Release body.
+
 ## Build a staged release
 
 From the Rust workspace, build the binary and run the build-only Cargo example.
@@ -83,8 +152,8 @@ embedded source digest does not match the current build's source digest.
 
 ## Install
 
-Bootstrap from the binary in the staged release, with an explicit state root
-at an absolute path. The default root is `~/.local/share/provenant/v1`. Quit
+Bootstrap from the binary in the staged release. An explicit state root must
+be absolute; the default is `~/.local/share/provenant/v1`. Quit
 Claude Code before installing, because it rewrites `~/.claude.json` while
 running. Close the other selected harness clients and config editors before the
 preview, and keep them closed through the install and `check install`. The

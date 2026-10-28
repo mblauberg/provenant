@@ -238,6 +238,7 @@ fn main() -> BuildResult<()> {
     for (source, release_name) in [
         ("AGENTS.md", "instructions/AGENTS.md"),
         ("HARNESS.md", "instructions/HARNESS.md"),
+        ("install.sh", "scripts/install.sh"),
     ] {
         let path = repository.join(source);
         watch(&mut watched, path.clone())?;

@@ -9,13 +9,13 @@ use provenant_config::{
 use provenant_core::Roots;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, clap::Args)]
+#[derive(Debug, Clone, clap::Args)]
 pub struct Install {
     /// Release directory to install from
     #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(crate::grammar::absolute))]
     pub source: PathBuf,
-    /// Harness to install for (repeatable)
-    #[arg(long, required = true, value_parser = harness_parser())]
+    /// Harness to install for (repeatable; defaults to the receipt or detected CLIs)
+    #[arg(long, value_parser = harness_parser())]
     pub harness: Vec<Harness>,
     /// Directory for the installed binary
     #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(crate::grammar::absolute))]
@@ -36,6 +36,16 @@ pub struct Uninstall {
     /// Harness to remove (repeatable)
     #[arg(long, required = true, value_parser = harness_parser())]
     pub harness: Vec<Harness>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct Upgrade {
+    /// Build this checkout instead of downloading the latest release
+    #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(crate::grammar::absolute))]
+    pub from_source: Option<PathBuf>,
+    /// Upgrade this host and every registered Fabric peer
+    #[arg(long, value_parser = ["all"], default_value = "all")]
+    pub hosts: String,
 }
 
 pub(crate) fn harness_parser() -> impl clap::builder::TypedValueParser<Value = Harness> {
