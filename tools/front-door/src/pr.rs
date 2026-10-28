@@ -154,27 +154,19 @@ fn merge(project: &Path, number: &str, head: GitOid) -> Result<()> {
     successful(execute(project, &argv, false)?)?;
     Ok(())
 }
-pub fn run(command: Pr, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
-    let (leaf, number, expected) = match command {
-        Pr::Watch { number } => ("pr watch", number, None),
-        Pr::Merge { number, head } => ("pr merge", number, Some(head)),
-        Pr::Land { number, head } => return land::run(number, head, globals, workers),
+pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 {
+    let (leaf, number) = match command {
+        Pr::Watch { number } => ("pr watch", number),
         Pr::Open(command) => return open::run(*command, globals),
         Pr::Status { numbers } => return status::run(numbers, globals),
     };
-    let mut captured = expected;
+    let mut captured = None;
     let result = (|| -> Result<()> {
         let project = roots::selected_project(globals.project.as_deref(), true)?;
         let number = number.to_string();
         let current = head(&project, &number)?;
         captured = Some(current);
-        if expected.is_some_and(|expected| expected != current) {
-            return Err(format!("pull request head moved to {current}").into());
-        }
-        checks(&project, &number, current, expected.is_none())?;
-        if expected.is_some() {
-            merge(&project, &number, current)?;
-        }
+        checks(&project, &number, current, true)?;
         Ok(())
     })();
     let Some(head) = captured else {
@@ -199,12 +191,6 @@ pub fn run(command: Pr, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
         outcome,
         serde_json::json!({"number": number, "head": head, "result": status}),
     );
-    let text_status = if result.is_ok() && expected.is_some() {
-        report.data["merged"] = true.into();
-        "merged"
-    } else {
-        status
-    };
     if let Err(error) = result {
         report.error = Some(provenant_records::CommandError {
             code: "PR".into(),
@@ -216,7 +202,7 @@ pub fn run(command: Pr, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
     emit(
         &report,
         globals,
-        &format!("{text_status} #{number} {head}\n"),
-        expected.is_none(),
+        &format!("{status} #{number} {head}\n"),
+        true,
     )
 }

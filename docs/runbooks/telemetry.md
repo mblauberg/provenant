@@ -56,7 +56,7 @@ counters.
 
 ## Quota
 
-`provenant quota show` reads cached observations. `provenant quota tick`
+`provenant quota` reads cached observations. `provenant quota tick`
 refreshes due accounts; use `--trigger` and `--power` to record why the
 refresh ran and the current power source. `provenant quota display [--headline
 auto|5h|weekly] [--icon most_constrained|ACCOUNT]` sets the menu bar choices,

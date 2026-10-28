@@ -3,18 +3,26 @@
 Owner: run and Fabric maintainers
 Anchor: docs/specs/run.md, docs/specs/fabric.md
 
-Create and own a local writer checkout with one dispatch:
+Create a writer checkout, submit and wait with one command:
 
 ```sh
-provenant dispatch --operation-id fix-issue --model codex/gpt-6.1-sol \
-  --mode worktree-write --worktree-branch fix/issue --base main \
-  --deliver push --prompt-file brief.md
+provenant run --prompt-file brief.md --route senior \
+  --branch fix/issue --base main --deliver push
 ```
 
-The receipt names the worktree. `--worktree PATH` still uses an existing
-registered checkout without taking over its lifecycle. To register a native
-linked checkout, use `provenant worktree adopt PATH --owner manual`; another
-project's checkout and a live or reserved writer are refused.
+`run` waits up to 240 seconds, then prints the state and a result tail. Use
+`--wait 30m` or `--wait 3600s` for a longer background wait. Timeout prints the
+attempt ID and exact command to keep waiting; follow it rather than submitting
+again. `provenant status` shows active lanes and the twenty newest settled
+lanes, newest first. `--json` returns full records for the same selection.
+Use `--all` with `--limit N` and the returned `--cursor N` to page all history.
+
+The receipt names the worktree. `--worktree PATH` uses an existing checkout
+without taking over its lifecycle. A missing branch name creates an owned
+checkout; for an absolute path or a path below `.worktrees/`, use
+`--branch BRANCH` to create it. To register a native linked checkout, use
+`provenant worktree adopt PATH --owner manual`; another project's checkout and
+a live or reserved writer are refused.
 
 Choose `--deliver none`, `push`, `integrate:integration` or `pr`. Push and PR
 use origin and the lane branch. Integration targets must already exist;
@@ -28,9 +36,9 @@ Writer lanes with open network can push and open pull requests using the host's
 read-only gh configuration and the pinned `gh auth git-credential` helper for
 HTTPS remotes; SSH remotes keep their own authentication. Custom gh configuration
 paths and keychain-only logins are not mirrored. Hosts without gh or
-`~/.config/gh` continue local work without publishing setup. Merge through
-`provenant pr merge --head SHA N` or
-`pr land`, or hand the merge to the chair. Publishing defaults on; disable it with
+`~/.config/gh` continue local work without publishing setup. Merge through `provenant land N`, or hand the merge to the chair. Landing
+verifies green CI at the PR's current head; add `--head SHA` to pin a reviewed
+head. Publishing defaults on; disable it with
 `--knob lanes.publish=false`, Fabric `knobs: ["lanes.publish=false"]`, or host
 configuration `[knobs] "lanes.publish" = false`. Read-only lanes retain their
 existing open-network gh read access.
@@ -53,8 +61,12 @@ intent before removal, then pruning or the retention reason. Failed and
 cancelled lanes retain their worktrees. Explicitly supplied and adopted
 worktrees retain their existing GC policy.
 
-`resume ATTEMPT --operation-id ID --prompt-file followup.md` starts fresh by
-default when continuation state is unavailable, preserving authority with
+`provenant resume ATTEMPT --prompt-file followup.md` generates and prints an
+operation ID; supply `--operation-id ID` for a planned retry. It pins the prior
+attempt's applied provider, model and account, including when dispatch selected
+a named route pool. Targets accept unique hex prefixes of at least eight
+characters and `RUN/ATTEMPT`; an ambiguous prefix lists candidates. Resume
+starts fresh by default when continuation state is unavailable, preserving authority with
 original context and the previous result attached. Ownership must match the
 lane lineage for a previously lane-owned tree. Explicit unowned and adopted
 checkouts resume in place unless a lane owner now names another lineage.
@@ -64,6 +76,8 @@ A missing or reassigned checkout uses a fresh owned worktree when fallback is
 allowed. Its receipt records `continuation: fresh`. Add `--no-fallback` to require
 provider resume.
 Custody, policy or launch refusals still need their named cause addressed.
+`provenant cancel ATTEMPT` generates and prints its operation ID. Cancel and
+`provenant reconcile --id RUN` infer project scope from the run record.
 
 Put graph documents and briefs in `.provenant/scratch/`, or `.agent-run/` when
 that root already exists. Graph setup creates `graphs/` and excludes the

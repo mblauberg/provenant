@@ -34,7 +34,7 @@ fn rig() -> Result<TestRig> {
     Ok(rig)
 }
 fn merge(rig: &TestRig) -> Result<provenant_os::exec::ExecOutcome> {
-    rig.command(&["pr", "merge", "1668", "--head", HEAD, "--json"])
+    rig.command(&["land", "1668", "--head", HEAD, "--json"])
 }
 fn no_merge(rig: &TestRig) -> Result {
     assert!(!rig.project.join("merge-args").exists());
@@ -68,7 +68,7 @@ fn pr_watch_failure_and_head_changes_report_fail_with_head() -> Result {
     Ok(())
 }
 
-fn pr_merge_refuses_unpassed_missing_and_malformed_checks() -> Result {
+fn land_refuses_unpassed_missing_and_malformed_checks() -> Result {
     for bucket in [
         "pending",
         "fail",
@@ -95,7 +95,7 @@ fn pr_merge_refuses_unpassed_missing_and_malformed_checks() -> Result {
     Ok(())
 }
 
-fn pr_merge_refuses_head_changes_before_and_after_checks() -> Result {
+fn land_refuses_head_changes_before_and_after_checks() -> Result {
     for changed_before in [false, true] {
         let rig = rig()?;
         if changed_before {
@@ -115,18 +115,18 @@ fn pr_merge_refuses_head_changes_before_and_after_checks() -> Result {
     Ok(())
 }
 
-fn pr_merge_reports_merged_in_text() -> Result {
+fn land_reports_pending_merge_in_text() -> Result {
     let rig = rig()?;
-    let output = rig.command(&["pr", "merge", "1668", "--head", HEAD])?;
+    let output = rig.command(&["land", "1668", "--head", HEAD])?;
     assert_eq!(code(&output), 0, "{output:?}");
     assert_eq!(
         String::from_utf8(output.stdout.bytes)?,
-        format!("merged #1668 {HEAD}\n")
+        format!("pending #1668 {HEAD} (OPEN)\n")
     );
     Ok(())
 }
 
-fn pr_merge_guards_head_and_uses_optional_git_email() -> Result {
+fn land_guards_head_and_uses_optional_git_email() -> Result {
     for email in [None, Some("123+fixture@users.noreply.github.com")] {
         let rig = rig()?;
         if let Some(email) = email {
@@ -141,7 +141,8 @@ fn pr_merge_guards_head_and_uses_optional_git_email() -> Result {
         let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
         assert_eq!(report["data"]["head"], HEAD);
         assert_eq!(report["data"]["result"], "pass");
-        assert_eq!(report["data"]["merged"], true);
+        assert_eq!(report["data"]["merged"], false);
+        assert_eq!(report["data"]["state"], "OPEN");
         let mut expected = format!("pr\nmerge\n1668\n--merge\n--match-head-commit\n{HEAD}\n");
         if let Some(email) = email {
             expected.push_str(&format!("--author-email\n{email}\n"));
@@ -150,7 +151,7 @@ fn pr_merge_guards_head_and_uses_optional_git_email() -> Result {
             fs::read_to_string(rig.project.join("merge-args"))?,
             expected
         );
-        assert!(!rig.project.join("watched").exists());
+        assert!(rig.project.join("watched").exists());
     }
     Ok(())
 }
@@ -162,7 +163,7 @@ fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
         let output = merge(&rig)?;
         assert_ne!(code(&output), 0, "{flag}");
         let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-        assert!(report["data"].get("merged").is_none());
+        assert_eq!(report["data"]["merged"], false);
         if flag == "checks-fail" {
             no_merge(&rig)?;
         }
@@ -174,6 +175,8 @@ fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
         vec!["pr", "land", "1668"],
         vec!["pr", "land", "1668", "--head", "abc"],
         vec!["pr", "land", "0", "--head", HEAD],
+        vec!["land", "0"],
+        vec!["land", "1668", "--head", "abc"],
         vec!["pr", "watch", "0"],
         vec!["pr", "watch", "--admin"],
     ] {
@@ -239,6 +242,9 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             }
             fs::write("head-read", "")?;
         }
+        "pr view 1668 --json state,baseRefName,headRefName,isCrossRepository" => {
+            io::stdout().write_all(br#"{"state":"OPEN","baseRefName":"main","headRefName":"feature","isCrossRepository":false}"#)?;
+        }
         "pr checks 1668 --watch" => {
             fs::write("watched", "")?;
             if Path::new("watch-fail").exists() {
@@ -294,20 +300,20 @@ fn main() -> ExitCode {
                 pr_watch_failure_and_head_changes_report_fail_with_head,
             ),
             (
-                "pr_merge_refuses_unpassed_missing_and_malformed_checks",
-                pr_merge_refuses_unpassed_missing_and_malformed_checks,
+                "land_refuses_unpassed_missing_and_malformed_checks",
+                land_refuses_unpassed_missing_and_malformed_checks,
             ),
             (
-                "pr_merge_refuses_head_changes_before_and_after_checks",
-                pr_merge_refuses_head_changes_before_and_after_checks,
+                "land_refuses_head_changes_before_and_after_checks",
+                land_refuses_head_changes_before_and_after_checks,
             ),
             (
-                "pr_merge_reports_merged_in_text",
-                pr_merge_reports_merged_in_text,
+                "land_reports_pending_merge_in_text",
+                land_reports_pending_merge_in_text,
             ),
             (
-                "pr_merge_guards_head_and_uses_optional_git_email",
-                pr_merge_guards_head_and_uses_optional_git_email,
+                "land_guards_head_and_uses_optional_git_email",
+                land_guards_head_and_uses_optional_git_email,
             ),
             (
                 "pr_external_failures_and_invalid_arguments_fail_closed",

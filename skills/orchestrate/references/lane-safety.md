@@ -49,7 +49,7 @@ false report. Paste the first section into every lane and reviewer brief.
   verify uptake from the commits, report file or transcript.
 - A worktree without installed dependencies runs nothing, yet lanes report
   passes. Install and prove it with one test file before dispatch.
-- Read lane state from `provenant lanes`; for run details use `fabric_run`'s
+- Read lane state from `provenant status`; for run details use `fabric_run`'s
   `status` operation with an explicit target. Record the tip of each writer lane
   (one expected to deliver commits) on first sight:
   an unchanged tip with nothing ahead is `empty`, a failure even when the run

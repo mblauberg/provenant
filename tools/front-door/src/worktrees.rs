@@ -535,7 +535,7 @@ fn gc_primary_checkout<'a>(
     }
 }
 
-/// What `pr land` did to a merged branch's registered worktree.
+/// What `land` did to a merged branch's registered worktree.
 #[derive(Debug, Default)]
 pub(crate) struct LandWorktree {
     /// A worktree was registered for the branch.

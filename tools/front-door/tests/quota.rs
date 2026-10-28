@@ -194,6 +194,7 @@ fn disabled_modes_never_read_auth_or_invoke_external_tools() -> Result {
         .push(("QUOTA_MARKER".into(), marker.as_os_str().to_owned()));
     for args in [
         &["quota", "show", "--json"][..],
+        &["quota", "--json"],
         &["quota", "tick", "--power", "low", "--json"],
         &["quota", "--help"],
     ] {
@@ -205,8 +206,7 @@ fn disabled_modes_never_read_auth_or_invoke_external_tools() -> Result {
     assert!(!marker.exists());
     assert_eq!(fs::read(cursor.join("state.vscdb"))?, database);
     for args in [
-        &["quota", "--json"][..],
-        &["quota", "forget", "opaque", "--json"],
+        &["quota", "forget", "opaque", "--json"][..],
         &["quota", "show", "--adapter", "bogus", "--json"],
     ] {
         assert_eq!(code(&rig.command(args)?), 2);

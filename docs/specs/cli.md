@@ -156,23 +156,33 @@ and the final line is the usual envelope. `--watch` excludes `--wait`,
   `::watch_times_out_with_pending_lanes_and_names_the_host`
 - Owner: `crates/cli/src/run/watch.rs`, `src/lib.rs`
 
+### Status selection
+
+`status` lists every active lane and the twenty newest settled lanes, newest
+first. `status --json` returns the same selection as full records. `--all`
+selects all history, paged by `--limit` and `--cursor`.
+
 ## Guards
 
 ### Merge guard
 
-`pr merge NUMBER --head SHA` merges only the commit with that full object ID. `pr watch` and
-`pr merge` need at least one passing check (the rest passing or
+`land NUMBER` merges only the head it verified: the pull request head read
+before the checks, or the full object ID given with the hidden `--head SHA`.
+Landing a reviewed head passes `--head SHA`; `land NUMBER` alone lands the
+current verified head. Human output prints `merged #NUMBER FULL_SHA`; JSON
+retains the full SHA in `data.head`.
+`pr watch` and `land` need at least one passing check (the rest passing or
 skipped), refuse a head change during verification and fail closed on
 incomplete evidence.
 - Why: a merge must land exactly the head that CI verified.
-- Test: `tests/pr.rs::pr_merge_refuses_head_changes_before_and_after_checks`;
-  `::pr_merge_refuses_unpassed_missing_and_malformed_checks`
+- Test: `tests/pr.rs::land_refuses_head_changes_before_and_after_checks`;
+  `::land_refuses_unpassed_missing_and_malformed_checks`
 - Owner: `src/pr.rs`
 
 ### Landing adds no merge authority
 
-`pr land NUMBER --head SHA` runs the `pr watch` wait and the `pr merge` at
-that head unchanged, then follows up locally: fetch the base, fast-forward the
+`land NUMBER` runs the `pr watch` wait and the guarded merge at the verified
+head, then follows up locally: fetch the base, fast-forward the
 local base only in a checkout with no changes, delete declared build output
 and remove the branch's registered worktree through `worktree remove`, and
 delete the merged branch. The two cleanup steps act only
@@ -190,7 +200,7 @@ checkout still holds its branch and an unreadable entry refuses), then deletes
 with `git update-ref -d <branch> <head>`, which compares
 the branch against the merged head and deletes in one ref transaction, so a
 branch moved after the check is kept. (A checkout, rebase or bisect of the
-branch that begins between that test and the deletion is not caught.) The head is required. A failure
+branch that begins between that test and the deletion is not caught.) A failure
 before the merge changes nothing. After it, each step refuses and reports
 instead of forcing, and the command exits 1 with `merged: true`.
 - Why: a landing is four routine steps, and none of them may widen what was

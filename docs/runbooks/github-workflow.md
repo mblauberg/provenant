@@ -167,7 +167,7 @@ git push -u origin fix/repo-runbook-mechanics
 ```
 
 A Fabric writer lane has no Git credentials. Use host delivery with
-`provenant dispatch --deliver-remote origin --deliver-branch BRANCH --open-pr`
+`provenant run --prompt-file BRIEF --route senior --branch BRANCH --deliver pr`
 to push its verified commit and open the pull request.
 
 ### Pull request
@@ -248,22 +248,20 @@ either succeeded or was skipped by the path filter, and fails closed on any
 failure or cancellation. "CI is green" means exactly this one context; no
 other check is required.
 
-Use the thin `gh` helpers to watch CI, then merge the reported full head SHA:
+Use the core landing command:
 
 ```sh
-provenant pr watch 148
-provenant pr merge 148 --head <reported-sha>
+provenant land 148
 ```
 
-`pr watch` waits with `gh pr checks --watch`, then prints `pass` or `fail`
-with the captured head. Failure exits non-zero. Both verbs reject pending,
-failed, cancelled or absent checks, require at least one passing check with
-all others passing or skipped, and refuse a head that changes during verification.
-`pr merge` checks current evidence without waiting and calls
-`gh pr merge --merge --match-head-commit <sha>`. GitHub still enforces branch
-protection and any merge queue. Neither helper bypasses those gates.
-
-`pr merge` is for the immediate-merge path; use `gh pr merge --auto` to queue a merge.
+It captures the PR's current head, waits for green CI at that exact head,
+merges with a matching-head check and prunes the eligible local worktree and
+merged refs. Landing a reviewed head passes `provenant land 148 --head SHA`;
+`provenant land 148` alone lands the current verified head. Pending, failed,
+cancelled or absent checks and a changed head refuse the merge. GitHub still
+enforces branch protection and any merge queue. `provenant pr watch 148` is
+available when only observing CI; `gh pr merge --auto` can queue a merge after
+the repository's gates are met.
 
 ### Open a pull request from receipts
 
@@ -286,13 +284,11 @@ line each, for polling without parsing `gh` output.
 
 ### Land a pull request
 
-`provenant pr land 148 --head <reviewed-sha>` runs the four landing steps in
-order: the `pr watch` wait on CI, the `pr merge` at that exact head, then the
-local follow-up below. The head is required, as for `pr merge`, so a landing can
-only merge what was reviewed. Nothing after the merge changes what merged, and
-no step forces: a refusal is reported in `data.steps` and the command exits 1
-with `merged: true`, so rerun it after fixing the cause (every step is safe to
-repeat).
+`provenant land 148` waits for CI, merges at the verified PR head, then runs
+the local follow-up below. `--head <reviewed-sha>` optionally pins the head.
+Nothing after the merge changes what merged, and no step forces: a refusal is
+reported in `data.steps` and the command exits 1 with `merged: true`, so rerun
+it after fixing the cause (every step is safe to repeat).
 
 | Step | Does | Refuses when |
 |---|---|---|

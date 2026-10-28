@@ -52,18 +52,41 @@ pub fn render<T: Serialize>(
     mode: RenderMode<'_>,
     writer: &mut impl Write,
 ) -> Result<(), RenderError> {
+    let mut error = result.error.clone();
+    if let Some(error) = &mut error {
+        error.repair.get_or_insert_with(|| {
+            let command = match result.command.as_str() {
+                "parse" | "help" => "--all",
+                command => command,
+            };
+            format!("run `provenant help {command}`")
+        });
+    }
+    let result = CommandResult {
+        schema_version: result.schema_version,
+        command: result.command.clone(),
+        status: result.status,
+        data: &result.data,
+        error,
+    };
     let mut buffer = Buffer {
         bytes: Vec::new(),
         overflow: false,
     };
     let encoded = match mode {
-        RenderMode::Json => serde_json::to_writer(&mut buffer, result)
+        RenderMode::Json => serde_json::to_writer(&mut buffer, &result)
             .map_err(RenderError::Encode)
             .and_then(|()| buffer.write_all(b"\n").map_err(RenderError::Write)),
         RenderMode::Human { text, .. } => {
             if let Some(error) = &result.error {
-                writeln!(buffer, "provenant: {}: {}", error.code, error.message)
-                    .map_err(RenderError::Write)
+                writeln!(
+                    buffer,
+                    "provenant: {}: {}\nnext: {}",
+                    error.code,
+                    error.message,
+                    error.repair.as_deref().unwrap_or_default()
+                )
+                .map_err(RenderError::Write)
             } else {
                 buffer
                     .write_all(text.as_bytes())

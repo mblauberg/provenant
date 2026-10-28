@@ -472,6 +472,23 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 ),
             }
         }
+        Command::Run(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            let mut reply = provenant_cli::run::run(*cmd, edge);
+            if let Err(error) =
+                fabric::settle_dispatched_attempts(edge, &mut reply, process.workers())
+            {
+                reply
+                    .human
+                    .push_str(&format!("worktree retained: {error}\n"));
+                reply.result.data["worktree_settlement_error"] =
+                    serde_json::json!(error.to_string());
+            }
+            reply
+        }),
+        Command::Status(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::status(cmd, globals.json, edge)
+        }),
+        Command::Land { number, head } => pr::land::run(number, head, globals, process.workers()),
         Command::Dispatch(cmd) => run_edge(&inv.leaf, globals, |edge| {
             let mut reply = provenant_cli::run::dispatch(*cmd, edge);
             if let Err(error) =
@@ -536,7 +553,10 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             })
         }
         Command::Chair(cmd) => chair::run(cmd, globals),
-        Command::Quota(cmd) => {
+        Command::Quota { command } => {
+            let cmd = command.unwrap_or(provenant_cli::Quota::Show(provenant_cli::quota::Filter {
+                adapter: None,
+            }));
             match roots::resolve(globals, Workspace::Project, Product::Required) {
                 Ok(resolved) => match live_quota(&resolved) {
                     Ok(effects) => provenant_cli::quota::run(

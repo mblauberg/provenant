@@ -1,4 +1,4 @@
-//! `pr land` against a fake `gh` and real Git remotes, worktrees and branches.
+//! `land` against a fake `gh` and real Git remotes, worktrees and branches.
 use super::worktree_tests::support::{Result, TestRig, code};
 use super::worktree_tests::{command, git, json, repository};
 use std::{
@@ -124,15 +124,13 @@ fn landing() -> Result<Landing> {
 }
 
 fn land(landing: &Landing) -> Result<serde_json::Value> {
-    let output = command(
-        &landing.rig,
-        &["pr", "land", NUMBER, "--head", &landing.head, "--json"],
-    )?;
+    let output = command(&landing.rig, &["land", NUMBER, "--json"])?;
     let value = json(&output)?;
     assert!(
         code(&output) == 0 || value["data"]["merged"] == true,
         "{value}"
     );
+    assert_eq!(value["data"]["head"], landing.head);
     Ok(value)
 }
 
@@ -157,10 +155,7 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
         landing.worktree.join("crate/target/debug/artifact"),
         "built",
     )?;
-    let output = command(
-        rig,
-        &["pr", "land", NUMBER, "--head", &landing.head, "--json"],
-    )?;
+    let output = command(rig, &["land", NUMBER, "--head", &landing.head, "--json"])?;
     let value = json(&output)?;
     assert_eq!(code(&output), 0, "{value}");
     assert_eq!(value["data"]["merged"], true);
@@ -182,7 +177,7 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
     assert!(!landing.worktree.exists());
     assert!(!branch_exists(rig, "feat")?);
     // Landing again finds nothing left to prune, and the text form names each step.
-    let text = command(rig, &["pr", "land", NUMBER, "--head", &landing.head])?;
+    let text = command(rig, &["land", NUMBER])?;
     assert_eq!(code(&text), 0);
     let text = String::from_utf8(text.stdout.bytes)?;
     assert!(
@@ -200,7 +195,7 @@ pub(crate) fn pr_land_refuses_each_unsafe_step_and_reports_the_rest() -> Result 
     fs::write(landing.rig.project.join("stray.txt"), "mine\n")?;
     let output = command(
         &landing.rig,
-        &["pr", "land", NUMBER, "--head", &landing.head, "--json"],
+        &["land", NUMBER, "--head", &landing.head, "--json"],
     )?;
     let value = json(&output)?;
     assert_eq!(code(&output), 1, "{value}");
@@ -594,10 +589,7 @@ pub(crate) fn pr_land_changes_nothing_when_the_merge_does_not_happen() -> Result
         } else {
             fs::write(rig.project.join(flag), "")?;
         }
-        let output = command(
-            rig,
-            &["pr", "land", NUMBER, "--head", &landing.head, "--json"],
-        )?;
+        let output = command(rig, &["land", NUMBER, "--head", &landing.head, "--json"])?;
         assert_ne!(code(&output), 0, "{flag}");
         let value = json(&output)?;
         assert_eq!(value["data"]["merged"], false, "{value}");
@@ -606,10 +598,8 @@ pub(crate) fn pr_land_changes_nothing_when_the_merge_does_not_happen() -> Result
         assert!(branch_exists(rig, "feat")?, "{flag}");
         assert_eq!(git(rig, &["rev-parse", "main"])?, landing.stale, "{flag}");
     }
-    // The head is required, and a pending merge cleans nothing.
+    // The current head is the default, and a pending merge cleans nothing.
     let landing = landing()?;
-    let missing = command(&landing.rig, &["pr", "land", NUMBER])?;
-    assert_eq!(code(&missing), 2);
     fs::write(
         landing.rig.project.join("view.json"),
         r#"{"state":"OPEN","baseRefName":"main","headRefName":"feat","isCrossRepository":false}"#,

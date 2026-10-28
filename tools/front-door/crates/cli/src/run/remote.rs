@@ -1111,6 +1111,47 @@ pub(super) fn output(
 /// `output --host PEER` or `PEER/ATTEMPT`: the peer's own attempt, with no
 /// local placement. The peer resolves the attempt and applies its own
 /// confinement and access rules; any run or task in the target is not checked.
+pub(super) fn resolve_prefix(
+    edge: &Edge<'_>,
+    host: HostId,
+    target: &crate::Target,
+) -> Result<crate::Target, Fail> {
+    let selection = target.selection.as_deref().ok_or_else(corrupt)?;
+    let peer = Peer::open(edge)?;
+    peer.project()?;
+    let PeerResult::RunStatuses(records) = peer.call(
+        host,
+        PeerAction::Lanes {
+            all: true,
+            limit: PEER_LANES,
+        },
+    )?
+    else {
+        return Err(corrupt());
+    };
+    if records.len() >= usize::from(PEER_LANES) {
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            "peer history exceeds its enumeration limit; run `provenant lanes --host PEER --all` and use a full attempt ID",
+        ));
+    }
+    let candidates = records
+        .into_iter()
+        .map(|record| super::targets::Candidate {
+            target: crate::Target {
+                selection: None,
+                run: Some(record.run_id),
+                task: Some(record.task_id),
+                attempt: Some(record.attempt_id),
+            },
+            project: None,
+            host: Some(host),
+        })
+        .collect();
+    Ok(super::targets::choose(selection, candidates, false)?.target)
+}
+
 pub(super) fn output_on_peer(
     command: &Output,
     host: HostId,
@@ -1359,6 +1400,50 @@ fn collect(
         hosts.push(row);
     }
     (facts, hosts)
+}
+
+/// Full identities from peer receipts, used to check prefix uniqueness against
+/// local identities before routing a command.
+pub(super) fn target_candidates(roots: &Roots) -> Result<Vec<super::targets::Candidate>, Fail> {
+    if !roots.state.as_path().join(PLACEMENTS).exists() {
+        return Ok(Vec::new());
+    }
+    let directory = directory(roots)?;
+    let mut candidates = Vec::new();
+    for name in directory.entries().map_err(io_fail)? {
+        let name = name.map_err(io_fail)?;
+        let Some(run) = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".json"))
+            .and_then(|id| RunId::parse(id).ok())
+        else {
+            continue;
+        };
+        let placement = read(&directory, &name.to_string_lossy(), run)?;
+        candidates.push(super::targets::Candidate {
+            target: crate::Target {
+                selection: None,
+                run: Some(run),
+                task: None,
+                attempt: None,
+            },
+            project: None,
+            host: Some(placement.host),
+        });
+        for attempt in placement.attempts {
+            candidates.push(super::targets::Candidate {
+                target: crate::Target {
+                    selection: None,
+                    run: Some(run),
+                    task: Some(attempt.task_id),
+                    attempt: Some(attempt.attempt_id),
+                },
+                project: None,
+                host: Some(placement.host),
+            });
+        }
+    }
+    Ok(candidates)
 }
 
 #[cfg(test)]

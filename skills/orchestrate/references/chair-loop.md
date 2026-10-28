@@ -11,7 +11,7 @@ wake, in this order:
 
 1. **Reconcile.** Read the host session checkpoint with
    `provenant workflow session show <session-id>`, then live evidence:
-   `provenant lanes`, native subagents, worktrees (dirty, ahead, merged), open pull
+   `provenant status`, native subagents, worktrees (dirty, ahead, merged), open pull
    requests, free memory. Evidence wins; correct the state file.
 2. **Land** what is ready under the repository's merge workflow, then prune.
 3. **Review** finished lanes; adjudicate returned reviews.
@@ -84,15 +84,21 @@ code — independently of this lane id.
 
 ## Waiting
 
-After dispatch, use one `provenant lanes --wait N` to wait up to N seconds
-for any selected lane. Add `--condition all` to wait for the whole selection;
-`--all` selects all lanes. Re-arm after each result. Use `--limit N` to bound
-the report and `provenant output RUN/TASK/ATTEMPT --tail N` to read a result
-tail. For CI, inspect the exact PR head with `gh pr checks <pr>`; the chair waits
-for the required `ci-status` check before merging. Do not start one
-wait per lane. `provenant lanes` is the source of truth after compaction or
-restart; page further results with its cursor. Read retained events with
-`provenant output RUN/TASK/ATTEMPT --part events` and its byte offset.
+CLI `provenant run --prompt-file BRIEF --route senior` submits, waits up to
+240 seconds and prints a result tail. On timeout, follow the exact printed
+command to keep waiting on that attempt. A longer `--wait 30m` or `--wait 3600s`
+belongs in the background.
+
+After MCP or batch submission, or for several existing lanes, use one advanced
+`provenant lanes --wait N` for the selection. Add `--condition all` to wait for
+the whole selection and `--all` to select all lanes. Re-arm after a result;
+use `--limit N` to bound the report. Read extra bytes with
+`provenant output RUN/ATTEMPT --tail N` only when needed. Do not start one
+wait per lane. `provenant status` is the source of truth after compaction or
+restart; `--all` or `--json` provides full records. Read retained events with
+`provenant output RUN/ATTEMPT --part events` and its byte offset. For CI and
+landing of a reviewed head, pass `provenant land N --head SHA`.
+`provenant land N` alone lands the current verified head.
 
 A dispatching sub-agent still blocks in the foreground on its own worker; see
 [worker-liveness.md](worker-liveness.md). Registered worktrees share the

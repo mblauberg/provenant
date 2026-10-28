@@ -118,7 +118,12 @@ fn prepare_with(
             .map_err(|e| e.to_string())?;
     let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
         .map_err(|e| e.to_string())?;
-    let request = route_request(task)?;
+    // Continue the applied decision rather than redrawing the named pool
+    // using the new operation seed.
+    let request = match resume {
+        Some(prior) => continuation_request(prior)?,
+        None => route_request(task)?,
+    };
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
     let eligible = provenant_routing::probe_adapters(&request, &catalogue, &config.domains.routing)
         .map_err(|e| e.to_string())?;
@@ -257,7 +262,7 @@ fn prepare_with(
     let selected = task
         .account
         .as_deref()
-        .filter(|_| prior_account.is_none())
+        .filter(|_| resume.is_none())
         .map(|label| {
             let mut matching = entries.iter().filter(|e| {
                 (e.label == label || e.key == label)
@@ -627,6 +632,36 @@ fn skip(route: &str, kind: SkipKind, detail: impl Into<String>) -> SkippedRoute 
         kind,
         detail: detail.into(),
     }
+}
+
+/// Recheck current readiness for the exact route the provider session used.
+/// Resolving an exact model bypasses named-pool selection and quota redraws.
+fn continuation_request(
+    prior: &run::AttemptRecord,
+) -> Result<provenant_routing::RouteRequest, String> {
+    use provenant_routing::{Fallback, ModelId, RouteChoice};
+
+    let applied = prior.applied_route.as_ref().ok_or(
+        "the prior attempt recorded no applied route; run provenant run with its result as context",
+    )?;
+    let model = applied.model.as_deref().ok_or(
+        "the prior attempt recorded no applied model; run provenant run with its result as context",
+    )?;
+    let model = ModelId::parse(model)
+        .map_err(|error| format!("{error}; run provenant run with the prior result as context"))?;
+    if applied.provider.as_deref() != Some(model.adapter()) {
+        return Err(
+            "the prior attempt's applied provider and model differ; run provenant run with its result as context"
+                .into(),
+        );
+    }
+    Ok(provenant_routing::RouteRequest {
+        choice: RouteChoice::Model(model),
+        effort: applied.effort.clone(),
+        fallback: Fallback::None,
+        confidential: false,
+        allow_free: false,
+    })
 }
 
 /// The continuation of `prior` on this candidate route. It must be the very
@@ -2462,6 +2497,54 @@ mod tests {
             provenant_records::CanonicalV1::file_digest(pointer.as_bytes())
         );
         assert_eq!(std::fs::read_to_string(attempt.join("prompt.txt"))?, prompt);
+        // The original named pool may change or disappear after dispatch.
+        // A continuation must use the exact applied provider, model and
+        // account without consulting that pool or the original account alias.
+        let mut prior = store.record(attempt_id, &call)?;
+        prior.requested_route = run::RequestedRoute::Named {
+            name: "retired-pool".into(),
+            effort: None,
+        };
+        prior.applied_route = Some(launch.route.clone());
+        prior.session = Some("fixture-session".into());
+        let mut continued_task = task.clone();
+        continued_task.route = prior.requested_route.clone();
+        continued_task.account = Some("retired-account-alias".into());
+        let continued_paths = run::LaunchPaths {
+            attempt_id: paths.attempt_id,
+            operation_id: OperationId::parse("different-resume-seed")?,
+            task_index: paths.task_index,
+            lane_depth: paths.lane_depth,
+            run_id: paths.run_id,
+            deadline_unix_ms: paths.deadline_unix_ms,
+            scratch: attempt.join("continued-scratch"),
+            provider_state: attempt.join("continued-provider-state"),
+            temporary: attempt.join("continued-tmp"),
+        };
+        for path in [
+            &continued_paths.scratch,
+            &continued_paths.provider_state,
+            &continued_paths.temporary,
+        ] {
+            std::fs::DirBuilder::new().mode(0o700).create(path)?;
+        }
+        let continued = prepare_with(
+            &registry,
+            &continued_task,
+            "Continue the prior task",
+            &continued_paths,
+            Some(&prior),
+            |adapter| {
+                assert_eq!(adapter, "cursor", "resume probed a different provider");
+                Ok(executable.clone())
+            },
+            None,
+        )?;
+        assert_eq!(continued.route.provider, launch.route.provider);
+        assert_eq!(continued.route.model, launch.route.model);
+        assert_eq!(continued.route.account_key, launch.route.account_key);
+        assert!(continued.route.pool_selection.is_none());
+        assert!(continued.argv.iter().any(|arg| arg == "--resume"));
         let confinement = launch.confinement.ok_or("writer confinement missing")?;
         assert!(confinement.writer.is_some());
         assert!(!confinement.plan.permissions().writer_publishing());

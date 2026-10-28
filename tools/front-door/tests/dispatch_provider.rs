@@ -59,6 +59,9 @@ fn fixture() -> Result {
     }
     let mut prompt = String::new();
     io::stdin().read_to_string(&mut prompt)?;
+    if prompt.contains("fixture slow result") {
+        std::thread::park_timeout(std::time::Duration::from_secs(3));
+    }
     let home = PathBuf::from(std::env::var_os("CODEX_HOME").ok_or("CODEX_HOME")?);
     let auth: Value = serde_json::from_slice(&fs::read(home.join("auth.json"))?)?;
     assert_eq!(auth["tokens"]["account_id"], "fixture-one");
@@ -116,7 +119,7 @@ fn codex_dispatch_observes_rollout() -> Result {
         fs::write(&prompt_file, prompt)?;
         let op = format!("{:032x}", index + 1);
         let out = rig.command(&[
-            "dispatch",
+            if index == 0 { "run" } else { "dispatch" },
             if index == 0 { "--route" } else { "--model" },
             if index == 0 {
                 "utility"
@@ -135,7 +138,11 @@ fn codex_dispatch_observes_rollout() -> Result {
         ])?;
         assert_eq!(
             code(&out),
-            0,
+            if index == 0 && !cfg!(target_os = "macos") {
+                1
+            } else {
+                0
+            },
             "{} {}",
             String::from_utf8_lossy(&out.stdout.bytes),
             String::from_utf8_lossy(&out.stderr.bytes)
@@ -163,6 +170,33 @@ fn codex_dispatch_observes_rollout() -> Result {
             assert_eq!(lane["observed_route"]["model"], "codex/gpt-6-luna");
             assert_eq!(lane["observed_route"]["source"], "codex_rollout");
             assert!(lane["applied_route"]["account_label"].as_str().is_some());
+            let result: Value = serde_json::from_slice(&out.stdout.bytes)?;
+            let id = lane["attempt_id"].as_str().ok_or("attempt")?;
+            assert_eq!(result["data"]["result_tails"][id]["bytes"]["data"], "OK");
+            fs::write(&prompt_file, "fixture slow result")?;
+            let slow = rig.command(&[
+                "run",
+                "--model",
+                "codex/gpt-6-luna",
+                "--effort",
+                "low",
+                "--prompt-file",
+                prompt_file.to_str().ok_or("prompt")?,
+                "--wait",
+                "1s",
+            ])?;
+            assert_eq!(code(&slow), 124, "{slow:?}");
+            let text = String::from_utf8(slow.stdout.bytes)?;
+            let id = text
+                .lines()
+                .find_map(|line| line.strip_prefix("attempt "))
+                .ok_or("timeout attempt")?;
+            assert!(
+                text.contains(&format!("provenant lanes --id {id} --wait 4m")),
+                "{text}"
+            );
+            let settled = rig.command(&["lanes", "--id", id, "--wait", "10s", "--json"])?;
+            assert_eq!(code(&settled), 0, "{settled:?}");
         } else {
             assert_eq!(lane["state"], "failed", "{lane}");
             assert!(

@@ -23,4 +23,9 @@ Classify usage limit, rate limit, authentication, unavailable model, permission 
 
 Report the result status, path, route and guarantee. The route should be `adapter/model@effort` from the observed or resolved invocation, with provider and identity stated. A native Claude subagent route is `claude/<model>@<effort> (anthropic; resolved)` from the Agent tool model parameter. Keep the exact receipt beside the output. The chair verifies the live tree and uses the [HARNESS.md](../../../HARNESS.md) review ladder.
 
-Use `provenant dispatch` for a direct CLI invocation of the same Rust run owner. Retain its attempt record and identify the missing Fabric exchange. Global provider config edits require explicit authority; prefer per-run flags.
+Use `provenant run --prompt-file brief.md --route senior` for a direct CLI
+invocation of the same Rust run owner. It waits up to 240 seconds and prints
+the state and result tail. On timeout, retain the attempt ID and follow the
+printed wait command. Retain its attempt record and identify the missing
+Fabric exchange. Global provider config edits require explicit authority;
+prefer per-run flags. `provenant help run` reveals advanced controls.

@@ -66,11 +66,11 @@ class ReferenceTests(unittest.TestCase):
         workspace = self.root / GEN['WORKSPACE']
         workspace.mkdir(parents=True)
         (workspace / 'Cargo.toml').touch()
-        failure = subprocess.CalledProcessError(2, ['provenant', 'help', '--json'])
+        failure = subprocess.CalledProcessError(2, ['provenant', 'help', '--all', '--json'])
         with patch('subprocess.run', side_effect=failure):
             files, gaps = GEN['generate'](self.root, self.root / 'built-cli')
             self.assertIn('no machine-readable catalogue', files['cli.md'])
-            self.assertTrue(any('help --json' in gap for gap in gaps))
+            self.assertTrue(any('help --all --json' in gap for gap in gaps))
         with patch.dict(GLOBALS, cargo=unittest.mock.Mock(side_effect=failure)):
             with self.assertRaises(subprocess.CalledProcessError):
                 GEN['generate'](self.root)
@@ -100,7 +100,7 @@ class ReferenceTests(unittest.TestCase):
         ])), patch('subprocess.run', return_value=result) as run:
             self.assertEqual(GEN['catalogue'](self.root), {'commands': []})
             self.assertIn('build', GLOBALS['cargo'].call_args_list[0].args)
-            self.assertEqual(run.call_args.args[0], [str(target / 'debug/provenant'), 'help', '--json'])
+            self.assertEqual(run.call_args.args[0], [str(target / 'debug/provenant'), 'help', '--all', '--json'])
             self.assertEqual(run.call_args.kwargs['cwd'], self.root)
         with patch.dict(GLOBALS, cargo=unittest.mock.Mock()) as globals_, patch('subprocess.run', return_value=result):
             GEN['catalogue'](self.root, self.root / 'built-cli')

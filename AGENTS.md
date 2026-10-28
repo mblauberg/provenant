@@ -24,8 +24,9 @@ changing memory policy.
   machine. Push the branch, open the pull request and let CI run them.
   Locally, run only fast targeted checks: static lint, type checks and the
   tests you touched. Gate each merge on the pull request's CI run.
-- **CLI.** Run `provenant help` to discover commands. Route answer-bearing
-  external work through the `orchestrate` skill and Fabric.
+- **CLI.** The core path is `provenant run`, `status`, `land` and `quota`;
+  `provenant help --all` lists the rest. Route answer-bearing external work
+  through the `orchestrate` skill and Fabric.
 - **Style.** Keep traffic between agents, and mechanical and status messages,
   terse. Write prose for the user in the register its domain expects.
 - **Shell.** The interactive shell is usually zsh, whose quoting and

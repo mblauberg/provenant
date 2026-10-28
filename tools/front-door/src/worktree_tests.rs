@@ -93,7 +93,7 @@ pub fn main() -> std::process::ExitCode {
         }
         Some("exec" | "-p") => exit("lane provider", lane_provider()),
         Some("--writer-provider") => exit("writer provider", provider(&args)),
-        // The fake `gh` of the `pr land` fixtures.
+        // The fake `gh` of the `land` fixtures.
         Some("pr") => {
             let args: Vec<String> = std::env::args().skip(1).collect();
             match crate::pr_land_tests::fake_gh(&args) {
@@ -104,7 +104,7 @@ pub fn main() -> std::process::ExitCode {
                 }
             }
         }
-        // The branch deletion of `pr land` with another process acting after
+        // The branch deletion of `land` with another process acting after
         // the cleanup check: `--land-race <merged head> [<git argument>...]`.
         Some("--land-race") => {
             let result = (|| -> Result<String> {
