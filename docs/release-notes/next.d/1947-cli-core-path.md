@@ -1,4 +1,4 @@
-## Changes
+## Breaking changes
 
 The CLI core path is `run`, `status`, `land`, `quota`, `install` and help.
 `run` creates a new requested worktree, submits, waits up to 240 seconds and
