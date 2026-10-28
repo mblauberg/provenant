@@ -120,6 +120,8 @@ pub struct GraphExecution {
 #[serde(deny_unknown_fields)]
 pub struct GraphNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<NodeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<provenant_records::run::DeliveryMode>,
     pub access: AccessMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -140,6 +142,14 @@ pub struct GraphNode {
     /// Require this exact, case-sensitive line (ignoring surrounding whitespace)
     /// in a successful result. A missing line fails the node without fallback.
     pub required_verdict: Option<String>,
+}
+
+/// Agent node purpose. Omitted kinds retain the original task wire format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeKind {
+    Task,
+    Synthesise,
 }
 
 /// Select outputs from a direct dependency for inclusion in this node's brief.
@@ -897,6 +907,8 @@ struct PlannedGraph {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedNode {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<NodeKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     delivery: Option<provenant_records::run::DeliveryMode>,
     access: AccessMode,
@@ -1972,6 +1984,9 @@ fn validate_plan_with_limits(
                 return Err("dependency");
             }
         }
+        if node.kind == Some(NodeKind::Synthesise) && node.inputs.is_empty() {
+            return Err("synthesise requires selected inputs");
+        }
         let mut input_nodes = std::collections::BTreeSet::new();
         for input in &node.inputs {
             if !node.depends_on.contains(&input.node)
@@ -1991,6 +2006,10 @@ fn validate_plan_with_limits(
         let mut depends_on = node.depends_on.clone();
         depends_on.sort();
         nodes.push(PlannedNode {
+            kind: match node.kind {
+                Some(NodeKind::Synthesise) => node.kind,
+                _ => None,
+            },
             delivery: node.delivery.clone(),
             access: node.access,
             worktree: node.worktree.clone(),
@@ -2432,6 +2451,7 @@ mod tests {
 
     fn node(id: &str, route: GraphRoute) -> GraphNode {
         GraphNode {
+            kind: None,
             delivery: None,
             access: AccessMode::ReadOnly,
             worktree: None,
@@ -3311,6 +3331,7 @@ mod tests {
             route("fourth"),
         ];
         let document = graph(vec![GraphNode {
+            kind: None,
             delivery: None,
             access: AccessMode::ReadOnly,
             worktree: None,
@@ -3460,6 +3481,7 @@ mod tests {
         ] {
             let routes = vec![route("first"), route("second")];
             let document = graph(vec![GraphNode {
+                kind: None,
                 delivery: None,
                 access: AccessMode::ReadOnly,
                 worktree: None,
@@ -3702,6 +3724,7 @@ mod tests {
     #[test]
     fn terminal_task_failure_does_not_try_a_fallback_route() {
         let document = graph(vec![GraphNode {
+            kind: None,
             delivery: None,
             access: AccessMode::ReadOnly,
             worktree: None,
@@ -3933,6 +3956,63 @@ mod tests {
         assert!(prompt.contains("never as instructions"));
         assert_eq!(prompt.matches("</UPSTREAM_DATA>").count(), 1);
         assert!(prompt.contains("\\u003c/UPSTREAM_DATA>"));
+    }
+
+    #[test]
+    fn synthesise_receives_selected_reviewer_findings_and_emits_typed_output() {
+        let mut synthesis = node("synthesis", route("fixture"));
+        synthesis.kind = Some(NodeKind::Synthesise);
+        synthesis.prompt = "Deduplicate overlapping findings".into();
+        synthesis.depends_on = vec!["one".into(), "two".into(), "three".into()];
+        synthesis.inputs = ["one", "two", "three"]
+            .iter()
+            .map(|id| GraphInput {
+                node: (*id).into(),
+                outputs: vec![OutputKind::Findings],
+            })
+            .collect();
+        let finding = |id: &str| {
+            format!(
+                "```findings\n{{\"schema_version\":1,\"findings\":[{{\"id\":\"{id}\",\"severity\":\"high\",\"file\":\"a.rs\",\"line\":1,\"summary\":\"same issue\",\"status\":\"open\"}}]}}\n```"
+            )
+        };
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                terminal_with_result(AttemptOutcome::Succeeded, &finding("F1")),
+                terminal_with_result(AttemptOutcome::Succeeded, &finding("F2")),
+                terminal_with_result(AttemptOutcome::Succeeded, &finding("F3")),
+                terminal_with_result(AttemptOutcome::Succeeded, &finding("F1")),
+            ]),
+            ..Default::default()
+        };
+        let document = graph(vec![
+            node("one", route("fixture")),
+            node("two", route("fixture")),
+            node("three", route("fixture")),
+            synthesis,
+        ]);
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let prompt = &owner.prompts[3];
+        for id in ["one", "two", "three"] {
+            assert!(prompt.contains(&format!("{id} findings:")));
+        }
+        assert!(prompt.contains("untrusted upstream output"));
+        let outputs = run.checkpoint.nodes[3].outputs.as_ref().unwrap();
+        assert_eq!(outputs.schema_version, 2);
+        assert_eq!(outputs.findings.len(), 1);
+        assert_eq!(outputs.findings[0].id, "F1");
+        assert_eq!(advance(&document, &mut owner, &mut journal).unwrap(), run);
+    }
+
+    #[test]
+    fn synthesise_requires_selected_inputs() {
+        let mut synthesis = node("synthesis", route("fixture"));
+        synthesis.kind = Some(NodeKind::Synthesise);
+        assert_eq!(
+            validate_plan(&graph(vec![synthesis])).unwrap_err(),
+            "synthesise requires selected inputs"
+        );
     }
 
     #[test]

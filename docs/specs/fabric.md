@@ -211,6 +211,16 @@ specify a single `route` or an ordered `routes` list. A route can name a pool
 with just `alias`, resolved as for `dispatch --route`, or supply an explicit
 adapter. Routes require an adapter or alias and may mix these forms in a list.
 
+An agent node may set `kind` to `synthesise` and select one or more direct
+dependencies with `inputs`. Its configured prompt states the synthesis purpose.
+The runtime uses the same bounded, untrusted-data handoff and typed settlement
+as a task. Omitting `kind`, or setting it to `task`, preserves task behaviour.
+
+Why: one configurable agent can combine results for different purposes without
+adding a node kind for each purpose.
+Test: `synthesise_receives_selected_reviewer_findings_and_emits_typed_output`.
+Owner: Fabric runtime.
+
 ### Typed node outputs
 
 Settled nodes record version 2 outputs in the checkpoint, exposed by graph
