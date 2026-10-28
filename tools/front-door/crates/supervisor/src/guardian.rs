@@ -181,7 +181,7 @@ pub struct GuardianHooks<'a> {
     pub stderr_filter: Option<&'a mut dyn provenant_os::exec::CaptureFilter>,
 }
 /// The host resolves the same free-space floor used by admission and GC.
-/// An unreadable sample preserves the last known pause decision.
+/// An unreadable sample resumes running builds.
 pub trait DiskPressure {
     fn below_floor(&self, context: &[u8]) -> io::Result<bool>;
 }
@@ -864,15 +864,17 @@ impl Driver<'_> {
                             disk_paused = paused;
                             disk_warning_active = false;
                         }
-                        Err(_) if !disk_warning_active => {
-                            warn(
-                                &mut warnings,
-                                &mut omitted_warnings,
-                                "disk floor observation failed",
-                            );
-                            disk_warning_active = true;
+                        Err(_) => {
+                            disk_paused = false;
+                            if !disk_warning_active {
+                                warn(
+                                    &mut warnings,
+                                    &mut omitted_warnings,
+                                    "disk floor observation failed",
+                                );
+                                disk_warning_active = true;
+                            }
                         }
-                        Err(_) => {}
                     }
                 }
             }

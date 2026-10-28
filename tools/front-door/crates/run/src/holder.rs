@@ -182,7 +182,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
     fn admit(&self, context: &[u8], attempt: &Directory) -> custody::Result<()> {
         let (context, store) = HolderContext::open(context).map_err(custody_error)?;
         store
-            .admit(
+            .admit_with_floor(
                 context.attempt_id,
                 attempt,
                 &LaneResources {
@@ -191,6 +191,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
                 },
                 &SystemClock,
                 &CancelToken::new(),
+                context.disk_roots().0,
             )
             .map(drop)
             .map_err(custody_error)

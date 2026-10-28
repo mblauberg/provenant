@@ -1805,17 +1805,10 @@ fn disk_floor_pauses_and_recovery_resumes_builds(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn disk_sample_failure_preserves_the_last_pause_decision(root: &Path) -> Result<()> {
+fn disk_sample_failure_resumes_paused_builds(root: &Path) -> Result<()> {
     let mut fixture = disk_build(root)?;
     set_disk_sample(&fixture.state, b"error-paused")?;
-    assert_eq!(
-        fixture::fixture_read_byte(&mut fixture.channel, Duration::from_millis(250))
-            .map_err(|error| error.kind()),
-        Err(io::ErrorKind::TimedOut),
-        "failed disk sample must leave the paused build stopped",
-    );
-
-    set_disk_sample(&fixture.state, b"high")?;
+    // The pending heartbeat proves CONT was delivered without a good sample.
     byte(&mut fixture.channel, b'A')?;
     set_disk_sample(&fixture.state, b"error-running")?;
     fixture.channel.write_all(b"B")?;
@@ -2174,8 +2167,8 @@ const CASES: &[Case] = &[
         disk_floor_pauses_and_recovery_resumes_builds,
     ),
     (
-        "disk_sample_failure_preserves_the_last_pause_decision",
-        disk_sample_failure_preserves_the_last_pause_decision,
+        "disk_sample_failure_resumes_paused_builds",
+        disk_sample_failure_resumes_paused_builds,
     ),
     (
         "cancel_resumes_paused_builds_before_delivering_stop",

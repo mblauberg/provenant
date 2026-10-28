@@ -1103,22 +1103,29 @@ fn legacy_guard_ready(home: &Path) -> io::Result<provenant_os::fs::LockGuard> {
         struct State {
             paused: Vec<LegacyPausedBuild>,
         }
-        let state: State = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        let state: State = match serde_json::from_slice(&bytes) {
+            Ok(state) => state,
+            Err(error) => {
+                use std::io::Write;
+                let _ = writeln!(io::stderr(), "invalid disk guard {name}: {error}");
+                continue;
+            }
+        };
         for process in state.paused {
             resume_legacy_build(&process)?;
         }
-        // paused.json superseded state.json. Remove both so a retry cannot
-        // resurrect an older snapshot once the newer one has been consumed.
-        for name in ["paused.json", "state.json"] {
-            match guard.unlink(name.as_ref()) {
-                Ok(()) => {}
-                Err(error) if error.is_not_found() => {}
-                Err(error) => return Err(io::Error::other(error)),
-            }
-        }
-        guard.sync().map_err(io::Error::other)?;
         break;
     }
+    // paused.json superseded state.json. Remove both so a retry cannot
+    // resurrect an older snapshot, including when both records were corrupt.
+    for name in ["paused.json", "state.json"] {
+        match guard.unlink(name.as_ref()) {
+            Ok(()) => {}
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(io::Error::other(error)),
+        }
+    }
+    guard.sync().map_err(io::Error::other)?;
     Ok(lock)
 }
 
@@ -1203,6 +1210,34 @@ fn legacy_start_seconds(_: &provenant_supervisor::census::ProcessIdentity) -> io
 mod retired_disk_guard_tests {
     #[allow(unused_imports)] // The worktree driver includes this module without libtest.
     use super::*;
+
+    #[test]
+    fn retirement_removes_corrupt_pause_state_after_bootout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let plist = home
+            .path()
+            .join("Library/LaunchAgents/dev.provenant.disk-guard.plist");
+        std::fs::create_dir_all(plist.parent().ok_or("plist parent")?)?;
+        std::fs::write(&plist, b"old plist")?;
+        let path = home.path().join(".local/share/provenant/v1/disk-guard");
+        let _directory = provenant_config::private_directory(&path, true)?;
+        for name in ["paused.json", "state.json"] {
+            std::fs::write(path.join(name), b"{")?;
+        }
+        let mut calls = Vec::new();
+        for _ in 0..2 {
+            retire_disk_guard_with(home.path(), |args, _| {
+                calls.push(args[0].to_owned());
+                Ok((true, String::new()))
+            })?;
+        }
+        assert_eq!(calls, [OsStr::new("print"), OsStr::new("bootout")]);
+        assert!(!plist.exists());
+        assert!(!path.join("paused.json").exists());
+        assert!(!path.join("state.json").exists());
+        Ok(())
+    }
 
     #[test]
     fn retirement_stops_and_deletes_the_old_agent_once() {

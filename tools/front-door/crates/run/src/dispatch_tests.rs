@@ -5970,7 +5970,10 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
         let context = context(temp.path())?;
-        let mut store = RunStore::open(&context, &call)?;
+        let registry = temp.path().join("registry");
+        std::fs::create_dir(&registry)?;
+        std::fs::write(registry.join("config.toml"), "[gc]\nfree_floor='1B'\n")?;
+        let mut store = RunStore::open(&context, &call)?.with_writer_registry(&registry);
         std::fs::write(
             context.state_root.as_path().join("config.toml"),
             "schema_version=1\n[gc]\nfree_floor='100B'\n",

@@ -34,43 +34,88 @@ pub(super) fn resume_paused_with(
     scope: Scope,
     observer: &dyn ProcessObserver,
 ) -> Result<()> {
+    match resume_paused_with_signal(attempt, scope, observer, |identity| {
+        crate::process_os::provider::signal_build(identity, libc::SIGCONT)
+    }) {
+        Err(CustodyError::InvalidRecord) => {
+            invalid_pause_journal();
+            Ok(())
+        }
+        result => result,
+    }
+}
+
+fn invalid_pause_journal() {
+    let _ = writeln!(
+        io::stderr(),
+        "invalid disk pause journal; continuing recovery"
+    );
+}
+
+fn resume_paused_with_signal(
+    attempt: &Directory,
+    scope: Scope,
+    observer: &dyn ProcessObserver,
+    mut signal: impl FnMut(&ProcessIdentity) -> io::Result<bool>,
+) -> Result<()> {
     use crate::build_pause::{PAUSE_FILE, PauseJournal};
-    let journal: PauseJournal = match read_record(attempt, PAUSE_FILE, RECORD_LIMIT) {
-        Ok(record) => record,
-        Err(CustodyError::Filesystem(error)) if error.is_not_found() => return Ok(()),
-        Err(error) => return Err(error),
+    let raw = match attempt.read_bounded(OsStr::new(PAUSE_FILE), RECORD_LIMIT) {
+        Ok(raw) => raw,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error.into()),
     };
-    if journal.schema_version != 1
-        || journal.scope != scope
-        || journal.guardian.validate().is_err()
-        || journal
-            .identities
-            .iter()
-            .any(|identity| identity.validate().is_err() || identity.boot != journal.guardian.boot)
-    {
+    let valid = decode_v1::<PauseJournal, _>(raw.as_slice(), Limits::CONFIG).is_ok_and(|journal| {
+        journal.scope == scope
+            && journal.guardian.validate().is_ok()
+            && journal.identities.iter().all(|identity| {
+                identity.validate().is_ok() && identity.boot == journal.guardian.boot
+            })
+    });
+    let document: serde_json::Value =
+        serde_json::from_slice(&raw).map_err(|_| CustodyError::InvalidRecord)?;
+    if serde_json::from_value::<Scope>(document["scope"].clone()).ok() != Some(scope) {
         return Err(CustodyError::InvalidRecord);
     }
-    let same_boot =
-        observer.boot_identity().map_err(|_| CustodyError::Fenced)? == journal.guardian.boot;
-    if same_boot {
-        match observer.observe(journal.guardian.pid) {
-            ProcessObservation::Present(fact)
-                if fact.identity == journal.guardian && !fact.zombie =>
-            {
+    if !valid {
+        invalid_pause_journal();
+    }
+    let boot = observer.boot_identity().map_err(|_| CustodyError::Fenced)?;
+    let guardian = serde_json::from_value::<ProcessIdentity>(document["guardian"].clone())
+        .ok()
+        .filter(|identity| identity.validate().is_ok());
+    if let Some(guardian) = guardian.filter(|identity| identity.boot == boot) {
+        match observer.observe(guardian.pid) {
+            ProcessObservation::Present(fact) if fact.identity == guardian && !fact.zombie => {
                 return Err(CustodyError::Fenced);
             }
             ProcessObservation::Unknown(_) => return Err(CustodyError::Fenced),
             _ => {}
         }
-        for identity in &journal.identities {
-            match observer.observe(identity.pid) {
-                ProcessObservation::Present(fact) if fact.identity == *identity && !fact.zombie => {
-                    crate::process_os::provider::signal_build(identity, libc::SIGCONT)?;
-                }
-                ProcessObservation::Unknown(_) => return Err(CustodyError::Fenced),
-                _ => {}
-            }
+    }
+    let identities = document["identities"]
+        .as_array()
+        .ok_or(CustodyError::InvalidRecord)?;
+    let mut first_error = None;
+    for record in identities {
+        let Ok(identity) = serde_json::from_value::<ProcessIdentity>(record.clone()) else {
+            continue;
+        };
+        if identity.validate().is_err() || identity.boot != boot {
+            continue;
         }
+        let result = match observer.observe(identity.pid) {
+            ProcessObservation::Present(fact) if fact.identity == identity && !fact.zombie => {
+                signal(&identity).map(drop).map_err(CustodyError::from)
+            }
+            ProcessObservation::Unknown(_) => Err(CustodyError::Fenced),
+            _ => Ok(()),
+        };
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
     }
     // Clear the checkpoint before the journal. An interrupted recovery can
     // safely replay CONT, and never leaves a recovered pause visible.
@@ -579,6 +624,65 @@ mod tests {
         let checkpoint: serde_json::Value =
             serde_json::from_slice(&std::fs::read(f.path.join("process.json"))?)?;
         assert_eq!(checkpoint["disk_paused"], false);
+        Ok(())
+    }
+
+    #[test]
+    fn resume_failure_does_not_strand_the_remaining_builds() -> TestResult {
+        let f = fixture(&[], &[])?;
+        let builds = [identity(20, 2), identity(21, 3), identity(22, 4)];
+        let world = World::default();
+        for build in &builds {
+            world.live.borrow_mut().insert(build.pid, build.clone());
+        }
+        let journal = crate::build_pause::PauseJournal {
+            schema_version: 1,
+            scope: scope(),
+            guardian: identity(100, 1),
+            identities: builds.into_iter().collect(),
+        };
+        let path = f.path.join(crate::build_pause::PAUSE_FILE);
+        std::fs::write(&path, serde_json::to_vec(&journal)?)?;
+        let mut resumed = Vec::new();
+        let result = resume_paused_with_signal(&f.attempt, scope(), &world, |identity| {
+            if identity.pid == 20 {
+                Err(io::ErrorKind::PermissionDenied.into())
+            } else {
+                resumed.push(identity.pid);
+                Ok(true)
+            }
+        });
+        assert!(
+            matches!(result, Err(CustodyError::Io(error)) if error.kind() == io::ErrorKind::PermissionDenied)
+        );
+        assert_eq!(resumed, [21, 22]);
+        assert!(
+            path.exists(),
+            "failed identities must remain available for retry"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_pause_journal_still_resumes_identifiable_builds() -> TestResult {
+        let f = fixture(&[], &[])?;
+        let build = identity(20, 2);
+        let world = World::default();
+        world.live.borrow_mut().insert(build.pid, build.clone());
+        std::fs::write(
+            f.path.join(crate::build_pause::PAUSE_FILE),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1, "scope": scope(), "guardian": identity(100, 1),
+                "identities": [{"pid": 99}, build],
+            }))?,
+        )?;
+        let mut resumed = Vec::new();
+        resume_paused_with_signal(&f.attempt, scope(), &world, |identity| {
+            resumed.push(identity.pid);
+            Ok(true)
+        })?;
+        assert_eq!(resumed, [20]);
+        assert!(!f.path.join(crate::build_pause::PAUSE_FILE).exists());
         Ok(())
     }
 
