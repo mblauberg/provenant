@@ -13,7 +13,7 @@ use std::{ffi::OsString, path::Path, time::Duration};
 mod git;
 pub(crate) mod land;
 mod open;
-mod status;
+pub(crate) mod status;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 

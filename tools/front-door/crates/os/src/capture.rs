@@ -68,7 +68,9 @@ impl<'a, 'f> StreamCapture<'a, 'f> {
         filter: Option<&'f mut dyn CaptureFilter>,
     ) -> Result<Self, ExecError> {
         let limit = match &policy {
-            StreamPolicy::Capture { limit } | StreamPolicy::Tee { limit, .. } => *limit,
+            StreamPolicy::Capture { limit }
+            | StreamPolicy::Tail { limit }
+            | StreamPolicy::Tee { limit, .. } => *limit,
             StreamPolicy::Discard => 0,
         };
         if limit > MAX_CAPTURE_LIMIT {
@@ -286,9 +288,26 @@ impl Frames {
             out.sink_failed |= loss == QueueLoss::Closed;
         }
 
+        if let StreamPolicy::Tail { limit } = policy {
+            let discard = out
+                .bytes
+                .len()
+                .saturating_add(bytes.len())
+                .saturating_sub(*limit);
+            out.truncated |= discard > 0;
+            if discard >= out.bytes.len() {
+                let skip = discard - out.bytes.len();
+                out.bytes.clear();
+                out.bytes.extend_from_slice(&bytes[skip..]);
+            } else {
+                out.bytes.drain(..discard);
+                out.bytes.extend_from_slice(bytes);
+            }
+            return;
+        }
         let limit = match policy {
             StreamPolicy::Capture { limit } | StreamPolicy::Tee { limit, .. } => *limit,
-            StreamPolicy::Discard => return,
+            StreamPolicy::Discard | StreamPolicy::Tail { .. } => return,
         };
         let room = limit.saturating_sub(out.bytes.len());
         out.bytes.extend_from_slice(&bytes[..bytes.len().min(room)]);
@@ -450,6 +469,22 @@ mod tests {
 
     fn provider<'a>(decoder: &'a TestDecoder, events: &'a EventSink) -> FrameDelivery<'a> {
         FrameDelivery::Provider { decoder, events }
+    }
+
+    #[test]
+    fn tail_retains_latest_bytes_across_chunks() {
+        let mut capture = StreamCapture::new(StreamPolicy::Tail { limit: 4 }, None, None).unwrap();
+        capture.push(b"abc").unwrap();
+        capture.push(b"def").unwrap();
+        assert_eq!(capture.outcome().bytes, b"cdef");
+        assert!(capture.outcome().truncated);
+        capture.push(b"123456").unwrap();
+        assert_eq!(capture.outcome().bytes, b"3456");
+        assert_eq!(capture.outcome().total_bytes, 12);
+        let mut empty = StreamCapture::new(StreamPolicy::Tail { limit: 0 }, None, None).unwrap();
+        empty.push(b"x").unwrap();
+        assert!(empty.outcome().bytes.is_empty());
+        assert!(empty.outcome().truncated);
     }
 
     #[test]

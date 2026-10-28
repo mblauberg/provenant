@@ -3369,8 +3369,27 @@ fn settle_attempt(
     Ok(store.worktree_settlement(id, &call)?)
 }
 
+impl provenant_fabric_runtime::graph::CiStatus for BoundGraphOwner<'_> {
+    fn host_stamp(&self) -> Option<provenant_fabric_runtime::graph::CiHostStamp> {
+        Some(provenant_fabric_runtime::graph::CiHostStamp {
+            boot_identity: self.factory.clock.boot_identity().ok()?,
+            host_monotonic_micros: self.factory.clock.host_monotonic_micros().ok()?,
+        })
+    }
+    fn observe_ci(
+        &mut self,
+        target: &str,
+        checks: &[String],
+    ) -> provenant_fabric_runtime::graph::CiObservation {
+        crate::pr::status::observe_ci(&self.factory.cwd, target, checks)
+    }
+}
+
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     type Error = FacadeError;
+    fn ci_status(&mut self) -> Option<&mut dyn provenant_fabric_runtime::graph::CiStatus> {
+        Some(self)
+    }
     fn actor(&self) -> String {
         self.factory.context.identity.inbox.actor.to_string()
     }

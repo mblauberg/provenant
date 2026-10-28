@@ -20,6 +20,8 @@ struct View {
 }
 #[derive(Deserialize)]
 struct Check {
+    #[serde(default)]
+    name: String,
     bucket: String,
 }
 #[derive(Serialize)]
@@ -67,11 +69,211 @@ impl Line {
 fn counts(project: &Path, number: &str) -> Option<Vec<Check>> {
     let output = execute(
         project,
-        &["gh", "pr", "checks", number, "--json", "bucket"],
+        &["gh", "pr", "checks", number, "--json", "name,bucket"],
         false,
     )
     .ok()?;
     serde_json::from_slice(&output.stdout.bytes).ok()
+}
+
+/// Graph gates use the same bounded check reader as `pr status`. gh returns
+/// non-zero for pending and failed checks, so valid JSON is authoritative.
+pub(crate) fn observe_ci(
+    project: &Path,
+    target: &str,
+    names: &[String],
+) -> provenant_fabric_runtime::graph::CiObservation {
+    observe_ci_with(
+        names,
+        || required_checks(project, target),
+        || counts(project, target),
+    )
+}
+
+fn observe_ci_with(
+    names: &[String],
+    resolve: impl FnOnce() -> Option<Vec<String>>,
+    read_checks: impl FnOnce() -> Option<Vec<Check>>,
+) -> provenant_fabric_runtime::graph::CiObservation {
+    let required = if names.is_empty() {
+        resolve().map(|names| ("branch-required", names))
+    } else {
+        Some(("configured", names.to_vec()))
+    };
+    summarise_ci(
+        read_checks(),
+        required
+            .as_ref()
+            .map(|(policy, names)| (*policy, names.as_slice())),
+    )
+}
+
+// Both classic protection and rulesets may apply. Only trust the resolved
+// policy when both sources are readable.
+fn required_checks(project: &Path, target: &str) -> Option<Vec<String>> {
+    #[derive(Deserialize)]
+    struct Repo {
+        name: String,
+    }
+    #[derive(Deserialize)]
+    struct Owner {
+        login: String,
+    }
+    #[derive(Deserialize)]
+    struct Base {
+        #[serde(rename = "baseRefName")]
+        branch: String,
+        #[serde(rename = "baseRepository")]
+        repo: Repo,
+        #[serde(rename = "baseRepositoryOwner")]
+        owner: Owner,
+    }
+    let bytes = successful(
+        execute(
+            project,
+            &[
+                "gh",
+                "pr",
+                "view",
+                target,
+                "--json",
+                "baseRefName,baseRepository,baseRepositoryOwner",
+            ],
+            false,
+        )
+        .ok()?,
+    )
+    .ok()?;
+    let base: Base = serde_json::from_slice(&bytes).ok()?;
+    let encode = |value: &str| -> String {
+        value
+            .bytes()
+            .map(|b| {
+                if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                    (b as char).to_string()
+                } else {
+                    format!("%{b:02X}")
+                }
+            })
+            .collect()
+    };
+    let repo = format!(
+        "repos/{}/{}",
+        encode(&base.owner.login),
+        encode(&base.repo.name)
+    );
+    let branch = encode(&base.branch);
+    let get = |path: &str, paginate: bool| -> Option<Vec<u8>> {
+        let args = if paginate {
+            vec!["gh", "api", "--paginate", "--slurp", path]
+        } else {
+            vec!["gh", "api", path]
+        };
+        successful(execute(project, &args, false).ok()?).ok()
+    };
+    let branch_info: serde_json::Value =
+        serde_json::from_slice(&get(&format!("{repo}/branches/{branch}"), false)?).ok()?;
+    let protection = if branch_info.get("protected")?.as_bool()? {
+        Some(
+            serde_json::from_slice(&get(
+                &format!("{repo}/branches/{branch}/protection"),
+                false,
+            )?)
+            .ok()?,
+        )
+    } else {
+        None
+    };
+    let pages: Vec<Vec<serde_json::Value>> = serde_json::from_slice(&get(
+        &format!("{repo}/rules/branches/{branch}?per_page=100"),
+        true,
+    )?)
+    .ok()?;
+    parse_required_checks(protection.as_ref(), &pages)
+}
+
+fn parse_required_checks(
+    protection: Option<&serde_json::Value>,
+    pages: &[Vec<serde_json::Value>],
+) -> Option<Vec<String>> {
+    let mut names = Vec::new();
+    if let Some(protection) = protection {
+        let checks = protection.get("required_status_checks")?;
+        if !checks.is_null() {
+            for name in checks.get("contexts")?.as_array()? {
+                names.push(name.as_str()?.to_owned());
+            }
+        }
+    }
+    for rule in pages.iter().flatten() {
+        if rule.get("type")?.as_str()? == "required_status_checks" {
+            for check in rule
+                .get("parameters")?
+                .get("required_status_checks")?
+                .as_array()?
+            {
+                names.push(check.get("context")?.as_str()?.to_owned());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    // An empty required set cannot establish that any CI ran.
+    (!names.is_empty()).then_some(names)
+}
+
+fn summarise_ci(
+    checks: Option<Vec<Check>>,
+    required: Option<(&str, &[String])>,
+) -> provenant_fabric_runtime::graph::CiObservation {
+    use provenant_fabric_runtime::graph::{CiObservation, CiState};
+    let policy = required.map_or("all-reported", |(policy, _)| policy);
+    let Some(checks) = checks else {
+        return CiObservation {
+            state: CiState::Unavailable,
+            summary: format!("policy={policy} checks unavailable"),
+        };
+    };
+    let selected: Vec<&Check> = match required {
+        Some((_, names)) => checks.iter().filter(|c| names.contains(&c.name)).collect(),
+        None => checks.iter().collect(),
+    };
+    let missing = required.map_or(0, |(_, names)| {
+        names
+            .iter()
+            .filter(|name| !selected.iter().any(|c| &c.name == *name))
+            .count()
+    });
+    let passed = selected.iter().filter(|c| c.bucket == "pass").count();
+    let skipped = selected.iter().filter(|c| c.bucket == "skipping").count();
+    let failed = selected
+        .iter()
+        .filter(|c| matches!(c.bucket.as_str(), "fail" | "cancel"))
+        .count();
+    let pending = selected.iter().filter(|c| c.bucket == "pending").count();
+    let total = selected.len();
+    let state = if total == 0
+        || missing > 0
+        || passed + skipped + failed + pending != total
+        || (required.is_some() && skipped > 0)
+    {
+        CiState::Unavailable
+    } else if failed > 0 {
+        CiState::Failed
+    } else if pending > 0 {
+        CiState::Pending
+    } else if passed == 0 {
+        CiState::Unavailable
+    } else {
+        CiState::Passed
+    };
+    let selection = required.map_or_else(String::new, |(_, names)| format!(" names={names:?}"));
+    CiObservation {
+        state,
+        summary: format!(
+            "policy={policy}{selection} checks={passed}/{total} fail={failed} pending={pending} skipped={skipped} missing={missing}"
+        ),
+    }
 }
 fn open_numbers(project: &Path) -> Result<Vec<u64>> {
     #[derive(Deserialize)]
@@ -105,7 +307,7 @@ fn line(project: &Path, number: u64) -> Result<Line> {
         false,
     )?)?;
     let view: View = serde_json::from_slice(&bytes)?;
-    let checks = counts(project, &text);
+    let checks = counts(project, &text).filter(|checks| !checks.is_empty());
     let passed = checks.as_ref().map(|checks| {
         checks
             .iter()
@@ -170,5 +372,152 @@ pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
             )
         }
         Err(error) => fail(LEAF, Outcome::Error, "PR", &error.to_string(), globals),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn failed_policy_lookup_uses_all_reported_checks() {
+        use super::*;
+        use provenant_fabric_runtime::graph::CiState;
+        for (bucket, expected) in [("fail", CiState::Failed), ("pending", CiState::Pending)] {
+            let observation = observe_ci_with(
+                &[],
+                || None,
+                || {
+                    Some(vec![Check {
+                        name: "build".into(),
+                        bucket: bucket.into(),
+                    }])
+                },
+            );
+            assert_eq!(observation.state, expected);
+            assert!(observation.summary.contains("policy=all-reported"));
+        }
+        assert_eq!(
+            observe_ci_with(&[], || None, || Some(vec![])).state,
+            CiState::Unavailable
+        );
+    }
+
+    #[test]
+    fn branch_requirements_merge_protection_and_paginated_rulesets() {
+        use super::*;
+        use provenant_fabric_runtime::graph::CiState;
+        use serde_json::json;
+        let protection = json!({"required_status_checks": {"contexts": ["build", "lint"]}});
+        let pages = vec![
+            vec![json!({"type": "required_status_checks", "parameters": {
+                "required_status_checks": [{"context": "lint"}, {"context": "integration"}]
+            }})],
+            vec![
+                json!({"type": "required_status_checks", "parameters": {
+                    "required_status_checks": [{"context": "deploy"}]
+                }}),
+                json!({"type": "pull_request"}),
+            ],
+        ];
+        let names = parse_required_checks(Some(&protection), &pages).unwrap();
+        assert_eq!(names, ["build", "deploy", "integration", "lint"]);
+        let checks = ["build", "deploy", "integration", "lint"]
+            .into_iter()
+            .map(|name| Check {
+                name: name.into(),
+                bucket: if name == "integration" {
+                    "skipping"
+                } else {
+                    "pass"
+                }
+                .into(),
+            })
+            .collect();
+        let observation = summarise_ci(Some(checks), Some(("branch-required", &names)));
+        assert_eq!(observation.state, CiState::Unavailable);
+        assert!(observation.summary.contains("policy=branch-required"));
+    }
+
+    #[test]
+    fn branch_requirements_reject_incomplete_data_and_empty_sets() {
+        use super::*;
+        use serde_json::json;
+        let no_protection = json!({"required_status_checks": null});
+        assert_eq!(parse_required_checks(Some(&no_protection), &[]), None);
+        assert_eq!(parse_required_checks(Some(&json!({})), &[]), None);
+        assert_eq!(
+            parse_required_checks(
+                None,
+                &[vec![
+                    json!({"type": "required_status_checks", "parameters": {}})
+                ]]
+            ),
+            None
+        );
+        let rules = vec![vec![
+            json!({"type": "required_status_checks", "parameters": {
+                "required_status_checks": [{"context": "build"}]
+            }}),
+        ]];
+        assert_eq!(
+            parse_required_checks(Some(&no_protection), &rules),
+            Some(vec!["build".into()])
+        );
+    }
+
+    #[test]
+    fn gate_check_buckets_fail_closed() {
+        use super::*;
+        use provenant_fabric_runtime::graph::CiState;
+        let observe = |buckets: &[(&str, &str)], names: Option<&[String]>| {
+            summarise_ci(
+                Some(
+                    buckets
+                        .iter()
+                        .map(|(name, bucket)| Check {
+                            name: (*name).into(),
+                            bucket: (*bucket).into(),
+                        })
+                        .collect(),
+                ),
+                names.map(|names| ("configured", names)),
+            )
+        };
+        let required = vec!["build".to_owned()];
+        assert_eq!(
+            observe(&[("build", "pass"), ("lint", "skipping")], None).state,
+            CiState::Passed
+        );
+        assert_eq!(
+            observe(&[("build", "pass"), ("lint", "pending")], None).state,
+            CiState::Pending
+        );
+        assert_eq!(observe(&[("build", "cancel")], None).state, CiState::Failed);
+        assert_eq!(
+            observe(&[("build", "neutral")], None).state,
+            CiState::Unavailable
+        );
+        assert_eq!(
+            observe(&[("build", "skipping")], Some(&required)).state,
+            CiState::Unavailable
+        );
+        assert_eq!(
+            observe(&[("lint", "pass")], Some(&required)).state,
+            CiState::Unavailable
+        );
+        assert_eq!(
+            observe(&[("build", "pass"), ("lint", "fail")], Some(&required)).state,
+            CiState::Passed
+        );
+        assert_eq!(
+            observe(&[("build", "pending")], Some(&required)).state,
+            CiState::Pending
+        );
+        assert_eq!(observe(&[], None).state, CiState::Unavailable);
+        assert_eq!(summarise_ci(None, None).state, CiState::Unavailable);
+        assert!(
+            observe(&[("build", "pass")], Some(&required))
+                .summary
+                .contains("policy=configured")
+        );
     }
 }

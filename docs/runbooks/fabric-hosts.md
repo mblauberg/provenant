@@ -104,7 +104,36 @@ depend on all nodes whose settled usage it should check before admitting the
 work it guards. Reaching a budget or missing telemetry for a configured
 metric fails that check; without a configured budget it passes.
 
-CI-state and confined argv-command gates are deferred to [#2075](https://github.com/mblauberg/provenant/issues/2075).
+Use a CI gate to wait for the checks on a pull request or branch:
+
+```json
+{
+  "id": "ci",
+  "kind": "gate",
+  "access": "read_only",
+  "condition": {"type": "ci", "target": "123", "checks": ["build", "test"], "timeout_seconds": 7200}
+}
+```
+
+The `condition` fields for this gate are:
+
+| Field | Meaning |
+| --- | --- |
+| `type` | `ci` |
+| `target` | Non-empty pull request number or branch name, as a string |
+| `checks` | Optional array of required check names |
+| `timeout_seconds` | Optional timeout from 1 to 604800 seconds; defaults to 7200 |
+
+Every explicitly named check must pass. When `checks` is omitted, the host
+uses required checks from branch protection or rulesets if it can resolve them.
+Otherwise every reported check must pass or be skipped, with at least one pass.
+The gate records the policy it applied with its evidence. Failed checks fail
+the gate. Missing checks, an unknown pull request or an API error fail with
+reason `unavailable`. Pending checks leave the gate waiting until
+they settle or the timeout expires. The checkpoint records the first observation,
+last state and check summary. Pending gates are re-evaluated by `fabric graph run`
+or `fabric graph resume` and when an attempt settles. Graph status reads the saved
+snapshot; it does not advance the graph. No background timer re-checks the gate.
 
 Set `on_fail` to a recovery node ID and include the gate in that node's
 `depends_on`. The recovery path runs only on failure; the ordinary dependants

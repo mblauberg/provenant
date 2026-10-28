@@ -842,6 +842,94 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
 }
 
 #[test]
+fn pending_ci_graph_status_is_a_snapshot() -> Result {
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    let gh = rig.root.join("gh");
+    let calls = rig.root.join("gh-calls");
+    let response = rig.root.join("gh-response");
+    std::fs::write(&response, r#"[{"name":"build","bucket":"pending"}]"#)?;
+    std::fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\nprintf 'call\\n' >> '{}'\ncat '{}'\n",
+            calls.display(),
+            response.display()
+        ),
+    )?;
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", rig.root.display()).into(),
+    ));
+    std::fs::write(
+        rig.project.join("graph.json"),
+        serde_json::to_vec(&json!({"schema_version":1,"graph_id":"pending-ci","nodes":[
+            {"id":"ci","kind":"gate","access":"read_only","condition":{"type":"ci","target":"123","checks":["build"]}},
+            {"id":"after","prompt":"work","access":"read_only","route":{"adapter":"fixture","model":"one"},"depends_on":["ci"]}
+        ]}))?,
+    )?;
+    let run = rig.command(&[
+        "fabric",
+        "graph",
+        "run",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&run),
+        0,
+        "{}",
+        String::from_utf8_lossy(&run.stderr.bytes)
+    );
+    let run: Value = serde_json::from_slice(&run.stdout.bytes)?;
+    let checkpoint = &run["data"]["checkpoint"];
+    assert_eq!(checkpoint["nodes"][0]["ci"]["state"], "pending");
+    assert_eq!(checkpoint["nodes"][1]["attempts"], json!([]));
+    let observed_calls = std::fs::read(&calls)?;
+    assert!(!observed_calls.is_empty());
+
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+    let project = identity["data"]["project"].as_str().ok_or("project")?;
+    let marker = rig
+        .state
+        .join("fabric/graphs")
+        .join(project)
+        .join("graph-pending-ci.advance-error");
+    std::fs::write(&marker, "journal lock timed out")?;
+    // If status queried CI, the new response could release the downstream node.
+    std::fs::write(&response, r#"[{"name":"build","bucket":"pass"}]"#)?;
+    let status = rig.command(&["fabric", "graph", "status", "pending-ci", "--json"])?;
+    assert_eq!(code(&status), 0);
+    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+    assert_eq!(status["data"]["checkpoint"], *checkpoint);
+    assert_eq!(status["data"]["advance_error"], "journal lock timed out");
+    let frames = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":"status","method":"tools/call","params":{"name":"fabric_graph","arguments":{"op":"status","id":"pending-ci"}}}),
+        ],
+    )?;
+    let result = &frames
+        .iter()
+        .find(|frame| frame["id"] == "status")
+        .ok_or("graph status")?["result"];
+    assert_ne!(result["isError"], true, "{result}");
+    assert_eq!(result["structuredContent"]["checkpoint"], *checkpoint);
+    assert_eq!(
+        result["structuredContent"]["advance_error"],
+        "journal lock timed out"
+    );
+    assert_eq!(std::fs::read(&calls)?, observed_calls);
+    assert_eq!(std::fs::read_to_string(marker)?, "journal lock timed out");
+    cleanup.disarm();
+    Ok(())
+}
+
+#[test]
 fn graph_resume_clears_a_recorded_advance_failure() -> Result {
     let rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
