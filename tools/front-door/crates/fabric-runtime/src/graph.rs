@@ -712,7 +712,8 @@ pub trait AttemptOwner {
 }
 
 /// The file journal persists every state transition atomically. Its held lock
-/// fences concurrent writers for this graph.
+/// fences concurrent writers for this graph. The caller must hold exclusive
+/// access to the journal for the whole advance.
 pub trait GraphJournal {
     type Error: Error + 'static;
 
@@ -1295,7 +1296,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     journal: &mut J,
     (limits, ceiling): (&crate::config::GraphLimits, &crate::config::GraphLimits),
     budget: &crate::config::GraphBudget,
-    resume: bool,
+    mut resume: bool,
     extensions: &[String],
 ) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
     let unbounded = crate::config::GraphLimits {
@@ -1311,13 +1312,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         .map_err(GraphError::Journal)?;
     let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
     let (base, _) = validate_plan_with_limits(document, &unbounded).map_err(GraphError::Invalid)?;
-    let expanded = plans::expand(
+    let mut expanded = plans::expand(
         document,
         stored_extensions,
         stored.as_ref().map_or(&[], |c| c.expansions.as_slice()),
     )
     .map_err(GraphError::Invalid)?;
-    let (plan, positions) =
+    let (mut plan, mut positions) =
         validate_flat_plan(&expanded, &unbounded).map_err(GraphError::Invalid)?;
     let plan_digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &base)
         .map_err(GraphError::Canonical)?
@@ -1507,566 +1508,558 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
 
-    plans::remaining(&mut checkpoint, &expanded, &effective_limits);
-    for node in &plan.nodes {
-        if (!checkpoint.cancelled || resume)
-            && checkpoint
-                .nodes
-                .iter()
-                .any(|n| n.id == node.id && (n.handoff.is_some() || n.fragment.is_some()))
-            && plans::settle(node, &expanded, &mut checkpoint, None, &effective_limits)
-        {
-            let preview = plans::expand(document, &checkpoint.extensions, &checkpoint.expansions)
-                .map_err(GraphError::Invalid)?;
-            owner
-                .validate_expansion(&preview, &checkpoint)
-                .map_err(GraphError::Run)?;
-            journal.save(&checkpoint).map_err(GraphError::Journal)?;
-            return advance_inner(
-                document,
-                owner,
-                journal,
-                (limits, ceiling),
-                budget,
-                false,
-                &[],
-            );
-        }
-    }
-    if let Some(reason) = checkpoint
-        .nodes
-        .iter()
-        .find_map(|n| n.expansion_pause.clone())
-    {
-        checkpoint.pause_reason = Some(reason);
-    }
-    let structural_pause = if checkpoint.nodes.iter().all(|node| node.state.settled()) {
-        None
-    } else {
-        structural_limit_reason(&expanded, &plan, &effective_limits, &checkpoint.extensions)
-    };
-    if let Some(reason) = &structural_pause {
-        checkpoint.pause_reason = Some(reason.clone());
-        journal.save(&checkpoint).map_err(GraphError::Journal)?;
-    }
-
-    close_resolved_loop_asks(&mut checkpoint, owner, journal)?;
-    if checkpoint.cancelled {
-        if !resume {
-            return Ok(GraphRun {
-                status: GraphStatus::Cancelled,
-                checkpoint,
-                advance_error: None,
-            });
-        }
-        checkpoint.cancelled = false;
-        journal.save(&checkpoint).map_err(GraphError::Journal)?;
-    }
-
-    for node_index in 0..plan.nodes.len() {
-        if checkpoint.nodes[node_index].state.settled() {
-            continue;
-        }
-
-        let node = &plan.nodes[node_index];
-        if loops::inactive_round(node, &checkpoint, &positions) {
-            checkpoint.nodes[node_index].state = NodeState::Skipped;
-            journal.save(&checkpoint).map_err(GraphError::Journal)?;
-            continue;
-        }
-        if let Some(spec) = &node.loop_body {
-            let terminal_decision = checkpoint.extensions.iter().any(|e| {
-                e == &format!("loop.{}.decision=stop", node.id)
-                    || e == &format!("loop.{}.decision=accept", node.id)
-            });
-            let body_settled = checkpoint
-                .nodes
-                .iter()
-                .filter(|n| n.round.as_ref().is_some_and(|r| r.loop_id == node.id))
-                .all(|n| n.state.settled());
-            if (structural_pause.is_none() || terminal_decision || body_settled)
-                && let Some(extension) = loops::settle(
-                    node_index,
-                    spec,
-                    &plan,
-                    &positions,
-                    &mut checkpoint,
-                    owner,
-                    journal,
-                )?
+    'schedule: loop {
+        plans::remaining(&mut checkpoint, &expanded, &effective_limits);
+        for node in &plan.nodes {
+            if (!checkpoint.cancelled || resume)
+                && checkpoint
+                    .nodes
+                    .iter()
+                    .any(|n| n.id == node.id && (n.handoff.is_some() || n.fragment.is_some()))
+                && let Some((next_expanded, next_plan, next_positions)) =
+                    plans::settle(node, &expanded, &mut checkpoint, None, &effective_limits)
             {
-                if let Err(reason) = loops::prepare_decision_extension(
-                    document,
-                    &checkpoint,
-                    &extension,
-                    &effective_limits,
-                ) {
-                    for ask in &mut checkpoint.nodes[node_index].loop_asks {
-                        ask.resolved = true;
-                    }
-                    loops::pause_invalid_decision(&mut checkpoint, &node.id, &reason, journal)?;
-                } else {
-                    return advance_inner(
-                        document,
-                        owner,
-                        journal,
-                        (limits, ceiling),
-                        budget,
-                        true,
-                        &[extension],
-                    );
-                }
-            }
-            continue;
-        }
-        let dependency = dependency_state(node, &plan, &checkpoint, &positions);
-        if let Some(state) = dependency {
-            if checkpoint.nodes[node_index].state != state {
-                checkpoint.nodes[node_index].state = state;
+                validate_expanded_rows(&checkpoint, &next_plan)?;
+                owner
+                    .validate_expansion(&next_expanded, &checkpoint)
+                    .map_err(GraphError::Run)?;
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
+                resume = false;
+                continue 'schedule;
             }
-            continue;
         }
-        if let Some(condition) = &node.condition {
-            if structural_pause.is_some() || checkpoint.pause_reason.is_some() {
+        if let Some(reason) = checkpoint
+            .nodes
+            .iter()
+            .find_map(|n| n.expansion_pause.clone())
+        {
+            checkpoint.pause_reason = Some(reason);
+        }
+        let structural_pause = if checkpoint.nodes.iter().all(|node| node.state.settled()) {
+            None
+        } else {
+            structural_limit_reason(&expanded, &plan, &effective_limits, &checkpoint.extensions)
+        };
+        if let Some(reason) = &structural_pause {
+            checkpoint.pause_reason = Some(reason.clone());
+            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+        }
+
+        close_resolved_loop_asks(&mut checkpoint, owner, journal)?;
+        if checkpoint.cancelled {
+            if !resume {
+                return Ok(GraphRun {
+                    status: GraphStatus::Cancelled,
+                    checkpoint,
+                    advance_error: None,
+                });
+            }
+            checkpoint.cancelled = false;
+            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+        }
+
+        for node_index in 0..plan.nodes.len() {
+            if checkpoint.nodes[node_index].state.settled() {
                 continue;
             }
-            let reason = if let GateCondition::Ci {
-                target,
-                timeout_seconds,
-                checks,
-            } = condition
-            {
-                let mut host = owner.ci_status();
-                let sampled = host.as_ref().and_then(|host| host.host_stamp());
-                let prior = checkpoint.nodes[node_index].ci.as_ref();
-                let mut anchor = prior.and_then(|e| e.first_observed_stamp.clone());
-                let mut reanchor_reason = prior.and_then(|e| e.clock_reanchor_reason.clone());
-                let mut reanchors = prior.map_or(0, |e| e.clock_reanchors);
-                const REANCHOR_LIMIT: u8 = 3;
-                if let Some(now) = &sampled {
-                    match &anchor {
-                        Some(first) if first.boot_identity != now.boot_identity => {
-                            anchor = Some(now.clone());
-                            reanchors = reanchors.saturating_add(1);
-                            reanchor_reason = Some("host boot changed".into());
-                        }
-                        Some(first) if now.host_monotonic_micros < first.host_monotonic_micros => {
-                            anchor = Some(now.clone());
-                            reanchors = reanchors.saturating_add(1);
-                            reanchor_reason = Some("host monotonic clock moved backwards".into());
-                        }
-                        None => {
-                            anchor = Some(now.clone());
-                            if prior.is_some() {
-                                reanchor_reason =
-                                    Some("previous checkpoint lacked a host stamp".into());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                let timed_out = prior.is_some()
-                    && sampled
-                        .as_ref()
-                        .zip(anchor.as_ref())
-                        .is_some_and(|(now, first)| {
-                            now.host_monotonic_micros
-                                .saturating_sub(first.host_monotonic_micros)
-                                >= timeout_seconds.saturating_mul(1_000_000)
-                        });
-                if reanchors > REANCHOR_LIMIT {
-                    if let Some(evidence) = checkpoint.nodes[node_index].ci.as_mut() {
-                        evidence.first_observed_stamp = anchor;
-                        evidence.clock_reanchors = reanchors;
-                        evidence.clock_reanchor_reason = reanchor_reason;
-                    }
-                    Some(format!(
-                        "timeout: clock re-anchor limit ({REANCHOR_LIMIT}) exceeded"
-                    ))
-                } else if timed_out {
-                    Some("timeout".into())
-                } else {
-                    let observation = host.as_mut().filter(|_| sampled.is_some()).map_or_else(
-                        || CiObservation {
-                            state: CiState::Unavailable,
-                            summary: "CI status or host clock unavailable".into(),
-                        },
-                        |host| host.observe_ci(target, checks),
-                    );
-                    let state = observation.state;
-                    checkpoint.nodes[node_index].ci = Some(CiEvidence {
-                        first_observed_stamp: anchor,
-                        clock_reanchors: reanchors,
-                        clock_reanchor_reason: reanchor_reason,
-                        state,
-                        summary: observation.summary,
-                    });
-                    match state {
-                        CiState::Pending => {
-                            checkpoint.nodes[node_index].state = NodeState::Running;
-                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                            continue;
-                        }
-                        CiState::Passed => None,
-                        CiState::Failed => Some("failed".into()),
-                        CiState::Unavailable => Some("unavailable".into()),
-                    }
-                }
-            } else {
-                gate_failure(condition, node, &checkpoint, &positions, &effective_budget)
-            };
-            let progress = &mut checkpoint.nodes[node_index];
-            progress.state = if reason.is_none() {
-                NodeState::Succeeded
-            } else {
-                NodeState::Failed
-            };
-            progress.gate = Some(GateResult {
-                passed: reason.is_none(),
-                reason,
-                on_fail: node.on_fail.clone(),
-            });
-            progress.outputs = Some(gate_outputs(progress.state == NodeState::Succeeded));
-            journal.save(&checkpoint).map_err(GraphError::Journal)?;
-            continue;
-        }
-        loop {
-            let progress = &checkpoint.nodes[node_index];
-            let route_index = match progress.attempts.last() {
-                None => 0,
-                Some(last) if last.state != AttemptState::Terminal => {
-                    usize::from(last.key.route_index)
-                }
-                Some(last)
-                    if last.outcome.is_some_and(|outcome| {
-                        outcome.allows_route_fallback(node.access, last.launched)
-                    }) =>
-                {
-                    progress.attempts.len()
-                }
-                Some(_) => break,
-            };
-            let route = node
-                .routes
-                .get(route_index)
-                .ok_or(GraphError::BadCheckpoint)?
-                .clone();
-            let key = AttemptKey {
-                graph_id: plan.graph_id.clone(),
-                node_id: node.id.clone(),
-                route_index: u16::try_from(route_index)
-                    .map_err(|_| GraphError::Invalid("route count"))?,
-            };
 
-            let needs_record = checkpoint.nodes[node_index]
-                .attempts
-                .last()
-                .is_none_or(|last| last.state == AttemptState::Terminal);
-            if needs_record {
-                let cap = effective_limits.node_prompt_bytes;
-                if node.access == AccessMode::WorktreeWrite
-                    && checkpoint.nodes.iter().enumerate().any(|(index, other)| {
-                        index != node_index
-                            && other.state == NodeState::Running
-                            && plan.nodes.iter().any(|peer| {
-                                peer.id == other.id && plans::writers_conflict(node, peer)
-                            })
-                    })
-                {
-                    break;
-                }
-                if effective_limits.concurrency.is_some_and(|cap| {
-                    checkpoint
-                        .nodes
-                        .iter()
-                        .enumerate()
-                        .filter(|(index, node)| {
-                            *index != node_index
-                                && node.state == NodeState::Running
-                                && node.ci.is_none()
-                        })
-                        .count()
-                        >= cap
-                }) {
-                    break;
-                }
-                update_usage_warnings(&mut checkpoint, &effective_budget);
-                if let Some(reason) = checkpoint
-                    .pause_reason
-                    .clone()
-                    .or_else(|| budget_reason(&checkpoint, &effective_budget))
-                {
-                    checkpoint.pause_reason = Some(reason);
-                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                    break;
-                }
-                if !node.inputs.is_empty() && render_input(node, &checkpoint, &positions, cap).1 {
-                    let reason = if node
-                        .prompt
-                        .len()
-                        .saturating_add(INPUT_OPEN.len())
-                        .saturating_add(INPUT_CLOSE.len())
-                        > cap
-                    {
-                        "node prompt leaves no room for upstream data"
-                    } else {
-                        "selected upstream outputs do not fit"
-                    };
-                    let progress = &mut checkpoint.nodes[node_index];
-                    progress.advance_error = Some(format!(
-                        "node {}: {reason}; increase node_prompt_bytes and restart the graph",
-                        node.id
-                    ));
-                    progress.state = NodeState::Failed;
-                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                    break;
-                }
-                checkpoint.nodes[node_index].attempts.push(GraphAttempt {
-                    key: key.clone(),
-                    route: route.clone(),
-                    state: AttemptState::Starting,
-                    attempt_ref: None,
-                    outcome: None,
-                    launched: true,
-                    launch_actor: owner.actor(),
-                    input_cap: (!node.inputs.is_empty()).then_some(cap),
-                    usage: None,
-                });
-                checkpoint.nodes[node_index].state = NodeState::Running;
+            let node = &plan.nodes[node_index];
+            if loops::inactive_round(node, &checkpoint, &positions) {
+                checkpoint.nodes[node_index].state = NodeState::Skipped;
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                continue;
             }
-
-            let stored_ref = checkpoint.nodes[node_index]
-                .attempts
-                .last()
-                .and_then(|last| last.attempt_ref.clone());
-            let launch_actor = checkpoint.nodes[node_index]
-                .attempts
-                .last()
-                .map_or_else(|| owner.actor(), |last| last.launch_actor.clone());
-            let input_cap = checkpoint.nodes[node_index]
-                .attempts
-                .last()
-                .and_then(|attempt| attempt.input_cap)
-                .unwrap_or(effective_limits.node_prompt_bytes);
-            let prompt = render_input(node, &checkpoint, &positions, input_cap).0;
-            let observation = owner
-                .observe_or_start(
-                    &key,
-                    NodeInput {
-                        title: node.title.as_deref().unwrap_or(&node.id),
-                        prompt: &prompt,
-                        required_verdict: node.required_verdict.as_deref(),
-                    },
-                    &route,
-                    node.access,
-                    node.worktree.as_deref(),
-                    Replay {
-                        delivery: node.delivery.as_ref(),
-                        stored_ref: stored_ref.as_deref(),
-                        launch_actor: &launch_actor,
-                    },
-                )
-                .map_err(GraphError::Run)?;
-            let mut usage_error = None;
-            let mut cost_error = None;
-            let usage = if let AttemptObservation::Terminal {
-                attempt_ref: Some(reference),
-                ..
-            } = &observation
-            {
-                Some(match owner.usage(reference) {
-                    Ok(usage) => usage,
-                    Err(error) => {
-                        usage_error = Some(error.to_string());
-                        cost_error = owner.cost_unknown_reason();
-                        AttemptUsage::default()
+            if let Some(spec) = &node.loop_body {
+                let terminal_decision = checkpoint.extensions.iter().any(|e| {
+                    e == &format!("loop.{}.decision=stop", node.id)
+                        || e == &format!("loop.{}.decision=accept", node.id)
+                });
+                let body_settled = checkpoint
+                    .nodes
+                    .iter()
+                    .filter(|n| n.round.as_ref().is_some_and(|r| r.loop_id == node.id))
+                    .all(|n| n.state.settled());
+                if (structural_pause.is_none() || terminal_decision || body_settled)
+                    && let Some(extension) = loops::settle(
+                        node_index,
+                        spec,
+                        &plan,
+                        &positions,
+                        &mut checkpoint,
+                        owner,
+                        journal,
+                    )?
+                {
+                    if let Err(reason) = loops::prepare_decision_extension(
+                        document,
+                        &checkpoint,
+                        &extension,
+                        &effective_limits,
+                    ) {
+                        for ask in &mut checkpoint.nodes[node_index].loop_asks {
+                            ask.resolved = true;
+                        }
+                        loops::pause_invalid_decision(&mut checkpoint, &node.id, &reason, journal)?;
+                    } else {
+                        return advance_inner(
+                            document,
+                            owner,
+                            journal,
+                            (limits, ceiling),
+                            budget,
+                            true,
+                            &[extension],
+                        );
                     }
-                })
-            } else {
-                if matches!(
-                    &observation,
-                    AttemptObservation::Terminal { launched: true, .. }
-                ) {
-                    cost_error = owner.cost_unknown_reason();
                 }
-                None
-            };
-            let mut settled_result = None;
-            let should_continue = {
+                continue;
+            }
+            let dependency = dependency_state(node, &plan, &checkpoint, &positions);
+            if let Some(state) = dependency {
+                if checkpoint.nodes[node_index].state != state {
+                    checkpoint.nodes[node_index].state = state;
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                }
+                continue;
+            }
+            if let Some(condition) = &node.condition {
+                if structural_pause.is_some() || checkpoint.pause_reason.is_some() {
+                    continue;
+                }
+                let reason = if let GateCondition::Ci {
+                    target,
+                    timeout_seconds,
+                    checks,
+                } = condition
+                {
+                    let mut host = owner.ci_status();
+                    let sampled = host.as_ref().and_then(|host| host.host_stamp());
+                    let prior = checkpoint.nodes[node_index].ci.as_ref();
+                    let mut anchor = prior.and_then(|e| e.first_observed_stamp.clone());
+                    let mut reanchor_reason = prior.and_then(|e| e.clock_reanchor_reason.clone());
+                    let mut reanchors = prior.map_or(0, |e| e.clock_reanchors);
+                    const REANCHOR_LIMIT: u8 = 3;
+                    if let Some(now) = &sampled {
+                        match &anchor {
+                            Some(first) if first.boot_identity != now.boot_identity => {
+                                anchor = Some(now.clone());
+                                reanchors = reanchors.saturating_add(1);
+                                reanchor_reason = Some("host boot changed".into());
+                            }
+                            Some(first)
+                                if now.host_monotonic_micros < first.host_monotonic_micros =>
+                            {
+                                anchor = Some(now.clone());
+                                reanchors = reanchors.saturating_add(1);
+                                reanchor_reason =
+                                    Some("host monotonic clock moved backwards".into());
+                            }
+                            None => {
+                                anchor = Some(now.clone());
+                                if prior.is_some() {
+                                    reanchor_reason =
+                                        Some("previous checkpoint lacked a host stamp".into());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let timed_out = prior.is_some()
+                        && sampled
+                            .as_ref()
+                            .zip(anchor.as_ref())
+                            .is_some_and(|(now, first)| {
+                                now.host_monotonic_micros
+                                    .saturating_sub(first.host_monotonic_micros)
+                                    >= timeout_seconds.saturating_mul(1_000_000)
+                            });
+                    if reanchors > REANCHOR_LIMIT {
+                        if let Some(evidence) = checkpoint.nodes[node_index].ci.as_mut() {
+                            evidence.first_observed_stamp = anchor;
+                            evidence.clock_reanchors = reanchors;
+                            evidence.clock_reanchor_reason = reanchor_reason;
+                        }
+                        Some(format!(
+                            "timeout: clock re-anchor limit ({REANCHOR_LIMIT}) exceeded"
+                        ))
+                    } else if timed_out {
+                        Some("timeout".into())
+                    } else {
+                        let observation = host.as_mut().filter(|_| sampled.is_some()).map_or_else(
+                            || CiObservation {
+                                state: CiState::Unavailable,
+                                summary: "CI status or host clock unavailable".into(),
+                            },
+                            |host| host.observe_ci(target, checks),
+                        );
+                        let state = observation.state;
+                        checkpoint.nodes[node_index].ci = Some(CiEvidence {
+                            first_observed_stamp: anchor,
+                            clock_reanchors: reanchors,
+                            clock_reanchor_reason: reanchor_reason,
+                            state,
+                            summary: observation.summary,
+                        });
+                        match state {
+                            CiState::Pending => {
+                                checkpoint.nodes[node_index].state = NodeState::Running;
+                                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                                continue;
+                            }
+                            CiState::Passed => None,
+                            CiState::Failed => Some("failed".into()),
+                            CiState::Unavailable => Some("unavailable".into()),
+                        }
+                    }
+                } else {
+                    gate_failure(condition, node, &checkpoint, &positions, &effective_budget)
+                };
                 let progress = &mut checkpoint.nodes[node_index];
-                let attempt = progress
+                progress.state = if reason.is_none() {
+                    NodeState::Succeeded
+                } else {
+                    NodeState::Failed
+                };
+                progress.gate = Some(GateResult {
+                    passed: reason.is_none(),
+                    reason,
+                    on_fail: node.on_fail.clone(),
+                });
+                progress.outputs = Some(gate_outputs(progress.state == NodeState::Succeeded));
+                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                continue;
+            }
+            loop {
+                let progress = &checkpoint.nodes[node_index];
+                let route_index = match progress.attempts.last() {
+                    None => 0,
+                    Some(last) if last.state != AttemptState::Terminal => {
+                        usize::from(last.key.route_index)
+                    }
+                    Some(last)
+                        if last.outcome.is_some_and(|outcome| {
+                            outcome.allows_route_fallback(node.access, last.launched)
+                        }) =>
+                    {
+                        progress.attempts.len()
+                    }
+                    Some(_) => break,
+                };
+                let route = node
+                    .routes
+                    .get(route_index)
+                    .ok_or(GraphError::BadCheckpoint)?
+                    .clone();
+                let key = AttemptKey {
+                    graph_id: plan.graph_id.clone(),
+                    node_id: node.id.clone(),
+                    route_index: u16::try_from(route_index)
+                        .map_err(|_| GraphError::Invalid("route count"))?,
+                };
+
+                let needs_record = checkpoint.nodes[node_index]
                     .attempts
-                    .last_mut()
-                    .ok_or(GraphError::BadCheckpoint)?;
-                match observation {
-                    AttemptObservation::Pending { attempt_ref } => {
-                        attempt.state = AttemptState::Running;
-                        attempt.attempt_ref = attempt_ref;
-                        progress.state = NodeState::Running;
-                        false
+                    .last()
+                    .is_none_or(|last| last.state == AttemptState::Terminal);
+                if needs_record {
+                    let cap = effective_limits.node_prompt_bytes;
+                    if node.access == AccessMode::WorktreeWrite
+                        && checkpoint.nodes.iter().enumerate().any(|(index, other)| {
+                            index != node_index
+                                && other.state == NodeState::Running
+                                && plan.nodes.iter().any(|peer| {
+                                    peer.id == other.id && plans::writers_conflict(node, peer)
+                                })
+                        })
+                    {
+                        break;
                     }
-                    AttemptObservation::Unknown { attempt_ref } => {
-                        attempt.state = AttemptState::Unresolved;
-                        attempt.attempt_ref = attempt_ref;
-                        progress.state = NodeState::Running;
-                        false
+                    if effective_limits.concurrency.is_some_and(|cap| {
+                        checkpoint
+                            .nodes
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, node)| {
+                                *index != node_index
+                                    && node.state == NodeState::Running
+                                    && node.ci.is_none()
+                            })
+                            .count()
+                            >= cap
+                    }) {
+                        break;
                     }
-                    AttemptObservation::Terminal {
-                        attempt_ref,
-                        outcome,
-                        launched,
-                        result,
-                        result_warning,
-                        result_path,
-                        branch,
-                        commit,
-                    } => {
-                        settled_result = result.clone();
-                        attempt.usage = usage;
-                        attempt.launched = launched;
-                        attempt.state = AttemptState::Terminal;
-                        attempt.attempt_ref = attempt_ref;
-                        // Provider success alone does not satisfy an explicit result contract.
-                        let outcome = if result_warning.is_some() {
-                            AttemptOutcome::OtherFailure
-                        } else if outcome == AttemptOutcome::Succeeded
-                            && node.required_verdict.is_some()
-                            && !(plans::writer(node)
-                                && result.as_ref().is_some_and(|capture| {
-                                    plans::handoff(capture).ok().flatten().is_some()
-                                }))
-                            && !result
-                                .as_ref()
-                                .is_some_and(|capture| capture.matched_required)
+                    update_usage_warnings(&mut checkpoint, &effective_budget);
+                    if let Some(reason) = checkpoint
+                        .pause_reason
+                        .clone()
+                        .or_else(|| budget_reason(&checkpoint, &effective_budget))
+                    {
+                        checkpoint.pause_reason = Some(reason);
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        break;
+                    }
+                    if !node.inputs.is_empty() && render_input(node, &checkpoint, &positions, cap).1
+                    {
+                        let reason = if node
+                            .prompt
+                            .len()
+                            .saturating_add(INPUT_OPEN.len())
+                            .saturating_add(INPUT_CLOSE.len())
+                            > cap
                         {
-                            AttemptOutcome::TaskFailed
+                            "node prompt leaves no room for upstream data"
                         } else {
-                            outcome
+                            "selected upstream outputs do not fit"
                         };
-                        attempt.outcome = Some(outcome);
-                        progress.outputs = Some(make_outputs(
-                            result.as_ref(),
+                        let progress = &mut checkpoint.nodes[node_index];
+                        progress.advance_error = Some(format!(
+                            "node {}: {reason}; increase node_prompt_bytes and restart the graph",
+                            node.id
+                        ));
+                        progress.state = NodeState::Failed;
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        break;
+                    }
+                    checkpoint.nodes[node_index].attempts.push(GraphAttempt {
+                        key: key.clone(),
+                        route: route.clone(),
+                        state: AttemptState::Starting,
+                        attempt_ref: None,
+                        outcome: None,
+                        launched: true,
+                        launch_actor: owner.actor(),
+                        input_cap: (!node.inputs.is_empty()).then_some(cap),
+                        usage: None,
+                    });
+                    checkpoint.nodes[node_index].state = NodeState::Running;
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                }
+
+                let stored_ref = checkpoint.nodes[node_index]
+                    .attempts
+                    .last()
+                    .and_then(|last| last.attempt_ref.clone());
+                let launch_actor = checkpoint.nodes[node_index]
+                    .attempts
+                    .last()
+                    .map_or_else(|| owner.actor(), |last| last.launch_actor.clone());
+                let input_cap = checkpoint.nodes[node_index]
+                    .attempts
+                    .last()
+                    .and_then(|attempt| attempt.input_cap)
+                    .unwrap_or(effective_limits.node_prompt_bytes);
+                let prompt = render_input(node, &checkpoint, &positions, input_cap).0;
+                let observation = owner
+                    .observe_or_start(
+                        &key,
+                        NodeInput {
+                            title: node.title.as_deref().unwrap_or(&node.id),
+                            prompt: &prompt,
+                            required_verdict: node.required_verdict.as_deref(),
+                        },
+                        &route,
+                        node.access,
+                        node.worktree.as_deref(),
+                        Replay {
+                            delivery: node.delivery.as_ref(),
+                            stored_ref: stored_ref.as_deref(),
+                            launch_actor: &launch_actor,
+                        },
+                    )
+                    .map_err(GraphError::Run)?;
+                let mut usage_error = None;
+                let mut cost_error = None;
+                let usage = if let AttemptObservation::Terminal {
+                    attempt_ref: Some(reference),
+                    ..
+                } = &observation
+                {
+                    Some(match owner.usage(reference) {
+                        Ok(usage) => usage,
+                        Err(error) => {
+                            usage_error = Some(error.to_string());
+                            cost_error = owner.cost_unknown_reason();
+                            AttemptUsage::default()
+                        }
+                    })
+                } else {
+                    if matches!(
+                        &observation,
+                        AttemptObservation::Terminal { launched: true, .. }
+                    ) {
+                        cost_error = owner.cost_unknown_reason();
+                    }
+                    None
+                };
+                let mut settled_result = None;
+                let should_continue = {
+                    let progress = &mut checkpoint.nodes[node_index];
+                    let attempt = progress
+                        .attempts
+                        .last_mut()
+                        .ok_or(GraphError::BadCheckpoint)?;
+                    match observation {
+                        AttemptObservation::Pending { attempt_ref } => {
+                            attempt.state = AttemptState::Running;
+                            attempt.attempt_ref = attempt_ref;
+                            progress.state = NodeState::Running;
+                            false
+                        }
+                        AttemptObservation::Unknown { attempt_ref } => {
+                            attempt.state = AttemptState::Unresolved;
+                            attempt.attempt_ref = attempt_ref;
+                            progress.state = NodeState::Running;
+                            false
+                        }
+                        AttemptObservation::Terminal {
+                            attempt_ref,
+                            outcome,
+                            launched,
+                            result,
                             result_warning,
                             result_path,
                             branch,
                             commit,
-                        ));
-                        match outcome {
-                            AttemptOutcome::Succeeded => {
-                                progress.state = NodeState::Succeeded;
-                                false
-                            }
-                            AttemptOutcome::AuthRequired
-                            | AttemptOutcome::UsageLimited
-                            | AttemptOutcome::AdapterUnavailable => {
-                                if !outcome.allows_route_fallback(node.access, launched)
-                                    || route_index + 1 == node.routes.len()
-                                {
+                        } => {
+                            settled_result = result.clone();
+                            attempt.usage = usage;
+                            attempt.launched = launched;
+                            attempt.state = AttemptState::Terminal;
+                            attempt.attempt_ref = attempt_ref;
+                            // Provider success alone does not satisfy an explicit result contract.
+                            let outcome = if result_warning.is_some() {
+                                AttemptOutcome::OtherFailure
+                            } else if outcome == AttemptOutcome::Succeeded
+                                && node.required_verdict.is_some()
+                                && !(plans::writer(node)
+                                    && result.as_ref().is_some_and(|capture| {
+                                        plans::handoff(capture).ok().flatten().is_some()
+                                    }))
+                                && !result
+                                    .as_ref()
+                                    .is_some_and(|capture| capture.matched_required)
+                            {
+                                AttemptOutcome::TaskFailed
+                            } else {
+                                outcome
+                            };
+                            attempt.outcome = Some(outcome);
+                            progress.outputs = Some(make_outputs(
+                                result.as_ref(),
+                                result_warning,
+                                result_path,
+                                branch,
+                                commit,
+                            ));
+                            match outcome {
+                                AttemptOutcome::Succeeded => {
+                                    progress.state = NodeState::Succeeded;
+                                    false
+                                }
+                                AttemptOutcome::AuthRequired
+                                | AttemptOutcome::UsageLimited
+                                | AttemptOutcome::AdapterUnavailable => {
+                                    if !outcome.allows_route_fallback(node.access, launched)
+                                        || route_index + 1 == node.routes.len()
+                                    {
+                                        progress.state = NodeState::Failed;
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                }
+                                AttemptOutcome::TaskFailed | AttemptOutcome::OtherFailure => {
                                     progress.state = NodeState::Failed;
                                     false
-                                } else {
-                                    true
                                 }
-                            }
-                            AttemptOutcome::TaskFailed | AttemptOutcome::OtherFailure => {
-                                progress.state = NodeState::Failed;
-                                false
                             }
                         }
                     }
+                };
+                if let Some(reason) = usage_error {
+                    checkpoint.usage_events.push(UnknownUsageEvent {
+                        node_id: node.id.clone(),
+                        route_index: key.route_index,
+                        metric: "telemetry".to_owned(),
+                        reason: Some(reason),
+                    });
                 }
-            };
-            if let Some(reason) = usage_error {
-                checkpoint.usage_events.push(UnknownUsageEvent {
-                    node_id: node.id.clone(),
-                    route_index: key.route_index,
-                    metric: "telemetry".to_owned(),
-                    reason: Some(reason),
-                });
-            }
-            if let Some(reason) = cost_error {
-                checkpoint.usage_events.push(UnknownUsageEvent {
-                    node_id: node.id.clone(),
-                    route_index: key.route_index,
-                    metric: "cost_usd".to_owned(),
-                    reason: Some(reason),
-                });
-            }
-            update_usage_warnings(&mut checkpoint, &effective_budget);
-            let appended = if settled_result.is_some() || node.plan.is_some() {
-                plans::settle(
-                    node,
-                    &expanded,
-                    &mut checkpoint,
-                    settled_result.as_ref(),
-                    &effective_limits,
-                )
-            } else {
-                false
-            };
-            if appended {
-                let preview =
-                    plans::expand(document, &checkpoint.extensions, &checkpoint.expansions)
-                        .map_err(GraphError::Invalid)?;
-                owner
-                    .validate_expansion(&preview, &checkpoint)
-                    .map_err(GraphError::Run)?;
-            }
-            journal.save(&checkpoint).map_err(GraphError::Journal)?;
-            if appended {
-                return advance_inner(
-                    document,
-                    owner,
-                    journal,
-                    (limits, ceiling),
-                    budget,
-                    false,
-                    &[],
-                );
-            }
-            if !should_continue {
-                break;
+                if let Some(reason) = cost_error {
+                    checkpoint.usage_events.push(UnknownUsageEvent {
+                        node_id: node.id.clone(),
+                        route_index: key.route_index,
+                        metric: "cost_usd".to_owned(),
+                        reason: Some(reason),
+                    });
+                }
+                update_usage_warnings(&mut checkpoint, &effective_budget);
+                let appended = if settled_result.is_some() || node.plan.is_some() {
+                    plans::settle(
+                        node,
+                        &expanded,
+                        &mut checkpoint,
+                        settled_result.as_ref(),
+                        &effective_limits,
+                    )
+                } else {
+                    None
+                };
+                if let Some((next_expanded, next_plan, _)) = &appended {
+                    validate_expanded_rows(&checkpoint, next_plan)?;
+                    owner
+                        .validate_expansion(next_expanded, &checkpoint)
+                        .map_err(GraphError::Run)?;
+                }
+                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                if let Some((next_expanded, next_plan, next_positions)) = appended {
+                    (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
+                    resume = false;
+                    continue 'schedule;
+                }
+                if !should_continue {
+                    break;
+                }
             }
         }
-    }
 
-    close_resolved_loop_asks(&mut checkpoint, owner, journal)?;
-    loops::refresh_pause(&mut checkpoint);
-    let all_settled = checkpoint.nodes.iter().all(|node| node.state.settled());
-    if all_settled
-        && checkpoint.nodes.iter().all(|n| n.expansion_pause.is_none())
-        && checkpoint.pause_reason.take().is_some()
-    {
-        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+        close_resolved_loop_asks(&mut checkpoint, owner, journal)?;
+        loops::refresh_pause(&mut checkpoint);
+        let all_settled = checkpoint.nodes.iter().all(|node| node.state.settled());
+        if all_settled
+            && checkpoint.nodes.iter().all(|n| n.expansion_pause.is_none())
+            && checkpoint.pause_reason.take().is_some()
+        {
+            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+        }
+        if document.delivery == Some(provenant_records::run::DeliveryMode::Pr)
+            && !checkpoint.delivered
+            && checkpoint.successful()
+        {
+            checkpoint.pull_request = owner
+                .deliver_graph(document, &checkpoint)
+                .map_err(GraphError::Run)?;
+            checkpoint.delivered = true;
+            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+        }
+        let status = if checkpoint.pause_reason.is_some() {
+            GraphStatus::Paused
+        } else if all_settled {
+            GraphStatus::Complete
+        } else {
+            GraphStatus::Pending
+        };
+        let advance_error = checkpoint
+            .nodes
+            .iter()
+            .find_map(|node| node.advance_error.clone());
+        return Ok(GraphRun {
+            status,
+            checkpoint,
+            advance_error,
+        });
     }
-    if document.delivery == Some(provenant_records::run::DeliveryMode::Pr)
-        && !checkpoint.delivered
-        && checkpoint.successful()
-    {
-        checkpoint.pull_request = owner
-            .deliver_graph(document, &checkpoint)
-            .map_err(GraphError::Run)?;
-        checkpoint.delivered = true;
-        journal.save(&checkpoint).map_err(GraphError::Journal)?;
-    }
-    let status = if checkpoint.pause_reason.is_some() {
-        GraphStatus::Paused
-    } else if all_settled {
-        GraphStatus::Complete
-    } else {
-        GraphStatus::Pending
-    };
-    let advance_error = checkpoint
-        .nodes
-        .iter()
-        .find_map(|node| node.advance_error.clone());
-    Ok(GraphRun {
-        status,
-        checkpoint,
-        advance_error,
-    })
 }
 
 /// A failure target must declare its gate as a dependency. Other dependants
@@ -3125,6 +3118,22 @@ fn render_input(
     (prompt, false)
 }
 
+fn validate_expanded_rows<R: Error + 'static, J: Error + 'static>(
+    checkpoint: &GraphCheckpoint,
+    plan: &PlannedGraph,
+) -> Result<(), GraphError<R, J>> {
+    if checkpoint.nodes.len() != plan.nodes.len()
+        || checkpoint
+            .nodes
+            .iter()
+            .zip(&plan.nodes)
+            .any(|(progress, node)| progress.id != node.id || progress.round != node.round)
+    {
+        return Err(GraphError::BadCheckpoint);
+    }
+    Ok(())
+}
+
 fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
     checkpoint: &GraphCheckpoint,
     plan: &PlannedGraph,
@@ -3331,6 +3340,7 @@ mod tests {
         usage: AttemptUsage,
         usage_fails: bool,
         refuse_expansion_target: bool,
+        expansion_validations: usize,
     }
 
     impl AttemptOwner for FakeOwner {
@@ -3344,6 +3354,7 @@ mod tests {
             document: &GraphDocument,
             _checkpoint: &GraphCheckpoint,
         ) -> Result<(), Self::Error> {
+            self.expansion_validations += 1;
             if self.refuse_expansion_target
                 && document.nodes.iter().any(|node| {
                     matches!(

@@ -126,7 +126,7 @@ fn skipped_writer_does_not_connect_separate_checkouts_during_expansion() {
     checkpoint.nodes.iter_mut().find(|n| n.id == "skipped").unwrap().state = NodeState::Skipped;
     let planner = plan.nodes.iter().find(|n| n.id == "plan").unwrap();
     let mut child = slice("required", &["src"]); child["access"] = json!("worktree_write"); child["worktree"] = json!(".worktrees/new");
-    assert!(plans::settle(planner, &doc, &mut checkpoint, Some(&capture(&result(vec![child]))), &Default::default()), "{:?}", checkpoint.pause_reason);
+    assert!(plans::settle(planner, &doc, &mut checkpoint, Some(&capture(&result(vec![child]))), &Default::default()).is_some(), "{:?}", checkpoint.pause_reason);
     assert_eq!(checkpoint.expansions[0].nodes[0].worktree.as_deref(), Some(".worktrees/active"));
 }
 
@@ -400,8 +400,46 @@ fn nested_plan_rewires_all_consumers_and_keeps_original_digest() {
     assert_eq!(owner.calls[2].0.node_id, "plan--nested--inner");
     assert_eq!(owner.calls[3].0.node_id, "after");
     assert_eq!(run.checkpoint.expansions.len(), 2);
+    let recursive: GraphCheckpoint = serde_json::from_str(include_str!("nested-plan-recursive.json")).unwrap();
+    assert_eq!(run.checkpoint, recursive);
     let (base, _) = validate_plan(&doc).unwrap();
     assert_eq!(run.checkpoint.plan_digest, CanonicalV1::record_digest("fabric-graph-plan", 1, &base).unwrap().to_string());
+}
+
+#[test]
+fn expansion_at_node_budget_reads_journal_once() {
+    #[derive(Default)]
+    struct CountingJournal { inner: MemoryJournal, reads: usize, saves: usize }
+    impl GraphJournal for CountingJournal {
+        type Error = std::convert::Infallible;
+        fn load(&mut self, id: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            self.reads += 1;
+            self.inner.load(id)
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            self.saves += 1;
+            self.inner.save(checkpoint)
+        }
+    }
+    let limits = crate::config::GraphLimits::default();
+    let count = limits.nodes / 2;
+    let nodes = (0..count).map(|index| {
+        let mut node = planner(1).nodes.remove(0);
+        node.id = format!("plan{index}");
+        node
+    }).collect();
+    let doc = graph(nodes);
+    let output = result(vec![slice("child", &["src"])]);
+    let mut owner = fixture_owner(&vec![output.as_str(); count]);
+    owner.observations.extend((0..count).map(|_| terminal_with_result(AttemptOutcome::Succeeded, "done")));
+    let mut journal = CountingJournal::default();
+    let run = advance_with_budget(&doc, &mut owner, &mut journal, &limits, &limits, &Default::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert_eq!(run.checkpoint.nodes.len(), limits.nodes);
+    assert_eq!(run.checkpoint.expansions.len(), count);
+    assert_eq!(journal.reads, 1);
+    assert_eq!(owner.expansion_validations, count);
+    assert_eq!(journal.saves, 1 + count * 4);
 }
 
 #[test]
