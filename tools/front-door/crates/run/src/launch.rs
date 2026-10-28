@@ -96,6 +96,12 @@ fn applied_write_grants(
     Ok(admission::AppliedWriteGrants {
         grants,
         git_grants_digest,
+        granted_tracking_ref: confinement.writer.as_ref().map(|writer| {
+            format!(
+                "refs/remotes/origin/{}",
+                writer.branch.as_str().trim_start_matches("refs/heads/")
+            )
+        }),
     })
 }
 /// Provider-decoded facts from a completed capture.
