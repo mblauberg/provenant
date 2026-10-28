@@ -100,7 +100,10 @@ fn pacing_override_persists_replaces_and_clears() -> Result {
         "schema_version = 1\n[domains.accounts.entries.claude-pro]\nadapter='claude'\nlabel='pro'\nkey='pro'\ndirectory='/tmp/pro'\n[domains.routing.pacing.accounts.pro]\npolicy = 'pace'\nwindows = ['five_hour']\nreserve = { five_hour = 15 }\n",
     )?;
     let list = call(&rig, &["route", "list"], 0)?;
-    assert_eq!(list["data"]["configured_accounts"]["pro"]["policy"], "pace");
+    assert_eq!(
+        list["data"]["configured_accounts"]["claude/pro"]["policy"],
+        "pace"
+    );
     call(
         &rig,
         &[
@@ -150,7 +153,7 @@ fn pacing_override_persists_replaces_and_clears() -> Result {
         .as_array()
         .ok_or("overrides")?;
     assert_eq!(overrides.len(), 2);
-    assert_eq!(overrides[0]["account"], "pro");
+    assert_eq!(overrides[0]["account"], "claude/pro");
     assert_eq!(overrides[0]["policy"], "pace");
     assert!(overrides[0]["expires_unix_seconds"].as_i64().is_some());
     call(&rig, &["route", "pacing", "override", "clear"], 0)?;
@@ -159,6 +162,59 @@ fn pacing_override_persists_replaces_and_clears() -> Result {
         config["data"]["domains"]["routing"]["pacing_overrides"],
         serde_json::json!([])
     );
+    Ok(())
+}
+
+#[test]
+fn pacing_override_resolves_labels_and_rejects_ambiguous_keys() -> Result {
+    let rig = rig()?;
+    fs::create_dir_all(&rig.state)?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.accounts.entries.one]\nadapter='claude'\nlabel='work'\nkey='shared'\ndirectory='/tmp/a'\n[domains.accounts.entries.two]\nadapter='codex'\nlabel='personal'\nkey='shared'\ndirectory='/tmp/b'\n[[domains.routing.pacing_overrides]]\naccount='work'\npolicy='pace'\nexpires_unix_seconds=2000000000\n",
+    )?;
+    let rejected = call(
+        &rig,
+        &[
+            "route",
+            "pacing",
+            "override",
+            "--account",
+            "shared",
+            "--policy",
+            "spend",
+            "--until",
+            "2h",
+        ],
+        2,
+    )?;
+    assert!(
+        rejected["error"]["message"]
+            .as_str()
+            .ok_or("error")?
+            .contains("ambiguous")
+    );
+    call(
+        &rig,
+        &[
+            "route",
+            "pacing",
+            "override",
+            "--account",
+            "claude/shared",
+            "--policy",
+            "spend",
+            "--until",
+            "2h",
+        ],
+        0,
+    )?;
+    let config = call(&rig, &["config", "show"], 0)?;
+    let overrides = config["data"]["domains"]["routing"]["pacing_overrides"]
+        .as_array()
+        .ok_or("overrides")?;
+    assert_eq!(overrides.len(), 1);
+    assert_eq!(overrides[0]["account"], "claude/shared");
     Ok(())
 }
 #[test]
@@ -218,7 +274,7 @@ fn cached_account_pacing_is_visible_without_probing() -> Result {
             "pacing",
             "override",
             "--account",
-            "opaque-one",
+            "michael",
             "--policy",
             "spend",
             "--until",
@@ -251,12 +307,12 @@ fn pacing_profile_account_labels_resolve_and_unknown_names_fail() -> Result {
     )?;
     let list = call(&rig, &["route", "list"], 0)?;
     assert_eq!(
-        list["data"]["configured_accounts"]["opaque-one"]["deadline"]["reset_of"],
-        "opaque-two"
+        list["data"]["configured_accounts"]["claude/opaque-one"]["deadline"]["reset_of"],
+        "claude/opaque-two"
     );
     assert_eq!(
         list["data"]["configured_free"]["opencode"]["deadline"]["reset_of"],
-        "opaque-one"
+        "claude/opaque-one"
     );
     for profile in [
         "[domains.routing.pacing.accounts.missing]\npolicy='pace'\n",

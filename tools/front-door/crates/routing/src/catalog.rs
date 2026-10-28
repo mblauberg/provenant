@@ -179,6 +179,10 @@ impl From<FixedDeadline> for String {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(default)]
+/// Routing settings. Library callers should resolve account selectors to
+/// `adapter/key` before routing. Bare account keys remain supported for
+/// registry-free callers and can match accounts across adapters, including
+/// profile, reset reference and override selectors.
 pub struct RoutingConfig {
     /// Silence the advisory for Opus implementation lanes.
     pub suppress_opus_writer_warning: bool,
@@ -431,7 +435,10 @@ impl DomainConfig for RoutingConfig {
             }
         }
         for (index, override_) in self.pacing_overrides.iter().enumerate() {
-            if override_.account.as_deref().is_some_and(|a| !identifier(a))
+            if override_
+                .account
+                .as_deref()
+                .is_some_and(|a| !account_identifier(a))
                 || override_.account.is_some() && override_.provider.is_some()
                 || override_.provider.as_deref().is_some_and(|p| {
                     !provenant_providers::REGISTRY

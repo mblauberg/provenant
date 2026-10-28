@@ -26,8 +26,12 @@ pub enum RoutingError {
     ConfidentialModel,
     #[error("no eligible pool member: {exclusions:?}")]
     NoEligiblePoolMember { exclusions: Vec<String> },
-    #[error("{model} does not support the requested effort; {support}")]
-    UnsupportedEffort { model: String, support: String },
+    #[error("{model} does not support the requested effort {effort}; {support}")]
+    UnsupportedEffort {
+        model: String,
+        effort: String,
+        support: String,
+    },
     #[error("invalid catalogue")]
     Catalogue,
     #[error("invalid availability record")]

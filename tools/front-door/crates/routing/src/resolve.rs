@@ -347,6 +347,8 @@ fn effective_profile<'a>(
     &'static str,
     Option<i64>,
 ) {
+    // Direct library callers may supply legacy bare keys. These match any
+    // adapter; callers with an account registry should qualify them first.
     let account_profile = account.and_then(|a| {
         context
             .config
@@ -365,7 +367,15 @@ fn effective_profile<'a>(
     let profile = account_profile.or(free_profile);
     let active = context.config.pacing_overrides.iter().rev().find(|o| {
         o.expires_unix_seconds > context.now_seconds()
-            && o.account.as_deref().is_none_or(|a| Some(a) == account)
+            && o.account.as_deref().is_none_or(|selector| {
+                account.is_some_and(|key| {
+                    selector
+                        .split_once('/')
+                        .map_or(selector == key, |(adapter, selected)| {
+                            adapter == model.adapter() && selected == key
+                        })
+                })
+            })
             && o.provider.as_deref().is_none_or(|p| p == model.adapter())
     });
     if let Some(o) = active {
@@ -501,6 +511,8 @@ fn reference_observation<'a>(
         .quota
         .iter()
         .filter(|o| {
+            // Bare keys are supported for direct library callers without a
+            // registry and can match any adapter. Qualify when one is available.
             deadline.reset_of.split_once('/').map_or_else(
                 || o.snapshot.account.account_key == deadline.reset_of,
                 |(adapter, key)| {
@@ -994,7 +1006,7 @@ fn admissible<'c>(
         .find(|r| r.adapter.id() == model.adapter())
         .ok_or(RoutingError::UnknownAdapter)?;
     let entry = context.catalogue.model(model);
-    if effort.is_some_and(|e| {
+    if let Some(effort) = effort.filter(|e| {
         !crate::request::effort_valid(e)
             || entry.is_none_or(|row| !row.efforts.iter().any(|v| v == e))
     }) {
@@ -1015,6 +1027,7 @@ fn admissible<'c>(
         };
         return Err(RoutingError::UnsupportedEffort {
             model: model.as_str().to_owned(),
+            effort: effort.to_owned(),
             support,
         });
     }

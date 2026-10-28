@@ -386,11 +386,46 @@ fn claude_fixture() -> Result<TestRig> {
 }
 
 fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
+    {
+        let rig = claude_fixture()?;
+        let cleanup = rig.process_cleanup();
+        let mut config = OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?;
+        writeln!(
+            config,
+            "\n[domains.routing.pacing.accounts.pro]\ndeadline={{reset_of='removed'}}"
+        )?;
+        let prompt = rig.root.join("prompt.md");
+        fs::write(&prompt, "Reply OK.")?;
+        let out = rig.command(&[
+            "dispatch",
+            "--operation-id",
+            "stale-profile",
+            "--model",
+            "claude/claude-sonnet-5-5",
+            "--account",
+            "pro",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--json",
+        ])?;
+        assert_ne!(code(&out), 0);
+        let result: Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert!(
+            result["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("removed")),
+            "{result}"
+        );
+        cleanup.disarm();
+    }
     for (model, writer, suppress) in [
         ("claude/claude-opus-5-5", true, false),
         ("claude/claude-opus-5-5", true, true),
         ("claude/claude-opus-5-5", false, false),
         ("claude/claude-sonnet-5-5", true, false),
+        ("claude/claude-sonnet-5-6", false, false),
     ] {
         let rig = claude_fixture()?;
         let cleanup = rig.process_cleanup();
@@ -447,6 +482,7 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
             String::from_utf8_lossy(&out.stderr.bytes)
         );
         let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+        assert!(!stderr.contains("not in the catalogue"), "{stderr}");
         let reply: Value = serde_json::from_slice(&out.stdout.bytes)?;
         assert_eq!(reply["status"], "ok", "{reply}");
         if !writer || suppress || model.contains("sonnet") {

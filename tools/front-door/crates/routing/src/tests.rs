@@ -50,6 +50,7 @@ fn effort_errors_report_recorded_controls_and_nearest_models()
             .expect_err("effort must be refused")
             .to_string();
         assert!(message.contains(model), "{message}");
+        assert!(message.contains("unsupported"), "{message}");
         assert!(message.contains(expected), "{message}");
     }
     assert_eq!(
@@ -1417,8 +1418,13 @@ fn account_spend_and_expiring_override_ignore_reserve() -> Result<(), Box<dyn st
         ("spend", serde_json::json!([]), false),
         (
             "pace",
-            serde_json::json!([{"account":"opaque-account", "policy":"spend", "expires_unix_seconds":101}]),
+            serde_json::json!([{"account":"codex/opaque-account", "policy":"spend", "expires_unix_seconds":101}]),
             false,
+        ),
+        (
+            "pace",
+            serde_json::json!([{"account":"claude/opaque-account", "policy":"spend", "expires_unix_seconds":101}]),
+            true,
         ),
         (
             "pace",
@@ -2110,7 +2116,6 @@ fn probe_adapters_include_only_requested_routes_pools_and_fallbacks()
     Ok(())
 }
 
-/// Exercise profile decisions through the public resolver and its receipt.
 #[test]
 fn qualified_pacing_and_reset_references_respect_adapter() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -2149,6 +2154,7 @@ fn qualified_pacing_and_reset_references_respect_adapter() -> Result<(), Box<dyn
     Ok(())
 }
 
+/// Exercise profile decisions through the public resolver and its receipt.
 fn profile_preview(
     mut config: RoutingConfig,
     model: &str,
