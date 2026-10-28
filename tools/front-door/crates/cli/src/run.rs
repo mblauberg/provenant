@@ -3303,6 +3303,72 @@ pub fn attempt_facts(
 pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
     reply("output", output_inner(command, edge))
 }
+fn reviewer_receipt(
+    record: &provenant_records::run::AttemptRecord,
+) -> Result<(Value, String), Fail> {
+    use provenant_records::run::AttemptState;
+    if !matches!(record.state, AttemptState::Terminal { .. }) {
+        return Err(Fail::new(
+            Status::Refused,
+            ErrorKind::Nonterminal,
+            "receipt requires a settled attempt",
+        ));
+    }
+    let route = record.applied_route.as_ref().ok_or_else(|| {
+        Fail::new(
+            Status::Refused,
+            ErrorKind::Refused,
+            "attempt has no applied route",
+        )
+    })?;
+    let adapter = route.provider.as_deref().ok_or_else(|| {
+        Fail::new(
+            Status::Refused,
+            ErrorKind::Refused,
+            "applied route has no adapter",
+        )
+    })?;
+    let model = route.model.as_deref().ok_or_else(|| {
+        Fail::new(
+            Status::Refused,
+            ErrorKind::Refused,
+            "applied route has no model",
+        )
+    })?;
+    let effort = route.effort.as_deref().unwrap_or("unknown");
+    let family = provenant_routing::Catalogue::bundled()
+        .ok()
+        .and_then(|catalogue| {
+            ModelId::parse(model)
+                .ok()
+                .and_then(|id| catalogue.model(&id).and_then(|entry| entry.family.clone()))
+        })
+        .unwrap_or_else(|| "unknown".into());
+    let redraws = route
+        .pool_selection
+        .as_ref()
+        .map_or(0, |pool| pool.redraws.len());
+    let resolved_from = if record.skipped_routes.len() > redraws {
+        "fallback".into()
+    } else if let Some(pool) = &route.pool_selection {
+        format!("pool {}", pool.pool)
+    } else {
+        "explicit".into()
+    };
+    let qualified_model = if model.starts_with(&format!("{adapter}/")) {
+        model.to_owned()
+    } else {
+        format!("{adapter}/{model}")
+    };
+    let line = format!(
+        "Reviewer: {qualified_model}@{effort} ({family}; resolved from {resolved_from}), run {}/{}/{}",
+        record.run_id, record.task_id, record.attempt_id
+    );
+    Ok((
+        json!({"run_id": record.run_id, "task_id": record.task_id, "attempt_id": record.attempt_id, "adapter": adapter, "model": model, "effort": effort, "family": family, "resolved_from": resolved_from, "receipt": line}),
+        format!("{line}\n"),
+    ))
+}
 /// The most lines `output --tail` returns; a larger request is clamped.
 const TAIL_MAX: u64 = 500;
 
@@ -3348,7 +3414,8 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let candidate = targets::resolve(edge, &command.attempt.0, false)?;
+    let receipt = matches!(command.part, Part::Receipt);
+    let candidate = targets::resolve(edge, &command.attempt.0, receipt)?;
     command.attempt.0 = candidate.target.clone();
     if site.is_none()
         && let Some(placement) = targets::placement(edge, &candidate.target, false)?
@@ -3356,11 +3423,30 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         return remote::output(&command, &placement, edge);
     }
     let (session, target) = targets::read_resolved(edge, candidate, &call)?;
-    let id = target.attempt.ok_or(Fail::new(
-        Status::Invalid,
-        ErrorKind::Invalid,
-        "attempt required",
-    ))?;
+    let id = match target.attempt {
+        Some(id) => id,
+        None if receipt => {
+            let page = session.service().lanes(
+                &lane_query(&session, std::slice::from_ref(&target), true, 2, 0, &call)?,
+                &call,
+            )?;
+            if page.lanes.len() != 1 || page.next.is_some() {
+                return Err(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Conflict,
+                    "receipt target must identify exactly one attempt; specify RUN/TASK/ATTEMPT",
+                ));
+            }
+            page.lanes[0].attempt_id
+        }
+        None => {
+            return Err(Fail::new(
+                Status::Invalid,
+                ErrorKind::Invalid,
+                "attempt required",
+            ));
+        }
+    };
     let record = session.service().status(id, &call)?;
     if target.run.is_some_and(|run| record.run_id != run)
         || target.task.is_some_and(|task| task != record.task_id)
@@ -3390,6 +3476,7 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         ));
     }
     let part = match command.part {
+        Part::Receipt => return reviewer_receipt(&record),
         Part::Result => run::ArtifactPart::Result,
         Part::Prompt => run::ArtifactPart::Prompt,
         Part::Stderr => run::ArtifactPart::Stderr,
@@ -6613,6 +6700,48 @@ mod tests {
             decoded.reason.as_deref(),
             Some("Codex rollout identity: provider continuation identity is unknown")
         );
+    }
+
+    #[test]
+    fn reviewer_receipts_cover_explicit_pool_fallback_and_unsettled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let now = WallTime::from_micros(100)?;
+        let mut record: run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1, "attempt_id": AttemptId::from_bytes([1; 16]),
+            "run_id": RunId::from_bytes([2; 16]), "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([4; 16]), "operation_id": "receipt-test",
+            "attempt_number": 1, "revision": 1, "generation": 0,
+            "requested_route": {"kind":"model","provider":"codex","model":"codex/gpt-6.1-sol"},
+            "applied_route": {"provider":"codex","model":"codex/gpt-6.1-sol","effort":"high","account_label":null},
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]), "queued_at": now,
+            "state": {"state":"terminal","outcome":"succeeded","exit_code":0,"finished_at":now,"reason":null},
+            "usage": {}, "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"}, "digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
+        }))?;
+        let (data, line) = reviewer_receipt(&record).unwrap();
+        assert_eq!(data["resolved_from"], "explicit");
+        assert_eq!(
+            line,
+            format!(
+                "Reviewer: codex/gpt-6.1-sol@high (openai; resolved from explicit), run {}/{}/{}\n",
+                record.run_id, record.task_id, record.attempt_id
+            )
+        );
+        record.applied_route.as_mut().unwrap().pool_selection = Some(serde_json::from_value(
+            json!({"pool":"junior","candidates":[],"roll":0,"total_weight":1,"pick":"codex/gpt-6.1-sol"}),
+        )?);
+        let (data, line) = reviewer_receipt(&record).unwrap();
+        assert_eq!(data["resolved_from"], "pool junior");
+        assert!(line.contains("(openai; resolved from pool junior)"));
+        record.skipped_routes.push(serde_json::from_value(
+            json!({"route":"codex/other","kind":"unavailable","detail":"unavailable"}),
+        )?);
+        assert_eq!(
+            reviewer_receipt(&record).unwrap().0["resolved_from"],
+            "fallback"
+        );
+        record.state = run::AttemptState::Running;
+        assert!(reviewer_receipt(&record).is_err());
+        Ok(())
     }
 
     #[test]

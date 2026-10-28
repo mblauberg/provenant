@@ -215,8 +215,8 @@ push|reconcile`. A terminal without MCP cancels with `provenant cancel ATTEMPT`.
   `fabric_run`'s `status` operation; see
   [worker-liveness.md](worker-liveness.md) for degraded runs. Size alone proves
   nothing.
-- On a terminal result, record `adapter/model@effort` from the receipt; derive
-  family from it. Native subagents record `claude/<model>@<effort> (anthropic;
+- On a terminal review, record the exact provenance line from
+  `provenant output RUN/TASK/ATTEMPT --part receipt`. Native subagents record `claude/<model>@<effort> (anthropic;
   resolved)` from the Agent tool's model parameter, never from self-report.
 
 ## Fabric dispatch brief template
@@ -230,6 +230,7 @@ Scope/paths: <target, base/head and allowed paths>
 Constraints: <authority, isolation, governing skill and stop condition>
 Output: <shape, length and durable evidence location>
 Verification: <checks; for review, the rubric path or full rubric>
+Review provenance: the chair records `provenant output RUN/TASK/ATTEMPT --part receipt` after settlement.
 Cargo (writer lanes): batch targeted tests into one invocation
 (`cargo test -p a -p b FILTER`) and never run two cargo commands on the same
 target directory at once. Run `cargo check` and `cargo clippy` with both

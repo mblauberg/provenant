@@ -577,12 +577,14 @@ pub enum Part {
     Prompt,
     Stderr,
     Events,
+    /// Reviewer provenance for a settled attempt
+    Receipt,
     /// The provider's own transcript, tailed in place
     Transcript,
 }
 #[derive(Debug, Args)]
 pub struct Output {
-    /// Attempt ID, or RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT
+    /// Attempt ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT; receipt also accepts a unique RUN or RUN/TASK
     pub attempt: Attempt,
     /// Read a configured peer's own attempt, by label or host ID
     #[arg(long)]

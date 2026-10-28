@@ -177,8 +177,10 @@ local branch and its worktree alone, so does a branch recreated or advanced to
 any other tip (even one the base contains), and a local branch whose tip the
 fetched base does not contain is refused and keeps its worktree as well as the
 branch. Removal carries that head and refuses, under the worktree lock, if the
-worktree's HEAD has moved since it was checked. The branch deletion carries it
-too: with no registered worktree it refuses a branch that any worktree has
+worktree's HEAD has moved since it was checked. When the selected project is
+that worktree, cleanup uses the main checkout as its repository anchor so the
+selected worktree can be removed. The branch deletion carries the head too:
+with no registered worktree it refuses a branch that any worktree has
 checked out, is rebasing (paused or not) or is bisecting, as `git branch -d`
 does (read from Git's administrative directories, so a missing or unmounted
 checkout still holds its branch and an unreadable entry refuses), then deletes
@@ -191,6 +193,7 @@ instead of forcing, and the command exits 1 with `merged: true`.
 - Why: a landing is four routine steps, and none of them may widen what was
   reviewed or delete work that is not merged.
 - Test: `src/pr_land_tests.rs::pr_land_merges_then_fetches_fast_forwards_and_prunes`;
+  `::pr_land_prunes_the_selected_merged_worktree`;
   `::pr_land_refuses_each_unsafe_step_and_reports_the_rest`;
   `::pr_land_changes_nothing_when_the_merge_does_not_happen`;
   `::pr_land_leaves_a_local_namesake_of_a_fork_branch_alone`;

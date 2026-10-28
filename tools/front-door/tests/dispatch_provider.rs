@@ -1052,6 +1052,52 @@ fn persisted_attempt(
     Ok((rig, terminal))
 }
 
+fn receipt_output_resolves_run_task_and_attempt() -> Result {
+    let (rig, terminal) = persisted_attempt(
+        "codex",
+        "codex/gpt-6.1-sol",
+        ("work", "fixture"),
+        b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n",
+        b"",
+        0,
+    )?;
+    let run = terminal.run_id.to_string();
+    let task = terminal.task_id.to_string();
+    let attempt = terminal.attempt_id.to_string();
+    let targets = [
+        run.clone(),
+        format!("{run}/{task}"),
+        format!("{run}/{task}/{attempt}"),
+    ];
+    let expected = format!(
+        "Reviewer: codex/gpt-6.1-sol@unknown (openai; resolved from explicit), run {run}/{task}/{attempt}\n"
+    );
+    for target in &targets {
+        let human = rig.command(&["output", target, "--part", "receipt"])?;
+        assert_eq!(
+            code(&human),
+            0,
+            "{}",
+            String::from_utf8_lossy(&human.stderr.bytes)
+        );
+        assert_eq!(String::from_utf8(human.stdout.bytes)?, expected);
+        let output = rig.command(&["output", target, "--part", "receipt", "--json"])?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(data["data"]["receipt"], expected.trim_end());
+        assert_eq!(data["data"]["run_id"], run);
+        assert_eq!(data["data"]["task_id"], task);
+        assert_eq!(data["data"]["attempt_id"], attempt);
+        assert_eq!(data["data"]["resolved_from"], "explicit");
+    }
+    Ok(())
+}
+
 fn agy_denial_result_reaches_terminal_reason() -> Result {
     let (rig, terminal) = persisted_attempt(
         "agy",
@@ -1638,6 +1684,7 @@ fn main() -> ExitCode {
         provenant_supervisor::fixture::run_libtest(
             &args,
             &[
+                "receipt_output_resolves_run_task_and_attempt",
                 "owned_dispatch_retains_failed_attempt_and_replays",
                 "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation",
                 "codex_dispatch_observes_rollout",
@@ -1654,6 +1701,9 @@ fn main() -> ExitCode {
             ],
             |name| {
                 let result = match name {
+                    "receipt_output_resolves_run_task_and_attempt" => {
+                        receipt_output_resolves_run_task_and_attempt()
+                    }
                     "owned_dispatch_retains_failed_attempt_and_replays" => {
                         owned_dispatch_retains_failed_attempt_and_replays()
                     }

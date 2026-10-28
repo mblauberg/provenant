@@ -13,29 +13,34 @@ const NUMBER: &str = "1668";
 /// The fake `gh` the driver re-enters as: a passing, unchanged pull request.
 pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
     let call = args.join(" ");
+    let dir = std::env::var_os("FIXTURE_GH_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_default();
     writeln!(
         fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open("gh-calls")?,
+            .open(dir.join("gh-calls"))?,
         "{call}"
     )?;
     match call.as_str() {
-        "pr view 1668 --json headRefOid" => io::stdout().write_all(&fs::read("head.json")?)?,
+        "pr view 1668 --json headRefOid" => {
+            io::stdout().write_all(&fs::read(dir.join("head.json"))?)?
+        }
         "pr view 1668 --json state,baseRefName,headRefName,isCrossRepository" => {
-            io::stdout().write_all(&fs::read("view.json")?)?;
+            io::stdout().write_all(&fs::read(dir.join("view.json"))?)?;
         }
         "pr checks 1668 --watch" => {
-            fs::write("watched", "")?;
+            fs::write(dir.join("watched"), "")?;
         }
         "pr checks 1668 --json bucket" => {
-            if Path::new("checks-fail").exists() {
+            if dir.join("checks-fail").exists() {
                 return Ok(8);
             }
             io::stdout().write_all(br#"[{"bucket":"pass"}]"#)?;
         }
         value if value.starts_with("pr merge 1668 --merge --match-head-commit ") => {
-            fs::write("merge-args", args.join("\n") + "\n")?;
+            fs::write(dir.join("merge-args"), args.join("\n") + "\n")?;
         }
         _ => return Err(format!("unexpected gh arguments: {call}").into()),
     }
@@ -186,6 +191,23 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
     );
     assert!(text.contains("  worktree skipped"), "{text}");
     assert!(text.contains("  branch skipped"), "{text}");
+    Ok(())
+}
+
+pub(crate) fn pr_land_prunes_the_selected_merged_worktree() -> Result {
+    let mut landing = landing()?;
+    landing.rig.env.push((
+        "FIXTURE_GH_DIR".into(),
+        landing.rig.project.clone().into_os_string(),
+    ));
+    let path = landing.worktree.to_str().ok_or("path")?;
+    let output = command(&landing.rig, &["--project", path, "land", NUMBER, "--json"])?;
+    let value = json(&output)?;
+    assert_eq!(code(&output), 0, "{value}");
+    assert_eq!(status(&value, "worktree")?, "done", "{value}");
+    assert_eq!(status(&value, "branch")?, "done", "{value}");
+    assert!(!landing.worktree.exists());
+    assert!(!branch_exists(&landing.rig, "feat")?);
     Ok(())
 }
 

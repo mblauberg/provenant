@@ -124,7 +124,10 @@ See the [configuration runbook](runbooks/configuration.md#lane-cache-collection)
 Settlement collects the lane's declared ignored output and Cargo cache without
 an idle delay, even when the worktree stays for delivery pickup. Successful
 settlement, delivery integration and `land` prune eligible worktrees and
-caches. Event collection uses the same GC lock as the daily sweep and keeps
+caches. When landing from the merged linked worktree, `land` uses the main
+checkout for cleanup so it can remove the selected worktree and its branch.
+The landing report gives a reason for any cleanup step that is skipped or
+refused. Event collection uses the same GC lock as the daily sweep and keeps
 foreign worktrees out of scope.
 Output pruning holds the worktree's writer lock; the repository lock is held
 only for individual worktree removals. Tracked paths and their ancestors are

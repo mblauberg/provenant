@@ -238,7 +238,11 @@ keep running after the SSH call returns. Fabric MCP `fabric_run`
 To read a peer's own attempt without a local placement record, use
 `provenant output ATTEMPT --host workshop`, or `output HOST/ATTEMPT` with
 the host ID. Output also accepts `RUN/ATTEMPT`; a local `--tail` above 500
-is clamped to 500 lines.
+is clamped to 500 lines. For a settled local attempt, `output RUN --part receipt`
+prints its reviewer provenance when the run has exactly one attempt. A
+`RUN/TASK` target likewise must select exactly one attempt; otherwise use
+`RUN/TASK/ATTEMPT`. Add `--json` for the individual fields. Receipt output
+is not supported over peer transport; run the command on the peer host.
 
 A writer on a peer names a new branch and its base instead of `--worktree`,
 which is a path on the calling host. This is the terminal path; agents use

@@ -295,11 +295,34 @@ fn follow_up(
             }
         }
         Cleanup::Prune(tip) => {
-            let (worktree, branch_gone) = prune_worktree(globals, branch, &upstream, tip, workers);
+            // Use the main checkout as the Git anchor if the selected project
+            // is the worktree being removed. Subsequent Git operations must
+            // not depend on a checkout that no longer exists.
+            let anchor = match checkout_of(&git, project, branch)? {
+                Some(path) if project.starts_with(&path) => git
+                    .full(project, &["worktree", "list", "--porcelain"])?
+                    .and_then(|listing| {
+                        listing
+                            .lines()
+                            .next()?
+                            .strip_prefix("worktree ")
+                            .map(PathBuf::from)
+                    })
+                    .filter(|anchor| !anchor.starts_with(&path)),
+                _ => None,
+            };
+            let cleanup_project = anchor.as_deref().unwrap_or(project);
+            let cleanup_globals = provenant_cli::Globals {
+                json: globals.json,
+                state_dir: globals.state_dir.clone(),
+                project: Some(cleanup_project.to_path_buf()),
+            };
+            let (worktree, branch_gone) =
+                prune_worktree(&cleanup_globals, branch, &upstream, tip, workers);
             steps.push(worktree);
             steps.push(delete_branch(
                 &git,
-                project,
+                cleanup_project,
                 branch,
                 base,
                 &upstream,
