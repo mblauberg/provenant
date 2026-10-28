@@ -261,7 +261,7 @@ pub struct Access {
     /// Access mode: read-only or worktree-write
     #[arg(long, value_enum, default_value = "read-only")]
     pub mode: Mode,
-    /// Worktree the lane may write to
+    /// Writer worktree; local run creates an owned worktree for a missing branch name
     #[arg(long)]
     pub worktree: Option<PathBuf>,
     /// Extra directory the lane may read (repeatable)
@@ -335,13 +335,13 @@ pub struct Dispatch {
     /// Configured peer (label or host ID) to run the dispatch on
     #[arg(long)]
     pub host: Option<String>,
-    /// New branch for a peer writer; the peer creates its worktree
+    /// New writer branch; run creates an owned worktree locally or on --host
     #[arg(long, requires_all = ["host", "base"])]
     pub branch: Option<String>,
     /// Create or reuse a clean local writer worktree owned by this lane
     #[arg(long, conflicts_with_all = ["worktree", "branch", "host", "manifest"])]
     pub worktree_branch: Option<String>,
-    /// Git base for attempt history and, with --branch, the peer writer's branch
+    /// Git base for attempt history and a new writer branch
     #[arg(long)]
     pub base: Option<String>,
     /// Wait for settlement (seconds, or a duration such as 30m)

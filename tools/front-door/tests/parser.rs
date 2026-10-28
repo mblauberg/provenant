@@ -5,7 +5,7 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     let mut rig = TestRig::new()?;
     let binary = std::path::Path::new(env!("CARGO_BIN_EXE_provenant"));
     let mut attempts = Vec::new();
-    for _ in 0..2 {
+    for _ in 0..25 {
         let out = rig.execute(
             binary,
             &[
@@ -38,27 +38,49 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     assert_eq!(code(&out), 0);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
     let lanes = value["data"]["lanes"].as_array().ok_or("lanes")?;
-    assert_eq!(lanes.len(), 2);
-    assert_eq!(lanes[0]["attempt_id"], attempts[1]);
-    assert_eq!(lanes[1]["attempt_id"], attempts[0]);
+    assert_eq!(lanes.len(), 20);
+    assert_eq!(lanes[0]["attempt_id"], attempts[24]);
+    assert_eq!(lanes[19]["attempt_id"], attempts[5]);
     assert!(lanes[0]["state"].is_object(), "full record: {value}");
     let human = rig.command(&["status"])?;
     let text = String::from_utf8(human.stdout.bytes)?;
-    assert_eq!(text.lines().count(), 2, "{text}");
-    assert!(text.starts_with(&attempts[1][..8]), "{text}");
-    let page = rig.command(&["status", "--json", "--limit", "1"])?;
+    assert_eq!(text.lines().count(), 20, "{text}");
+    assert!(text.starts_with(&attempts[24][..8]), "{text}");
+    let all = rig.command(&["status", "--all", "--json"])?;
+    let all: serde_json::Value = serde_json::from_slice(&all.stdout.bytes)?;
+    assert_eq!(all["data"]["lanes"].as_array().ok_or("all")?.len(), 25);
+    let page = rig.command(&["status", "--all", "--json", "--limit", "1"])?;
     let page: serde_json::Value = serde_json::from_slice(&page.stdout.bytes)?;
     assert_eq!(page["data"]["lanes"].as_array().ok_or("page")?.len(), 1);
     let cursor = page["data"]["next_cursor"]
         .as_u64()
         .ok_or("next cursor")?
         .to_string();
-    let next = rig.command(&["status", "--json", "--limit", "1", "--cursor", &cursor])?;
+    let next = rig.command(&[
+        "status", "--all", "--json", "--limit", "1", "--cursor", &cursor,
+    ])?;
     let next: serde_json::Value = serde_json::from_slice(&next.stdout.bytes)?;
-    assert_eq!(next["data"]["lanes"][0]["attempt_id"], attempts[0]);
-    // Recovery works from a different, non-Git directory without --project.
+    assert_eq!(next["data"]["lanes"][0]["attempt_id"], attempts[23]);
+    // Recovery works from another registered project without --project.
     rig.project = rig.root.join("elsewhere");
     std::fs::create_dir(&rig.project)?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    assert_eq!(code(&rig.execute(&git, &["init", "-q"], None)?), 0);
+    let other = rig.execute(
+        binary,
+        &[
+            "run",
+            "--prompt-stdin",
+            "--model",
+            "codex/id",
+            "--wait",
+            "1s",
+            "--json",
+        ],
+        Some(b"other project"),
+    )?;
+    assert_eq!(code(&other), 1);
+    let other: serde_json::Value = serde_json::from_slice(&other.stdout.bytes)?;
     let prompt = rig.command(&["output", &attempts[0][..8], "--part", "prompt", "--json"])?;
     let prompt: serde_json::Value = serde_json::from_slice(&prompt.stdout.bytes)?;
     assert_eq!(prompt["data"]["attempt_id"], attempts[0], "{prompt}");
@@ -83,10 +105,43 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
         "{}",
         String::from_utf8_lossy(&reconciled.stdout.bytes)
     );
+    // Full IDs bypass unrelated history, both in this project and others.
+    let other_lane = &other["data"]["lanes"][0];
+    let checkpoint = rig
+        .state
+        .join("runs")
+        .join(other_lane["run_id"].as_str().ok_or("other run")?)
+        .join("attempts")
+        .join(other_lane["attempt_id"].as_str().ok_or("other attempt")?)
+        .join("process.json");
+    std::fs::write(&checkpoint, b"invalid observation")?;
+    rig.project = rig.root.join("project");
+    let full = rig.command(&["output", &attempts[0], "--part", "prompt", "--json"])?;
+    assert_eq!(
+        code(&full),
+        0,
+        "{}",
+        String::from_utf8_lossy(&full.stdout.bytes)
+    );
+    let local_checkpoint = rig
+        .state
+        .join("runs")
+        .join(lanes[1]["run_id"].as_str().ok_or("local run")?)
+        .join("attempts")
+        .join(&attempts[23])
+        .join("process.json");
+    std::fs::write(&local_checkpoint, b"invalid observation")?;
+    let full = rig.command(&["output", &attempts[0], "--part", "prompt", "--json"])?;
+    assert_eq!(
+        code(&full),
+        0,
+        "{}",
+        String::from_utf8_lossy(&full.stdout.bytes)
+    );
     rig.assert_legacy_unchanged()
 }
 #[test]
-fn core_run_creates_a_new_managed_worktree_from_an_absolute_path() -> Result {
+fn core_run_creates_a_new_managed_worktree_from_a_name_or_branch() -> Result {
     let rig = TestRig::new()?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let commit = rig.execute(
@@ -104,32 +159,83 @@ fn core_run_creates_a_new_managed_worktree_from_an_absolute_path() -> Result {
         None,
     )?;
     assert_eq!(code(&commit), 0);
-    let path = rig.project.join(".worktrees/new-lane");
-    let out = rig.execute(
-        std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &[
-            "run",
-            "--prompt-stdin",
-            "--model",
-            "codex/id",
-            "--worktree",
-            path.to_str().ok_or("path")?,
-            "--base",
-            "HEAD",
-            "--wait",
-            "1s",
-            "--json",
-        ],
-        Some(b"fixture"),
-    )?;
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
-    assert_eq!(code(&out), 1, "{value}");
-    assert_eq!(
-        value["data"]["worktree"]["path"],
-        path.to_string_lossy().as_ref(),
-        "{value}"
-    );
-    assert!(path.join(".git").exists());
+    for (flag, branch, directory) in [
+        ("--worktree", "new-lane", "new-lane"),
+        ("--branch", "feat/new-lane", "feat-new-lane"),
+    ] {
+        let path = rig.project.join(".worktrees").join(directory);
+        let out = rig.execute(
+            std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &[
+                "run",
+                "--prompt-stdin",
+                "--model",
+                "codex/id",
+                flag,
+                branch,
+                "--base",
+                "HEAD",
+                "--wait",
+                "1s",
+            ],
+            Some(b"fixture"),
+        )?;
+        assert_eq!(code(&out), 1, "{out:?}");
+        let text = String::from_utf8(out.stdout.bytes)?;
+        assert!(
+            text.contains(&format!("worktree {} ({branch})", path.display())),
+            "{text}"
+        );
+        assert!(path.join(".git").exists());
+        let out = rig.execute(
+            std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &[
+                "run",
+                "--prompt-stdin",
+                "--model",
+                "codex/id",
+                "--worktree",
+                path.to_str().ok_or("path")?,
+                "--wait",
+                "1s",
+            ],
+            Some(b"fixture"),
+        )?;
+        let text = String::from_utf8(out.stdout.bytes)?;
+        assert!(
+            text.contains(&format!("worktree {} ({branch})", path.display())),
+            "{text}"
+        );
+    }
+    for path in [
+        std::path::PathBuf::from(".worktrees/feat/nested"),
+        rig.root.join("absolute"),
+    ] {
+        let out = rig.execute(
+            std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &[
+                "run",
+                "--prompt-stdin",
+                "--model",
+                "codex/id",
+                "--worktree",
+                path.to_str().ok_or("path")?,
+                "--wait",
+                "1s",
+                "--json",
+            ],
+            Some(b"fixture"),
+        )?;
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert_eq!(code(&out), 2, "{value}");
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .is_some_and(|s| s.contains("--branch BRANCH")),
+            "{value}"
+        );
+        assert!(!rig.project.join(&path).exists());
+    }
     rig.assert_legacy_unchanged()
 }
 

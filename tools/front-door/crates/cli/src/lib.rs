@@ -350,9 +350,11 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
         }
         if path == "provenant run" {
             command = command
+                .mut_arg("worktree", |arg| arg.help("Use a writer worktree; a missing branch name creates an owned local worktree"))
                 .mut_arg("wait", |arg| arg.default_value("240"))
                 .mut_arg("branch", |arg| {
                     arg.requires(clap::builder::Resettable::Reset)
+                        .help("Create or reuse an owned writer worktree for this branch, locally or on --host")
                 });
         }
         if !advanced

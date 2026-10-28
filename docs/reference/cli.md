@@ -1767,7 +1767,6 @@ bounds are null. Positional arguments have no long flag.
 | `--fallback` | `{"bounds": [0, 2], "name": "fallback"}` |
 | `--account` | `{"name": "account"}` |
 | `--mode` | `{"defaults": ["read-only"], "name": "mode", "values": ["read-only", "worktree-write"]}` |
-| `--worktree` | `{"name": "worktree"}` |
 | `--read-root` | `{"bounds": [0, 32], "name": "read_root", "repeatable": true}` |
 | `--write-root` | `{"bounds": [0, 32], "name": "write_root", "repeatable": true}` |
 | `--network` | `{"name": "network", "values": ["on", "off"]}` |
@@ -1783,6 +1782,7 @@ bounds are null. Positional arguments have no long flag.
 | `--project` | `{"name": "project"}` |
 | `--model` | `{"conflicts": ["route"], "name": "model"}` |
 | `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "network", "capability", "provider_timeout"], "name": "manifest"}` |
+| `--worktree` | `{"name": "worktree"}` |
 | `--wait` | `{"bounds": [1, 14400], "defaults": ["240"], "name": "wait"}` |
 | `--branch` | `{"name": "branch"}` |
 | `--help` | `{"name": "help"}` |

@@ -1,42 +1,13 @@
 //! Resolve CLI selections at the shared run owner boundary.
 use super::{Edge, Fail, Session, Target, remote, run};
 
-/// Peer placements and local records must agree that a bare ID is unique.
+/// Resolution has already checked local and peer candidates for collisions.
 pub(super) fn placement(
     edge: &Edge<'_>,
     target: &Target,
     allow_run: bool,
 ) -> Result<Option<remote::Placement>, Fail> {
-    let resolved = match resolve(edge, target, allow_run) {
-        Ok(candidate) => Some(candidate.target),
-        Err(fail)
-            if target.selection.is_none() && matches!(fail.kind, super::ErrorKind::NotFound) =>
-        {
-            None
-        }
-        Err(fail) => return Err(fail),
-    };
-    let target = resolved.as_ref().unwrap_or(target);
-    let placement = remote::find_target(edge.roots, target, allow_run)?;
-    if placement.is_none() || target.run.is_some() {
-        return Ok(placement);
-    }
-    let clock = super::SystemClock::new();
-    let cancel = super::CancelToken::new();
-    let call = super::request(&clock, &cancel)?;
-    let (_, store) = super::open_read_only(edge, &call)?;
-    if let Some(store) = store {
-        match run::Service::new(&store).resolve_target(
-            target.attempt.ok_or(run::RunError::NotFound)?,
-            allow_run,
-            &call,
-        ) {
-            Ok(_) | Err(run::RunError::Conflict) => return Err(run::RunError::Conflict.into()),
-            Err(run::RunError::NotFound) => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(placement)
+    remote::find_target(edge.roots, target, allow_run)
 }
 
 pub(super) fn local(
@@ -117,6 +88,43 @@ fn index(context: &run::ExecutionContext, selection: &str) -> Result<Vec<Candida
     let Some(store) = run::RunStore::open_read_only(context, &call)? else {
         return Ok(Vec::new());
     };
+    // Full bare IDs have direct indexed reads. Never page project history
+    // just to locate one attempt or run.
+    if selection.len() == 32 && !selection.contains('/') {
+        let id: provenant_core::AttemptId =
+            selection.parse().map_err(|_| run::RunError::NotFound)?;
+        let mut candidates = Vec::new();
+        match store.record(id, &call) {
+            Ok(record) => candidates.push(Candidate {
+                target: Target {
+                    selection: None,
+                    run: Some(record.run_id),
+                    task: Some(record.task_id),
+                    attempt: Some(id),
+                },
+                project: Some(context.project_id),
+                host: None,
+            }),
+            Err(run::RunError::NotFound) => {}
+            Err(error) => return Err(error.into()),
+        }
+        let run_id = provenant_core::RunId::from_bytes(*id.as_bytes());
+        match store.run(run_id, &call) {
+            Ok(_) => candidates.push(Candidate {
+                target: Target {
+                    selection: None,
+                    run: Some(run_id),
+                    task: None,
+                    attempt: None,
+                },
+                project: Some(context.project_id),
+                host: None,
+            }),
+            Err(run::RunError::NotFound) => {}
+            Err(error) => return Err(error.into()),
+        }
+        return Ok(candidates);
+    }
     let parts: Vec<_> = selection.split('/').collect();
     let mut query = run::LaneQuery {
         targets: vec![],
@@ -223,12 +231,18 @@ pub(super) fn choose(
             super::Status::Invalid,
             super::ErrorKind::Conflict,
             format!(
-                "ambiguous ID {selection}: {}; run `provenant help output` and retry with one full RUN/TASK/ATTEMPT ID",
+                "ambiguous ID {selection}: {}{}; run `provenant help output` and retry with one full RUN/TASK/ATTEMPT ID",
                 selected
                     .iter()
+                    .take(5)
                     .map(Candidate::name)
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", "),
+                if selected.len() > 5 {
+                    format!(", and {} more", selected.len() - 5)
+                } else {
+                    String::new()
+                }
             ),
         )),
     }
@@ -260,6 +274,17 @@ pub(super) fn resolve(
         selection = attempt.to_owned();
     }
     let context = super::execution_context(edge)?;
+    let exact = selection.len() == 32 && !selection.contains('/');
+    let peers = remote::target_candidates(edge.roots)?;
+    let mut candidates = index(&context, &selection)?;
+    if exact
+        && candidates
+            .iter()
+            .any(|candidate| allow_run || candidate.target.attempt.is_some())
+    {
+        candidates.extend(peers);
+        return choose(&selection, candidates, allow_run);
+    }
     let mut projects: Vec<_> = provenant_config::registered_projects(edge.roots)
         .map_err(|error| {
             Fail::new(
@@ -270,19 +295,25 @@ pub(super) fn resolve(
         })?
         .into_iter()
         .map(|binding| binding.project_id())
+        .filter(|project| *project != context.project_id)
         .collect();
-    projects.push(context.project_id);
     projects.sort();
     projects.dedup();
-    let mut candidates = Vec::new();
     for project_id in projects {
         let scoped = run::ExecutionContext {
             project_id,
             ..context.clone()
         };
         candidates.extend(index(&scoped, &selection)?);
+        if exact
+            && candidates
+                .iter()
+                .any(|candidate| allow_run || candidate.target.attempt.is_some())
+        {
+            break;
+        }
     }
-    candidates.extend(remote::target_candidates(edge.roots)?);
+    candidates.extend(peers);
     choose(&selection, candidates, allow_run)
 }
 /// Reopen the selected run's stored project without changing actor identity.
@@ -293,7 +324,13 @@ pub(super) fn open(
     allow_run: bool,
     call: &run::Request<'_>,
 ) -> Result<(Session, Target), Fail> {
-    let candidate = resolve(edge, target, allow_run)?;
+    open_resolved(edge, resolve(edge, target, allow_run)?, call)
+}
+pub(super) fn open_resolved(
+    edge: &Edge<'_>,
+    candidate: Candidate,
+    call: &run::Request<'_>,
+) -> Result<(Session, Target), Fail> {
     let mut context = super::execution_context(edge)?;
     context.project_id = candidate.project.ok_or_else(|| {
         Fail::new(
@@ -314,13 +351,11 @@ pub(super) fn run_id(edge: &Edge<'_>, target: &Target) -> Result<provenant_core:
         .ok_or_else(|| run::RunError::NotFound.into())
 }
 
-pub(super) fn read(
+pub(super) fn read_resolved(
     edge: &Edge<'_>,
-    target: &Target,
-    allow_run: bool,
+    candidate: Candidate,
     call: &run::Request<'_>,
 ) -> Result<(Session, Target), Fail> {
-    let candidate = resolve(edge, target, allow_run)?;
     let mut context = super::execution_context(edge)?;
     context.project_id = candidate.project.ok_or_else(|| {
         Fail::new(
@@ -422,6 +457,26 @@ mod tests {
         assert!(error.message.contains("provenant help output"));
         let selected = choose("03030303/02020202", rows, false).expect("qualified unique attempt");
         assert_eq!(selected.target.run, Some(RunId::from_bytes([3; 16])));
+    }
+    #[test]
+    fn ambiguity_lists_at_most_five_candidates() {
+        let error = choose(
+            "02020202",
+            (1..=8).map(|n| candidate(n, 2, n)).collect(),
+            false,
+        )
+        .expect_err("ambiguous attempt");
+        assert!(error.message.contains("and 3 more"), "{}", error.message);
+        assert!(
+            error
+                .message
+                .contains(&RunId::from_bytes([5; 16]).to_string())
+        );
+        assert!(
+            !error
+                .message
+                .contains(&RunId::from_bytes([6; 16]).to_string())
+        );
     }
     #[test]
     fn run_attempt_collision_is_ambiguous_only_when_runs_are_allowed() {

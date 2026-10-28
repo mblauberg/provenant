@@ -1,4 +1,4 @@
-//! `pr land`: the existing CI watch and head-pinned merge, then local
+//! `land`: the existing CI watch and head-pinned merge, then local
 //! follow-up. No step forces: each one refuses and says why.
 use super::git::{Git, plain_ref};
 use super::{Result, checks, head, merge, successful};

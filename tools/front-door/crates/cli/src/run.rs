@@ -1147,18 +1147,27 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
             edge.cwd.join(path)
         };
         if !absolute.exists() {
-            let branch = if path.is_absolute() || path.starts_with(".worktrees") {
-                path.file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            } else {
-                path.to_string_lossy().into_owned()
-            };
-            command.worktree_branch = Some(branch);
+            if path.is_absolute() || path.starts_with(".worktrees") {
+                return reply(
+                    "run",
+                    Err(Fail::new(
+                        Status::Invalid,
+                        ErrorKind::Invalid,
+                        format!(
+                            "worktree {} does not exist; use --branch BRANCH to create an owned worktree",
+                            path.display()
+                        ),
+                    )),
+                );
+            }
+            command.worktree_branch = Some(path.to_string_lossy().into_owned());
             command.access.worktree = None;
         }
     }
-    let mut result = dispatch(command, edge);
+    render_run(dispatch(command, edge), edge)
+}
+
+fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
     result.result.command = "run".into();
     if result.result.error.is_some() {
         return result;
@@ -1173,6 +1182,16 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
             .as_str()
             .unwrap_or("unknown")
     );
+    if let (Some(path), Some(branch)) = (
+        result.result.data["worktree"]["path"].as_str(),
+        result.result.data["worktree"]["branch"].as_str(),
+    ) {
+        human.push_str(&format!(
+            "worktree {} ({})\n",
+            plain_text(path, usize::MAX),
+            plain_text(branch, usize::MAX)
+        ));
+    }
     let timed_out = result.result.status == Status::Timeout;
     for row in rows {
         let Some(id) = row["attempt_id"].as_str() else {
@@ -1218,13 +1237,18 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
                 ));
             }
         }
-        if timed_out {
+        if timed_out && matches!(state, "queued" | "starting" | "running" | "settling") {
             human.push_str(&format!(
                 "attempt {id}\nkeep waiting: provenant lanes --id {id} --wait 4m\n"
             ));
         }
+        if state == "input_required" {
+            human.push_str(&format!(
+                "input required: provenant resume {id} --prompt-file ANSWER\n"
+            ));
+        }
         human.push_str(&format!("more: provenant output {id}\n"));
-        if !timed_out && !matches!(state, "succeeded" | "review_required") {
+        if !timed_out && !matches!(state, "succeeded" | "review_required" | "input_required") {
             result.result.status = Status::Failed;
         }
     }
@@ -1233,7 +1257,7 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
 }
 
 /// Active attempts plus the twenty most recent settled lanes.
-pub fn status(command: crate::Status, json_output: bool, edge: &Edge<'_>) -> Reply {
+pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Reply {
     reply(
         "status",
         (|| {
@@ -1245,7 +1269,7 @@ pub fn status(command: crate::Status, json_output: bool, edge: &Edge<'_>) -> Rep
                 return Ok((json!({"lanes": []}), "no lanes\n".into()));
             };
             let session = Session { store, context };
-            let full = command.all || json_output || command.cursor.is_some();
+            let full = command.all;
             let mut query = lane_query(
                 &session,
                 &[],
@@ -1839,6 +1863,21 @@ fn dispatch_inner(
             },
         )
         .collect();
+    let worktree = if let Some(path) = &access.worktree {
+        let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
+        Some(provenant_confinement::worktrees::with_context(
+            edge.roots, edge.home, &writer.project, &clock, &cancel, |context| {
+                use provenant_confinement::worktrees;
+                let info = worktrees::list(context, &cancel)?.into_iter()
+                    .find(|tree| tree.path == writer.worktree)
+                    .ok_or(worktrees::WorktreeError::InvalidRequest)?;
+                let branch = info.branch.ok_or(worktrees::WorktreeError::InvalidRequest)?;
+                Ok(json!({"path": info.path, "branch": branch.trim_start_matches("refs/heads/"), "owned": command.worktree_branch.is_some()}))
+            },
+        ).map_err(run::RunError::from)?)
+    } else {
+        None
+    };
     let (record, started) = submit(
         &session,
         edge,
@@ -1852,8 +1891,8 @@ fn dispatch_inner(
     )?;
     let (mut data, human, timed_out) =
         report(&session, &record, &started, command.wait, edge, &call)?;
-    if let Some(branch) = command.worktree_branch {
-        data["worktree"] = json!({"path": access.worktree, "branch": branch, "owned": true});
+    if let Some(worktree) = worktree {
+        data["worktree"] = worktree;
     }
     Ok((data, human, timed_out))
 }
@@ -2896,19 +2935,11 @@ pub fn lanes(command: Lanes, edge: &Edge<'_>) -> Reply {
 /// `lanes` with a watch writing each line to `out` and flushing it as it
 /// happens. With `json` each line is a JSON object and the reply is the last.
 pub fn lanes_streaming(
-    mut command: Lanes,
+    command: Lanes,
     edge: &Edge<'_>,
     json: bool,
     out: &mut dyn FnMut(&str) -> Result<(), Fail>,
 ) -> Reply {
-    for target in &mut command.id {
-        if target.selection.is_some() {
-            match targets::resolve(edge, target, true) {
-                Ok(candidate) => *target = candidate.target,
-                Err(fail) => return reply("lanes", Err(fail)),
-            }
-        }
-    }
     reply_waited("lanes", lanes_inner(&command, edge, json, out))
 }
 fn lanes_inner(
@@ -2919,12 +2950,16 @@ fn lanes_inner(
 ) -> Result<(Value, String, bool), Fail> {
     let mut normalised = command.clone();
     let mut projects = std::collections::BTreeSet::new();
+    let mut first = None;
     for target in &mut normalised.id {
         let candidate = targets::resolve(edge, target, true)?;
         if let Some(project) = candidate.project {
             projects.insert(project);
         }
-        *target = candidate.target;
+        *target = candidate.target.clone();
+        if first.is_none() {
+            first = Some(candidate);
+        }
     }
     if projects.len() > 1 {
         return Err(Fail::new(
@@ -2945,8 +2980,8 @@ fn lanes_inner(
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let (context, store) = if let Some(target) = command.id.first() {
-        let (session, _) = targets::read(edge, target, true, &call)?;
+    let (context, store) = if let Some(candidate) = first {
+        let (session, _) = targets::read_resolved(edge, candidate, &call)?;
         (session.context, Some(session.store))
     } else {
         open_read_only(edge, &call)?
@@ -3116,14 +3151,15 @@ pub fn attempt_facts(
     attempts
         .iter()
         .map(|attempt| {
-            if targets::placement(edge, &attempt.0, false)?.is_some() {
+            let candidate = targets::resolve(edge, &attempt.0, false)?;
+            if targets::placement(edge, &candidate.target, false)?.is_some() {
                 return Err(Fail::new(
                     Status::Refused,
                     ErrorKind::Unsupported,
                     "that attempt ran on a peer; its record is read on that host",
                 ));
             }
-            let (session, selected) = targets::read(edge, &attempt.0, false, &call)?;
+            let (session, selected) = targets::read_resolved(edge, candidate, &call)?;
             let id = targets::local(&session, &selected, &call)?
                 .attempt
                 .ok_or(Fail::new(
@@ -3206,21 +3242,11 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
             })
             .and_then(|host| remote::qualifier_site(edge, host)),
     };
-    if command.attempt.0.selection.is_some() {
-        command.attempt.0 = match site {
-            Some(remote::Site::Peer(host)) => {
-                remote::resolve_prefix(edge, host, &command.attempt.0)?
-            }
-            _ => targets::resolve(edge, &command.attempt.0, false)?.target,
-        };
-    }
     if let Some(remote::Site::Peer(host)) = site {
+        if command.attempt.0.selection.is_some() {
+            command.attempt.0 = remote::resolve_prefix(edge, host, &command.attempt.0)?;
+        }
         return remote::output_on_peer(&command, host, edge);
-    }
-    if site.is_none()
-        && let Some(placement) = targets::placement(edge, &command.attempt.0, false)?
-    {
-        return remote::output(&command, &placement, edge);
     }
     // `HOST/ATTEMPT` is the form a graph `attempt_ref` has; a host qualifier
     // is not a run, so it never has to match the record.
@@ -3238,7 +3264,14 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let (session, target) = targets::read(edge, &command.attempt.0, false, &call)?;
+    let candidate = targets::resolve(edge, &command.attempt.0, false)?;
+    command.attempt.0 = candidate.target.clone();
+    if site.is_none()
+        && let Some(placement) = targets::placement(edge, &candidate.target, false)?
+    {
+        return remote::output(&command, &placement, edge);
+    }
+    let (session, target) = targets::read_resolved(edge, candidate, &call)?;
     let id = target.attempt.ok_or(Fail::new(
         Status::Invalid,
         ErrorKind::Invalid,
@@ -3453,13 +3486,12 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
     out
 }
 fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
-    if command.target.selection.is_some() {
-        match targets::resolve(edge, &command.target, true) {
-            Ok(candidate) => command.target = candidate.target,
-            Err(fail) => return reply("cancel", Err(fail)),
-        }
-    }
-    match targets::placement(edge, &command.target, true) {
+    let candidate = match targets::resolve(edge, &command.target, true) {
+        Ok(candidate) => candidate,
+        Err(fail) => return reply("cancel", Err(fail)),
+    };
+    command.target = candidate.target.clone();
+    match targets::placement(edge, &candidate.target, true) {
         Ok(Some(placement)) => {
             if crate::fabric::in_lane() {
                 return reply(
@@ -3483,7 +3515,7 @@ fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
-            let (session, selected_target) = targets::open(edge, &command.target, true, &call)?;
+            let (session, selected_target) = targets::open_resolved(edge, candidate, &call)?;
             let reason = command.reason.as_deref().unwrap_or("cancelled by request");
             let targets = [selected_target];
             let selected = select(&session, &targets, None, session.context.actor_id, &call)?;
@@ -4149,20 +4181,8 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let mut target = if command.attempt.0.selection.is_some() {
-        targets::resolve(edge, &command.attempt.0, false)?.target
-    } else {
-        command.attempt.0.clone()
-    };
-    if command.attempt.is_qualified_pair()
-        && target
-            .run
-            .and_then(|qualifier| remote::qualifier_site(edge, qualifier))
-            == Some(remote::Site::Local)
-    {
-        target.run = None;
-    }
-    let prior = target.attempt.ok_or(Fail::new(
+    let candidate = targets::resolve(edge, &command.attempt.0, false)?;
+    let prior = candidate.target.attempt.ok_or(Fail::new(
         Status::Invalid,
         ErrorKind::Invalid,
         "attempt required",
@@ -4171,7 +4191,7 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool
         Some(path) => read_bounded(path)?,
         None => read_text(std::io::stdin().lock())?,
     };
-    let (session, target) = targets::open(edge, &target, false, &call)?;
+    let (session, target) = targets::open_resolved(edge, candidate, &call)?;
     let prior = target.attempt.unwrap_or(prior);
     let record = session.service().status(prior, &call)?;
     if target.run.is_some_and(|run| record.run_id != run)
@@ -4760,6 +4780,72 @@ mod lane_depth_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn core_run_timeout_only_offers_waiting_for_unsettled_lanes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let edge = Edge {
+            roots: &roots,
+            home: &root.join("home"),
+            assets: root,
+            cwd: root,
+        };
+        let result = super::reply_waited(
+            "dispatch",
+            Ok((
+                serde_json::json!({
+                    "operation_id": "timeout",
+                    "lanes": [
+                        {"attempt_id":"01010101010101010101010101010101", "state":"running"},
+                        {"attempt_id":"02020202020202020202020202020202", "state":"succeeded"},
+                        {"attempt_id":"03030303030303030303030303030303", "state":"input_required"}
+                    ]
+                }),
+                String::new(),
+                true,
+            )),
+        );
+        let report = super::render_run(result, &edge);
+        assert_eq!(report.result.status, Status::Timeout);
+        assert_eq!(
+            report.human.matches("keep waiting:").count(),
+            1,
+            "{}",
+            report.human
+        );
+        assert!(
+            report
+                .human
+                .contains("provenant lanes --id 01010101010101010101010101010101 --wait 4m")
+        );
+        assert!(
+            report
+                .human
+                .contains("provenant resume 03030303030303030303030303030303 --prompt-file ANSWER"),
+            "{}",
+            report.human
+        );
+        let input = super::reply(
+            "dispatch",
+            Ok((
+                serde_json::json!({
+                    "operation_id": "answer",
+                    "lanes": [{"attempt_id":"03030303030303030303030303030303", "state":"input_required"}]
+                }),
+                String::new(),
+            )),
+        );
+        let input = super::render_run(input, &edge);
+        assert_eq!(input.result.status, Status::Ok);
+        assert!(input.human.contains("input required: provenant resume"));
+        assert!(!input.human.contains("keep waiting:"));
+        Ok(())
+    }
+
     #[test]
     fn displaced_fallback_reports_unavailable_history() {
         let history = super::fallback_history(Path::new(env!("CARGO_MANIFEST_DIR")), "HEAD", true);
