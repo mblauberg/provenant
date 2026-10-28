@@ -39,6 +39,102 @@ fn receipt_request(critical: &str, decision: Value) -> Value {
 }
 const DELIVERY: &str = "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a";
 
+fn state_snapshot(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>> {
+    let mut snapshot = Vec::new();
+    if root.exists() {
+        for entry in std::fs::read_dir(root)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                snapshot.push((path.clone(), Vec::new()));
+                snapshot.extend(state_snapshot(&path)?);
+            } else {
+                snapshot.push((path.clone(), std::fs::read(path)?));
+            }
+        }
+    }
+    snapshot.sort();
+    Ok(snapshot)
+}
+
+#[test]
+fn session_reads_allocate_nothing() -> Result {
+    let rig = TestRig::new()?;
+    let before = state_snapshot(&rig.state)?;
+    for args in [
+        vec!["workflow", "session", "show", "absent"],
+        vec!["workflow", "session", "show", "absent", "--revisions"],
+        vec!["workflow", "session", "show", "absent", "--rev", "1"],
+        vec!["workflow", "session", "diff", "absent", "1"],
+    ] {
+        call(&rig, &args, 1)?;
+        assert_eq!(state_snapshot(&rig.state)?, before);
+    }
+    std::fs::remove_dir_all(&rig.state)?;
+    call(&rig, &["workflow", "session", "show", "absent"], 1)?;
+    assert!(!rig.state.exists());
+    Ok(())
+}
+
+#[test]
+fn session_save_discovery_restart() -> Result {
+    let rig = TestRig::new()?;
+    let identity = call(&rig, &["fabric", "identity"], 0)?;
+    let identity = &identity["data"];
+    let file = rig.root.join("checkpoint.md");
+    std::fs::write(&file, "# Goal\nExact chair identity.\n")?;
+    call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "chair-1",
+            "--file",
+            &file.to_string_lossy(),
+        ],
+        0,
+    )?;
+    let project = identity["project"].as_str().ok_or("project identity")?;
+    let manifest_path = rig.state.join(format!(
+        "workflow/projects/{project}/sessions/chair-1/revisions.json"
+    ));
+    let manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+    let discovery = &manifest["discovery"];
+    assert_eq!(discovery["schema_version"], 1);
+    assert_eq!(discovery["host"], identity["host"]);
+    assert_eq!(discovery["project_id"], identity["project"]);
+    assert_eq!(discovery["chair_actor"], identity["inbox"]["actor"]);
+    assert_eq!(discovery["host_session_id"], "chair-1");
+    assert_eq!(discovery["checkpoint"], manifest["revisions"][0]);
+    // Each CLI call is a fresh process. Reads leave every state file unchanged.
+    let before = state_snapshot(&rig.state)?;
+    let shown = call(&rig, &["workflow", "session", "show", "chair-1"], 0)?;
+    assert_eq!(shown["data"]["markdown"], "# Goal\nExact chair identity.\n");
+    call(
+        &rig,
+        &["workflow", "session", "show", "chair-1", "--revisions"],
+        0,
+    )?;
+    call(
+        &rig,
+        &["workflow", "session", "show", "chair-1", "--rev", "1"],
+        0,
+    )?;
+    call(&rig, &["workflow", "session", "diff", "chair-1", "1"], 0)?;
+    assert_eq!(state_snapshot(&rig.state)?, before);
+    // A legacy manifest has no registration; showing it must not register it.
+    let mut legacy = manifest;
+    legacy
+        .as_object_mut()
+        .ok_or("manifest")?
+        .remove("discovery");
+    std::fs::write(manifest_path, serde_json::to_vec(&legacy)?)?;
+    let before = state_snapshot(&rig.state)?;
+    call(&rig, &["workflow", "session", "show", "chair-1"], 0)?;
+    assert_eq!(state_snapshot(&rig.state)?, before);
+    Ok(())
+}
+
 #[test]
 fn long_checkpoints_save_up_to_the_documented_bound() -> Result {
     let rig = TestRig::new()?;

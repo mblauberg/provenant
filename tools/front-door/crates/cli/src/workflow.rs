@@ -398,6 +398,14 @@ fn execute(
     cwd: &Path,
 ) -> Result<Value, Error> {
     let _ = globals;
+    // Session reads resolve only an existing project binding. Fabric's writable
+    // context would allocate host/project identity and a utility home here.
+    if matches!(
+        cmd,
+        Workflow::Session(Session::Show { .. } | Session::Diff { .. })
+    ) {
+        return read_session(cmd, &roots, cwd);
+    }
     let (roots, project, actor) = crate::fabric::identity(roots, home, cwd)?;
     let edge = Edge {
         roots,
@@ -436,7 +444,10 @@ fn execute(
             let id = HostSessionId::parse(&session_id).map_err(|e| invalid(e.to_string()))?;
             let text = read_input(&file)?;
             let keep = session_revisions(&edge.roots);
+            let host = provenant_config::bind_host(&edge.roots)
+                .map_err(|error| invalid(error.to_string()))?;
             let saved = SessionStore::new(edge.roots.state.clone(), project, id)
+                .with_chair(host, actor)
                 .with_revisions(keep)
                 .save_revision(&text, edge.budget()?, &edge.cancel, &edge.clock)?;
             Ok(serde_json::json!({
@@ -449,13 +460,41 @@ fn execute(
                 "keep": keep,
             }))
         }
+        Workflow::Session(Session::Show { .. } | Session::Diff { .. }) => unreachable_read(),
+        Workflow::Session(Session::Handoff(_)) => Err(invalid(
+            "workflow session handoff is composed by the provenant binary",
+        )),
+    }
+}
+
+fn unreachable_read() -> Result<Value, Error> {
+    Err(invalid("session reads require the read-only context"))
+}
+
+fn read_session(cmd: Workflow, roots: &Roots, cwd: &Path) -> Result<Value, Error> {
+    use provenant_confinement::{UtilityBudget, UtilityRuntime};
+    let git = provenant_os::git::git_executable().ok_or_else(|| invalid("Git unavailable"))?;
+    let runtime = UtilityRuntime::read_only(git).map_err(|e| invalid(e.to_string()))?;
+    let executor =
+        provenant_os::exec::SystemExecutor::new(1).map_err(|error| invalid(error.to_string()))?;
+    let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5))
+        .map_err(|e| invalid(e.to_string()))?;
+    let location = runtime
+        .project_location(&executor, cwd, budget, &CancelToken::new())
+        .map_err(|e| invalid(e.to_string()))?
+        .location;
+    let project = provenant_config::lookup_project(roots, &location)
+        .map_err(|e| invalid(e.to_string()))?
+        .ok_or(Error::Missing)?
+        .project_id();
+    match cmd {
         Workflow::Session(Session::Show {
             session_id,
             rev,
             revisions,
         }) => {
             let id = HostSessionId::parse(&session_id).map_err(|e| invalid(e.to_string()))?;
-            let store = SessionStore::new(edge.roots.state.clone(), project, id);
+            let store = SessionStore::new(roots.state.clone(), project, id);
             if revisions {
                 let chain = store.revisions()?;
                 if chain.is_empty() {
@@ -480,14 +519,12 @@ fn execute(
         }
         Workflow::Session(Session::Diff { session_id, rev }) => {
             let id = HostSessionId::parse(&session_id).map_err(|e| invalid(e.to_string()))?;
-            let diff = SessionStore::new(edge.roots.state.clone(), project, id)
+            let diff = SessionStore::new(roots.state.clone(), project, id)
                 .diff(rev)?
                 .ok_or(Error::Missing)?;
             serde_json::to_value(diff).map_err(|e| invalid(e.to_string()))
         }
-        Workflow::Session(Session::Handoff(_)) => Err(invalid(
-            "workflow session handoff is composed by the provenant binary",
-        )),
+        _ => unreachable_read(),
     }
 }
 fn save(

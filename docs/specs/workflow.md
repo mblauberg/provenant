@@ -118,8 +118,9 @@ The order is: store the old text, publish the new checkpoint, publish the
 history, then delete revisions beyond `retention.session_revisions` (default 8,
 1 to 64, current included), whether the save comes from `session save` or from
 `session handoff`. A save that stops part-way leaves a complete
-checkpoint, and the next one records the revision it finds; unreadable history
-never blocks a save. Identical text adds no revision. Each revision is held to
+checkpoint, and the next one records the revision it finds. Legacy saves can
+restart unreadable history; explicit chair saves refuse unreadable history to
+preserve the registered identity. Identical text adds no revision. Each revision is held to
 the 256 KiB checkpoint bound. `session show --rev N` and `session diff N` print
 a retained revision, or its unified line diff against the current one, as plain
 text. Lines compare with their terminators, so text that differs only in its final
@@ -135,6 +136,58 @@ marks it. A revision whose text fails its hash is refused with `HISTORY`.
   `src/handoff.rs::a_handoff_checkpoint_keeps_the_configured_number_of_revisions`;
   `tests/workflow.rs::session_checkpoints_keep_bounded_revisions_and_show_what_changed`
 - Owner: `crates/workflow/src/session.rs`, `crates/workflow/src/session/diff.rs`
+
+### Explicit chairs are discoverable
+
+`workflow session save SESSION` registers the caller's exact Fabric host,
+bound project, supplied host session ID and trusted actor as a chair. Source
+checkpoint saves during `session handoff` use the same binding. The workflow
+owner stores a per-session index entry in the optional `discovery` member of
+`workflow/projects/<project>/sessions/<session>/revisions.json`:
+
+| Field | Contract |
+|---|---|
+| `schema_version` | `1` |
+| `host`, `project_id`, `host_session_id` | Exact session key; host/project IDs come from their existing owners |
+| `chair_actor` | Exact Fabric actor, bound by the writing edge; later explicit saves cannot change it or the host |
+| `created_at`, `last_saved_at` | Canonical RFC3339 UTC with microseconds; first registration and latest successful save, including unchanged saves |
+| `checkpoint` | The complete current `Revision`: revision, parent, SHA-256, bytes and saved time |
+
+The entry denotes role `chair` and evidence source `checkpoint_save`. No
+provider, provider session, label, title, parent, route, summary, log, lifecycle,
+lane association or interaction channel is inferred. Those absent facts remain
+unknown; later slices own their capture. A provider session handle in a worker
+attempt is never registration evidence. Autosave and checkpoint reads do not
+register chairs. Legacy manifests and bare checkpoints remain readable with no
+discovery entry; summaries remain unavailable.
+
+The save holds `checkpoint.lock` across the checkpoint replacement and the
+atomic manifest replacement. History and discovery commit in the same manifest,
+so no separate shared index can race another session's writer. If a process
+stops after publishing the checkpoint but before the manifest, an earlier entry
+remains at its earlier revision/hash. `SessionStore::discovery` compares the
+held checkpoint's hash and manifest revision against that entry, returning
+`current`, `checkpoint_changed` or `checkpoint_missing`. These are bounded
+observations, not a lease or an assertion that the provider is alive. Unreadable
+files return an error. A crash on the first save can leave a readable checkpoint
+without registration, which remains unknown until an explicit save succeeds.
+The next save reconciles revisions and publishes the corresponding entry;
+identity must be supplied again when registration was never committed.
+
+`discover_sessions` enumerates only committed explicit entries, in session-key
+order, with a 16,384-directory-entry scan ceiling. Exceeding it or encountering
+unreadable state returns an error rather than claiming complete coverage.
+Discovery, `session show` (all modes) and `session diff` create no files, locks,
+directories or project/host identities, and never repair state. These CLI reads
+also skip demand-usage recording. Consumers must
+check consistency before treating cached checkpoint metadata as current.
+
+- Why: later delivery and catalogue readers need durable exact identities without guessing ownership.
+- Test: `crates/workflow/src/session.rs::session_save_discovery_restart`;
+  `::discovery_reports_interrupted_publication_without_read_repair`;
+  `tests/workflow.rs::session_save_discovery_restart`;
+  `::session_reads_allocate_nothing`
+- Owner: `crates/workflow/src/session/discovery.rs`, `crates/cli/src/workflow.rs`
 
 ### Session hooks are advisory
 

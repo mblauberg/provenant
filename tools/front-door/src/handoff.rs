@@ -414,10 +414,10 @@ fn execute(
         .map(|(_, lanes)| lanes)
         .map_err(|fail| fail.message);
     let project = context.identity.project;
-    let store = session
-        .as_ref()
-        .filter(|_| !args.no_checkpoint)
-        .map(|id| checkpoint_store(&src.roots, project, id.clone()));
+    let store = session.as_ref().filter(|_| !args.no_checkpoint).map(|id| {
+        checkpoint_store(&src.roots, project, id.clone())
+            .with_chair(context.identity.host, context.identity.inbox.actor)
+    });
     let checkpoint = store
         .as_ref()
         .map(SessionStore::read)

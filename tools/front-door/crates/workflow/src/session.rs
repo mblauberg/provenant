@@ -7,8 +7,10 @@ use std::ffi::OsStr;
 use thiserror::Error;
 
 mod diff;
+mod discovery;
 mod hooks;
 mod state;
+pub use discovery::*;
 pub use hooks::*;
 pub use state::*;
 
@@ -43,6 +45,8 @@ struct Manifest {
     schema_version: u64,
     /// Oldest first; the last is the checkpoint in `checkpoint.md`.
     revisions: Vec<Revision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    discovery: Option<SessionDiscovery>,
 }
 /// What a save recorded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -207,6 +211,8 @@ pub enum SessionError {
     Deadline,
     #[error("session revision history is unreadable or does not match its recorded hash")]
     History,
+    #[error("session discovery identity does not match the registered chair")]
+    DiscoveryIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -231,6 +237,7 @@ pub struct SessionStore {
     project: ProjectId,
     session: HostSessionId,
     keep: u64,
+    chair: Option<ChairIdentity>,
 }
 impl SessionStore {
     pub fn new(root: StateRoot, project: ProjectId, session: HostSessionId) -> Self {
@@ -239,6 +246,7 @@ impl SessionStore {
             project,
             session,
             keep: REVISIONS_DEFAULT,
+            chair: None,
         }
     }
     /// Keep this many revisions, current included, clamped to 1 through 64.
@@ -305,7 +313,8 @@ impl SessionStore {
         let now = clock.wall_now()?;
         // A checkpoint that cannot be read (a symlink, say) is replaced, not kept.
         let existing = read_current(&dir).ok().flatten();
-        let mut manifest = load(&dir).unwrap_or_default();
+        let mut manifest = self.load_for_save(&dir)?;
+        self.check_discovery_identity(manifest.discovery.as_ref())?;
         let floor = highest_revision_file(&dir)?;
         let mut chain = reconcile(&manifest, existing.as_ref(), floor);
         let digest = provenant_records::CanonicalV1::file_digest(text);
@@ -328,6 +337,7 @@ impl SessionStore {
         let current = chain.last().cloned().ok_or(SessionError::History)?;
         let keep = usize::try_from(self.keep).unwrap_or(usize::MAX);
         let pruned: Vec<Revision> = chain.drain(..chain.len().saturating_sub(keep)).collect();
+        manifest.discovery = self.saved_discovery(manifest.discovery, &current, now);
         manifest.schema_version = 1;
         manifest.revisions = chain;
         let manifest_bytes = serde_json::to_vec(&manifest).map_err(|_| SessionError::History)?;
@@ -637,6 +647,112 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+    #[test]
+    fn session_save_discovery_restart() {
+        use provenant_core::{ActorId, HostId};
+        let (_temp, root, project) = setup();
+        let host = HostId::from_bytes([3; 16]);
+        let actor = ActorId::from_bytes([4; 16]);
+        let selected = store(&root, project, "explicit-chair").with_chair(host, actor);
+        assert!(selected.discovery().unwrap().is_none());
+        assert!(discover_sessions(&root, project).unwrap().is_empty());
+        assert!(!root.as_path().join("workflow").exists());
+        saved(&selected, "chair notes\n");
+        drop(selected);
+        let restarted = store(&root, project, "explicit-chair");
+        let found = restarted.discovery().unwrap().unwrap();
+        assert_eq!(
+            discover_sessions(&root, project).unwrap(),
+            std::slice::from_ref(&found)
+        );
+        assert_eq!(found.consistency, DiscoveryConsistency::Current);
+        let record = found.record;
+        assert_eq!(
+            (record.host, record.project_id, record.chair_actor),
+            (host, project, actor)
+        );
+        assert_eq!(record.host_session_id.as_str(), "explicit-chair");
+        assert_eq!(record.checkpoint, restarted.revisions().unwrap()[0]);
+        // Unchanged saves refresh observation without adding a revision, and
+        // saves through an existing store preserve the explicit registration.
+        let later = clock(10);
+        restarted
+            .save(
+                b"chair notes\n",
+                WaitBudget::cli(later.mono_now(), 1).unwrap(),
+                &CancelToken::new(),
+                &later,
+            )
+            .unwrap();
+        let updated = restarted.discovery().unwrap().unwrap().record;
+        assert_eq!(updated.created_at, record.created_at);
+        assert_eq!(updated.last_saved_at, later.wall_now().unwrap());
+        assert_eq!(updated.checkpoint.revision, 1);
+        for wrong in [
+            store(&root, project, "another-chair"),
+            store(&root, ProjectId::from_bytes([2; 16]), "explicit-chair"),
+        ] {
+            assert!(wrong.discovery().unwrap().is_none());
+        }
+        let wrong_actor =
+            store(&root, project, "explicit-chair").with_chair(host, ActorId::from_bytes([5; 16]));
+        assert!(matches!(
+            save(&wrong_actor, b"wrong"),
+            Err(SessionError::DiscoveryIdentity)
+        ));
+        let wrong_host =
+            store(&root, project, "explicit-chair").with_chair(HostId::from_bytes([6; 16]), actor);
+        assert!(matches!(
+            save(&wrong_host, b"wrong"),
+            Err(SessionError::DiscoveryIdentity)
+        ));
+        assert_eq!(restarted.read().unwrap().unwrap().markdown, "chair notes\n");
+    }
+
+    #[test]
+    fn discovery_reports_interrupted_publication_without_read_repair() {
+        use provenant_core::{ActorId, HostId};
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "chair")
+            .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([4; 16]));
+        saved(&selected, "before");
+        let dir = path(&root, project, "chair");
+        let manifest = std::fs::read(dir.join(MANIFEST)).unwrap();
+        // Crash after checkpoint replacement, before manifest publication.
+        std::fs::write(dir.join("checkpoint.md"), "interrupted").unwrap();
+        assert_eq!(
+            selected.discovery().unwrap().unwrap().consistency,
+            DiscoveryConsistency::CheckpointChanged
+        );
+        assert_eq!(std::fs::read(dir.join(MANIFEST)).unwrap(), manifest);
+        saved(&selected, "interrupted");
+        let repaired = selected.discovery().unwrap().unwrap();
+        assert_eq!(repaired.consistency, DiscoveryConsistency::Current);
+        assert_eq!(repaired.record.checkpoint.revision, 2);
+        std::fs::remove_file(dir.join("checkpoint.md")).unwrap();
+        assert_eq!(
+            selected.discovery().unwrap().unwrap().consistency,
+            DiscoveryConsistency::CheckpointMissing
+        );
+        // On the first save, a crash before the manifest leaves unknown identity.
+        std::fs::remove_file(dir.join(MANIFEST)).unwrap();
+        std::fs::write(dir.join("checkpoint.md"), "legacy").unwrap();
+        assert!(selected.discovery().unwrap().is_none());
+        assert_eq!(selected.read().unwrap().unwrap().markdown, "legacy");
+        // Autosave and legacy writes alone never establish chair identity.
+        let worker = store(&root, project, "worker");
+        saved(&worker, "worker checkpoint");
+        worker
+            .write_autosave(
+                b"derived",
+                WaitBudget::cli(clock(0).mono_now(), 1).unwrap(),
+                &CancelToken::new(),
+                &clock(0),
+            )
+            .unwrap();
+        assert!(worker.discovery().unwrap().is_none());
+        assert!(discover_sessions(&root, project).unwrap().is_empty());
     }
     #[test]
     fn enforces_utf8_and_byte_bounds_on_read_and_write() {
