@@ -169,6 +169,14 @@ pub fn discover_sessions_bounded(
 }
 
 impl SessionStore {
+    /// Publish an advisory direct lookup for this explicitly saved workspace.
+    /// Canonicalisation is filesystem-only; it never discovers a Git project.
+    #[must_use]
+    pub fn with_workspace(mut self, workspace: std::path::PathBuf) -> Self {
+        self.workspace = Some(workspace);
+        self
+    }
+
     /// Only an edge with explicit chair identity opts a session into discovery.
     /// A later save cannot silently transfer its host or actor ownership.
     #[must_use]
@@ -212,7 +220,13 @@ impl SessionStore {
         record: &SessionDiscovery,
     ) -> Result<(), SessionError> {
         let bytes = serde_json::to_vec(record).map_err(|_| SessionError::History)?;
-        publish(dir, DISCOVERY, &bytes)
+        publish(dir, DISCOVERY, &bytes)?;
+        if let Some(workspace) = &self.workspace {
+            let workspace = provenant_os::fs::canonicalize(workspace)?;
+            let index = location_directory(&self.root, true)?;
+            publish(&index, &location_key(&workspace, &self.session), &bytes)?;
+        }
+        Ok(())
     }
 
     pub(super) fn check_discovery_identity(
@@ -304,4 +318,76 @@ impl SessionStore {
             consistency,
         }))
     }
+}
+
+fn location_key(workspace: &std::path::Path, session: &HostSessionId) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut bytes = workspace.as_os_str().as_bytes().to_vec();
+    bytes.push(0);
+    bytes.extend_from_slice(session.as_str().as_bytes());
+    format!(
+        "{}.json",
+        provenant_records::CanonicalV1::file_digest(&bytes)
+    )
+}
+
+fn location_directory(root: &StateRoot, create: bool) -> Result<Directory, FsError> {
+    let mut dir = Directory::open_anchor(root.as_path())?;
+    for name in ["workflow", "session-locations"] {
+        let name = OsStr::new(name);
+        if create {
+            match dir.mkdir(name, 0o700) {
+                Ok(()) => dir.sync()?,
+                Err(error) if error.is_exists() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        dir = dir.open_verified_directory(name)?;
+    }
+    Ok(dir)
+}
+
+/// Direct workspace/session lookup of an explicitly saved chair. No enumeration,
+/// allocation, locking, Git discovery or repair. Stale locators remain unknown.
+/// The deadline is checked between steps. Blocking filesystem operations,
+/// including canonicalisation and checkpoint reads, cannot be interrupted.
+/// Callers needing a hard bound must run this off-thread and time out the wait.
+#[allow(clippy::disallowed_methods)]
+pub fn discover_session_at(
+    root: &StateRoot,
+    workspace: &std::path::Path,
+    session: &HostSessionId,
+    deadline: std::time::Instant,
+) -> Result<Option<DiscoveredSession>, SessionError> {
+    let check = || {
+        if std::time::Instant::now() >= deadline {
+            Err(SessionError::Deadline)
+        } else {
+            Ok(())
+        }
+    };
+    check()?;
+    let read = || -> Result<Vec<u8>, FsError> {
+        let workspace = provenant_os::fs::canonicalize(workspace)?;
+        location_directory(root, false)?.read_bounded(
+            OsStr::new(&location_key(&workspace, session)),
+            DISCOVERY_LIMIT,
+        )
+    };
+    let bytes = match read() {
+        Ok(bytes) => bytes,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    check()?;
+    let locator: SessionDiscovery =
+        serde_json::from_slice(&bytes).map_err(|_| SessionError::History)?;
+    if locator.schema_version != 1 || &locator.host_session_id != session {
+        return Err(SessionError::DiscoveryIdentity);
+    }
+    let found = SessionStore::new(root.clone(), locator.project_id, session.clone()).discovery()?;
+    check()?;
+    Ok(found.filter(|found| {
+        found.record == locator && found.consistency == DiscoveryConsistency::Current
+    }))
 }

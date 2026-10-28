@@ -1128,7 +1128,7 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
 }
 
 /// Prepares a plan; no guardian ever runs it.
-struct Ready;
+pub(super) struct Ready;
 
 impl Providers for Ready {
     fn prepare(
@@ -1148,6 +1148,7 @@ impl Providers for Ready {
             route: route(),
             skipped_routes: Vec::new(),
             observed_head: None,
+            repository: None,
             confinement: None,
         })
     }
@@ -1217,6 +1218,23 @@ fn priority_selection_failure_does_not_stall_siblings() -> TestResult {
         Started::Refused { attempt: second, .. },
     ] if *attempt == first && reason.contains("priority configuration unavailable") && *second == sibling));
     assert_eq!(*held.borrow(), [sibling]);
+    let index = WorkIndex::open(store.writer_registry(), &call)?;
+    let selector = |attempt| WorkSelector {
+        project: store.context.project_id,
+        run: prepared.run_id,
+        task: None,
+        attempt: Some(attempt),
+        repository: None,
+        head: None,
+    };
+    assert_eq!(
+        index.validate(&selector(first), &call)?,
+        WorkCoverage::Unindexed
+    );
+    assert_eq!(
+        index.validate(&selector(sibling), &call)?,
+        WorkCoverage::Verified
+    );
     assert_eq!(terminal(&store, first, &call)?, Outcome::Rejected);
     Ok(())
 }
@@ -1290,6 +1308,7 @@ impl Providers for Confined {
             },
             writer: None,
             home: "/fixture/home".into(),
+            cargo_registry_seed: false,
         });
         Ok(launch)
     }

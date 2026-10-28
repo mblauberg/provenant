@@ -13,6 +13,22 @@ stores chair associations, with execution facts owned by Run ([fabric](fabric.md
 itself. Grammar and bounds are in the generated [CLI
 reference](../reference/cli.md). Paths are relative to `tools/front-door/`.
 
+## Cargo registry seed
+
+An opted-in macOS writer may seed its private Cargo registry from the host
+registry. It must never replace an existing registry or publish a partially
+cloned tree. Unsupported entries or clone failures must fall back without
+blocking the lane. Each attempt must report the seed outcome and reason in
+`cargo-setup.json` on a best-effort basis.
+- Why: a seed must preserve lane isolation and leave Cargo usable when cloning
+  is unavailable, while making the outcome observable.
+- Test: `crates/run/src/cargo_seed.rs::tests::existing_registry_is_never_replaced`;
+  `::failed_clone_removes_partial_tree`; `::registry_clone_is_private`;
+  `crates/run/src/writer.rs::cargo_setup_tests::cargo_setup_record_reports_writer_and_read_only_outcomes`;
+  `src/compose_tests.rs::writer_dispatch_uses_lane_cache_and_narrow_provider_state`;
+  `::read_only_dispatch_applies_bound_git_and_project_writes`
+- Owner: `crates/run/src/cargo_seed.rs`, `crates/run/src/writer.rs`
+
 ## Operation IDs
 
 An operation ID is 1 to 128 ASCII letters, digits, `.`, `_` or `-`, starting
@@ -38,6 +54,36 @@ absent titles remain absent in older records. Titles are never inferred from
 prompts.
 - Test: `crates/run/src/service_tests.rs::task_title_roundtrip`
 - Owner: `crates/run/src/service.rs`, `crates/records/src/run.rs`
+
+## Work correlation lookup
+
+`run::WorkIndex` owns immutable membership in `<host-state>/work-index.sqlite3`.
+Only the trusted host store seals its minted attempt IDs, from root dispatch,
+resume or continuation, before marking them Starting. Nested attempts are never
+sealed: their IDs originate in a lane-writable store. Trusted nested membership
+requires host-owned child enrolment, which is a separate contract.
+
+The constructor is crate-private until a trusted reader path is implemented.
+Identical captures replay; disagreements and permanent capture errors refuse
+handoff. Contention or cancellation leaves the attempt queued for retry.
+Repository identity is the verified canonical Git common directory. Head is the
+host-observed launch HEAD for readers; writer heads and unavailable Git facts
+remain explicitly unproven. Membership proves neither chair-session ownership,
+successful launch nor workflow authority.
+
+`WorkSelector` requires project and run, with optional task, attempt, repository
+and head constraints. Reads check at most 64 candidates and 64 KiB per record,
+using the same byte bound as writes. `Verified` requires a task or attempt;
+run-only reads return `Partial` because there is no trusted complete member list.
+Missing nested, historical and unprepared work returns `Unindexed`. Contradictory
+facts return `Mismatch`, ahead of unavailable repository/head facts and unindexed
+coverage. `Limit` never proves absence. Lookups traverse no child roots and accept
+no caller-supplied store locator. Configured grants cannot expose the host index,
+its companions or lock. Membership survives lane-local record removal. Index
+growth is unbounded and is not counted towards the disk floor.
+
+- Test: `crates/run/src/correlation.rs::tests`; `crates/cli/src/run/provider.rs::configured_grants_cannot_expose_host_indexes`
+- Owner: `crates/run/src/correlation.rs`, `crates/run/src/launch.rs`
 
 ## Chair associations
 

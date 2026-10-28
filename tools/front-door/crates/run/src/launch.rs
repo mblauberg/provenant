@@ -61,6 +61,8 @@ pub struct PreparedLaunch {
     /// HEAD of the checkout a read-only lane runs in, read by the host at
     /// preparation. Writers record theirs from delivery instead.
     pub observed_head: Option<provenant_core::GitOid>,
+    /// Canonical Git common directory verified by the host preparation edge.
+    pub repository: Option<provenant_records::AbsolutePath>,
     pub confinement: Option<crate::LaunchConfinement>,
 }
 
@@ -884,6 +886,8 @@ impl RunStore {
             if !plan.skipped_routes.is_empty() {
                 self.record_skipped_routes(id, &plan.skipped_routes, call)?;
             }
+            // Capture errors leave the claim available to this or another launcher.
+            self.seal_work(&record, &plan, call)?;
             let record = match self.mark_starting_with_priority(
                 &record,
                 &plan.route,
@@ -1084,7 +1088,7 @@ impl RunStore {
                     .map_err(|e| HandOff::Uncertain(e.to_string()))?;
                 return Err(local(&error));
             }
-            match confinement.command(&plan.argv, &id, call.cancel) {
+            match confinement.command(&plan.argv, &id, call.cancel, &directory()?) {
                 Ok(argv) => plan.argv = argv,
                 Err(error) => {
                     lease

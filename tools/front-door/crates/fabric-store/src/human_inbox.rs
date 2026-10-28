@@ -6,6 +6,22 @@ use provenant_records::inbox::*;
 /// Preserve history and pending deliveries; refuse growth rather than pruning them.
 pub const MAX_HUMAN_REQUESTS: i64 = 10_000;
 
+/// The fields needed by an overview; request bodies never leave the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingHumanRequest {
+    pub id: String,
+    pub project_id: String,
+    pub project_key: Option<String>,
+    pub title: String,
+    pub chair_session_id: Option<String>,
+}
+
+pub struct PendingHumanRequests {
+    pub items: Vec<PendingHumanRequest>,
+    pub truncated: bool,
+    pub bytes_read: usize,
+}
+
 pub struct HumanClosure<'a> {
     pub project: ProjectId,
     pub id: HumanRequestId,
@@ -26,6 +42,85 @@ pub struct HumanAcknowledgement<'a> {
 }
 
 impl Store {
+    /// Read a bounded batch across projects, without loading request bodies.
+    /// The session column is authoritative for routing and this projection.
+    pub fn pending_human_requests(
+        &self,
+        limit: u64,
+        max_bytes: usize,
+        request: &Request<'_>,
+    ) -> Result<PendingHumanRequests> {
+        let rows_limit = page(0, limit)?;
+        request.retry(|| {
+            let mut statement = self.db.prepare(
+                "WITH recent AS (SELECT project,id,length(record) AS bytes FROM human_requests
+                   WHERE state='open' ORDER BY project,id LIMIT ?1),
+                 sized AS (SELECT project,id,bytes,sum(bytes) OVER (ORDER BY project,id) AS total FROM recent)
+                 SELECT s.project,s.id,s.bytes,s.total,
+                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+                   THEN json_extract(CAST(r.record AS TEXT),'$.schema_version') END,
+                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+                   THEN json_extract(CAST(r.record AS TEXT),'$.project_id') END,
+                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+                   THEN json_extract(CAST(r.record AS TEXT),'$.id') END,
+                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+                   THEN json_extract(CAST(r.record AS TEXT),'$.project_key') END,
+                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+                   THEN json_extract(CAST(r.record AS TEXT),'$.request.title') END,
+                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+                   THEN r.session END,
+                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+                   THEN json_type(CAST(r.record AS TEXT),'$.chair_session_id') END
+                 FROM sized s JOIN human_requests r ON r.project=s.project AND r.id=s.id ORDER BY s.project,s.id",
+            )?;
+            let mut rows = statement.query(params![rows_limit + 1, MAX_RECORD_BYTES as i64, max_bytes.min(1_048_576) as i64])?;
+            let mut items = Vec::new();
+            let mut bytes_read = 0;
+            let mut truncated = false;
+            while let Some(row) = rows.next()? {
+                request.check()?;
+                if items.len() == limit as usize {
+                    truncated = true;
+                    break;
+                }
+                let size: i64 = row.get(2)?;
+                let total: i64 = row.get(3)?;
+                if size < 0 || total < 0 || size > MAX_RECORD_BYTES as i64 || total > max_bytes.min(1_048_576) as i64 {
+                    truncated = true;
+                    break;
+                }
+                bytes_read = total as usize;
+                let project_id: String = row.get(0)?;
+                let id: String = row.get(1)?;
+                let version: Option<i64> = row.get(4)?;
+                let record_project: Option<String> = row.get(5)?;
+                let record_id: Option<String> = row.get(6)?;
+                let project_key: Option<String> = row.get(7)?;
+                let title: Option<String> = row.get(8)?;
+                let chair_session_id: Option<String> = row.get(9)?;
+                let session_type: Option<String> = row.get(10)?;
+                if version != Some(1)
+                    || record_project.as_deref() != Some(&project_id)
+                    || record_id.as_deref() != Some(&id)
+                    || title.is_none()
+                    || chair_session_id.is_none()
+                    || !matches!(session_type.as_deref(), None | Some("text"))
+                {
+                    return Err(Error::Invalid("stored request identity or version"));
+                }
+                let title = title.unwrap_or_default();
+                items.push(PendingHumanRequest {
+                    id,
+                    project_id,
+                    project_key,
+                    title,
+                    chair_session_id,
+                });
+            }
+            Ok(PendingHumanRequests { items, truncated, bytes_read })
+        })
+    }
+
     /// Atomically record bounded at-least-once offers. Overflow is untouched;
     /// reading ordinary mail never advances or acknowledges this outbox.
     pub fn offer_human_answers(

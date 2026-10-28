@@ -1344,7 +1344,9 @@ fn run_chair_migration_preserves_mail_and_rejects_older_readers() {
     store.send(&message(&f, 9), &f.request()).unwrap();
     store
         .db
-        .execute_batch("DROP TABLE run_chairs; PRAGMA user_version=8;")
+        .execute_batch(
+            "DROP INDEX human_local_delivery; DROP TABLE run_chairs; PRAGMA user_version=8;",
+        )
         .unwrap();
     drop(store);
     let store = f.open();
@@ -1358,7 +1360,7 @@ fn run_chair_migration_preserves_mail_and_rejects_older_readers() {
     );
     assert!(matches!(
         provenant_sqlite::read_version(&store.db, 8),
-        Err(provenant_sqlite::VersionError::Unsupported(9))
+        Err(provenant_sqlite::VersionError::Unsupported(version)) if version == crate::db::MIGRATIONS.len() as i64
     ));
     assert!(
         HostStore::open(&f.root, &f.request())

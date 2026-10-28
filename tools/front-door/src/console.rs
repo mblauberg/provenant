@@ -6,6 +6,7 @@ use std::io;
 
 pub fn run(command: Console, globals: &Globals) -> u8 {
     let leaf = match &command {
+        Console::Overview => "console overview",
         Console::Projects => "console projects",
         Console::Sessions { .. } => "console sessions",
     };

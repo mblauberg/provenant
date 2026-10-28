@@ -25,8 +25,11 @@ final class QuotaModel {
     private(set) var error: String?
     private(set) var updatedAt: Date?
     private(set) var isRefreshing = false
-    /// Lanes that may need attention, from `provenant lanes`; the panel classifies them against its own clock.
+    /// Fixture lanes retained for the render preview.
     private(set) var lanes: [Lane] = []
+    private(set) var overview: ConsoleOverview?
+    private(set) var overviewError: String?
+    private(set) var overviewUpdatedAt: Date?
     @ObservationIgnored private var readingLanes = false
     @ObservationIgnored private var lanesReadAt: Date?
     /// The status item's content, replaced only when it changes.
@@ -71,7 +74,7 @@ final class QuotaModel {
         loadCurrent()
     }
 
-    /// Reads the lane list only when the panel opens (nothing in the status item uses it), at most once every
+    /// Reads the overview only when the panel opens (nothing in the status item uses it), at most once every
     /// 10 s and never two at once.
     private func refreshLanes() {
         guard !fixture, !readingLanes else { return }
@@ -80,12 +83,12 @@ final class QuotaModel {
         lanesReadAt = .now
         let cached = launcher
         Task {
-            let (resolved, outcome) = await Task.detached(priority: .background) { CLI.lanes(cached) }.value
+            let (resolved, outcome) = await Task.detached(priority: .background) { CLI.overview(cached) }.value
             readingLanes = false
             launcher = launcher ?? resolved
             switch outcome {
-            case .success(let found): if found != lanes { lanes = found }
-            case .failure(let failure): log.error("\(failure.message, privacy: .public)")   // the last list stays
+            case .success(let found): overview = found; overviewError = nil; overviewUpdatedAt = .now
+            case .failure(let failure): overviewError = failure.message; log.error("\(failure.message, privacy: .public)")
             }
         }
     }
@@ -93,7 +96,7 @@ final class QuotaModel {
     var stateRoot: URL { LaneBoard.stateRoot(report: report) }
 
     /// ⌘R.
-    func refresh() { run(.manual) }
+    func refresh() { lanesReadAt = nil; refreshLanes(); run(.manual) }
 
     /// Each menu open; avoid closely spaced ticks.
     func panelOpened() {

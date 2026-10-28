@@ -113,6 +113,14 @@ impl Default for GraphLimits {
 #[serde(default, deny_unknown_fields)]
 pub struct Lanes {
     pub priority: LanePriority,
+    pub cargo_seed: CargoSeed,
+}
+
+/// Optional host Cargo registry seed for writer lanes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CargoSeed {
+    pub enabled: bool,
 }
 
 /// Nice values applied by the host before entering lane confinement.
@@ -446,12 +454,28 @@ mod tests {
     #[test]
     fn lane_priority_defaults_and_bounds() {
         let mut config = config();
+        assert!(!config.lanes.cargo_seed.enabled);
         assert_eq!(config.lanes.priority.for_lane(true, false), 10);
         assert_eq!(config.lanes.priority.for_lane(false, false), 5);
         assert_eq!(config.lanes.priority.for_lane(true, true), 15);
         assert_eq!(config.lanes.priority.for_lane(false, true), 15);
         let mut value = serde_json::to_value(&config).unwrap();
+        value["lanes"]["cargo_seed"]["enabled"] = true.into();
+        assert!(
+            serde_json::from_value::<FabricConfig>(value.clone())
+                .unwrap()
+                .lanes
+                .cargo_seed
+                .enabled
+        );
         value.as_object_mut().unwrap().remove("lanes");
+        assert!(
+            !serde_json::from_value::<FabricConfig>(value.clone())
+                .unwrap()
+                .lanes
+                .cargo_seed
+                .enabled
+        );
         assert_eq!(
             serde_json::from_value::<FabricConfig>(value)
                 .unwrap()
