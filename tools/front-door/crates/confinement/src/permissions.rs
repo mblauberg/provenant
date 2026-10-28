@@ -198,7 +198,7 @@ pub enum PermissionError {
     )]
     HardLinkedWritableFile(PathBuf),
     #[error(
-        "hard-link write denials exceed the {bound} limit ({limit}) in {directory:?}; delete or move disposable build/dependency output from this directory (for Rust, set CARGO_TARGET_DIR outside the worktree), then retry"
+        "hard-link write denials exceed the {bound} limit ({limit}) in {directory:?}; delete or move disposable build/dependency output from this directory, then retry; Rust lanes should use Fabric's Cargo environment"
     )]
     HardLinkDenyBound {
         directory: PathBuf,
@@ -2754,7 +2754,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("CARGO_TARGET_DIR outside the worktree")
+                .contains("Rust lanes should use Fabric's Cargo environment")
         );
         Ok(())
     }
@@ -2820,7 +2820,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("CARGO_TARGET_DIR outside the worktree")
+                .contains("Rust lanes should use Fabric's Cargo environment")
         );
         Ok(())
     }
@@ -4501,7 +4501,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("CARGO_TARGET_DIR outside the worktree")
+                .contains("Rust lanes should use Fabric's Cargo environment")
         );
         for index in 0..MAX_HARD_LINK_DENIES {
             std::fs::remove_file(overflow.join(index.to_string()))?;

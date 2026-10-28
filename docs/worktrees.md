@@ -79,16 +79,19 @@ Claude creates a native agent's worktree with `provenant worktree create
 claude/NAME` and removes it with `provenant worktree remove`, so it has an owner
 from the start. See the [Claude hooks runbook](runbooks/claude-hooks.md).
 
-Never share `CARGO_TARGET_DIR` across worktrees. Confined writers use
+Fabric sets `CARGO_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR` and `CARGO_HOME` for
+each lane. Do not override them: confinement may deny other paths. Confined writers use
 `$HOME/Library/Caches/provenant-lane-cargo/<sha256>`, derived from canonical
 worktree and common Git paths and held directory identities. Same-named and
 recreated worktrees get separate caches. Setup requires the cache and lane-only
 parent to belong to the effective user with mode 0700, and refuses mismatches.
-Host builds must use separate target directories outside this lane namespace;
-see the [release build example](runbooks/install.md#build-a-staged-release).
+Native unconfined agents should use one shared per-host target outside
+worktrees and this lane namespace. Take care to run the intended checkout's
+test binaries when sharing a target. See the
+[release build example](runbooks/install.md#build-a-staged-release).
 
 Confined writers also get `PROVENANT_LANE_CARGO_LINT_TARGET`, a `target-lint/`
-directory in that cache. Lint-only runs (`cargo check`, `cargo clippy`) set both
+directory in that cache. For lint-only runs (`cargo check`, `cargo clippy`), set both
 `CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` to it. Cargo locks the build
 directory, so setting only the target directory still queues behind test and
 build runs. Worktree removal and `provenant gc` remove this directory with the

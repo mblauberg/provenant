@@ -49,15 +49,13 @@ a reset.
 
 ## Writer lanes
 
-A confined writer's environment is built from scratch and sets `CARGO_TARGET_DIR`
-and `CARGO_BUILD_BUILD_DIR` to its per-lane cache's `target` directory. Read-only
-lanes set both to `target` under their scratch directory, and build offline
-(`CARGO_NET_OFFLINE=true`) without Cargo's automatic cache clean-up. Pinning build-dir
-overrides inherited Cargo configuration and keeps intermediate artefacts in the
-lane. Share a target only within one worktree; across
-worktrees keep per-lane targets (`provenant worktree remove` and
-`provenant gc` prune the lane caches), because a target shared across
-worktrees can run another checkout's stale test binaries.
+Fabric sets `CARGO_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR` and `CARGO_HOME` to
+lane-private paths. Do not override them: confinement may deny other paths.
+Writers can set both build directories to `PROVENANT_LANE_CARGO_LINT_TARGET`
+for lint-only runs, avoiding the test build lock. Read-only lanes use scratch
+and build offline (`CARGO_NET_OFFLINE=true`) without Cargo's automatic cache
+clean-up. Pinning the build directory overrides inherited Cargo configuration.
+`provenant worktree remove` and `provenant gc` prune writer caches.
 
 On macOS, launch inspects the whole writable worktree, including ignored
 `target/` and `node_modules/` directories. Existing hard-linked regular files
@@ -65,8 +63,8 @@ stay readable, but each in-tree alias is write-denied and its ancestor
 directories cannot be renamed. Other files remain writable. The census allows
 500,000 entries and at most 4,096 denied paths; the profile with those denials
 is bounded to 512 KiB. If the denials exceed either limit, launch refuses with
-recovery advice: move disposable build/dependency output out of the worktree
-(for Rust, set `CARGO_TARGET_DIR` outside it), then retry. Important files and
+recovery advice: move disposable build/dependency output out of the worktree,
+then retry. Fabric already supplies the Cargo build paths for the lane. Important files and
 links whose ownership is unclear should be preserved. Other censused writable
 roots, such as private scratch and Git objects, still refuse hard-linked files.
 

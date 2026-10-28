@@ -79,7 +79,7 @@ only its publish step receives `GITHUB_TOKEN`. Before tagging, commit
 
 ## Build a staged release
 
-From the Rust workspace, build the binary and run the build-only Cargo example.
+On the host, outside a Fabric lane, build the binary and run the build-only Cargo example.
 Choose a fresh absolute output directory outside every repository checkout. The
 output's parent directory must already exist. The example copies the exact asset
 inventory digested by `build.rs`, reads the binary's `--version --json` identity,
