@@ -28,6 +28,7 @@ pub(super) fn prepare(
         paths,
         resume,
         |name| match registry.host {
+            _ if name == "gh" => resolve_executable(name),
             Some(host) => host
                 .executables
                 .get(name)
@@ -85,8 +86,8 @@ fn prepare_with(
         Some(writer) => writer.worktree.path().to_owned(),
         None => canonical(registry.cwd.ok_or("working directory is unavailable")?)?,
     };
-    // gh is optional on the host. A missing executable must not prevent a
-    // writer from doing local work or grant it unused publishing credentials.
+    // Publishing is optional. Missing gh tools or configuration leave the
+    // writer able to do local work without publishing credential access.
     let publishing_gh = (writer.is_some()
         && task.access.network(true) == NetworkAccess::Open
         && task
@@ -95,7 +96,7 @@ fn prepare_with(
             .get("lanes.publish")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true))
-    .then(|| resolve_executable("gh").ok())
+    .then(|| publishing_executable(&home, &locate))
     .flatten();
     let git_context = task
         .base
@@ -1568,6 +1569,18 @@ fn read_only_plan(
     }
 }
 
+fn publishing_executable(
+    home: &Path,
+    locate: &impl Fn(&str) -> Result<PathBuf, String>,
+) -> Option<PathBuf> {
+    if !home.join(".config/gh").is_dir() {
+        return None;
+    }
+    // Resolve links before adding exact executable grants or writing wrappers.
+    let executable = canonical(&locate("gh").ok()?).ok()?;
+    (executable.is_file() && provenant_os::sys::is_executable(&executable)).then_some(executable)
+}
+
 pub(crate) fn resolve_executable(name: &str) -> Result<PathBuf, String> {
     let name = AdapterSpec::get(name).map_or(name, |spec| spec.binary);
     let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
@@ -1760,6 +1773,7 @@ pub fn writer_fixture_plan(
 
 /// Exercise production preparation against a fake external provider executable.
 /// A supplied Claude token stands in for the host authority and refresh path.
+/// Optional publishing uses only a fixture gh beside the supplied executable.
 #[cfg(feature = "fixture")]
 pub fn prepare_fixture(
     registry: &Registry<'_>,
@@ -1775,7 +1789,13 @@ pub fn prepare_fixture(
         prompt,
         paths,
         None,
-        |_| canonical(executable),
+        |name| {
+            if name == "gh" {
+                canonical(&executable.with_file_name("gh"))
+            } else {
+                canonical(executable)
+            }
+        },
         token,
     )
 }
@@ -1783,6 +1803,41 @@ pub fn prepare_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publishing_is_optional_without_gh_configuration() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        let executable = std::env::current_exe()?.canonicalize()?;
+        assert_eq!(
+            publishing_executable(&home, &|_| Ok(executable.clone())),
+            None
+        );
+        assert!(!home.join(".config/gh").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn publishing_canonicalises_symlinked_gh_and_ignores_missing_tools()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        std::fs::create_dir_all(home.join(".config/gh"))?;
+        let executable = std::env::current_exe()?.canonicalize()?;
+        let gh = home.join("gh");
+        std::os::unix::fs::symlink(&executable, &gh)?;
+        assert_eq!(
+            publishing_executable(&home, &|_| Ok(gh.clone())),
+            Some(executable)
+        );
+        assert_eq!(
+            publishing_executable(&home, &|_| Err("not installed".into())),
+            None
+        );
+        std::fs::remove_file(&gh)?;
+        assert_eq!(publishing_executable(&home, &|_| Ok(gh.clone())), None);
+        Ok(())
+    }
 
     #[test]
     fn version_probe_reports_outcomes_without_disclosing_output()
