@@ -207,7 +207,7 @@ impl LogStore {
                 INSERT OR IGNORE INTO meta VALUES (1, 0, 0, -9223372036854775808);
                 CREATE TABLE IF NOT EXISTS entries (sequence INTEGER PRIMARY KEY, created_at INTEGER NOT NULL, bytes INTEGER NOT NULL, payload BLOB NOT NULL);
                 CREATE INDEX IF NOT EXISTS entries_age ON entries(created_at);
-                CREATE TABLE IF NOT EXISTS receipts (operation_id TEXT PRIMARY KEY, issued_at INTEGER NOT NULL, digest TEXT NOT NULL, sequence INTEGER NOT NULL, created_at INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS receipts (operation_id TEXT PRIMARY KEY, issued_at INTEGER NOT NULL, digest TEXT NOT NULL, sequence INTEGER NOT NULL, created_at INTEGER NOT NULL, host TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS receipts_age ON receipts(issued_at);
                 PRAGMA user_version=1; COMMIT;")?;
         } else if !write && version == 0 {
@@ -259,6 +259,30 @@ impl LogStore {
         }
         Ok(())
     }
+    // Select the newest age-eligible suffix that fits both count and byte
+    // limits. This is computed before applying a page cursor.
+    fn retention_view(
+        db: &Connection,
+        retention: Retention,
+        now: i64,
+    ) -> Result<(Option<i64>, u64), Error> {
+        let (first, removed): (Option<i64>, i64) = db.query_row(
+            "WITH ranked AS (
+                 SELECT sequence, row_number() OVER (ORDER BY sequence DESC) AS position,
+                        sum(bytes) OVER (ORDER BY sequence DESC ROWS UNBOUNDED PRECEDING) AS used
+                 FROM entries WHERE created_at >= ?1
+             ), kept AS (SELECT sequence FROM ranked WHERE position <= ?2 AND used <= ?3)
+             SELECT (SELECT min(sequence) FROM kept),
+                    (SELECT count(*) FROM entries) - (SELECT count(*) FROM kept)",
+            params![
+                Self::cutoff(now, retention.max_age_seconds),
+                retention.max_entries as i64,
+                retention.max_bytes as i64
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((first, Self::positive(removed)?))
+    }
     fn prune(db: &Connection, retention: Retention, now: i64) -> Result<u64, Error> {
         let cutoff = Self::cutoff(now, retention.replay_horizon_seconds);
         db.execute(
@@ -269,9 +293,10 @@ impl LogStore {
             "DELETE FROM receipts WHERE issued_at < (SELECT expiry_cutoff FROM meta WHERE id=1)",
             [],
         )?;
+        let (first, _) = Self::retention_view(db, retention, now)?;
         let removed = db.execute(
-            "DELETE FROM entries WHERE created_at < ?1",
-            [Self::cutoff(now, retention.max_age_seconds)],
+            "DELETE FROM entries WHERE created_at < ?1 OR ?2 IS NULL OR sequence < ?2",
+            params![Self::cutoff(now, retention.max_age_seconds), first],
         )?;
         db.execute(
             "UPDATE meta SET total_pruned=total_pruned+?1 WHERE id=1",
@@ -279,7 +304,7 @@ impl LogStore {
         )?;
         Ok(removed as u64)
     }
-    /// Prune expired receipts and payloads. Dry-run does not write or create files.
+    /// Apply all payload limits and prune expired receipts. Dry-run does not write or create files.
     pub fn gc(&self, retention: Retention, now: i64, dry_run: bool) -> Result<u64, Error> {
         Self::check_retention(retention)?;
         let dir = match self.dir(false) {
@@ -288,16 +313,14 @@ impl LogStore {
             Err(e) => return Err(e.into()),
         };
         let _lock = Self::lock(&dir, !dry_run)?;
+        if _lock.is_none() {
+            return Ok(0);
+        }
         let Some(mut db) = self.open(&dir, !dry_run)? else {
             return Ok(0);
         };
         if dry_run {
-            let count: i64 = db.query_row(
-                "SELECT count(*) FROM entries WHERE created_at < ?1",
-                [Self::cutoff(now, retention.max_age_seconds)],
-                |r| r.get(0),
-            )?;
-            return Self::positive(count);
+            return Ok(Self::retention_view(&db, retention, now)?.1);
         }
         let tx = db.transaction()?;
         let count = Self::prune(&tx, retention, now)?;
@@ -365,14 +388,14 @@ impl LogStore {
         if input.issued_at < floor {
             return Err(Error::Expired);
         }
-        let old: Option<(String, i64, i64)> = tx
+        let old: Option<(String, i64, i64, String)> = tx
             .query_row(
-                "SELECT digest,sequence,created_at FROM receipts WHERE operation_id=?1",
+                "SELECT digest,sequence,created_at,host FROM receipts WHERE operation_id=?1",
                 [input.operation_id.as_str()],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        if let Some((old_digest, sequence, created_at)) = old {
+        if let Some((old_digest, sequence, created_at, host)) = old {
             if old_digest != digest {
                 return Err(Error::Conflict);
             }
@@ -387,6 +410,8 @@ impl LogStore {
             return if let Some(payload) = payload {
                 Self::decode_entry(sequence, &payload)
             } else {
+                let mut input = input;
+                input.host = host;
                 Ok(LogEntry {
                     schema_version: 1,
                     id: format!("{}-{sequence}", self.session.as_str()),
@@ -422,33 +447,18 @@ impl LogStore {
             params![sequence, now, payload.len() as i64, payload],
         )?;
         tx.execute(
-            "INSERT INTO receipts VALUES (?1,?2,?3,?4,?5)",
+            "INSERT INTO receipts VALUES (?1,?2,?3,?4,?5,?6)",
             params![
                 entry.update.operation_id.as_str(),
                 entry.update.issued_at,
                 digest,
                 sequence,
-                now
+                now,
+                entry.update.host
             ],
         )?;
         tx.execute("UPDATE meta SET total_appended=?1 WHERE id=1", [sequence])?;
         Self::prune(&tx, retention, now)?;
-        let (mut count, mut bytes): (i64, i64) = tx.query_row(
-            "SELECT count(*),coalesce(sum(bytes),0) FROM entries",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        while count > retention.max_entries as i64 || bytes > retention.max_bytes as i64 {
-            let (seq, size): (i64, i64) = tx.query_row(
-                "SELECT sequence,bytes FROM entries ORDER BY sequence LIMIT 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            tx.execute("DELETE FROM entries WHERE sequence=?1", [seq])?;
-            tx.execute("UPDATE meta SET total_pruned=total_pruned+1 WHERE id=1", [])?;
-            count -= 1;
-            bytes -= size;
-        }
         tx.commit()?;
         Ok(entry)
     }
@@ -469,16 +479,25 @@ impl LogStore {
             Err(e) => return Err(e.into()),
         };
         let _lock = Self::lock(&dir, false)?;
+        if _lock.is_none() {
+            return Ok(Self::empty_page());
+        }
         let Some(db) = self.open(&dir, false)? else {
             return Ok(Self::empty_page());
         };
-        let (total, pruned, expired): (i64,i64,i64) = db.query_row("SELECT total_appended,total_pruned,(SELECT count(*) FROM entries WHERE created_at < ?1) FROM meta WHERE id=1", [Self::cutoff(now, retention.max_age_seconds)], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        let (total, pruned): (i64, i64) = db.query_row(
+            "SELECT total_appended,total_pruned FROM meta WHERE id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let (first, excluded) = Self::retention_view(&db, retention, now)?;
         let cursor = after.unwrap_or(0).min(i64::MAX as u64) as i64;
-        let mut stmt = db.prepare("SELECT sequence,bytes,payload FROM entries WHERE sequence>?1 AND created_at>=?2 ORDER BY sequence LIMIT ?3")?;
+        let mut stmt = db.prepare("SELECT sequence,bytes,payload FROM entries WHERE sequence>?1 AND created_at>=?2 AND ?4 IS NOT NULL AND sequence>=?4 ORDER BY sequence LIMIT ?3")?;
         let mut rows = stmt.query(params![
             cursor,
             Self::cutoff(now, retention.max_age_seconds),
-            (limit + 1) as i64
+            (limit + 1) as i64,
+            first
         ])?;
         let mut entries: Vec<LogEntry> = Vec::new();
         let mut bytes = 0usize;
@@ -509,11 +528,9 @@ impl LogStore {
             },
             entries,
             total_appended: Self::positive(total)?,
-            total_pruned: Self::positive(
-                pruned
-                    .checked_add(expired)
-                    .ok_or(Error::Invalid("invalid chair log counter"))?,
-            )?,
+            total_pruned: Self::positive(pruned)?
+                .checked_add(excluded)
+                .ok_or(Error::Invalid("invalid chair log counter"))?,
         })
     }
 }
@@ -772,6 +789,123 @@ mod tests {
         ));
     }
     #[test]
+    fn list_returns_empty_if_initialisation_lock_is_missing() {
+        let (_tmp, store) = fixture();
+        let policy = retention();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let store = &store;
+            let writer = scope.spawn(move || {
+                let dir = store.dir(true).unwrap();
+                // Model a reader that has observed the missing lock just before
+                // the first writer creates it and initialises the database.
+                let db = store.open(&dir, true).unwrap().unwrap();
+                db.execute("UPDATE meta SET total_appended=1 WHERE id=1", [])
+                    .unwrap();
+                ready_tx.send(()).unwrap();
+                resume_rx.recv().unwrap();
+                drop(db);
+            });
+            ready_rx.recv().unwrap();
+            let page = store.page(None, 10, policy, 1);
+            let gc_count = store.gc(policy, 1, true);
+            resume_tx.send(()).unwrap();
+            writer.join().unwrap();
+            let page = page.unwrap();
+            assert_eq!(page.total_appended, 0);
+            assert!(page.entries.is_empty());
+            assert_eq!(gc_count.unwrap(), 0);
+        });
+    }
+    #[test]
+    fn reduced_count_and_byte_limits_apply_to_list_and_gc() {
+        for bytes_case in [false, true] {
+            let (_tmp, store) = fixture();
+            let mut policy = retention();
+            policy.max_entries = 10;
+            policy.max_bytes = 100_000;
+            for n in 0..5 {
+                store
+                    .append(
+                        update(&format!("op-{n}"), n + 1, &"x".repeat(9_000)),
+                        policy,
+                        n + 1,
+                    )
+                    .unwrap();
+            }
+            if bytes_case {
+                policy.max_bytes = 32_768;
+            } else {
+                policy.max_entries = 3;
+            }
+            let page = store.page(None, 2, policy, 5).unwrap();
+            assert_eq!(
+                page.entries.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+                vec![3, 4]
+            );
+            assert_eq!(
+                (page.total_appended, page.total_pruned, page.next_cursor),
+                (5, 2, Some(4))
+            );
+            assert_eq!(
+                store.page(Some(4), 10, policy, 5).unwrap().entries[0].sequence,
+                5
+            );
+            assert_eq!(store.gc(policy, 5, true).unwrap(), 2);
+            let dir = store.dir(false).unwrap();
+            let db = store.open(&dir, false).unwrap().unwrap();
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM entries", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                5
+            );
+            drop(db);
+            assert_eq!(store.gc(policy, 5, false).unwrap(), 2);
+            assert_eq!(store.gc(policy, 5, false).unwrap(), 0);
+            let page = store.page(None, 10, policy, 5).unwrap();
+            assert_eq!(
+                (page.total_appended, page.total_pruned, page.entries.len()),
+                (5, 2, 3)
+            );
+        }
+    }
+    #[test]
+    fn age_filter_precedes_count_retention_when_clock_moves_backwards() {
+        let (_tmp, store) = fixture();
+        let mut policy = retention();
+        policy.max_entries = 10;
+        for (n, now) in [10, 4, 10].into_iter().enumerate() {
+            store
+                .append(update(&format!("op-{n}"), now, "payload"), policy, now)
+                .unwrap();
+        }
+        policy.max_age_seconds = 5;
+        policy.max_entries = 1;
+        let page = store.page(None, 10, policy, 10).unwrap();
+        assert_eq!(
+            page.entries.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert_eq!(page.total_pruned, 2);
+        assert_eq!(store.gc(policy, 10, false).unwrap(), 2);
+        assert_eq!(store.page(None, 10, policy, 10).unwrap().total_pruned, 2);
+    }
+    #[test]
+    fn replay_after_pruning_preserves_original_host() {
+        let (_tmp, store) = fixture();
+        let mut policy = retention();
+        policy.max_entries = 1;
+        let mut first = update("first", 1, "payload");
+        first.host = "host-a".into();
+        let original = store.append(first.clone(), policy, 1).unwrap();
+        store
+            .append(update("second", 2, "other"), policy, 2)
+            .unwrap();
+        first.host = "host-b".into();
+        assert_eq!(store.append(first, policy, 2).unwrap(), original);
+    }
+    #[test]
     fn replay_store_has_no_lifetime_receipt_cap() {
         let (_tmp, store) = fixture();
         let retention = retention();
@@ -783,7 +917,7 @@ mod tests {
         let tx = db.transaction().unwrap();
         {
             let mut insert = tx
-                .prepare("INSERT INTO receipts VALUES(?1,?2,'digest',?3,?2)")
+                .prepare("INSERT INTO receipts VALUES(?1,?2,'digest',?3,?2,'host')")
                 .unwrap();
             for n in 0..100_001 {
                 insert

@@ -332,8 +332,9 @@ operation limit may prevent appends. Persisted expiry boundaries must not move
 backwards when the clock or configuration changes.
 
 Entries are returned in sequence order with bounded pagination. Retention
-removes oldest payloads under the configured age, count and byte limits. A
-correction is a new entry referencing an earlier sequence, which may have been
+removes oldest payloads under the configured age, count and byte limits.
+Listing applies these limits before pagination without changing storage, and
+full GC applies them to idle sessions. A correction is a new entry referencing an earlier sequence, which may have been
 pruned. Lanes must not append chair updates. Listing must not create state or
 require write access. The cost of append and list must depend on retained data
 and the replay horizon, not the session's lifetime history.
