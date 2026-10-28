@@ -76,6 +76,71 @@ fn session_reads_allocate_nothing() -> Result {
 }
 
 #[test]
+fn chair_log_cli_replay_and_pages() -> Result {
+    let rig = TestRig::new()?;
+    let first = request(
+        &rig,
+        "log.json",
+        json!({"kind":"progress", "markdown":"First update", "channel":"chat"}),
+    )?;
+    let append = |file: &str, operation: &str| {
+        call(
+            &rig,
+            &[
+                "chair",
+                "log",
+                "append",
+                "--session",
+                "chair",
+                "--file",
+                file,
+                "--operation-id",
+                operation,
+            ],
+            0,
+        )
+    };
+    let original = append(&first, "first")?;
+    assert_eq!(append(&first, "first")?["data"], original["data"]);
+    let correction = request(
+        &rig,
+        "correction.json",
+        json!({"kind":"correction", "markdown":"Corrected", "channel":"chat", "correction_of":1}),
+    )?;
+    append(&correction, "correction")?;
+    call(
+        &rig,
+        &[
+            "chair",
+            "log",
+            "append",
+            "--session",
+            "chair",
+            "--file",
+            &correction,
+            "--operation-id",
+            "first",
+        ],
+        1,
+    )?;
+    let page = call(
+        &rig,
+        &["chair", "log", "list", "--session", "chair", "--limit", "1"],
+        0,
+    )?;
+    assert_eq!(page["data"]["entries"][0]["markdown"], "First update");
+    assert_eq!(page["data"]["next_cursor"], 1);
+    let next = call(
+        &rig,
+        &["chair", "log", "list", "--session", "chair", "--after", "1"],
+        0,
+    )?;
+    assert_eq!(next["data"]["entries"][0]["correction_of"], 1);
+    assert!(next["data"]["next_cursor"].is_null());
+    Ok(())
+}
+
+#[test]
 fn session_show_honours_project_and_state_dir_without_allocating() -> Result {
     let rig = TestRig::new()?;
     let other = rig.root.join("other");

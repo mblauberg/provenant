@@ -188,6 +188,9 @@ pub struct PrOpen {
 }
 #[derive(Debug, Subcommand)]
 pub enum Chair {
+    /// Append and read a chair session's authored updates.
+    #[command(subcommand)]
+    Log(ChairLog),
     /// Checkpoint and continue under an allowed registered Claude account.
     Switch {
         /// Registered Claude account to switch to
@@ -199,6 +202,33 @@ pub enum Chair {
         /// Source session; required for real runs unless CLAUDE_SESSION_ID is set.
         #[arg(long)]
         session_id: Option<String>,
+    },
+}
+#[derive(Debug, Subcommand)]
+pub enum ChairLog {
+    /// Append an update from a JSON file, or standard input with `-`.
+    Append {
+        /// Chair session ID
+        #[arg(long)]
+        session: String,
+        /// JSON containing markdown, kind, channel and optional links
+        #[arg(long)]
+        file: String,
+        /// Stable retry key; generated when omitted
+        #[arg(long, default_value = "", value_parser = operation_id)]
+        operation_id: OperationId,
+    },
+    /// List a bounded page of updates in sequence order.
+    List {
+        /// Chair session ID
+        #[arg(long)]
+        session: String,
+        /// Return entries after this sequence
+        #[arg(long)]
+        after: Option<u64>,
+        /// Maximum entries in this page
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u64).range(1..=100))]
+        limit: u64,
     },
 }
 #[derive(Debug, Subcommand)]

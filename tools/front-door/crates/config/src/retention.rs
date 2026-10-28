@@ -8,6 +8,9 @@ pub struct RetentionSettings {
     pub logs_days: u64,
     /// Revisions a session checkpoint keeps, the current one included.
     pub session_revisions: u64,
+    pub chair_log_days: u64,
+    pub chair_log_entries: u64,
+    pub chair_log_bytes: u64,
 }
 
 impl Default for RetentionSettings {
@@ -16,6 +19,9 @@ impl Default for RetentionSettings {
             provider_state_days: 7,
             logs_days: 30,
             session_revisions: 8,
+            chair_log_days: 30,
+            chair_log_entries: 10_000,
+            chair_log_bytes: 16 * 1024 * 1024,
         }
     }
 }
@@ -30,6 +36,15 @@ impl RetentionSettings {
         }
         if !(1..=64).contains(&self.session_revisions) {
             return Err("session_revisions_range");
+        }
+        if !(1..=3650).contains(&self.chair_log_days) {
+            return Err("chair_log_days_range");
+        }
+        if !(1..=100_000).contains(&self.chair_log_entries) {
+            return Err("chair_log_entries_range");
+        }
+        if !(65_536..=1_073_741_824).contains(&self.chair_log_bytes) {
+            return Err("chair_log_bytes_range");
         }
         Ok(())
     }

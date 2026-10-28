@@ -1,5 +1,5 @@
 //! Opt-in chair handoff composition. Hooks read cached quota, never probe it.
-use provenant_cli::{Chair, Globals};
+use provenant_cli::{Chair, ChairLog, Globals};
 use provenant_core::Roots;
 use provenant_os::{
     exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     ffi::{OsStr, OsString},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -435,11 +435,18 @@ fn prepared_response(context: &Context, handoff: &Handoff) -> Value {
     json!({"outcome":"already_prepared","dry_run":false,"target_account":handoff.target_account,"checkpoint":path,"command":recovery.as_ref().ok(),"launch_error":recovery.as_ref().err().map(|e|e.to_string())})
 }
 pub fn run(chair: Chair, globals: &Globals) -> u8 {
+    let chair = match chair {
+        Chair::Log(log) => return log_run(log, globals),
+        chair => chair,
+    };
     let Chair::Switch {
         to,
         dry_run,
         session_id,
-    } = chair;
+    } = chair
+    else {
+        unreachable!()
+    };
     let result = (|| -> Result<Value, Error> {
         let cwd = crate::roots::selected_project(globals.project.as_deref(), false)?;
         let context = Context::new(globals, &cwd)?;
@@ -490,6 +497,155 @@ pub fn run(chair: Chair, globals: &Globals) -> u8 {
         ),
     }
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LogInput {
+    kind: String,
+    markdown: String,
+    channel: String,
+    #[serde(default)]
+    request_ids: Vec<String>,
+    #[serde(default)]
+    attempt_ids: Vec<String>,
+    #[serde(default)]
+    issue_ids: Vec<String>,
+    #[serde(default)]
+    pr_ids: Vec<String>,
+    #[serde(default)]
+    correction_of: Option<u64>,
+}
+
+// The standard input transport has a real deadline.
+#[allow(clippy::disallowed_methods)]
+fn log_input(path: &str) -> Result<LogInput, Error> {
+    const LIMIT: usize = 256 * 1024;
+    let bytes = if path == "-" {
+        hook_io::read_stdin(LIMIT, Instant::now() + Duration::from_secs(30))?
+    } else {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take((LIMIT + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > LIMIT {
+            return Err("input exceeds 256 KiB".into());
+        }
+        bytes
+    };
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn log_run(command: ChairLog, globals: &Globals) -> u8 {
+    use provenant_workflow::log::{Append, LogStore, Retention};
+    let read_only = matches!(command, ChairLog::List { .. });
+    let path = if read_only {
+        "chair log list"
+    } else {
+        "chair log append"
+    };
+    let result = (|| -> Result<Value, Error> {
+        let resolved = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::Project,
+            crate::roots::Product::Required,
+        )?;
+        match command {
+            ChairLog::Append {
+                session,
+                file,
+                operation_id,
+            } => {
+                let context = provenant_cli::fabric::Context::open(
+                    resolved.roots,
+                    &resolved.home,
+                    &resolved.project,
+                )?;
+                if context.in_lane {
+                    return Err("a lane cannot append a chair log".into());
+                }
+                let input = log_input(&file)?;
+                let config = provenant_config::read_with_domains(
+                    &context.roots,
+                    &provenant_cli::domains::SECTIONS,
+                )?;
+                let settings = config.retention;
+                let retention = Retention {
+                    max_age_seconds: settings.chair_log_days * 86400,
+                    max_entries: settings.chair_log_entries,
+                    max_bytes: settings.chair_log_bytes,
+                };
+                let entry = LogStore::new(
+                    context.roots.state,
+                    context.identity.project,
+                    HostSessionId::parse(&session)?,
+                )
+                .append(
+                    Append {
+                        operation_id,
+                        host: context.identity.host.to_string(),
+                        kind: input.kind,
+                        markdown: input.markdown,
+                        request_ids: input.request_ids,
+                        attempt_ids: input.attempt_ids,
+                        issue_ids: input.issue_ids,
+                        pr_ids: input.pr_ids,
+                        channel: input.channel,
+                        correction_of: input.correction_of,
+                    },
+                    retention,
+                    now(),
+                )?;
+                Ok(serde_json::to_value(entry)?)
+            }
+            ChairLog::List {
+                session,
+                after,
+                limit,
+            } => {
+                let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+                let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+                let executor = SystemExecutor::new(1)?;
+                let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+                let location = runtime
+                    .project_location(
+                        &executor,
+                        &resolved.project,
+                        budget,
+                        &provenant_core::CancelToken::new(),
+                    )?
+                    .location;
+                let project = provenant_config::lookup_project(&resolved.roots, &location)?
+                    .ok_or("project not registered")?
+                    .project_id();
+                let page = LogStore::new(
+                    resolved.roots.state,
+                    project,
+                    HostSessionId::parse(&session)?,
+                )
+                .page(after, limit as usize)?;
+                Ok(serde_json::to_value(page)?)
+            }
+        }
+    })();
+    match result {
+        Ok(value) => {
+            let human = serde_json::to_string_pretty(&value).unwrap_or_default();
+            crate::emit(
+                &CommandResult::new(path, Outcome::Ok, value),
+                globals,
+                &human,
+                read_only,
+            )
+        }
+        Err(error) => crate::fail(
+            path,
+            Outcome::Refused,
+            "CHAIR_LOG",
+            &error.to_string(),
+            globals,
+        ),
+    }
+}
+
 fn message(value: &Value) -> String {
     if value["dry_run"] == true && value["target_account"].is_string() {
         return format!(

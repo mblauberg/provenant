@@ -129,6 +129,32 @@ fn session_revision_retention_defaults_overrides_and_validation() {
 }
 
 #[test]
+fn chair_log_retention_defaults_overrides_and_validation() {
+    let defaults = serde_json::to_value(load::<&[u8]>(&roots(), None).unwrap()).unwrap();
+    assert_eq!(defaults["retention"]["chair_log_days"], 30);
+    assert_eq!(defaults["retention"]["chair_log_entries"], 10_000);
+    assert_eq!(defaults["retention"]["chair_log_bytes"], 16_777_216);
+    let config = load(&roots(), Some(&b"schema_version=1\n[retention]\nchair_log_days=12\nchair_log_entries=20\nchair_log_bytes=65536"[..])).unwrap();
+    test_support::assert_leaf_origins(&config);
+    let value = serde_json::to_value(config).unwrap();
+    assert_eq!(value["retention"]["chair_log_days"], 12);
+    assert_eq!(value["retention"]["chair_log_entries"], 20);
+    assert_eq!(value["retention"]["chair_log_bytes"], 65_536);
+    for (key, value) in [
+        ("chair_log_days", "0"),
+        ("chair_log_days", "3651"),
+        ("chair_log_entries", "0"),
+        ("chair_log_entries", "100001"),
+        ("chair_log_bytes", "65535"),
+        ("chair_log_bytes", "1073741825"),
+    ] {
+        let text = format!("schema_version=1\n[retention]\n{key}={value}");
+        let error = load(&roots(), Some(text.as_bytes())).unwrap_err();
+        assert_refusal(&error, &format!("{key}_range"));
+    }
+}
+
+#[test]
 fn gc_settings_parse_defaults_overrides_and_refuse_invalid_values() {
     let defaults = serde_json::to_value(load::<&[u8]>(&roots(), None).unwrap()).unwrap();
     assert_eq!(defaults["gc"]["schedule"], true);
