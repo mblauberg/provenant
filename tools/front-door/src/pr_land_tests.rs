@@ -239,8 +239,45 @@ pub(crate) fn pr_land_prunes_the_selected_merged_worktree() -> Result {
     Ok(())
 }
 
-// The shell remains parked in the lane while its child runs land. This uses
-// the real observer, including the parent shell in the native census.
+pub(crate) fn pr_land_refuses_incomplete_worker_census() -> Result {
+    for observation in ["initial", "late"] {
+        let mut landing = landing()?;
+        landing.rig.env.push((
+            "FIXTURE_GH_DIR".into(),
+            landing.rig.project.clone().into_os_string(),
+        ));
+        landing
+            .rig
+            .env
+            .push(("FIXTURE_UNKNOWN_WORKERS".into(), observation.into()));
+        let output = command(
+            &landing.rig,
+            &[
+                "--project",
+                landing.worktree.to_str().ok_or("path")?,
+                "land",
+                NUMBER,
+                "--json",
+            ],
+        )?;
+        let value = json(&output)?;
+        assert_eq!(code(&output), 1, "{value}");
+        assert_eq!(status(&value, "worktree")?, "refused", "{value}");
+        let text = value.to_string();
+        assert!(
+            text.contains("incomplete") && text.contains("retry"),
+            "{value}"
+        );
+        assert!(landing.worktree.is_dir());
+        assert!(branch_exists(&landing.rig, "feat")?);
+    }
+    Ok(())
+}
+
+// The shell remains parked in the lane while its child runs land. A complete
+// census seam makes the positive cases independent of host-wide visibility;
+// native cwd observations exercise refusal for root/subdirectory contenders.
+// The confinement census test proves ancestor exclusion at the process seam.
 #[allow(clippy::disallowed_methods)] // Real child cwd exercises the native worker observer.
 pub(crate) fn pr_land_from_lane_ignores_only_its_callers() -> Result {
     struct Child(std::process::Child);
@@ -250,29 +287,52 @@ pub(crate) fn pr_land_from_lane_ignores_only_its_callers() -> Result {
             let _ = self.0.wait();
         }
     }
-    for another_worker in [false, true] {
+    for (from_subdirectory, worker_subdirectory) in [
+        (false, None),
+        (true, None),
+        (false, Some(false)),
+        (false, Some(true)),
+    ] {
+        let another_worker = worker_subdirectory.is_some();
         let mut landing = landing()?;
         let main = landing.rig.project.clone();
         landing
             .rig
             .env
             .push(("FIXTURE_GH_DIR".into(), main.clone().into_os_string()));
-        landing
-            .rig
-            .env
-            .push(("FIXTURE_SYSTEM_WORKERS".into(), "1".into()));
+        if another_worker {
+            landing
+                .rig
+                .env
+                .push(("FIXTURE_SYSTEM_WORKERS".into(), "1".into()));
+        }
+        let nested = landing.worktree.join("nested");
+        assert!(nested.is_dir());
+        let cwd_file = landing.rig.root.join("cwd-after-land");
+        landing.rig.env.push((
+            "FIXTURE_LAND_CWD_FILE".into(),
+            cwd_file.clone().into_os_string(),
+        ));
         let worker = if another_worker {
             Some(Child(
                 std::process::Command::new("/bin/sh")
                     .args(["-c", "read line"])
-                    .current_dir(&landing.worktree)
+                    .current_dir(if worker_subdirectory == Some(true) {
+                        &nested
+                    } else {
+                        &landing.worktree
+                    })
                     .stdin(std::process::Stdio::piped())
                     .spawn()?,
             ))
         } else {
             None
         };
-        landing.rig.project = landing.worktree.clone();
+        landing.rig.project = if from_subdirectory {
+            nested
+        } else {
+            landing.worktree.clone()
+        };
         let executable = std::env::current_exe()?;
         let state = landing.rig.state.to_str().ok_or("state path")?;
         let output = landing.rig.execute(
@@ -291,6 +351,17 @@ pub(crate) fn pr_land_from_lane_ignores_only_its_callers() -> Result {
             None,
         )?;
         let value = json(&output)?;
+        assert_eq!(
+            Path::new(&fs::read_to_string(&cwd_file)?),
+            main,
+            "land must render from the surviving checkout"
+        );
+        let notice = "your shell's directory was removed";
+        assert_eq!(
+            value.to_string().matches(notice).count(),
+            usize::from(!another_worker),
+            "{value}"
+        );
         assert_eq!(code(&output), if another_worker { 1 } else { 0 }, "{value}");
         assert_eq!(
             status(&value, "worktree")?,
@@ -344,7 +415,16 @@ pub(crate) fn pr_land_canonicalises_quoted_worktree_paths() -> Result {
 pub(crate) fn pr_land_recovers_only_abandoned_prepared_writer_leases() -> Result {
     use provenant_core::Clock;
     use provenant_supervisor::custody::{Scope, WriterBinding};
-    for case in ["abandoned", "held", "malformed", "wrong_binding"] {
+    for case in [
+        "abandoned",
+        "held",
+        "malformed",
+        "wrong_binding",
+        "dirty",
+        "symlink_output",
+        "protected_output",
+        "allowed_output",
+    ] {
         let landing = landing()?;
         let (_, context) = super::worktree_tests::writer_context(&landing.rig)?;
         let clock = provenant_os::clock::SystemClock;
@@ -399,8 +479,28 @@ pub(crate) fn pr_land_recovers_only_abandoned_prepared_writer_leases() -> Result
             fs::write(state.join("reservation.json"), b"malformed reservation")?;
         }
         let reservation = fs::read(state.join("reservation.json"))?;
+        match case {
+            "dirty" => fs::write(landing.worktree.join("notes.txt"), "uncommitted")?,
+            "symlink_output" => {
+                fs::create_dir(landing.rig.root.join("external"))?;
+                fs::write(landing.rig.root.join("external/artifact"), "preserve")?;
+                symlink(
+                    landing.rig.root.join("external"),
+                    landing.worktree.join("target"),
+                )?;
+            }
+            "protected_output" => {
+                fs::create_dir(landing.worktree.join("target"))?;
+                fs::write(landing.worktree.join("target/.git"), "protected repository")?;
+            }
+            "allowed_output" => {
+                fs::create_dir(landing.worktree.join("target"))?;
+                fs::write(landing.worktree.join("target/artifact"), "regenerable")?;
+            }
+            _ => {}
+        }
         let value = land(&landing)?;
-        let removed = case == "abandoned";
+        let removed = matches!(case, "abandoned" | "allowed_output");
         assert_eq!(
             status(&value, "worktree")?,
             if removed { "done" } else { "refused" },
@@ -413,6 +513,25 @@ pub(crate) fn pr_land_recovers_only_abandoned_prepared_writer_leases() -> Result
             assert!(state.join("settlement.json").exists());
         } else {
             assert_eq!(fs::read(state.join("reservation.json"))?, reservation);
+            if case == "dirty" {
+                assert_eq!(
+                    fs::read_to_string(landing.worktree.join("notes.txt"))?,
+                    "uncommitted"
+                );
+            }
+            if case == "protected_output" {
+                assert_eq!(
+                    fs::read_to_string(landing.worktree.join("target/.git"))?,
+                    "protected repository"
+                );
+            }
+            if case == "symlink_output" {
+                assert!(landing.worktree.join("target").is_symlink());
+                assert_eq!(
+                    fs::read_to_string(landing.rig.root.join("external/artifact"))?,
+                    "preserve"
+                );
+            }
         }
         drop(lease);
     }
@@ -625,10 +744,6 @@ pub(crate) fn pr_land_primary_with_separate_git_directory() -> Result {
             .rig
             .env
             .push(("FIXTURE_GH_DIR".into(), main.clone().into_os_string()));
-        landing
-            .rig
-            .env
-            .push(("FIXTURE_SYSTEM_WORKERS".into(), "1".into()));
         if from_lane {
             landing.rig.project = landing.worktree.clone();
         }

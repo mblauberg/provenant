@@ -57,28 +57,42 @@ and a clamped tail reports its effective bound. The generated
 ### Settled attempt provenance receipts
 
 `output TARGET --part receipt` prints one local, settled attempt's applied
-route and resolution source. An attempt target is exact; `RUN` or `RUN/TASK`
-is accepted only when it selects exactly one attempt. Ambiguous targets,
+route, resolution source and canonical reviewer attribution. An attempt target
+is exact; `RUN` or `RUN/TASK` is accepted only when it selects exactly one
+attempt. Ambiguous targets,
 nonterminal attempts and peer transport are refused. `--trace` conflicts with
 `--part receipt`.
 
-The human line has this exact shape:
+The human output has this exact shape:
 
 ```text
 Reviewer: codex/gpt-6.1-sol@high (openai; resolved from explicit), run RUN/TASK/ATTEMPT
+Reviewer provenance: observed, actor ACTOR, model codex/gpt-6.1-sol, family openai
 ```
 
 A canonical task with a writer request uses `Writer:` instead of `Reviewer:`.
-The resolution source is `explicit`, `pool NAME` or `fallback`. Missing applied
-effort and uncatalogued model family print `unknown`; no provider default effort
-is inferred. Model names are qualified with their adapter before family lookup.
+The resolution source is `explicit`, `pool NAME`, `fallback` or `unknown`.
+A matching recorded pool pick proves `pool NAME`; an applied model matching the
+requested model proves `explicit`. A different applied model proves `fallback`
+only when it matches a canonical task fallback and the requested route was
+recorded as skipped. Other records print `unknown`.
+
+A settled attempt without a recorded route still produces a receipt. Missing
+route fields, unrecorded effort and uncatalogued model family print `unknown`;
+no provider default effort is inferred. Model names are qualified with their
+adapter before family lookup. The second line reports `AttemptFact.reviewer`
+provenance and actor identity, with its observed model and catalogue family.
+Missing reviewer fields print `unknown`.
+
 `--json` returns `run_id`, `task_id`, `attempt_id`, `adapter`, `model`, `effort`,
-`family`, `role` (`reviewer` or `writer`), `resolved_from` and the exact `receipt`
-line without its trailing newline.
+`family`, `role` (`reviewer` or `writer`), `resolved_from`, the exact first
+`receipt` line and second `reviewer_provenance` line without trailing newlines,
+and `reviewer` with `provenance`, `actor_id`, `model` and `family`.
 - Why: chairs can cite grep-able provenance without calling a writer a reviewer
   or guessing provider defaults.
 - Test: `tests/dispatch_provider.rs::receipt_output_resolves_run_task_and_attempt`;
   `::receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts`;
+  `::receipt_output_reports_unknown_route_for_settled_lost_attempt`;
   `crates/cli/src/lib.rs::bounded_waits_counts_and_byte_windows`
 - Owner: `crates/cli/src/run.rs`
 
@@ -210,11 +224,13 @@ that worktree, cleanup uses the verified primary checkout as its repository
 anchor, process cwd and output project. Canonical paths and NUL-delimited Git
 inventory handle symlink aliases and quoted paths. The landing worker census
 ignores itself and only its ancestor chain through the session leader; other
-positively observed processes inside the lane refuse removal, including when
-the rest of the census is incomplete. Landing clears a writer reservation only
+observable live processes inside the lane refuse removal. An incomplete census
+or unknown ancestor hop refuses landing with a retry message; each exempted
+ancestor requires a strictly older native start stamp. Landing clears a writer reservation only
 through custody recovery: a verified prepared reservation never handed off,
 or an absent writer with a matching canonical terminal attempt, worktree/Git
-binding and verified settlement. Unknown, malformed and live reservations stay.
+binding and verified settlement. Dirty and ignored-output prechecks pass under
+writer exclusion before lease clearance. Unknown, malformed and live reservations stay.
 The branch deletion carries the head too:
 with no registered worktree it refuses a branch that any worktree has
 checked out, is rebasing (paused or not) or is bisecting, as `git branch -d`
@@ -231,6 +247,7 @@ instead of forcing, and the command exits 1 with `merged: true`.
 - Test: `src/pr_land_tests.rs::pr_land_merges_then_fetches_fast_forwards_and_prunes`;
   `::pr_land_prunes_the_selected_merged_worktree`;
   `::pr_land_from_lane_ignores_only_its_callers`;
+  `::pr_land_refuses_incomplete_worker_census`;
   `::pr_land_canonicalises_quoted_worktree_paths`;
   `::pr_land_recovers_only_abandoned_prepared_writer_leases`;
   `::pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores`;

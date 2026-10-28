@@ -883,6 +883,7 @@ struct PersistedAttemptOptions {
     writer: bool,
     extra_task: bool,
     nonterminal: bool,
+    lost_before_route: bool,
 }
 
 fn persisted_attempt_with(
@@ -1025,6 +1026,23 @@ fn persisted_attempt_with(
     if options.nonterminal {
         return Ok((rig, running));
     }
+
+    if options.lost_before_route {
+        running.applied_route = None;
+        running.resolved_route = None;
+        running.state = provenant_run::AttemptState::Terminal {
+            outcome: provenant_run::Outcome::Lost,
+            exit_code: None,
+            finished_at: clock.wall_now()?,
+            reason: Some("lost before recording a route".into()),
+        };
+        let bytes = CanonicalV1::bytes(&running)?.as_bytes().to_vec();
+        database.execute(
+            "UPDATE attempts SET terminal=1,record=?1 WHERE id=?2",
+            rusqlite::params![bytes, attempt_id.to_string()],
+        )?;
+        return Ok((rig, running));
+    }
     let attempt_dir = roots
         .state
         .as_path()
@@ -1141,9 +1159,16 @@ fn receipt_output_resolves_run_task_and_attempt() -> Result {
         format!("{run}/{task}"),
         format!("{run}/{task}/{attempt}"),
     ];
-    let expected = format!(
-        "Reviewer: codex/gpt-6.1-sol@unknown (openai; resolved from explicit), run {run}/{task}/{attempt}\n"
+    let actor = provenant_run::fact(terminal.clone())?
+        .reviewer
+        .ok_or("reviewer fact")?
+        .actor_id;
+    let receipt = format!(
+        "Reviewer: codex/gpt-6.1-sol@unknown (openai; resolved from explicit), run {run}/{task}/{attempt}"
     );
+    let attribution =
+        format!("Reviewer provenance: unknown, actor {actor}, model unknown, family unknown");
+    let expected = format!("{receipt}\n{attribution}\n");
     for target in &targets {
         let human = rig.command(&["output", target, "--part", "receipt"])?;
         assert_eq!(
@@ -1161,7 +1186,10 @@ fn receipt_output_resolves_run_task_and_attempt() -> Result {
             String::from_utf8_lossy(&output.stderr.bytes)
         );
         let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
-        assert_eq!(data["data"]["receipt"], expected.trim_end());
+        assert_eq!(data["data"]["receipt"], receipt);
+        assert_eq!(data["data"]["reviewer_provenance"], attribution);
+        assert_eq!(data["data"]["reviewer"]["provenance"], "unknown");
+        assert_eq!(data["data"]["reviewer"]["actor_id"], actor.to_string());
         assert_eq!(data["data"]["run_id"], run);
         assert_eq!(data["data"]["task_id"], task);
         assert_eq!(data["data"]["attempt_id"], attempt);
@@ -1212,7 +1240,15 @@ fn receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts()
             assert!(line.starts_with("Writer: codex/gpt-6.1-sol@unknown (openai;"));
             let human = rig.command(&["output", &exact, "--part", "receipt"])?;
             assert_eq!(code(&human), 0);
-            assert_eq!(String::from_utf8(human.stdout.bytes)?, format!("{line}\n"));
+            assert_eq!(data["data"]["reviewer"]["provenance"], "observed");
+            assert_eq!(data["data"]["reviewer"]["family"], "openai");
+            let provenance = data["data"]["reviewer_provenance"]
+                .as_str()
+                .ok_or("provenance line")?;
+            assert_eq!(
+                String::from_utf8(human.stdout.bytes)?,
+                format!("{line}\n{provenance}\n")
+            );
         } else if ambiguous {
             assert_ne!(code(&output), 0, "{data}");
             assert_eq!(data["error"]["code"], "CONFLICT");
@@ -1233,6 +1269,43 @@ fn receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts()
             );
         }
     }
+    Ok(())
+}
+
+fn receipt_output_reports_unknown_route_for_settled_lost_attempt() -> Result {
+    let (rig, record) = persisted_attempt_with(
+        "codex",
+        "codex/gpt-6.1-sol",
+        ("work", "fixture"),
+        b"",
+        b"",
+        0,
+        PersistedAttemptOptions {
+            lost_before_route: true,
+            ..Default::default()
+        },
+    )?;
+    let target = format!("{}/{}/{}", record.run_id, record.task_id, record.attempt_id);
+    let output = rig.command(&["output", &target, "--part", "receipt", "--json"])?;
+    let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(code(&output), 0, "{data}");
+    for field in ["adapter", "model", "effort", "family", "resolved_from"] {
+        assert_eq!(data["data"][field], "unknown", "{field}: {data}");
+    }
+    assert_eq!(data["data"]["reviewer"]["provenance"], "unknown");
+    let actor = provenant_run::fact(record)?
+        .reviewer
+        .ok_or("reviewer fact")?
+        .actor_id;
+    assert_eq!(data["data"]["reviewer"]["actor_id"], actor.to_string());
+    let human = rig.command(&["output", &target, "--part", "receipt"])?;
+    assert_eq!(code(&human), 0);
+    assert_eq!(
+        String::from_utf8(human.stdout.bytes)?,
+        format!(
+            "Reviewer: unknown@unknown (unknown; resolved from unknown), run {target}\nReviewer provenance: unknown, actor {actor}, model unknown, family unknown\n"
+        )
+    );
     Ok(())
 }
 
@@ -1822,6 +1895,7 @@ fn main() -> ExitCode {
         provenant_supervisor::fixture::run_libtest(
             &args,
             &[
+                "receipt_output_reports_unknown_route_for_settled_lost_attempt",
                 "receipt_output_resolves_run_task_and_attempt",
                 "receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts",
                 "owned_dispatch_retains_failed_attempt_and_replays",
@@ -1840,6 +1914,9 @@ fn main() -> ExitCode {
             ],
             |name| {
                 let result = match name {
+                    "receipt_output_reports_unknown_route_for_settled_lost_attempt" => {
+                        receipt_output_reports_unknown_route_for_settled_lost_attempt()
+                    }
                     "receipt_output_resolves_run_task_and_attempt" => {
                         receipt_output_resolves_run_task_and_attempt()
                     }

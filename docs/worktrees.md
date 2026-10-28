@@ -127,9 +127,12 @@ settlement, delivery integration and `land` prune eligible worktrees and
 caches. When landing from the merged linked worktree, `land` uses the main
 checkout for cleanup and output so it can remove the selected worktree and its
 branch. It ignores its own caller ancestors through the session leader in the
-worker census, while other live processes inside the lane retain it. The land
-process changes cwd before removal; an invoking shell must change its own cwd
-afterwards. The landing report gives a reason for any cleanup step that is skipped or
+worker census, while other observable live processes inside the lane retain it.
+An incomplete census or unproved ancestor hop refuses landing with a retry
+message; ancestor identities require strictly older native start stamps. The
+land process changes cwd before removal and prints a notice when the invoking
+shell's directory was removed. The shell must change its own cwd afterwards.
+The landing report gives a reason for any cleanup step that is skipped or
 refused. Event collection uses the same GC lock as the daily sweep and keeps
 foreign worktrees out of scope.
 Output pruning holds the worktree's writer lock; the repository lock is held
@@ -193,6 +196,8 @@ authority for that exact reservation:
 proves it was never handed off, or its canonical attempt is terminal and
 supervisor proves absence and verifies settlement. It checks the worktree/Git
 binding and keeps malformed, live, nonterminal or unproved reservations.
+Dirty and ignored-output prechecks run under recovered writer exclusion before
+any lease clearance; a refused precheck leaves the reservation intact.
 Ordinary `worktree remove` still refuses any reservation.
 When custody is lost without a durable exit, this revision cannot create the
 required terminal receipt, so the fence cannot yet be cleared. Retain it and

@@ -94,6 +94,7 @@ impl Error {
                 | WorktreeError::GitOperationInProgress
                 | WorktreeError::LiveWriter
                 | WorktreeError::UnknownWriter
+                | WorktreeError::IncompleteCensus
                 | WorktreeError::Primary
                 | WorktreeError::IdentityChanged
                 | WorktreeError::PrimaryMoved,
@@ -616,7 +617,10 @@ pub(crate) fn land_cleanup(
                 return Ok(landed);
             };
             landed.registered = true;
-            if project.starts_with(&lane.path) {
+            if std::env::current_dir()
+                .map_err(roots::RootError::from)?
+                .starts_with(&lane.path)
+            {
                 landed.kept = Some(
                     "this command runs inside that worktree; run it from another checkout".into(),
                 );
@@ -628,6 +632,21 @@ pub(crate) fn land_cleanup(
                     lane.head
                 ));
                 return Ok(landed);
+            }
+            match context
+                .workers
+                .observe_roots(std::slice::from_ref(&lane.path))
+                .get(&lane.path)
+            {
+                Some(worktrees::WorkerState::Free) => {}
+                Some(worktrees::WorkerState::Live) => {
+                    landed.kept = Some(WorktreeError::LiveWriter.to_string());
+                    return Ok(landed);
+                }
+                _ => {
+                    landed.kept = Some(WorktreeError::IncompleteCensus.to_string());
+                    return Ok(landed);
+                }
             }
             let project_id = context.binding.project_id();
             let settings = config
@@ -641,7 +660,16 @@ pub(crate) fn land_cleanup(
                 regenerable.push("target".into());
             }
             let snapshot = crate::gc_support::lane_states(&roots, &home, &assets, project_id).ok();
-            if let Err(error) = clear_landed_writer(context, &lane, snapshot.as_ref(), cancel) {
+            if let Err(error) = clear_landed_writer(
+                context,
+                &lane,
+                snapshot.as_ref(),
+                &provenant_config::ProjectGcSettings {
+                    regenerable: regenerable.clone(),
+                    ..settings.clone()
+                },
+                cancel,
+            ) {
                 landed.kept = Some(error.to_string());
                 return Ok(landed);
             }
@@ -717,6 +745,7 @@ fn clear_landed_writer(
     context: &WorktreeContext<'_>,
     lane: &worktrees::WorktreeInfo,
     snapshot: Option<&crate::gc_support::LaneSnapshot>,
+    output: &provenant_config::ProjectGcSettings,
     cancel: &CancelToken,
 ) -> Result<(), Error> {
     use provenant_supervisor::custody::{self, CustodyError};
@@ -728,13 +757,14 @@ fn clear_landed_writer(
         Err(error) => return Err(error.into()),
         Ok(_) => {}
     }
-    if context
+    match context
         .workers
         .observe_roots(std::slice::from_ref(&lane.path))
         .get(&lane.path)
-        == Some(&worktrees::WorkerState::Live)
     {
-        return Err(WorktreeError::LiveWriter.into());
+        Some(worktrees::WorkerState::Free) => {}
+        Some(worktrees::WorkerState::Live) => return Err(WorktreeError::LiveWriter.into()),
+        _ => return Err(WorktreeError::IncompleteCensus.into()),
     }
     let verified = provenant_confinement::repo::verify_worktree(context.repo, &lane.path)
         .map_err(WorktreeError::from)?;
@@ -754,6 +784,7 @@ fn clear_landed_writer(
                 branch,
             )
             .map_err(|error| Error::WriterRecovery(error.to_string()))?;
+        worktrees::check_removal_preconditions(context, &verified, output, cancel)?;
         Ok(recovery)
     };
     match acquire()?.withdraw_prepared() {

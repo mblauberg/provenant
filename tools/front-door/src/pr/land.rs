@@ -143,6 +143,10 @@ fn checkouts(git: &Git, project: &Path) -> Result<Vec<Checkout>> {
 /// continue to use the ordinary observer, which includes those processes.
 struct LandWorkers<'a>(&'a dyn WorkerObserver);
 impl WorkerObserver for LandWorkers<'_> {
+    fn requires_complete_census(&self) -> bool {
+        true
+    }
+
     fn observe_roots(
         &self,
         roots: &[PathBuf],
@@ -361,16 +365,23 @@ fn follow_up(
             let cleanup_project = &checkouts.first().ok_or("no primary checkout")?.path;
             // Move this process and output publication to the surviving checkout
             // before removal. A child cannot change its invoking shell's cwd.
-            if let Some(lane) = checkouts
-                .iter()
-                .find(|checkout| checkout.branch.as_deref() == Some(branch))
-                && std::env::current_dir()?.starts_with(&lane.path)
-            {
+            let caller_cwd = std::env::current_dir()?;
+            let relocated = checkouts.iter().any(|checkout| {
+                checkout.branch.as_deref() == Some(branch) && caller_cwd.starts_with(&checkout.path)
+            });
+            if relocated {
                 std::env::set_current_dir(cleanup_project)?;
             }
             globals.project = Some(cleanup_project.to_path_buf());
             let workers = LandWorkers(workers);
-            let (worktree, branch_gone) = prune_worktree(globals, branch, &upstream, tip, &workers);
+            let (mut worktree, branch_gone) =
+                prune_worktree(globals, branch, &upstream, tip, &workers);
+            if relocated && worktree.status == Status::Done {
+                worktree.detail.push_str(&format!(
+                    "; your shell's directory was removed; change directory to {}",
+                    cleanup_project.display()
+                ));
+            }
             steps.push(worktree);
             steps.push(delete_branch(
                 &git,

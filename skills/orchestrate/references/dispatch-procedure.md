@@ -217,8 +217,9 @@ push|reconcile`. A terminal without MCP cancels with `provenant cancel ATTEMPT`.
   nothing.
 - On a terminal review, record the exact provenance line from
   `provenant output RUN/TASK/ATTEMPT --part receipt`. Reviews use `Reviewer:`;
-  writer provenance uses `Writer:`. Preserve `unknown` effort or family rather
-  than guessing it. Native subagents record `claude/<model>@<effort> (anthropic;
+  writer provenance uses `Writer:`. Include the following `Reviewer provenance:`
+  line for the canonical actor and observed attribution. Preserve `unknown` route,
+  effort, family and resolution evidence rather than guessing them. Native subagents record `claude/<model>@<effort> (anthropic;
   resolved)` from the Agent tool's model parameter, never from self-report.
 
 ## Fabric dispatch brief template

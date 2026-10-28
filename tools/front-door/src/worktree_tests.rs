@@ -34,12 +34,33 @@ impl provenant_confinement::worktrees::WorkerObserver for FreeWorkers {
     }
 }
 
+struct UnknownWorkers;
+impl provenant_confinement::worktrees::WorkerObserver for UnknownWorkers {
+    fn observe_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState> {
+        static OBSERVATIONS: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        let late = std::env::var("FIXTURE_UNKNOWN_WORKERS").is_ok_and(|mode| mode == "late");
+        let observed = if late && OBSERVATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2
+        {
+            provenant_confinement::worktrees::WorkerState::Free
+        } else {
+            provenant_confinement::worktrees::WorkerState::Unknown
+        };
+        roots.iter().cloned().map(|root| (root, observed)).collect()
+    }
+}
+
 /// The driver's seams: free workers, the recorded boot and a holder that can
 /// crash after durable exit.
 struct Fixture;
 impl crate::Process for Fixture {
     fn workers(&self) -> &'static dyn provenant_confinement::worktrees::WorkerObserver {
-        if std::env::var_os("FIXTURE_SYSTEM_WORKERS").is_some() {
+        if std::env::var_os("FIXTURE_UNKNOWN_WORKERS").is_some() {
+            &UnknownWorkers
+        } else if std::env::var_os("FIXTURE_SYSTEM_WORKERS").is_some() {
             &provenant_confinement::worktrees::SystemWorkerObserver
         } else {
             &FreeWorkers
@@ -132,7 +153,16 @@ pub fn main() -> std::process::ExitCode {
             }
         }
         Some("--state-dir" | "internal") => {
-            ExitCode::from(crate::dispatch(provenant_cli::parse(args), &Fixture))
+            let code = crate::dispatch(provenant_cli::parse(args), &Fixture);
+            // A fixture-only observation after the real command has rendered.
+            if let Some(path) = std::env::var_os("FIXTURE_LAND_CWD_FILE") {
+                let result = std::env::current_dir()
+                    .and_then(|cwd| fs::write(path, cwd.as_os_str().as_encoded_bytes()));
+                if let Err(error) = result {
+                    return exit("land cwd", Err(error.into()));
+                }
+            }
+            ExitCode::from(code)
         }
         _ => exit(
             "worktree integration",
@@ -180,6 +210,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "pr_land_merges_then_fetches_fast_forwards_and_prunes",
             "pr_land_prunes_the_selected_merged_worktree",
             "pr_land_from_lane_ignores_only_its_callers",
+            "pr_land_refuses_incomplete_worker_census",
             "pr_land_canonicalises_quoted_worktree_paths",
             "pr_land_recovers_only_abandoned_prepared_writer_leases",
             "pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores",
@@ -273,6 +304,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                     crate::pr_land_tests::pr_land_prunes_the_selected_merged_worktree()
                 }
                 "pr_land_from_lane_ignores_only_its_callers" => crate::pr_land_tests::pr_land_from_lane_ignores_only_its_callers(),
+                "pr_land_refuses_incomplete_worker_census" => crate::pr_land_tests::pr_land_refuses_incomplete_worker_census(),
                 "pr_land_canonicalises_quoted_worktree_paths" => crate::pr_land_tests::pr_land_canonicalises_quoted_worktree_paths(),
                 "pr_land_recovers_only_abandoned_prepared_writer_leases" => crate::pr_land_tests::pr_land_recovers_only_abandoned_prepared_writer_leases(),
                 "pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores" => crate::pr_land_tests::pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores(),

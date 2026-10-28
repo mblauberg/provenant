@@ -615,7 +615,18 @@ pub(super) fn prepare_removal(
     keep: &[String],
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
-    prepare_removal_before(context, repo, regenerable, keep, i128::MAX, cancel)
+    prepare_removal_before(context, repo, regenerable, keep, false, cancel)
+}
+
+/// Preview exactly the same ignored-output eligibility as actual removal.
+pub(super) fn precheck_removal(
+    context: &WorktreeContext<'_>,
+    repo: &VerifiedRepo,
+    regenerable: &[String],
+    keep: &[String],
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    prepare_removal_before(context, repo, regenerable, keep, true, cancel)
 }
 
 fn prepare_removal_before(
@@ -623,7 +634,7 @@ fn prepare_removal_before(
     repo: &VerifiedRepo,
     regenerable: &[String],
     keep: &[String],
-    written_before_ns: i128,
+    preview_only: bool,
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
     let protected = output_protection(context, repo, keep, cancel)?;
@@ -633,7 +644,7 @@ fn prepare_removal_before(
         no_live_lanes: &|_| true,
         regenerable,
         keep,
-        written_before_ns,
+        written_before_ns: i128::MAX,
         dry_run: true,
         foreign_merged_clean: false,
         foreign_idle_before_ns: None,
@@ -668,6 +679,9 @@ fn prepare_removal_before(
             .map(|record| String::from_utf8_lossy(&record.path).into_owned())
             .collect::<Vec<_>>();
         return Err(WorktreeError::IgnoredPaths(paths.join(", ")));
+    }
+    if preview_only {
+        return Ok(());
     }
     policy.dry_run = false;
     output.clear();

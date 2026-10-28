@@ -28,8 +28,8 @@ use provenant_os::fs::{
 use provenant_os::pid::{CwdObservation, CwdObserver, SystemCwdObserver};
 use provenant_records::{PathWire, PathWireError};
 use provenant_supervisor::census::{
-    ProcessFact, ProcessLookup, ProcessObservation, ProcessObserver, SystemProcessObserver,
-    current_process,
+    Ancestry, ProcessFact, ProcessLookup, ProcessObservation, ProcessObserver,
+    SystemProcessObserver, current_process,
 };
 use provenant_supervisor::custody::WriterBinding;
 use serde::ser::SerializeStruct;
@@ -69,6 +69,10 @@ pub enum WorktreeError {
     GitOperationInProgress,
     #[error("worktree writer is live")]
     LiveWriter,
+    #[error(
+        "incomplete worker census or ancestry; retry `provenant land` when process observation is complete"
+    )]
+    IncompleteCensus,
     #[error("worktree writer or registration is unknown")]
     UnknownWriter,
     #[error("worktree operation was cancelled")]
@@ -288,6 +292,12 @@ pub enum WorkerState {
 pub trait WorkerObserver: Send + Sync {
     fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState>;
 
+    /// Landing requires positive observation of a free root. Ordinary removal
+    /// still relies on writer custody when the host census is unobservable.
+    fn requires_complete_census(&self) -> bool {
+        false
+    }
+
     /// Landing may remove its caller's checkout. Exclude only the caller and
     /// its verified ancestors through the session leader, never other workers.
     fn observe_roots_for_land(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
@@ -347,25 +357,27 @@ fn observe_worker_roots(
             .map(|root| (root, WorkerState::Unknown))
             .collect();
     };
+    let mut unknown_all = !census.is_complete();
     let mut excluded = BTreeSet::from([current.identity.clone()]);
     if ancestors {
         let mut child = current;
         while child.identity.pid != current.identity.session_id {
             let ProcessLookup::Present(parent) = census.process(child.parent_pid) else {
+                unknown_all = true;
                 break;
             };
             if parent.identity.boot != current.identity.boot
                 || parent.identity.session_id != current.identity.session_id
-                || parent.identity.native_start > child.identity.native_start
+                || census.ancestry(&child.identity, &parent.identity) != Ancestry::Yes
                 || !excluded.insert(parent.identity.clone())
             {
+                unknown_all = true;
                 break;
             }
             child = parent;
         }
     }
     // An incomplete census must not hide positively observed live workers.
-    let mut unknown_all = !census.is_complete();
     for fact in census.facts() {
         if excluded.contains(&fact.identity) {
             continue;
@@ -1014,6 +1026,9 @@ fn lock_worktree_for_mutation(
         .copied()
         .unwrap_or(WorkerState::Unknown)
     {
+        WorkerState::Unknown if context.workers.requires_complete_census() => {
+            Err(WorktreeError::IncompleteCensus)
+        }
         WorkerState::Free | WorkerState::Unknown => Ok(LockedWorktree {
             verified,
             state,
@@ -1790,7 +1805,9 @@ fn retain_reason(error: &WorktreeError) -> RetainReason {
         WorktreeError::Dirty | WorktreeError::IgnoredPaths(_) => RetainReason::Dirty,
         WorktreeError::GitOperationInProgress => RetainReason::GitOperationInProgress,
         WorktreeError::LiveWriter => RetainReason::LiveWriter,
-        WorktreeError::UnknownWriter | WorktreeError::Cancelled => RetainReason::UnknownWriter,
+        WorktreeError::UnknownWriter
+        | WorktreeError::Cancelled
+        | WorktreeError::IncompleteCensus => RetainReason::UnknownWriter,
         WorktreeError::CheckedOut => RetainReason::CheckedOut,
         WorktreeError::IdentityChanged => RetainReason::Changed,
         WorktreeError::Primary => RetainReason::Primary,
@@ -2005,6 +2022,30 @@ fn primary_integration(
         .strip_prefix("ref: ")
         .ok_or(WorktreeError::InvalidRequest)?;
     pin_branch_ref(context, name, cancel)
+}
+
+/// Read-only dirty/output prechecks before a caller releases recovered writer
+/// custody. The caller holds the writer lock; removal rechecks after recovery.
+pub fn check_removal_preconditions(
+    context: &WorktreeContext<'_>,
+    worktree: &VerifiedWorktree,
+    output: &provenant_config::ProjectGcSettings,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    worktree.repo().revalidate()?;
+    match worktree_dirty_at(context, worktree.repo(), cancel)? {
+        WorktreeCondition::Clean => Ok(()),
+        WorktreeCondition::Ignored => gc::precheck_removal(
+            context,
+            worktree.repo(),
+            &output.regenerable,
+            &output.keep,
+            cancel,
+        ),
+        WorktreeCondition::Dirty => Err(WorktreeError::Dirty),
+        WorktreeCondition::GitOperationInProgress => Err(WorktreeError::GitOperationInProgress),
+        WorktreeCondition::Unknown => Err(WorktreeError::UnknownWriter),
+    }
 }
 
 /// Remove one clean managed linked worktree, or prune a caller-scoped set of
@@ -3338,6 +3379,75 @@ mod lifecycle_tests {
                 assert_eq!(observe(&cwds, true), WorkerState::Live, "pid {pid}");
                 cwds.0.insert(pid, outside.clone());
             }
+        }
+        for ambiguity in [
+            "equal_stamp",
+            "younger_parent",
+            "missing_hop",
+            "cycle",
+            "reused_current",
+        ] {
+            let mut ambiguous = facts.clone();
+            match ambiguity {
+                "equal_stamp" => {
+                    ambiguous
+                        .iter_mut()
+                        .find(|fact| fact.identity.pid == 90)
+                        .ok_or("parent")?
+                        .identity
+                        .native_start = 100
+                }
+                "younger_parent" => {
+                    ambiguous
+                        .iter_mut()
+                        .find(|fact| fact.identity.pid == 90)
+                        .ok_or("parent")?
+                        .identity
+                        .native_start = 101
+                }
+                "missing_hop" => ambiguous.retain(|fact| fact.identity.pid != 90),
+                "cycle" => {
+                    ambiguous
+                        .iter_mut()
+                        .find(|fact| fact.identity.pid == 80)
+                        .ok_or("parent")?
+                        .parent_pid = 90
+                }
+                "reused_current" => {
+                    ambiguous
+                        .iter_mut()
+                        .find(|fact| fact.identity.pid == 100)
+                        .ok_or("current")?
+                        .identity
+                        .native_start += 1
+                }
+                _ => unreachable!(),
+            }
+            let processes = Processes(Census::from_observations(
+                ambiguous,
+                [],
+                [],
+                true,
+                false,
+                32,
+            )?);
+            let cwds = Cwds(
+                facts
+                    .iter()
+                    .map(|fact| (fact.identity.pid, outside.clone()))
+                    .collect(),
+            );
+            assert_eq!(
+                observe_worker_roots(
+                    std::slice::from_ref(&root),
+                    &processes,
+                    &cwds,
+                    &current,
+                    true
+                )[&root],
+                WorkerState::Unknown,
+                "{ambiguity}"
+            );
         }
         Ok(())
     }
