@@ -288,7 +288,11 @@ impl LogStore {
             .iter()
             .find(|r| r.operation_id == input.operation_id)
         {
-            if old.digest != digest {
+            // Receipts written by the original chair-log format used a raw
+            // digest of the whole input, including host. Preserve same-host
+            // retries of those receipts while new receipts use the canonical payload.
+            if old.digest != digest && old.digest != CanonicalV1::file_digest(&encoded).to_string()
+            {
                 return Err(Error::Conflict);
             }
             return if old.retained {
@@ -481,6 +485,28 @@ mod tests {
             store.append(update("op-1", "different"), retention, 2),
             Err(Error::Conflict)
         ));
+        let dir = store.dir(false).unwrap();
+        let mut manifest = LogStore::load(&dir).unwrap();
+        let current_digest = manifest.receipts[0].digest.clone();
+        manifest.receipts[0].digest =
+            CanonicalV1::file_digest(&serde_json::to_vec(&first).unwrap()).to_string();
+        LogStore::publish(
+            &dir,
+            "manifest.json",
+            &serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            store.append(first.clone(), retention, 2).unwrap().sequence,
+            1
+        );
+        manifest.receipts[0].digest = current_digest;
+        LogStore::publish(
+            &dir,
+            "manifest.json",
+            &serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
         let mut handoff = first.clone();
         handoff.host = "other-host".into();
         assert_eq!(store.append(handoff, retention, 2).unwrap().sequence, 1);
