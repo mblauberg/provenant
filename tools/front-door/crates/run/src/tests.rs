@@ -558,6 +558,54 @@ fn missing_output_is_not_found_only_after_terminal() -> TestResult {
 }
 
 #[test]
+fn streamed_result_is_verified_and_redacted_across_chunks() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let secret = format!("ghp_{}", "a".repeat(36));
+    let text = format!("{} {}\n{}", "x".repeat(8189), secret, "z".repeat(1000));
+    let mut done = publication();
+    done.result = &text;
+    store.publish_terminal(id, 1, &done, &exit(), &call)?;
+    let result = store.stream_result(id, &call, None)?;
+    assert_eq!(
+        result.digest,
+        CanonicalV1::file_digest(text.as_bytes()).to_string()
+    );
+    assert!(result.source_truncated);
+    assert!(!result.tail.contains(&secret));
+    assert!(result.tail.contains("[REDACTED]"));
+    let path = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}/result.md", input.run_id));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
+        let expected =
+            std::path::PathBuf::from(format!("runs/{}/attempts/{id}/result.md", input.run_id));
+        assert!(
+            matches!(store.stream_result(id, &call, None), Err(RunError::UnsafePath { path, check: PathCheck::Mode }) if path == expected)
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::write(path, vec![b'x'; text.len()])?;
+    assert!(matches!(
+        store.stream_result(id, &call, None),
+        Err(RunError::ArtifactMismatch)
+    ));
+    Ok(())
+}
+
+#[test]
 fn transcript_part_reads_the_redacted_tail_of_the_provider_transcript() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;

@@ -54,4 +54,5 @@ pub use resolved_route::{
     RouteSelectionReceipt, RouteSelectionRedraw, TooManyAlternatives,
 };
 
+pub mod result_capture;
 pub mod run;

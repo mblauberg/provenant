@@ -2,7 +2,7 @@ use crate::*;
 use provenant_core::{RelativePath, RunId};
 use provenant_os::fs::{Directory, FileKind, Metadata, PayloadTree, PublishMode};
 use provenant_records::{CanonicalV1, PathWire};
-use std::{ffi::OsStr, path::Component};
+use std::{ffi::OsStr, io::Read, path::Component};
 
 pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<Directory> {
     if create {
@@ -82,6 +82,78 @@ pub(crate) fn remove_entry_tree(parent: &Directory, name: &OsStr) -> provenant_o
 }
 
 impl RunStore {
+    /// Verify the original artifact before returning bounded, redacted evidence.
+    /// The returned digest identifies the original artifact.
+    pub fn stream_result(
+        &self,
+        id: provenant_core::AttemptId,
+        call: &Request<'_>,
+        required_verdict: Option<&str>,
+    ) -> Result<provenant_records::result_capture::CapturedResult> {
+        use provenant_os::exec::CaptureFilter;
+        use sha2::{Digest as _, Sha256};
+
+        let record = self.record(id, call)?;
+        let artifact = record.result.as_ref().ok_or_else(|| {
+            if matches!(record.state, AttemptState::Terminal { .. }) {
+                RunError::NotFound
+            } else {
+                RunError::Nonterminal
+            }
+        })?;
+        if artifact.bytes > RESULT_LIMIT {
+            return Err(RunError::TooLarge {
+                limit: RESULT_LIMIT,
+            });
+        }
+        let dir = self.attempt_dir(record.run_id, id, false)?;
+        let mut file = dir.open_read(OsStr::new("result.md"))?;
+        let before = file.metadata()?;
+        if let Some(check) = PathCheck::file(before) {
+            return Err(RunError::unsafe_entry(&dir, OsStr::new("result.md"), check));
+        }
+        if before.size != artifact.bytes {
+            return Err(RunError::ArtifactMismatch);
+        }
+        let mut hash = Sha256::new();
+        let mut redactor = provenant_confinement::redact::Redactor::new([])
+            .map_err(|_| RunError::Validation("output redaction failed"))?;
+        let mut capture = provenant_records::result_capture::ResultCapture::new(required_verdict);
+        let mut buffer = [0u8; 8192];
+        let mut total = 0u64;
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            total = total.saturating_add(count as u64);
+            if total > artifact.bytes {
+                return Err(RunError::ArtifactMismatch);
+            }
+            hash.update(&buffer[..count]);
+            let safe = redactor
+                .filter(&buffer[..count])
+                .map_err(|_| RunError::Validation("output redaction failed"))?;
+            capture.push(&safe);
+        }
+        let digest = provenant_records::FileDigest::from_bytes(hash.finalize().into());
+        if total != artifact.bytes
+            || digest != artifact.digest
+            || !before.unchanged(&file.metadata()?)
+        {
+            return Err(RunError::ArtifactMismatch);
+        }
+        let safe = redactor
+            .finish()
+            .map_err(|_| RunError::Validation("output redaction failed"))?;
+        capture.push(&safe);
+        let mut result = capture.finish();
+        result.digest = digest.to_string();
+        result.source_truncated =
+            artifact.bytes > provenant_records::result_capture::ResultCapture::HEAD_BYTES as u64;
+        Ok(result)
+    }
+
     pub(crate) fn run_dir(&self, run: RunId, create: bool) -> Result<Directory> {
         let runs = subdir(&self.root, OsStr::new("runs"), create)?;
         subdir(&runs, OsStr::new(&run.to_string()), create)
