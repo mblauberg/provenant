@@ -1,13 +1,13 @@
 //! Host-only dispatch associations. Never open this index in a lane's child root.
 use provenant_core::{Digest, ProjectId, RunId, StateRoot};
-use provenant_fabric_store::Store;
+use provenant_fabric_store::HostStore;
 pub use provenant_fabric_store::{Error, Request, RunChair, ThreadWait};
 use provenant_records::run::CanonicalRequest;
 
-pub struct ChairIndex(Store);
+pub struct ChairIndex(HostStore);
 impl ChairIndex {
     pub fn open(root: &StateRoot, call: &Request<'_>) -> Result<Self, Error> {
-        Store::open_host(root, call).map(Self)
+        HostStore::open(root, call).map(Self)
     }
 
     /// Missing records mean unbound. No provider/session or run-store fallback.
@@ -148,19 +148,6 @@ mod tests {
             Err(Error::Conflict)
         ));
         assert!(index.read(project, run(4), &call)?.is_none());
-        // The ordinary Fabric mail database is also lane-writable. Forged rows
-        // there must not be read as host-owned associations.
-        Store::open(&root, &call)?.seal_run_chair(
-            project,
-            run(2),
-            &RunChair {
-                request_digest: forged.digest()?,
-                chair: forged.chair.clone(),
-            },
-            &call,
-        )?;
-        assert_eq!(index.read(project, run(2), &call)?.unwrap().chair, chair);
-
         inputs.state_dir = Some(root.as_path().join("children/fabricated"));
         let lane_root = inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state;
         ChairIndex::open(&lane_root, &call)?.submit(project, run(2), &forged, &call)?;

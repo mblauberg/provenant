@@ -280,12 +280,13 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
             &reason,
             &call,
             |id, validated| {
+                let stored = session.store.request(id, &call)?;
                 with_chair_index(&roots, &call, |index, index_call| {
                     index.inherit(
                         context.project_id,
                         (context.run_id, sealed.request_digest),
                         id,
-                        validated,
+                        &stored,
                         index_call,
                     )
                 })?;

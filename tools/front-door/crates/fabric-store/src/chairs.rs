@@ -10,7 +10,14 @@ pub struct RunChair {
     pub chair: Option<ChairBinding>,
 }
 
-impl Store {
+/// Only this handle can access authoritative chair records. Coordination
+/// Store handles deliberately expose no association methods.
+pub struct HostStore(Store);
+impl HostStore {
+    pub fn open(root: &provenant_core::StateRoot, request: &Request<'_>) -> Result<Self> {
+        Store::open_host(root, request).map(Self)
+    }
+
     pub fn run_chair(
         &self,
         project: ProjectId,
@@ -19,6 +26,7 @@ impl Store {
     ) -> Result<Option<RunChair>> {
         request.retry(|| {
             let raw: Option<Vec<u8>> = self
+                .0
                 .db
                 .query_row(
                     "SELECT substr(record,1,?3) FROM run_chairs WHERE project=?1 AND run=?2",
@@ -39,7 +47,7 @@ impl Store {
         request: &Request<'_>,
     ) -> Result<()> {
         let bytes = encode(value)?;
-        self.write(request, |tx| {
+        self.0.write(request, |tx| {
             let previous: Option<Vec<u8>> = tx
                 .query_row(
                     "SELECT substr(record,1,?3) FROM run_chairs WHERE project=?1 AND run=?2",

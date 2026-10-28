@@ -2327,7 +2327,14 @@ fn with_chair_index<T>(
                     | provenant_fabric_runtime::chairs::Error::Invalid(_) => Status::Refused,
                     _ => Status::Error,
                 },
-                ErrorKind::Fabric,
+                match &error {
+                    provenant_fabric_runtime::chairs::Error::Conflict => ErrorKind::Conflict,
+                    provenant_fabric_runtime::chairs::Error::NotFound => ErrorKind::NotFound,
+                    provenant_fabric_runtime::chairs::Error::Invalid(_) => ErrorKind::Refused,
+                    provenant_fabric_runtime::chairs::Error::Busy => ErrorKind::Contention,
+                    provenant_fabric_runtime::chairs::Error::Cancelled => ErrorKind::Cancelled,
+                    _ => ErrorKind::Fabric,
+                },
                 format!("chair association: {error}"),
             )
         })
@@ -5622,9 +5629,42 @@ mod tests {
         };
         let (first, _) =
             submit(&session, &edge, submission("context-base"), &call).map_err(|f| f.message)?;
+        with_chair_index(&roots, &call, |index, index_call| {
+            let binding = index
+                .read(session.context.project_id, first.run_id, index_call)?
+                .unwrap();
+            assert_eq!(binding.chair, chair);
+            assert_eq!(
+                binding.request_digest,
+                session
+                    .store
+                    .request(first.run_id, &call)
+                    .unwrap()
+                    .digest()
+                    .unwrap()
+            );
+            Ok(())
+        })
+        .map_err(|f| f.message)?;
         std::fs::rename(
             roots.state.as_path().join("fabric/host.sqlite3"),
             roots.state.as_path().join("fabric/interrupted.sqlite3"),
+        )?;
+        let mut forged = session.store.request(first.run_id, &call)?;
+        forged.concurrency = 2;
+        with_chair_index(&roots, &call, |index, c| {
+            index.submit(session.context.project_id, first.run_id, &forged, c)
+        })
+        .map_err(|f| f.message)?;
+        assert_eq!(
+            launch(&session, first.run_id, &edge, &call)
+                .unwrap_err()
+                .status,
+            Status::Refused
+        );
+        std::fs::rename(
+            roots.state.as_path().join("fabric/host.sqlite3"),
+            roots.state.as_path().join("fabric/forged.sqlite3"),
         )?;
         launch(&session, first.run_id, &edge, &call).map_err(|f| f.message)?;
         let expired = run::Request {

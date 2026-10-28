@@ -1361,7 +1361,8 @@ fn run_chair_migration_preserves_mail_and_rejects_older_readers() {
         Err(provenant_sqlite::VersionError::Unsupported(9))
     ));
     assert!(
-        store
+        HostStore::open(&f.root, &f.request())
+            .unwrap()
             .run_chair(
                 project(),
                 provenant_core::RunId::from_bytes([1; 16]),
@@ -1384,10 +1385,52 @@ fn host_store_refuses_unsafe_database_companions() {
             .join(format!("host.sqlite3{suffix}"));
         std::os::unix::fs::symlink(f.path(), &path).unwrap();
         assert!(matches!(
-            Store::open_host(&f.root, &f.request()),
+            HostStore::open(&f.root, &f.request()),
             Err(Error::UnsafePath(_))
         ));
         // The host refusal must leave ordinary mail storage intact.
         store.send(&message(&f, 9), &f.request()).unwrap();
     }
+}
+
+#[test]
+fn host_store_ignores_lane_writable_locks_and_shared_rows() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let shared = f.open();
+    let host = HostStore::open(&f.root, &f.request()).unwrap();
+    let run = provenant_core::RunId::from_bytes([1; 16]);
+    let value = RunChair {
+        request_digest: provenant_core::Digest::from_bytes([2; 32]),
+        chair: None,
+    };
+    host.seal_run_chair(project(), run, &value, &f.request())
+        .unwrap();
+    shared
+        .db
+        .execute(
+            "INSERT INTO run_chairs VALUES(?1,?2,?3)",
+            params![project().to_string(), run.to_string(), b"forged".as_slice()],
+        )
+        .unwrap();
+    std::fs::set_permissions(
+        f.root.as_path().join("fabric/locks"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    assert!(matches!(
+        Store::open(&f.root, &f.request()),
+        Err(Error::UnsafePath(_))
+    ));
+    drop(host);
+    // A current-schema open must not need a migration write transaction.
+    let writer = rusqlite::Connection::open(f.root.as_path().join("fabric/host.sqlite3")).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert_eq!(
+        HostStore::open(&f.root, &f.request())
+            .unwrap()
+            .run_chair(project(), run, &f.request())
+            .unwrap(),
+        Some(value)
+    );
 }

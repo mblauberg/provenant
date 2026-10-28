@@ -60,10 +60,15 @@ same operation ID: launch repairs its index from the immutable host request,
 including owned-worktree replay. Lane stores cannot repair it.
 Transient index errors leave queued children available for a later scan.
 
-Readers use `fabric-runtime::chairs::ChairIndex`; missing records and older runs
-are unbound. Provider handles and child requests are never fallbacks. Graph and
+Launch validation reads `fabric-runtime::chairs::ChairIndex`; missing records
+and older runs are unbound. Display readers arrive in a later slice. Provider handles and child requests are never fallbacks. Graph and
 peer executions remain unbound until they retain an originating chair separately
 from the actor owning operation replay. Board and tree rendering are separate.
+
+Association rows live as long as run metadata. Current GC removes provider
+payloads, logs, events and worktrees; it never removes run/attempt metadata.
+Whole-run collection must delete its association in the same host-owned removal
+workflow. Lane-writable missing child records alone cannot authorise deletion.
 
 - Test: `crates/fabric-runtime/src/chairs.rs::nested_chair_binding`;
   `crates/run/src/service_tests.rs::chair_binding_replays_the_original_submission`

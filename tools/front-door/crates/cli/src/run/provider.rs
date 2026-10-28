@@ -1564,7 +1564,7 @@ fn chair_index_protected(
         };
         grants.iter().all(|grant| {
             resolve(&grant.path).is_some_and(|root| match grant.scope {
-                PathScope::Exact => root != path,
+                PathScope::Exact => root != path && !(root.is_dir() && path.starts_with(root)),
                 PathScope::Subtree => !path.starts_with(root),
             })
         })
@@ -1572,7 +1572,7 @@ fn chair_index_protected(
 }
 
 #[test]
-fn configured_grants_cannot_expose_the_chair_index() {
+fn configured_grants_cannot_expose_the_chair_index() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::permissions::WriteGrant;
     for path in [
         "/state/fabric",
@@ -1589,6 +1589,16 @@ fn configured_grants_cannot_expose_the_chair_index() {
         assert!(!chair_index_protected(Path::new("/state"), &[grant]));
     }
     assert!(chair_index_protected(Path::new("/state"), &[]));
+    let temp = tempfile::tempdir()?;
+    let fabric = temp.path().join("fabric");
+    std::fs::create_dir(&fabric)?;
+    let grant = WriteGrant {
+        source: run::WriteSource::StateWrite,
+        path: fabric,
+        scope: PathScope::Exact,
+    };
+    assert!(!chair_index_protected(temp.path(), &[grant]));
+    Ok(())
 }
 
 /// Read access to the primary checkout's project scratch (`.provenant/scratch`, or

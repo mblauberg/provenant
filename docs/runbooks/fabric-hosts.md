@@ -478,10 +478,16 @@ release, archive the store and let Fabric create a fresh one:
    archive=~/fabric-store-archive-$(date +%Y%m%d)
    mkdir -m 700 "$archive"
    mv "$state"/fabric/fabric.sqlite3* "$archive"/
+   # Include the host-owned chair index when present.
+   for file in "$state"/fabric/host.sqlite3 "$state"/fabric/host.sqlite3-wal "$state"/fabric/host.sqlite3-shm "$state"/fabric/host.sqlite3-journal; do
+     if [ -e "$file" ]; then mv "$file" "$archive"/; fi
+   done
    ```
 
 4. Run the newer release. It starts with no tasks, mail, events, claims or peer
-   journal; create again any work you still need.
+   journal. The host chair association index also starts empty, so retained runs
+   display as unbound until an explicit root replay repairs their association;
+   create again any coordination work you still need.
 
 On a project's home host, the archive removes that project's tasks and mail for
 every peer, and their in-flight operations against it report `launch_unknown`.

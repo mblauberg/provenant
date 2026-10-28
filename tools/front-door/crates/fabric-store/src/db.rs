@@ -139,22 +139,27 @@ impl Request<'_> {
 
 pub struct Store {
     pub(crate) db: Connection,
-    pub(crate) locks: Directory,
+    pub(crate) locks: Option<Directory>,
     // SQLite supports movable connections, but Fabric requires worker ownership.
     _owner: PhantomData<Rc<()>>,
 }
 impl Store {
     pub fn open(root: &StateRoot, request: &Request<'_>) -> Result<Self> {
-        Self::open_database(root, request, "fabric.sqlite3")
+        Self::open_database(root, request, "fabric.sqlite3", Some("locks"))
     }
 
     /// Host-only records live outside the exact coordination DB grants lanes
     /// receive. Reuse all directory, companion and migration checks.
-    pub fn open_host(root: &StateRoot, request: &Request<'_>) -> Result<Self> {
-        Self::open_database(root, request, "host.sqlite3")
+    pub(crate) fn open_host(root: &StateRoot, request: &Request<'_>) -> Result<Self> {
+        Self::open_database(root, request, "host.sqlite3", None)
     }
 
-    fn open_database(root: &StateRoot, request: &Request<'_>, database: &str) -> Result<Self> {
+    fn open_database(
+        root: &StateRoot,
+        request: &Request<'_>,
+        database: &str,
+        locks_name: Option<&str>,
+    ) -> Result<Self> {
         request.check()?;
         let mut directory = Directory::root(true)?;
         for part in root.as_path().components() {
@@ -208,23 +213,28 @@ impl Store {
         // Refuse future versions before journal-mode changes or schema writes.
         request.retry(|| schema_version(&db))?;
         request.retry(|| enable_wal(&db))?;
-        match fabric.mkdir(OsStr::new("locks"), 0o700) {
-            Ok(()) => fabric.sync()?,
-            Err(error) if error.is_exists() => {}
-            Err(error) => return Err(error.into()),
-        }
-        let locks = checked_directory(
-            &fabric,
-            OsStr::new("locks"),
-            Some(fabric.metadata()?.device),
-        )?;
-        private(&locks, &path.join("locks"))?;
+        let locks = if let Some(locks_name) = locks_name {
+            match fabric.mkdir(OsStr::new(locks_name), 0o700) {
+                Ok(()) => fabric.sync()?,
+                Err(error) if error.is_exists() => {}
+                Err(error) => return Err(error.into()),
+            }
+            let locks = checked_directory(
+                &fabric,
+                OsStr::new(locks_name),
+                Some(fabric.metadata()?.device),
+            )?;
+            private(&locks, &path.join(locks_name))?;
+            Some(locks)
+        } else {
+            None
+        };
         let store = Self {
             db,
             locks,
             _owner: PhantomData,
         };
-        loop {
+        while request.retry(|| schema_version(&store.db))? < MIGRATIONS.len() {
             let done = store.write(request, |tx| {
                 let version = schema_version(tx)?;
                 let Some(sql) = MIGRATIONS.get(version) else {
