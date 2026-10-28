@@ -1,0 +1,151 @@
+//! Provider-neutral human requests. These records confer no workflow authority.
+use provenant_core::{
+    ActorId, HostId, HumanAnswerId, HumanRequestId, OperationId, ProjectId, WallTime,
+};
+use serde::{Deserialize, Serialize};
+
+pub const REQUEST_BODY_BYTES: usize = 8192;
+pub const ANSWER_TEXT_BYTES: usize = 4096;
+pub const MAX_OPTIONS: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestKind {
+    Decision,
+    Assumption,
+    Question,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestState {
+    Open,
+    Answered,
+    Confirmed,
+    Overridden,
+    Withdrawn,
+    Superseded,
+    Expired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerAction {
+    Choose,
+    Reply,
+    Confirm,
+    Override,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionChannel {
+    Chat,
+    Console,
+    PhoneRemote,
+    Cli,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestOption {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+}
+
+/// Caller-authored content only. The service binds project, host and actor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestDraft {
+    pub kind: RequestKind,
+    pub title: String,
+    pub body: String,
+    #[serde(default)]
+    pub blocking: bool,
+    #[serde(default)]
+    pub options: Vec<RequestOption>,
+    pub recommended_option_id: Option<String>,
+    pub proceeding_with: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanRequest {
+    pub schema_version: u64,
+    pub id: HumanRequestId,
+    pub revision: u64,
+    pub operation_id: OperationId,
+    /// RFC 3339 UTC, including a trailing Z.
+    pub created_at: WallTime,
+    pub updated_at: WallTime,
+    pub project_id: ProjectId,
+    pub project_key: Option<String>,
+    pub owner_host: HostId,
+    pub chair_session_id: String,
+    pub chair_actor: ActorId,
+    pub request: RequestDraft,
+    pub state: RequestState,
+    pub answer_id: Option<HumanAnswerId>,
+    pub closure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanAnswer {
+    pub schema_version: u64,
+    pub id: HumanAnswerId,
+    pub request_id: HumanRequestId,
+    pub request_revision: u64,
+    pub action: AnswerAction,
+    pub option_id: Option<String>,
+    /// Exact submitted text, including whitespace.
+    pub text: Option<String>,
+    pub actor: ActorId,
+    pub channel: InteractionChannel,
+    pub answered_at: WallTime,
+    pub operation_id: OperationId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerDeliveryState {
+    Queued,
+    Offered,
+    Acknowledged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerTransport {
+    FabricMail,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnswerDelivery {
+    pub schema_version: u64,
+    pub answer_id: HumanAnswerId,
+    pub target_host: HostId,
+    pub target_session: String,
+    pub target_actor: ActorId,
+    /// Fabric mail is not live provider injection.
+    pub transport: AnswerTransport,
+    pub message_id: provenant_core::MessageId,
+    pub state: AnswerDeliveryState,
+    pub attempts: u64,
+    pub last_attempt_at: Option<WallTime>,
+    pub acknowledged_at: Option<WallTime>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InboxItem {
+    pub request: HumanRequest,
+    pub answer: Option<HumanAnswer>,
+    pub delivery: Option<AnswerDelivery>,
+    /// Immutable request revisions, oldest first. No silent editing after answer.
+    pub history: Vec<HumanRequest>,
+}

@@ -19,8 +19,24 @@ fabric-runtime.
 Mail and event reads return store-owned `Page` values with integer sequences;
 task reads use a task-ID cursor. Each page has a `truncated` flag for the 1 MiB
 byte bound; resume after the last returned sequence or task ID.
-Fabric-only records, `Page` and any future `Cursor` stay in fabric-store until
-a second owner needs them.
+Mail/task records and `Page` stay in fabric-store. Human inbox records live in
+records because runtime, CLI and MCP share their wire contract.
+
+Human requests retain their opening revision, their optional resolution and
+their optional closure, with one immutable answer and one outbox record.
+`coordination_operation` commits the revision comparison, answer, history,
+outbox, addressed response message and receipt together. Migration 8 adds these
+tables without changing existing mail or tasks. Previous binaries refuse schema
+8, so rollback requires restoring a pre-upgrade store backup or a forward repair;
+do not change `user_version` by hand or delete pending answers.
+
+Requests retain history without automatic pruning, up to 10,000 items per
+project, including closed items. Further creation is refused without deleting
+anything. Request bodies cap at 8 KiB, answers at 4 KiB and options at 16.
+History holds at most three request revisions. Inbox pages default to 50 rows,
+cap at 100 and stop at 512 KiB of stored request bytes before envelope rendering.
+No chair log is stored by this slice. The runtime owns filter/snapshot-bound
+cursors and explicit local-only coverage.
 
 Tasks start Open. Claims atomically activate them, increment the persistent
 generation and bind actor, token and expiry. Callers supply a lease duration;

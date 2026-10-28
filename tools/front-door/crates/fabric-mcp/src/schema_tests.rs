@@ -188,6 +188,7 @@ fn strings() -> Vec<String> {
         "0".repeat(40),
         "0".repeat(64),
         format!("sha256:{}", "0".repeat(64)),
+        format!("{}.sha256:{}.0", "0".repeat(32), "0".repeat(64)),
         "a".repeat(128),
         "x".repeat(4096),
         "x".repeat(65_536),
@@ -776,7 +777,8 @@ fn schema_catalogue_is_fixed_order_and_has_no_legacy_aliases() {
             "fabric_task",
             "fabric_events",
             "fabric_lease",
-            "fabric_graph"
+            "fabric_graph",
+            "fabric_inbox"
         ]
     );
     assert!(ToolCall::parse("fabric_not_a_tool", json!({"op":"inspect"})).is_err());

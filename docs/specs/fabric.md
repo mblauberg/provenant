@@ -80,6 +80,49 @@ claim complete coverage.
   `crates/fabric-store/src/federation.rs::run_event_rows_and_host_cursor_rollback_together_then_deduplicate`
 - Owner: `crates/fabric-store/src/`
 
+## Human requests
+
+Human requests, immutable answers, revision history and the delivery outbox
+belong to Fabric. CLI and MCP must use the same service. The service binds
+project, host and actor from Fabric identity; request JSON cannot supply them.
+The chair declares its exact session explicitly. This declaration is not
+session discovery or evidence of a live provider connection.
+- Why: a shared agent label cannot identify a particular chair session.
+- Test: `tests/inbox.rs::inbox_cli_refuses_forged_ownership_and_closes_without_approval`;
+  `crates/fabric-runtime/src/inbox/tests.rs::inbox_acknowledgement_requires_the_exact_host_project_session_and_actor`
+- Owner: `crates/fabric-runtime/src/inbox.rs`, `crates/records/src/inbox.rs`
+
+One operation must commit the revision comparison, answer, request state,
+history, delivery intent, local Fabric response and replay receipt together.
+Replays return the original receipt before checking the current revision.
+Changed content or actors under the same operation ID conflict. A competing
+answer cannot replace the winner. Closing an item preserves any earlier answer.
+- Why: a timeout or competing UI must not produce a second authoritative answer.
+- Test: `crates/fabric-store/src/tests/human_inbox.rs::human_answer_outbox_mail_and_history_roll_back_when_receipt_fails`;
+  `crates/fabric-runtime/src/inbox/tests.rs::inbox_concurrent_answers_have_one_winner_and_one_mail`;
+  `crates/fabric-runtime/src/inbox/tests.rs::inbox_request_and_answer_replay_survive_restart`
+- Owner: `crates/fabric-store/src/human_inbox.rs`
+
+Fabric mail is queued delivery, not live injection or evidence of consumption.
+Only explicit acknowledgement from the exact target host/project/session/actor
+marks an answer consumed. Mail cursors remain independent. Answers never start,
+resume or cancel runs, approve reviews or broaden authority. Only decisions
+may be marked blocking; assumptions still require existing authority.
+- Why: transport success and human choice cannot substitute for workflow gates.
+- Test: `crates/fabric-runtime/src/inbox/tests.rs::inbox_fabric_mail_is_correlated_and_read_cursor_does_not_acknowledge`;
+  `tests/inbox.rs::inbox_cli_posts_lists_and_resolves_all_kinds_without_apps`
+- Owner: `crates/fabric-runtime/src/inbox.rs`
+
+The inbox must refuse a configured remote home rather than opening a local
+mirror. Reads disclose local-only coverage and create no session records.
+Paging binds project, host, session, state, page size and request snapshot;
+changed filters or snapshots require an explicit restart. New observations
+invoke no model, provider probe, polling loop or background process.
+- Why: unknown peer/session coverage must remain unknown.
+- Test: `crates/fabric-runtime/src/inbox/tests.rs::inbox_remote_owner_and_worker_mutations_are_refused_without_opening_store`;
+  `crates/fabric-runtime/src/inbox/tests.rs::inbox_paging_binds_filters_snapshot_and_limits`
+- Owner: `crates/fabric-runtime/src/inbox.rs`
+
 ## CLI and MCP surfaces
 
 The tool catalogue is generated reference in

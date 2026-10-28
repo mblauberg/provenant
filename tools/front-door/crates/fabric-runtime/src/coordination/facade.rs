@@ -452,6 +452,14 @@ pub struct EventCoverage {
 /// composed in `src/fabric.rs`; calls are bounded and cancellable, while only
 /// the explicit run-cancel operation can stop a launched run.
 pub trait F3Facade {
+    fn inbox(
+        &mut self,
+        _input: crate::inbox::InboxInput,
+        _budget: WaitBudget,
+        _cancel: &CancelToken,
+    ) -> Result<crate::inbox::InboxResult, crate::inbox::InboxError> {
+        Err(crate::inbox::InboxError::OwnerUnavailable)
+    }
     fn refresh_events(
         &mut self,
         _budget: WaitBudget,

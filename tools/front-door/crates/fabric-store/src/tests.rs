@@ -908,10 +908,16 @@ const IMPORTS_TABLE: &str = "CREATE TABLE imports(source TEXT PRIMARY KEY, \
      project TEXT NOT NULL, legacy_project TEXT NOT NULL, imported_at INTEGER NOT NULL, \
      tasks INTEGER NOT NULL, messages INTEGER NOT NULL, \
      skipped_rows BLOB NOT NULL DEFAULT X'7B7D') STRICT;";
+// Fixtures rewinding a current database must remove migration 8's tables in
+// foreign-key order before the older schema can be upgraded again.
+const REMOVE_HUMAN_TABLES: &str = "DROP TABLE human_answer_outbox; \
+    DROP TABLE human_answers; DROP TABLE human_request_history; DROP TABLE human_requests;";
 fn downgrade_to_six(store: &Store, rows: &str) {
     store
         .db
-        .execute_batch(&format!("{IMPORTS_TABLE} {rows} PRAGMA user_version=6;"))
+        .execute_batch(&format!(
+            "{REMOVE_HUMAN_TABLES} {IMPORTS_TABLE} {rows} PRAGMA user_version=6;"
+        ))
         .unwrap();
 }
 // Seed each record kind that carried the removed members: a message, a task,
@@ -1328,4 +1334,5 @@ fn owner_can_close_its_expired_active_task_but_cannot_update_it() {
 
 mod f2;
 
+mod human_inbox;
 mod operations;
