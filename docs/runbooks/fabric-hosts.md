@@ -43,13 +43,15 @@ as a graph file in the project:
   "nodes": [
     {
       "id": "write",
+      "title": "Implement change",
       "prompt": "Implement the approved change and commit it.",
       "access": "worktree_write",
       "worktree": ".worktrees/feature",
-      "route": {"adapter": "codex", "model": "codex/gpt-6.1-sol"}
+      "route": {"alias": "senior"}
     },
     {
       "id": "review",
+      "title": "Review change",
       "prompt": "Review the change in .worktrees/feature.",
       "access": "read_only",
       "depends_on": ["write"],
@@ -64,8 +66,14 @@ as a graph file in the project:
 }
 ```
 
-Register `pro` with `provenant accounts register` before running the graph.
-Both `route` and each entry in `routes` accept `account`.
+Configure the `senior` routing pool and register `pro` with `provenant accounts
+register` before running the graph. An alias-only route resolves its adapter
+through the same routing configuration as `dispatch --route`. Explicit
+adapter and model routes also work. A route must include an adapter or alias;
+`route` selects one route, while `routes` provides an ordered fallback list
+that can mix both forms. Both forms accept `account`. A node's optional `title`
+appears in `lanes` and graph status; it defaults to the node ID and must pass
+the task title validation, including the prohibition on control characters.
 
 ```sh
 provenant fabric graph run --document graph.json

@@ -36,11 +36,12 @@ pub struct GraphDocument {
 }
 
 /// Legacy Fabric route wire shape. Exactly one of `model` and `alias` is
-/// required. `adapter` is the adapter id, not the run record's provider field.
+/// required. `adapter` is required for a model and optional for an alias.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphRoute {
-    pub adapter: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,6 +74,8 @@ pub struct GraphNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub prompt: String,
     #[serde(default)]
     pub depends_on: Vec<String>,
@@ -122,6 +125,8 @@ fn not_delivered(delivered: &bool) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeProgress {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Retain the writer checkout for chair inspection after a failed launch.
     pub worktree: Option<String>,
     pub id: String,
@@ -235,6 +240,12 @@ pub struct Replay<'a> {
     pub launch_actor: &'a str,
 }
 
+/// User-facing content for a graph node's submitted task.
+pub struct NodeInput<'a> {
+    pub title: &'a str,
+    pub prompt: &'a str,
+}
+
 /// `observe_or_start` must be idempotent by `AttemptKey`. It starts the run
 /// only when that key has no accepted operation, and otherwise observes it.
 /// A `stored_ref` from the checkpoint names an accepted attempt: observe it as
@@ -257,7 +268,7 @@ pub trait AttemptOwner {
     fn observe_or_start(
         &mut self,
         key: &AttemptKey,
-        prompt: &str,
+        node: NodeInput<'_>,
         route: &GraphRoute,
         access: AccessMode,
         worktree: Option<&str>,
@@ -718,6 +729,8 @@ struct PlannedNode {
     access: AccessMode,
     worktree: Option<String>,
     id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
     prompt: String,
     depends_on: Vec<String>,
     routes: Vec<GraphRoute>,
@@ -776,6 +789,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .iter()
                     .map(|node| NodeProgress {
                         id: node.id.clone(),
+                        title: Some(node.title.as_deref().unwrap_or(&node.id).to_owned()),
                         worktree: node.worktree.clone(),
                         state: NodeState::Pending,
                         attempts: Vec::new(),
@@ -891,7 +905,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             let observation = owner
                 .observe_or_start(
                     &key,
-                    &node.prompt,
+                    NodeInput {
+                        title: node.title.as_deref().unwrap_or(&node.id),
+                        prompt: &node.prompt,
+                    },
                     &route,
                     node.access,
                     node.worktree.as_deref(),
@@ -1076,6 +1093,9 @@ fn validate_plan(
         }) {
             return Err("required verdict must be a non-empty single line");
         }
+        if let Some(title) = &node.title {
+            provenant_core::validate_task_title(title)?;
+        }
         validate_access(node.access, node.worktree.as_deref())?;
         if node.access == AccessMode::ReadOnly
             && !matches!(node.delivery, None | Some(DeliveryMode::None))
@@ -1110,6 +1130,18 @@ fn validate_plan(
         if routes.len() > MAX_ROUTES_PER_NODE {
             return Err("route count");
         }
+        if routes
+            .iter()
+            .any(|route| route.adapter.is_none() && route.alias.is_none())
+        {
+            return Err("route requires an adapter or alias");
+        }
+        if routes
+            .iter()
+            .any(|route| route.model.is_some() && route.adapter.is_none())
+        {
+            return Err("model route requires an adapter");
+        }
         if routes.iter().any(|route| !route_is_bounded(route)) {
             return Err("route field size");
         }
@@ -1127,6 +1159,7 @@ fn validate_plan(
             access: node.access,
             worktree: node.worktree.clone(),
             id: node.id.clone(),
+            title: node.title.clone(),
             prompt: node.prompt.clone(),
             depends_on,
             routes,
@@ -1193,7 +1226,10 @@ fn route_is_bounded(route: &GraphRoute) -> bool {
     fn field(value: &str, limit: usize) -> bool {
         !value.is_empty() && value.len() <= limit && !value.contains('\0')
     }
-    field(&route.adapter, 128)
+    route
+        .adapter
+        .as_deref()
+        .is_none_or(|value| field(value, 128))
         && (route.model.is_some() ^ route.alias.is_some())
         && route.model.as_deref().is_none_or(|value| field(value, 256))
         && route.alias.as_deref().is_none_or(|value| field(value, 128))
@@ -1322,6 +1358,7 @@ mod tests {
         delivery_modes: Vec<Option<provenant_records::run::DeliveryMode>>,
         observations: VecDeque<AttemptObservation>,
         calls: Vec<(AttemptKey, GraphRoute)>,
+        titles: Vec<String>,
         permissions: Vec<(AccessMode, Option<String>)>,
         stored_refs: Vec<Option<String>>,
         actor: String,
@@ -1346,12 +1383,13 @@ mod tests {
         fn observe_or_start(
             &mut self,
             key: &AttemptKey,
-            _prompt: &str,
+            node: NodeInput<'_>,
             route: &GraphRoute,
             access: AccessMode,
             worktree: Option<&str>,
             replay: Replay<'_>,
         ) -> Result<AttemptObservation, Self::Error> {
+            self.titles.push(node.title.to_owned());
             self.delivery_modes.push(replay.delivery.cloned());
             self.stored_refs.push(replay.stored_ref.map(str::to_owned));
             self.launch_actors.push(replay.launch_actor.to_owned());
@@ -1364,7 +1402,7 @@ mod tests {
     fn route(adapter: &str) -> GraphRoute {
         GraphRoute {
             account: None,
-            adapter: adapter.to_owned(),
+            adapter: Some(adapter.to_owned()),
             model: Some(format!("{adapter}/model")),
             alias: None,
             effort: None,
@@ -1377,6 +1415,7 @@ mod tests {
             access: AccessMode::ReadOnly,
             worktree: None,
             id: id.to_owned(),
+            title: None,
             prompt: format!("work for {id}"),
             depends_on: Vec::new(),
             route: Some(route),
@@ -1393,6 +1432,33 @@ mod tests {
             graph_id: "g-test".to_owned(),
             nodes,
         }
+    }
+
+    #[test]
+    fn node_titles_are_validated_and_sent_to_attempts_and_status() {
+        let mut named = node("named", route("first"));
+        named.title = Some("Review changes".into());
+        let defaulted = node("defaulted", route("first"));
+        let document = graph(vec![named, defaulted]);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                terminal(AttemptOutcome::Succeeded),
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..FakeOwner::default()
+        };
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(owner.titles, ["Review changes", "defaulted"]);
+        let status = serde_json::to_value(&run).unwrap();
+        assert_eq!(status["checkpoint"]["nodes"][0]["title"], "Review changes");
+        assert_eq!(status["checkpoint"]["nodes"][1]["title"], "defaulted");
+
+        let mut invalid = node("invalid", route("first"));
+        invalid.title = Some("bad\ntitle".into());
+        assert_eq!(
+            validate_plan(&graph(vec![invalid])).err(),
+            Some("task title must be 1 to 256 bytes and contain no control characters")
+        );
     }
 
     fn terminal(outcome: AttemptOutcome) -> AttemptObservation {
@@ -1520,6 +1586,7 @@ mod tests {
             access: AccessMode::ReadOnly,
             worktree: None,
             id: "node".to_owned(),
+            title: None,
             prompt: "do the work".to_owned(),
             depends_on: Vec::new(),
             route: None,
@@ -1615,6 +1682,47 @@ mod tests {
     }
 
     #[test]
+    fn pool_only_and_mixed_routes_advance_in_order() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "pools", "nodes": [
+                {"id": "one", "prompt": "work", "access": "read_only", "route": {"alias": "senior"}},
+                {"id": "two", "prompt": "work", "access": "read_only", "depends_on": ["one"], "routes": [
+                    {"adapter": "codex", "model": "codex/model"}, {"alias": "senior"}
+                ]}
+            ]
+        })).unwrap();
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                terminal(AttemptOutcome::Succeeded),
+                terminal(AttemptOutcome::AuthRequired),
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..FakeOwner::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(run.status, GraphStatus::Complete);
+        assert_eq!(owner.calls.len(), 3);
+        assert_eq!(owner.calls[0].1.adapter, None);
+        assert_eq!(owner.calls[1].1.adapter.as_deref(), Some("codex"));
+        assert_eq!(owner.calls[2].1.alias.as_deref(), Some("senior"));
+    }
+
+    #[test]
+    fn route_requires_adapter_or_alias() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "g", "nodes": [{
+                "id": "one", "prompt": "work", "access": "read_only", "route": {}
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_plan(&document).err(),
+            Some("route requires an adapter or alias")
+        );
+    }
+
+    #[test]
     fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
         for first in [
             AttemptObservation::Pending { attempt_ref: None },
@@ -1626,6 +1734,7 @@ mod tests {
                 access: AccessMode::ReadOnly,
                 worktree: None,
                 id: "node".to_owned(),
+                title: None,
                 prompt: "do the work".to_owned(),
                 depends_on: Vec::new(),
                 route: None,
@@ -1862,6 +1971,7 @@ mod tests {
             access: AccessMode::ReadOnly,
             worktree: None,
             id: "node".to_owned(),
+            title: None,
             prompt: "do the work".to_owned(),
             depends_on: Vec::new(),
             route: None,
@@ -2009,7 +2119,7 @@ mod file_tests {
         fn observe_or_start(
             &mut self,
             _: &AttemptKey,
-            _: &str,
+            _: NodeInput<'_>,
             _: &GraphRoute,
             _: AccessMode,
             _: Option<&str>,

@@ -194,6 +194,12 @@ A graph is bounded (8 routes per node, 64 nodes, 256 edges, 64 KiB per
 prompt, 256 KiB in total), with each attempt bounded by
 `limits.graph_timeout_seconds`.
 
+Each node has an optional task `title`, defaulting to its ID; titles use the
+shared task title validation and appear in lanes and graph status. A node may
+specify a single `route` or an ordered `routes` list. A route can name a pool
+with just `alias`, resolved as for `dispatch --route`, or supply an explicit
+adapter. Routes require an adapter or alias and may mix these forms in a list.
+
 ### Checkpoint before launch
 
 The owner writes a checkpoint under a stable graph, node and route key
