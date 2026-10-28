@@ -26,6 +26,13 @@ crate::adapter!(OpenCode, "opencode", prepare);
 /// The JSON run stream carries no answering-model position.
 const MODEL_ON_WIRE: bool = false;
 
+/// The answering model from OpenCode's own session record, keyed by the
+/// stream's session id. Missing, ambiguous or unreadable records are unknown.
+pub fn observe_model(data: &std::path::Path, session: &str) -> Result<String, ProviderError> {
+    let _ = (data, session);
+    Err(ProviderError::UnknownIdentity)
+}
+
 /// OpenCode uses the user's configuration and stored provider accounts.
 /// Inline permissions deny edits and shell commands for read-only runs.
 fn prepare(
@@ -409,6 +416,56 @@ crate::quota_source!(OpenCode, "opencode");
 mod tests {
     use super::*;
     use crate::Adapter;
+
+    fn store(rows: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let db = rusqlite::Connection::open(dir.path().join("opencode.db")).unwrap();
+        db.execute_batch("CREATE TABLE message (id TEXT, session_id TEXT, data TEXT)")
+            .unwrap();
+        for (index, (session, data)) in rows.iter().enumerate() {
+            db.execute(
+                "INSERT INTO message VALUES (?, ?, ?)",
+                (format!("m{index}"), session, data),
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    const GLM: &str =
+        r#"{"role":"assistant","providerID":"opencode","modelID":"glm-5.3-flash-free"}"#;
+    const OTHER: &str = r#"{"role":"assistant","providerID":"opencode","modelID":"other"}"#;
+
+    #[test]
+    fn model_comes_from_the_session_record() {
+        let dir = store(&[
+            ("ses_a", r#"{"role":"user"}"#),
+            ("ses_a", GLM),
+            ("ses_a", GLM),
+            ("ses_b", OTHER),
+        ]);
+        assert_eq!(
+            observe_model(dir.path(), "ses_a").unwrap(),
+            "opencode/opencode/glm-5.3-flash-free"
+        );
+    }
+
+    #[test]
+    fn missing_or_conflicting_records_stay_unknown() {
+        let dir = store(&[("ses_a", GLM), ("ses_a", OTHER)]);
+        assert!(matches!(
+            observe_model(dir.path(), "ses_a"),
+            Err(ProviderError::IdentityMismatch)
+        ));
+        assert!(matches!(
+            observe_model(dir.path(), "ses_none"),
+            Err(ProviderError::UnknownIdentity)
+        ));
+        assert!(matches!(
+            observe_model(&dir.path().join("absent"), "ses_a"),
+            Err(ProviderError::UnknownIdentity)
+        ));
+    }
 
     // Reduced from #1891: three tool steps, then final text without step_finish.
     const FINAL_TEXT_WITHOUT_FINISH: &str = concat!(
