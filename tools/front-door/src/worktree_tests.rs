@@ -39,7 +39,11 @@ impl provenant_confinement::worktrees::WorkerObserver for FreeWorkers {
 struct Fixture;
 impl crate::Process for Fixture {
     fn workers(&self) -> &'static dyn provenant_confinement::worktrees::WorkerObserver {
-        &FreeWorkers
+        if std::env::var_os("FIXTURE_SYSTEM_WORKERS").is_some() {
+            &provenant_confinement::worktrees::SystemWorkerObserver
+        } else {
+            &FreeWorkers
+        }
     }
     fn holder(
         &self,
@@ -175,6 +179,11 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "dispatch_into_an_unregistered_worktree_beside_registered_ones_names_the_create_command",
             "pr_land_merges_then_fetches_fast_forwards_and_prunes",
             "pr_land_prunes_the_selected_merged_worktree",
+            "pr_land_from_lane_ignores_only_its_callers",
+            "pr_land_canonicalises_quoted_worktree_paths",
+            "pr_land_recovers_only_abandoned_prepared_writer_leases",
+            "pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores",
+            "pr_land_primary_with_separate_git_directory",
             "pr_land_refuses_each_unsafe_step_and_reports_the_rest",
             "pr_land_changes_nothing_when_the_merge_does_not_happen",
             "pr_land_leaves_a_local_namesake_of_a_fork_branch_alone",
@@ -263,9 +272,14 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "pr_land_prunes_the_selected_merged_worktree" => {
                     crate::pr_land_tests::pr_land_prunes_the_selected_merged_worktree()
                 }
+                "pr_land_from_lane_ignores_only_its_callers" => crate::pr_land_tests::pr_land_from_lane_ignores_only_its_callers(),
+                "pr_land_canonicalises_quoted_worktree_paths" => crate::pr_land_tests::pr_land_canonicalises_quoted_worktree_paths(),
+                "pr_land_recovers_only_abandoned_prepared_writer_leases" => crate::pr_land_tests::pr_land_recovers_only_abandoned_prepared_writer_leases(),
+                "pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores" => crate::pr_land_tests::pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores(),
                 "pr_land_refuses_each_unsafe_step_and_reports_the_rest" => {
                     crate::pr_land_tests::pr_land_refuses_each_unsafe_step_and_reports_the_rest()
                 }
+                "pr_land_primary_with_separate_git_directory" => crate::pr_land_tests::pr_land_primary_with_separate_git_directory(),
                 "pr_open_refuses_what_the_receipts_cannot_support" => {
                     crate::pr_land_tests::pr_open_refuses_what_the_receipts_cannot_support()
                 }
@@ -1025,7 +1039,7 @@ pub(super) fn open_writer_store(
     Ok(store)
 }
 
-fn writer_run(
+pub(super) fn writer_run(
     writer: provenant_run::WriterRequest,
     operation: &str,
     seed: u8,

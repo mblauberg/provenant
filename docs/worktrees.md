@@ -125,8 +125,11 @@ Settlement collects the lane's declared ignored output and Cargo cache without
 an idle delay, even when the worktree stays for delivery pickup. Successful
 settlement, delivery integration and `land` prune eligible worktrees and
 caches. When landing from the merged linked worktree, `land` uses the main
-checkout for cleanup so it can remove the selected worktree and its branch.
-The landing report gives a reason for any cleanup step that is skipped or
+checkout for cleanup and output so it can remove the selected worktree and its
+branch. It ignores its own caller ancestors through the session leader in the
+worker census, while other live processes inside the lane retain it. The land
+process changes cwd before removal; an invoking shell must change its own cwd
+afterwards. The landing report gives a reason for any cleanup step that is skipped or
 refused. Event collection uses the same GC lock as the daily sweep and keeps
 foreign worktrees out of scope.
 Output pruning holds the worktree's writer lock; the repository lock is held
@@ -186,7 +189,11 @@ authority for that exact reservation:
    call `settle_reconciled`. Both paths hold the writer lock while settling
    classified scratch and clearing the reservation.
 
-The CLI does not expose this clearance yet.
+`land` clears a retained reservation for its merged worktree when supervisor
+proves it was never handed off, or its canonical attempt is terminal and
+supervisor proves absence and verifies settlement. It checks the worktree/Git
+binding and keeps malformed, live, nonterminal or unproved reservations.
+Ordinary `worktree remove` still refuses any reservation.
 When custody is lost without a durable exit, this revision cannot create the
 required terminal receipt, so the fence cannot yet be cleared. Retain it and
 use a fresh registered worktree. A failed provider or an unfinished Git

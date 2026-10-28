@@ -577,7 +577,7 @@ pub enum Part {
     Prompt,
     Stderr,
     Events,
-    /// Reviewer provenance for a settled attempt
+    /// Reviewer or writer provenance for a settled attempt
     Receipt,
     /// The provider's own transcript, tailed in place
     Transcript,

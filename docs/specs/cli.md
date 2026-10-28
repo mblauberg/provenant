@@ -54,6 +54,34 @@ and a clamped tail reports its effective bound. The generated
   `tests/fabric_transport.rs::read_only_dispatch_places_on_a_peer_and_forwards_by_id`
 - Owner: `crates/cli/src/run.rs`, `crates/cli/src/run/remote.rs`
 
+### Settled attempt provenance receipts
+
+`output TARGET --part receipt` prints one local, settled attempt's applied
+route and resolution source. An attempt target is exact; `RUN` or `RUN/TASK`
+is accepted only when it selects exactly one attempt. Ambiguous targets,
+nonterminal attempts and peer transport are refused. `--trace` conflicts with
+`--part receipt`.
+
+The human line has this exact shape:
+
+```text
+Reviewer: codex/gpt-6.1-sol@high (openai; resolved from explicit), run RUN/TASK/ATTEMPT
+```
+
+A canonical task with a writer request uses `Writer:` instead of `Reviewer:`.
+The resolution source is `explicit`, `pool NAME` or `fallback`. Missing applied
+effort and uncatalogued model family print `unknown`; no provider default effort
+is inferred. Model names are qualified with their adapter before family lookup.
+`--json` returns `run_id`, `task_id`, `attempt_id`, `adapter`, `model`, `effort`,
+`family`, `role` (`reviewer` or `writer`), `resolved_from` and the exact `receipt`
+line without its trailing newline.
+- Why: chairs can cite grep-able provenance without calling a writer a reviewer
+  or guessing provider defaults.
+- Test: `tests/dispatch_provider.rs::receipt_output_resolves_run_task_and_attempt`;
+  `::receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts`;
+  `crates/cli/src/lib.rs::bounded_waits_counts_and_byte_windows`
+- Owner: `crates/cli/src/run.rs`
+
 ### Positional route resolution
 
 Route lookup resolves only a named route or an unambiguous catalogue model.
@@ -178,8 +206,16 @@ any other tip (even one the base contains), and a local branch whose tip the
 fetched base does not contain is refused and keeps its worktree as well as the
 branch. Removal carries that head and refuses, under the worktree lock, if the
 worktree's HEAD has moved since it was checked. When the selected project is
-that worktree, cleanup uses the main checkout as its repository anchor so the
-selected worktree can be removed. The branch deletion carries the head too:
+that worktree, cleanup uses the verified primary checkout as its repository
+anchor, process cwd and output project. Canonical paths and NUL-delimited Git
+inventory handle symlink aliases and quoted paths. The landing worker census
+ignores itself and only its ancestor chain through the session leader; other
+positively observed processes inside the lane refuse removal, including when
+the rest of the census is incomplete. Landing clears a writer reservation only
+through custody recovery: a verified prepared reservation never handed off,
+or an absent writer with a matching canonical terminal attempt, worktree/Git
+binding and verified settlement. Unknown, malformed and live reservations stay.
+The branch deletion carries the head too:
 with no registered worktree it refuses a branch that any worktree has
 checked out, is rebasing (paused or not) or is bisecting, as `git branch -d`
 does (read from Git's administrative directories, so a missing or unmounted
@@ -194,6 +230,11 @@ instead of forcing, and the command exits 1 with `merged: true`.
   reviewed or delete work that is not merged.
 - Test: `src/pr_land_tests.rs::pr_land_merges_then_fetches_fast_forwards_and_prunes`;
   `::pr_land_prunes_the_selected_merged_worktree`;
+  `::pr_land_from_lane_ignores_only_its_callers`;
+  `::pr_land_canonicalises_quoted_worktree_paths`;
+  `::pr_land_recovers_only_abandoned_prepared_writer_leases`;
+  `::pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores`;
+  `::pr_land_primary_with_separate_git_directory`;
   `::pr_land_refuses_each_unsafe_step_and_reports_the_rest`;
   `::pr_land_changes_nothing_when_the_merge_does_not_happen`;
   `::pr_land_leaves_a_local_namesake_of_a_fork_branch_alone`;

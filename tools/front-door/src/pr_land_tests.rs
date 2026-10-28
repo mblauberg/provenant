@@ -66,7 +66,23 @@ fn git_in(rig: &TestRig, dir: &Path, args: &[&str]) -> Result<String> {
 /// A project whose `feat` worktree was merged into `origin/main` by a merge
 /// commit, with the local `main` still before it.
 fn landing() -> Result<Landing> {
+    landing_with_git_dir(false)
+}
+
+fn landing_with_git_dir(separate: bool) -> Result<Landing> {
     let mut rig = repository()?;
+    if separate {
+        git(
+            &rig,
+            &[
+                "init",
+                "-q",
+                "--separate-git-dir",
+                rig.root.join("separate.git").to_str().ok_or("path")?,
+            ],
+        )?;
+    }
+    let admin = rig.project.join(git(&rig, &["rev-parse", "--git-dir"])?);
     let bin = rig.root.join("bin");
     fs::create_dir(&bin)?;
     symlink(std::env::current_exe()?, bin.join("gh"))?;
@@ -77,7 +93,7 @@ fn landing() -> Result<Landing> {
         .ok_or("PATH")?;
     *path = format!("{}:/usr/bin:/bin", bin.display()).into();
     fs::write(
-        rig.project.join(".git/info/exclude"),
+        admin.join("info/exclude"),
         "head.json\nview.json\ngh-calls\nwatched\nmerge-args\nchecks-fail\n",
     )?;
     fs::write(rig.project.join(".gitignore"), ".worktrees/\n**/target/\n")?;
@@ -196,6 +212,18 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
 
 pub(crate) fn pr_land_prunes_the_selected_merged_worktree() -> Result {
     let mut landing = landing()?;
+    // Git retains registrations of unrelated checkouts that disappeared.
+    let missing = landing.rig.project.join(".worktrees/disappeared");
+    git(
+        &landing.rig,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            missing.to_str().ok_or("path")?,
+        ],
+    )?;
+    fs::remove_dir_all(&missing)?;
     landing.rig.env.push((
         "FIXTURE_GH_DIR".into(),
         landing.rig.project.clone().into_os_string(),
@@ -208,6 +236,409 @@ pub(crate) fn pr_land_prunes_the_selected_merged_worktree() -> Result {
     assert_eq!(status(&value, "branch")?, "done", "{value}");
     assert!(!landing.worktree.exists());
     assert!(!branch_exists(&landing.rig, "feat")?);
+    Ok(())
+}
+
+// The shell remains parked in the lane while its child runs land. This uses
+// the real observer, including the parent shell in the native census.
+#[allow(clippy::disallowed_methods)] // Real child cwd exercises the native worker observer.
+pub(crate) fn pr_land_from_lane_ignores_only_its_callers() -> Result {
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    for another_worker in [false, true] {
+        let mut landing = landing()?;
+        let main = landing.rig.project.clone();
+        landing
+            .rig
+            .env
+            .push(("FIXTURE_GH_DIR".into(), main.clone().into_os_string()));
+        landing
+            .rig
+            .env
+            .push(("FIXTURE_SYSTEM_WORKERS".into(), "1".into()));
+        let worker = if another_worker {
+            Some(Child(
+                std::process::Command::new("/bin/sh")
+                    .args(["-c", "read line"])
+                    .current_dir(&landing.worktree)
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()?,
+            ))
+        } else {
+            None
+        };
+        landing.rig.project = landing.worktree.clone();
+        let executable = std::env::current_exe()?;
+        let state = landing.rig.state.to_str().ok_or("state path")?;
+        let output = landing.rig.execute(
+            Path::new("/bin/sh"),
+            &[
+                "-c",
+                "\"$@\" & wait $!",
+                "land-shell",
+                executable.to_str().ok_or("path")?,
+                "--state-dir",
+                state,
+                "land",
+                NUMBER,
+                "--json",
+            ],
+            None,
+        )?;
+        let value = json(&output)?;
+        assert_eq!(code(&output), if another_worker { 1 } else { 0 }, "{value}");
+        assert_eq!(
+            status(&value, "worktree")?,
+            if another_worker { "refused" } else { "done" },
+            "{value}"
+        );
+        assert_eq!(landing.worktree.exists(), another_worker, "{value}");
+        if another_worker {
+            assert!(
+                value.to_string().contains("worktree writer is live"),
+                "{value}"
+            );
+        }
+        drop(worker);
+        landing.rig.project = main;
+        assert_eq!(branch_exists(&landing.rig, "feat")?, another_worker);
+    }
+    Ok(())
+}
+
+pub(crate) fn pr_land_canonicalises_quoted_worktree_paths() -> Result {
+    let mut landing = landing()?;
+    let alias = landing.rig.root.join("alias\twith quotes\"");
+    symlink(&landing.rig.project, &alias)?;
+    fs::write(
+        landing.rig.project.join(".git/worktrees/feat/gitdir"),
+        format!("{}/.worktrees/feat/.git\n", alias.display()),
+    )?;
+    landing.rig.env.push((
+        "FIXTURE_GH_DIR".into(),
+        landing.rig.project.clone().into_os_string(),
+    ));
+    let selected = alias.join(".worktrees/feat");
+    let output = command(
+        &landing.rig,
+        &[
+            "--project",
+            selected.to_str().ok_or("path")?,
+            "land",
+            NUMBER,
+            "--json",
+        ],
+    )?;
+    let value = json(&output)?;
+    assert_eq!(code(&output), 0, "{value}");
+    assert_eq!(status(&value, "worktree")?, "done", "{value}");
+    assert!(!landing.worktree.exists());
+    Ok(())
+}
+
+pub(crate) fn pr_land_recovers_only_abandoned_prepared_writer_leases() -> Result {
+    use provenant_core::Clock;
+    use provenant_supervisor::custody::{Scope, WriterBinding};
+    for case in ["abandoned", "held", "malformed", "wrong_binding"] {
+        let landing = landing()?;
+        let (_, context) = super::worktree_tests::writer_context(&landing.rig)?;
+        let clock = provenant_os::clock::SystemClock;
+        let cancel = provenant_core::CancelToken::new();
+        let request = provenant_run::resolve_writer(
+            context.state_root.as_path(),
+            &landing.rig.project,
+            &landing.worktree,
+        )?;
+        let writer = provenant_run::prepare_writer(
+            &request,
+            context.state_root.as_path(),
+            context.project_id,
+        )?;
+        let binding = WriterBinding::from_verified(
+            writer.worktree.repo().root_dir(),
+            writer.worktree.repo().private_dir(),
+            if case == "wrong_binding" {
+                "refs/heads/other"
+            } else {
+                writer.branch.as_str()
+            },
+            provenant_core::GitOid::parse(&landing.head)?,
+        )?;
+        let state = landing
+            .rig
+            .state
+            .join("worktrees")
+            .join(context.project_id.to_string())
+            .join(provenant_confinement::worktrees::state_dir_name(
+                &landing.worktree,
+            ));
+        let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+            provenant_os::fs::Directory::open_anchor(&state)?,
+            Scope {
+                run: provenant_core::RunId::from_bytes([81; 16]),
+                attempt: provenant_core::AttemptId::from_bytes([82; 16]),
+                generation: 1,
+            },
+            binding,
+            provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )?;
+        let lease = if case == "held" {
+            Some(lease)
+        } else {
+            drop(lease);
+            None
+        };
+        if case == "malformed" {
+            fs::write(state.join("reservation.json"), b"malformed reservation")?;
+        }
+        let reservation = fs::read(state.join("reservation.json"))?;
+        let value = land(&landing)?;
+        let removed = case == "abandoned";
+        assert_eq!(
+            status(&value, "worktree")?,
+            if removed { "done" } else { "refused" },
+            "{case}: {value}"
+        );
+        assert_eq!(landing.worktree.exists(), !removed);
+        assert_eq!(branch_exists(&landing.rig, "feat")?, !removed);
+        if removed {
+            assert!(!state.join("reservation.json").exists());
+            assert!(state.join("settlement.json").exists());
+        } else {
+            assert_eq!(fs::read(state.join("reservation.json"))?, reservation);
+        }
+        drop(lease);
+    }
+    Ok(())
+}
+
+/// Terminal records may live in a child store while custody remains in the
+/// host registry. Exercise land through the production recursive snapshot.
+pub(crate) fn pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores() -> Result {
+    use provenant_core::{Clock, WaitBudget};
+    use provenant_os::fs::Directory;
+    use provenant_run::{AttemptState, RouteRecord, RunStore, TerminalPublication};
+    use provenant_supervisor::custody::{
+        ExitObservation, PublicationState, Scope, SettlementEvidence, WriterBinding,
+    };
+    use std::os::unix::fs::OpenOptionsExt;
+    for child in [false, true] {
+        let landing = landing()?;
+        let rig = &landing.rig;
+        let (roots, mut context) = super::worktree_tests::writer_context(rig)?;
+        let clock = provenant_os::clock::SystemClock;
+        let cancel = provenant_core::CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            budget: WaitBudget::cli(clock.mono_now(), 10)?,
+            cancel: &cancel,
+        };
+        // Keep a normal host store beside the nested store, as the snapshot
+        // sees it during a real dispatch from a lane.
+        drop(RunStore::open(&context, &call)?);
+        if child {
+            context.state_root = crate::roots::child(
+                &rig.home,
+                &rig.project,
+                rig.state.join("children").join("retained-writer"),
+            )?
+            .state;
+        }
+        let store = RunStore::open(&context, &call)?.with_writer_registry(&rig.state);
+        let request = provenant_run::resolve_writer(&rig.state, &rig.project, &landing.worktree)?;
+        let input =
+            super::worktree_tests::writer_run(request.clone(), "land-terminal", 91, "done")?;
+        store.create(&input, &call)?;
+        let id = input.attempts[0].attempt_id;
+        let mut running = store.record(id, &call)?;
+        running.revision += 1;
+        running.generation = 1;
+        running.state = AttemptState::Running;
+        running.started_at = Some(clock.wall_now()?);
+        running.provider_launched = Some(true);
+        // The provider seam advances admission without launching a backend;
+        // terminal publication below still uses Run's canonical transaction.
+        rusqlite::Connection::open(context.state_root.as_path().join("run.sqlite3"))?.execute(
+            "UPDATE attempts SET revision=?1,record=?2 WHERE id=?3",
+            rusqlite::params![
+                i64::try_from(running.revision)?,
+                provenant_records::CanonicalV1::bytes(&running)?.as_bytes(),
+                id.to_string()
+            ],
+        )?;
+        let scope = Scope {
+            run: input.run_id,
+            attempt: id,
+            generation: running.generation,
+        };
+        let attempt = context
+            .state_root
+            .as_path()
+            .join(format!("runs/{}/attempts/{id}", input.run_id));
+        let exit = ExitObservation {
+            publication: PublicationState::Durable,
+            scope,
+            termination: Some(provenant_os::exec::Termination::Exit(0)),
+            never_spawned: false,
+            stop_reason: None,
+            delivered_signals: vec![],
+            reaped: vec![],
+            omitted_reaped: 0,
+            spared: vec![],
+            omitted_spared: 0,
+            warnings: vec![],
+            omitted_warnings: 0,
+            terminal_observed: true,
+            unresolved_cleanup: false,
+            unresolved_pids: vec![],
+            settlement_evidence: SettlementEvidence::DarwinCensusAndCustodyLease,
+            stdout: Default::default(),
+            stderr: Default::default(),
+        };
+        let mut evidence = serde_json::to_value(&exit)?;
+        evidence
+            .as_object_mut()
+            .ok_or("exit fixture")?
+            .remove("publication");
+        evidence["schema_version"] = 1.into();
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(attempt.join("process-exit.json"))?;
+        file.write_all(&serde_json::to_vec(&evidence)?)?;
+        file.sync_all()?;
+        drop(file);
+        let route = RouteRecord {
+            provider: Some("claude".into()),
+            model: Some("claude/test-model".into()),
+            ..Default::default()
+        };
+        store.publish_terminal(
+            id,
+            running.revision,
+            &TerminalPublication {
+                outcome: provenant_run::Outcome::Succeeded,
+                started_at: running.started_at,
+                finished_at: clock.wall_now()?,
+                provider_ms: Some(1),
+                reason: None,
+                result: "landed writer",
+                complete: true,
+                redacted: false,
+                resolved_route: Some(route.clone()),
+                applied_route: Some(route.clone()),
+                observed_route: Some(route),
+                usage: Default::default(),
+                session: None,
+            },
+            &exit,
+            &call,
+        )?;
+        let attempt_directory = Directory::open_anchor(&attempt)?;
+        attempt_directory.mkdir(std::ffi::OsStr::new("quarantine"), 0o700)?;
+        let archive =
+            attempt_directory.open_verified_directory(std::ffi::OsStr::new("quarantine"))?;
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1, "scope": scope, "kind": "quarantine_manifest",
+        }))?;
+        archive
+            .atomic_write(
+                std::ffi::OsStr::new("manifest.json"),
+                ".manifest-",
+                &manifest,
+                provenant_os::fs::PublishMode::NoReplace,
+            )?
+            .require_durable()?;
+        let writer = provenant_run::prepare_writer(&request, &rig.state, context.project_id)?;
+        let state = rig
+            .state
+            .join("worktrees")
+            .join(context.project_id.to_string())
+            .join(provenant_confinement::worktrees::state_dir_name(
+                &landing.worktree,
+            ));
+        let binding = WriterBinding::from_verified(
+            writer.worktree.repo().root_dir(),
+            writer.worktree.repo().private_dir(),
+            writer.branch.as_str(),
+            provenant_core::GitOid::parse(&landing.head)?,
+        )?;
+        drop(provenant_supervisor::fixture::acquire_writer_with_binding(
+            Directory::open_anchor(&state)?,
+            scope,
+            binding,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )?);
+        let reservation = state.join("reservation.json");
+        let mut fence: serde_json::Value = serde_json::from_slice(&fs::read(&reservation)?)?;
+        let metadata = Directory::open_anchor(&attempt)?.metadata()?;
+        fence["launch_state"] = "never_spawned".into();
+        fence["unresolved_cleanup"] = false.into();
+        fence["census_incomplete"] = false.into();
+        fence["attempt_device"] = metadata.device.into();
+        fence["attempt_inode"] = metadata.inode.into();
+        fs::write(&reservation, serde_json::to_vec(&fence)?)?;
+        assert!(
+            crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)?
+                .get(&landing.worktree)
+                == Some(&true)
+        );
+        let value = land(&landing)?;
+        assert_eq!(
+            status(&value, "worktree")?,
+            "done",
+            "child={child}: {value}"
+        );
+        assert_eq!(status(&value, "branch")?, "done", "child={child}: {value}");
+        assert!(!landing.worktree.exists());
+        assert!(!branch_exists(rig, "feat")?);
+        assert!(!reservation.exists());
+        assert!(state.join("settlement.json").is_file());
+        assert!(attempt.join("release.json").is_file());
+        assert_eq!(
+            fs::read(attempt.join("quarantine/manifest.json"))?,
+            manifest
+        );
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal { .. }
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn pr_land_primary_with_separate_git_directory() -> Result {
+    for from_lane in [false, true] {
+        let mut landing = landing_with_git_dir(true)?;
+        let main = landing.rig.project.clone();
+        landing
+            .rig
+            .env
+            .push(("FIXTURE_GH_DIR".into(), main.clone().into_os_string()));
+        landing
+            .rig
+            .env
+            .push(("FIXTURE_SYSTEM_WORKERS".into(), "1".into()));
+        if from_lane {
+            landing.rig.project = landing.worktree.clone();
+        }
+        let value = land(&landing)?;
+        assert_eq!(status(&value, "worktree")?, "done", "{value}");
+        assert_eq!(status(&value, "branch")?, "done", "{value}");
+        assert!(!landing.worktree.exists());
+        landing.rig.project = main;
+        assert!(!branch_exists(&landing.rig, "feat")?);
+    }
     Ok(())
 }
 
@@ -232,11 +663,26 @@ pub(crate) fn pr_land_refuses_each_unsafe_step_and_reports_the_rest() -> Result 
     assert!(landing.rig.project.join("stray.txt").exists());
 
     // A worktree with uncommitted work is kept, and so is its branch.
-    let landing = self::landing()?;
+    let mut landing = self::landing()?;
     fs::write(landing.worktree.join("notes.txt"), "unsaved\n")?;
     fs::create_dir_all(landing.worktree.join("target"))?;
     fs::write(landing.worktree.join("target/artifact"), "built")?;
-    let value = land(&landing)?;
+    landing.rig.env.push((
+        "FIXTURE_GH_DIR".into(),
+        landing.rig.project.clone().into_os_string(),
+    ));
+    let output = command(
+        &landing.rig,
+        &[
+            "--project",
+            landing.worktree.to_str().ok_or("path")?,
+            "land",
+            NUMBER,
+            "--json",
+        ],
+    )?;
+    let value = json(&output)?;
+    assert_eq!(code(&output), 1, "{value}");
     assert_eq!(status(&value, "worktree")?, "refused", "{value}");
     assert_eq!(status(&value, "branch")?, "refused", "{value}");
     assert!(landing.worktree.join("notes.txt").exists());
@@ -247,11 +693,26 @@ pub(crate) fn pr_land_refuses_each_unsafe_step_and_reports_the_rest() -> Result 
     assert!(branch_exists(&landing.rig, "feat")?);
 
     // Commits the pull request never merged keep the branch.
-    let landing = self::landing()?;
+    let mut landing = self::landing()?;
     fs::write(landing.worktree.join("later.txt"), "later\n")?;
     git_in(&landing.rig, &landing.worktree, &["add", "later.txt"])?;
     git_in(&landing.rig, &landing.worktree, &["commit", "-qm", "later"])?;
-    let value = land(&landing)?;
+    landing.rig.env.push((
+        "FIXTURE_GH_DIR".into(),
+        landing.rig.project.clone().into_os_string(),
+    ));
+    let output = command(
+        &landing.rig,
+        &[
+            "--project",
+            landing.worktree.to_str().ok_or("path")?,
+            "land",
+            NUMBER,
+            "--json",
+        ],
+    )?;
+    let value = json(&output)?;
+    assert_eq!(code(&output), 1, "{value}");
     assert_eq!(status(&value, "worktree")?, "refused", "{value}");
     assert_eq!(status(&value, "branch")?, "refused", "{value}");
     assert!(

@@ -239,7 +239,9 @@ To read a peer's own attempt without a local placement record, use
 `provenant output ATTEMPT --host workshop`, or `output HOST/ATTEMPT` with
 the host ID. Output also accepts `RUN/ATTEMPT`; a local `--tail` above 500
 is clamped to 500 lines. For a settled local attempt, `output RUN --part receipt`
-prints its reviewer provenance when the run has exactly one attempt. A
+prints its provenance when the run has exactly one attempt. Read-only tasks
+use `Reviewer:` and writer tasks use `Writer:`; JSON includes the matching `role`.
+Missing applied effort or catalogue family is `unknown`, never a guessed default. A
 `RUN/TASK` target likewise must select exactly one attempt; otherwise use
 `RUN/TASK/ATTEMPT`. Add `--json` for the individual fields. Receipt output
 is not supported over peer transport; run the command on the peer host.

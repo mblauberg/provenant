@@ -216,7 +216,9 @@ push|reconcile`. A terminal without MCP cancels with `provenant cancel ATTEMPT`.
   [worker-liveness.md](worker-liveness.md) for degraded runs. Size alone proves
   nothing.
 - On a terminal review, record the exact provenance line from
-  `provenant output RUN/TASK/ATTEMPT --part receipt`. Native subagents record `claude/<model>@<effort> (anthropic;
+  `provenant output RUN/TASK/ATTEMPT --part receipt`. Reviews use `Reviewer:`;
+  writer provenance uses `Writer:`. Preserve `unknown` effort or family rather
+  than guessing it. Native subagents record `claude/<model>@<effort> (anthropic;
   resolved)` from the Agent tool's model parameter, never from self-report.
 
 ## Fabric dispatch brief template

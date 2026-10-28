@@ -3305,6 +3305,7 @@ pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
 }
 fn reviewer_receipt(
     record: &provenant_records::run::AttemptRecord,
+    writer: bool,
 ) -> Result<(Value, String), Fail> {
     use provenant_records::run::AttemptState;
     if !matches!(record.state, AttemptState::Terminal { .. }) {
@@ -3335,11 +3336,16 @@ fn reviewer_receipt(
             "applied route has no model",
         )
     })?;
+    let qualified_model = if model.starts_with(&format!("{adapter}/")) {
+        model.to_owned()
+    } else {
+        format!("{adapter}/{model}")
+    };
     let effort = route.effort.as_deref().unwrap_or("unknown");
     let family = provenant_routing::Catalogue::bundled()
         .ok()
         .and_then(|catalogue| {
-            ModelId::parse(model)
+            ModelId::parse(&qualified_model)
                 .ok()
                 .and_then(|id| catalogue.model(&id).and_then(|entry| entry.family.clone()))
         })
@@ -3355,17 +3361,14 @@ fn reviewer_receipt(
     } else {
         "explicit".into()
     };
-    let qualified_model = if model.starts_with(&format!("{adapter}/")) {
-        model.to_owned()
-    } else {
-        format!("{adapter}/{model}")
-    };
+    let role = if writer { "writer" } else { "reviewer" };
+    let label = if writer { "Writer" } else { "Reviewer" };
     let line = format!(
-        "Reviewer: {qualified_model}@{effort} ({family}; resolved from {resolved_from}), run {}/{}/{}",
+        "{label}: {qualified_model}@{effort} ({family}; resolved from {resolved_from}), run {}/{}/{}",
         record.run_id, record.task_id, record.attempt_id
     );
     Ok((
-        json!({"run_id": record.run_id, "task_id": record.task_id, "attempt_id": record.attempt_id, "adapter": adapter, "model": model, "effort": effort, "family": family, "resolved_from": resolved_from, "receipt": line}),
+        json!({"run_id": record.run_id, "task_id": record.task_id, "attempt_id": record.attempt_id, "adapter": adapter, "model": model, "effort": effort, "family": family, "role": role, "resolved_from": resolved_from, "receipt": line}),
         format!("{line}\n"),
     ))
 }
@@ -3476,7 +3479,18 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         ));
     }
     let part = match command.part {
-        Part::Receipt => return reviewer_receipt(&record),
+        Part::Receipt => {
+            let writer = session
+                .store
+                .request(record.run_id, &call)?
+                .tasks
+                .into_iter()
+                .find(|task| task.task_id == record.task_id)
+                .ok_or(run::RunError::NotFound)?
+                .writer
+                .is_some();
+            return reviewer_receipt(&record, writer);
+        }
         Part::Result => run::ArtifactPart::Result,
         Part::Prompt => run::ArtifactPart::Prompt,
         Part::Stderr => run::ArtifactPart::Stderr,
@@ -6717,7 +6731,7 @@ mod tests {
             "state": {"state":"terminal","outcome":"succeeded","exit_code":0,"finished_at":now,"reason":null},
             "usage": {}, "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"}, "digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
         }))?;
-        let (data, line) = reviewer_receipt(&record).unwrap();
+        let (data, line) = reviewer_receipt(&record, false).unwrap();
         assert_eq!(data["resolved_from"], "explicit");
         assert_eq!(
             line,
@@ -6726,21 +6740,39 @@ mod tests {
                 record.run_id, record.task_id, record.attempt_id
             )
         );
+        record.applied_route.as_mut().unwrap().model = Some("gpt-6.1-sol".into());
+        let (writer_data, writer_line) = reviewer_receipt(&record, true).unwrap();
+        assert_eq!(writer_data["role"], "writer");
+        assert_eq!(writer_data["family"], "openai");
+        assert!(writer_line.starts_with("Writer: codex/gpt-6.1-sol@high (openai;"));
+        record.applied_route.as_mut().unwrap().effort = None;
+        assert!(
+            reviewer_receipt(&record, false)
+                .unwrap()
+                .1
+                .contains("@unknown")
+        );
+        record.applied_route.as_mut().unwrap().model = Some("codex/uncatalogued".into());
+        assert_eq!(
+            reviewer_receipt(&record, false).unwrap().0["family"],
+            "unknown"
+        );
+        record.applied_route.as_mut().unwrap().model = Some("codex/gpt-6.1-sol".into());
         record.applied_route.as_mut().unwrap().pool_selection = Some(serde_json::from_value(
             json!({"pool":"junior","candidates":[],"roll":0,"total_weight":1,"pick":"codex/gpt-6.1-sol"}),
         )?);
-        let (data, line) = reviewer_receipt(&record).unwrap();
+        let (data, line) = reviewer_receipt(&record, false).unwrap();
         assert_eq!(data["resolved_from"], "pool junior");
         assert!(line.contains("(openai; resolved from pool junior)"));
         record.skipped_routes.push(serde_json::from_value(
             json!({"route":"codex/other","kind":"unavailable","detail":"unavailable"}),
         )?);
         assert_eq!(
-            reviewer_receipt(&record).unwrap().0["resolved_from"],
+            reviewer_receipt(&record, false).unwrap().0["resolved_from"],
             "fallback"
         );
         record.state = run::AttemptState::Running;
-        assert!(reviewer_receipt(&record).is_err());
+        assert!(reviewer_receipt(&record, false).is_err());
         Ok(())
     }
 

@@ -74,21 +74,81 @@ fn pull(project: &Path, number: &str) -> Result<Pull> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-/// The path of the checkout that has `branch` checked out, if any.
-fn checkout_of(git: &Git, project: &Path, branch: &str) -> Result<Option<String>> {
-    let Some(listing) = git.full(project, &["worktree", "list", "--porcelain"])? else {
-        return Err("cannot list worktrees".into());
-    };
-    let wanted = format!("branch refs/heads/{branch}");
-    let mut path = None;
-    for line in listing.lines() {
-        if let Some(found) = line.strip_prefix("worktree ") {
-            path = Some(found);
-        } else if line == wanted {
-            return Ok(path.map(str::to_owned));
+struct Checkout {
+    path: PathBuf,
+    branch: Option<String>,
+}
+
+/// NUL fields avoid Git's C quoting for paths containing tabs or quotes.
+fn checkouts(git: &Git, project: &Path) -> Result<Vec<Checkout>> {
+    let listing = git
+        .full(project, &["worktree", "list", "--porcelain", "-z"])?
+        .ok_or("cannot list worktrees")?;
+    let mut checkouts: Vec<Checkout> = Vec::new();
+    for field in listing.split('\0') {
+        if let Some(path) = field.strip_prefix("worktree ") {
+            // The primary anchor must resolve. Preserve other registrations
+            // for branch-holder checks even if their checkout disappeared.
+            let path = match fs::canonicalize(path) {
+                Ok(path) => path,
+                Err(error) if checkouts.is_empty() => return Err(error.into()),
+                Err(_) => PathBuf::from(path),
+            };
+            checkouts.push(Checkout { path, branch: None });
+        } else if let Some(branch) = field.strip_prefix("branch refs/heads/") {
+            checkouts
+                .last_mut()
+                .ok_or("worktree branch without a path")?
+                .branch = Some(branch.to_owned());
         }
     }
-    Ok(None)
+    let common = git
+        .full(
+            project,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?
+        .ok_or("cannot find the common Git directory")?;
+    let common = fs::canonicalize(common.trim_end_matches('\n'))?;
+    // A separate Git directory can appear as Git's first inventory path.
+    // Managed lanes sit below their primary checkout; verify candidate roots
+    // by Git identity rather than inferring the root from the common directory.
+    for candidate in project
+        .ancestors()
+        .filter(|path| path.join(".git").exists())
+    {
+        let Some(private) = git.full(candidate, &["rev-parse", "--absolute-git-dir"])? else {
+            continue;
+        };
+        if fs::canonicalize(private.trim_end_matches('\n'))? == common
+            && roots::selected_project(Some(candidate), true)? == candidate
+        {
+            checkouts.first_mut().ok_or("no primary checkout")?.path = candidate.to_path_buf();
+            break;
+        }
+    }
+    let primary = &checkouts.first().ok_or("no primary checkout")?.path;
+    if roots::selected_project(Some(primary), true)? != *primary {
+        return Err("worktree inventory does not name the primary checkout root".into());
+    }
+    let private = git
+        .full(primary, &["rev-parse", "--absolute-git-dir"])?
+        .ok_or("cannot verify the primary checkout")?;
+    if fs::canonicalize(private.trim_end_matches('\n'))? != common {
+        return Err("worktree inventory does not name the primary checkout".into());
+    }
+    Ok(checkouts)
+}
+
+/// A landing census exempts only this invocation's callers. Other commands
+/// continue to use the ordinary observer, which includes those processes.
+struct LandWorkers<'a>(&'a dyn WorkerObserver);
+impl WorkerObserver for LandWorkers<'_> {
+    fn observe_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState> {
+        self.0.observe_roots_for_land(roots)
+    }
 }
 
 /// How a worktree is using a branch.
@@ -234,7 +294,7 @@ fn follow_up(
     project: &Path,
     pull: &Pull,
     merged: GitOid,
-    globals: &provenant_cli::Globals,
+    globals: &mut provenant_cli::Globals,
     workers: &dyn WorkerObserver,
 ) -> Result<Vec<Step>> {
     let git = Git::new()?;
@@ -286,7 +346,10 @@ fn follow_up(
         format!("{upstream} updated"),
     ));
 
-    steps.push(fast_forward(&git, project, base, &remote, &upstream)?);
+    let checkouts = checkouts(&git, project)?;
+    steps.push(fast_forward(
+        &git, project, base, &remote, &upstream, &checkouts,
+    )?);
 
     match cleanup_target(&git, project, pull, pinned, &upstream)? {
         Cleanup::Skip(status, why) => {
@@ -295,30 +358,19 @@ fn follow_up(
             }
         }
         Cleanup::Prune(tip) => {
-            // Use the main checkout as the Git anchor if the selected project
-            // is the worktree being removed. Subsequent Git operations must
-            // not depend on a checkout that no longer exists.
-            let anchor = match checkout_of(&git, project, branch)? {
-                Some(path) if project.starts_with(&path) => git
-                    .full(project, &["worktree", "list", "--porcelain"])?
-                    .and_then(|listing| {
-                        listing
-                            .lines()
-                            .next()?
-                            .strip_prefix("worktree ")
-                            .map(PathBuf::from)
-                    })
-                    .filter(|anchor| !anchor.starts_with(&path)),
-                _ => None,
-            };
-            let cleanup_project = anchor.as_deref().unwrap_or(project);
-            let cleanup_globals = provenant_cli::Globals {
-                json: globals.json,
-                state_dir: globals.state_dir.clone(),
-                project: Some(cleanup_project.to_path_buf()),
-            };
-            let (worktree, branch_gone) =
-                prune_worktree(&cleanup_globals, branch, &upstream, tip, workers);
+            let cleanup_project = &checkouts.first().ok_or("no primary checkout")?.path;
+            // Move this process and output publication to the surviving checkout
+            // before removal. A child cannot change its invoking shell's cwd.
+            if let Some(lane) = checkouts
+                .iter()
+                .find(|checkout| checkout.branch.as_deref() == Some(branch))
+                && std::env::current_dir()?.starts_with(&lane.path)
+            {
+                std::env::set_current_dir(cleanup_project)?;
+            }
+            globals.project = Some(cleanup_project.to_path_buf());
+            let workers = LandWorkers(workers);
+            let (worktree, branch_gone) = prune_worktree(globals, branch, &upstream, tip, &workers);
             steps.push(worktree);
             steps.push(delete_branch(
                 &git,
@@ -444,6 +496,7 @@ fn fast_forward(
     base: &str,
     remote: &str,
     upstream: &str,
+    checkouts: &[Checkout],
 ) -> Result<Step> {
     let local = format!("refs/heads/{base}");
     let (exists, _) = git.run(project, &["rev-parse", "--verify", "--quiet", &local])?;
@@ -454,15 +507,18 @@ fn fast_forward(
             format!("no local {base} branch"),
         ));
     }
-    let outcome = match checkout_of(git, project, base)? {
-        Some(path) => {
-            let dir = Path::new(&path);
+    let outcome = match checkouts
+        .iter()
+        .find(|checkout| checkout.branch.as_deref() == Some(base))
+    {
+        Some(checkout) => {
+            let dir = &checkout.path;
             let changes = git.full(dir, &["status", "--porcelain"])?;
             if changes.is_none_or(|changes| !changes.trim().is_empty()) {
                 return Ok(Step::new(
                     "fast_forward",
                     Status::Refused,
-                    format!("the {base} checkout at {path} has local changes"),
+                    format!("the {base} checkout at {} has local changes", dir.display()),
                 ));
             }
             git.run(dir, &["merge", "--ff-only", upstream])?
@@ -577,6 +633,11 @@ pub(crate) fn run(
 ) -> u8 {
     const LEAF: &str = "land";
     let mut captured = expected;
+    let mut output_globals = provenant_cli::Globals {
+        json: globals.json,
+        state_dir: globals.state_dir.clone(),
+        project: globals.project.clone(),
+    };
     let mut merged = false;
     let mut state = String::new();
     let mut steps = Vec::new();
@@ -594,7 +655,7 @@ pub(crate) fn run(
         state = view.state.clone();
         merged = view.state == "MERGED";
         if merged {
-            steps = follow_up(&project, &view, current, globals, workers)?;
+            steps = follow_up(&project, &view, current, &mut output_globals, workers)?;
         }
         Ok(())
     })();
@@ -666,7 +727,7 @@ pub(crate) fn run(
             step.detail
         ));
     }
-    emit(&report, globals, &text, false)
+    emit(&report, &output_globals, &text, false)
 }
 
 /// Test seam: the cleanup check for `feat` merged at `merged` into `main`, then
