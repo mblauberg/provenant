@@ -82,9 +82,24 @@ impl Candidate {
     }
 }
 fn index(context: &run::ExecutionContext, selection: &str) -> Result<Vec<Candidate>, Fail> {
+    index_with_budget(context, selection, false)
+}
+fn index_with_budget(
+    context: &run::ExecutionContext,
+    selection: &str,
+    nonblocking: bool,
+) -> Result<Vec<Candidate>, Fail> {
     let clock = super::SystemClock::new();
     let cancel = super::CancelToken::new();
-    let call = super::request(&clock, &cancel)?;
+    let call = if nonblocking {
+        run::Request {
+            clock: &clock,
+            budget: super::WaitBudget::nonblocking(provenant_core::Clock::mono_now(&clock)),
+            cancel: &cancel,
+        }
+    } else {
+        super::request(&clock, &cancel)?
+    };
     let Some(store) = run::RunStore::open_read_only(context, &call)? else {
         return Ok(Vec::new());
     };
@@ -265,6 +280,14 @@ pub(super) fn resolve(
     target: &Target,
     allow_run: bool,
 ) -> Result<Candidate, Fail> {
+    resolve_with_budget(edge, target, allow_run, false)
+}
+pub(super) fn resolve_with_budget(
+    edge: &Edge<'_>,
+    target: &Target,
+    allow_run: bool,
+    nonblocking: bool,
+) -> Result<Candidate, Fail> {
     let mut selection = text(target);
     if let Some((qualifier, attempt)) = selection.split_once('/')
         && !attempt.contains('/')
@@ -276,7 +299,7 @@ pub(super) fn resolve(
     let context = super::execution_context(edge)?;
     let exact = selection.len() == 32 && !selection.contains('/');
     let peers = remote::target_candidates(edge.roots)?;
-    let mut candidates = index(&context, &selection)?;
+    let mut candidates = index_with_budget(&context, &selection, nonblocking)?;
     if exact
         && candidates
             .iter()
@@ -304,7 +327,7 @@ pub(super) fn resolve(
             project_id,
             ..context.clone()
         };
-        candidates.extend(index(&scoped, &selection)?);
+        candidates.extend(index_with_budget(&scoped, &selection, nonblocking)?);
         if exact
             && candidates
                 .iter()

@@ -134,6 +134,7 @@ impl WaitTransport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WaitBudget {
     deadline: Deadline,
+    nonblocking: bool,
 }
 impl WaitBudget {
     /// One immediate attempt, with no retry wait. Used for writer probes while
@@ -141,7 +142,13 @@ impl WaitBudget {
     pub const fn nonblocking(now: MonoTime) -> Self {
         Self {
             deadline: Deadline(now),
+            nonblocking: true,
         }
+    }
+    /// Explicitly allow one immediate attempt, even though the deadline is now.
+    /// An ordinary budget that expires does not become a nonblocking probe.
+    pub const fn is_nonblocking(self) -> bool {
+        self.nonblocking
     }
     pub fn new(
         now: MonoTime,
@@ -154,6 +161,7 @@ impl WaitBudget {
         }
         Ok(Self {
             deadline: Deadline(now.checked_add(duration)?),
+            nonblocking: false,
         })
     }
     pub fn cli(now: MonoTime, seconds: u64) -> Result<Self, TimeError> {
