@@ -1,5 +1,3 @@
-<!-- Modified for Provenant. -->
-
 # Responsive accessibility
 
 Choose representative widths from content and supported devices, not a fixed

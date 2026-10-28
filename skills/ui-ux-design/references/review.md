@@ -1,5 +1,3 @@
-<!-- Modified for Provenant. -->
-
 # Review
 
 Review is a negative capability: inspect and report without changing the

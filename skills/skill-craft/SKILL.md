@@ -59,11 +59,10 @@ Both branches follow this without restating it in two voices:
 - **Description contract:** front-load the first 250 characters with trigger
   words and the nearest exclusion; keep boundary-routing negation explicit
   (name the skill to use instead); never drop it for brevity.
-- **Provenance:** any adaptation from a third-party source records source
-  URL, version/commit, retrieval date and licence in the repository
-  `THIRD_PARTY_NOTICES.md` index, with the full licence text under `LICENSES/`.
-  See [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md) for this skill's
-  own Skill Optimizer lineage.
+- **Provenance:** when copied or closely paraphrased third-party text, code or
+  data ships, record its source URL, commit, retrieval date and licence, and
+  retain the required notices and licence text. Ideas and methods alone do not
+  require a notice.
 
 Reference eval cases (not run by CI): [boundary traces](evals/boundary_trace_cases.yaml)
 and [behaviour cases](evals/behaviour_cases.yaml).

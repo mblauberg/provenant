@@ -1,5 +1,3 @@
-<!-- Modified for Provenant. -->
-
 # Visual QA
 
 Define a small state-by-viewport matrix from the acceptance criteria. Include

@@ -1,5 +1,3 @@
-<!-- Modified for Provenant. -->
-
 # Design systems
 
 Infer one focused job: **audit**, **consolidate**, **extend**, or **migrate**.

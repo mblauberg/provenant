@@ -129,9 +129,10 @@ Rust harness asset checks enforce the machine-checkable subset.
    verification.
 3. Use a consistent kebab-case capability name. Related writing skills use
    parallel names: `engineering-writing`, `natural-writing`, `legal-writing`.
-4. Keep portable frontmatter to `name` and `description`. Put provenance in a
-   notice and provider UI metadata in a validated sidecar. Metadata and tool
-   lists may narrow invocation but never grant authority.
+4. Keep portable frontmatter to `name` and `description`. Keep required
+   third-party notices with copied material and provider UI metadata in a
+   validated sidecar. Metadata and tool lists may narrow invocation but never
+   grant authority.
 5. Put trigger terms and the nearest exclusion in the first 250 description
    characters. Keep the complete canonical catalogue at or below 8,000
    characters, targeting 7,600 for wrapper and version headroom.
@@ -170,9 +171,8 @@ only when its trigger, authority, artefact and gate remain distinct.
 
 Nothing outside a skill may name a file under that skill's `references/`
 directory. Cross-skill references use the skill name only. This is a review
-rule; no contract test currently scans it. Licence attribution in
-`THIRD_PARTY_NOTICES.md` is the deliberate
-exception, because an attribution must name the file it covers.
+rule; no contract test currently scans it. Required licence notices may name
+the files they cover.
 
 `natural-writing` is the writing hub and single owner of the shared prose
 doctrine (tiered anti-AI taxonomy, Australian-English house style, condense pass
@@ -219,8 +219,10 @@ numerator and denominator, model and harness versions.
 
 - Exclude personal absolute paths, private project names, credentials, local
   plugin caches, matter facts and private symlink targets.
-- Import material only with a redistribution licence. Preserve upstream
-  licence, copyright, notice and modification requirements beside it.
+- Import copyrightable expression only with a redistribution licence. Preserve
+  applicable licence, copyright, notice and modification requirements. Ideas,
+  methods, taxonomies, numeric thresholds and rubric weights do not by themselves
+  require a third-party notice.
 - Prefer source links and small adaptations to large generated bundles. Record
   why each third-party component is present.
 - Treat plugins as supply-chain packages: before execution or installation,
