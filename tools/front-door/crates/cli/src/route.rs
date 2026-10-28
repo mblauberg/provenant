@@ -1101,6 +1101,7 @@ mod route_tests {
                 adapter: "codex".into(),
                 executable: "/fixture/codex".into(),
                 version: "fixture".into(),
+                last_update: None,
                 fixture_ref: "fixture".into(),
                 catalogue_revision: catalogue.revision().into(),
                 account_key: Some(key.into()),
