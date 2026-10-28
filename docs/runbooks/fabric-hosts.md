@@ -79,8 +79,11 @@ Add a deterministic check after a review with a gate such as:
 }
 ```
 
-The review must emit the exact verdict line. Thresholds are `all`, `any`,
-`majority` or `{"count": 2}`. A gate has no route, prompt, writer worktree or
+The review must emit the exact verdict line beginning with `VERDICT:`.
+Leave `required_verdict` unset on reviewers when a negative verdict should
+count as a non-match; a failed required-verdict contract blocks the gate.
+Thresholds are `all`, `any`, `majority` or `{"count": 2}`.
+A gate has no route, prompt, writer worktree or
 delivery configuration. Use `condition: {"type": "budget"}` without `inputs`
 to check settled usage against the host's configured per-node and graph
 budgets. Reaching a budget or missing telemetry fails that check; without a
@@ -89,8 +92,10 @@ configured budget it passes. Checks do not reserve future budget.
 Set `on_fail` to a recovery node ID and include the gate in that node's
 `depends_on`. The recovery path runs only on failure; the ordinary dependants
 run only on success. Inactive paths become `skipped`. A failed gate without
-recovery prevents delivery. A successful recovery permits final graph delivery;
-the usual budget admission fence still applies to any recovery agent. Replay
+recovery prevents delivery. Dependencies are conjunctive; a join that requires
+both success and failure paths is rejected as unreachable. A successful
+recovery permits final graph delivery; the usual budget admission fence still
+applies to any recovery agent. Replay
 retains a saved decision; use a new graph ID to evaluate it again.
 
 Configure the `senior` routing pool and register `pro` with `provenant accounts

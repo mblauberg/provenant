@@ -1231,8 +1231,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         let node = &plan.nodes[node_index];
         let dependency = dependency_state(node, &plan, &checkpoint, &positions);
         if let Some(state) = dependency {
-            checkpoint.nodes[node_index].state = state;
-            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            if checkpoint.nodes[node_index].state != state {
+                checkpoint.nodes[node_index].state = state;
+                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            }
             continue;
         }
         if let Some(condition) = &node.condition {
@@ -2114,6 +2116,7 @@ fn validate_plan_with_limits(
                 threshold,
             }) => {
                 if expected.trim().is_empty()
+                    || expected.trim() != expected
                     || expected.len() > limits.node_prompt_bytes
                     || expected.contains(['\n', '\r'])
                     || node.inputs.is_empty()
@@ -2271,6 +2274,29 @@ fn validate_plan_with_limits(
     }
     if order.len() != nodes.len() {
         return Err("dependency cycle");
+    }
+
+    // Dependencies are conjunctive. Reject nodes that require mutually
+    // exclusive branches, including through transitive dependencies.
+    let mut requirements = vec![std::collections::BTreeMap::new(); nodes.len()];
+    for index in &order {
+        let mut required = std::collections::BTreeMap::new();
+        for parent in &nodes[*index].depends_on {
+            let parent = positions[parent];
+            let mut inherited = requirements[parent].clone();
+            if let Some(target) = &nodes[parent].on_fail {
+                inherited.insert(parent, target != &nodes[*index].id);
+            }
+            for (gate, outcome) in inherited {
+                if required
+                    .insert(gate, outcome)
+                    .is_some_and(|prior| prior != outcome)
+                {
+                    return Err("node requires both gate outcomes");
+                }
+            }
+        }
+        requirements[*index] = required;
     }
 
     let topological_nodes: Vec<PlannedNode> =
@@ -2744,8 +2770,7 @@ mod tests {
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version": 1, "graph_id": "g-test", "nodes": [
                 {"id": "review", "prompt": "Review", "access": "read_only",
-                 "route": {"adapter": "fixture", "model": "fixture/model"},
-                 "required_verdict": "VERDICT: PASS"},
+                 "route": {"adapter": "fixture", "model": "fixture/model"}},
                 {"id": "gate", "kind": "gate", "depends_on": ["review"],
                  "inputs": [{"node": "review", "outputs": ["verdict"]}],
                  "condition": {"type": "verdict", "expected": "VERDICT: PASS", "threshold": "all"}}
@@ -2783,21 +2808,24 @@ mod tests {
         verdicts: &[Option<&str>],
     ) -> (GraphDocument, FakeOwner) {
         let mut gate = gate_node(GateCondition::Verdict {
-            expected: "PASS".into(),
+            expected: "VERDICT: PASS".into(),
             threshold,
         });
         let mut nodes = Vec::new();
         let mut owner = FakeOwner::default();
         for (i, verdict) in verdicts.iter().enumerate() {
-            let mut review = node(&format!("review-{i}"), route("fixture"));
-            review.required_verdict = verdict.map(str::to_owned);
+            let review = node(&format!("review-{i}"), route("fixture"));
             gate.depends_on.push(review.id.clone());
             gate.inputs.push(GraphInput {
                 node: review.id.clone(),
                 outputs: vec![OutputKind::Verdict],
             });
-            let mut capture = crate::result_capture::ResultCapture::new(*verdict);
-            capture.push(verdict.unwrap_or("no verdict").as_bytes());
+            let mut capture = crate::result_capture::ResultCapture::new(None);
+            let text = verdict.map_or_else(
+                || "no verdict".to_owned(),
+                |line| format!("VERDICT: {line}"),
+            );
+            capture.push(text.as_bytes());
             let mut observation = terminal(AttemptOutcome::Succeeded);
             if let AttemptObservation::Terminal { result, .. } = &mut observation {
                 *result = Some(capture.finish());
@@ -3056,6 +3084,28 @@ mod tests {
         .unwrap();
         assert_eq!(run.status, GraphStatus::Paused);
         assert!(run.checkpoint.nodes.iter().all(|node| node.gate.is_none()));
+    }
+
+    #[test]
+    fn gate_rejects_unreachable_joins_of_mutually_exclusive_paths() {
+        for transitive in [false, true] {
+            let (mut document, _) = verdict_fixture(VerdictThreshold::All, &[Some("PASS")]);
+            document.nodes[1].on_fail = Some("recovery".into());
+            let mut recovery = node("recovery", route("fixture"));
+            recovery.depends_on.push("gate".into());
+            let mut success = node("success", route("fixture"));
+            success.depends_on.push("gate".into());
+            let mut join = node("join", route("fixture"));
+            join.depends_on = vec![
+                if transitive { "success" } else { "gate" }.into(),
+                "recovery".into(),
+            ];
+            document.nodes.extend([recovery, success, join]);
+            assert_eq!(
+                validate_plan(&document).err(),
+                Some("node requires both gate outcomes")
+            );
+        }
     }
 
     #[test]

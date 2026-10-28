@@ -235,7 +235,8 @@ even if budgets change. Gates expose `PASS` or `FAIL` as their typed verdict.
 A failure target named by `on_fail` must depend on its gate, so ordinary cycle
 and edge limits cover the failure path. Only that target may follow a failed
 gate; other dependants and inactive failure paths must be skipped. An unhandled
-failure or failed recovery must prevent graph delivery. A recovered graph may
+failure or failed recovery must prevent graph delivery. Dependencies requiring
+both outcomes of a gate must be rejected as unreachable. A recovered graph may
 deliver once its active paths succeed, with gate evidence and skipped nodes
 recorded in the final PR body.
 
@@ -246,7 +247,8 @@ recorded in the final PR body.
   `::gate_on_fail_routes_only_the_active_path_and_delivers_after_recovery`;
   `::gate_inactive_path_waits_for_other_parents_before_settling`;
   `::gate_checkpoint_rejects_attempts_inconsistent_results_and_forged_skips`;
-  `::gate_validation_rejects_agent_fields_bad_thresholds_and_failure_cycles`.
+  `::gate_validation_rejects_agent_fields_bad_thresholds_and_failure_cycles`;
+  `::gate_rejects_unreachable_joins_of_mutually_exclusive_paths`.
 - Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`
 
 ### Typed node outputs
