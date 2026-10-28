@@ -475,6 +475,9 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
 
 fn claude_dispatch_refreshes_registered_account() -> Result {
     let rig = claude_fixture()?;
+    // Open-network Claude dispatch must not require a Rust installation.
+    assert!(!rig.home.join(".cargo").exists());
+    assert!(!rig.home.join(".rustup").exists());
     let cleanup = rig.process_cleanup();
     let account = rig.home.join(".claude-pro");
     let manifest = rig.root.join("manifest.json");

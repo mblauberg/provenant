@@ -298,6 +298,37 @@ pub(crate) fn rust_tools(
             ("CARGO_CACHE_AUTO_CLEAN_FREQUENCY".into(), "never".into()),
         ]);
     }
+    system_tools(access, runtime_reads, tool_exec_roots, env);
+    // Homebrew resolves bin/git into its versioned keg. Its remote helpers
+    // live beside bin/, independently of whether Node enables Homebrew tools.
+    // Grant only the selected Git's helper directory, and only to writers.
+    if access == Access::WorktreeWrite
+        && let Some(prefix) = input.provenant.git.parent().and_then(Path::parent)
+    {
+        let core = prefix.join("libexec/git-core");
+        if core.is_dir() {
+            runtime_reads.push(subtree(&core));
+            tool_exec_roots.push(subtree(core));
+        }
+    }
+    if access == Access::ReadOnly {
+        setup.push(SetupStep::CreateDir(target));
+    }
+    // Repository scripts (a Cargo rustc wrapper, test runners) run directly.
+    // Children inherit this profile, so exec stays confined; read and write
+    // grants and the protected and credential denials are unchanged.
+    tool_exec_roots.push(subtree(input.cwd));
+}
+
+/// Public TLS files and macOS developer tools, independent of whether Rust
+/// is installed. Keep these grants shared by Codex and Claude.
+#[allow(unused_variables)] // The grants are macOS-specific.
+pub(crate) fn system_tools(
+    access: Access,
+    runtime_reads: &mut Vec<PathGrant>,
+    tool_exec_roots: &mut Vec<PathGrant>,
+    env: &mut Vec<(OsString, OsString)>,
+) {
     // Cargo's system LibreSSL reads its public default configuration
     // (openssl.cnf) and the TLS trust roots (cert.pem, certs/) to download
     // crates. Read-only; the whole public directory holds no secrets.
@@ -326,25 +357,6 @@ pub(crate) fn rust_tools(
             ]);
         }
     }
-    // Homebrew resolves bin/git into its versioned keg. Its remote helpers
-    // live beside bin/, independently of whether Node enables Homebrew tools.
-    // Grant only the selected Git's helper directory, and only to writers.
-    if access == Access::WorktreeWrite
-        && let Some(prefix) = input.provenant.git.parent().and_then(Path::parent)
-    {
-        let core = prefix.join("libexec/git-core");
-        if core.is_dir() {
-            runtime_reads.push(subtree(&core));
-            tool_exec_roots.push(subtree(core));
-        }
-    }
-    if access == Access::ReadOnly {
-        setup.push(SetupStep::CreateDir(target));
-    }
-    // Repository scripts (a Cargo rustc wrapper, test runners) run directly.
-    // Children inherit this profile, so exec stays confined; read and write
-    // grants and the protected and credential denials are unchanged.
-    tool_exec_roots.push(subtree(input.cwd));
 }
 
 /// Git's default XDG global ignore and attributes files, read-only. Cargo's

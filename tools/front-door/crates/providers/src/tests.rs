@@ -932,6 +932,16 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
     use provenant_confinement::permissions::NetworkAccess;
     let prompt = Prompt::new("fixture".into());
     let token = fixture_token();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap();
+    for path in [
+        ".cargo/bin",
+        ".cargo/registry",
+        ".cargo/git",
+        ".rustup/toolchains",
+    ] {
+        std::fs::create_dir_all(home.join(path)).unwrap();
+    }
     let repo = Path::new("/fixture/repo");
     let mut claude_route = route("claude", "fixture-model");
     claude_route.account_key = None;
@@ -944,13 +954,10 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
             NetworkAccess::Open,
         ] {
             let plan = fixture_network_plan(access, None, network);
-            let launch = claude::Claude.prepare(fixture_input(
-                &claude_route,
-                &plan,
-                &prompt,
-                repo,
-                Some(&token),
-            ))?;
+            let launch = claude::Claude.prepare(PrepareInput {
+                home: &home,
+                ..fixture_input(&claude_route, &plan, &prompt, repo, Some(&token))
+            })?;
             for flag in ["--tools", "--allowedTools"] {
                 let list = launch.argv.windows(2).find(|pair| pair[0] == flag).unwrap();
                 let tools: Vec<_> = list[1].to_str().unwrap().split(',').collect();
@@ -971,29 +978,32 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
             let rendered = provenant_confinement::permissions::snapshot::render(
                 plan.permissions(),
                 &launch.profile,
-                Path::new("/fixture/home"),
+                &home,
             )
             .unwrap();
-            assert!(
-                rendered.contains(
-                    "(deny file-read* (literal \"/fixture/home/.cargo/credentials.toml\"))"
-                )
-            );
+            assert!(rendered.contains(&format!(
+                "(deny file-read* (literal \"{}/.cargo/credentials.toml\"))",
+                home.display()
+            )));
             assert_eq!(
-                rendered.contains("(allow file-read* (subpath \"/fixture/home/.config/gh\"))"),
+                rendered.contains(&format!(
+                    "(allow file-read* (subpath \"{}/.config/gh\"))",
+                    home.display()
+                )),
                 network == NetworkAccess::Open,
                 "the existing gh policy still controls credential reads"
             );
             if access == Access::ReadOnly {
                 for path in [
-                    "/fixture/repo",
-                    "/fixture/home/.cargo",
-                    "/fixture/home/.rustup",
-                    "/private/etc/ssl",
+                    repo.to_owned(),
+                    home.join(".cargo"),
+                    home.join(".rustup"),
+                    Path::new("/private/etc/ssl").to_owned(),
                 ] {
-                    assert!(
-                        !rendered.contains(&format!("(allow file-write* (subpath \"{path}\"))"))
-                    );
+                    assert!(!rendered.contains(&format!(
+                        "(allow file-write* (subpath \"{}\"))",
+                        path.display()
+                    )));
                 }
             }
             if access == Access::ReadOnly && network != NetworkAccess::Open {
@@ -1005,13 +1015,10 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
                 continue;
             }
             let codex_plan = fixture_network_plan(access, Some("login"), network);
-            let codex = codex::Codex.prepare(fixture_input(
-                &codex_route,
-                &codex_plan,
-                &prompt,
-                repo,
-                None,
-            ))?;
+            let codex = codex::Codex.prepare(PrepareInput {
+                home: &home,
+                ..fixture_input(&codex_route, &codex_plan, &prompt, repo, None)
+            })?;
             for key in [
                 "PATH",
                 "CARGO_HOME",
@@ -1059,11 +1066,61 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
                         .spec
                         .runtime_reads
                         .iter()
-                        .any(|grant| covers(grant, &Path::new("/fixture/home").join(secret))),
+                        .any(|grant| covers(grant, &home.join(secret))),
                     "new credential read: {secret}"
                 );
             }
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn claude_network_on_without_complete_rust_keeps_public_system_tools()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::permissions::NetworkAccess;
+    let prompt = Prompt::new("fixture".into());
+    let token = fixture_token();
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
+    for installed in [None, Some(".cargo/bin"), Some(".rustup/toolchains")] {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        if let Some(path) = installed {
+            std::fs::create_dir_all(home.join(path))?;
+        }
+        let plan = fixture_network_plan(Access::ReadOnly, None, NetworkAccess::Open);
+        let launch = claude::Claude.prepare(PrepareInput {
+            home: &home,
+            ..fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                Some(&token),
+            )
+        })?;
+        assert!(launch.env.iter().all(|(key, _)| key != "CARGO_HOME"));
+        for grant in launch
+            .profile
+            .spec
+            .runtime_reads
+            .iter()
+            .chain(&launch.profile.spec.tool_exec_roots)
+        {
+            assert!(
+                !grant.path.starts_with(home.join(".cargo"))
+                    && !grant.path.starts_with(home.join(".rustup"))
+            );
+        }
+        #[cfg(target_os = "macos")]
+        assert!(
+            launch
+                .profile
+                .spec
+                .runtime_reads
+                .contains(&crate::launch::subtree("/private/etc/ssl"))
+        );
     }
     Ok(())
 }

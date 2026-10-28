@@ -15,7 +15,9 @@ lanes use the same Rust and Node toolchain setup as Codex: `~/.cargo/bin` on
 PATH, the detected Homebrew Node prefix, private build output, and read-only
 host toolchain stores. On macOS this also allows the public `/private/etc/ssl`
 configuration and certificates and selects Command Line Tools when installed.
-It does not inherit arbitrary host PATH entries.
+For read-only lanes, Rust setup is skipped when its executable directories
+are absent; public TLS files, Command Line Tools and detected Node tools remain
+available. It does not inherit arbitrary host PATH entries.
 
 `--network off` retains the previous tool selection and toolchain grants.
 Read-only lanes gain no workspace or shared-cache writes. Credential and

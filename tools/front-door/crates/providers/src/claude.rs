@@ -668,14 +668,23 @@ fn prepare(
     // Use the same read-only toolchain, public TLS configuration and CLT
     // selection as Codex. Access still controls private caches and writes.
     if toolchain {
-        crate::launch::rust_tools(
-            input,
-            access,
-            &mut runtime_reads,
-            &mut tool_exec_roots,
-            &mut env,
-            &mut setup,
-        );
+        // Network access must not make Rust an installation prerequisite.
+        // Every subtree grant needs an existing directory at anchoring time.
+        let rust_installed = [".cargo/bin", ".rustup/toolchains"]
+            .iter()
+            .all(|path| input.home.join(path).is_dir());
+        if shell || rust_installed {
+            crate::launch::rust_tools(
+                input,
+                access,
+                &mut runtime_reads,
+                &mut tool_exec_roots,
+                &mut env,
+                &mut setup,
+            );
+        } else {
+            crate::launch::system_tools(access, &mut runtime_reads, &mut tool_exec_roots, &mut env);
+        }
         crate::launch::node_tools(
             input.home,
             access,
