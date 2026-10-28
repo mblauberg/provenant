@@ -25,17 +25,15 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).map_err(|_| Error::Encode)?;
-    let fabric_call = provenant_fabric_store::Request {
-        clock: &clock,
-        budget,
-        cancel: &cancel,
-        backoff: &provenant_fabric_store::ThreadWait,
-    };
     let mut needs_you = Vec::new();
     let mut remaining_bytes = BYTE_BUDGET;
-    let fabric = match provenant_fabric_store::Store::open_existing(&roots.state, &fabric_call)
-        .and_then(|s| s.pending_human_requests(100, remaining_bytes, &fabric_call))
-    {
+    let fabric = match provenant_fabric_runtime::inbox::overview(
+        &roots.state,
+        &clock,
+        budget,
+        &cancel,
+        remaining_bytes,
+    ) {
         Ok(page) => {
             remaining_bytes -= page.bytes_read;
             for item in page.items {
@@ -49,10 +47,7 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
                 "complete"
             }
         }
-        Err(
-            provenant_fabric_store::Error::SchemaVersion(_)
-            | provenant_fabric_store::Error::UnversionedDatabase,
-        ) => "incompatible",
+        Err(provenant_fabric_runtime::inbox::OverviewError::Incompatible) => "incompatible",
         Err(_) => "unavailable",
     };
     let run_call = provenant_run::Request {

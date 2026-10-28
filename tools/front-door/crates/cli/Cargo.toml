@@ -19,7 +19,6 @@ provenant-config = { workspace = true }
 provenant-confinement = { workspace = true }
 provenant-core = { workspace = true }
 provenant-fabric-runtime = { workspace = true }
-provenant-fabric-store = { workspace = true }
 provenant-records = { workspace = true }
 provenant-routing = { workspace = true }
 provenant-run = { workspace = true }
