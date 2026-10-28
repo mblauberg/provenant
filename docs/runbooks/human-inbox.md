@@ -123,6 +123,8 @@ The local reader observes up to 16 indexed pending answers within an explicit
 deadline. It creates no state and never records an offer attempt or acknowledges
 an answer. It requires a current explicit save from that working directory.
 Configured Fabric home mappings defer to mail; no remote I/O runs in the reader.
+Internal candidate pages cap at 128 KiB; adapters must fit their final protocol
+output within 8 KiB, skipping oversized candidates without hiding smaller ones.
 
 This slice adds the service API. CLI/MCP syntax is unchanged. Hook composition,
 remote delivery and provider input adapters remain separate work. Both apps may

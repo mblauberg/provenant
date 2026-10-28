@@ -30,7 +30,9 @@ impl Store {
         deadline: Instant,
     ) -> Result<Page<AnswerOffer>> {
         let rows_limit = page(0, limit)?;
-        if !(64..=MAX_OFFER_BYTES).contains(&max_bytes) {
+        // Internal candidates may exceed a provider's output budget so one
+        // heavily escaped answer cannot hide smaller deliverable answers.
+        if !(64..=16 * MAX_OFFER_BYTES).contains(&max_bytes) {
             return Err(Error::Invalid("offer byte limit"));
         }
         before(deadline)?;
