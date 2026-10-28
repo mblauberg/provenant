@@ -67,6 +67,19 @@ pub use provenant_records::run::LaneWait;
 /// Resource probes. A failed probe queues; it never admits unchecked.
 pub trait Resources {
     fn memory(&self) -> std::io::Result<MemorySample>;
+    fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+        match provenant_supervisor::census::SystemProcessObserver
+            .observe(i64::from(std::process::id()))
+        {
+            provenant_supervisor::census::ProcessObservation::Present(fact) if !fact.zombie => {
+                Some(fact.identity)
+            }
+            _ => None,
+        }
+    }
+    fn pressure(&self) -> std::io::Result<Option<resources::MemoryPressure>> {
+        Ok(None)
+    }
     fn disk(&self, attempt: &Directory) -> std::io::Result<u64>;
     /// Host admission observes the same output volumes as the running guardian.
     /// Test probes may retain their synthetic attempt-level observation.
@@ -78,6 +91,9 @@ pub struct SystemResources;
 impl Resources for SystemResources {
     fn memory(&self) -> std::io::Result<MemorySample> {
         resources::memory()
+    }
+    fn pressure(&self) -> std::io::Result<Option<resources::MemoryPressure>> {
+        resources::memory_pressure()
     }
     fn disk(&self, attempt: &Directory) -> std::io::Result<u64> {
         attempt.available_bytes()
@@ -142,6 +158,14 @@ impl RunStore {
     /// names a wait only when it can see one: run concurrency, then startup
     /// spacing, then the shared host and project caps and resource floors.
     pub fn lane_waits(&self, lanes: &[AttemptRecord], call: &Request<'_>) -> Vec<LaneWait> {
+        self.lane_waits_with_resources(lanes, call, &SystemResources)
+    }
+    pub fn lane_waits_with_resources(
+        &self,
+        lanes: &[AttemptRecord],
+        call: &Request<'_>,
+        resources: &dyn Resources,
+    ) -> Vec<LaneWait> {
         lanes
             .iter()
             .filter(|lane| {
@@ -182,6 +206,24 @@ impl RunStore {
                             class_name(class),
                             tenths(left),
                             tenths(spacing)
+                        )
+                    } else if let Ok(Some(
+                        pressure @ (resources::MemoryPressure::Warning
+                        | resources::MemoryPressure::Critical),
+                    )) = resources.pressure()
+                    {
+                        format!("host capacity: memory pressure {pressure:?}")
+                    } else if class == LaneClass::Writer
+                        && let (Ok(memory), Ok(settings), Some(count)) = (
+                            resources.memory(),
+                            provenant_config::LaneBuildSettings::read(&self.writer_registry),
+                            crate::ledger::writer_count(&self.writer_registry, call),
+                        )
+                        && count >= settings.build_limit(memory.total_bytes)
+                    {
+                        format!(
+                            "host capacity: {count} of {} writer build slots active",
+                            settings.build_limit(memory.total_bytes)
                         )
                     } else {
                         "host capacity: active lane caps and memory or disk floors".to_owned()
@@ -337,6 +379,7 @@ impl RunStore {
     }
     /// Wait until host capacity, startup spacing and resource floors admit
     /// this attempt, then mark it running. Expiry or a state change refuses.
+    #[allow(clippy::print_stderr)]
     pub fn admit(
         &self,
         id: AttemptId,
@@ -346,7 +389,7 @@ impl RunStore {
         cancel: &CancelToken,
     ) -> Result<AttemptRecord> {
         let mut delay = Duration::from_millis(100);
-        let mut disk_refusal = None;
+        let mut refusal = None;
         loop {
             let call = Request {
                 clock,
@@ -359,10 +402,7 @@ impl RunStore {
                 .wall_now()
                 .map_err(|_| RunError::Validation("wall clock"))?;
             if now >= ticket.admission_deadline {
-                return Err(match disk_refusal {
-                    Some((free, floor)) => RunError::DiskFloor { free, floor },
-                    None => RunError::Refused,
-                });
+                return Err(refusal.unwrap_or(RunError::Refused));
             }
             // An explicit cancel before spawn ends the wait; finish records it.
             if crate::artifacts::read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some() {
@@ -373,29 +413,75 @@ impl RunStore {
             // admitting with the ticket's submission-time observation.
             let disk_floor_bytes = provenant_config::GcSettings::read(&self.writer_registry)
                 .and_then(|settings| settings.free_floor_bytes(&self.writer_registry));
+            let pressure = resources.pressure().unwrap_or_else(|error| {
+                eprintln!("admission: memory pressure probe failed: {error}");
+                None
+            });
+            let settings = provenant_config::LaneBuildSettings::read(&self.writer_registry);
+            if settings
+                .as_ref()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::InvalidInput)
+            {
+                return Err(RunError::BuildSettings);
+            }
             let fits = match (
                 resources.memory(),
+                pressure,
                 resources.disk(attempt),
                 disk_floor_bytes,
+                settings,
             ) {
-                (Ok(memory), Ok(disk), Ok(floor)) => {
-                    disk_refusal = (disk < floor).then_some((disk, floor));
-                    memory.total_bytes > 0
+                (Ok(memory), pressure, Ok(disk), Ok(floor), Ok(settings)) => {
+                    refusal = if disk < floor {
+                        Some(RunError::DiskFloor { free: disk, floor })
+                    } else if let Some(
+                        level @ (resources::MemoryPressure::Warning
+                        | resources::MemoryPressure::Critical),
+                    ) = pressure
+                    {
+                        Some(RunError::MemoryPressure {
+                            level: format!("{level:?}"),
+                        })
+                    } else {
+                        None
+                    };
+                    let fits = !matches!(
+                        pressure,
+                        Some(
+                            resources::MemoryPressure::Warning
+                                | resources::MemoryPressure::Critical
+                        )
+                    ) && memory.total_bytes > 0
                         && u128::from(memory.available_bytes) * 10_000
                             >= u128::from(memory.total_bytes)
                                 * u128::from(ticket.memory_floor_basis_points)
-                        && disk >= floor
+                        && disk >= floor;
+                    fits.then_some(settings.build_limit(memory.total_bytes))
                 }
                 _ => {
-                    disk_refusal = None;
-                    false
+                    refusal = None;
+                    None
                 }
             };
-            if fits {
-                match self.claim(id, clock, &call) {
+            if let Some(limit) = fits {
+                match self.claim_with_build_limit_observed(id, limit, clock, &call, &|| {
+                    resources.guardian_identity()
+                }) {
                     Ok(Some(record)) => return Ok(record),
                     // A busy store is transient; keep waiting to the deadline.
-                    Ok(None) | Err(RunError::Contention) => {}
+                    Ok(None) => {
+                        if ticket.lane_class == LaneClass::Writer
+                            && let Some(active) =
+                                crate::ledger::writer_count(&self.writer_registry, &call)
+                            && active >= limit
+                        {
+                            refusal = Some(RunError::BuildSlots { active, limit });
+                        }
+                    }
+                    Err(RunError::GuardianIdentityUnavailable) => {
+                        refusal = Some(RunError::GuardianIdentityUnavailable);
+                    }
+                    Err(RunError::Contention) => {}
                     Err(error) => return Err(error),
                 }
             }
@@ -422,12 +508,48 @@ impl RunStore {
             delay = (delay * 2).min(Duration::from_secs(2));
         }
     }
+    #[cfg(test)]
     pub(crate) fn claim(
         &self,
         id: AttemptId,
         clock: &dyn Clock,
         call: &Request<'_>,
     ) -> Result<Option<AttemptRecord>> {
+        self.claim_with_build_limit(id, HOST_ACTIVE, clock, call)
+    }
+    #[cfg(test)]
+    pub(crate) fn claim_with_build_limit(
+        &self,
+        id: AttemptId,
+        max_builds: u64,
+        clock: &dyn Clock,
+        call: &Request<'_>,
+    ) -> Result<Option<AttemptRecord>> {
+        self.claim_with_build_limit_observed(id, max_builds, clock, call, &|| {
+            SystemResources.guardian_identity()
+        })
+    }
+    fn claim_with_build_limit_observed(
+        &self,
+        id: AttemptId,
+        max_builds: u64,
+        clock: &dyn Clock,
+        call: &Request<'_>,
+        observe: &dyn Fn() -> Option<provenant_supervisor::census::ProcessIdentity>,
+    ) -> Result<Option<AttemptRecord>> {
+        // Avoid the ledger and store write locks when this run is already full.
+        // The transaction below repeats the count to decide the claim.
+        if let (Ok(record), Ok(ticket)) = (self.record(id, call), self.ticket(&self.db, id))
+            && record.state == AttemptState::Starting
+            && let Ok(active) = self.db.query_row(
+                "SELECT COUNT(*) FROM admission WHERE active=1 AND run=?1",
+                [record.run_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            && active >= sql_int(ticket.run_concurrency)?
+        {
+            return Ok(None);
+        }
         let ledger = crate::ledger::open(&self.writer_registry, call)?;
         self.write(call, |tx| {
             let old = self.record(id, call)?;
@@ -451,8 +573,10 @@ impl RunStore {
                 &ledger,
                 self.context.state_root.as_path(),
                 &ticket,
+                max_builds,
                 clock,
                 call,
+                observe,
             )?
             else {
                 return Ok(None);

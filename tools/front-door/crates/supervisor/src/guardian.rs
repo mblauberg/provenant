@@ -510,7 +510,12 @@ impl provenant_os::capture::DecodedEventSink for Events {
 /// published. Arbitrary admission errors never expose paths or source text.
 fn admission_refusal(error: &CustodyError) -> String {
     match error {
-        CustodyError::AdmissionClock | CustodyError::AdmissionDisk { .. } => error.to_string(),
+        CustodyError::AdmissionClock
+        | CustodyError::AdmissionBuildSettings
+        | CustodyError::AdmissionGuardianIdentity
+        | CustodyError::AdmissionDisk { .. }
+        | CustodyError::AdmissionMemoryPressure { .. }
+        | CustodyError::AdmissionBuildSlots { .. } => error.to_string(),
         _ => "admission refused".into(),
     }
 }

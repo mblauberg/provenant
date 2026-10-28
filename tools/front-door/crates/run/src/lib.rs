@@ -39,7 +39,7 @@ pub use git_context::{GitContext, continuation_history, resolve_git_base, review
 pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
 pub use launch::{
     Decoded, LaunchPaths, PreparedLaunch, PreparedStart, Providers, RefusalKind, Started,
-    capture_plan, concurrency,
+    ValidatedChild, capture_plan, concurrency,
 };
 pub use overview::{OverviewAttempt, OverviewState, RunOverview};
 pub use plan::read_only_plan;
@@ -99,9 +99,9 @@ impl PathCheck {
             Self::Mode => "mode",
             Self::Symlink => "symlink",
             Self::Kind => "kind",
-            Self::Links => "links",
-            Self::Containment => "containment",
-            Self::Identity => "identity",
+            Self::Links => "link count",
+            Self::Containment => "outside the root",
+            Self::Identity => "identity mismatch",
             Self::Missing => "missing",
         }
     }
@@ -208,6 +208,18 @@ pub enum RunError {
         "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes; run `provenant gc --apply`"
     )]
     DiskFloor { free: u64, floor: u64 },
+    #[error("memory pressure is {level}; wait for host memory pressure to fall")]
+    MemoryPressure { level: String },
+    #[error(
+        "writer build slots full: {active} of {limit} active; wait for a writer to finish or adjust lanes.max_concurrent_builds"
+    )]
+    BuildSlots { active: u64, limit: u64 },
+    #[error(
+        "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds and domains.fabric.lanes.cargo_build_jobs"
+    )]
+    BuildSettings,
+    #[error("guardian process identity unavailable; retry when process observation is available")]
+    GuardianIdentityUnavailable,
     #[error("operation refused by the execution context")]
     Refused,
     #[error("nested lane depth {depth} exceeds configured maximum {max_depth}")]

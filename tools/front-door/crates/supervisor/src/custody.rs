@@ -43,11 +43,23 @@ pub enum CustodyError {
     /// it can reach the user without any path.
     #[error("startup spacing cannot be judged: host clock or boot identity unreadable")]
     AdmissionClock,
+    #[error(
+        "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds and domains.fabric.lanes.cargo_build_jobs"
+    )]
+    AdmissionBuildSettings,
+    #[error("guardian process identity unavailable; retry when process observation is available")]
+    AdmissionGuardianIdentity,
     /// Numeric host observations are safe to publish as the lane's refusal.
     #[error(
         "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes; run `provenant gc --apply`"
     )]
     AdmissionDisk { free: u64, floor: u64 },
+    #[error("memory pressure is {level}; wait for host memory pressure to fall")]
+    AdmissionMemoryPressure { level: String },
+    #[error(
+        "writer build slots full: {active} of {limit} active; wait for a writer to finish or adjust lanes.max_concurrent_builds"
+    )]
+    AdmissionBuildSlots { active: u64, limit: u64 },
     #[error("custody I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]

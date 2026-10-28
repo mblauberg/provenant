@@ -413,7 +413,7 @@ fn collect_logs(
             };
             // Captures keep the provider's mode; only kind, links and owner matter.
             if let Some(check) = PathCheck::file(before).filter(|check| *check != PathCheck::Mode) {
-                return Err(RunError::unsafe_path(path.join(name), check));
+                return Err(RunError::unsafe_entry(attempt, name_os, check));
             }
             if before.size <= TAIL {
                 return Ok(());
@@ -421,13 +421,21 @@ fn collect_logs(
             if !dry_run {
                 let mut file = attempt.open_read(name_os)?;
                 if !before.unchanged(&file.metadata()?) {
-                    return Err(RunError::unsafe_path(path.join(name), PathCheck::Identity));
+                    return Err(RunError::unsafe_entry(
+                        attempt,
+                        name_os,
+                        PathCheck::Identity,
+                    ));
                 }
                 file.seek(SeekFrom::End(-(TAIL as i64)))?;
                 let mut tail = Vec::new();
                 file.take(TAIL).read_to_end(&mut tail)?;
                 if !before.unchanged(&attempt.metadata_at(name_os, false)?) {
-                    return Err(RunError::unsafe_path(path.join(name), PathCheck::Identity));
+                    return Err(RunError::unsafe_entry(
+                        attempt,
+                        name_os,
+                        PathCheck::Identity,
+                    ));
                 }
                 attempt
                     .atomic_write(
@@ -439,7 +447,11 @@ fn collect_logs(
                     .require_durable()
                     .map_err(RunError::Publication)?;
                 if !before.unchanged(&attempt.metadata_at(name_os, false)?) {
-                    return Err(RunError::unsafe_path(path.join(name), PathCheck::Identity));
+                    return Err(RunError::unsafe_entry(
+                        attempt,
+                        name_os,
+                        PathCheck::Identity,
+                    ));
                 }
                 attempt.unlink(name_os)?;
                 attempt.sync()?;
@@ -645,7 +657,10 @@ fn credentials(
             let credential_path = std::path::Path::new(STATE).join(&name).join(credential);
             let prefix = std::path::Path::new(STATE).join(&name).join(
                 std::path::Path::new(credential).parent().ok_or_else(|| {
-                    RunError::unsafe_path(credential_path.clone(), PathCheck::Containment)
+                    RunError::unsafe_path(
+                        attempt.anchored_path().join(&credential_path),
+                        PathCheck::Containment,
+                    )
                 })?,
             );
             prefix_removals(report, first, &prefix);
@@ -779,10 +794,9 @@ fn existing_config(
     };
     let metadata = directory.metadata()?;
     if metadata.uid != provenant_os::fs::effective_uid() {
-        return Err(RunError::unsafe_path(
-            std::path::Path::new(STATE)
-                .join(candidate)
-                .join("claude-config"),
+        return Err(RunError::unsafe_entry(
+            parent,
+            OsStr::new("claude-config"),
             PathCheck::Owner,
         ));
     }

@@ -1198,6 +1198,25 @@ fn knob_edit(roots: &Roots, edit: KnobEdit) -> Result<ResolvedConfig, ConfigErro
         edit.apply(document)
     })
 }
+
+#[test]
+fn host_lane_build_settings_read_and_validate() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[domains.fabric.lanes]\nmax_concurrent_builds=2\ncargo_build_jobs=5\n",
+    )
+    .unwrap();
+    let settings = crate::LaneBuildSettings::read(temp.path()).unwrap();
+    assert_eq!(settings.max_concurrent_builds, Some(2));
+    assert_eq!(settings.cargo_build_jobs, Some(5));
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[domains.fabric.lanes]\nmax_concurrent_builds=0\n",
+    )
+    .unwrap();
+    assert!(crate::LaneBuildSettings::read(temp.path()).is_err());
+}
 #[test]
 fn set_knob_is_written_atomically_and_shown_with_its_source() {
     let dir = tempfile::tempdir().unwrap();

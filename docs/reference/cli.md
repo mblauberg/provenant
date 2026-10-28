@@ -2770,6 +2770,36 @@ bounds are null. Positional arguments have no long flag.
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
+## `provenant console tree`
+
+| Argument | Contract |
+|---|---|
+| `--max-depth` | `{"defaults": ["8"], "name": "max_depth"}` |
+| `--max-nodes` | `{"defaults": ["100"], "name": "max_nodes"}` |
+| `--detail` | `{"defaults": ["false"], "name": "detail", "values": ["true", "false"]}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "max_depth",
+        "max_nodes",
+        "detail"
+      ],
+      "multiple": true,
+      "name": "Tree",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant console board`
 
 | Argument | Contract |

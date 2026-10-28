@@ -51,14 +51,21 @@ fn board_read_only() -> Result {
     assert_eq!(board["data"]["lanes"], json!([]));
     assert_eq!(board["data"]["generation"], "empty");
     assert_eq!(board["data"]["coverage"]["runs"], "empty");
+    let tree = call(&empty, &["console", "tree"], 0)?;
+    assert_eq!(tree["data"]["nodes"], json!([]));
     assert!(!empty.state.exists());
     let rig = TestRig::new()?;
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let project = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
+    )?
+    .project_id();
     let context = ExecutionContext {
         state_root: roots.state,
-        project_id: ProjectId::from_bytes([1; 16]),
+        project_id: project,
         actor_id: ActorId::from_bytes([2; 16]),
         read_prompts: false,
     };
@@ -91,8 +98,46 @@ fn board_read_only() -> Result {
             &request,
         )?;
     }
+    let other = RunStore::open(
+        &ExecutionContext {
+            project_id: ProjectId::from_bytes([8; 16]),
+            ..context.clone()
+        },
+        &request,
+    )?;
+    other.create(
+        &PreparedRun {
+            run_id: RunId::from_bytes([8; 16]),
+            operation_id: OperationId::parse("tree-other")?,
+            created_at: clock.wall_now()?,
+            request: proposal,
+            attempts: vec![NewAttempt {
+                task_id: task,
+                attempt_id: AttemptId::from_bytes([8; 16]),
+                prompt: "private".into(),
+            }],
+        },
+        &request,
+    )?;
+    drop(other);
     drop(store);
     let before = snapshot(&rig.state)?;
+    let tree = call(&rig, &["console", "tree"], 0)?;
+    assert_eq!(tree["data"]["totals"]["attempts"], 3);
+    assert!(!serde_json::to_string(&tree)?.contains("private"));
+    let filtered = call(
+        &rig,
+        &[
+            "--project",
+            rig.project.to_str().ok_or("project")?,
+            "console",
+            "tree",
+            "--detail",
+        ],
+        0,
+    )?;
+    assert_eq!(filtered["data"]["totals"]["attempts"], 2);
+    assert!(filtered["data"]["nodes"][0]["metadata"]["attempt"].is_object());
     let first = call(&rig, &["console", "board", "--limit", "1"], 0)?;
     assert_eq!(first["data"]["lanes"].as_array().ok_or("lanes")?.len(), 1);
     let cursor = first["data"]["next_cursor"].as_str().ok_or("cursor")?;

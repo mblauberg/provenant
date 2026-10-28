@@ -689,6 +689,9 @@ waiting on contention, so a successful poll still observes settlement;
 persistent contention ends the wait or watch as a timeout. Optional wait
 details in the final reply use the same nonblocking reads. If peer reads
 remain unavailable at the deadline, the last failure is reported.
+Run-store privacy errors identify the path relative to the state root and the
+failed check; `.` denotes the state root itself. Paths outside that root, such
+as worktree paths, are reported as given.
 The time a peer read has left covers
 the whole SSH child, including its termination and reap, so a hung `ssh` that
 ignores `TERM` is killed by the deadline. Only the first read of `--wait 0`
