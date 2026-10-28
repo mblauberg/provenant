@@ -2149,7 +2149,7 @@ impl BinaryRunOwner<'_> {
                             all: true,
                             limit: u64::from(limit),
                             after: after_sequence,
-                            newest_first: false,
+                            newest_first: true,
                             owner: None,
                             unseen_after: None,
                         },
@@ -2167,7 +2167,7 @@ impl BinaryRunOwner<'_> {
                 };
                 Ok(RunResult::List {
                     page: AttemptPage {
-                        items: page.lanes,
+                        items: page.lanes.into_iter().map(Into::into).collect(),
                         next_after,
                         truncated,
                     },
@@ -4020,6 +4020,115 @@ mod peer_tests {
                 worktree: info.path,
             })
         }
+    }
+
+    #[test]
+    fn run_list_is_compact_and_pages_newest_first() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::run_list_is_compact_and_pages_newest_first")? {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadWait,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut owner = BinaryRunOwner {
+            factory: &factory,
+            allow_remote: false,
+            actor: None,
+        };
+        let first = owner.run(
+            RunInput::List {
+                after: None,
+                limit: 1,
+            },
+            budget,
+            &cancel,
+        )?;
+        let wire = serde_json::to_value(&first)?;
+        let row = &wire["page"]["items"][0];
+        assert!(
+            row["attempt_id"] == fixture.settled.attempt_id.to_string()
+                && row.get("usage").is_none()
+                && row.get("prompt").is_none()
+                && row.get("trace").is_none(),
+            "expected newest compact row, got {row}"
+        );
+        let RunResult::List { page } = first else {
+            return Err("list result".into());
+        };
+        assert!(page.truncated);
+        let cursor = page.next_after.ok_or("next cursor")?;
+        let second = owner.run(
+            RunInput::List {
+                after: Some(cursor),
+                limit: 1,
+            },
+            budget,
+            &cancel,
+        )?;
+        let RunResult::List { page } = second else {
+            return Err("list result".into());
+        };
+        assert!(!page.truncated);
+        assert!(page.next_after.is_none());
+        let second = serde_json::to_value(&page.items[0])?;
+        assert_ne!(second["attempt_id"], row["attempt_id"]);
+        assert_eq!(second["state"]["outcome"], "cancelled");
+        assert_eq!(second["state"]["reason"], "fixture");
+        assert!(second["state"]["finished_at"].is_string());
+        let status = owner.run(
+            RunInput::Status {
+                target: AttemptTarget {
+                    attempt: fixture.settled.attempt_id,
+                    host: None,
+                },
+            },
+            budget,
+            &cancel,
+        )?;
+        let RunResult::Status { mut attempt } = status else {
+            return Err("status result".into());
+        };
+        let status = serde_json::to_value(RunResult::Status {
+            attempt: attempt.clone(),
+        })?;
+        assert!(status["attempt"].get("usage").is_some());
+        assert!(status["attempt"].get("prompt").is_some());
+        // Pool routing carries an audit receipt in full records. It must not
+        // enlarge the compact route returned by list.
+        attempt.applied_route = Some(serde_json::from_value(serde_json::json!({
+            "provider":"fixture", "model":"fixture/model", "effort":"high",
+            "account_label":"fixture", "account_key":"private-key", "source":"pool",
+            "pool_selection": {
+                "pool":"senior", "candidates":[], "roll":0, "total_weight":1,
+                "pick":"fixture/model"
+            }
+        }))?);
+        let summary = provenant_fabric_runtime::runs::AttemptSummary::from(attempt);
+        let summary = serde_json::to_value(summary)?;
+        assert_eq!(
+            summary["applied_route"],
+            serde_json::json!({
+                "provider":"fixture", "model":"fixture/model", "effort":"high",
+                "account_label":"fixture"
+            })
+        );
+        Ok(())
     }
 
     #[test]

@@ -1072,7 +1072,8 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         .iter()
         .find(|reply| reply["id"] == 1)
         .ok_or("first page")?["result"]["structuredContent"]["page"];
-    assert_eq!(first["items"][0]["attempt_id"], attempts[0].to_string());
+    // Pages run newest first.
+    assert_eq!(first["items"][0]["attempt_id"], attempts[2].to_string());
     assert_eq!(first["truncated"], true);
     let cursor = first["next_after"].clone();
     let local_host = HostId::parse(cursor["host"].as_str().ok_or("cursor host")?)?;
@@ -1115,7 +1116,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         .iter()
         .find(|reply| reply["id"] == 1)
         .ok_or("third page")?["result"]["structuredContent"]["page"];
-    assert_eq!(third["items"][0]["attempt_id"], attempts[2].to_string());
+    assert_eq!(third["items"][0]["attempt_id"], attempts[0].to_string());
     assert_eq!(third["next_after"], Value::Null);
     let target = json!({"host":null,"attempt":attempt.to_string()});
     let replies = mcp(

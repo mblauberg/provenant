@@ -25,13 +25,50 @@ pub struct PeerWorktree {
     pub branch: String,
 }
 
-/// A bounded page of attempt records. `next_after` is supplied only when a
-/// caller can continue the same ordered selection.
+/// A compact listing row. Full execution evidence is available through status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptSummary {
+    pub attempt_id: provenant_core::AttemptId,
+    pub run_id: provenant_core::RunId,
+    pub task_id: provenant_core::TaskId,
+    pub operation_id: OperationId,
+    pub state: provenant_records::run::AttemptState,
+    pub requested_route: provenant_records::run::RequestedRoute,
+    pub applied_route: Option<provenant_records::run::RouteRecord>,
+    pub queued_at: provenant_core::WallTime,
+    pub started_at: Option<provenant_core::WallTime>,
+    pub last_output_at: Option<provenant_core::WallTime>,
+}
+
+impl From<AttemptRecord> for AttemptSummary {
+    fn from(record: AttemptRecord) -> Self {
+        Self {
+            attempt_id: record.attempt_id,
+            run_id: record.run_id,
+            task_id: record.task_id,
+            operation_id: record.operation_id,
+            state: record.state,
+            requested_route: record.requested_route,
+            applied_route: record.applied_route.map(|mut route| {
+                route.account_key = None;
+                route.source = None;
+                route.pool_selection = None;
+                route
+            }),
+            queued_at: record.queued_at,
+            started_at: record.started_at,
+            last_output_at: record.last_output_at,
+        }
+    }
+}
+
+/// A bounded page of summaries, newest queued first. `next_after` is supplied
+/// only when a caller can continue the same ordered selection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptPage {
-    #[serde(with = "attempts_wire")]
-    pub items: Vec<AttemptRecord>,
+    pub items: Vec<AttemptSummary>,
     pub next_after: Option<AttemptTarget>,
     pub truncated: bool,
 }

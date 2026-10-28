@@ -1127,7 +1127,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json`.
   "_meta": {
     "io.provenant/schemaVersion": 2
   },
-  "description": "Submit, list, inspect, wait for, cancel or resume runs.",
+  "description": "Submit, list, inspect, wait for, cancel or resume runs. List returns compact attempt summaries newest queued first; pass next_after as after to continue towards older attempts. Status returns the full attempt record.",
   "inputSchema": {
     "$defs": {
       "AttemptTarget": {
