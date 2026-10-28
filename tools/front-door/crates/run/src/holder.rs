@@ -126,10 +126,15 @@ impl HolderContext {
         inputs.state_dir = Some(context.roots.state_root.clone());
         let state_root = inputs
             .resolve(&provenant_os::fs::SystemPathResolver)
-            .map_err(|_| RunError::UnsafePath)?
+            .map_err(|_| {
+                RunError::unsafe_path(context.roots.state_root.as_path(), PathCheck::Containment)
+            })?
             .state;
         if state_root.as_path() != context.roots.state_root {
-            return Err(RunError::UnsafePath);
+            return Err(RunError::unsafe_path(
+                context.roots.state_root.as_path(),
+                PathCheck::Containment,
+            ));
         }
         let execution = ExecutionContext {
             state_root,

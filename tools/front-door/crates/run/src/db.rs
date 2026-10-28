@@ -418,8 +418,8 @@ fn version(db: &Connection) -> Result<i64> {
 }
 pub(crate) fn private(directory: &Directory) -> Result<()> {
     let m = directory.metadata()?;
-    if !provenant_sqlite::is_private(m) {
-        return Err(RunError::UnsafePath);
+    if let Some(check) = PathCheck::directory(m) {
+        return Err(RunError::unsafe_path(directory.anchored_path(), check));
     }
     Ok(())
 }
@@ -431,7 +431,7 @@ fn companions(directory: &Directory, base: &str, request: &Request<'_>) -> Resul
         &names,
         |check| request.wait(check),
         Into::into,
-        |_| RunError::UnsafePath,
+        |name, fault| RunError::unsafe_entry(directory, name, fault.into()),
     )
 }
 #[cfg(test)]
@@ -443,7 +443,7 @@ fn companion(
         &mut metadata,
         |check| request.wait(check),
         Into::into,
-        || RunError::UnsafePath,
+        |fault| RunError::unsafe_path("run.sqlite3", fault.into()),
     )
 }
 pub(crate) fn bytes<T: serde::Serialize>(record: &T) -> Result<Vec<u8>> {
@@ -544,7 +544,7 @@ mod tests {
                     unsafe_metadata
                 })
             });
-            assert!(matches!(result, Err(RunError::UnsafePath)));
+            assert!(matches!(result, Err(RunError::UnsafePath { .. })));
             assert_eq!(observations, 2);
         }
         Ok(())
