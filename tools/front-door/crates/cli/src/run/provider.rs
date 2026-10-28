@@ -379,6 +379,15 @@ fn prepare_with(
         &access,
         &host,
     )?;
+    if let Some(selection) = &resolved.pool_selection {
+        for redraw in &selection.redraws {
+            reasons.push(skip(
+                &redraw.rejected_pick,
+                SkipKind::Unavailable,
+                &redraw.reason,
+            ));
+        }
+    }
     for (candidate, route) in candidates(resolved).into_iter().enumerate() {
         let label = format!("{}/{}", route.adapter, route.model);
         let Some(registration) = REGISTRY

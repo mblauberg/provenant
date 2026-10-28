@@ -139,6 +139,23 @@ the quota tick does not report them. Activity records the old and new versions.
 Each lane's `availability.json`
 also includes its observed version and the latest update result.
 
+## OpenCode Go monthly allowance floor
+
+OpenCode Go models must have a documented monthly allowance at or above the
+configured floor. The default is $60 on the $10 plan; set the floor to zero to
+disable this policy:
+
+```toml
+[domains.routing.opencode_go]
+min_monthly_allowance_usd = 60
+```
+
+The floor applies to pool members and explicitly selected Go models, including
+uncatalogued exact IDs. A model with an unknown allowance is refused while the
+floor is enabled. Choose a model with a documented allowance at or above the
+floor, or lower the floor to admit it. The separate OpenCode Zen account is not subject to this
+floor. This policy is independent of the quota calibration below.
+
 ## OpenCode Go quota calibration
 
 Go usage from this host's ledger is a partial lower bound. Enter dashboard
