@@ -408,15 +408,23 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
             "pro",
             "--prompt-file",
             prompt.to_str().ok_or("prompt")?,
+            "--wait",
+            "10s",
             "--json",
         ])?;
-        assert_ne!(code(&out), 0);
+        assert_eq!(code(&out), 0, "{out:?}");
         let result: Value = serde_json::from_slice(&out.stdout.bytes)?;
+        let run = result["data"]["run_id"].as_str().ok_or("run")?;
+        let lanes = rig.command(&["lanes", "--id", run, "--json"])?;
+        assert_eq!(code(&lanes), 0, "{lanes:?}");
+        let result: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+        let lane = &result["data"]["lanes"][0];
+        assert_eq!(lane["state"], "rejected", "{lane}");
         assert!(
-            result["error"]["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("removed")),
-            "{result}"
+            lane["reason"].as_str().is_some_and(|message| message
+                .contains("pacing.accounts.pro.deadline.reset_of")
+                && message.contains("removed")),
+            "{lane}"
         );
         cleanup.disarm();
     }
