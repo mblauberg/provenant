@@ -438,6 +438,15 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                 is_free_kind,
             )]
         }
+        // OpenCode 2.2.0 maps ModelUnavailableError to this structured type.
+        // https://github.com/anomalyco/opencode/blob/v2.2.0/packages/core/src/session/to-session-error.ts
+        Event::Error { error, .. } if error.kind == "provider.no-route" => {
+            vec![E::ModelUnavailable {
+                message: error
+                    .message
+                    .unwrap_or_else(|| "provider model unavailable".into()),
+            }]
+        }
         Event::Error { .. } => vec![E::Error],
         _ => vec![],
     })
@@ -468,6 +477,73 @@ mod tests {
     const GLM: &str =
         r#"{"role":"assistant","providerID":"opencode","modelID":"glm-5.3-flash-free"}"#;
     const OTHER: &str = r#"{"role":"assistant","providerID":"opencode","modelID":"other"}"#;
+
+    #[test]
+    fn unavailable_model_is_a_typed_refusal() {
+        let mut stream = OpenCode.stream(None).unwrap();
+        let mut events = Vec::new();
+        for chunk in
+            include_bytes!("../../../tests/fixtures/providers/opencode/model-unavailable.jsonl")
+                .chunks(17)
+        {
+            events.extend(OpenCode.observe(&mut stream, chunk).unwrap());
+        }
+        assert!(events.contains(&E::ModelUnavailable {
+            message: "Model unavailable: opencode/misspelt-free".into(),
+        }));
+        let outcome = OpenCode
+            .finish(
+                stream,
+                crate::ExitObservation {
+                    code: Some(1),
+                    timed_out: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome.status(), crate::OutcomeStatus::Refused);
+    }
+
+    #[test]
+    fn v2_text_without_finish_observes_model_from_live_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = rusqlite::Connection::open(dir.path().join("opencode.db")).unwrap();
+        db.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; \
+             CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO session_message VALUES (?, 'assistant', ?)",
+            (
+                "ses_x",
+                r#"{"model":{"id":"beam-free","providerID":"opencode-go"},"finish":"stop"}"#,
+            ),
+        )
+        .unwrap();
+        assert!(dir.path().join("opencode.db-wal").is_file());
+        let mut stream = OpenCode.stream(None).unwrap();
+        for chunk in
+            include_bytes!("../../../tests/fixtures/providers/opencode/v2.2.0-success.jsonl")
+                .chunks(17)
+        {
+            OpenCode.observe(&mut stream, chunk).unwrap();
+        }
+        let outcome = OpenCode
+            .finish(
+                stream,
+                crate::ExitObservation {
+                    code: Some(0),
+                    timed_out: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome.status(), crate::OutcomeStatus::Success);
+        assert_eq!(outcome.session(), Some("ses_x"));
+        assert_eq!(
+            observe_model(dir.path(), outcome.session().unwrap()).unwrap(),
+            "opencode/opencode-go/beam-free"
+        );
+    }
 
     #[test]
     fn recorded_stream_session_selects_v2_model() {

@@ -113,8 +113,9 @@ push|reconcile`. A terminal without MCP cancels with `provenant cancel ATTEMPT`.
   and synthesise their results in the chair. The CLI's explicit model fallbacks
   are ordered recovery candidates, not council seats. `provenant route list`
   shows pool members and weights; readiness is decided at dispatch. An unknown
-  exact model remains unverified until current provider observation, activation,
-  disclosure and confinement allow it; an unsupported effort is refused.
+  exact model can reach its provider after activation, disclosure and confinement
+  checks; named routes and pools require catalogue entries. An unsupported
+  effort is refused.
 - Dispatch defaults:
   - Fan out 2-4 independent lanes; go wider only for independent, checkable
     slices.
