@@ -443,7 +443,9 @@ fn prepare_writer_git(
         Ok(_) => return Err(RunError::WriterRefLocked(tracking_lock)),
         Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
         Err(failure) => {
-            return Err(error("verify tracking ref lock", Some(&tracking_lock))(failure));
+            return Err(error("verify tracking ref lock", Some(&tracking_lock))(
+                failure,
+            ));
         }
     }
     if let Some(authority) = authority {
@@ -578,7 +580,30 @@ fn verify_writer_git_paths(common: &Path, branch: &GitRefName) -> Result<()> {
         "logs/refs/remotes/origin",
     ] {
         for name in [suffix.to_owned(), format!("{suffix}.lock")] {
-            let path = common.join(prefix).join(name);
+            let relative = Path::new(prefix).join(name);
+            let path = common.join(&relative);
+            // lstat on the leaf still follows intermediate symlinks. A planted
+            // parent could redirect Git's host-side fetch outside the repository.
+            let mut parent = common.to_path_buf();
+            if let Some(components) = relative.parent() {
+                for component in components.components() {
+                    parent.push(component);
+                    match std::fs::symlink_metadata(&parent) {
+                        Ok(metadata) if metadata.file_type().is_dir() => {}
+                        Ok(_) => {
+                            return Err(RunError::OperationIo {
+                                operation: "verify lane Git parent (must be a directory)",
+                                path: Some(parent),
+                                source: std::io::Error::other("unsafe file type"),
+                            });
+                        }
+                        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => break,
+                        Err(failure) => {
+                            return Err(error("verify lane Git parent", Some(&parent))(failure));
+                        }
+                    }
+                }
+            }
             match std::fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.is_file() && metadata.nlink() == 1 => {}
                 Ok(_) => {
@@ -853,7 +878,12 @@ mod cargo_setup_tests {
             run(&["config", "--local", "--get", "branch.feature/second.merge"])?,
             "refs/heads/feature/second"
         );
-        run(&["remote", "add", "origin", project.to_str().ok_or("project path")?])?;
+        run(&[
+            "remote",
+            "add",
+            "origin",
+            project.to_str().ok_or("project path")?,
+        ])?;
         let target = root.join("reflog-target");
         std::fs::write(&target, b"untouched")?;
         let reflog = git_dir.join("logs/refs/remotes/origin/feature/nested");
@@ -865,14 +895,32 @@ mod cargo_setup_tests {
         assert!(failure.to_string().contains(&reflog.display().to_string()));
         assert_eq!(std::fs::read(&target)?, b"untouched");
         std::fs::remove_file(&reflog)?;
+        let parent = reflog.parent().ok_or("reflog parent")?;
+        std::fs::remove_dir(parent)?;
+        std::os::unix::fs::symlink(&root, parent)?;
+        let failure = prepare_writer_git(&mut writer, &state, &root, None)
+            .err()
+            .ok_or("symlinked tracking reflog parent must refuse")?;
+        assert!(failure.to_string().contains(&parent.display().to_string()));
+        assert_eq!(std::fs::read(&target)?, b"untouched");
+        std::fs::remove_file(parent)?;
+        std::fs::create_dir_all(parent)?;
         let tracking_lock = git_dir.join("refs/remotes/origin/feature/nested.lock");
         std::fs::create_dir_all(tracking_lock.parent().ok_or("tracking lock parent")?)?;
         std::fs::write(&tracking_lock, b"held")?;
         let failure = prepare_writer_git(&mut writer, &state, &root, None)
             .err()
             .ok_or("stale tracking lock must refuse")?;
-        assert!(failure.to_string().contains(&tracking_lock.display().to_string()));
-        assert!(failure.to_string().contains("check for a running Git process"));
+        assert!(
+            failure
+                .to_string()
+                .contains(&tracking_lock.display().to_string())
+        );
+        assert!(
+            failure
+                .to_string()
+                .contains("check for a running Git process")
+        );
         assert_eq!(std::fs::read(&tracking_lock)?, b"held");
         std::fs::remove_file(&tracking_lock)?;
         run(&["remote", "remove", "origin"])?;
