@@ -13,6 +13,22 @@ stores chair associations, with execution facts owned by Run ([fabric](fabric.md
 itself. Grammar and bounds are in the generated [CLI
 reference](../reference/cli.md). Paths are relative to `tools/front-door/`.
 
+## Cargo registry seed
+
+An opted-in macOS writer may seed its private Cargo registry from the host
+registry. It must never replace an existing registry or publish a partially
+cloned tree. Unsupported entries or clone failures must fall back without
+blocking the lane. Each attempt must report the seed outcome and reason in
+`cargo-setup.json` on a best-effort basis.
+- Why: a seed must preserve lane isolation and leave Cargo usable when cloning
+  is unavailable, while making the outcome observable.
+- Test: `crates/run/src/cargo_seed.rs::tests::existing_registry_is_never_replaced`;
+  `::failed_clone_removes_partial_tree`; `::registry_clone_is_private`;
+  `crates/run/src/writer.rs::cargo_setup_tests::cargo_setup_record_reports_writer_and_read_only_outcomes`;
+  `src/compose_tests.rs::writer_dispatch_uses_lane_cache_and_narrow_provider_state`;
+  `::read_only_dispatch_applies_bound_git_and_project_writes`
+- Owner: `crates/run/src/cargo_seed.rs`, `crates/run/src/writer.rs`
+
 ## Operation IDs
 
 An operation ID is 1 to 128 ASCII letters, digits, `.`, `_` or `-`, starting
