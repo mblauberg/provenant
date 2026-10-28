@@ -118,13 +118,32 @@ pub fn is_private(metadata: Metadata) -> bool {
     metadata.mode & 0o077 == 0 && metadata.uid == provenant_os::fs::effective_uid()
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct UnsafeCompanion;
+/// Why a database or companion file was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompanionFault {
+    NotRegular,
+    Symlink,
+    Owner,
+    Mode,
+    Links,
+}
 
 /// Return false when the observed inode disappeared so the caller can retry.
-fn companion_is_safe(metadata: Metadata) -> Result<bool, UnsafeCompanion> {
-    if metadata.kind != FileKind::Regular || !is_private(metadata) || metadata.links > 1 {
-        return Err(UnsafeCompanion);
+fn companion_is_safe(metadata: Metadata) -> Result<bool, CompanionFault> {
+    if metadata.kind == FileKind::Symlink {
+        return Err(CompanionFault::Symlink);
+    }
+    if metadata.kind != FileKind::Regular {
+        return Err(CompanionFault::NotRegular);
+    }
+    if metadata.uid != provenant_os::fs::effective_uid() {
+        return Err(CompanionFault::Owner);
+    }
+    if metadata.mode & 0o077 != 0 {
+        return Err(CompanionFault::Mode);
+    }
+    if metadata.links > 1 {
+        return Err(CompanionFault::Links);
     }
     Ok(metadata.links == 1)
 }
@@ -136,14 +155,14 @@ pub fn check_companions<E>(
     names: &[OsString],
     mut retry: impl FnMut(&mut dyn FnMut() -> Result<Option<()>, E>) -> Result<(), E>,
     mut filesystem_error: impl FnMut(FsError) -> E,
-    mut unsafe_name: impl FnMut(&OsStr) -> E,
+    mut unsafe_name: impl FnMut(&OsStr, CompanionFault) -> E,
 ) -> Result<(), E> {
     for name in names {
         check_companion(
             || directory.metadata_at(name, false),
             &mut retry,
             &mut filesystem_error,
-            || unsafe_name(name),
+            |fault| unsafe_name(name, fault),
         )?;
     }
     Ok(())
@@ -155,13 +174,13 @@ pub fn check_companion<E>(
     mut metadata: impl FnMut() -> Result<Metadata, FsError>,
     mut retry: impl FnMut(&mut dyn FnMut() -> Result<Option<()>, E>) -> Result<(), E>,
     mut filesystem_error: impl FnMut(FsError) -> E,
-    mut unsafe_error: impl FnMut() -> E,
+    mut unsafe_error: impl FnMut(CompanionFault) -> E,
 ) -> Result<(), E> {
     let mut check = || match metadata() {
         Ok(metadata) => match companion_is_safe(metadata) {
             Ok(true) => Ok(Some(())),
             Ok(false) => Ok(None),
-            Err(UnsafeCompanion) => Err(unsafe_error()),
+            Err(fault) => Err(unsafe_error(fault)),
         },
         Err(error) if error.is_not_found() => Ok(Some(())),
         Err(error) => Err(filesystem_error(error)),

@@ -158,7 +158,7 @@ impl RunStore {
             return Err(RunError::Validation("logs_days_range"));
         }
         if !self.root.metadata()?.same_identity(&expected.metadata()?) {
-            return Err(RunError::UnsafePath);
+            return Err(RunError::unsafe_path(".", PathCheck::Identity));
         }
         if !(1..=3650).contains(&days) {
             return Err(RunError::Validation("provider_state_days_range"));
@@ -310,7 +310,9 @@ impl RunStore {
                     if !open {
                         collect_logs(
                             &attempt,
-                            path.parent().ok_or(RunError::UnsafePath)?,
+                            path.parent().ok_or_else(|| {
+                                RunError::unsafe_path(path.clone(), PathCheck::Containment)
+                            })?,
                             dry_run,
                             &mut report,
                         )?;
@@ -355,13 +357,12 @@ impl RunStore {
                 }
                 Ok(())
             })();
-            prefix_removals(
-                &mut report,
-                first_removal,
-                path.parent().ok_or(RunError::UnsafePath)?,
-            );
+            let parent = path
+                .parent()
+                .ok_or_else(|| RunError::unsafe_path(path.clone(), PathCheck::Containment))?;
+            prefix_removals(&mut report, first_removal, parent);
             for tightened in &mut report.tightened[first_tightened..] {
-                *tightened = path.parent().ok_or(RunError::UnsafePath)?.join(&*tightened);
+                *tightened = parent.join(&*tightened);
             }
             if let Err(error) = result {
                 let cancelled = matches!(error, RunError::Cancelled);
@@ -410,11 +411,9 @@ fn collect_logs(
                 Err(error) if error.is_not_found() => return Ok(()),
                 Err(error) => return Err(error.into()),
             };
-            if before.kind != FileKind::Regular
-                || before.links != 1
-                || before.uid != provenant_os::fs::effective_uid()
-            {
-                return Err(RunError::UnsafePath);
+            // Captures keep the provider's mode; only kind, links and owner matter.
+            if let Some(check) = PathCheck::file(before).filter(|check| *check != PathCheck::Mode) {
+                return Err(RunError::unsafe_path(path.join(name), check));
             }
             if before.size <= TAIL {
                 return Ok(());
@@ -422,13 +421,13 @@ fn collect_logs(
             if !dry_run {
                 let mut file = attempt.open_read(name_os)?;
                 if !before.unchanged(&file.metadata()?) {
-                    return Err(RunError::UnsafePath);
+                    return Err(RunError::unsafe_path(path.join(name), PathCheck::Identity));
                 }
                 file.seek(SeekFrom::End(-(TAIL as i64)))?;
                 let mut tail = Vec::new();
                 file.take(TAIL).read_to_end(&mut tail)?;
                 if !before.unchanged(&attempt.metadata_at(name_os, false)?) {
-                    return Err(RunError::UnsafePath);
+                    return Err(RunError::unsafe_path(path.join(name), PathCheck::Identity));
                 }
                 attempt
                     .atomic_write(
@@ -438,9 +437,9 @@ fn collect_logs(
                         provenant_os::fs::PublishMode::Replace,
                     )?
                     .require_durable()
-                    .map_err(|_| RunError::UnsafePath)?;
+                    .map_err(RunError::Publication)?;
                 if !before.unchanged(&attempt.metadata_at(name_os, false)?) {
-                    return Err(RunError::UnsafePath);
+                    return Err(RunError::unsafe_path(path.join(name), PathCheck::Identity));
                 }
                 attempt.unlink(name_os)?;
                 attempt.sync()?;
@@ -643,10 +642,11 @@ fn credentials(
                 }
                 Ok(())
             })();
+            let credential_path = std::path::Path::new(STATE).join(&name).join(credential);
             let prefix = std::path::Path::new(STATE).join(&name).join(
-                std::path::Path::new(credential)
-                    .parent()
-                    .ok_or(RunError::UnsafePath)?,
+                std::path::Path::new(credential).parent().ok_or_else(|| {
+                    RunError::unsafe_path(credential_path.clone(), PathCheck::Containment)
+                })?,
             );
             prefix_removals(report, first, &prefix);
             if let Err(error) = result {
@@ -779,7 +779,12 @@ fn existing_config(
     };
     let metadata = directory.metadata()?;
     if metadata.uid != provenant_os::fs::effective_uid() {
-        return Err(RunError::UnsafePath);
+        return Err(RunError::unsafe_path(
+            std::path::Path::new(STATE)
+                .join(candidate)
+                .join("claude-config"),
+            PathCheck::Owner,
+        ));
     }
     if metadata.mode & 0o077 != 0 {
         if !dry_run {
@@ -865,17 +870,17 @@ fn retry_tombstones(
 fn remove_detached(parent: &Directory, name: &OsStr, device: u64, inode: u64) -> Result<()> {
     let metadata = parent.metadata_at(name, false)?;
     if metadata.device != device || metadata.inode != inode {
-        return Err(RunError::UnsafePath);
+        return Err(RunError::unsafe_entry(parent, name, PathCheck::Identity));
     }
     let directory = parent.open_verified_directory(name)?;
     if !directory.metadata()?.same_identity(&metadata) {
-        return Err(RunError::UnsafePath);
+        return Err(RunError::unsafe_entry(parent, name, PathCheck::Identity));
     }
     directory.make_private()?;
     let tree = PayloadTree::claim(parent, name, &metadata)?;
     remove_contents(&tree, 0)?;
     if !parent.metadata_at(name, false)?.same_identity(&metadata) {
-        return Err(RunError::UnsafePath);
+        return Err(RunError::unsafe_entry(parent, name, PathCheck::Identity));
     }
     parent.rmdir(name)?;
     parent.sync()?;
