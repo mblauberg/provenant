@@ -4023,6 +4023,91 @@ mod peer_tests {
     }
 
     #[test]
+    fn run_list_is_compact_and_pages_newest_first() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::run_list_is_compact_and_pages_newest_first")? {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadWait,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut owner = BinaryRunOwner {
+            factory: &factory,
+            allow_remote: false,
+            actor: None,
+        };
+        let first = owner.run(
+            RunInput::List {
+                after: None,
+                limit: 1,
+            },
+            budget,
+            &cancel,
+        )?;
+        let wire = serde_json::to_value(&first)?;
+        let row = &wire["page"]["items"][0];
+        assert!(
+            row["attempt_id"] == fixture.settled.attempt_id.to_string()
+                && row.get("usage").is_none()
+                && row.get("prompt").is_none()
+                && row.get("trace").is_none(),
+            "expected newest compact row, got {row}"
+        );
+        let RunResult::List { page } = first else {
+            return Err("list result".into());
+        };
+        assert!(page.truncated);
+        let cursor = page.next_after.ok_or("next cursor")?;
+        let second = owner.run(
+            RunInput::List {
+                after: Some(cursor),
+                limit: 1,
+            },
+            budget,
+            &cancel,
+        )?;
+        let RunResult::List { page } = second else {
+            return Err("list result".into());
+        };
+        assert!(!page.truncated);
+        assert!(page.next_after.is_none());
+        let second = serde_json::to_value(&page.items[0])?;
+        assert_ne!(second["attempt_id"], row["attempt_id"]);
+        assert_eq!(second["state"]["outcome"], "cancelled");
+        assert_eq!(second["state"]["reason"], "fixture");
+        assert!(second["state"]["finished_at"].is_string());
+        let status = owner.run(
+            RunInput::Status {
+                target: AttemptTarget {
+                    attempt: fixture.settled.attempt_id,
+                    host: None,
+                },
+            },
+            budget,
+            &cancel,
+        )?;
+        let status = serde_json::to_value(status)?;
+        assert!(status["attempt"].get("usage").is_some());
+        assert!(status["attempt"].get("prompt").is_some());
+        Ok(())
+    }
+
+    #[test]
     fn settlement_failure_in_one_graph_does_not_stop_another_graph()
     -> Result<(), Box<dyn std::error::Error>> {
         if host_test(
