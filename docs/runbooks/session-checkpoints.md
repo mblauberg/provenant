@@ -86,17 +86,23 @@ and reapply the intended change. Check the returned checkpoint warnings: if
 discovery publication failed, reread the current checkpoint and save that
 Markdown to repair it. Retrying the old summary revision is stale.
 
-`provenant chair summary diff SESSION --from N --to N --json` compares fields
+`provenant chair summary diff SESSION --from N [--to N] --json` compares fields
 in two summary revisions found in retained checkpoint history. These are
-summary revision numbers, not checkpoint revision numbers. The result lists
+summary revision numbers, not checkpoint revision numbers; `--to` defaults to
+the current summary revision. The result lists
 unavailable revisions when history has been pruned; it does not treat them as
-unchanged. Repeated identical summaries across checkpoint saves are allowed.
+unchanged. Request IDs are reported as added and removed sets. Repeated
+identical summaries across checkpoint saves are allowed.
 
 Summary show also compares `needs_you` with the bounded local inbox. It reports
 stale references and open requests missing from the summary for the same host,
 project and chair. Coverage is `partial` when the scan is truncated or a
 matching request has unknown host identity; in that case stale references
-cannot be established. Missing local host identity reports `host_unavailable`.
+cannot be established from absence. References observed under another host,
+project or chair, or not accounted for by an incomplete scan, appear in
+`unknown` and make coverage partial. A complete scan can still establish other
+absent references as stale when coverage is partial only because a reference
+was observed elsewhere. Missing local host identity reports `host_unavailable`.
 Unavailable or incompatible inbox data is reported in coverage. The comparison
 does not contact peers or change inbox state.
 

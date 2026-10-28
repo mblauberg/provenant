@@ -14,13 +14,19 @@ pub fn summary_comparison(
     chair: &str,
     needs_you: &[String],
 ) -> Value {
+    let unknown = || {
+        needs_you
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+    };
     let Some(host) = provenant_config::lookup_host(roots).ok().flatten() else {
-        return json!({"stale":[],"missing":[],"coverage":"host_unavailable"});
+        return json!({"stale":[],"missing":[],"unknown":unknown(),"coverage":"host_unavailable"});
     };
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let Ok(budget) = WaitBudget::cli(clock.mono_now(), 5) else {
-        return json!({"stale":[],"missing":[],"coverage":"unavailable"});
+        return json!({"stale":[],"missing":[],"unknown":unknown(),"coverage":"unavailable"});
     };
     match provenant_fabric_runtime::inbox::overview(
         &roots.state,
@@ -31,9 +37,9 @@ pub fn summary_comparison(
     ) {
         Ok(page) => compare_summary(page, project, &host.to_string(), chair, needs_you),
         Err(provenant_fabric_runtime::inbox::OverviewError::Incompatible) => {
-            json!({"stale":[],"missing":[],"coverage":"incompatible"})
+            json!({"stale":[],"missing":[],"unknown":unknown(),"coverage":"incompatible"})
         }
-        Err(_) => json!({"stale":[],"missing":[],"coverage":"unavailable"}),
+        Err(_) => json!({"stale":[],"missing":[],"unknown":unknown(),"coverage":"unavailable"}),
     }
 }
 
@@ -47,28 +53,46 @@ fn compare_summary(
     use std::collections::BTreeSet;
     let mut partial = page.truncated;
     let mut open = BTreeSet::new();
+    let mut elsewhere = BTreeSet::new();
+    let refs: BTreeSet<_> = needs_you.iter().cloned().collect();
     for item in page.items {
         if item.project_id != project.to_string() || item.chair_session_id.as_deref() != Some(chair)
         {
+            if refs.contains(&item.id) {
+                elsewhere.insert(item.id);
+            }
             continue;
         }
         match item.owner_host.as_deref() {
             Some(owner) if provenant_core::HostId::parse(owner).is_ok() => {
                 if owner == host {
                     open.insert(item.id);
+                } else if refs.contains(&item.id) {
+                    elsewhere.insert(item.id);
                 }
             }
-            _ => partial = true,
+            _ => {
+                partial = true;
+                if refs.contains(&item.id) {
+                    elsewhere.insert(item.id);
+                }
+            }
         }
     }
-    let refs: BTreeSet<_> = needs_you.iter().cloned().collect();
-    let stale: Vec<_> = if partial {
-        Vec::new()
-    } else {
-        refs.difference(&open).cloned().collect()
-    };
+    // A reference seen under a different key cannot be attributed to this
+    // chair, even when the scan itself is complete.
+    let mut unknown = elsewhere;
+    if partial {
+        unknown.extend(refs.difference(&open).cloned());
+    }
+    let stale: Vec<_> = refs
+        .difference(&open)
+        .filter(|id| !unknown.contains(*id))
+        .cloned()
+        .collect();
     let missing: Vec<_> = open.difference(&refs).cloned().collect();
-    json!({"stale":stale,"missing":missing,"coverage":if partial { "partial" } else { "complete" }})
+    partial |= !unknown.is_empty();
+    json!({"stale":stale,"missing":missing,"unknown":unknown,"coverage":if partial { "partial" } else { "complete" }})
 }
 
 #[cfg(test)]
@@ -109,23 +133,43 @@ mod comparison_tests {
             truncated,
             bytes_read: 0,
         };
-        let refs = vec!["closed".into(), "foreign".into()];
+        let refs = vec![
+            "closed".into(),
+            "foreign".into(),
+            "other".into(),
+            "project".into(),
+        ];
         let complete = compare_summary(page(false), project, &host, "chair", &refs);
-        assert_eq!(complete["stale"], json!(["closed", "foreign"]));
+        assert_eq!(complete["stale"], json!(["closed"]));
         assert_eq!(complete["missing"], json!(["open"]));
-        assert_eq!(complete["coverage"], "complete");
+        assert_eq!(complete["unknown"], json!(["foreign", "other", "project"]));
+        assert_eq!(complete["coverage"], "partial");
         let partial = compare_summary(page(true), project, &host, "chair", &refs);
         assert_eq!(partial["stale"], json!([]));
         assert_eq!(partial["missing"], json!(["open"]));
+        assert_eq!(
+            partial["unknown"],
+            json!(["closed", "foreign", "other", "project"])
+        );
         assert_eq!(partial["coverage"], "partial");
+        let clean = compare_summary(
+            page(false),
+            project,
+            &host,
+            "chair",
+            &["open".into(), "closed".into()],
+        );
+        assert_eq!(clean["stale"], json!(["closed"]));
+        assert_eq!(clean["unknown"], json!([]));
+        assert_eq!(clean["coverage"], "complete");
         let mut unknown = page(false);
         unknown
             .items
             .push(item("unknown", None, "chair", project.to_string()));
-        assert_eq!(
-            compare_summary(unknown, project, &host, "chair", &refs)["coverage"],
-            "partial"
-        );
+        let unknown = compare_summary(unknown, project, &host, "chair", &["unknown".into()]);
+        assert_eq!(unknown["coverage"], "partial");
+        assert_eq!(unknown["unknown"], json!(["unknown"]));
+        assert_eq!(unknown["stale"], json!([]));
     }
 }
 

@@ -99,6 +99,19 @@ fn summary_comparison_uses_local_host_and_reports_missing_identity() -> Result {
         json!({"from":"", "to":"Working"})
     );
     assert_eq!(diff["data"]["diff"]["unavailable"], json!([]));
+    let current = call(
+        &rig,
+        &["chair", "summary", "diff", "chair-a", "--from", "1"],
+    )?;
+    assert_eq!(current["data"]["diff"], diff["data"]["diff"]);
+    for args in [
+        &["chair", "summary", "diff", "chair-a", "--from", "0"][..],
+        &[
+            "chair", "summary", "diff", "chair-a", "--from", "1", "--to", "0",
+        ][..],
+    ] {
+        assert_eq!(code(&rig.command(args)?), 2);
+    }
     std::fs::remove_file(rig.state.join("host-id"))?;
     let unavailable = call(&rig, &["chair", "summary", "show", "chair-a"])?;
     assert_eq!(
@@ -106,6 +119,10 @@ fn summary_comparison_uses_local_host_and_reports_missing_identity() -> Result {
         "host_unavailable"
     );
     assert_eq!(unavailable["data"]["comparison"]["stale"], json!([]));
+    assert_eq!(
+        unavailable["data"]["comparison"]["unknown"],
+        json!(["old-request"])
+    );
     assert!(!rig.state.join("host-id").exists());
     Ok(())
 }

@@ -445,6 +445,57 @@ impl SessionStore {
         let floor = highest_revision_file(&dir)?;
         Ok(reconcile(&manifest, existing.as_ref(), floor))
     }
+    /// Capture current text once, then read retained files from one manifest.
+    /// A concurrent save may prune or replace a file between these reads.
+    fn summary_snapshot(&self) -> Result<(String, Vec<String>), SessionError> {
+        self.summary_snapshot_with(|| {})
+    }
+    fn summary_snapshot_with(
+        &self,
+        after_snapshot: impl FnOnce(),
+    ) -> Result<(String, Vec<String>), SessionError> {
+        let missing = || SessionError::MissingCheckpoint {
+            session: self.session.as_str().into(),
+        };
+        let dir = match self.directory(false) {
+            Ok(dir) => dir,
+            Err(error) if error.is_not_found() => return Err(missing()),
+            Err(error) => return Err(error.into()),
+        };
+        let current = read_current(&dir)?.ok_or_else(missing)?;
+        let manifest = match load(&dir) {
+            Ok(manifest) => manifest,
+            Err(SessionError::Filesystem(error)) if error.is_not_found() => Manifest::default(),
+            Err(error) => return Err(error),
+        };
+        let chain = reconcile(&manifest, Some(&current), highest_revision_file(&dir)?);
+        after_snapshot();
+        let mut history = Vec::new();
+        for revision in chain.iter().take(chain.len().saturating_sub(1)) {
+            let bytes = match dir.read_bounded(
+                OsStr::new(&revision_file(revision.revision)),
+                CHECKPOINT_LIMIT,
+            ) {
+                Ok(bytes) => bytes,
+                Err(error) if error.is_not_found() => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if provenant_records::CanonicalV1::file_digest(&bytes) != revision.sha256 {
+                // Preserve corruption detection when the snapshot is stable.
+                // If it moved, this revision cannot be trusted in this scan.
+                let latest = read_current(&dir)?;
+                let latest_manifest = load(&dir)?;
+                if latest.as_ref().map(|(bytes, _)| bytes) == Some(&current.0)
+                    && latest_manifest.revisions == manifest.revisions
+                {
+                    return Err(SessionError::History);
+                }
+                continue;
+            }
+            history.push(std::str::from_utf8(&bytes)?.to_owned());
+        }
+        Ok((std::str::from_utf8(&current.0)?.to_owned(), history))
+    }
     /// The text of one retained revision, checked against its recorded hash.
     pub fn read_revision(&self, revision: u64) -> Result<Option<RevisionText>, SessionError> {
         let chain = self.revisions()?;
@@ -1092,7 +1143,7 @@ mod tests {
         saved(&selected, &first);
         saved(&selected, &first.replace("Body", "Other body"));
         saved(&selected, &header(2, "Second", "[\"request\"]"));
-        let diff = serde_json::to_value(selected.summary_diff(1, 2).unwrap()).unwrap();
+        let diff = serde_json::to_value(selected.summary_diff(1, Some(2)).unwrap()).unwrap();
         assert_eq!(diff["unavailable"], serde_json::json!([]));
         assert_eq!(
             diff["now"],
@@ -1100,17 +1151,63 @@ mod tests {
         );
         assert_eq!(
             diff["needs_you"],
-            serde_json::json!({"from":[],"to":["request"]})
+            serde_json::json!({"added":["request"],"removed":[]})
         );
         assert!(diff["next"].is_null());
         saved(&selected, &header(3, "Third", "[]"));
         saved(&selected, &header(4, "Fourth", "[]"));
-        let diff = selected.summary_diff(1, 4).unwrap();
+        let diff = selected.summary_diff(1, None).unwrap();
         assert_eq!(diff.unavailable, vec![1]);
         assert!(diff.now.is_none());
         saved(&selected, &header(4, "Conflicting", "[]"));
         assert!(matches!(
-            selected.summary_diff(4, 4),
+            selected.summary_diff(4, Some(4)),
+            Err(SessionError::History)
+        ));
+    }
+    #[test]
+    fn summary_diff_skips_invalid_history_and_snapshots_during_save() {
+        let (_temp, root, project) = setup();
+        let missing = store(&root, project, "missing");
+        assert!(matches!(
+            missing.summary_diff(1, Some(2)),
+            Err(SessionError::MissingCheckpoint { .. })
+        ));
+        let selected = store(&root, project, "chair").with_revisions(6);
+        saved(&selected, "A checkpoint without a summary");
+        assert!(matches!(
+            selected.summary_diff(1, Some(2)),
+            Err(SessionError::Summary(_))
+        ));
+        let header = |revision, needs: &str| {
+            format!(
+                "---\nprovenant_summary:\n  schema_version: 1\n  revision: {revision}\n  updated_at: \"2026-10-28T03:00:00Z\"\n  now: \"Working\"\n  next: \"Next\"\n  needs_you: {needs}\n  risk: \"None\"\n---\nBody\n"
+            )
+        };
+        saved(&selected, &header(1, "[\"old\",\"same\"]"));
+        saved(&selected, "---\nprovenant_summary: invalid\n---\nBody\n");
+        saved(&selected, &header(2, "[\"new\",\"same\"]"));
+        let diff = serde_json::to_value(selected.summary_diff(1, None).unwrap()).unwrap();
+        assert_eq!(
+            diff["needs_you"],
+            serde_json::json!({"added":["new"],"removed":["old"]})
+        );
+        assert_eq!(diff["to"], 2);
+        let (current, history) = selected
+            .summary_snapshot_with(|| {
+                saved(&selected, &header(3, "[]"));
+            })
+            .unwrap();
+        assert_eq!(parse_summary(&current).unwrap().unwrap().revision, 2);
+        assert!(history.iter().any(|text| {
+            parse_summary(text)
+                .ok()
+                .flatten()
+                .is_some_and(|s| s.revision == 1)
+        }));
+        std::fs::write(path(&root, project, "chair").join("rev-2.md"), "corrupt").unwrap();
+        assert!(matches!(
+            selected.summary_diff(1, Some(3)),
             Err(SessionError::History)
         ));
     }

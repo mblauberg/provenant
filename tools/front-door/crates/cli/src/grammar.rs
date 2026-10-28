@@ -222,11 +222,11 @@ pub enum ChairSummary {
         /// Chair session ID
         session: String,
         /// Earlier summary revision
-        #[arg(long)]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         from: u64,
-        /// Later summary revision
-        #[arg(long)]
-        to: u64,
+        /// Later summary revision (defaults to current)
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        to: Option<u64>,
     },
     /// Update selected fields from a JSON patch.
     Update {
