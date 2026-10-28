@@ -264,6 +264,75 @@ recorded in the final PR body.
   `::gate_reachability_accepts_a_limit_sized_graph_and_rejects_lower_limits`.
 - Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`
 
+### Bounded loops
+
+A node with `kind: "loop"` and `access: "read_only"` declares a `loop` object
+containing `body`, `until` and a positive `max_rounds`. The body is a
+self-contained DAG of task, synthesise and gate nodes. `until` names a body
+gate that follows every other body node, directly or transitively. Nested loops,
+body `on_fail` routes and body delivery are rejected. The wrapper has no
+prompt, route, worktree, inputs, condition or delivery configuration. All body
+writers must name the same existing worktree; every round continues on its
+branch without creating a checkout.
+
+The runtime expands the full allowance before admission. Node, edge, prompt,
+depth and fan-out limits therefore cover every possible round, including rounds
+that later become inactive. Admission counts `max_rounds` copies of the body
+plus the wrapper, with cross-round edges included. Budget and concurrency
+checks use the ordinary scheduler and attempt telemetry. Extensions must also
+fit these limits. Independent safety bounds reject more than 1024 rounds,
+more than 16384 expanded nodes or an expanded node ID longer than 64 bytes.
+
+Within a body, ordinary dependencies and inputs refer to nodes in the current
+round. An input named `previous.NODE` selects the preceding round's output
+using the existing output selectors and bounded untrusted-data handoff. It
+adds the corresponding cross-round dependency and is omitted in round one.
+Every later round waits for the preceding `until` gate. A failed `until`
+starts the next round; a passing gate succeeds the wrapper and skips unused
+rounds. A failed task, synthesise node or other gate fails the loop rather
+than consuming another round. The wrapper exposes its own `PASS` or `FAIL`
+typed verdict; body results remain on their round nodes.
+
+Each expanded node has the stable ID `LOOP--rN--BODY`, with rounds numbered
+from one. Its checkpoint includes `round` metadata: `loop_id`, `round`, the
+local `node_id`, whether it is the `until` gate, and `previous_gate` (null in
+round one). Existing checkpoint-before-launch, attempt keys, gate decisions
+and output records apply to these identities. Replay mid-round must retain
+admitted attempts and settled outputs exactly. Graph status exposes these
+round records and outputs, including failed checks and skipped future rounds.
+
+If every allowed round settles without passing, the wrapper stays pending and
+the graph pauses with an exhaustion reason. Optional `decision_session` names
+the originating chair session explicitly; graphs do not infer a session from
+their actor. With this field, exhaustion posts one blocking human request per
+exhausted allowance using the existing inbox service. The request offers
+`stop`, `extend` and `accept`: stop fails the wrapper, extend adds one round,
+and accept succeeds with the existing outputs. A reply of
+`{"decision":"extend","rounds":K}` adds a positive integer K within the safety bounds. The saved
+request identity and original actor survive replay. Resume reads and
+acknowledges an immutable answer and saves its decision before advancing;
+answer delivery alone does not resume work.
+
+Without a decision session, or to resolve exhaustion explicitly, resume the
+unchanged document with `--extend loop.ID.rounds=N`, where N is an absolute
+total allowance greater than the document's `max_rounds`, or with
+`--extend loop.ID.decision=stop|accept`. New loop extensions and decisions are
+valid only at exhaustion. Saved allowances are monotonic; retrying the same
+extension cannot add rounds twice. The original checkpoint and body worktree
+remain in use. Existing graph budget and limit extensions still apply.
+
+- Why: repeated review and repair needs bounded admission, exact replay and a
+  human decision when the bound is exhausted.
+- Test: `crates/fabric-runtime/src/graph/loop_tests.rs::loop_fixture_passes_on_round_two_and_status_retains_outputs`;
+  `::loop_fixture_exhausts_and_pauses_without_delivery`;
+  `::loop_fixture_resumes_after_extension_without_repeating_rounds`;
+  `::loop_replay_mid_round_keeps_attempt_actor_and_input`;
+  `::loop_admission_counts_every_round_before_any_launch`;
+  `::loop_decisions_stop_or_accept_exhausted_outputs`;
+  `::loop_writers_keep_one_worktree_and_never_deliver_between_rounds`;
+  `::loop_body_failure_blocks_later_rounds_and_dependants`.
+- Owner: `crates/fabric-runtime/src/graph/loops.rs`, `src/fabric.rs`
+
 ### Typed node outputs
 
 Settled nodes record version 2 outputs in the checkpoint, exposed by graph

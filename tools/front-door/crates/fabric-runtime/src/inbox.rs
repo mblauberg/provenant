@@ -492,7 +492,7 @@ fn bounded(text: &str, max: usize, field: &'static str) -> Result<(), InboxError
     }
     Ok(())
 }
-fn session_id(id: &str) -> Result<(), InboxError> {
+pub(crate) fn session_id(id: &str) -> Result<(), InboxError> {
     if id.is_empty()
         || id.len() > 128
         || id.contains("..")

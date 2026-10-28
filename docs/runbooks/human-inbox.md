@@ -85,6 +85,39 @@ an explicit consumption acknowledgement can move `queued` directly to
 resolution. Repeated acknowledgement is harmless and never repeats an action.
 Neither the answer nor acknowledgement grants new authority or replaces review.
 
+## Exhausted graph loops
+
+A graph loop can set `decision_session` inside its `loop` configuration to the
+explicit originating session ID. On exhaustion, the graph pauses and posts one
+blocking decision to that session's inbox. It retains the original graph actor
+when settlement or resume runs under another client label. Replaying exhaustion
+reuses the request, including an answer already acknowledged before a crash.
+Without a decision session, the loop pauses for an explicit graph resume decision.
+
+Choose `stop`, `extend` or `accept` using the normal answer command. `extend`
+adds one round; `accept` uses the current outputs and continues the graph. To
+extend by a different positive number of rounds, save this exact reply shape
+in `extension.json`:
+
+```json
+{"decision":"extend","rounds":3}
+```
+
+```sh
+provenant answer REQUEST_ID --action reply --text-file extension.json \
+  --expect-revision 1 --channel cli --operation-id loop-extension-1 --json
+provenant fabric graph resume --document graph.json
+```
+
+Resume reads the immutable answer, acknowledges it for its original target,
+and saves the resulting decision before admitting more work. An extension adds
+rounds to the saved allowance once and still obeys admission limits. An invalid
+reply or an extension beyond the safety bounds retains an actionable pause;
+resolve it with an explicit graph resume extension or decision. `stop`
+prevents successful graph delivery. A withdrawn, expired or superseded request
+does not resume the loop. The [Fabric spec](../specs/fabric.md) describes loop
+declarations, previous-round inputs and explicit resume extensions.
+
 ## Delivery service
 
 The local `offer_until_ack` API is available to delivery adapters. Adapters must resolve the target using authoritative session discovery and fail closed on missing or unreadable registration. Identity mismatches return `conflict`; discovery failures return `inbox_unavailable`.

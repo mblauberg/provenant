@@ -2264,6 +2264,162 @@ struct BoundGraphOwner<'a> {
     prices: Option<Result<provenant_telemetry::PriceTable, String>>,
 }
 
+struct GraphLoopInbox<'a> {
+    graph_id: &'a str,
+    node_id: &'a str,
+    rounds: usize,
+    session: &'a str,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
+enum GraphLoopReply {
+    Stop {},
+    Extend { rounds: usize },
+    Accept {},
+}
+
+fn graph_loop_answer(
+    answer: &provenant_records::inbox::HumanAnswer,
+) -> Result<provenant_fabric_runtime::graph::LoopDecision, FacadeError> {
+    use provenant_fabric_runtime::graph::LoopDecision;
+    use provenant_records::inbox::AnswerAction;
+    let decision = match (
+        answer.action,
+        answer.option_id.as_deref(),
+        answer.text.as_deref(),
+    ) {
+        (AnswerAction::Choose, Some("stop"), None) => Some(LoopDecision::Stop),
+        (AnswerAction::Choose, Some("extend"), None) => Some(LoopDecision::Extend { rounds: 1 }),
+        (AnswerAction::Choose, Some("accept"), None) => Some(LoopDecision::Accept),
+        (AnswerAction::Reply, None, Some(text)) => match serde_json::from_str(text) {
+            Ok(GraphLoopReply::Stop {}) => Some(LoopDecision::Stop),
+            Ok(GraphLoopReply::Extend { rounds }) if rounds > 0 => {
+                Some(LoopDecision::Extend { rounds })
+            }
+            Ok(GraphLoopReply::Accept {}) => Some(LoopDecision::Accept),
+            _ => None,
+        },
+        _ => None,
+    };
+    decision.ok_or_else(|| FacadeError::DispatchRefused {
+        reason: "loop inbox answer must choose stop, extend (one round), or accept; to extend by K positive rounds, reply with {\"decision\":\"extend\",\"rounds\":K}".into(),
+    })
+}
+
+fn graph_loop_inbox_ask(
+    scope: &GraphLoopInbox<'_>,
+) -> Result<provenant_fabric_runtime::inbox::InboxInput, FacadeError> {
+    use provenant_fabric_runtime::inbox::InboxInput;
+    use provenant_records::inbox::{RequestDraft, RequestKind, RequestOption};
+    let operation = provenant_records::CanonicalV1::record_digest(
+        "graph-loop-inbox",
+        1,
+        &(scope.graph_id, scope.node_id, scope.rounds, scope.session),
+    )
+    .map_err(|_| FacadeError::StateCorrupt)?;
+    let operation_id = provenant_core::OperationId::parse(&format!(
+        "loop-{}",
+        provenant_core::hex(operation.as_bytes())
+    ))
+    .map_err(|_| FacadeError::StateCorrupt)?;
+    let request = RequestDraft {
+        kind: RequestKind::Decision,
+        title: format!("Graph loop {} exhausted", scope.node_id),
+        body: format!(
+            "Graph {}, loop {} exhausted after {} rounds. Choose stop to stop the loop, extend to add one round, or accept to use the current outputs as is. To add K rounds, reply with JSON {{\"decision\":\"extend\",\"rounds\":K}} where K is a positive integer. Continue with fabric graph resume using the original document. This decision does not replace review or grant new authority.",
+            scope.graph_id, scope.node_id, scope.rounds
+        ),
+        blocking: true,
+        options: [
+            ("stop", "Stop", "Stop the loop without accepting its outputs."),
+            ("extend", "Extend by 1 round", "Continue on the same branch and worktree for one more round; reply with JSON to add K rounds."),
+            ("accept", "Accept as is", "Accept the current outputs and continue the graph."),
+        ]
+        .into_iter()
+        .map(|(id, label, description)| RequestOption {
+            id: id.into(),
+            label: label.into(),
+            description: description.into(),
+        })
+        .collect(),
+        recommended_option_id: None,
+        proceeding_with: None,
+    };
+    Ok(InboxInput::Ask {
+        session: scope.session.into(),
+        request,
+        operation_id: Some(operation_id),
+    })
+}
+
+fn graph_loop_inbox_decision(
+    service: &provenant_fabric_runtime::inbox::InboxService<'_>,
+    scope: &GraphLoopInbox<'_>,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<Option<provenant_fabric_runtime::graph::LoopDecision>, FacadeError> {
+    use provenant_fabric_runtime::inbox::{InboxFilter, InboxInput, InboxResult};
+    use provenant_records::inbox::RequestState;
+    let inbox_error =
+        |error: provenant_fabric_runtime::inbox::InboxError| FacadeError::DispatchRefused {
+            reason: format!("loop inbox decision: {error}"),
+        };
+    // The immutable ask and its operation receipt commit together. A crash before
+    // saving graph state replays this exact request, including its original ID.
+    let InboxResult::Saved { receipt } = service
+        .execute(graph_loop_inbox_ask(scope)?, budget, cancel)
+        .map_err(inbox_error)?
+    else {
+        return Err(FacadeError::StateCorrupt);
+    };
+    let InboxResult::Item { item } = service
+        .execute(
+            InboxInput::List {
+                id: Some(receipt.request_id),
+                session: None,
+                state: InboxFilter::All,
+                limit: 1,
+                cursor: None,
+            },
+            budget,
+            cancel,
+        )
+        .map_err(inbox_error)?
+    else {
+        return Err(FacadeError::StateCorrupt);
+    };
+    if item.request.state != RequestState::Answered {
+        return Ok(None);
+    }
+    let Some(answer) = item.answer else {
+        return Ok(None);
+    };
+    let decision = graph_loop_answer(&answer).unwrap_or_else(|error| {
+        provenant_fabric_runtime::graph::LoopDecision::Invalid {
+            reason: error.to_string(),
+        }
+    });
+    // Acknowledgement precedes action. The immutable answer stays readable after
+    // acknowledgement, so a failed graph checkpoint save loses no decision.
+    service
+        .execute(
+            InboxInput::Acknowledge {
+                id: receipt.request_id,
+                answer_id: answer.id,
+                session: scope.session.into(),
+                operation_id: Some(
+                    provenant_core::OperationId::parse(&format!("loop-ack-{}", answer.id))
+                        .map_err(|_| FacadeError::StateCorrupt)?,
+                ),
+            },
+            budget,
+            cancel,
+        )
+        .map_err(inbox_error)?;
+    Ok(Some(decision))
+}
+
 fn load_graph_prices(assets: &std::path::Path) -> Result<provenant_telemetry::PriceTable, String> {
     let path = assets.join("config/telemetry-prices.toml");
     let text =
@@ -2967,6 +3123,49 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     type Error = FacadeError;
     fn actor(&self) -> String {
         self.factory.context.identity.inbox.actor.to_string()
+    }
+    fn loop_decision(
+        &mut self,
+        graph_id: &str,
+        node_id: &str,
+        rounds: usize,
+        session: &str,
+        actor: &str,
+    ) -> Result<Option<provenant_fabric_runtime::graph::LoopDecision>, Self::Error> {
+        use provenant_fabric_runtime::inbox::InboxService;
+        let context = &self.factory.context;
+        let mut identity = context.identity.clone();
+        // Settlement can run under another client label. Keep the actor saved
+        // before escalation, just as an attempt retains its launch actor.
+        identity.inbox.actor = actor.parse().map_err(|_| FacadeError::StateCorrupt)?;
+        let scope = GraphLoopInbox {
+            graph_id,
+            node_id,
+            rounds,
+            session,
+        };
+        // Validate the ordinary inbox edge before opening local state. Graph
+        // escalation obeys lane and configured home-host restrictions too.
+        provenant_fabric_runtime::inbox::validate_request(
+            &identity,
+            &context.config,
+            context.in_lane,
+            &graph_loop_inbox_ask(&scope)?,
+        )
+        .map_err(|error| FacadeError::DispatchRefused {
+            reason: format!("loop inbox decision: {error}"),
+        })?;
+        let service = InboxService::open(
+            &context.roots.state,
+            &identity,
+            &self.factory.clock,
+            self.budget,
+            self.cancel,
+        )
+        .map_err(|error| FacadeError::DispatchRefused {
+            reason: format!("loop inbox decision: {error}"),
+        })?;
+        graph_loop_inbox_decision(&service, &scope, self.budget, self.cancel)
     }
     fn cost_unknown_reason(&mut self) -> Option<String> {
         let graph_budget = &self.factory.context.config.graph.budget;
@@ -3945,6 +4144,181 @@ pub fn events(
         }
     }
 }
+#[cfg(test)]
+#[allow(unused_imports)] // The custom worktree driver compiles without a test harness.
+mod graph_loop_inbox_tests {
+    use super::*;
+    use provenant_fabric_runtime::{
+        graph::LoopDecision,
+        inbox::{InboxFilter, InboxInput, InboxResult, InboxService},
+    };
+    use provenant_records::inbox::{
+        AnswerAction, AnswerDeliveryState, InteractionChannel, RequestState,
+    };
+
+    #[test]
+    fn graph_loop_inbox_replays_requests_and_acknowledged_decisions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("assets"));
+        inputs.state_dir = Some(base.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let host = provenant_core::HostId::from_bytes([1; 16]);
+        let identity = Identity {
+            project: provenant_core::ProjectId::from_bytes([2; 16]),
+            host,
+            inbox: provenant_fabric_runtime::identity::Address::new(host, "chair")?,
+            client: "test".into(),
+            cwd: provenant_records::AbsolutePath::new(&base)?,
+            common_dir: provenant_records::AbsolutePath::new(&base)?,
+            federation: None,
+        };
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let budget = || WaitBudget::cli(clock.mono_now(), 5);
+        let service = InboxService::open(&roots.state, &identity, &clock, budget()?, &cancel)?;
+        for (index, (option, text, expected)) in [
+            (Some("stop"), None, LoopDecision::Stop),
+            (Some("accept"), None, LoopDecision::Accept),
+            (Some("extend"), None, LoopDecision::Extend { rounds: 1 }),
+            (
+                None,
+                Some("{\"decision\":\"extend\",\"rounds\":3}"),
+                LoopDecision::Extend { rounds: 3 },
+            ),
+            (None, Some("extend by two"), LoopDecision::Invalid {
+                reason: "loop inbox answer must choose stop, extend (one round), or accept; to extend by K positive rounds, reply with {\"decision\":\"extend\",\"rounds\":K}".into()
+            }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let scope = GraphLoopInbox {
+                graph_id: "fixture",
+                node_id: "review",
+                rounds: index + 1,
+                session: "chair-session",
+            };
+            assert_eq!(
+                graph_loop_inbox_decision(&service, &scope, budget()?, &cancel)?,
+                None
+            );
+            let InboxResult::Saved { receipt } =
+                service.execute(graph_loop_inbox_ask(&scope)?, budget()?, &cancel)?
+            else {
+                return Err("missing ask receipt".into());
+            };
+            service.execute(
+                InboxInput::Answer {
+                    id: receipt.request_id,
+                    action: if option.is_some() {
+                        AnswerAction::Choose
+                    } else {
+                        AnswerAction::Reply
+                    },
+                    option_id: option.map(String::from),
+                    text: text.map(String::from),
+                    expect_revision: receipt.revision,
+                    channel: InteractionChannel::Cli,
+                    operation_id: None,
+                },
+                budget()?,
+                &cancel,
+            )?;
+            for _ in 0..2 {
+                assert_eq!(
+                    graph_loop_inbox_decision(&service, &scope, budget()?, &cancel)?,
+                    Some(expected.clone())
+                );
+            }
+            let InboxResult::Item { item } = service.execute(
+                InboxInput::List {
+                    id: Some(receipt.request_id),
+                    session: None,
+                    state: InboxFilter::All,
+                    limit: 1,
+                    cursor: None,
+                },
+                budget()?,
+                &cancel,
+            )?
+            else {
+                return Err("missing answered request".into());
+            };
+            assert_eq!(
+                item.delivery.ok_or("missing delivery")?.state,
+                AnswerDeliveryState::Acknowledged
+            );
+            assert_eq!(item.request.chair_actor, identity.inbox.actor);
+            assert_eq!(item.request.chair_session_id, scope.session);
+            if index == 0 {
+                service.execute(
+                    InboxInput::Close {
+                        id: receipt.request_id,
+                        state: RequestState::Superseded,
+                        reason: "Replace the decision".into(),
+                        expect_revision: item.request.revision,
+                        operation_id: None,
+                    },
+                    budget()?,
+                    &cancel,
+                )?;
+                assert_eq!(
+                    graph_loop_inbox_decision(&service, &scope, budget()?, &cancel)?,
+                    None,
+                    "a superseded request reused its historical answer"
+                );
+            }
+        }
+        let InboxResult::Listed { items, .. } = service.execute(
+            InboxInput::List {
+                id: None,
+                session: Some("chair-session".into()),
+                state: InboxFilter::All,
+                limit: 50,
+                cursor: None,
+            },
+            budget()?,
+            &cancel,
+        )?
+        else {
+            return Err("missing inbox listing".into());
+        };
+        assert_eq!(items.len(), 5, "replay created duplicate decisions");
+        Ok(())
+    }
+
+    #[test]
+    fn graph_loop_reply_rejects_zero_unknown_fields_and_unstructured_text()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_records::inbox::HumanAnswer;
+        for text in [
+            "{\"decision\":\"extend\",\"rounds\":0}",
+            "{\"decision\":\"extend\",\"rounds\":-1}",
+            "{\"decision\":\"extend\",\"rounds\":2,\"other\":true}",
+            "{\"decision\":\"accept\",\"rounds\":2}",
+            "extend by two",
+        ] {
+            let answer = HumanAnswer {
+                schema_version: 1,
+                id: provenant_core::HumanAnswerId::from_bytes([1; 16]),
+                request_id: provenant_core::HumanRequestId::from_bytes([2; 16]),
+                request_revision: 1,
+                action: AnswerAction::Reply,
+                option_id: None,
+                text: Some(text.into()),
+                actor: provenant_core::ActorId::from_bytes([3; 16]),
+                channel: InteractionChannel::Cli,
+                answered_at: provenant_core::WallTime::from_micros(1)?,
+                operation_id: provenant_core::OperationId::parse("answer")?,
+            };
+            assert!(graph_loop_answer(&answer).is_err(), "accepted {text}");
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod result_tests {
     #[test]

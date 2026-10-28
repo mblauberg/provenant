@@ -159,6 +159,84 @@ dependency. For example:
 Omitting `kind` or using `"task"` keeps task behaviour. All nodes require an
 explicit `access`; gates require `"read_only"`.
 
+### Repeat review and repair
+
+Use a `loop` node when review and repair should repeat until a gate passes.
+For example, add this node to a graph after registering `.worktrees/feature`:
+
+```json
+{
+  "id": "repair-review", "kind": "loop", "access": "read_only",
+  "loop": {
+    "max_rounds": 2,
+    "until": "approved",
+    "body": [
+      {
+        "id": "repair", "access": "worktree_write",
+        "worktree": ".worktrees/feature", "route": {"alias": "senior"},
+        "prompt": "Repair the change using previous review findings, if present. Commit it.",
+        "inputs": [{"node": "previous.review", "outputs": ["result", "findings"]}]
+      },
+      {
+        "id": "review", "access": "read_only", "route": {"alias": "senior"},
+        "prompt": "Review .worktrees/feature. Report findings and finish with VERDICT: PASS or VERDICT: FAIL.",
+        "depends_on": ["repair"],
+        "inputs": [{"node": "repair", "outputs": ["result", "branch", "commit"]}]
+      },
+      {
+        "id": "approved", "kind": "gate", "access": "read_only",
+        "depends_on": ["review"],
+        "inputs": [{"node": "review", "outputs": ["verdict"]}],
+        "condition": {"type": "verdict", "expected": "VERDICT: PASS", "threshold": "all"}
+      }
+    ]
+  }
+}
+```
+
+Round one omits `previous.review`; round two receives round one's result and
+findings. Current-round references use the local node ID, such as `repair`.
+All writers in the body must use the same worktree, so repairs continue on the
+existing branch. The `until` gate must follow the entire body. Body delivery,
+`on_fail` and nested loops are refused. A task failure fails the loop; a
+negative `until` verdict starts the next round.
+
+Configure host limits for the full expansion before running. This example
+requires seven nodes and a dependency depth of six. All allowed rounds count
+towards structural and prompt limits even if the first round passes. An
+extension adds to that expansion and must fit host ceilings. The safety bounds
+are 1024 rounds, 16384 expanded nodes and 64 bytes per expanded node ID.
+
+Inspect rounds with `provenant fabric graph status GRAPH_ID --json`. Body IDs
+include their round, for example `repair-review--r2--review`; each checkpoint
+node includes `round` metadata and its typed outputs. Passing the gate skips
+future rounds and lets dependants of `repair-review` continue. After two
+negative rounds the graph reports `paused` with an exhaustion reason.
+
+To allow two more rounds, keep the graph document unchanged and set the total
+allowance to four:
+
+```sh
+provenant fabric graph resume --document graph.json \
+  --extend loop.repair-review.rounds=4
+```
+
+Loop extensions and decisions require an exhausted loop. The extension is
+saved, so retrying this command retains four total rounds.
+Use `--extend loop.repair-review.decision=stop` to fail the loop, or
+`--extend loop.repair-review.decision=accept` to accept the existing outputs
+and continue. Budget and structural limit extensions may also be needed.
+
+To request a human decision on exhaustion, add `decision_session` to the
+`loop` object with the exact originating chair session ID. The inbox offers
+stop, extend by one round or accept as is; a JSON reply can extend by a positive
+number of rounds within the safety bounds. Run graph resume after answering. See
+[exhausted graph loops](human-inbox.md#exhausted-graph-loops) for the answer
+commands and replay behaviour. Without `decision_session`, use the explicit
+resume extensions above.
+
+### Inspect findings and recover a graph
+
 To report findings, include a fenced `findings` block in the result containing
 JSON with `schema_version: 1` and a `findings` array. Each finding has `id`,
 `severity`, `file`, `line`, `summary` and `status`. For example:

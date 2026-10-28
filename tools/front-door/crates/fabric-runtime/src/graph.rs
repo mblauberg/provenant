@@ -14,6 +14,9 @@ use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use thiserror::Error;
 
+mod loops;
+pub use loops::{LoopDecision, LoopRound, LoopSpec};
+
 const MAX_CHECKPOINT_BYTES: u64 = 16_777_216;
 const MAX_ADVANCE_ERROR_BYTES: usize = 2_048;
 
@@ -119,6 +122,10 @@ pub struct GraphExecution {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphNode {
+    #[serde(default, rename = "loop", skip_serializing_if = "Option::is_none")]
+    pub loop_body: Option<LoopSpec>,
+    #[serde(skip)]
+    round: Option<LoopRound>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<NodeKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -165,6 +172,7 @@ pub enum NodeKind {
     Task,
     Synthesise,
     Gate,
+    Loop,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +313,10 @@ fn not_delivered(delivered: &bool) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct NodeProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round: Option<LoopRound>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_decision_actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<GateResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -393,6 +405,9 @@ impl GraphCheckpoint {
     /// Failed gates are handled only when their recovery path succeeds.
     pub fn successful(&self) -> bool {
         self.nodes.iter().all(|node| {
+            if loops::handled_gate(self, node) {
+                return true;
+            }
             let mut current = node;
             for depth in 0..self.nodes.len() {
                 match current.state {
@@ -423,6 +438,8 @@ impl NodeProgress {
     pub fn deterministic_summary(&self) -> Option<String> {
         if self.state == NodeState::Skipped {
             Some(format!("Node {}: skipped\n\n", self.id))
+        } else if self.attempts.is_empty() && self.outputs.is_some() && self.gate.is_none() {
+            Some(format!("Node {}: loop {:?}\n\n", self.id, self.state))
         } else {
             self.gate.as_ref().map(|gate| {
                 format!(
@@ -532,6 +549,17 @@ pub trait AttemptOwner {
 
     /// The actor this owner submits as, recorded before the first submit.
     fn actor(&self) -> String;
+
+    fn loop_decision(
+        &mut self,
+        _graph_id: &str,
+        _node_id: &str,
+        _rounds: usize,
+        _session: &str,
+        _actor: &str,
+    ) -> Result<Option<LoopDecision>, Self::Error> {
+        Ok(None)
+    }
     fn deliver_graph(
         &mut self,
         _document: &GraphDocument,
@@ -644,6 +672,7 @@ impl FileJournal {
                 continue;
             }
             let mut changed = false;
+            let mut reopened_loops = std::collections::BTreeSet::new();
             for node in &mut checkpoint.nodes {
                 if node.state != NodeState::Failed {
                     continue;
@@ -656,6 +685,9 @@ impl FileJournal {
                         .and_then(|reference| reference.rsplit('/').next())
                         == Some(attempt.as_str())
                 {
+                    if let Some(round) = &node.round {
+                        reopened_loops.insert(round.loop_id.clone());
+                    }
                     node.state = NodeState::Running;
                     last.state = AttemptState::Starting;
                     last.outcome = None;
@@ -663,6 +695,7 @@ impl FileJournal {
                 }
             }
             if changed {
+                loops::reopen_after_delivery(&mut checkpoint, &reopened_loops);
                 for node in &mut checkpoint.nodes {
                     if node.state == NodeState::Blocked {
                         node.state = NodeState::Pending;
@@ -1006,6 +1039,10 @@ struct PlannedGraph {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedNode {
     #[serde(skip_serializing_if = "Option::is_none")]
+    loop_body: Option<LoopSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    round: Option<LoopRound>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<NodeKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     condition: Option<GateCondition>,
@@ -1119,13 +1156,19 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         graph_prompt_bytes: usize::MAX,
         ..limits.clone()
     };
+    let stored = journal
+        .load(&document.graph_id)
+        .map_err(GraphError::Journal)?;
+    let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
+    let (base, _) = validate_plan_with_limits(document, &unbounded).map_err(GraphError::Invalid)?;
+    let expanded = loops::expand(document, stored_extensions).map_err(GraphError::Invalid)?;
     let (plan, positions) =
-        validate_plan_with_limits(document, &unbounded).map_err(GraphError::Invalid)?;
-    let plan_digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &plan)
+        validate_flat_plan(&expanded, &unbounded).map_err(GraphError::Invalid)?;
+    let plan_digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &base)
         .map_err(GraphError::Canonical)?
         .to_string();
 
-    let mut checkpoint = match journal.load(&plan.graph_id).map_err(GraphError::Journal)? {
+    let mut checkpoint = match stored {
         Some(checkpoint) => {
             validate_checkpoint(&checkpoint, &plan, &plan_digest)?;
             checkpoint
@@ -1149,6 +1192,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .nodes
                     .iter()
                     .map(|node| NodeProgress {
+                        round: node.round.clone(),
+                        loop_decision_actor: node.loop_body.as_ref().map(|_| owner.actor()),
                         gate: None,
                         id: node.id.clone(),
                         title: Some(node.title.as_deref().unwrap_or(&node.id).to_owned()),
@@ -1179,7 +1224,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 )
             }))
     {
-        if extension.starts_with("limits.") {
+        if extension.starts_with("loop.") {
+            loops::validate_extension(document, extension).map_err(GraphError::Extension)?;
+        } else if extension.starts_with("limits.") {
             apply_limit_extension(&mut effective_limits, ceiling, extension, replay)
                 .map_err(GraphError::Extension)?;
         } else {
@@ -1193,19 +1240,47 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
     if resume {
+        if extensions.iter().any(|e| e.starts_with("loop.")) {
+            let mut prospective = checkpoint.clone();
+            for extension in extensions.iter().filter(|e| e.starts_with("loop.")) {
+                loops::validate_resume_extension(document, &prospective, extension)
+                    .map_err(GraphError::Extension)?;
+                if !prospective.extensions.contains(extension) {
+                    prospective.extensions.push(extension.clone());
+                }
+            }
+        }
         for extension in extensions {
             if !checkpoint.extensions.contains(extension) {
                 checkpoint.extensions.push(extension.clone());
             }
         }
         checkpoint.pause_reason = None;
+        if extensions.iter().any(|e| e.starts_with("loop.")) {
+            let expanded =
+                loops::expand(document, &checkpoint.extensions).map_err(GraphError::Invalid)?;
+            let (extended, _) =
+                validate_flat_plan(&expanded, &unbounded).map_err(GraphError::Invalid)?;
+            loops::reconcile(&mut checkpoint, &extended);
+            checkpoint.cancelled = false;
+            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            return advance_inner(
+                document,
+                owner,
+                journal,
+                (limits, ceiling),
+                budget,
+                false,
+                &[],
+            );
+        }
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
 
     let structural_pause = if checkpoint.nodes.iter().all(|node| node.state.settled()) {
         None
     } else {
-        structural_limit_reason(document, &plan, &effective_limits, &checkpoint.extensions)
+        structural_limit_reason(&expanded, &plan, &effective_limits, &checkpoint.extensions)
     };
     if let Some(reason) = &structural_pause {
         checkpoint.pause_reason = Some(reason.clone());
@@ -1230,6 +1305,41 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
 
         let node = &plan.nodes[node_index];
+        if loops::inactive_round(node, &checkpoint, &positions) {
+            checkpoint.nodes[node_index].state = NodeState::Skipped;
+            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            continue;
+        }
+        if let Some(spec) = &node.loop_body {
+            if structural_pause.is_none()
+                && let Some(extension) = loops::settle(
+                    node_index,
+                    spec,
+                    &plan,
+                    &positions,
+                    &mut checkpoint,
+                    owner,
+                    journal,
+                )?
+            {
+                if let Err(reason) =
+                    loops::prepare_decision_extension(document, &checkpoint, &extension, &unbounded)
+                {
+                    loops::pause_invalid_decision(&mut checkpoint, &node.id, &reason, journal)?;
+                } else {
+                    return advance_inner(
+                        document,
+                        owner,
+                        journal,
+                        (limits, ceiling),
+                        budget,
+                        true,
+                        &[extension],
+                    );
+                }
+            }
+            continue;
+        }
         let dependency = dependency_state(node, &plan, &checkpoint, &positions);
         if let Some(state) = dependency {
             if checkpoint.nodes[node_index].state != state {
@@ -1554,7 +1664,18 @@ fn dependency_state(
     let mut skipped = false;
     for parent in &node.depends_on {
         let index = positions[parent];
-        let recovery = plan.nodes[index].on_fail.as_ref() == Some(&node.id);
+        if loops::round_failure_edge(node, &plan.nodes[index])
+            && checkpoint.nodes[index].state == NodeState::Failed
+        {
+            continue;
+        }
+        let recovery = plan.nodes[index].on_fail.as_ref().is_some_and(|target| {
+            target == &node.id
+                || node
+                    .round
+                    .as_ref()
+                    .is_some_and(|round| &round.loop_id == target)
+        });
         match checkpoint.nodes[index].state {
             NodeState::Failed if recovery => {}
             NodeState::Failed if plan.nodes[index].on_fail.is_some() => skipped = true,
@@ -2064,6 +2185,14 @@ fn validate_plan_with_limits(
     document: &GraphDocument,
     limits: &crate::config::GraphLimits,
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), &'static str> {
+    let expanded = loops::expand(document, &[])?;
+    validate_flat_plan(&expanded, limits)
+}
+
+fn validate_flat_plan(
+    document: &GraphDocument,
+    limits: &crate::config::GraphLimits,
+) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), &'static str> {
     if document.schema_version != 1 {
         return Err("schema version");
     }
@@ -2098,6 +2227,10 @@ fn validate_plan_with_limits(
     let mut prompt_bytes = 0usize;
     let mut nodes = Vec::with_capacity(document.nodes.len());
     for node in &document.nodes {
+        let is_loop = node.kind == Some(NodeKind::Loop);
+        if is_loop != node.loop_body.is_some() {
+            return Err("loop requires a body");
+        }
         let is_gate = node.kind == Some(NodeKind::Gate);
         if is_gate != node.condition.is_some()
             || !is_gate && node.on_fail.is_some()
@@ -2169,7 +2302,9 @@ fn validate_plan_with_limits(
         if document.delivery == Some(DeliveryMode::Pr) && node.delivery == Some(DeliveryMode::Pr) {
             return Err("graph PR is exclusive with node PRs");
         }
-        if !is_gate && node.prompt.is_empty() || node.prompt.len() > limits.node_prompt_bytes {
+        if !is_gate && !is_loop && node.prompt.is_empty()
+            || node.prompt.len() > limits.node_prompt_bytes
+        {
             return Err("prompt size");
         }
         prompt_bytes = prompt_bytes
@@ -2186,7 +2321,7 @@ fn validate_plan_with_limits(
         }
 
         let routes = match (&node.route, &node.routes) {
-            (None, None) if is_gate => Vec::new(),
+            (None, None) if is_gate || is_loop => Vec::new(),
             (Some(route), None) => vec![route.clone()],
             (None, Some(routes)) if !routes.is_empty() => routes.clone(),
             (Some(_), Some(_)) => return Err("route and routes are exclusive"),
@@ -2239,8 +2374,10 @@ fn validate_plan_with_limits(
         let mut depends_on = node.depends_on.clone();
         depends_on.sort();
         nodes.push(PlannedNode {
+            loop_body: node.loop_body.clone(),
+            round: node.round.clone(),
             kind: match node.kind {
-                Some(NodeKind::Synthesise | NodeKind::Gate) => node.kind,
+                Some(NodeKind::Synthesise | NodeKind::Gate | NodeKind::Loop) => node.kind,
                 _ => None,
             },
             condition: node.condition.clone(),
@@ -2297,7 +2434,16 @@ fn validate_plan_with_limits(
         let mut required = vec![None; nodes.len()];
         let mut pending: std::collections::VecDeque<_> = children[gate]
             .iter()
-            .map(|child| (*child, target != &nodes[*child].id))
+            .map(|child| {
+                (
+                    *child,
+                    target != &nodes[*child].id
+                        && !nodes[*child]
+                            .round
+                            .as_ref()
+                            .is_some_and(|r| &r.loop_id == target),
+                )
+            })
             .collect();
         while let Some((index, outcome)) = pending.pop_front() {
             if let Some(prior) = required[index] {
@@ -2533,7 +2679,8 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         .map(|(i, node)| (node.id.clone(), i))
         .collect();
     for (progress, node) in checkpoint.nodes.iter().zip(&plan.nodes) {
-        if progress.id != node.id
+        if progress.round != node.round
+            || progress.id != node.id
             || progress.worktree != node.worktree
             || progress.attempts.len() > node.routes.len()
             || progress
@@ -2565,10 +2712,16 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         }
         if progress.state == NodeState::Skipped
             && (dependency_state(node, plan, checkpoint, &positions) != Some(NodeState::Skipped)
+                && !loops::inactive_round(node, checkpoint, &positions)
                 || !progress.attempts.is_empty()
                 || progress.outputs.is_some())
         {
             return Err(GraphError::BadCheckpoint);
+        }
+        if node.loop_body.is_some() {
+            loops::validate_progress(progress, node, checkpoint, &positions)
+                .map_err(|_| GraphError::BadCheckpoint)?;
+            continue;
         }
         if node.condition.is_some() {
             continue;
@@ -2738,6 +2891,8 @@ mod tests {
 
     fn node(id: &str, route: GraphRoute) -> GraphNode {
         GraphNode {
+            loop_body: None,
+            round: None,
             kind: None,
             condition: None,
             on_fail: None,
@@ -4245,6 +4400,8 @@ mod tests {
             route("fourth"),
         ];
         let document = graph(vec![GraphNode {
+            loop_body: None,
+            round: None,
             kind: None,
             condition: None,
             on_fail: None,
@@ -4397,6 +4554,8 @@ mod tests {
         ] {
             let routes = vec![route("first"), route("second")];
             let document = graph(vec![GraphNode {
+                loop_body: None,
+                round: None,
                 kind: None,
                 condition: None,
                 on_fail: None,
@@ -4642,6 +4801,8 @@ mod tests {
     #[test]
     fn terminal_task_failure_does_not_try_a_fallback_route() {
         let document = graph(vec![GraphNode {
+            loop_body: None,
+            round: None,
             kind: None,
             condition: None,
             on_fail: None,
@@ -5516,6 +5677,9 @@ mod tests {
             );
             assert!(owner.calls.is_empty());
         }
+    }
+    mod loop_tests {
+        include!("graph/loop_tests.rs");
     }
 }
 
