@@ -76,6 +76,9 @@ A missing or reassigned checkout uses a fresh owned worktree when fallback is
 allowed. Its receipt records `continuation: fresh`. Add `--no-fallback` to require
 provider resume.
 Custody, policy or launch refusals still need their named cause addressed.
+An accepted continuation that is rejected during launch remains listed by
+`provenant lanes --all`, with the reason on its attempt. Its result is empty
+when no provider ran; `provenant output ATTEMPT` can still address it.
 `provenant cancel ATTEMPT` generates and prints its operation ID. Cancel and
 `provenant reconcile --id RUN` infer project scope from the run record.
 

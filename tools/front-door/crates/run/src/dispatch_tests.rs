@@ -4009,6 +4009,96 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
 }
 
 #[test]
+fn rejected_resume_remains_visible_and_addressable() -> TestResult {
+    struct RouteMismatch;
+    impl Providers for RouteMismatch {
+        fn prepare(
+            &self,
+            _: &TaskRequest,
+            _: &str,
+            _: &LaunchPaths,
+            prior: Option<&AttemptRecord>,
+        ) -> std::result::Result<PreparedLaunch, String> {
+            assert!(prior.is_some());
+            Err("route differs from the prior attempt's provider, model or account".into())
+        }
+        fn decode(
+            &self,
+            _: &RouteRecord,
+            _: &[u8],
+            _: &ExitObservation,
+            _: &std::path::Path,
+        ) -> std::result::Result<Decoded, String> {
+            unreachable!()
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let initial = input();
+    store.create(&initial, &call)?;
+    let refusal = Fake {
+        refuse: true,
+        ..Fake::default()
+    };
+    store.start(initial.run_id, &refusal, &|_, _| unreachable!(), &call)?;
+    let resumed = Resume {
+        prior: initial.attempts[0].attempt_id,
+        expected_generation: 0,
+        operation_id: "rejected-resume".parse()?,
+        run_id: RunId::from_bytes([20; 16]),
+        attempt_id: AttemptId::from_bytes([21; 16]),
+        prompt: "answer".into(),
+        created_at: WallTime::from_micros(100)?,
+    };
+    store.resume(&resumed, &call)?;
+    store.start(
+        resumed.run_id,
+        &RouteMismatch,
+        &|_, _| unreachable!(),
+        &call,
+    )?;
+    let reader =
+        RunStore::open_read_only(&context(temp.path())?, &call)?.ok_or("run store missing")?;
+    let lanes = reader.lanes(
+        &LaneQuery {
+            targets: vec![],
+            all: true,
+            limit: 10,
+            after: 0,
+            newest_first: false,
+            owner: None,
+            unseen_after: None,
+        },
+        &call,
+    )?;
+    let rejected = lanes
+        .lanes
+        .iter()
+        .find(|lane| lane.attempt_id == resumed.attempt_id)
+        .ok_or("rejected resume missing from lanes")?;
+    assert!(matches!(
+        rejected.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Rejected,
+            ..
+        }
+    ));
+    assert!(
+        matches!(&rejected.state, AttemptState::Terminal { reason: Some(reason), .. } if reason.contains("route differs"))
+    );
+    let output = Service::new(&reader).output(
+        resumed.attempt_id,
+        ArtifactPart::Result,
+        ByteRange::default(),
+        &call,
+    )?;
+    assert!(output.bytes.is_empty());
+    Ok(())
+}
+
+#[test]
 fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
