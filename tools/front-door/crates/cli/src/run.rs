@@ -1273,15 +1273,29 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
-            let (context, store) = open_read_only(edge, &call)?;
+            let resolved = command
+                .id
+                .as_ref()
+                .map(|target| targets::resolve(edge, target, true))
+                .transpose()?;
+            let targets: Vec<Target> = resolved
+                .as_ref()
+                .map(|candidate| vec![candidate.target.clone()])
+                .unwrap_or_default();
+            let (context, store) = if let Some(candidate) = resolved {
+                let (session, _) = targets::read_resolved(edge, candidate, &call)?;
+                (session.context, Some(session.store))
+            } else {
+                open_read_only(edge, &call)?
+            };
             let Some(store) = store else {
                 return Ok((json!({"lanes": []}), "no lanes\n".into()));
             };
             let session = Session { store, context };
-            let full = command.all;
+            let full = command.all || command.id.is_some();
             let mut query = lane_query(
                 &session,
-                &[],
+                &targets,
                 full,
                 if full { command.limit } else { 100 },
                 command.cursor.unwrap_or(0),
@@ -1337,7 +1351,23 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 compact_status(&rows, &waits, now)
             };
             let human = match next {
-                Some(cursor) => format!("{human}more: provenant status --all --cursor {cursor}\n"),
+                Some(cursor) => {
+                    let target = targets
+                        .first()
+                        .map(|target| {
+                            [
+                                target.run.map(|id| id.to_string()),
+                                target.task.map(|id| id.to_string()),
+                                target.attempt.map(|id| id.to_string()),
+                            ]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>()
+                            .join("/")
+                        })
+                        .unwrap_or_default();
+                    format!("{human}more: provenant status {target} --all --cursor {cursor}\n")
+                }
                 None => human,
             };
             Ok((json!({"lanes": rows, "next_cursor": next}), human))
@@ -4433,14 +4463,28 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         .unwrap_or_default();
     let report = provenant_telemetry::stats(facts, &prices, window)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
-    let cost = report.totals.cost.complete.as_ref().map_or_else(
-        || format!("at least ${}", report.totals.cost.known_lower_bound.usd),
-        |money| format!("${}", money.usd),
-    );
-    let human = format!("{} attempts, {cost}\n", report.totals.attempts);
+    let human = stats_summary(&report.totals);
     let data = serde_json::to_value(&report)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
     Ok((data, human))
+}
+
+fn stats_summary(totals: &provenant_telemetry::Totals) -> String {
+    let cost = &totals.cost;
+    let human = if let Some(money) = &cost.complete {
+        format!("${}", money.usd)
+    } else if let Some(money) = &cost.known_lower_bound {
+        format!(
+            "at least ${} ({} of {} attempts priced)",
+            money.usd, cost.priced_attempts, totals.attempts
+        )
+    } else {
+        format!(
+            "cost unknown ({} attempts missing cost data)",
+            cost.missing_attempts
+        )
+    };
+    format!("{} attempts, {human}\n", totals.attempts)
 }
 
 /// Offline lane timeline: terminal attempts as Chrome Trace Event JSON.
@@ -4789,6 +4833,38 @@ mod lane_depth_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stats_summary_reports_cost_coverage() {
+        use provenant_telemetry::{CostTotal, Money, Totals};
+        let mut totals = Totals {
+            attempts: 3,
+            usage: Default::default(),
+            cost: CostTotal {
+                complete: None,
+                known_lower_bound: None,
+                priced_attempts: 0,
+                missing_attempts: 3,
+            },
+            outcomes: Default::default(),
+        };
+        assert_eq!(
+            stats_summary(&totals),
+            "3 attempts, cost unknown (3 attempts missing cost data)\n"
+        );
+        totals.cost.known_lower_bound = Some(Money {
+            microdollars: 2_000_000,
+            usd: "2.000000".into(),
+        });
+        totals.cost.priced_attempts = 1;
+        totals.cost.missing_attempts = 2;
+        assert_eq!(
+            stats_summary(&totals),
+            "3 attempts, at least $2.000000 (1 of 3 attempts priced)\n"
+        );
+        totals.cost.complete = totals.cost.known_lower_bound.clone();
+        assert_eq!(stats_summary(&totals), "3 attempts, $2.000000\n");
+    }
+
     #[test]
     fn core_run_timeout_only_offers_waiting_for_unsettled_lanes()
     -> Result<(), Box<dyn std::error::Error>> {

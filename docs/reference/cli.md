@@ -1860,6 +1860,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `id` | `{"name": "id", "positional": true}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
 | `--cursor` | `{"name": "cursor"}` |
 | `--all` | `{"defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
@@ -1874,6 +1875,7 @@ bounds are null. Positional arguments have no long flag.
   "groups": [
     {
       "arguments": [
+        "id",
         "limit",
         "cursor",
         "all"
@@ -2027,7 +2029,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--id` | `{"bounds": [0, 100], "conflicts": ["all"], "name": "id", "repeatable": true}` |
+| `--id` | `{"bounds": [0, 100], "name": "id", "repeatable": true}` |
 | `--host` | `{"conflicts": ["id", "cursor"], "name": "host"}` |
 | `--session` | `{"conflicts": ["all"], "name": "session"}` |
 | `--all` | `{"defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
