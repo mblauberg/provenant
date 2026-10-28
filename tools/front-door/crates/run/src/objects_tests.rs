@@ -1317,3 +1317,42 @@ fn import_total_wall_clock_budget_covers_initialisation_and_indexing() -> TestRe
     fixture.assert_not_published();
     Ok(())
 }
+
+#[test]
+fn staged_hash_deadline_is_terminal() -> TestResult {
+    use std::ffi::OsStr;
+    use std::time::Instant;
+    let root = tempfile::tempdir()?;
+    fs::write(root.path().join("object"), b"contents")?;
+    let directory = Directory::open_anchor(root.path())?;
+    assert!(matches!(
+        super::file_stamp(
+            &directory,
+            OsStr::new("object"),
+            true,
+            Some(Instant::now()),
+            true
+        ),
+        Err(crate::RunError::ObjectImportLimit(
+            super::STAGED_BYTES_LIMIT_REASON
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
+fn large_file_digest_detects_change_across_rename() -> TestResult {
+    use std::ffi::OsStr;
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("object");
+    fs::write(&path, vec![1_u8; super::SMALL_FILE_HASH_LIMIT as usize + 1])?;
+    let directory = Directory::open_anchor(root.path())?;
+    let before = super::file_stamp(&directory, OsStr::new("object"), true, None, false)?;
+    fs::write(&path, vec![2_u8; super::SMALL_FILE_HASH_LIMIT as usize + 1])?;
+    let mut after = super::file_stamp(&directory, OsStr::new("object"), true, None, false)?;
+    // Model a write that restores every timestamp except rename's ctime.
+    after.metadata = before.metadata;
+    after.metadata.changed_ns += 1;
+    assert!(!super::renamed_matches(&before, &after));
+    Ok(())
+}

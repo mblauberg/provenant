@@ -621,8 +621,9 @@ The snapshot lives in the common Git directory, so publication uses atomic
 creation on the repository volume even when lane scratch is on another volume.
 After taking the exclusive lock, the host rechecks every staged file's device,
 inode, size, ctime and other read-relevant metadata against the snapshot taken
-before hashing. Files up to 1 MiB also carry a SHA-256 digest. A change refuses
-publication, including a swap by a still-live lane using a pre-v11 policy.
+before hashing. Each staged file also carries a SHA-256 digest, including files
+over 1 MiB, to detect changes across rename. A change refuses publication,
+including a swap by a still-live lane using a pre-v11 policy.
 The final shared-store check uses `fsck --connectivity-only --strict` and checks
 each newly published file again, avoiding a second full hash. Existing object
 files retain their contents, inode and permissions. SHA-1 and SHA-256 repositories
@@ -630,12 +631,18 @@ use the same boundary. Only the host's trusted shallow boundary is preserved;
 lane-supplied boundaries cannot excuse missing history. Import is bounded by
 100,000 directory entries, 2 GiB of source objects, 64 packs and a 120-second
 wall-clock budget for copying and `index-pack`, including initialisation and
-preflight. Each verification phase has a separate deadline: 120 seconds plus
-60 seconds per started GiB of object files (shared plus staged for import),
-capped at one hour. Delivery cache misses get a fresh verification deadline.
-Exclusive or shared lock waiting has its own 120-second limit. A lock-wait
-timeout leaves settlement non-terminal with a retry reason, retaining custody
-and private evidence. Verification deadlines also leave settlement retryable.
+preflight. Full verification has a separate deadline: 120 seconds plus 60
+seconds per started GiB of object files (shared plus staged for import), capped
+at one hour. Hashing staged files alone has the same size-scaled allowance;
+exhausting it immediately refuses the import. Delivery cache misses get a fresh
+verification deadline. The locked publication and connectivity check has a
+shorter deadline of 30 seconds plus 30 seconds per started GiB, capped at five
+minutes, because the unlocked full check has already hashed the objects.
+Exclusive or shared lock waiting has its own 120-second limit. Settlement retains
+custody and private evidence while retrying: three verification deadline
+expiries or 30 lock-wait timeouts terminally refuse the import and release
+custody. These counts are separate and persist in host-owned settlement state
+across restarts. Thirty ordinary lock waits can span up to an hour.
 Exceeding either the pack limit or the copy/index budget terminally refuses
 the import with the limit named in the reason. Import snapshots are
 removed after each attempt; a later import attempts to sweep at most 32 exact
@@ -651,8 +658,8 @@ shared ref refuses publication. Private HEAD must still select the authorised
 branch. Shared ref publication precedes the host's instruction recovery and
 ancestry reads. A hash-verified rewind is quarantined before ancestry
 certification refuses it, so its evidence can be sealed and the failed attempt
-can release custody. Object verification failure or a competing shared ref
-change keeps custody and scratch for recovery.
+can release custody. Other object verification failures or a competing shared
+ref change keep custody and scratch for recovery.
 
 Host integration and delivery hash-check the lane and target graphs before
 reading commit messages, merging or pushing. Remote refresh checks the advertised

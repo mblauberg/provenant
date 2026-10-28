@@ -19,6 +19,10 @@ const IMPORT_BUDGET: Duration = Duration::from_secs(120);
 const LOCK_BUDGET: Duration = Duration::from_secs(120);
 const GIB: u64 = 1024 * 1024 * 1024;
 const SMALL_FILE_HASH_LIMIT: u64 = 1024 * 1024;
+pub(crate) const STAGED_BYTES_LIMIT_REASON: &str =
+    "staged object hashing exceeded verification budget";
+pub(crate) const VERIFICATION_DEADLINE_REASON: &str =
+    "verification deadline exceeded; retry settlement";
 const STAGING_PREFIX: &str = ".provenant-object-import-";
 const STALE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_STALE_SWEEP: usize = 32;
@@ -65,7 +69,7 @@ impl Deadline {
         if self.import {
             RunError::ObjectImportLimit("copy/index-pack 120 s wall-clock budget exceeded")
         } else {
-            RunError::ObjectVerificationRetry("verification deadline exceeded; retry settlement")
+            RunError::ObjectVerificationRetry(VERIFICATION_DEADLINE_REASON)
         }
     }
 }
@@ -85,8 +89,36 @@ fn verification_deadline(generation: &[(PathBuf, Metadata)], extra: u64) -> Dead
         .iter()
         .filter(|(_, m)| m.kind == FileKind::Regular)
         .fold(extra, |total, (_, m)| total.saturating_add(m.size));
+    #[cfg(test)]
+    let budget = TEST_VERIFICATION_BUDGET
+        .get()
+        .unwrap_or_else(|| verification_budget(bytes));
+    #[cfg(not(test))]
+    let budget = verification_budget(bytes);
     Deadline {
-        at: Instant::now() + verification_budget(bytes),
+        at: Instant::now() + budget,
+        import: false,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_VERIFICATION_BUDGET: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+}
+
+/// The unlocked full check hashes every object. The locked pass only walks
+/// connectivity: 30 seconds plus 30 per started GiB, capped at five minutes.
+#[allow(clippy::disallowed_methods)]
+fn connectivity_deadline(generation: &[(PathBuf, Metadata)], extra: u64) -> Deadline {
+    let bytes = generation
+        .iter()
+        .filter(|(_, m)| m.kind == FileKind::Regular)
+        .fold(extra, |total, (_, m)| total.saturating_add(m.size));
+    let seconds = 30_u64
+        .saturating_add(bytes.div_ceil(GIB).saturating_mul(30))
+        .min(300);
+    Deadline {
+        at: Instant::now() + Duration::from_secs(seconds),
         import: false,
     }
 }
@@ -851,7 +883,7 @@ fn import_before(
         total.saturating_add(file.stamp.metadata.size)
     });
     let mut retried = false;
-    let (generation, _lock) = loop {
+    let (_generation, _lock, connectivity) = loop {
         let generation = store_generation(repo.common_dir())?;
         let check = Verification {
             deadline: verification_deadline(&generation, staged_bytes),
@@ -867,8 +899,9 @@ fn import_before(
         );
         // Only publication and the final shared check exclude other lanes.
         let lock = object_lock(repo.common_dir(), LockMode::Exclusive)?;
+        let connectivity = connectivity_deadline(&generation, staged_bytes);
         for file in &snapshot {
-            file.check(&objects)?;
+            file.check(&objects, connectivity)?;
         }
         if store_generation(repo.common_dir())? != generation {
             if !retried {
@@ -880,7 +913,7 @@ fn import_before(
             ));
         }
         result?;
-        break (generation, lock);
+        break (generation, lock, connectivity);
     };
     let shared_dir = repo
         .common_dir()
@@ -890,18 +923,17 @@ fn import_before(
     let mut published = Vec::new();
     let mut fanouts = BTreeSet::new();
     for file in snapshot {
+        remaining(Some(connectivity))?;
         let from = objects.open_verified_directory(&file.fanout)?;
         let to = directory(&shared_dir, &file.fanout)?;
         fanouts.insert(file.fanout.clone());
-        file.check(&objects)?;
+        file.check(&objects, connectivity)?;
         match from.rename_noreplace(&file.name, &to, &file.name) {
             Ok(()) => {
-                let stamp = file_stamp(&to, &file.name)?;
+                let stamp = file_stamp(&to, &file.name, true, Some(connectivity.at), false)?;
                 // Rename changes ctime. All other read-relevant metadata,
                 // identity and the inexpensive content digest must match.
-                let mut renamed = file.stamp.clone();
-                renamed.metadata.changed_ns = stamp.metadata.changed_ns;
-                if renamed != stamp {
+                if !renamed_matches(&file.stamp, &stamp) {
                     return Err(staged_changed());
                 }
                 published.push(StagedFile { stamp, ..file });
@@ -915,7 +947,7 @@ fn import_before(
     }
     shared_dir.sync()?;
     for file in &published {
-        file.check(&shared_dir)?;
+        file.check(&shared_dir, connectivity)?;
     }
     verify_shared(
         git,
@@ -924,12 +956,12 @@ fn import_before(
         repo.root_path(),
         head,
         Verification {
-            deadline: verification_deadline(&generation, staged_bytes),
+            deadline: connectivity,
             mode: "--connectivity-only",
         },
     )?;
     for file in &published {
-        file.check(&shared_dir)?;
+        file.check(&shared_dir, connectivity)?;
     }
     Ok(())
 }
@@ -938,6 +970,12 @@ fn import_before(
 struct FileStamp {
     metadata: Metadata,
     digest: Option<[u8; 32]>,
+}
+
+fn renamed_matches(before: &FileStamp, after: &FileStamp) -> bool {
+    let mut expected = before.clone();
+    expected.metadata.changed_ns = after.metadata.changed_ns;
+    expected == *after
 }
 
 struct StagedFile {
@@ -950,14 +988,49 @@ fn staged_changed() -> RunError {
     RunError::Validation("staged object file changed during verification")
 }
 
-fn file_stamp(directory: &Directory, name: &OsStr) -> Result<FileStamp> {
+#[allow(clippy::disallowed_methods)]
+fn file_stamp(
+    directory: &Directory,
+    name: &OsStr,
+    hash_large: bool,
+    deadline: Option<Instant>,
+    staged_budget: bool,
+) -> Result<FileStamp> {
     use sha2::{Digest as _, Sha256};
     let metadata = directory.metadata_at(name, false)?;
     if metadata.kind != FileKind::Regular || metadata.links != 1 {
         return Err(staged_changed());
     }
-    let digest = if metadata.size <= SMALL_FILE_HASH_LIMIT {
-        Some(Sha256::digest(directory.read_stable(name, SMALL_FILE_HASH_LIMIT)?).into())
+    let digest = if hash_large || metadata.size <= SMALL_FILE_HASH_LIMIT {
+        let mut file = directory.open_read(name)?;
+        if !metadata.unchanged(&file.metadata()?) {
+            return Err(staged_changed());
+        }
+        let mut hash = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut count = 0_u64;
+        loop {
+            if deadline.is_some_and(|end| Instant::now() >= end) {
+                return Err(if staged_budget {
+                    RunError::ObjectImportLimit(STAGED_BYTES_LIMIT_REASON)
+                } else {
+                    RunError::ObjectVerificationRetry(VERIFICATION_DEADLINE_REASON)
+                });
+            }
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            count = count.saturating_add(read as u64);
+            if count > metadata.size {
+                return Err(staged_changed());
+            }
+            hash.update(&buffer[..read]);
+        }
+        if count != metadata.size || !metadata.unchanged(&file.metadata()?) {
+            return Err(staged_changed());
+        }
+        Some(hash.finalize().into())
     } else {
         None
     };
@@ -968,31 +1041,44 @@ fn file_stamp(directory: &Directory, name: &OsStr) -> Result<FileStamp> {
 }
 
 impl StagedFile {
-    fn check(&self, objects: &Directory) -> Result<()> {
+    fn check(&self, objects: &Directory, deadline: Deadline) -> Result<()> {
+        remaining(Some(deadline))?;
         let directory = objects.open_verified_directory(&self.fanout)?;
-        if self.stamp != file_stamp(&directory, &self.name)? {
+        let current = file_stamp(&directory, &self.name, false, Some(deadline.at), false)?;
+        if self.stamp.metadata != current.metadata
+            || (current.digest.is_some() && self.stamp.digest != current.digest)
+        {
             return Err(staged_changed());
         }
         Ok(())
     }
 }
 
+#[allow(clippy::disallowed_methods)]
 fn snapshot_files(objects: &Directory) -> Result<Vec<StagedFile>> {
-    let mut files = Vec::new();
+    let mut names = Vec::new();
+    let mut bytes = 0_u64;
     for fanout in entry_names(objects, 258)? {
         if !hex(&fanout, 2) && fanout != "pack" {
             continue;
         }
         let directory = objects.open_verified_directory(&fanout)?;
         for name in entry_names(&directory, MAX_FILES)? {
-            files.push(StagedFile {
-                stamp: file_stamp(&directory, &name)?,
-                fanout: fanout.clone(),
-                name,
-            });
+            bytes = bytes.saturating_add(directory.metadata_at(&name, false)?.size);
+            names.push((fanout.clone(), name));
         }
     }
-    // A pack becomes discoverable with its index. Publish packs first.
+    // The staged bytes alone must be hashable within their verification budget.
+    let deadline = Instant::now() + verification_budget(bytes);
+    let mut files = Vec::new();
+    for (fanout, name) in names {
+        let directory = objects.open_verified_directory(&fanout)?;
+        files.push(StagedFile {
+            stamp: file_stamp(&directory, &name, true, Some(deadline), true)?,
+            fanout,
+            name,
+        });
+    }
     files.sort_by_key(|file| Path::new(&file.name).extension() == Some(OsStr::new("idx")));
     Ok(files)
 }

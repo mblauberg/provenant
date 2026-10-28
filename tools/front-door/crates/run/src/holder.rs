@@ -12,6 +12,80 @@ use provenant_supervisor::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+// The host registry is protected from lanes. Thirty lock timeouts permit an
+// hour of contention at the normal lock budget.
+const VERIFICATION_RETRY_LIMIT: i64 = 3;
+const BUSY_RETRY_LIMIT: i64 = 30;
+
+fn settlement_retries(
+    host: &std::path::Path,
+    scope: custody::Scope,
+    call: &Request<'_>,
+    increment: Option<bool>,
+) -> Result<(i64, i64)> {
+    use rusqlite::{OptionalExtension, params};
+    let (_, db, _initialisation) =
+        crate::db::open_database(host, "object-settlement.sqlite3", call)?;
+    crate::db::immediate(&db, call, |tx| {
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS retries (run TEXT NOT NULL, attempt TEXT NOT NULL, generation TEXT NOT NULL, deadlines INTEGER NOT NULL, busy INTEGER NOT NULL, PRIMARY KEY(run,attempt,generation)) STRICT;")?;
+        let key = (
+            scope.run.to_string(),
+            scope.attempt.to_string(),
+            scope.generation.to_string(),
+        );
+        if let Some(deadline) = increment {
+            tx.execute(
+                "INSERT INTO retries VALUES (?1,?2,?3,?4,?5) ON CONFLICT(run,attempt,generation) DO UPDATE SET deadlines=deadlines+?4, busy=busy+?5",
+                params![key.0, key.1, key.2, i64::from(deadline), i64::from(!deadline)],
+            )?;
+        }
+        Ok(tx
+            .query_row(
+                "SELECT deadlines,busy FROM retries WHERE run=?1 AND attempt=?2 AND generation=?3",
+                params![key.0, key.1, key.2],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or((0, 0)))
+    })
+}
+
+fn retry_limit(counts: (i64, i64)) -> Option<RunError> {
+    if counts.0 >= VERIFICATION_RETRY_LIMIT {
+        Some(RunError::ObjectImportLimit(
+            "verification deadline retry cap exceeded (3)",
+        ))
+    } else if counts.1 >= BUSY_RETRY_LIMIT {
+        Some(RunError::ObjectImportLimit(
+            "object store lock retry cap exceeded (30)",
+        ))
+    } else {
+        None
+    }
+}
+
+fn seal_retry_refusal(attempt: &Directory, scope: custody::Scope) -> Result<()> {
+    let archive = crate::artifacts::subdir(attempt, std::ffi::OsStr::new("quarantine"), true)?;
+    #[derive(Serialize)]
+    struct Manifest {
+        schema_version: u64,
+        scope: custody::Scope,
+        kind: &'static str,
+        disposition: &'static str,
+    }
+    crate::artifacts::seal(
+        &archive,
+        "manifest.json",
+        &crate::db::bytes(&Manifest {
+            schema_version: 1,
+            scope,
+            kind: "quarantine_manifest",
+            disposition: "object_import_limit",
+        })?,
+        RECORD_LIMIT,
+    )
+}
+
 /// Inputs that re-resolve the submitting edge's state root in the guardian,
 /// whose environment is cleared.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -630,10 +704,22 @@ impl RunStore {
             }
             let refusal = object_import_refused(attempt, exit.scope)?;
             let refused = refusal.is_some();
+            let prior_limit = if refused {
+                None
+            } else {
+                retry_limit(settlement_retries(
+                    &self.writer_registry,
+                    exit.scope,
+                    call,
+                    None,
+                )?)
+            };
             let check = if let Some(reason) = refusal {
                 decoded.outcome = Outcome::Failed;
                 decoded.reason = Some(reason);
                 Ok(false)
+            } else if let Some(error) = prior_limit {
+                Err(error)
             } else {
                 crate::prepare_writer(writer, &self.writer_registry, record.project_id).and_then(
                     |writer| {
@@ -650,9 +736,48 @@ impl RunStore {
                     },
                 )
             };
+            let check = match check {
+                Err(error @ RunError::ObjectStoreBusy) => {
+                    match retry_limit(settlement_retries(
+                        &self.writer_registry,
+                        exit.scope,
+                        call,
+                        Some(false),
+                    )?) {
+                        Some(limit) => Err(limit),
+                        None => return Err(error),
+                    }
+                }
+                Err(
+                    error @ RunError::ObjectVerificationRetry(
+                        crate::objects::VERIFICATION_DEADLINE_REASON,
+                    ),
+                ) => {
+                    match retry_limit(settlement_retries(
+                        &self.writer_registry,
+                        exit.scope,
+                        call,
+                        Some(true),
+                    )?) {
+                        Some(limit) => Err(limit),
+                        None => return Err(error),
+                    }
+                }
+                Err(error @ RunError::ObjectVerificationRetry(_)) => return Err(error),
+                other => other,
+            };
             match check {
-                Err(error @ (RunError::ObjectStoreBusy | RunError::ObjectVerificationRetry(_))) => {
-                    return Err(error);
+                Err(error @ RunError::ObjectImportLimit(reason))
+                    if reason == "verification deadline retry cap exceeded (3)"
+                        || reason == "object store lock retry cap exceeded (30)"
+                        || reason == crate::objects::STAGED_BYTES_LIMIT_REASON =>
+                {
+                    seal_retry_refusal(attempt, exit.scope)?;
+                    decoded.outcome = Outcome::Failed;
+                    decoded.reason = Some(format!(
+                        "writer object import refused for {}: {error}",
+                        writer.worktree.display()
+                    ));
                 }
                 Err(error @ RunError::ObjectImportLimit(_)) => {
                     let reason = format!(
@@ -999,6 +1124,8 @@ mod writer_recovery_tests {
     enum ImportCase {
         PackLimit,
         LockWait,
+        Deadline,
+        BusyCap,
         LegacyPolicy,
     }
 
@@ -1015,6 +1142,18 @@ mod writer_recovery_tests {
     }
 
     #[test]
+    fn verification_deadline_cap_seals_and_releases_custody()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        object_import_refusal_fixture(ImportCase::Deadline)
+    }
+
+    #[test]
+    fn busy_cap_is_separate_and_releases_custody()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        object_import_refusal_fixture(ImportCase::BusyCap)
+    }
+
+    #[test]
     fn legacy_git_policy_warning_names_run_and_attempt_in_the_terminal_event()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         object_import_refusal_fixture(ImportCase::LegacyPolicy)
@@ -1026,7 +1165,7 @@ mod writer_recovery_tests {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         use provenant_os::fs::LockMode;
         use std::ffi::OsStr;
-        let lock_wait = case == ImportCase::LockWait;
+        let lock_wait = matches!(case, ImportCase::LockWait | ImportCase::BusyCap);
 
         let fixture = PrepareFixture::new()?;
         let execution = registered_landed_writer_fixture(&fixture)?;
@@ -1077,15 +1216,16 @@ mod writer_recovery_tests {
         }
         std::fs::write(candidate.join("recovery.lock"), b"private evidence")?;
         let (custody_directory, binding) = launch.custody.take().ok_or("writer custody")?;
-        let recovery = provenant_supervisor::fixture::acquire_writer_with_binding(
+        let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
             custody_directory,
             scope,
             binding,
             call.budget,
             &cancel,
             &clock,
-        )?
-        .into_recovery()?;
+        )?;
+        let recovery =
+            provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?.into_recovery()?;
         let mut observed = crate::tests::exit();
         observed.scope = scope;
         crate::dispatch_tests::seal_exit(&store, &observed)?;
@@ -1099,6 +1239,9 @@ mod writer_recovery_tests {
         if lock_wait {
             crate::objects::TEST_LOCK_BUDGET.set(Some(std::time::Duration::from_millis(100)));
         }
+        if case == ImportCase::Deadline {
+            crate::objects::TEST_VERIFICATION_BUDGET.set(Some(std::time::Duration::ZERO));
+        }
         let first = store.finish_in_custody(
             id,
             &attempt,
@@ -1108,6 +1251,58 @@ mod writer_recovery_tests {
             &call,
         );
         crate::objects::TEST_LOCK_BUDGET.set(None);
+        crate::objects::TEST_VERIFICATION_BUDGET.set(None);
+        if matches!(case, ImportCase::Deadline | ImportCase::BusyCap) {
+            let expected = if case == ImportCase::Deadline {
+                VERIFICATION_RETRY_LIMIT
+            } else {
+                BUSY_RETRY_LIMIT
+            };
+            assert!(first.is_err());
+            for index in 1..expected {
+                if case == ImportCase::Deadline {
+                    crate::objects::TEST_VERIFICATION_BUDGET.set(Some(std::time::Duration::ZERO));
+                } else {
+                    crate::objects::TEST_LOCK_BUDGET.set(Some(std::time::Duration::from_millis(1)));
+                }
+                let result = store.finish_in_custody(
+                    id,
+                    &attempt,
+                    &observed,
+                    Completion::Recovered(Some(&recovery)),
+                    &crate::dispatch_tests::Fake::default(),
+                    &call,
+                );
+                crate::objects::TEST_VERIFICATION_BUDGET.set(None);
+                crate::objects::TEST_LOCK_BUDGET.set(None);
+                if index + 1 == expected {
+                    assert!(matches!(
+                        result?.state,
+                        AttemptState::Terminal {
+                            outcome: Outcome::Failed,
+                            ..
+                        }
+                    ));
+                } else {
+                    assert!(result.is_err());
+                }
+            }
+            let counts = settlement_retries(&store.writer_registry, scope, &call, None)?;
+            assert_eq!(
+                counts,
+                if case == ImportCase::Deadline {
+                    (3, 0)
+                } else {
+                    (0, 30)
+                }
+            );
+            assert!(object_import_refused(&attempt, scope)?.is_none());
+            drop(shared_lock);
+            store.settle_recovered(&attempt, recovery)?;
+            assert!(read_sealed(&attempt, "release.json", RECORD_LIMIT)?.is_some());
+            assert!(store.writer_fence_listing()?.reservations.is_empty());
+            return Ok(());
+        }
         if lock_wait {
             assert!(matches!(first, Err(RunError::ObjectStoreBusy)));
             assert!(!matches!(
