@@ -85,6 +85,26 @@ pub fn collect(
             continue;
         }
         let foreign = policy.foreign_merged_clean && !(policy.terminal)(&lane.path);
+        // Listing deliberately reports unsafe custody as unknown. Recheck
+        // under the repository lock before considering even foreign cleanup,
+        // which may otherwise treat an existing stale record as unregistered.
+        if lane.writer == WriterState::Unknown {
+            let stale = match repository_lock(context, LockMode::Exclusive, cancel) {
+                Ok(_repository) => matches!(
+                    read_worktree_identity(context, entry, true),
+                    Err(WorktreeError::RegistrationMismatch { .. })
+                ),
+                Err(_) => false,
+            };
+            if stale {
+                retain(
+                    &mut report.worktrees,
+                    &branch,
+                    RetainReason::StaleRegistration,
+                );
+                continue;
+            }
+        }
         if policy.foreign_merged_clean && lane.writer == WriterState::Unknown {
             match collect_foreign(context, entry, lane, policy, cancel) {
                 Ok(Some(info)) => report.worktrees.removed.push(info),
@@ -107,7 +127,10 @@ pub fn collect(
         let mut preview_clean = lane.dirty == WorktreeCondition::Clean;
         if !policy.regenerable.is_empty() {
             let mut prune = || -> Result<(), WorktreeError> {
-                let locked = lock_worktree_for_mutation(context, entry, cancel)?;
+                let locked = {
+                    let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
+                    lock_worktree_for_mutation(context, entry, cancel)?
+                };
                 if !(policy.no_live_lanes)(&lane.path) {
                     return Err(WorktreeError::UnknownWriter);
                 }
