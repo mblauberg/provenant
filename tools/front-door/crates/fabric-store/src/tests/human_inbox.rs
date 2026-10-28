@@ -77,12 +77,35 @@ fn viewer_isolation() {
             .request
             .blocking
     );
+    store.db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) INSERT INTO human_requests SELECT project,printf('old-%d',x),revision,session,state,record FROM human_requests,n WHERE id=?1", [id.to_string()]).unwrap();
+    store.db.execute("INSERT INTO viewer_requests(project,viewer,request) SELECT project,'full',id FROM human_requests WHERE id LIKE 'old-%'", []).unwrap();
+    assert!(matches!(
+        store.set_request_view(project(), "full", id, &view, &request),
+        Err(Error::ViewerLimit)
+    ));
+    store
+        .set_request_view(project(), "other", id, &view, &request)
+        .unwrap();
+    store
+        .db
+        .execute(
+            "UPDATE human_requests SET state='answered' WHERE id='old-1'",
+            [],
+        )
+        .unwrap();
+    store
+        .set_request_view(project(), "full", id, &view, &request)
+        .unwrap();
     store
         .set_summary_baseline(project(), "console", "chair", 1, &request)
         .unwrap();
     store
         .set_summary_baseline(project(), "phone", "chair", 2, &request)
         .unwrap();
+    assert!(matches!(
+        store.set_summary_baseline(project(), "phone", "chair", 1, &request),
+        Err(Error::Conflict)
+    ));
     assert_eq!(
         store
             .summary_baseline(project(), "console", "chair", &request)
@@ -98,6 +121,25 @@ fn viewer_isolation() {
     assert_eq!(
         store
             .summary_baseline(project(), "console", "other", &request)
+            .unwrap(),
+        None
+    );
+    store.db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) INSERT INTO viewer_summaries(project,viewer,session,revision) SELECT ?1,'full',printf('s-%d',x),1 FROM n", [project().to_string()]).unwrap();
+    store
+        .set_summary_baseline(project(), "full", "new", 2, &request)
+        .unwrap();
+    assert_eq!(
+        store
+            .summary_baseline(project(), "full", "s-1", &request)
+            .unwrap(),
+        None
+    );
+    store
+        .forget_summary_baseline(project(), "phone", "chair", &request)
+        .unwrap();
+    assert_eq!(
+        store
+            .summary_baseline(project(), "phone", "chair", &request)
             .unwrap(),
         None
     );

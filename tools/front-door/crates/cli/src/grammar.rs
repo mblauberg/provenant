@@ -248,6 +248,8 @@ pub enum ChairViewer {
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         revision: u64,
     },
+    /// Forget a viewer's summary baseline.
+    Forget { viewer: String, session: String },
 }
 
 #[cfg(test)]

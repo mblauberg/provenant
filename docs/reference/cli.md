@@ -2872,6 +2872,34 @@ bounds are null. Positional arguments have no long flag.
 }
 ```
 
+## `provenant chair viewer forget`
+
+| Argument | Contract |
+|---|---|
+| `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
+| `session` | `{"name": "session", "positional": true, "required": true}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "viewer",
+        "session"
+      ],
+      "multiple": true,
+      "name": "Forget",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant chair summary`
 
 | Argument | Contract |
