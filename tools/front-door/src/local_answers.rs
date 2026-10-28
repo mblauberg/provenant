@@ -147,7 +147,13 @@ mod tests {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let budget = || WaitBudget::cli(clock.mono_now(), 1).unwrap();
-        store.save(b"checkpoint", budget(), &cancel, &clock)?;
+        store.save(
+            b"---\nprovenant_summary:\n  schema_version: 1\n  revision: 1\n  updated_at: \"2026-10-28T03:00:00Z\"\n  now: \"Working\"\n  next: \"Continue\"\n  needs_you: []\n  risk: \"None\"\n---\ncheckpoint",
+            budget(),
+            &cancel,
+            &clock,
+        )?;
+        assert!(store.discovery()?.unwrap().record.summary.is_some());
         let identity = Identity {
             project,
             host,

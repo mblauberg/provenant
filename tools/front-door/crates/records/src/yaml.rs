@@ -85,6 +85,15 @@ pub struct YamlError {
 /// Parse the bounded YAML frontmatter at the beginning of a skill file.
 /// Everything after the closing delimiter is ignored.
 pub fn parse_frontmatter(source: &str) -> Result<SpannedYaml, YamlError> {
+    parse_frontmatter_impl(source, false)
+}
+
+/// Parse frontmatter allowing plain nonnegative decimal integers as strings.
+pub fn parse_frontmatter_integers(source: &str) -> Result<SpannedYaml, YamlError> {
+    parse_frontmatter_impl(source, true)
+}
+
+fn parse_frontmatter_impl(source: &str, integers: bool) -> Result<SpannedYaml, YamlError> {
     let mut lines = source.split('\n').enumerate();
     let Some((_, first)) = lines.next() else {
         return Err(error(YamlErrorKind::MissingFrontmatter, 1, 1));
@@ -110,6 +119,7 @@ pub fn parse_frontmatter(source: &str) -> Result<SpannedYaml, YamlError> {
         return Err(error(YamlErrorKind::UnclosedFrontmatter, 1, 1));
     }
     let mut parser = Parser::new(&body, 2)?;
+    parser.integers = integers;
     let parsed = parser.parse_document()?;
     if !matches!(parsed.value, YamlValue::Mapping(_)) {
         return Err(error(
@@ -139,6 +149,7 @@ struct Parser<'a> {
     lines: Vec<SourceLine<'a>>,
     index: usize,
     nodes: usize,
+    integers: bool,
     first_line: usize,
 }
 
@@ -168,6 +179,7 @@ impl<'a> Parser<'a> {
             lines,
             index: 0,
             nodes: 0,
+            integers: false,
             first_line,
         })
     }
@@ -521,6 +533,9 @@ impl<'a> Parser<'a> {
         }
         if text == "false" {
             return Ok(YamlValue::Boolean(false));
+        }
+        if self.integers && !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
+            return Ok(YamlValue::String(text.to_owned()));
         }
         if ambiguous_word(text) || numeric_looking(text) || text == "~" {
             return Err(error(
