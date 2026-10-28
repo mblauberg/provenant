@@ -301,13 +301,34 @@ fn output_install(
 ) -> u8 {
     match result {
         Ok(outcome) => {
+            let (mut links, mut hooks, mut mcp) = (0, 0, 0);
+            for action in &outcome.actions {
+                let selector = action.selector.to_ascii_lowercase();
+                if selector.contains("hook") {
+                    hooks += 1;
+                } else if selector.contains("mcp") {
+                    mcp += 1;
+                } else if matches!(
+                    action.before.as_ref().or(action.after.as_ref()),
+                    Some(provenant_records::OwnedValue::Link { .. })
+                ) {
+                    links += 1;
+                }
+            }
             let mut human = format!(
-                "{command}: {} changes; {} targets; {} findings; {} manual includes\n",
+                "{command}: {} changes ({links} links, {hooks} hooks, {mcp} MCP); {} targets",
                 outcome.actions.len(),
                 summaries.len(),
-                outcome.findings.len(),
-                outcome.manual_includes.len(),
             );
+            for (count, label) in [
+                (outcome.findings.len(), "findings"),
+                (outcome.manual_includes.len(), "manual includes"),
+            ] {
+                if count > 0 {
+                    human.push_str(&format!("; {count} {label}"));
+                }
+            }
+            human.push('\n');
             if !outcome
                 .findings
                 .iter()

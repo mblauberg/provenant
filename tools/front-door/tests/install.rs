@@ -389,8 +389,10 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     let human_reapply = rig.execute_os(binary, &human_reapply_args, None)?;
     assert_eq!(code(&human_reapply), 0);
     let human_reapply = String::from_utf8_lossy(&human_reapply.stdout.bytes);
-    assert!(human_reapply.contains("0 changed hooks"));
-    assert!(human_reapply.contains("0 changed MCP"));
+    assert!(
+        human_reapply.contains("0 changes (0 links, 0 hooks, 0 MCP)"),
+        "{human_reapply}"
+    );
     let config = rig.root.join("codex/config.toml");
     let text = fs::read_to_string(&config)?;
     assert!(text.contains("--state-dir"));
@@ -1428,7 +1430,7 @@ fn install_compacts_routine_output_and_keeps_json_actions_once() -> Result {
         human.stdout.bytes.len(),
         applied.stdout.bytes.len()
     );
-    assert!(text.contains("changes; 1 targets;"), "{text}");
+    assert!(text.contains("MCP); 1 targets"), "{text}");
     assert!(!text.contains("changed links"), "{text}");
     assert!(!text.contains("peer agent:"), "{text}");
     assert!(!text.contains("scheduled gc:"), "{text}");
