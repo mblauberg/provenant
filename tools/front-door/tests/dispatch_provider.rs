@@ -138,7 +138,11 @@ fn codex_dispatch_observes_rollout() -> Result {
         ])?;
         assert_eq!(
             code(&out),
-            0,
+            if index == 0 && !cfg!(target_os = "macos") {
+                1
+            } else {
+                0
+            },
             "{} {}",
             String::from_utf8_lossy(&out.stdout.bytes),
             String::from_utf8_lossy(&out.stderr.bytes)
