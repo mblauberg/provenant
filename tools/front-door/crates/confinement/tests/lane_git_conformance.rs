@@ -57,9 +57,9 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
     fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
     fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700))?;
     let git_path = [
-        "/usr/bin/git",
         "/opt/homebrew/bin/git",
         "/usr/local/bin/git",
+        "/usr/bin/git",
     ]
     .iter()
     .map(PathBuf::from)
@@ -272,10 +272,20 @@ fn linked_lane_can_fetch_and_commit_with_packed_refs_read_only() -> Result<(), B
     };
     let exec_path = ok(git(&git_path, &repo_git, &repo, &home, &["--exec-path"]));
     let exec_path = fs::canonicalize(exec_path.trim())?;
+    // Homebrew Git loads libraries from other formulae in the same prefix.
+    // Grant the canonical prefix so the sandbox can read those dependencies.
+    let mut runtime_reads = vec![grant(exec_path.clone())];
+    for prefix in ["/opt/homebrew", "/usr/local"] {
+        if let Ok(prefix) = fs::canonicalize(prefix)
+            && git_path.starts_with(&prefix)
+        {
+            runtime_reads.push(grant(prefix));
+        }
+    }
     let profile = ProviderProfile {
         spec: ProviderProfileSpec {
             allow_process_fork: true,
-            runtime_reads: vec![grant(exec_path.clone())],
+            runtime_reads,
             tool_exec_roots: ["/bin", "/usr/bin", "/usr/libexec"]
                 .iter()
                 .map(|p| grant(PathBuf::from(p)))

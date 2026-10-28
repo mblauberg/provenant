@@ -82,7 +82,38 @@ impl std::fmt::Debug for HostDeliveryContext {
 impl HostDeliveryContext {
     /// Integration authority never includes the default or primary checkout ref.
     pub fn validate_integration_target(project: &Path, target: &str) -> Result<()> {
-        Self::check_delivery_branch(project, target.strip_prefix("origin/").unwrap_or(target))
+        let branch = target.strip_prefix("origin/").unwrap_or(target);
+        Self::check_delivery_branch(project, branch)?;
+        let writer = WriterRequest {
+            project: project.into(),
+            worktree: project.into(),
+        };
+        let mut host = Self::capture();
+        host.host_environment(&writer)?;
+        host.tools = Some(HostTools {
+            git: host.executable("git", &writer)?,
+            gh: None,
+        });
+        host.refuse_checked_out_tracking_target(&writer, branch)?;
+        Ok(())
+    }
+
+    fn refuse_checked_out_tracking_target(&self, writer: &WriterRequest, target: &str) -> Result<()> {
+        let trees = self.command(
+            &writer.worktree,
+            "git",
+            &["worktree", "list", "--porcelain"],
+            Stage::Prepare,
+        )?;
+        if trees.lines().filter_map(|line| line.strip_prefix("branch refs/heads/"))
+            .any(|branch| branch.eq_ignore_ascii_case(target))
+        {
+            return Err(prepare_error(
+                "integration target",
+                "integration target belongs to a checked-out worktree branch",
+            ));
+        }
+        Ok(())
     }
     /// A publication ref is distinct from a PR's base, which may be protected.
     pub fn check_delivery_branch(project: &Path, target: &str) -> Result<()> {
@@ -457,6 +488,22 @@ impl HostDeliveryContext {
             None
         };
         self.tools = Some(HostTools { git, gh });
+        if matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
+            // Bind this check to the lane's branch before the provider can
+            // change HEAD. Its tracking-ref grant remains for the whole run.
+            let lane_branch = self.command(
+                &writer.worktree,
+                "git",
+                &["symbolic-ref", "--quiet", "--short", "HEAD"],
+                stage,
+            )?;
+            if lane_branch.eq_ignore_ascii_case(&request.branch) {
+                return Err(prepare_error(
+                    "integration target",
+                    "integration target matches the lane branch",
+                ));
+            }
+        }
         self.refuse_protected_target(writer, &request.branch)?;
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) && request.remote.is_empty() {
             let branch = self.command(
@@ -627,6 +674,8 @@ impl HostDeliveryContext {
                 "protocol.file.allow=always",
                 "-c",
                 "remote.origin.uploadpack=git-upload-pack",
+                "-c",
+                "core.logAllRefUpdates=false",
                 "fetch",
                 "--no-auto-maintenance",
                 "--no-tags",
@@ -906,7 +955,7 @@ impl HostDeliveryContext {
             let stderr = if output.stderr.filter_failed {
                 "diagnostic redaction failed".into()
             } else {
-                String::from_utf8_lossy(&output.stderr.bytes).into_owned()
+                redact_url_userinfo(&String::from_utf8_lossy(&output.stderr.bytes), output.stderr.truncated)
             };
             return Err(failure(format!(
                 "{tool} {:?} (timed out: {}): {stderr}",
@@ -1397,6 +1446,34 @@ pub(super) fn cap_pr_body(mut body: String) -> String {
         body.push_str(NOTE);
     }
     body
+}
+
+// Git may include remote URLs in diagnostics. Usernames alone can be access
+// tokens, so remove all URL userinfo, including passwordless userinfo.
+fn redact_url_userinfo(detail: &str, truncated: bool) -> String {
+    let mut result = String::with_capacity(detail.len());
+    let mut rest = detail;
+    while let Some(scheme_end) = rest.find("://") {
+        let authority_start = scheme_end + 3;
+        result.push_str(&rest[..authority_start]);
+        rest = &rest[authority_start..];
+        let authority_end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '/' | '?' | '#' | '\'' | '"' | '<' | '>'))
+            .unwrap_or(rest.len());
+        let authority = &rest[..authority_end];
+        if let Some(at) = authority.rfind('@') {
+            result.push_str("[REDACTED]");
+            result.push_str(&authority[at..]);
+        } else if truncated && authority_end == rest.len() {
+            // A capture limit can cut off the '@' that identifies userinfo.
+            result.push_str("[REDACTED]");
+        } else {
+            result.push_str(authority);
+        }
+        rest = &rest[authority_end..];
+    }
+    result.push_str(rest);
+    result
 }
 
 fn prepare_error(step: &'static str, detail: impl std::fmt::Display) -> RunError {

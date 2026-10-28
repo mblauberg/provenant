@@ -613,25 +613,93 @@ impl WorktreeWriteGrants {
         for grant in self.iter().skip(1) {
             validate_noncredential_grant(grant)?;
         }
-        // The guard and base selection trust these host-owned tracking refs.
-        let origin = self.common_git_dir.path.join("refs/remotes/origin");
-        let tracking = &self.origin_tracking[0].path;
-        if tracking == &origin.join("HEAD") || tracking == &origin.join("main") {
-            return Err(PermissionError::GitWriteAuthorityMissing);
+        validate_origin_tracking(&self.common_git_dir.path, &self.origin_tracking[0].path)?;
+        Ok(())
+    }
+}
+
+// Compare components independently, including directory prefixes on case-folding
+// filesystems. An existing exact lane ref is allowed unless it is protected.
+fn tracking_paths_overlap(left: &str, right: &str) -> bool {
+    let mut left = left.split('/');
+    let mut right = right.split('/');
+    loop {
+        match (left.next(), right.next()) {
+            (Some(a), Some(b)) if a.eq_ignore_ascii_case(b) => {}
+            (Some(_), Some(_)) => return false,
+            _ => return true,
         }
-        match std::fs::read_to_string(origin.join("HEAD")) {
-            Ok(head) => {
-                if let Some(branch) = head.trim().strip_prefix("ref: refs/remotes/origin/")
-                    && tracking == &origin.join(branch)
-                {
-                    return Err(PermissionError::GitWriteAuthorityMissing);
-                }
+    }
+}
+
+fn validate_origin_tracking(common: &Path, tracking: &Path) -> Result<(), PermissionError> {
+    let denied = || PermissionError::GitWriteAuthorityMissing;
+    let origin = common.join("refs/remotes/origin");
+    let branch = tracking.strip_prefix(&origin).map_err(|_| denied())?
+        .to_str().ok_or_else(denied)?;
+    let mut protected = vec!["HEAD".to_owned(), "main".to_owned(), "master".to_owned(), "trunk".to_owned()];
+    let mut refs = Vec::<(String, String)>::new();
+
+    fn read_loose(dir: &Path, prefix: &str, refs: &mut Vec<(String, String)>) -> std::io::Result<()> {
+        match std::fs::symlink_metadata(dir) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => return Err(std::io::Error::other("invalid origin ref directory")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name().into_string().map_err(|_| std::io::Error::other("non-UTF-8 ref"))?;
+            let name = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                read_loose(&entry.path(), &name, refs)?;
+            } else if kind.is_file() {
+                refs.push((name, std::fs::read_to_string(entry.path())?.trim().to_owned()));
+            } else {
+                return Err(std::io::Error::other("invalid origin ref"));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(PermissionError::GitWriteAuthorityMissing),
         }
         Ok(())
     }
+    read_loose(&origin, "", &mut refs).map_err(|_| denied())?;
+    let loose_head = refs.iter().find(|(name, _)| name == "HEAD").map(|(_, value)| value.clone());
+    match std::fs::read_to_string(common.join("packed-refs")) {
+        Ok(packed) => {
+            for line in packed.lines().filter(|line| !line.is_empty() && !line.starts_with(['#', '^'])) {
+                let (value, name) = line.split_once(' ').ok_or_else(denied)?;
+                if let Some(name) = name.strip_prefix("refs/remotes/origin/") {
+                    // Loose refs override packed refs of the same name.
+                    if !refs.iter().any(|(existing, _)| existing == name) {
+                        refs.push((name.to_owned(), value.to_owned()));
+                    }
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(denied()),
+    }
+    let head = loose_head.or_else(|| refs.iter().find(|(name, _)| name == "HEAD").map(|(_, value)| value.clone()));
+    if let Some(head) = head {
+        if let Some(target) = head.strip_prefix("ref: refs/remotes/origin/") {
+            protected.push(target.to_owned());
+        } else {
+            // A packed direct HEAD has no symbolic target. Protect every origin
+            // ref resolving to the same object.
+            protected.extend(refs.iter().filter(|(_, value)| value == &head).map(|(name, _)| name.clone()));
+        }
+    }
+    if protected.iter().any(|name| tracking_paths_overlap(branch, name))
+        || refs.iter().any(|(name, _)| name != branch && tracking_paths_overlap(branch, name))
+    {
+        return Err(denied());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -646,11 +714,31 @@ mod protected_tracking_tests {
         let origin = common.join("refs/remotes/origin");
         std::fs::create_dir_all(&origin)?;
         std::fs::write(origin.join("HEAD"), "ref: refs/remotes/origin/trunk\n")?;
-        for branch in ["HEAD", "main", "trunk"] {
+        for branch in ["HEAD", "head", "Main", "MAIN", "master", "trunk"] {
             let grants = WorktreeWriteGrants::from_paths(temp.path(), &common, &common, branch);
             assert!(grants.validate().is_err(), "protected branch {branch}");
         }
         let grants = WorktreeWriteGrants::from_paths(temp.path(), &common, &common, "lane/test");
+        grants.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn origin_ref_collisions_include_prefixes_and_packed_head() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let common = temp.path().join("git");
+        let origin = common.join("refs/remotes/origin");
+        std::fs::create_dir_all(origin.join("feature"))?;
+        std::fs::write(origin.join("feature/topic"), "1234\n")?;
+        std::fs::write(common.join("packed-refs"), "# pack-refs with: sorted\n1234 refs/remotes/origin/HEAD\n1234 refs/remotes/origin/default\n5678 refs/remotes/origin/packed/nested\n")?;
+        for branch in ["FEATURE", "feature/Topic", "packed", "PACKED/nested/child", "default"] {
+            let grants = WorktreeWriteGrants::from_paths(temp.path(), &common, &common, branch);
+            assert!(grants.validate().is_err(), "collision {branch}");
+        }
+        let grants = WorktreeWriteGrants::from_paths(temp.path(), &common, &common, "feature/topic");
+        // A packed direct HEAD has the same object, so it is host protected.
+        assert!(grants.validate().is_err());
+        std::fs::write(origin.join("feature/topic"), "9999\n")?;
         grants.validate()?;
         Ok(())
     }

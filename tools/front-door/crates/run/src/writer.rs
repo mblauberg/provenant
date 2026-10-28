@@ -430,6 +430,22 @@ fn prepare_writer_git(
         ));
     }
     writer.worktree = refreshed;
+    verify_writer_git_paths(writer.worktree.repo().common_git_dir(), &writer.branch)?;
+    let tracking_lock = writer.worktree.repo().common_git_dir().join(format!(
+        "refs/remotes/origin/{}.lock",
+        writer
+            .branch
+            .as_str()
+            .strip_prefix("refs/heads/")
+            .ok_or(RunError::Validation("writer branch is not a local branch"))?
+    ));
+    match std::fs::symlink_metadata(&tracking_lock) {
+        Ok(_) => return Err(RunError::WriterRefLocked(tracking_lock)),
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
+        Err(failure) => {
+            return Err(error("verify tracking ref lock", Some(&tracking_lock))(failure));
+        }
+    }
     if let Some(authority) = authority {
         prepare_writer_directories(&writer.worktree, &writer.branch, authority, home)
             .map_err(RunError::Confinement)?;
@@ -545,6 +561,39 @@ fn prepare_writer_git(
     }
     writer.worktree = refreshed;
     Ok(config_lock)
+}
+
+// These exact paths are writable by the lane. Check them before host Git can
+// follow a planted link, including during fetch and reflog updates.
+fn verify_writer_git_paths(common: &Path, branch: &GitRefName) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let suffix = branch
+        .as_str()
+        .strip_prefix("refs/heads/")
+        .ok_or(RunError::Validation("writer branch is not a local branch"))?;
+    for prefix in [
+        "refs/heads",
+        "logs/refs/heads",
+        "refs/remotes/origin",
+        "logs/refs/remotes/origin",
+    ] {
+        for name in [suffix.to_owned(), format!("{suffix}.lock")] {
+            let path = common.join(prefix).join(name);
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_file() && metadata.nlink() == 1 => {}
+                Ok(_) => {
+                    return Err(RunError::OperationIo {
+                        operation: "verify lane Git path (must be absent or a single-link regular file)",
+                        path: Some(path),
+                        source: std::io::Error::other("unsafe file type or link count"),
+                    });
+                }
+                Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
+                Err(failure) => return Err(error("verify lane Git path", Some(&path))(failure)),
+            }
+        }
+    }
+    Ok(())
 }
 
 // Cargo configuration can override rustc independently of the rustup pin.
@@ -804,6 +853,29 @@ mod cargo_setup_tests {
             run(&["config", "--local", "--get", "branch.feature/second.merge"])?,
             "refs/heads/feature/second"
         );
+        run(&["remote", "add", "origin", project.to_str().ok_or("project path")?])?;
+        let target = root.join("reflog-target");
+        std::fs::write(&target, b"untouched")?;
+        let reflog = git_dir.join("logs/refs/remotes/origin/feature/nested");
+        std::fs::create_dir_all(reflog.parent().ok_or("reflog parent")?)?;
+        std::os::unix::fs::symlink(&target, &reflog)?;
+        let failure = prepare_writer_git(&mut writer, &state, &root, None)
+            .err()
+            .ok_or("symlinked tracking reflog must refuse")?;
+        assert!(failure.to_string().contains(&reflog.display().to_string()));
+        assert_eq!(std::fs::read(&target)?, b"untouched");
+        std::fs::remove_file(&reflog)?;
+        let tracking_lock = git_dir.join("refs/remotes/origin/feature/nested.lock");
+        std::fs::create_dir_all(tracking_lock.parent().ok_or("tracking lock parent")?)?;
+        std::fs::write(&tracking_lock, b"held")?;
+        let failure = prepare_writer_git(&mut writer, &state, &root, None)
+            .err()
+            .ok_or("stale tracking lock must refuse")?;
+        assert!(failure.to_string().contains(&tracking_lock.display().to_string()));
+        assert!(failure.to_string().contains("check for a running Git process"));
+        assert_eq!(std::fs::read(&tracking_lock)?, b"held");
+        std::fs::remove_file(&tracking_lock)?;
+        run(&["remote", "remove", "origin"])?;
         let stale = git_dir.join("refs/heads/feature/nested.lock");
         std::fs::write(&stale, b"held")?;
         let failure = prepare_writer_git(&mut writer, &state, &root, None)

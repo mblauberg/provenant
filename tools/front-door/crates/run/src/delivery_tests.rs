@@ -108,6 +108,44 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
 }
 
 #[test]
+fn integration_refuses_lane_branch_before_provider_launch()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    for target in ["lane", "LaNe", "origin/lane", "origin/LaNe"] {
+        fixture.request = HostDeliveryContext::destination(
+            DeliveryMode::Integrate(target.into()),
+            "lane",
+        )?
+        .ok_or("destination")?;
+        assert!(matches!(
+            fixture.prepare(),
+            Err(RunError::DeliveryPrepare { step: "integration target", .. })
+        ), "{target}");
+    }
+    Ok(())
+}
+
+#[test]
+fn graph_remote_target_refuses_a_lane_tracking_ref()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    for target in ["lane", "LaNe", "origin/lane", "origin/LaNe"] {
+        assert!(matches!(
+            HostDeliveryContext::validate_integration_target(&fixture.writer.project, target),
+            Err(RunError::DeliveryPrepare { step: "integration target", .. })
+        ));
+        let base = GitOid::parse("0000000000000000000000000000000000000001")?;
+        assert!(matches!(
+            HostDeliveryContext::new(fixture.environment.clone()).deliver_graph_pr(
+                &fixture.writer.project, target, base, "Graph"
+            ),
+            Err(RunError::DeliveryPrepare { step: "integration target", .. })
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
@@ -1650,7 +1688,7 @@ fn prepare_failures_name_step_and_bound_git_stderr()
         let git = fixture.root.join("git");
         let real_git = provenant_os::git::git_executable().ok_or("git executable")?;
         fixture.executable(&git, &format!(
-            "#!/bin/sh\ncase \"$*\" in\n*'{pattern}'*)\nprintf '%s' 'fixture git failure: private-token https://user:password@example.invalid/ {}' >&2\nexit 2;;\nesac\nexec '{}' \"$@\"\n", "é".repeat(5000), real_git.display()))?;
+            "#!/bin/sh\ncase \"$*\" in\n*'{pattern}'*)\nprintf '%s' 'fixture git failure: private-token https://user:password@example.invalid/ https://secret-user@example.invalid/ {}' >&2\nexit 2;;\nesac\nexec '{}' \"$@\"\n", "é".repeat(5000), real_git.display()))?;
         fixture
             .environment
             .push(("PROVENANT_GIT".into(), git.into_os_string()));
@@ -1663,6 +1701,7 @@ fn prepare_failures_name_step_and_bound_git_stderr()
         assert!(reason.contains("fixture git failure"), "{reason}");
         assert!(!reason.contains("private-token"), "{reason}");
         assert!(!reason.contains("user:password"), "{reason}");
+        assert!(!reason.contains("secret-user"), "{reason}");
         assert!(!reason.contains("receipt"), "{reason}");
         assert!(reason.len() < 1400, "diagnostic has {} bytes", reason.len());
     }

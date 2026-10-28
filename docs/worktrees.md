@@ -97,8 +97,11 @@ Git directory. Other tracking refs, including `origin/HEAD` and `origin/main`,
 shared Git config and `packed-refs` remain read-only. The host refreshes origin
 tracking refs and prepares the lane branch and upstream before launch. A lane
 can use `git fetch --refmap= origin main` to update `FETCH_HEAD` without trying
-to update `origin/main` if the remote advances during the run. A lane whose
-branch would alias a protected origin ref is refused.
+to update `origin/main` if the remote advances during the run. A lane is
+refused when its tracking ref would collide, under ASCII case folding, with
+`HEAD`, `main`, `master`, `trunk`, the origin default branch, another existing
+origin tracking ref or a path prefix of one. An exact existing ref for the
+lane is allowed unless it is protected.
 
 Fabric sets `CARGO_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR` and `CARGO_HOME` for
 each lane. Do not override them: confinement may deny other paths. Confined writers use
