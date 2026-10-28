@@ -475,6 +475,18 @@ pub fn report(
                 .as_ref()
                 .is_some_and(|c| c.deadline_unix_seconds > now),
             error: record.last_error,
+            capacity_cooldowns: record
+                .capacity_cooldowns
+                .iter()
+                .filter(|c| c.observed_unix_seconds <= now && c.expires_unix_seconds > now)
+                .map(|c| crate::CapacityCooldownRow {
+                    model: c.model.clone(),
+                    observed_unix_seconds: c.observed_unix_seconds,
+                    expires_unix_seconds: c.expires_unix_seconds,
+                    remaining_seconds: u64::try_from(c.expires_unix_seconds.saturating_sub(now))
+                        .unwrap_or(u64::MAX),
+                })
+                .collect(),
             display: None,
         });
     }
@@ -777,6 +789,34 @@ mod tests {
         assert_eq!(backoff(ProbeFailure::MissingCli, 1, None), 86400);
         assert_eq!(backoff(ProbeFailure::ProbeDirectory, 1, None), 120);
     }
+    #[test]
+    fn report_shows_only_live_capacity_cooldowns() {
+        let account = account();
+        let mut record = AccountRecord::empty(account.clone());
+        record.capacity_cooldowns.push(CapacityCooldown {
+            account,
+            model: "model".into(),
+            observed_unix_seconds: 100,
+            expires_unix_seconds: 700,
+        });
+        let row = |now| {
+            report(
+                crate::source::TEST_POLICIES,
+                &[record.clone()],
+                &[],
+                &QuotaQuery { adapter: None },
+                now,
+                "report.json".into(),
+            )
+            .unwrap()
+            .accounts
+            .remove(0)
+        };
+        assert_eq!(row(400).capacity_cooldowns[0].remaining_seconds, 300);
+        assert!(row(700).capacity_cooldowns.is_empty());
+        assert!(row(99).capacity_cooldowns.is_empty());
+    }
+
     #[test]
     fn reserve_adopts_a_renamed_label_for_the_same_account_key() {
         let a = account();

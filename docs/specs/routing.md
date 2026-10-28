@@ -29,6 +29,16 @@ and task index; the receipt records each weight, the random roll and the chosen 
   `::table_driven_weighted_pools_record_effort_readiness_roll_and_seed`
 - Owner: `crates/routing/src/`
 
+### Capacity cooldown
+
+A host records a short-lived capacity cooldown for the affected model and account
+when a provider reports capacity. Pool, named-route and senior/junior draws skip
+live cooldowns; if all candidates are cooling, the normal choice remains available
+and the receipt explains the fallback. Explicit model dispatches and resumes ignore
+capacity cooldowns. Quota refusals remain separate and continue to apply. The host
+setting `domains.routing.capacity_cooldown_seconds` defaults to 600 seconds; zero disables new cooldowns.
+`quota` and `lanes` show live cooldowns and their remaining time.
+
 ### One resolution, bounded alternatives
 
 Resolution runs once against immutable catalogue, availability and quota
@@ -221,8 +231,8 @@ account-scoped unless wire evidence proves a wider pool, and independent
 pools never exhaust each other. A newer comparable observation or the reset
 clears only that refusal. Only a quota-limited outcome cools an account;
 auth failures never switch accounts. Provider capacity errors settle as
-`model_unavailable` with the provider's reason visible in lanes. They do not
-currently record a routing cooldown.
+`model_unavailable` with the provider's reason visible in lanes and record a
+separate, advisory capacity cooldown on the host.
 - Why: one probe outage or model limit must not take a provider offline.
 - Test: `crates/quota/src/admission.rs::unknown_and_stale_do_not_manufacture_exhaustion`;
   `::independent_pool_reset_and_refusal_scope`;

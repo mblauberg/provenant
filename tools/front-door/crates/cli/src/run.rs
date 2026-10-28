@@ -504,6 +504,21 @@ impl run::Providers for Registry<'_> {
                 _ => None,
             })
         {
+            if description == "provider capacity"
+                && std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_none()
+                && let (Some(state_root), Some(roots)) =
+                    (provider_state.ancestors().nth(5), self.roots)
+                && let Ok(config) =
+                    provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+            {
+                // Capacity evidence is advisory; failure must not affect settlement.
+                let _ = crate::quota::persist_capacity_cooldown(
+                    state_root,
+                    route,
+                    jiff::Timestamp::now().as_second(),
+                    config.domains.routing.capacity_cooldown_seconds,
+                );
+            }
             decoded.outcome = outcome;
             let mut reason = provenant_confinement::redact::known_shapes(message.as_bytes())
                 .ok()
@@ -2912,11 +2927,43 @@ fn render_lanes(
     if rows.is_empty() {
         human.push_str("no matching lanes\n");
     }
+    let cooldowns = match (
+        crate::quota::read_cache_at(root),
+        SystemClock::new().wall_now(),
+    ) {
+        (Ok(records), Ok(now)) => {
+            render_cooldowns(&records, now.as_timestamp().as_second(), &mut human)
+        }
+        _ => Vec::new(),
+    };
     (
-        json!({ "lanes": rows, "next_cursor": next.map(|n| n.to_string()) }),
+        json!({ "lanes": rows, "next_cursor": next.map(|n| n.to_string()), "capacity_cooldowns": cooldowns }),
         human,
     )
 }
+fn render_cooldowns(
+    records: &[provenant_quota::AccountRecord],
+    now: i64,
+    human: &mut String,
+) -> Vec<Value> {
+    let mut shown = Vec::new();
+    for record in records {
+        for cooldown in &record.capacity_cooldowns {
+            if cooldown.observed_unix_seconds <= now && cooldown.expires_unix_seconds > now {
+                let remaining = cooldown.expires_unix_seconds.saturating_sub(now);
+                human.push_str(&format!(
+                    "capacity cooldown {}/{} [{}]: {remaining}s remaining\n",
+                    plain_text(&record.account.adapter, usize::MAX),
+                    plain_text(&cooldown.model, usize::MAX),
+                    plain_text(&record.account.label, usize::MAX)
+                ));
+                shown.push(json!({"account": record.account, "model": cooldown.model, "observed_unix_seconds": cooldown.observed_unix_seconds, "expires_unix_seconds": cooldown.expires_unix_seconds, "remaining_seconds": remaining}));
+            }
+        }
+    }
+    shown
+}
+
 fn settled(state: &run::AttemptState) -> (bool, bool) {
     match state {
         run::AttemptState::Terminal { outcome, .. } => {
@@ -6468,6 +6515,28 @@ mod tests {
     }
 
     #[test]
+    fn lanes_show_only_live_capacity_cooldowns() {
+        let account = provenant_quota::AccountScope {
+            adapter: "codex".into(),
+            account_key: "key".into(),
+            label: "work".into(),
+        };
+        let mut record = provenant_quota::AccountRecord::empty(account.clone());
+        record.capacity_cooldowns = vec![provenant_quota::CapacityCooldown {
+            account,
+            model: "model".into(),
+            observed_unix_seconds: 100,
+            expires_unix_seconds: 700,
+        }];
+        let mut human = String::new();
+        let shown = render_cooldowns(&[record.clone()], 400, &mut human);
+        assert_eq!(shown[0]["remaining_seconds"], 300);
+        assert!(human.contains("codex/model [work]: 300s remaining"));
+        assert!(render_cooldowns(&[record.clone()], 700, &mut String::new()).is_empty());
+        assert!(render_cooldowns(&[record], 99, &mut String::new()).is_empty());
+    }
+
+    #[test]
     fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::error::Error>> {
         let reason = "\x1b[31mreason\x1b[0m";
         let account = "\x1b]0;account\x07";
@@ -7235,6 +7304,51 @@ mod tests {
             decoded.session.as_deref(),
             Some("01234567-89ab-cdef-0123-456789abcdef")
         );
+    }
+
+    #[test]
+    fn capacity_store_failure_does_not_change_settlement() -> Result<(), Box<dyn std::error::Error>>
+    {
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
+                Ok(path.into())
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&Resolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        let registry = Registry {
+            roots: Some(&roots),
+            ..Default::default()
+        };
+        let route = run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6.1-sol".into()),
+            account_key: Some("key".into()),
+            account_label: Some("label".into()),
+            ..Default::default()
+        };
+        let stream = br#"{"type":"turn.failed","error":{"message":"at capacity","codex_error_info":"server_overloaded"}}"#;
+        let mut exit = clean_exit();
+        exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+        // The fifth ancestor is /dev/null, which cannot contain quota state.
+        assert!(
+            crate::quota::persist_capacity_cooldown(Path::new("/dev/null"), &route, 100, 600)
+                .is_err()
+        );
+        let decoded = registry
+            .decode(&route, stream, &exit, Path::new("/dev/null/a/b/c/d/e"))
+            .unwrap();
+        assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("provider capacity: at capacity")
+        );
+        Ok(())
     }
 
     #[test]

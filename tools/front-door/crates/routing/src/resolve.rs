@@ -21,6 +21,7 @@ pub struct RoutingContext<'a> {
     pub registry: &'a [Registration],
     pub availability: &'a [AvailabilityRecord],
     pub quota: &'a [QuotaObservation],
+    pub capacity_cooldowns: &'a [provenant_quota::CapacityCooldown],
     pub access: &'a [AccessContext<'a>],
     pub now: provenant_core::WallTime,
     pub host: &'a str,
@@ -1033,10 +1034,22 @@ fn admissible<'c>(
     }
     Ok(entry)
 }
+fn cooling(model: &ModelId, account: Option<&str>, context: &ValidatedContext<'_>) -> bool {
+    let now = context.now_seconds();
+    context.capacity_cooldowns.iter().any(|record| {
+        record.account.adapter == model.adapter()
+            && Some(record.account.account_key.as_str()) == account
+            && record.model == model.model()
+            && record.observed_unix_seconds <= now
+            && now < record.expires_unix_seconds
+    })
+}
+
 fn candidate(
     model: &ModelId,
     effort: Option<&str>,
     context: &ValidatedContext<'_>,
+    avoid_cooling: bool,
 ) -> Result<RouteAlternative, RoutingError> {
     let entry = admissible(model, effort, context)?;
     let access = context.access.iter().find(|a| a.adapter == model.adapter());
@@ -1059,7 +1072,15 @@ fn candidate(
             let (policy, _, _, _) = effective_profile(context, model, a.account_key.as_deref());
             let (headroom, _, standby) =
                 pacing_factor_basis_points(policy, model, a.account_key.as_deref(), context);
-            (a, reason, (!standby, headroom))
+            (
+                a,
+                reason,
+                (
+                    !avoid_cooling || !cooling(model, a.account_key.as_deref(), context),
+                    !standby,
+                    headroom,
+                ),
+            )
         })
         .collect();
     let best = evaluated
@@ -1234,7 +1255,10 @@ fn resolve_inner(
             if !privacy_allowed(model, request.confidential, context.catalogue) {
                 return Err(RoutingError::ConfidentialModel);
             }
-            (candidate(model, request.effort.as_deref(), context)?, None)
+            (
+                candidate(model, request.effort.as_deref(), context, false)?,
+                None,
+            )
         }
         RouteChoice::NamedRoute(name) => {
             let name = name.as_str();
@@ -1258,6 +1282,7 @@ fn resolve_inner(
                         &named.model,
                         request.effort.as_deref().or(named.effort.as_deref()),
                         context,
+                        false,
                     )?,
                     None,
                 )
@@ -1275,7 +1300,7 @@ fn resolve_inner(
     let alternatives = models
         .iter()
         .filter(|model| privacy_allowed(model, request.confidential, context.catalogue))
-        .map(|model| candidate(model, primary.effort.as_deref(), context))
+        .map(|model| candidate(model, primary.effort.as_deref(), context, false))
         .collect::<Result<Vec<_>, _>>()?;
     let exclusions = std::iter::once(&primary)
         .chain(alternatives.iter())
@@ -1348,6 +1373,7 @@ fn classify_pool(
     request: &RouteRequest,
     context: &ValidatedContext<'_>,
     excluded_members: &[ModelId],
+    avoid_cooling: bool,
 ) -> Result<ClassifiedPool, RoutingError> {
     let mut classified = ClassifiedPool {
         candidates: Vec::with_capacity(members.len()),
@@ -1398,8 +1424,23 @@ fn classify_pool(
             classified.exclusions.push(detail.to_owned());
             Some(kind.to_owned())
         } else {
-            match candidate(&member.model, effort.as_deref(), context) {
+            match candidate(&member.model, effort.as_deref(), context, avoid_cooling) {
                 Ok(resolved) => {
+                    if avoid_cooling
+                        && cooling(&member.model, resolved.account_key.as_deref(), context)
+                    {
+                        classified.candidates.push(RouteSelectionCandidate {
+                            model: member.model.as_str().into(),
+                            weight: member.weight,
+                            factor_basis_points,
+                            pacing_detail: None,
+                            effort,
+                            readiness: Some(resolved.readiness.clone()),
+                            exclusion: Some("capacity cooldown".into()),
+                        });
+                        classified.routes.push(None);
+                        continue;
+                    }
                     let (policy, _, _, _) =
                         effective_profile(context, &member.model, resolved.account_key.as_deref());
                     let (factor, detail, is_standby) = pacing_factor_basis_points(
@@ -1539,8 +1580,26 @@ fn select_pool(
     seed: Option<(&str, u64)>,
     excluded_members: &[ModelId],
 ) -> Result<PoolPick, RoutingError> {
-    let classified = classify_pool(members, request, context, excluded_members)?;
-    let draw = draw_pool(name, &classified, seed)?;
+    let mut classified = classify_pool(members, request, context, excluded_members, true)?;
+    let draw = match draw_pool(name, &classified, seed) {
+        Ok(draw) => draw,
+        Err(error)
+            if classified
+                .candidates
+                .iter()
+                .any(|candidate| candidate.exclusion.as_deref() == Some("capacity cooldown")) =>
+        {
+            classified = classify_pool(members, request, context, excluded_members, false)?;
+            let draw = draw_pool(name, &classified, seed).map_err(|_| error)?;
+            let detail = &mut classified.candidates[draw.index].pacing_detail;
+            *detail = Some(format!(
+                "{}; all eligible candidates cooling, normal selection",
+                detail.as_deref().unwrap_or("capacity cooldown")
+            ));
+            draw
+        }
+        Err(error) => return Err(error),
+    };
     let route = classified
         .routes
         .get(draw.index)

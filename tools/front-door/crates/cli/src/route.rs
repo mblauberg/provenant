@@ -582,6 +582,10 @@ fn with_context<T>(
         .quota
         .apply_calibration(&mut quota_records, timestamp.as_second());
     let quota = quota_observations(&catalogue, availability, &quota_records, requested_models)?;
+    let capacity_cooldowns: Vec<_> = quota_records
+        .iter()
+        .flat_map(|record| record.capacity_cooldowns.iter().cloned())
+        .collect();
     let now = WallTime::from_micros(timestamp.as_microsecond())?;
     action(
         &RoutingContext {
@@ -590,6 +594,7 @@ fn with_context<T>(
             registry: REGISTRY,
             availability,
             quota: &quota,
+            capacity_cooldowns: &capacity_cooldowns,
             access,
             now,
             host,

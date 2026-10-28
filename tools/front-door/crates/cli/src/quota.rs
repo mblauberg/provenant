@@ -250,7 +250,11 @@ fn read_records(dir: &Directory) -> Result<Vec<AccountRecord>, EdgeError> {
 
 /// Read validated quota state without creating directories or refreshing providers.
 pub(crate) fn read_cache(roots: &Roots) -> Result<Vec<AccountRecord>, EdgeError> {
-    let root = match Directory::open_anchor(roots.state.as_path()) {
+    read_cache_at(roots.state.as_path())
+}
+
+pub(crate) fn read_cache_at(state: &Path) -> Result<Vec<AccountRecord>, EdgeError> {
+    let root = match Directory::open_anchor(state) {
         Ok(root) => root,
         Err(error) if error.is_not_found() => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
@@ -323,6 +327,64 @@ pub(crate) fn persist_provider_refusal(
         pool,
         now_unix_seconds,
         resets_unix_seconds,
+    )?;
+    write_intent(&directory, &intent, &mut records)
+}
+
+pub(crate) fn persist_capacity_cooldown(
+    state_root: &Path,
+    route: &provenant_records::run::RouteRecord,
+    now_unix_seconds: i64,
+    duration_seconds: u64,
+) -> Result<(), EdgeError> {
+    let adapter = route
+        .provider
+        .as_deref()
+        .ok_or(QuotaError::Invalid("capacity cooldown route"))?;
+    let model = route
+        .model
+        .as_deref()
+        .ok_or(QuotaError::Invalid("capacity cooldown route"))?;
+    let account = AccountScope {
+        adapter: adapter.to_owned(),
+        account_key: route
+            .account_key
+            .clone()
+            .ok_or(QuotaError::Invalid("capacity cooldown account"))?,
+        label: route
+            .account_label
+            .clone()
+            .ok_or(QuotaError::Invalid("capacity cooldown account label"))?,
+    };
+    account.validate()?;
+
+    let root = private(state_root)?;
+    let directory = child(&root, OsStr::new("quota"))?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|_| EdgeError::Time)?;
+    let _lock = directory.lock(
+        OsStr::new("quota.lock"),
+        LockMode::Exclusive,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    let mut records = read_records(&directory)?;
+    let current = records
+        .iter()
+        .find(|record| {
+            record.account.adapter == account.adapter
+                && record.account.account_key == account.account_key
+        })
+        .cloned();
+    let account = current.as_ref().map_or(&account, |record| &record.account);
+    let intent = provenant_quota::record_capacity_cooldown(
+        current.as_ref(),
+        account,
+        model,
+        now_unix_seconds,
+        duration_seconds,
     )?;
     write_intent(&directory, &intent, &mut records)
 }
@@ -1154,6 +1216,13 @@ fn quota_human(report: &QuotaReport) -> String {
             if error == ProbeFailure::Auth {
                 human.push_str(" (needs login in this identity)");
             }
+        }
+        for cooldown in &row.capacity_cooldowns {
+            human.push_str(&format!(
+                "; capacity cooldown {}: {}s remaining",
+                cooldown.model.escape_debug(),
+                cooldown.remaining_seconds
+            ));
         }
         human.push('\n');
     }

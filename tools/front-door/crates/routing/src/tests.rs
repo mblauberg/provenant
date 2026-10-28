@@ -19,6 +19,7 @@ fn context<'a>(
         registry: REGISTRY,
         availability: &[],
         quota: &[],
+        capacity_cooldowns: &[],
         access: &[],
         now,
         host: "test-host",
@@ -2975,5 +2976,79 @@ fn opencode_zen_pool_does_not_inherit_go_pacing_quota() -> Result<(), Box<dyn st
     assert_eq!(previews.len(), 1);
     assert_eq!(previews[0].account.as_deref(), Some("zen"));
     assert_eq!(previews[0].policy, PacingPolicy::Pace);
+    Ok(())
+}
+
+#[test]
+fn capacity_cooldowns_apply_only_to_draws_and_expire() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pools": {"trial": [
+            {"model":"codex/gpt-6-luna", "weight":1, "efforts":["high"]},
+            {"model":"codex/gpt-6.1-sol", "weight":1, "efforts":["high"]}
+        ]}
+    }))?;
+    let registry = [provenant_providers::Registration {
+        quota_source: None,
+        ..provenant_providers::codex::REGISTRATION
+    }];
+    let availability = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let cooldown = provenant_quota::CapacityCooldown {
+        account: provenant_quota::AccountScope {
+            adapter: "codex".into(),
+            account_key: "opaque-account".into(),
+            label: "test".into(),
+        },
+        model: "gpt-6-luna".into(),
+        observed_unix_seconds: 90,
+        expires_unix_seconds: 110,
+    };
+    let cooldowns = [cooldown.clone()];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.registry = &registry;
+    ctx.availability = &availability;
+    ctx.access = &access;
+    ctx.capacity_cooldowns = &cooldowns;
+    let mut query = request("codex/gpt-6-luna")?;
+    let explicit = resolve(&query, &ctx)?;
+    assert_eq!(explicit.model, "gpt-6-luna");
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    let selected = resolve(&query, &ctx)?;
+    assert_eq!(selected.model, "gpt-6.1-sol");
+    assert_eq!(
+        selected.pool_selection.unwrap().candidates[0]
+            .exclusion
+            .as_deref(),
+        Some("capacity cooldown")
+    );
+    let both = [
+        cooldown,
+        provenant_quota::CapacityCooldown {
+            account: provenant_quota::AccountScope {
+                adapter: "codex".into(),
+                account_key: "opaque-account".into(),
+                label: "test".into(),
+            },
+            model: "gpt-6.1-sol".into(),
+            observed_unix_seconds: 90,
+            expires_unix_seconds: 110,
+        },
+    ];
+    ctx.capacity_cooldowns = &both;
+    let fallback = resolve(&query, &ctx)?;
+    let receipt = fallback.pool_selection.unwrap();
+    assert!(receipt.candidates.iter().any(|c| {
+        c.pacing_detail
+            .as_deref()
+            .is_some_and(|d| d.contains("all eligible candidates cooling"))
+    }));
+    ctx.now = provenant_core::WallTime::from_micros(110_000_000)?;
+    let expired = resolve(&query, &ctx)?.pool_selection.unwrap();
+    assert!(expired.candidates.iter().all(|c| c.exclusion.is_none()));
     Ok(())
 }
