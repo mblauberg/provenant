@@ -879,6 +879,13 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             }
             if api_error_status == Some(401) {
                 events.push(E::AuthRequired);
+            } else if api_error_status == Some(529) {
+                // Anthropic uses 529 for temporary API overload.
+                events.push(E::ModelOverloaded {
+                    message: result
+                        .filter(|message| !message.is_empty())
+                        .unwrap_or_else(|| "provider overloaded (HTTP 529)".into()),
+                });
             } else if is_error || subtype != "success" {
                 events.push(E::Error);
             } else {
@@ -891,6 +898,21 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         }
         _ => vec![],
     })
+}
+
+#[cfg(test)]
+mod overload_tests {
+    use super::*;
+
+    #[test]
+    fn result_529_is_typed_overload_with_provider_reason() {
+        let events = decode(br#"{"type":"result","session_id":"s","subtype":"error_during_execution","is_error":true,"api_error_status":529,"result":"Overloaded"}"#).unwrap();
+        assert!(events.contains(&E::ModelOverloaded {
+            message: "Overloaded".into()
+        }));
+        let events = decode(br#"{"type":"result","session_id":"s","subtype":"error_during_execution","is_error":true,"api_error_status":500,"result":"Overloaded"}"#).unwrap();
+        assert!(events.contains(&E::Error));
+    }
 }
 
 /// Metadata only. The caller must never read a token to establish presence.

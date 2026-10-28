@@ -488,6 +488,11 @@ impl run::Providers for Registry<'_> {
                     message,
                     "provider model unavailable",
                 )),
+                ProviderEvent::ModelOverloaded { message } => Some((
+                    run::Outcome::ModelUnavailable,
+                    message,
+                    "provider model at capacity",
+                )),
                 _ => None,
             })
         {
@@ -502,6 +507,25 @@ impl run::Providers for Registry<'_> {
             }
             reason.truncate(end);
             decoded.reason = Some(reason);
+        }
+        if events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::ModelOverloaded { .. }))
+            && std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_none()
+            && route.account_key.is_some()
+        {
+            if let Some(state_root) = provider_state.ancestors().nth(5) {
+                crate::quota::persist_provider_refusal(
+                    state_root,
+                    route,
+                    None,
+                    jiff::Timestamp::now().as_second(),
+                    None,
+                )
+                .map_err(|e| e.to_string())?;
+            } else if self.roots.is_some() {
+                return Err("capacity evidence has no state root".into());
+            }
         }
         if let Some(ProviderEvent::DeniedNote { action }) = events
             .iter()
@@ -2640,6 +2664,18 @@ fn render_lanes(
                 "{}/{}/{}{title_text} {state} {route_text}{account_field}{reason_text}\n",
                 lane.run_id, lane.task_id, lane.attempt_id,
             ));
+            if matches!(
+                lane.state,
+                run::AttemptState::Terminal {
+                    outcome: run::Outcome::ModelUnavailable,
+                    ..
+                }
+            ) {
+                human.push_str(&format!(
+                    "  continue: provenant resume {} --prompt-file PROMPT\n",
+                    lane.attempt_id
+                ));
+            }
             for skipped in &lane.skipped_routes {
                 human.push_str(&format!(
                     "  skipped {} {:?}: {}\n",
@@ -6129,6 +6165,20 @@ mod tests {
         assert_eq!(data["lanes"][0]["delivery"]["remote"], json!(remote));
         assert_eq!(data["lanes"][0]["delivery"]["branch"], json!(branch));
         lane.state = run::AttemptState::Terminal {
+            outcome: run::Outcome::ModelUnavailable,
+            exit_code: Some(1),
+            finished_at: now,
+            reason: Some("Selected model is at capacity".into()),
+        };
+        let (data, human) =
+            render_lanes(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
+        assert_eq!(data["lanes"][0]["state"], "model_unavailable");
+        assert!(human.contains("(Selected model is at capacity)"));
+        assert!(human.contains(&format!(
+            "continue: provenant resume {} --prompt-file PROMPT",
+            lane.attempt_id
+        )));
+        lane.state = run::AttemptState::Terminal {
             outcome: run::Outcome::ReviewRequired,
             exit_code: Some(0),
             finished_at: now,
@@ -6759,6 +6809,34 @@ mod tests {
                 .reason
                 .unwrap_or_default()
                 .contains("nearest catalogued IDs")
+        );
+    }
+
+    #[test]
+    fn codex_capacity_reaches_the_decoded_outcome() {
+        let mut exit = clean_exit();
+        exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+        let route = run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6.1-sol".into()),
+            ..Default::default()
+        };
+        let stream = format!(
+            "{}\n{}\n",
+            json!({"type":"thread.started","thread_id":"01234567-89ab-cdef-0123-456789abcdef"}),
+            json!({"type":"turn.failed","error":{"message":"Selected model is at capacity. Please try a different model.","codex_error_info":"server_overloaded"}})
+        );
+        let decoded = Registry::default()
+            .decode(&route, stream.as_bytes(), &exit, Path::new("/nonexistent"))
+            .unwrap();
+        assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("Selected model is at capacity. Please try a different model.")
+        );
+        assert_eq!(
+            decoded.session.as_deref(),
+            Some("01234567-89ab-cdef-0123-456789abcdef")
         );
     }
 

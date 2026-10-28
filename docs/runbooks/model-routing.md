@@ -34,7 +34,7 @@ no current reset use a full remaining window for conservative pacing; see
 members remain eligible without floors, using the local ledger as a lower
 bound. Route diagnostics identify uncalibrated windows. Missing quota data uses
 1.0. `spend` and `max` use 1.0; admission handles
-short rate-limit cooldowns, and a paid route remains eligible while credits
+short per-model rate-limit and capacity cooldowns, and a paid route remains eligible while credits
 remain. If no weighted member is ready, the first ready zero-weight member is
 selected; otherwise a recoverable unavailable member is preferred, and
 disabled members are excluded. If only disabled members remain, resolution

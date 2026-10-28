@@ -897,6 +897,39 @@ fn graph_settlement_advances_writer_and_account_routed_review() -> Result {
     Ok(())
 }
 
+fn codex_capacity_settles_and_persists_model_scoped_refusal() -> Result {
+    let message = "Selected model is at capacity. Please try a different model.";
+    let stdout = format!(
+        "{{\"type\":\"thread.started\",\"thread_id\":\"01234567-89ab-cdef-0123-456789abcdef\"}}\n{{\"type\":\"turn.failed\",\"error\":{{\"message\":\"{message}\",\"codex_error_info\":\"server_overloaded\"}}}}\n"
+    );
+    let (rig, terminal) = persisted_attempt(
+        "codex",
+        "codex/gpt-6.1-sol",
+        ("work", "codex-fixture"),
+        stdout.as_bytes(),
+        b"",
+        1,
+    )?;
+    assert!(matches!(
+        terminal.state,
+        provenant_run::AttemptState::Terminal {
+            outcome: provenant_run::Outcome::ModelUnavailable,
+            ..
+        }
+    ));
+    assert!(
+        matches!(&terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason == message)
+    );
+    let record = provenant_quota::AccountRecord::decode(&fs::read(
+        rig.state.join("quota/codex-fixture/codex.json"),
+    )?)?;
+    assert_eq!(record.refusals.len(), 1);
+    assert_eq!(record.refusals[0].model, "gpt-6.1-sol");
+    assert!(record.refusals[0].pool.is_none());
+    assert!(record.refusals[0].resets_unix_seconds.is_none());
+    Ok(())
+}
+
 /// Finish one attempt on `stdout` as provider output and return the quota
 /// record its refusal persisted for the applied account.
 fn persisted_refusal(
@@ -1712,6 +1745,7 @@ fn main() -> ExitCode {
                 "agy_individual_quota_cools_model_until_reset",
                 "agy_denied_command_reaches_result_and_terminal_reason",
                 "agy_denial_result_reaches_terminal_reason",
+                "codex_capacity_settles_and_persists_model_scoped_refusal",
             ],
             |name| {
                 let result = match name {
@@ -1751,6 +1785,9 @@ fn main() -> ExitCode {
                     }
                     "agy_denial_result_reaches_terminal_reason" => {
                         agy_denial_result_reaches_terminal_reason()
+                    }
+                    "codex_capacity_settles_and_persists_model_scoped_refusal" => {
+                        codex_capacity_settles_and_persists_model_scoped_refusal()
                     }
                     _ => opencode_free_pool_cools_second_model(),
                 };

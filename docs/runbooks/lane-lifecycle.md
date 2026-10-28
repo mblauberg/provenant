@@ -64,7 +64,9 @@ worktrees retain their existing GC policy.
 `provenant resume ATTEMPT --prompt-file followup.md` generates and prints an
 operation ID; supply `--operation-id ID` for a planned retry. It pins the prior
 attempt's applied provider, model and account, including when dispatch selected
-a named route pool. Targets accept unique hex prefixes of at least eight
+a named route pool. A model capacity failure appears as `model_unavailable`
+with its reason in lanes; resume can continue its provider session when supported.
+Targets accept unique hex prefixes of at least eight
 characters and `RUN/ATTEMPT`; an ambiguous prefix lists candidates. Resume
 starts fresh by default when continuation state is unavailable, preserving authority with
 original context and the previous result attached. Ownership must match the

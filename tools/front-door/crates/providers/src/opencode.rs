@@ -302,6 +302,8 @@ struct Failure {
     #[serde(rename = "type")]
     kind: String,
     message: Option<String>,
+    #[serde(default)]
+    status: Option<u16>,
     response: Option<Response>,
     #[serde(rename = "retryAfterMs", default)]
     retry_after_ms: Option<serde_json::Value>,
@@ -447,6 +449,18 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                     .unwrap_or_else(|| "provider model unavailable".into()),
             }]
         }
+        // OpenCode reports upstream HTTP status on provider.internal errors.
+        // Anthropic's 529 is a temporary overload, rather than a generic 5xx.
+        Event::Error { error, .. }
+            if error.kind == "provider.internal" && error.status == Some(529) =>
+        {
+            vec![E::ModelOverloaded {
+                message: error
+                    .message
+                    .filter(|message| !message.is_empty())
+                    .unwrap_or_else(|| "provider overloaded (HTTP 529)".into()),
+            }]
+        }
         Event::Error { .. } => vec![E::Error],
         _ => vec![],
     })
@@ -501,6 +515,23 @@ mod tests {
             )
             .unwrap();
         assert_eq!(outcome.status(), crate::OutcomeStatus::Refused);
+    }
+
+    #[test]
+    fn upstream_529_is_a_typed_overload() {
+        let events = decode(br#"{"type":"error","error":{"type":"provider.internal","status":529,"message":"Overloaded"}}"#).unwrap();
+        assert_eq!(
+            events,
+            vec![E::ModelOverloaded {
+                message: "Overloaded".into()
+            }]
+        );
+        for raw in [
+            br#"{"type":"error","error":{"type":"provider.internal","status":500,"message":"Overloaded"}}"#.as_slice(),
+            br#"{"type":"error","error":{"type":"unknown","status":529,"message":"Overloaded"}}"#.as_slice(),
+        ] {
+            assert_eq!(decode(raw).unwrap(), vec![E::Error]);
+        }
     }
 
     #[test]

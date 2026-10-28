@@ -485,6 +485,35 @@ fn recovered_transport_retry_succeeds_but_turn_failure_stays_failed() -> Result<
     Ok(())
 }
 #[test]
+fn codex_capacity_failure_is_typed_without_misclassifying_other_failures()
+-> Result<(), ProviderError> {
+    for raw in [
+        r#"{"type":"turn.failed","error":{"message":"Selected model is at capacity. Please try a different model.","codex_error_info":"server_overloaded"}}"#,
+        r#"{"type":"turn.failed","error":{"message":"Temporarily unavailable","codex_error_info":"server_overloaded"}}"#,
+        r#"{"type":"turn.failed","error":{"message":"Model is AT CAPACITY"}}"#,
+    ] {
+        let (events, outcome) = replay(&codex::Codex, &format!("{raw}\n"), EXIT)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Refused);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::ModelOverloaded { .. }))
+        );
+    }
+    let (events, outcome) = replay(
+        &codex::Codex,
+        "{\"type\":\"turn.failed\",\"error\":{\"message\":\"invalid request\"}}\n",
+        EXIT,
+    )?;
+    assert_eq!(outcome.status(), OutcomeStatus::Failed);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::ModelOverloaded { .. }))
+    );
+    Ok(())
+}
+#[test]
 fn codex_retry_exhausted_429_is_rate_limited() -> Result<(), ProviderError> {
     for message in [
         "exceeded retry limit, last status: 429 Too Many Requests",

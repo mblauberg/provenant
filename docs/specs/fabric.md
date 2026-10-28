@@ -225,7 +225,8 @@ detect tampering. Cancelling a graph persists the admission fence first.
 ### Fallback only for unavailability
 
 Only a terminal `auth_required`, `usage_limited` or `adapter_unavailable`
-moves a node to the next route. Task failure, input requirements and uncertain
+moves a node to the next route. Model capacity failures are treated as model
+unavailability for this purpose. Task failure, input requirements and uncertain
 launches never fall back; after launch only read-only nodes may fall back. A failed
 writer keeps its worktree. Graph writers deliver only when their node explicitly requests it.
 - Why: retrying a writer elsewhere would duplicate edits.
