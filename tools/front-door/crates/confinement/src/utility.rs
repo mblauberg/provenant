@@ -411,8 +411,12 @@ struct ExecutablePin {
 
 impl ExecutablePin {
     fn new(input: &Path, tool: &'static str) -> Result<Self, UtilityError> {
-        let path = canonicalize(input)?;
-        if !path.is_absolute() || path.file_name().and_then(OsStr::to_str) != Some(tool) {
+        // Canonicalisation would silently anchor a relative path at the cwd.
+        if !input.is_absolute() {
+            return Err(UtilityError::InvalidExecutable { tool });
+        }
+        let path = canonicalize(input).map_err(|_| UtilityError::InvalidExecutable { tool })?;
+        if path.file_name().and_then(OsStr::to_str) != Some(tool) {
             return Err(UtilityError::InvalidExecutable { tool });
         }
         let parent_path = path
@@ -1505,6 +1509,20 @@ pub(crate) mod tests {
             ExecutablePin::new(&link, "git"),
             Err(UtilityError::InvalidExecutable { tool: "git" })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn executable_pin_rejects_relative_and_dangling_paths() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let link = temp.path().join("git");
+        std::os::unix::fs::symlink(temp.path().join("missing/git"), &link)?;
+        for input in [Path::new("git"), link.as_path()] {
+            assert!(matches!(
+                ExecutablePin::new(input, "git"),
+                Err(UtilityError::InvalidExecutable { tool: "git" })
+            ));
+        }
         Ok(())
     }
 
