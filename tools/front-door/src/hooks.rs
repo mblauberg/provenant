@@ -272,7 +272,7 @@ const NO_CHECKPOINT_WINDOW: i64 = 24 * 60 * 60;
 fn project_id(
     globals: &Globals,
     cwd: &Path,
-) -> Result<(provenant_core::Roots, provenant_core::ProjectId), Error> {
+) -> Result<(provenant_core::Roots, PathBuf, provenant_core::ProjectId), Error> {
     let project = std::fs::canonicalize(cwd)?;
     if let Some(selected) = &globals.project
         && std::fs::canonicalize(selected)? != project
@@ -282,12 +282,12 @@ fn project_id(
     if !project.is_dir() {
         return Err("hook cwd unavailable".into());
     }
-    let roots = crate::roots::resolve(
+    let resolved = crate::roots::resolve(
         globals,
         crate::roots::Workspace::At(&project),
         crate::roots::Product::Required,
-    )?
-    .roots;
+    )?;
+    let roots = resolved.roots;
     let id = with_git(|runtime, executor, budget, cancel| {
         let location = runtime
             .project_location(executor, &project, budget, cancel)?
@@ -296,7 +296,7 @@ fn project_id(
             provenant_config::lookup_project(&roots, &location)?.ok_or("project not bound")?;
         Ok(binding.project_id())
     })?;
-    Ok((roots, id))
+    Ok((roots, resolved.home, id))
 }
 fn checkpoint(
     moment: Moment,
@@ -307,7 +307,7 @@ fn checkpoint(
     client: Option<provenant_records::Harness>,
 ) -> Result<provenant_workflow::session::HookContext, Error> {
     use provenant_workflow::session;
-    let (roots, project) = project_id(globals, cwd)?;
+    let (roots, home, project) = project_id(globals, cwd)?;
     let host: AdvisoryInput = serde_json::from_slice(input)?;
     let store = session::SessionStore::new(
         roots.state.clone(),
@@ -370,6 +370,9 @@ fn checkpoint(
         }
         _ => {}
     }
+    append_session_warning(&mut digest, moment, in_lane, || {
+        crate::disk_guard::session_warning(roots.state.as_path(), &home, cwd)
+    });
     if moment == Moment::Stop {
         return Ok(session::HookContext {
             session_id: None,
@@ -392,6 +395,58 @@ fn checkpoint(
             client,
         },
     ))
+}
+
+fn append_session_warning(
+    digest: &mut String,
+    moment: Moment,
+    in_lane: bool,
+    observe: impl FnOnce() -> Option<String>,
+) {
+    if !in_lane
+        && matches!(moment, Moment::Compact | Moment::Restart)
+        && let Some(warning) = observe()
+    {
+        if !digest.is_empty() {
+            digest.push('\n');
+        }
+        digest.push_str(&warning);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod disk_warning_tests {
+    #[allow(unused_imports)] // Also included by the harness=false worktree driver.
+    use super::{Moment, append_session_warning};
+
+    #[test]
+    fn session_warning_is_only_added_for_chair_starts() {
+        for moment in [Moment::Restart, Moment::Compact] {
+            let mut digest = String::from("state");
+            append_session_warning(&mut digest, moment, false, || None);
+            assert_eq!(digest, "state");
+            append_session_warning(&mut digest, moment, false, || {
+                Some("Disk pressure: low".into())
+            });
+            assert_eq!(digest, "state\nDisk pressure: low");
+        }
+        for (moment, lane) in [
+            (Moment::Restart, true),
+            (Moment::Compact, true),
+            (Moment::PreCompact, false),
+            (Moment::Stop, false),
+        ] {
+            let mut digest = String::new();
+            let observed = std::cell::Cell::new(false);
+            append_session_warning(&mut digest, moment, lane, || {
+                observed.set(true);
+                None
+            });
+            assert!(digest.is_empty());
+            assert!(!observed.get());
+        }
+    }
 }
 /// Collect state and save it to the hook-owned file beside the checkpoint.
 fn autosave(

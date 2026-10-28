@@ -705,14 +705,18 @@ fn human_text(command: &str, data: &Value) -> String {
     };
     match command {
         "workflow session save" => {
-            let mut text = crate::terse(data);
+            let mut summary = data.clone();
+            if let Some(object) = summary.as_object_mut() {
+                object.remove("warnings");
+            }
+            let mut text = crate::terse(&summary);
             for warning in data["warnings"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
             {
-                text.push_str(&format!("\nwarning: {warning}"));
+                text.push_str(&format!("warning: {warning}\n"));
             }
             with_newline(&text)
         }
@@ -755,7 +759,22 @@ pub fn session_revisions(roots: &Roots) -> u64 {
         })
 }
 
-pub fn run(cmd: Workflow, globals: &Globals, roots: &Roots, home: &Path, cwd: &Path) -> u8 {
+fn add_session_warning(data: &mut Value, warning: Option<String>) {
+    if let Some(warning) = warning
+        && let Some(warnings) = data.get_mut("warnings").and_then(Value::as_array_mut)
+    {
+        warnings.push(Value::String(warning));
+    }
+}
+
+pub fn run(
+    cmd: Workflow,
+    globals: &Globals,
+    roots: &Roots,
+    home: &Path,
+    cwd: &Path,
+    disk_warning: impl FnOnce() -> Option<String>,
+) -> u8 {
     let command = cmd.path();
     let read_only = cmd.read_only();
     let result = execute(cmd, globals, roots.clone(), home, cwd);
@@ -777,6 +796,9 @@ pub fn run(cmd: Workflow, globals: &Globals, roots: &Roots, home: &Path, cwd: &P
             out
         }
     };
+    if command == "workflow session save" && out.error.is_none() {
+        add_session_warning(&mut out.data, disk_warning());
+    }
     // Incomplete or failed coverage is a result, not an error.
     if command == "workflow review"
         && out.error.is_none()
@@ -823,6 +845,24 @@ mod tests {
             }),
         );
         assert!(text.contains("warning: repeat the same command (including --rebind)"));
+    }
+
+    #[test]
+    fn disk_warning_is_once_in_save_data_and_human_output() {
+        let warning = "Disk pressure: 1 byte free; run `provenant disk report` or `provenant gc`.";
+        for observed in [None, Some(warning.to_owned())] {
+            let mut data = serde_json::json!({"saved_bytes": 5, "warnings": []});
+            super::add_session_warning(&mut data, observed.clone());
+            let rendered = super::human_text("workflow session save", &data);
+            assert_eq!(
+                rendered.matches(warning).count(),
+                usize::from(observed.is_some())
+            );
+            assert_eq!(
+                data["warnings"].as_array().map(Vec::len),
+                Some(usize::from(observed.is_some()))
+            );
+        }
     }
 
     #[test]
