@@ -715,7 +715,7 @@ fn host_remembers_child_task_after_attempt_row_deletion() -> TestResult {
     // Make the replacement fully launchable, including its prompt and ticket.
     let directory = store.attempt_dir(nested.run_id, replacement.attempt_id, true)?;
     artifacts::seal(&directory, "prompt.txt", b"exact prompt", RECORD_LIMIT)?;
-    store.queue_ticket(&store.db, &replacement, LaneClass::ReadOnly, 1, 0)?;
+    store.queue_ticket(&store.db, &replacement, LaneClass::ReadOnly, 1, 0, 1)?;
     let revalidated = store.validate_child(
         nested.run_id,
         parent,
@@ -5855,77 +5855,298 @@ fn write_grants_are_bounded_at_admission_and_read_and_preserve_git_digest() -> T
 }
 
 #[test]
-fn lane_waits_name_a_disk_guard_pause_for_running_lanes() -> TestResult {
+fn lane_waits_report_only_the_running_lanes_own_disk_pause() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let id = starting(&store, &lane(120, true), &call)?;
     let running = store.claim(id, &at(0), &call)?.ok_or("lane starts")?;
-    assert_eq!(running.state, AttemptState::Running);
+    let other_id = starting(&store, &lane(121, true), &call)?;
+    let other = store
+        .claim(other_id, &at(20_000), &call)?
+        .ok_or("other starts")?;
+    let marker = store
+        .context
+        .state_root
+        .as_path()
+        .join("runs")
+        .join(running.run_id.to_string())
+        .join("attempts")
+        .join(id.to_string())
+        .join("process.json");
+    let guardian = match provenant_supervisor::census::SystemProcessObserver
+        .observe(i64::from(std::process::id()))
+    {
+        provenant_supervisor::census::ProcessObservation::Present(fact) => fact.identity,
+        _ => return Err("test guardian identity unavailable".into()),
+    };
+    std::fs::write(
+        &marker,
+        serde_json::to_vec(&serde_json::json!({
+            "disk_paused": true, "guardian": guardian,
+        }))?,
+    )?;
+    let records = [running, other];
+    let waits = store.lane_waits(&records, &call);
+    assert_eq!(waits.len(), 1);
+    assert_eq!(waits[0].attempt_id, id);
+    assert_eq!(
+        waits[0].waiting_for,
+        "disk pressure paused builds below gc.free_floor; run `provenant gc --apply`"
+    );
+    let exit_path = marker.with_file_name("process-exit.json");
+    std::fs::write(&exit_path, br#"{"unresolved_cleanup":true}"#)?;
+    assert!(
+        store.lane_waits(&records, &call).is_empty(),
+        "an exited provider cannot remain disk-paused while its guardian settles cleanup"
+    );
+    std::fs::remove_file(exit_path)?;
+    let mut dead_guardian = guardian;
+    dead_guardian.native_start = dead_guardian.native_start.saturating_add(1);
+    std::fs::write(
+        &marker,
+        serde_json::to_vec(&serde_json::json!({
+            "disk_paused": true, "guardian": dead_guardian,
+        }))?,
+    )?;
+    assert!(
+        store.lane_waits(&records, &call).is_empty(),
+        "a dead guardian's checkpoint must not report a current disk pause"
+    );
+    Ok(())
+}
+
+#[test]
+fn disk_pause_wait_ignores_false_missing_symlinked_and_oversized_observations() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let id = starting(&store, &lane(120, true), &call)?;
+    let running = store.claim(id, &at(0), &call)?.ok_or("lane starts")?;
     let records = [running];
+    let marker = store
+        .context
+        .state_root
+        .as_path()
+        .join("runs")
+        .join(records[0].run_id.to_string())
+        .join("attempts")
+        .join(id.to_string())
+        .join("process.json");
     assert!(store.lane_waits(&records, &call).is_empty());
-    let gib = 1024_u64.pow(3);
-    let guard = store.writer_registry().join("disk-guard");
-    std::fs::create_dir_all(&guard)?;
-    std::fs::write(
-        guard.join("paused.json"),
-        format!(
-            r#"{{"paused":[{{"pid":42,"uid":501,"name":"cargo","started":"x"}}],"free":{},"resume_at":{}}}"#,
-            20 * gib,
-            50 * gib
-        ),
-    )?;
-    let waits = store.lane_waits(&records, &call);
-    assert_eq!(
-        waits.first().map(|w| w.waiting_for.as_str()),
-        Some("disk guard paused builds (free 20.0 GiB, resumes at 50.0 GiB)")
-    );
-    Ok(())
-}
-
-#[test]
-fn disk_guard_wait_shows_a_pause_without_figures() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let id = starting(&store, &lane(120, true), &call)?;
-    let running = store.claim(id, &at(0), &call)?.ok_or("lane starts")?;
-    let records = [running];
-    let guard = store.writer_registry().join("disk-guard");
-    std::fs::create_dir_all(&guard)?;
-    std::fs::write(
-        guard.join("paused.json"),
-        r#"{"paused":[{"pid":42,"uid":501,"name":"cargo","started":"x"}]}"#,
-    )?;
-    let waits = store.lane_waits(&records, &call);
-    assert_eq!(
-        waits.first().map(|w| w.waiting_for.as_str()),
-        Some("disk guard paused builds")
-    );
-    Ok(())
-}
-
-#[test]
-fn disk_guard_wait_ignores_a_symlinked_or_oversized_marker() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let id = starting(&store, &lane(120, true), &call)?;
-    let running = store.claim(id, &at(0), &call)?.ok_or("lane starts")?;
-    let records = [running];
-    let guard = store.writer_registry().join("disk-guard");
-    std::fs::create_dir_all(&guard)?;
-    let body = r#"{"paused":[{"pid":42,"uid":501,"name":"cargo","started":"x"}],"free":1073741824,"resume_at":2147483648}"#;
+    std::fs::write(&marker, br#"{"disk_paused":false}"#)?;
+    assert!(store.lane_waits(&records, &call).is_empty());
+    std::fs::remove_file(&marker)?;
     let elsewhere = temp.path().join("elsewhere.json");
+    let body = r#"{"disk_paused":true}"#;
     std::fs::write(&elsewhere, body)?;
-    std::os::unix::fs::symlink(&elsewhere, guard.join("paused.json"))?;
+    std::os::unix::fs::symlink(&elsewhere, &marker)?;
     assert!(store.lane_waits(&records, &call).is_empty());
-    std::fs::remove_file(guard.join("paused.json"))?;
+    std::fs::remove_file(&marker)?;
     let padding = " ".repeat(usize::try_from(RECORD_LIMIT)? + 1);
-    std::fs::write(guard.join("paused.json"), format!("{body}{padding}"))?;
+    std::fs::write(&marker, format!("{body}{padding}"))?;
     assert!(store.lane_waits(&records, &call).is_empty());
+    Ok(())
+}
+
+#[test]
+fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
+    struct Disk(u64);
+    impl Resources for Disk {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            Ok(MemorySample {
+                total_bytes: 100,
+                available_bytes: 100,
+            })
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            Ok(self.0)
+        }
+    }
+    for free in [99, 100] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let context = context(temp.path())?;
+        let registry = temp.path().canonicalize()?.join("registry");
+        std::fs::DirBuilder::new().mode(0o700).create(&registry)?;
+        std::fs::write(registry.join("config.toml"), "[gc]\nfree_floor='100B'\n")?;
+        let mut store = RunStore::open(&context, &call)?.with_writer_registry(&registry);
+        std::fs::write(
+            context.state_root.as_path().join("config.toml"),
+            "schema_version=1\n[gc]\nfree_floor='1B'\n",
+        )?;
+        store.set_admission_policy(AdmissionPolicy {
+            admission_seconds: 1,
+            ..Default::default()
+        });
+        let run = lane(98, true);
+        let id = starting(&store, &run, &call)?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let result = store.admit(id, &attempt, &Disk(free), &clock, &cancel);
+        if free == 100 {
+            assert_eq!(result?.state, AttemptState::Running);
+        } else {
+            let error = result.err().ok_or("admitted below floor")?;
+            assert!(matches!(
+                error,
+                RunError::DiskFloor {
+                    free: 99,
+                    floor: 100
+                }
+            ));
+            let message = error.to_string();
+            assert!(message.contains("99 bytes available"), "{message}");
+            assert!(message.contains("gc.free_floor 100 bytes"), "{message}");
+            assert!(message.contains("provenant gc --apply"), "{message}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn admission_missing_configuration_uses_the_default_host_floor() -> TestResult {
+    struct Disk(u64);
+    impl Resources for Disk {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            Host { available: 100 }.memory()
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            Ok(self.0)
+        }
+    }
+    for below in [true, false] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let context = context(temp.path())?;
+        let registry = temp.path().canonicalize()?.join("registry");
+        std::fs::DirBuilder::new().mode(0o700).create(&registry)?;
+        let config = registry.join("config.toml");
+        std::fs::write(&config, "[gc]\nfree_floor='1B'\n")?;
+        let mut store = RunStore::open(&context, &call)?.with_writer_registry(&registry);
+        store.set_admission_policy(AdmissionPolicy {
+            admission_seconds: 1,
+            ..Default::default()
+        });
+        let run = lane(101, true);
+        let id = starting(&store, &run, &call)?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        std::fs::remove_file(config)?;
+        // A nested store's config must not replace the missing host config.
+        std::fs::write(context.state_root.as_path().join("config.toml"), "[gc")?;
+        let floor = provenant_config::GcSettings::default().free_floor_bytes(&registry)?;
+        let free = floor - u64::from(below);
+        let result = store.admit(id, &attempt, &Disk(free), &clock, &cancel);
+        if below {
+            assert!(
+                matches!(result, Err(RunError::DiskFloor { free: f, floor: p }) if f == free && p == floor)
+            );
+        } else {
+            assert_eq!(result?.state, AttemptState::Running);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn admission_rereads_gc_floor_after_submission_and_while_waiting() -> TestResult {
+    struct Disk<'a> {
+        config: &'a std::path::Path,
+        samples: Cell<u64>,
+    }
+    impl Resources for Disk<'_> {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            Ok(MemorySample {
+                total_bytes: 100,
+                available_bytes: 100,
+            })
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            self.samples.set(self.samples.get() + 1);
+            std::fs::write(self.config, "[gc]\nfree_floor='100B'\n")?;
+            Ok(100)
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let mut store = RunStore::open(&context, &call)?;
+    let config = context.state_root.as_path().join("config.toml");
+    std::fs::write(&config, "[gc]\nfree_floor='1B'\n")?;
+    store.set_admission_policy(AdmissionPolicy {
+        admission_seconds: 1,
+        ..Default::default()
+    });
+    let run = lane(99, true);
+    let id = starting(&store, &run, &call)?;
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    std::fs::write(&config, "[gc]\nfree_floor='101B'\n")?;
+    let disk = Disk {
+        config: &config,
+        samples: Cell::new(0),
+    };
+    assert_eq!(
+        store.admit(id, &attempt, &disk, &clock, &cancel)?.state,
+        AttemptState::Running
+    );
+    assert_eq!(
+        disk.samples.get(),
+        2,
+        "the changed floor must hold admission for one observation"
+    );
+    Ok(())
+}
+
+#[test]
+fn admission_waits_for_a_readable_current_gc_floor() -> TestResult {
+    struct Disk<'a> {
+        config: &'a std::path::Path,
+        samples: Cell<u64>,
+    }
+    impl Resources for Disk<'_> {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            Ok(MemorySample {
+                total_bytes: 100,
+                available_bytes: 100,
+            })
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            self.samples.set(self.samples.get() + 1);
+            std::fs::write(self.config, "[gc]\nfree_floor='100B'\n")?;
+            Ok(100)
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let mut store = RunStore::open(&context, &call)?;
+    let config = context.state_root.as_path().join("config.toml");
+    std::fs::write(&config, "[gc]\nfree_floor='1B'\n")?;
+    store.set_admission_policy(AdmissionPolicy {
+        admission_seconds: 1,
+        ..Default::default()
+    });
+    let run = lane(100, true);
+    let id = starting(&store, &run, &call)?;
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    std::fs::write(&config, "[gc]\nfree_floor='")?;
+    let disk = Disk {
+        config: &config,
+        samples: Cell::new(0),
+    };
+    assert_eq!(
+        store.admit(id, &attempt, &disk, &clock, &cancel)?.state,
+        AttemptState::Running
+    );
+    assert_eq!(
+        disk.samples.get(),
+        2,
+        "an unreadable current floor must queue until the next valid observation"
+    );
     Ok(())
 }

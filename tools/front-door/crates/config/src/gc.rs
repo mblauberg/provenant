@@ -28,6 +28,34 @@ impl Default for GcSettings {
 }
 
 impl GcSettings {
+    /// Read the owning section without resolving unrelated domain settings.
+    /// Missing configuration selects the compiled defaults; invalid input fails.
+    pub fn read(state: &Path) -> std::io::Result<Self> {
+        #[derive(Default, Deserialize)]
+        struct Settings {
+            #[serde(default)]
+            gc: GcSettings,
+        }
+        let read = provenant_os::fs::Directory::open_anchor(state).and_then(|directory| {
+            directory.read_bounded(
+                "config.toml".as_ref(),
+                provenant_records::Limits::CONFIG.max_bytes,
+            )
+        });
+        let settings = match read {
+            Ok(bytes) => {
+                let text = std::str::from_utf8(&bytes).map_err(std::io::Error::other)?;
+                toml_edit::de::from_str::<Settings>(text)
+                    .map_err(std::io::Error::other)?
+                    .gc
+            }
+            Err(error) if error.is_not_found() => Self::default(),
+            Err(error) => return Err(std::io::Error::other(error)),
+        };
+        settings.validate().map_err(std::io::Error::other)?;
+        Ok(settings)
+    }
+
     /// The configured floor, or 10% of the state volume with a 50 GiB minimum.
     /// Installation can render before the state directory has been created.
     pub fn free_floor_bytes(&self, state: &Path) -> std::io::Result<u64> {

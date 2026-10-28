@@ -43,6 +43,11 @@ pub enum CustodyError {
     /// it can reach the user without any path.
     #[error("startup spacing cannot be judged: host clock or boot identity unreadable")]
     AdmissionClock,
+    /// Numeric host observations are safe to publish as the lane's refusal.
+    #[error(
+        "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes; run `provenant gc --apply`"
+    )]
+    AdmissionDisk { free: u64, floor: u64 },
     #[error("custody I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -1136,6 +1141,7 @@ pub fn observe(
     cancel: &CancelToken,
     clock: &dyn Clock,
 ) -> Result<Observation> {
+    resume_orphaned_builds(&handle.directory, handle.scope)?;
     let remaining = Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
     let deadline = Instant::now()
         .checked_add(remaining)
@@ -1411,6 +1417,7 @@ impl Recovery {
             Err(FsError::LockTimeout { .. }) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
+        orphans::resume_paused_with(attempt, scope, observer)?;
         Ok(Some(RebootRecovery {
             recovery: self,
             _custody: custody,
@@ -1693,6 +1700,7 @@ impl Recovery {
             &CancelToken::new(),
             &clock,
         )?;
+        self.resume_paused_builds(attempt)?;
         SettlementCommit::verify(
             self.reservation.scope,
             attempt,
@@ -1887,7 +1895,9 @@ impl Recovery {
 }
 
 mod orphans;
-pub use orphans::OrphanReport;
+#[cfg(feature = "fixture")]
+pub(crate) use orphans::resume_orphaned_builds_with;
+pub use orphans::{OrphanReport, resume_orphaned_builds};
 
 #[cfg(test)]
 #[path = "custody_tests.rs"]

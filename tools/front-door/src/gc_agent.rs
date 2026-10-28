@@ -14,19 +14,11 @@ pub fn plist(home: &Path) -> PathBuf {
 }
 
 pub fn render(program: &Path, state: &Path, settings: &GcSettings) -> Result<Vec<u8>, AgentError> {
-    let floor = match &settings.free_floor {
-        Some(floor) => floor.clone(),
-        None => format!("{}B", settings.free_floor_bytes(state)?),
-    };
     let program = xml(utf8(program)?);
     let stdout = xml(utf8(&state.join("gc/stdout.log"))?);
     let stderr = xml(utf8(&state.join("gc/stderr.log"))?);
     let state = xml(utf8(state)?);
     let idle_days = settings.idle_days;
-    let floor = format!(
-        "    <string>--free-floor</string>\n    <string>{}</string>\n",
-        xml(&floor)
-    );
     Ok(format!(r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -41,7 +33,7 @@ pub fn render(program: &Path, state: &Path, settings: &GcSettings) -> Result<Vec
     <string>--apply</string>
     <string>--idle-days</string>
     <string>{idle_days}</string>
-{floor}  </array>
+  </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
@@ -68,18 +60,6 @@ pub enum Installed {
     Started,
     Skipped,
     Failed { message: String },
-}
-
-impl Installed {
-    pub fn describe(&self) -> String {
-        match self {
-            Self::Started => format!("{LABEL} scheduled at load and daily"),
-            Self::Skipped => {
-                "not installed (disabled or outside the macOS default state root)".into()
-            }
-            Self::Failed { message } => format!("failed: {message}"),
-        }
-    }
 }
 
 pub fn install(state: &Path, home: &Path, changed: bool, enabled: bool) -> Installed {
@@ -188,7 +168,10 @@ mod tests {
         assert!(text.contains("<string>--scheduled</string>"));
         assert!(text.contains("<string>--apply</string>"));
         assert!(text.contains("<string>--idle-days</string>\n    <string>14</string>"));
-        assert!(text.contains("<string>--free-floor</string>\n    <string>20G</string>"));
+        assert!(
+            !text.contains("--free-floor"),
+            "the collector must read the live shared floor"
+        );
         assert!(text.contains("<key>PROVENANT_STATE_DIR</key>"));
         for path in ["stdout.log", "stderr.log"] {
             assert!(text.contains(&format!("<string>/state/a&lt;b/gc/{path}</string>")));
@@ -197,18 +180,10 @@ mod tests {
         assert!(text.contains("<key>RunAtLoad</key>\n  <true/>"));
         let temp = tempfile::tempdir().unwrap();
         let state = temp.path().join("new/state");
-        let floor = (provenant_os::fs::Directory::open_anchor(temp.path())
-            .unwrap()
-            .total_bytes()
-            .unwrap()
-            / 10)
-            .max(50 * 1024_u64.pow(3));
         let defaults = String::from_utf8(
             render(Path::new("/bin/provenant"), &state, &GcSettings::default()).unwrap(),
         )
         .unwrap();
-        assert!(defaults.contains(&format!(
-            "<string>--free-floor</string>\n    <string>{floor}B</string>"
-        )));
+        assert!(!defaults.contains("--free-floor"));
     }
 }

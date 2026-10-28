@@ -254,6 +254,7 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
         &release,
         PublishMode::Replace,
     )?)?;
+    std::fs::write(attempt.path().join(crate::build_pause::PAUSE_FILE), b"{")?;
     let commit = recovery.verify_settlement(&held)?;
     let scratch_dir = tempfile::tempdir()?;
     std::fs::set_permissions(scratch_dir.path(), std::fs::Permissions::from_mode(0o700))?;
@@ -267,6 +268,27 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
     assert!(!root.path().join("reservation.json").exists());
     assert!(root.path().join("settlement.json").exists());
     drop(acquire(root.path())?);
+    Ok(())
+}
+
+#[test]
+fn corrupt_pause_journal_does_not_block_observation() -> TestResult {
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join(crate::build_pause::PAUSE_FILE), b"{")?;
+    let handle = CustodyHandle {
+        directory: Directory::open_anchor(root.path())?,
+        scope: scope(),
+        requester: ActorId::from_bytes([7; 16]),
+        held: false,
+    };
+    let clock = SystemClock::new();
+    let observation = observe(
+        &handle,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+    assert!(matches!(observation, Observation::Unknown));
     Ok(())
 }
 #[test]

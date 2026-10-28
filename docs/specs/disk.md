@@ -68,10 +68,9 @@ The disk-use epic #1570 closes with these decisions:
 - No byte budget (`disk.budget_bytes`) or LRU eviction by `last_used` at
   lease release. Free-space triggers cover single-user hosts: the GC free
   floor defaults to 10% of the state volume, at least 50 GiB; GC also runs
-  daily, and `gc.alert_below` raises a low-space alert. The disk guard warns
-  and collects below 60 GiB, pauses builds below 25 GiB and resumes them at
-  50 GiB. Reopen this decision if a host runs out of space with all of these
-  active.
+  daily, and `gc.alert_below` raises a low-space alert. Lane admission,
+  build pauses and pressure collection share `gc.free_floor`. Reopen this
+  decision if a host runs out of space with all of these active.
 - No seeded warm builds using a host seed cloned into lanes with `clonefile`.
   The [Stage 0 workshop trial](https://github.com/mblauberg/provenant/issues/1570#issuecomment-6407476129) found that Cargo fingerprints the registry source
   path: a private or symlinked `CARGO_HOME` makes every registry crate dirty.
@@ -179,6 +178,22 @@ retained tail as truncated. Offsets and digest describe the retained bytes.
 
 ## Pressure collection and daily backstop
 
+Admission, running guardians and settlement sample the minimum free space
+across the host state, lane working directory and lane Cargo cache volumes.
+Missing cache directories use their nearest existing ancestor. Each observation
+re-reads `gc.free_floor`, including percentage recalculation, so a configuration
+change applies to queued and running attempts on their next observation.
+Admission tickets retain the submission-time floor as historical evidence.
+An unreadable floor or volume keeps admission queued until a valid observation
+or its deadline; a guardian retains its last pause decision.
+
+Guardians durably record paused native identities in the attempt's
+`disk-paused.json` before each STOP. Recovery resumes those identities after
+guardian death, including when ancestry or exit evidence is gone, and resumes
+owned orphans before TERM. Settlement also consumes the pause journal. A failed
+disk sample keeps the last pause decision; cancellation and provider exit resume
+paused builds. Pause status is shown only while the recorded guardian is alive.
+
 Writer admission makes one collection attempt bounded to five seconds before
 refusing low disk, then rechecks the worktree, state and cache volumes.
 Refusals include reported reclaimed bytes. A timeout can remove data without
@@ -197,5 +212,8 @@ event wiring remains with those callers.
 - Why: free reclaimable space before sending the chair a manual remedy.
 - Test: `crates/cli/src/run.rs::writer_rechecks_once_after_collection_and_reports_reclaimed_bytes`;
   `src/gc_agent.rs::plist_renders_interval_arguments_state_logs_and_xml_escaping`;
-  `src/disk_guard_host.rs::pressure_gc_leaves_the_configured_free_floor_in_effect`
+  `src/disk_guard.rs::settlement_collects_below_the_shared_floor_only`;
+  `::lane_pause_rereads_the_floor_each_observation`;
+  `crates/run/src/dispatch_tests.rs::admission_rereads_gc_floor_after_submission_and_while_waiting`;
+  `crates/confinement/src/disk.rs::lane_sample_uses_each_output_volume_and_propagates_errors`
 - Owner: `crates/cli/src/run.rs`, `src/worktrees.rs`, `src/gc_agent.rs`

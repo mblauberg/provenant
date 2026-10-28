@@ -9,14 +9,9 @@ mod checks;
 mod compose_tests;
 mod disk;
 mod disk_guard;
-mod disk_guard_agent;
 mod fabric;
 mod gc_agent;
 
-/// Scheduled disk checks bypass the command catalogue and all state owners.
-pub fn disk_guard_early() -> Option<u8> {
-    disk_guard::early()
-}
 mod gc_support;
 mod handoff;
 mod hook_state;
@@ -132,7 +127,31 @@ fn fail(
         cause: None,
         repair: None,
     });
+    if let Some(error) = &mut result.error {
+        apply_repair(command, error, globals.json);
+    }
     emit(&result, globals, "", false)
+}
+fn apply_repair(command: &str, error: &mut CommandError, json: bool) {
+    if error.repair.is_some() {
+        return;
+    }
+    error.repair = match (command, error.code.as_str()) {
+        ("install", "HOME") => Some("Set HOME to your absolute home directory, then rerun `provenant install`.".into()),
+        ("gc", "GC") => Some("Run `provenant gc --apply --json` to inspect failed paths and retry incomplete collection.".into()),
+        (_, _) if error.message.starts_with("insufficient disk space") => {
+            // The CLI owner still renders its old floor override. Keep the
+            // observed volume and floor, and give the actionable command here.
+            if let Some((figures, _)) = error.message.split_once("; run `") {
+                error.message = format!("{figures}; run `provenant gc --apply`");
+            }
+            Some("Run `provenant gc --apply`, then retry when free space reaches gc.free_floor.".into())
+        }
+        _ => None,
+    };
+    if !json && let Some(repair) = &error.repair {
+        error.message.push_str(&format!("; {repair}"));
+    }
 }
 /// Resolve Run's composition paths, then emit the owner's reply.
 fn run_edge(
@@ -142,12 +161,15 @@ fn run_edge(
 ) -> u8 {
     match roots::resolve(globals, Workspace::Project, Product::Required) {
         Ok(resolved) => {
-            let reply = action(&provenant_cli::run::Edge {
+            let mut reply = action(&provenant_cli::run::Edge {
                 roots: &resolved.roots,
                 home: &resolved.home,
                 assets: &resolved.assets,
                 cwd: &resolved.project,
             });
+            if let Some(error) = &mut reply.result.error {
+                apply_repair(leaf, error, globals.json);
+            }
             emit(&reply.result, globals, &reply.human, false)
         }
         Err(error) => {
@@ -262,7 +284,9 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
     };
     process.holder(&holder, &mut |holder| {
         let holder = provenant_cli::run::HostHolder::new(holder);
+        let disk = disk_guard::LaneDisk::default();
         let hooks = provenant_supervisor::GuardianHooks {
+            disk: Some(&disk),
             holder: Some(&holder),
             nested_children: Some(&holder),
             ..Default::default()
@@ -292,12 +316,21 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
     let globals = &inv.globals;
     let command = match inv.command {
         Command::Hook(hook) => return hooks::run(hook, globals),
-        Command::DiskGuard(args) => return disk_guard::run(args, globals),
+        Command::DiskGuard(_) => {
+            return fail(
+                "disk-guard",
+                Outcome::Invalid,
+                "REMOVED",
+                "disk-guard has been removed; running lanes supervise disk pressure",
+                globals,
+            );
+        }
         command => command,
     };
     if let Err(error) = roots::validate_globals(globals) {
         // A bad selected root is a usage fault; the environment is not.
         let (status, code) = match error {
+            roots::RootError::Home if inv.leaf == "install" => (Outcome::Invalid, "HOME"),
             roots::RootError::Checkout | roots::RootError::State(_) => {
                 (Outcome::Invalid, "INVALID")
             }
@@ -306,7 +339,13 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         return fail(&inv.leaf, status, code, &error.to_string(), globals);
     }
     match command {
-        Command::DiskGuard(args) => disk_guard::run(args, globals),
+        Command::DiskGuard(_) => fail(
+            "disk-guard",
+            Outcome::Invalid,
+            "REMOVED",
+            "disk-guard has been removed; running lanes supervise disk pressure",
+            globals,
+        ),
         Command::Hosts { command: None } => fabric::hosts(globals, process.workers()),
         Command::Hosts {
             command: Some(command),

@@ -16,7 +16,7 @@ use provenant_supervisor::{
 use std::error::Error;
 use std::ffi::OsStr;
 use std::ffi::OsString;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -29,6 +29,24 @@ const S2_PRODUCTION_SHAPE: &str = "s2-production-shape";
 const S2_REFUSE_ADMISSION: &str = "s2-refuse-admission";
 const S2_IGNORE_CHILD_REGISTRY: &str = "s2-ignore-child-registry";
 const S2_SUPPRESSED_REGISTRY_READ: &str = "s2-registry-suppressed-read";
+
+const S2_DISK_PRESSURE: &str = "s2-disk-pressure";
+const S2_DISK_SAMPLED: &str = "s2-disk-sampled";
+
+struct MarkerDiskPressure {
+    state: PathBuf,
+}
+impl provenant_supervisor::DiskPressure for MarkerDiskPressure {
+    fn below_floor(&self, _: &[u8]) -> io::Result<bool> {
+        let decision = std::fs::read(self.state.join(S2_DISK_PRESSURE))?;
+        std::fs::write(self.state.join(S2_DISK_SAMPLED), &decision)?;
+        match decision.as_slice() {
+            b"low" => Ok(true),
+            b"high" => Ok(false),
+            _ => Err(io::Error::other("injected disk sample failure")),
+        }
+    }
+}
 
 struct CensusGateObserver;
 impl ProcessObserver for CensusGateObserver {
@@ -1699,6 +1717,198 @@ fn checkpoint_enospc_while_provider_lives_never_signals_it(root: &Path) -> Resul
     Ok(())
 }
 
+struct DiskBuild {
+    _writer: CustodyLease,
+    handle: CustodyHandle,
+    build: ProcessIdentity,
+    channel: UnixStream,
+    gate: UnixStream,
+    state: PathBuf,
+}
+
+fn disk_build(root: &Path) -> Result<DiskBuild> {
+    let state = root.join("PROVENANT_STATE_DIR");
+    std::fs::create_dir_all(&state)?;
+    std::fs::write(state.join(S2_DISK_PRESSURE), b"high")?;
+    let build_socket = root.join("disk-build.sock");
+    let gate_socket = root.join("disk-gate.sock");
+    let build_listener = UnixListener::bind(&build_socket).map_err(|error| {
+        io::Error::new(error.kind(), format!("bind disk build socket: {error}"))
+    })?;
+    let gate_listener = UnixListener::bind(&gate_socket)
+        .map_err(|error| io::Error::new(error.kind(), format!("bind disk gate socket: {error}")))?;
+    let (writer, handle) = start(
+        root,
+        "disk",
+        "s2-disk-build-provider",
+        &[build_socket.into_os_string(), gate_socket.into_os_string()],
+        CapturePlan {
+            descendant_grace_ms: 500,
+            ..CapturePlan::default()
+        },
+    )?;
+    let mut channel = fixture::fixture_accept(&build_listener, Duration::from_secs(5))?;
+    byte(&mut channel, b'R')?;
+    let build = process_identity(read_pid_line(&mut channel)?)?;
+    let mut gate = fixture::fixture_accept(&gate_listener, Duration::from_secs(5))?;
+    byte(&mut gate, b'R')?;
+    channel.write_all(b"I")?;
+    byte(&mut channel, b'I')?;
+    set_disk_sample(&state, b"low")?;
+    wait_for_paused_build(&mut channel)?;
+    Ok(DiskBuild {
+        _writer: writer,
+        handle,
+        build,
+        channel,
+        gate,
+        state,
+    })
+}
+
+fn wait_for_paused_build(channel: &mut UnixStream) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        channel.write_all(b"A")?;
+        match fixture::fixture_read_byte(channel, Duration::from_millis(250)) {
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => return Ok(()),
+            Ok(byte) => assert_eq!(byte, b'A'),
+            Err(error) => return Err(error.into()),
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other("owned cargo descendant was not SIGSTOPped").into());
+        }
+    }
+}
+
+fn set_disk_sample(state: &Path, sample: &[u8]) -> Result<()> {
+    std::fs::write(state.join(S2_DISK_PRESSURE), sample)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if std::fs::read(state.join(S2_DISK_SAMPLED)).is_ok_and(|seen| seen == sample) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other("guardian did not sample disk decision").into());
+        }
+        std::thread::park_timeout(Duration::from_millis(10));
+    }
+}
+
+fn disk_floor_pauses_and_recovery_resumes_builds(root: &Path) -> Result<()> {
+    let mut fixture = disk_build(root)?;
+
+    set_disk_sample(&fixture.state, b"high")?;
+    byte(&mut fixture.channel, b'A')?;
+    drop(fixture.gate);
+    // The build lives in its own session, so cleanup may not signal it; EOF
+    // lets it exit so the census can settle.
+    drop(fixture.channel);
+    assert!(!exited(&fixture.handle)?.unresolved_cleanup);
+    Ok(())
+}
+
+fn disk_sample_failure_resumes_paused_builds(root: &Path) -> Result<()> {
+    let mut fixture = disk_build(root)?;
+    set_disk_sample(&fixture.state, b"error-paused")?;
+    // The pending heartbeat proves CONT was delivered without a good sample.
+    byte(&mut fixture.channel, b'A')?;
+    set_disk_sample(&fixture.state, b"error-running")?;
+    fixture.channel.write_all(b"B")?;
+    byte(&mut fixture.channel, b'B')?;
+    drop(fixture.gate);
+    drop(fixture.channel);
+    assert!(!exited(&fixture.handle)?.unresolved_cleanup);
+    Ok(())
+}
+
+fn cancel_resumes_paused_builds_before_delivering_stop(root: &Path) -> Result<()> {
+    let mut fixture = disk_build(root)?;
+
+    assert_eq!(
+        stop(&fixture.handle, StopReason::ExplicitCancellation)?,
+        StopReceipt::Requested
+    );
+    byte(&mut fixture.channel, b'A')?;
+    drop(fixture.channel);
+    let exit = exited(&fixture.handle)?;
+    assert_eq!(exit.stop_reason, Some(StopReason::ExplicitCancellation));
+    assert!(!exit.unresolved_cleanup);
+    Ok(())
+}
+
+fn provider_exit_resumes_paused_builds(root: &Path) -> Result<()> {
+    let mut fixture = disk_build(root)?;
+
+    drop(fixture.gate);
+    byte(&mut fixture.channel, b'A')?;
+    drop(fixture.channel);
+    let exit = exited(&fixture.handle)?;
+    assert_eq!(
+        exit.termination,
+        Some(provenant_os::exec::Termination::Exit(0))
+    );
+    assert!(!exit.unresolved_cleanup);
+    Ok(())
+}
+
+fn guardian_sigkill_recovery_resumes_a_build_after_ancestry_is_lost(root: &Path) -> Result<()> {
+    let fixture = disk_build(root)?;
+    let guardian = reservation_identity(&root.join("disk-writer"), "guardian")?;
+    let provider = reservation_identity(&root.join("disk-writer"), "provider")?;
+    let attempt = root.join("disk-attempt");
+    let paused: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(attempt.join("disk-paused.json"))?)?;
+    assert!(
+        paused["identities"].as_array().is_some_and(|identities| {
+            identities
+                .iter()
+                .any(|identity| identity["pid"] == fixture.build.pid)
+        }),
+        "pause identity must be durable before SIGSTOP"
+    );
+    fixture::signal_recorded_process(&guardian, libc::SIGKILL)?;
+    fixture::guardian_exit_status(u32::try_from(guardian.pid)?, Duration::from_secs(5))?;
+    fixture::signal_recorded_process(&provider, libc::SIGKILL)?;
+    wait_for_identity_absence(&provider)?;
+    // The kernel reparents the build only after the provider is gone; wait for it.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while matches!(
+        fixture::RecordedBootObserver.observe(fixture.build.pid),
+        ProcessObservation::Present(fact) if fact.parent_pid == provider.pid
+    ) && Instant::now() < deadline
+    {
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
+    match fixture::RecordedBootObserver.observe(fixture.build.pid) {
+        ProcessObservation::Present(fact) => {
+            assert_ne!(
+                fact.parent_pid, provider.pid,
+                "dead provider ancestry must be lost"
+            );
+        }
+        other => return Err(io::Error::other(format!("paused build vanished: {other:?}")).into()),
+    }
+    let DiskBuild {
+        _writer,
+        mut channel,
+        gate,
+        build,
+        ..
+    } = fixture;
+    drop(_writer);
+    drop(gate);
+    fixture::resume_orphaned_builds(&Directory::open_anchor(&attempt)?, scope())?;
+    byte(&mut channel, b'A')?;
+    assert!(!attempt.join("disk-paused.json").exists());
+    let checkpoint: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(attempt.join("process.json"))?)?;
+    assert_eq!(checkpoint["disk_paused"], false);
+    drop(channel);
+    wait_for_identity_absence(&build)?;
+    Ok(())
+}
+
 fn guardian_signal_requests_provider_stop(root: &Path, signal: i32, label: &str) -> Result<()> {
     let socket = root.join(format!("guardian-{label}.sock"));
     let listener = UnixListener::bind(&socket)?;
@@ -1964,6 +2174,26 @@ fn wall_deadline_is_the_execution_bound(root: &Path) -> Result<()> {
 type Case = (&'static str, fn(&Path) -> Result<()>);
 const CASES: &[Case] = &[
     (
+        "guardian_sigkill_recovery_resumes_a_build_after_ancestry_is_lost",
+        guardian_sigkill_recovery_resumes_a_build_after_ancestry_is_lost,
+    ),
+    (
+        "disk_floor_pauses_and_recovery_resumes_builds",
+        disk_floor_pauses_and_recovery_resumes_builds,
+    ),
+    (
+        "disk_sample_failure_resumes_paused_builds",
+        disk_sample_failure_resumes_paused_builds,
+    ),
+    (
+        "cancel_resumes_paused_builds_before_delivering_stop",
+        cancel_resumes_paused_builds_before_delivering_stop,
+    ),
+    (
+        "provider_exit_resumes_paused_builds",
+        provider_exit_resumes_paused_builds,
+    ),
+    (
         "live_provider_publishes_initial_checkpoint",
         live_provider_publishes_initial_checkpoint,
     ),
@@ -2154,6 +2384,10 @@ fn main() -> Result<()> {
         let refusal_marker = home.join(S2_REFUSE_ADMISSION);
         let registry = FileChildRegistry { home };
         let observer = CensusGateObserver;
+        let disk = std::env::var_os("PROVENANT_STATE_DIR")
+            .map(PathBuf::from)
+            .filter(|state| state.join(S2_DISK_PRESSURE).is_file())
+            .map(|state| MarkerDiskPressure { state });
         let publisher = match std::env::var_os("PROVENANT_STATE_DIR") {
             Some(path) => fixture::ExitPublicationFaults::from_state_dir(&PathBuf::from(path))?,
             None => None,
@@ -2173,6 +2407,9 @@ fn main() -> Result<()> {
                 children: (!production_shape).then_some(&registry as &dyn ChildRegistry),
                 nested_children: production_shape.then_some(&store as &dyn NestedChildStore),
                 observer: Some(&observer),
+                disk: disk
+                    .as_ref()
+                    .map(|disk| disk as &dyn provenant_supervisor::DiskPressure),
                 exit_publisher: publisher.as_ref().map(|item| item as &dyn ExitPublisher),
                 stdout_decoder: Some(&Decoder),
                 ..Default::default()

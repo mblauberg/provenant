@@ -70,6 +70,8 @@ pub enum InstallError {
     ConfigFile(PathBuf),
     #[error("preview output failed")]
     Preview(#[source] std::io::Error),
+    #[error("{0}")]
+    AgentRetirement(String),
     #[error("release smoke check failed")]
     Smoke(#[source] std::io::Error),
     #[error("installation partially applied; resolve the failure and re-apply install")]
@@ -156,8 +158,6 @@ pub struct Targets {
     pub peer_agent: Option<Vec<u8>>,
     /// Rendered scheduled cache collector, supplied only by the process edge.
     pub gc_agent: Option<Vec<u8>>,
-    /// Rendered disk pressure monitor, supplied only by the process edge.
-    pub disk_guard_agent: Option<Vec<u8>>,
     /// Exact recognised historical rendering, for migration from pre-receipt agents.
     pub peer_agent_previous: Option<Vec<u8>>,
     pub hook_specs: Vec<HookRegistration>,
@@ -214,7 +214,6 @@ impl Targets {
             remove_hooks: false,
             peer_agent: None,
             gc_agent: None,
-            disk_guard_agent: None,
             peer_agent_previous: None,
             hook_specs: Vec::new(),
             protected_roots: Vec::new(),
@@ -487,7 +486,6 @@ impl Snapshots {
             for entry in &previous.entries {
                 if entry.selector == "binary"
                     || entry.selector == "gc-agent"
-                    || entry.selector == "disk-guard-agent"
                     || entry_owner(entry, previous, targets.roots.state.as_path())?
                         .is_some_and(|owner| selected.contains(&owner))
                 {
@@ -652,25 +650,6 @@ fn desired(
             "gc-agent".into(),
         )?;
     }
-    if let Some(bytes) = &targets.disk_guard_agent {
-        let path = disk_guard_agent_plist(targets.roots.state.as_path()).ok_or(
-            InstallError::InvalidConfig("disk guard agent requires the default state root"),
-        )?;
-        let home =
-            provenant_os::fs::canonicalize(&targets.home).unwrap_or_else(|_| targets.home.clone());
-        if path != home.join("Library/LaunchAgents/dev.provenant.disk-guard.plist") {
-            return Err(InstallError::Conflict(path));
-        }
-        insert(
-            path,
-            Value::File {
-                bytes: bytes.clone(),
-                mode: 0o600,
-            },
-            None,
-            "disk-guard-agent".into(),
-        )?;
-    }
     for target in &targets.harnesses {
         let mut skills = BTreeMap::new();
         for path in release.files.keys() {
@@ -742,11 +721,6 @@ pub fn peer_agent_plist(state: &Path) -> Option<PathBuf> {
 /// The scheduled collector shares the per-user default-state ownership scope.
 pub fn gc_agent_plist(state: &Path) -> Option<PathBuf> {
     peer_agent_plist(state).map(|path| path.with_file_name("dev.provenant.gc.plist"))
-}
-
-/// The disk guard shares the per-user default-state ownership scope.
-pub fn disk_guard_agent_plist(state: &Path) -> Option<PathBuf> {
-    peer_agent_plist(state).map(|path| path.with_file_name("dev.provenant.disk-guard.plist"))
 }
 
 fn validate_removal(
@@ -950,10 +924,7 @@ pub fn plan_install(
                 entries.push(entry.clone());
                 continue;
             }
-            if !matches!(
-                entry.selector.as_str(),
-                "binary" | "gc-agent" | "disk-guard-agent"
-            ) {
+            if !matches!(entry.selector.as_str(), "binary" | "gc-agent") {
                 let Some(owner) = owner else {
                     continue;
                 };
@@ -970,8 +941,7 @@ pub fn plan_install(
             if current
                 .as_ref()
                 .is_some_and(|before| matches_owned(&before.value, &entry.expected))
-                || (current.is_none()
-                    && matches!(entry.selector.as_str(), "gc-agent" | "disk-guard-agent"))
+                || (current.is_none() && entry.selector == "gc-agent")
             {
                 actions.push(Action {
                     path: entry.path.clone(),
@@ -982,7 +952,7 @@ pub fn plan_install(
                     identity: identity(current),
                     edits: Vec::new(),
                 });
-            } else if matches!(entry.selector.as_str(), "gc-agent" | "disk-guard-agent") {
+            } else if entry.selector == "gc-agent" {
                 snapshots.harness.findings.push(InstallFinding {
                     rule: "relinquished_modified_entry".into(),
                     path: entry.path.clone(),
@@ -1710,6 +1680,9 @@ impl Decoded {
 fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallError> {
     let mut receipt: InstallReceipt =
         provenant_records::decode_v1(bytes, Limits::CONFIG).map_err(InstallError::ReceiptDecode)?;
+    receipt
+        .entries
+        .retain(|entry| entry.selector != "disk-guard-agent");
     let state_root = targets.roots.state.as_path();
     normal_absolute(&receipt.bin_dir.to_path_buf()?)?;
     let mut harnesses = BTreeSet::new();
@@ -1926,14 +1899,10 @@ fn permitted_entry(
     let path = entry.path.to_path_buf()?;
     normal_absolute(&path)?;
     if entry.harness.is_none() {
-        if matches!(
-            entry.selector.as_str(),
-            "peer-agent" | "gc-agent" | "disk-guard-agent"
-        ) {
+        if matches!(entry.selector.as_str(), "peer-agent" | "gc-agent") {
             let expected_path = match entry.selector.as_str() {
                 "peer-agent" => peer_agent_plist(state_root),
-                "gc-agent" => gc_agent_plist(state_root),
-                _ => disk_guard_agent_plist(state_root),
+                _ => gc_agent_plist(state_root),
             };
             return Ok(expected_path.as_ref() == Some(&path)
                 && matches!(
@@ -2266,10 +2235,8 @@ pub fn uninstall(
     }
     let removed = |entry: &OwnedEntry, owner: &Option<TargetId>| {
         owner.as_ref().is_some_and(|id| selected.contains(id))
-            || (matches!(
-                entry.selector.as_str(),
-                "peer-agent" | "gc-agent" | "disk-guard-agent"
-            ) && selected == registered)
+            || (matches!(entry.selector.as_str(), "peer-agent" | "gc-agent")
+                && selected == registered)
     };
 
     let mut removals = Vec::new();
@@ -2320,7 +2287,7 @@ pub fn uninstall(
         // A deleted plist can still have a loaded service. Keep its stop in the
         // same locked, retryable removal path as an unchanged recorded plist.
         if before.is_none()
-            && !matches!(entry.selector.as_str(), "gc-agent" | "disk-guard-agent")
+            && entry.selector != "gc-agent"
             && (entry.selector != "peer-agent" || !recorded_peer_agent)
         {
             continue;

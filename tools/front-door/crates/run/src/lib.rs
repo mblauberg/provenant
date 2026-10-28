@@ -112,6 +112,10 @@ pub enum RunError {
     ArtifactMismatch,
     #[error("terminal publication is already sealed; recover its original facts and result")]
     TerminalRecoveryRequired,
+    #[error(
+        "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes; run `provenant gc --apply`"
+    )]
+    DiskFloor { free: u64, floor: u64 },
     #[error("operation refused by the execution context")]
     Refused,
     #[error("nested lane depth {depth} exceeds configured maximum {max_depth}")]

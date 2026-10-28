@@ -7,6 +7,7 @@
 #[allow(unsafe_code, clippy::disallowed_methods)]
 mod process_os;
 
+mod build_pause;
 pub mod census;
 pub mod custody;
 #[cfg(feature = "fixture")]
@@ -16,5 +17,6 @@ pub mod machine;
 #[cfg(feature = "fixture")]
 pub use guardian::ExitPublisher;
 pub use guardian::{
-    ChildRegistry, GuardianHooks, Holder, NestedChildStore, RegisteredChild, supervise,
+    ChildRegistry, DiskPressure, GuardianHooks, Holder, NestedChildStore, RegisteredChild,
+    supervise,
 };

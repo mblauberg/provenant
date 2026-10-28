@@ -75,11 +75,11 @@ cache pruning remain available. See
 and logs. Other installations need an explicit scheduler invoking
 `provenant gc`.
 
-The disk guard and writer admission use pressure collection without network
-fetches or worktree removal. Admission caps its single attempt at five seconds
+Writer admission and lane settlement use pressure collection without network
+fetches or worktree removal. Each caps its single attempt at five seconds
 and rechecks every output volume once. Applied full and pressure sweeps share
 `<state>/gc/collection.lock`; a busy collector is skipped, not queued.
-Manual `gc --pressure` prints a notice when scheduling is disabled, the project
+Manual `gc --pressure` prints a notice when the project
 is transient or no eligible data is in scope. JSON exposes the reason as `notice`.
 Lane settlement collects that lane's declared ignored output and Cargo cache,
 including when its worktree is retained for delivery pickup. Successful
@@ -107,3 +107,8 @@ are refused as collection roots; scheduled scans report them as unobserved.
 A preview uses existing project custody only. An unregistered selected checkout
 or missing custody hierarchy returns an observation error without initialising
 it. Scheduled previews list such roots in `unobserved_projects`.
+
+Default GC output shows aggregate counts and exceptions. Use `--json` for the
+full removal and retention records. Settlement runs one bounded pressure pass
+when any output volume is below `gc.free_floor`; the daily sweep retries
+eligible data left by a busy or interrupted pass.

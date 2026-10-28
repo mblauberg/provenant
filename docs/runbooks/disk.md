@@ -76,8 +76,9 @@ No rollback is needed because reporting changes no durable state. Preserve the
 JSON in your own chosen destination if evidence is required; investigate
 remaining errors with the owner of each reported path.
 
-Automatic pressure collection honours `gc.schedule=false`. Writer admission
-collects only the launching project; the disk guard uses scheduled enumeration.
+Writer admission honours `gc.schedule=false`. Admission and settlement
+pressure collection select the launching project. Settlement collection runs
+only below `gc.free_floor` and is capped at five seconds.
 Pressure sweeps prune declared idle output, with a one-day floor below the
 configured free-space floor, while retaining worktrees and skipping fetches.
 

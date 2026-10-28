@@ -160,6 +160,8 @@ pub trait NestedChildStore {
 /// Composition seam for Run's bounded provider decoder and confinement filter.
 #[derive(Default)]
 pub struct GuardianHooks<'a> {
+    /// Host disk policy, sampled only while this attempt has a live provider.
+    pub disk: Option<&'a dyn DiskPressure>,
     pub children: Option<&'a dyn ChildRegistry>,
     /// Answers whether the attempt can have no nested child lane when no
     /// registry is wired.
@@ -178,6 +180,12 @@ pub struct GuardianHooks<'a> {
     pub stdout_filter: Option<&'a mut dyn provenant_os::exec::CaptureFilter>,
     pub stderr_filter: Option<&'a mut dyn provenant_os::exec::CaptureFilter>,
 }
+/// The host resolves the same free-space floor used by admission and GC.
+/// An unreadable sample resumes running builds.
+pub trait DiskPressure {
+    fn below_floor(&self, context: &[u8]) -> io::Result<bool>;
+}
+
 /// The holder role: the composed terminal publisher runs inside the guardian,
 /// after durable exit and completed cleanup, while the guardian still holds
 /// the writer lease and attempt custody. It must durably publish Run's
@@ -480,15 +488,12 @@ impl provenant_os::capture::DecodedEventSink for Events {
         Ok(())
     }
 }
-/// The reason a refused admission publishes, which becomes the lane's reason.
-/// Only a host clock that cannot be read is named; any other error stays
-/// `admission refused`, never carrying its text or a path.
-fn admission_refusal(error: &CustodyError) -> &'static str {
+/// Only typed numeric disk observations and the fixed clock failure are
+/// published. Arbitrary admission errors never expose paths or source text.
+fn admission_refusal(error: &CustodyError) -> String {
     match error {
-        CustodyError::AdmissionClock => {
-            "startup spacing cannot be judged: host clock or boot identity unreadable"
-        }
-        _ => "admission refused",
+        CustodyError::AdmissionClock | CustodyError::AdmissionDisk { .. } => error.to_string(),
+        _ => "admission refused".into(),
     }
 }
 impl Driver<'_> {
@@ -515,7 +520,7 @@ impl Driver<'_> {
         if let Some(holder) = self.holder
             && let Err(error) = holder.admit(&self.holder_context, &self.attempt)
         {
-            return self.never_spawned(admission_refusal(&error));
+            return self.never_spawned(&admission_refusal(&error));
         }
         let started = Instant::now();
         let budgets =
@@ -588,6 +593,9 @@ impl Driver<'_> {
         let mut last_checkpoint = None;
         let mut last_observation_ms: Option<u64> = None;
         let mut last_cpu_observation_ms = 0;
+        let mut last_disk_sample_ms = None;
+        let mut disk_paused = false;
+        let mut disk_warning_active = false;
         let mut last_cancel_ms = None;
         let mut signal_pending = false;
         let mut last_stdout_bytes = 0_u64;
@@ -618,6 +626,7 @@ impl Driver<'_> {
                 ),
             }
             if exit.is_some() && !host_closed {
+                child.resume_builds();
                 host_closed = true;
                 if let Some(holder) = self.holder
                     && holder
@@ -752,6 +761,7 @@ impl Driver<'_> {
                     Effect::CloseStdin => child.stdin = None,
                     Effect::BeginCleanup(_) => cleanup_pending = true,
                     Effect::DeliverStop(reason) if exit.is_none() => {
+                        child.resume_builds();
                         stop_reason.get_or_insert(reason);
                         stop_at.get_or_insert(now);
                         let outcome = stop_delivery_outcome(child.stop(false));
@@ -840,20 +850,70 @@ impl Driver<'_> {
                     break;
                 }
             }
+            // The host is sampled only during this running lane. Reuse the
+            // existing native custody census to find builds, never host-wide
+            // command-line matching. No independent timer survives this lane.
+            if exit.is_none()
+                && stop_reason.is_none()
+                && last_disk_sample_ms.is_none_or(|last| now.saturating_sub(last) >= 1_000)
+            {
+                last_disk_sample_ms = Some(now);
+                if let Some(disk) = hooks.disk {
+                    match disk.below_floor(&self.holder_context) {
+                        Ok(paused) => {
+                            disk_paused = paused;
+                            disk_warning_active = false;
+                        }
+                        Err(_) => {
+                            disk_paused = false;
+                            if !disk_warning_active {
+                                warn(
+                                    &mut warnings,
+                                    &mut omitted_warnings,
+                                    "disk floor observation failed",
+                                );
+                                disk_warning_active = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if !disk_paused || exit.is_some() || stop_reason.is_some() {
+                child.resume_builds();
+            }
             // Keep safety history at 100 ms; slowing census can miss a short
             // lived parent before an escaped descendant changes session/group.
             if cpu_sample_due {
-                if self.refresh_census(&mut child).is_none() {
-                    if !census_warning_active {
-                        warn(
-                            &mut warnings,
-                            &mut omitted_warnings,
-                            "live process census incomplete",
-                        );
-                        census_warning_active = true;
-                    }
-                } else {
+                if let Some(census) = self.refresh_census(&mut child) {
                     census_warning_active = false;
+                    if disk_paused
+                        && exit.is_none()
+                        && stop_reason.is_none()
+                        && (self.descendant_stop_allowed || self.escapee_stop_allowed)
+                        && let Some(provider) = self.reservation.provider.as_ref()
+                    {
+                        let spared = self
+                            .spared
+                            .spared_identities()
+                            .chain(self.protected.iter())
+                            .cloned()
+                            .collect();
+                        child.pause_builds(
+                            &census,
+                            provider,
+                            &spared,
+                            &self.attempt,
+                            self.reservation.scope,
+                            &self.guardian,
+                        );
+                    }
+                } else if !census_warning_active {
+                    warn(
+                        &mut warnings,
+                        &mut omitted_warnings,
+                        "live process census incomplete",
+                    );
+                    census_warning_active = true;
                 }
                 self.persist_tracking(&mut warnings, &mut omitted_warnings);
             }
@@ -872,6 +932,7 @@ impl Driver<'_> {
                     last_output_at: Option<WallTime>,
                     last_progress_ms: Option<u64>,
                     silent: bool,
+                    disk_paused: bool,
                     provider_cpu_micros: Option<u64>,
                     last_cpu_progress_ms: Option<u64>,
                     publication_pending: bool,
@@ -888,6 +949,7 @@ impl Driver<'_> {
                     last_output_at,
                     last_progress_ms: state.last_progress_ms(),
                     silent: plan.silent(now, state.last_progress_ms()),
+                    disk_paused: disk_paused && exit.is_none() && stop_reason.is_none(),
                     provider_cpu_micros,
                     last_cpu_progress_ms,
                     publication_pending: false,

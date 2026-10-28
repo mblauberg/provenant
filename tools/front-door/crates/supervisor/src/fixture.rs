@@ -6,6 +6,14 @@ use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
+/// Resume orphaned build identities through the production recovery path.
+pub fn resume_orphaned_builds(
+    attempt: &provenant_os::fs::Directory,
+    scope: crate::custody::Scope,
+) -> crate::custody::Result<()> {
+    crate::custody::resume_orphaned_builds_with(attempt, scope, &RecordedBootObserver)
+}
+
 /// Inject native boot observation for reboot recovery tests only.
 pub fn after_reboot_with(
     recovery: crate::custody::Recovery,
@@ -776,6 +784,39 @@ pub fn dispatch() -> io::Result<bool> {
             let mut exiting = std::os::unix::net::UnixStream::connect(exit_socket)?;
             exiting.write_all(b"E")?;
             child.detach();
+        }
+        "s2-disk-build-provider" => {
+            let root = std::env::current_dir()?;
+            // Exercise real native build-name and ancestry observation.
+            let executable = root.join("cargo");
+            std::fs::copy(std::env::current_exe()?, &executable)?;
+            let env = environment(&root);
+            let mut command = Command::new(executable);
+            command
+                .args([
+                    OsString::from("--fixture"),
+                    OsString::from("s2-disk-build"),
+                    fixture_path(&args, 3)?.into_os_string(),
+                ])
+                .env_clear()
+                .envs(env.iter().cloned())
+                .current_dir(&root);
+            provenant_os::sys::child::configure_command(&mut command, &[], Some(&env), true)?;
+            let mut child = ChildGuard::new(command.spawn()?);
+            let mut gate = std::os::unix::net::UnixStream::connect(fixture_path(&args, 4)?)?;
+            gate.write_all(b"R")?;
+            wait_for_eof(&mut gate)?;
+            child.detach();
+        }
+        "s2-disk-build" => {
+            provenant_os::sys::fixture_ignore_term()?;
+            let mut stream = std::os::unix::net::UnixStream::connect(fixture_path(&args, 3)?)?;
+            stream.write_all(b"R")?;
+            writeln!(stream, "{}", std::process::id())?;
+            let mut request = [0];
+            while stream.read(&mut request)? != 0 {
+                stream.write_all(&request)?;
+            }
         }
         "s2-setsid-descendant" => {
             provenant_os::sys::fixture_ignore_term()?;

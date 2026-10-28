@@ -409,7 +409,10 @@ impl From<&RunError> for ErrorKind {
             RunError::Input { kind, .. } => *kind,
             RunError::WorktreeMissing(_) => Self::WorktreeMissing,
             RunError::WorktreeUnregistered(_) => Self::WorktreeUnregistered,
-            RunError::Writer(_) | RunError::Confinement(_) | RunError::Refused => Self::Refused,
+            RunError::Writer(_)
+            | RunError::Confinement(_)
+            | RunError::Refused
+            | RunError::DiskFloor { .. } => Self::Refused,
             RunError::Validation(_) | RunError::InvalidBase(_) | RunError::TooLarge { .. } => {
                 Self::Invalid
             }

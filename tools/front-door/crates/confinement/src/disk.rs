@@ -1,6 +1,38 @@
 //! Read-only lane-cache and worktree disk inventory.
 pub use provenant_os::fs::available_bytes_at;
 
+/// Sample the existing volume containing a prospective output path.
+/// A missing cache directory is not a failed disk observation.
+pub fn available_bytes_at_existing(path: &std::path::Path) -> std::io::Result<u64> {
+    let mut path = path;
+    loop {
+        match available_bytes_at(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                path = path.parent().ok_or(error)?;
+            }
+            result => return result,
+        }
+    }
+}
+
+/// The tightest output volume for lane admission, build pauses and settlement.
+/// Prospective cache paths are sampled at their nearest existing ancestor.
+pub fn lane_available_bytes(state: &Path, home: &Path, cwd: &Path) -> std::io::Result<u64> {
+    lane_available_bytes_with(state, home, cwd, available_bytes_at_existing)
+}
+
+fn lane_available_bytes_with(
+    state: &Path,
+    home: &Path,
+    cwd: &Path,
+    mut sample: impl FnMut(&Path) -> std::io::Result<u64>,
+) -> std::io::Result<u64> {
+    let cache = home.join("Library/Caches/provenant-lane-cargo");
+    [state, cwd, cache.as_path()]
+        .into_iter()
+        .try_fold(u64::MAX, |free, path| Ok(free.min(sample(path)?)))
+}
+
 use crate::cache::{
     CARGO_CACHE_OWNER, CacheGcPolicy, CacheGcReason, LEGACY_CARGO_CACHE_OWNER_PREFIX,
     cache_gc_reason_with_newest, cache_owner_fingerprint, cache_tombstone, is_cache_digest,
@@ -293,6 +325,37 @@ mod tests {
     use super::*;
     use crate::cache::CARGO_CACHE_OWNER_PREFIX;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    #[test]
+    fn lane_sample_uses_each_output_volume_and_propagates_errors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = Path::new("/state");
+        let home = Path::new("/home");
+        let cwd = Path::new("/checkout");
+        let cache = home.join("Library/Caches/provenant-lane-cargo");
+        for low in [state, cwd, cache.as_path()] {
+            let mut observed = Vec::new();
+            assert_eq!(
+                lane_available_bytes_with(state, home, cwd, |path| {
+                    observed.push(path.to_owned());
+                    Ok(if path == low { 99 } else { 100 })
+                })?,
+                99
+            );
+            assert_eq!(observed, [state, cwd, cache.as_path()]);
+        }
+        let error = lane_available_bytes_with(state, home, cwd, |path| {
+            if path == cwd {
+                Err(std::io::Error::other("volume unavailable"))
+            } else {
+                Ok(100)
+            }
+        })
+        .err()
+        .ok_or("missing sample error")?;
+        assert_eq!(error.to_string(), "volume unavailable");
+        Ok(())
+    }
 
     fn marker(path: &Path, owner: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let metadata = std::fs::metadata(owner)?;

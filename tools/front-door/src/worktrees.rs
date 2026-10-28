@@ -277,6 +277,20 @@ struct GcData {
     notice: Option<String>,
 }
 
+const GC_REPAIR: &str =
+    "Run `provenant gc --apply --json` to inspect failed paths and retry incomplete collection.";
+
+fn gc_failure<'a>(data: &'a GcData, message: &str, detailed: bool) -> CommandResult<GcOutput<'a>> {
+    let mut result = CommandResult::new("gc", Outcome::Error, gc_result_data(data, detailed));
+    result.error = Some(provenant_records::CommandError {
+        code: "GC".into(),
+        message: format!("{message}\n{}{GC_REPAIR}", gc_data_summary(data)),
+        cause: None,
+        repair: Some(GC_REPAIR.into()),
+    });
+    result
+}
+
 /// `provenant gc`: remove orphaned and idle lane caches, sparing any whose
 /// worktree has a live or unobservable writer.
 pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
@@ -284,21 +298,11 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
         Ok(data) => {
             let human = gc_data_summary(&data);
             let failed = !data.provider_state.errors.is_empty();
-            let mut result = CommandResult::new(
-                "gc",
-                if failed { Outcome::Error } else { Outcome::Ok },
-                data,
-            );
-            if failed {
-                result.error = Some(provenant_records::CommandError {
-                    code: "GC".into(),
-                    message:
-                        "provider-state retention incomplete; inspect data.provider_state.errors"
-                            .into(),
-                    cause: None,
-                    repair: None,
-                });
-            }
+            let result = if failed {
+                gc_failure(&data, "provider-state retention incomplete", globals.json)
+            } else {
+                CommandResult::new("gc", Outcome::Ok, gc_result_data(&data, globals.json))
+            };
             emit(&result, globals, &human, command.dry_run)
         }
         Err(Error::CacheGc(
@@ -321,14 +325,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 alerts,
                 notice: None,
             };
-            let message = format!("{failure}\n{}", gc_data_summary(&data));
-            let mut result = CommandResult::new("gc", Outcome::Error, data);
-            result.error = Some(provenant_records::CommandError {
-                code: "GC".into(),
-                message,
-                cause: None,
-                repair: None,
-            });
+            let result = gc_failure(&data, &failure, globals.json);
             emit(&result, globals, "", command.dry_run)
         }
         Err(error) => fail("gc", error.outcome(), "GC", &error.to_string(), globals),
@@ -336,36 +333,32 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
 }
 
 fn gc_data_summary(data: &GcData) -> String {
-    let mut human = gc_summary(&data.report);
-    if let Some(notice) = &data.notice {
-        human.push_str(notice);
-        human.push('\n');
-    }
-    human.push_str(&format!(
-        "{} provider-state removal(s), {} kept, {} error(s)\n",
+    let mut human = format!(
+        "{} cache(s), {} bytes {}; {} kept\n{} provider-state removal(s), {} kept, {} error(s)\n",
+        data.report.removed.len(),
+        data.report.bytes_freed,
+        if data.report.dry_run {
+            "reclaimable"
+        } else {
+            "freed"
+        },
+        data.report.kept.len(),
         data.provider_state.removed.len(),
         data.provider_state.kept.len(),
-        data.provider_state.errors.len()
-    ));
-    for project in &data.worktree_cleanup {
-        if let Some(error) = &project.upstream_error {
-            human.push_str(&format!("{error}; merged worktrees kept\n"));
-        }
-        for tree in &project.worktrees.removed {
-            human.push_str(&format!(
-                "{} merged worktree {}\n",
-                if project.dry_run {
-                    "would remove"
-                } else {
-                    "removed"
-                },
-                tree.path.display()
-            ));
-        }
-        for output in project.output.iter().chain(&project.idle_output) {
-            human.push_str(&format!("{} {}\n", output.reason, output.path.display()));
-        }
-    }
+        data.provider_state.errors.len(),
+    );
+    let trees: usize = data
+        .worktree_cleanup
+        .iter()
+        .map(|p| p.worktrees.removed.len())
+        .sum();
+    let outputs: usize = data
+        .worktree_cleanup
+        .iter()
+        .map(|p| p.output.len() + p.idle_output.len())
+        .sum();
+    human.push_str(&format!("{trees} merged worktree(s), {outputs} output directory(s), {} attempt tmp directory(s), {} capture(s)\n",
+        data.provider_state.attempt_tmp.len(), data.provider_state.attempt_logs.len()));
     for temporary in &data.provider_state.attempt_tmp {
         human.push_str(&format!(
             "{} attempt tmp {} ({} bytes)\n",
@@ -375,20 +368,7 @@ fn gc_data_summary(data: &GcData) -> String {
                 "removed"
             },
             temporary.path.display(),
-            temporary.bytes
-        ));
-    }
-    for log in &data.provider_state.attempt_logs {
-        human.push_str(&format!(
-            "{} capture {} ({} bytes, {} byte tail retained)\n",
-            if data.report.dry_run {
-                "would expire"
-            } else {
-                "expired"
-            },
-            log.path.display(),
-            log.bytes,
-            log.tail_bytes
+            temporary.bytes,
         ));
     }
     if data.provider_state.expired_events > 0 {
@@ -402,60 +382,92 @@ fn gc_data_summary(data: &GcData) -> String {
             data.provider_state.expired_events
         ));
     }
+    for error in &data.provider_state.errors {
+        human.push_str(&format!("{}: {}\n", error.path.display(), error.reason));
+    }
+    for entry in &data.report.kept {
+        if entry.reason == provenant_confinement::cache::CacheGcReason::Unobservable {
+            human.push_str(&format!("kept {} (unobservable)\n", entry.path.display()));
+        }
+    }
+    for project in &data.worktree_cleanup {
+        if let Some(error) = &project.upstream_error {
+            human.push_str(&format!("{error}; merged worktrees kept\n"));
+        }
+        for kept in &project.worktrees.retained {
+            if retained_exception(kept.reason) {
+                human.push_str(&format!(
+                    "kept worktree {} ({:?})\n",
+                    kept.branch, kept.reason
+                ));
+            }
+        }
+        for output in project
+            .output
+            .iter()
+            .chain(&project.idle_output)
+            .filter(|entry| !entry.removed && entry.reason != "would_remove")
+        {
+            human.push_str(&format!("{} {}\n", output.reason, output.path.display()));
+        }
+    }
+    for path in &data.unobserved_projects {
+        human.push_str(&format!("unobserved project {}\n", path.display()));
+    }
     for path in &data.skipped_transient {
         human.push_str(&format!("skipped transient project {}\n", path.display()));
     }
     for alert in &data.alerts {
         human.push_str(&format!("{alert}\n"));
     }
+    if let Some(notice) = &data.notice {
+        human.push_str(&format!("{notice}\n"));
+    }
     human
 }
 
-fn gc_summary(report: &provenant_confinement::cache::CacheGcReport) -> String {
-    let mut human = String::new();
-    let verb = if report.dry_run {
-        "would remove"
-    } else {
-        "removed"
-    };
-    for entry in &report.removed {
-        human.push_str(&format!(
-            "{verb} {} ({} bytes, {})\n",
-            entry.path.display(),
-            entry.bytes,
-            gc_reason(entry.reason)
-        ));
-    }
-    for entry in &report.kept {
-        human.push_str(&format!(
-            "kept {} ({})\n",
-            entry.path.display(),
-            gc_reason(entry.reason)
-        ));
-    }
-    human.push_str(&format!(
-        "{} cache(s), {} bytes {}\n",
-        report.removed.len(),
-        report.bytes_freed,
-        if report.dry_run {
-            "reclaimable"
-        } else {
-            "freed"
-        }
-    ));
-    human
+fn retained_exception(reason: RetainReason) -> bool {
+    matches!(
+        reason,
+        RetainReason::Dirty
+            | RetainReason::GitOperationInProgress
+            | RetainReason::UnknownWriter
+            | RetainReason::Changed
+            | RetainReason::GitFailure
+            | RetainReason::LockedOrPrunable
+    )
 }
 
-fn gc_reason(reason: provenant_confinement::cache::CacheGcReason) -> &'static str {
-    use provenant_confinement::cache::CacheGcReason;
-    match reason {
-        CacheGcReason::Orphaned => "orphaned",
-        CacheGcReason::Idle => "idle",
-        CacheGcReason::FreeFloor => "free_floor",
-        CacheGcReason::Tombstone => "tombstone",
-        CacheGcReason::Foreign => "foreign",
-        CacheGcReason::Live => "live",
-        CacheGcReason::Unobservable => "unobservable",
+#[derive(Serialize)]
+#[serde(untagged)]
+enum GcOutput<'a> {
+    Detailed(&'a GcData),
+    Summary {
+        dry_run: bool,
+        removed: usize,
+        kept: usize,
+        bytes_freed: u64,
+        provider_state_removed: usize,
+        errors: &'a [provenant_run::ProviderStateIssue],
+        unobserved_projects: &'a [PathBuf],
+        alerts: &'a [String],
+        notice: &'a Option<String>,
+    },
+}
+fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
+    if detailed {
+        return GcOutput::Detailed(data);
+    }
+    GcOutput::Summary {
+        dry_run: data.report.dry_run,
+        removed: data.report.removed.len(),
+        kept: data.report.kept.len(),
+        bytes_freed: data.report.bytes_freed,
+        provider_state_removed: data.provider_state.removed.len(),
+        errors: &data.provider_state.errors,
+        unobserved_projects: &data.unobserved_projects,
+        alerts: &data.alerts,
+        notice: &data.notice,
     }
 }
 
@@ -1179,6 +1191,87 @@ mod gc_preview_tests {
             let json = serde_json::to_value(&data).unwrap_or_default();
             assert_eq!(json["provider_state"]["expired_events"], 3);
         }
+    }
+    #[test]
+    fn gc_default_output_aggregates_routine_rows_and_keeps_exceptions() {
+        use provenant_confinement::cache::{CacheGcEntry, CacheGcReason};
+        let mut data = GcData::default();
+        for index in 0..10 {
+            data.report.removed.push(CacheGcEntry {
+                path: format!("/home/Library/Caches/provenant-lane-cargo/{index:064}").into(),
+                bytes: 1024,
+                reason: CacheGcReason::Orphaned,
+            });
+            data.report.kept.push(CacheGcEntry {
+                path: format!(
+                    "/home/Library/Caches/provenant-lane-cargo/{:064}",
+                    index + 10
+                )
+                .into(),
+                bytes: 2048,
+                reason: CacheGcReason::Live,
+            });
+        }
+        data.report.bytes_freed = 10240;
+        data.provider_state
+            .errors
+            .push(provenant_run::ProviderStateIssue {
+                path: "/state/broken".into(),
+                reason: "permission denied".into(),
+            });
+        let mut project = worktrees::WorktreeGcReport::default();
+        project.worktrees.retained.push(worktrees::RetainedBranch {
+            branch: "broken".into(),
+            reason: RetainReason::GitFailure,
+        });
+        data.worktree_cleanup.push(project);
+        let human = gc_data_summary(&data);
+        let after = human.len();
+        let detailed_json = serde_json::to_vec(&data).unwrap_or_default().len();
+        let after_json = serde_json::to_vec(&gc_result_data(&data, false))
+            .unwrap_or_default()
+            .len();
+        std::io::Write::write_fmt(
+            &mut std::io::stderr(),
+            format_args!(
+                "gc fixture bytes: human {after}, detailed data {detailed_json}, default data {after_json}\n"
+            ),
+        )
+        .unwrap_or_default();
+        assert!(after_json < detailed_json);
+        assert!(human.contains("10 cache(s), 10240 bytes freed"));
+        assert!(human.contains("/state/broken: permission denied"));
+        assert!(human.contains("kept worktree broken (GitFailure)"));
+        assert!(!human.contains("/home/Library/Caches"));
+        assert!(serde_json::to_value(&data).unwrap_or_default()["removed"].is_array());
+    }
+    #[test]
+    fn gc_failure_human_output_names_failed_paths_and_next_step()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut data = GcData::default();
+        data.provider_state
+            .errors
+            .push(provenant_run::ProviderStateIssue {
+                path: "/state/failed-cache".into(),
+                reason: "permission denied".into(),
+            });
+        let result = gc_failure(&data, "provider-state retention incomplete", false);
+        let mut output = Vec::new();
+        provenant_cli::render(
+            &result,
+            provenant_cli::RenderMode::Human {
+                text: "",
+                read_only: false,
+            },
+            &mut output,
+        )?;
+        let human = String::from_utf8(output)?;
+        assert!(
+            human.contains("/state/failed-cache: permission denied"),
+            "{human}"
+        );
+        assert!(human.contains("provenant gc --apply --json"), "{human}");
+        Ok(())
     }
     #[test]
     fn gc_preview_does_not_initialise_absent_state() -> Result<(), Box<dyn std::error::Error>> {

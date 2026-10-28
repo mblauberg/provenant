@@ -81,6 +81,16 @@ impl Completion<'_> {
     }
 }
 impl HolderContext {
+    /// Configuration and output roots sealed by the launching host.
+    pub fn disk_roots(&self) -> (&std::path::Path, &std::path::Path) {
+        self.launch.as_ref().map_or(
+            (
+                self.roots.state_root.as_path(),
+                self.roots.checkout.as_path(),
+            ),
+            |launch| (launch.configuration_root.as_path(), launch.cwd.as_path()),
+        )
+    }
     pub fn encode(&self) -> Result<Vec<u8>> {
         crate::db::bytes(self)
     }
@@ -148,11 +158,25 @@ pub struct RunHolder<'a> {
     pub providers: &'a dyn Providers,
     pub resources: &'a dyn Resources,
 }
-fn custody_error(error: RunError) -> CustodyError {
-    if matches!(error, RunError::HostClock) {
-        return CustodyError::AdmissionClock;
+/// Bind the host's sealed output roots to admission's resource observations.
+struct LaneResources<'a> {
+    resources: &'a dyn Resources,
+    context: &'a HolderContext,
+}
+impl Resources for LaneResources<'_> {
+    fn memory(&self) -> std::io::Result<provenant_os::sys::resources::MemorySample> {
+        self.resources.memory()
     }
-    CustodyError::Io(std::io::Error::other(error.to_string()))
+    fn disk(&self, attempt: &Directory) -> std::io::Result<u64> {
+        self.resources.lane_disk(attempt, self.context)
+    }
+}
+fn custody_error(error: RunError) -> CustodyError {
+    match error {
+        RunError::HostClock => CustodyError::AdmissionClock,
+        RunError::DiskFloor { free, floor } => CustodyError::AdmissionDisk { free, floor },
+        other => CustodyError::Io(std::io::Error::other(other.to_string())),
+    }
 }
 impl provenant_supervisor::Holder for RunHolder<'_> {
     fn admit(&self, context: &[u8], attempt: &Directory) -> custody::Result<()> {
@@ -161,7 +185,10 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
             .admit(
                 context.attempt_id,
                 attempt,
-                self.resources,
+                &LaneResources {
+                    resources: self.resources,
+                    context: &context,
+                },
                 &SystemClock,
                 &CancelToken::new(),
             )
@@ -646,6 +673,80 @@ mod host_clock_tests {
         assert!(matches!(
             custody_error(RunError::Validation("wall clock")),
             CustodyError::Io(_)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod disk_admission_tests {
+    use super::*;
+    #[test]
+    fn admission_samples_the_sealed_working_directory_and_cache()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(temp.path())?;
+        let blocker = temp.path().join("file");
+        std::fs::write(&blocker, "")?;
+        let mut context = HolderContext {
+            schema_version: 1,
+            roots: RootSeed {
+                home: temp.path().into(),
+                checkout: temp.path().into(),
+                state_root: temp.path().into(),
+            },
+            project_id: provenant_core::ProjectId::from_bytes([1; 16]),
+            actor_id: provenant_core::ActorId::from_bytes([2; 16]),
+            run_id: RunId::from_bytes([3; 16]),
+            attempt_id: AttemptId::from_bytes([4; 16]),
+            host_delivery: None,
+            launch: Some(HostLaunchContext {
+                configuration_root: temp.path().into(),
+                cwd: temp.path().into(),
+                executables: Default::default(),
+                git: "/usr/bin/git".into(),
+                codex_home: None,
+                #[cfg(feature = "fixture")]
+                fixture_state_write: false,
+            }),
+            sealed: None,
+        };
+        let available = |context: &HolderContext| {
+            LaneResources {
+                resources: &SystemResources,
+                context,
+            }
+            .disk(&attempt)
+        };
+        assert!(available(&context).is_ok(), "a missing cache is observable");
+        if let Some(launch) = &mut context.launch {
+            launch.cwd = blocker.join("child");
+        }
+        assert!(
+            available(&context).is_err(),
+            "admission must observe the sealed cwd rather than only the attempt volume"
+        );
+        if let Some(launch) = &mut context.launch {
+            launch.cwd = temp.path().into();
+        }
+        context.roots.home = blocker.join("child");
+        assert!(
+            available(&context).is_err(),
+            "admission must observe the cache volume"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn disk_refusal_reaches_the_guardian_as_safe_numeric_evidence() {
+        assert!(matches!(
+            custody_error(RunError::DiskFloor {
+                free: 99,
+                floor: 100
+            }),
+            CustodyError::AdmissionDisk {
+                free: 99,
+                floor: 100
+            }
         ));
     }
 }
