@@ -402,6 +402,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
         .iter()
         .map(|n| {
             prior.remove(&n.id).unwrap_or_else(|| NodeProgress {
+                fragment: None,
                 handoff: None,
                 expansion_pause: None,
                 loop_asks: Vec::new(),

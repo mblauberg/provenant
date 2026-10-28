@@ -1,5 +1,7 @@
 use super::*;
+use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
 use serde_json::{Value, json};
+use std::os::unix::fs::PermissionsExt;
 
 fn planner(max_nodes: usize) -> GraphDocument {
     serde_json::from_value(json!({
@@ -25,6 +27,140 @@ fn fixture_owner(results: &[&str]) -> FakeOwner {
 }
 
 const STOP: &str = "```handoff\n{\"schema_version\":1,\"status\":\"stopped_early\",\"note\":\"First half committed; finish the second half and run checks.\"}\n```";
+
+#[test]
+fn refused_planner_fragment_retries_after_file_journal_reopen() {
+    let directory = crate::test_support::tempdir().unwrap();
+    let base = std::fs::canonicalize(directory.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.join("state"));
+    std::fs::create_dir(base.join("state")).unwrap();
+    std::fs::set_permissions(base.join("state"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let project = ProjectId::from_bytes([7; 16]);
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    for (field, cap) in [("nodes", 3), ("edges", 3), ("fan_out_width", 2), ("expansion_depth", 1)] {
+        let mut doc = planner(2);
+        doc.graph_id = format!("planned-{field}");
+        let limits = serde_json::from_value(json!({field:cap})).unwrap();
+        let ceiling = crate::config::GraphLimits::default();
+        let mut first = slice("a", &["src"]);
+        first["goal"] = json!("detail ".repeat(700));
+        let output = result(vec![first, slice("b", &["docs"])]);
+        let mut owner = fixture_owner(&[&output]);
+        {
+            let mut journal = FileJournal::open(&root, project, &doc.graph_id, budget, &cancel, &clock).unwrap();
+            journal.bind(GraphExecution { integration_base: None, directory: base.clone(), document: doc.clone() }).unwrap();
+            let run = advance_with_budget(&doc, &mut owner, &mut journal, &limits, &ceiling, &Default::default()).unwrap();
+            assert_eq!(run.status, GraphStatus::Paused);
+            assert!(run.checkpoint.nodes[0].outputs.as_ref().unwrap().result.as_ref().unwrap().truncated);
+            assert!(run.checkpoint.nodes[0].fragment.as_ref().unwrap().len() > 4096);
+        }
+        owner.observations.extend(["a", "b", "checked"].map(|text| terminal_with_result(AttemptOutcome::Succeeded, text)));
+        let mut journal = FileJournal::open(&root, project, &doc.graph_id, budget, &cancel, &clock).unwrap();
+        let run = resume_with_budget(&doc, &mut owner, &mut journal, &limits, &ceiling, &Default::default(), &[format!("limits.{field}={}", cap * 2)]).unwrap();
+        assert_eq!(run.status, GraphStatus::Complete, "{field}: {:?}", run.checkpoint.pause_reason);
+        assert!(run.checkpoint.successful());
+        assert_eq!(run.checkpoint.expansions.len(), 1);
+        assert_eq!(owner.calls.len(), 4);
+        assert_eq!(advance_with_budget(&doc, &mut owner, &mut journal, &limits, &ceiling, &Default::default()).unwrap().checkpoint, run.checkpoint);
+    }
+}
+
+#[test]
+fn malformed_optional_handoff_warns_and_still_delivers() {
+    for output in ["```handoff\n{}\n```".to_owned(), format!("{STOP}\n{STOP}"), STOP.replace("stopped_early", "done"), STOP.replace("\"note\":", "\"extra\":true,\"note\":"), STOP.trim_end_matches("\n```").to_owned(), format!("```handoff\n{}\n```", json!({"schema_version":1,"status":"stopped_early","note":"x".repeat(4097)}))] {
+        let mut doc = writer_graph();
+        doc.nodes[0].required_verdict = None;
+        doc.delivery = Some(provenant_records::run::DeliveryMode::Pr);
+        doc.integration_branch = Some("integration".into());
+        let mut owner = fixture_owner(&[&output, "checked"]);
+        let mut journal = MemoryJournal::default();
+        let run = advance(&doc, &mut owner, &mut journal).unwrap();
+        assert_eq!(run.status, GraphStatus::Complete);
+        assert!(run.checkpoint.successful());
+        assert!(run.checkpoint.expansions.is_empty());
+        assert!(run.checkpoint.nodes[0].outputs.as_ref().unwrap().warnings.iter().any(|w| w.contains("ignored optional handoff")));
+        assert_eq!(owner.deliveries, 1);
+        assert_eq!(advance(&doc, &mut owner, &mut journal).unwrap().checkpoint, run.checkpoint);
+    }
+}
+
+#[test]
+fn original_writers_fence_overlapping_and_unspecified_scopes() {
+    for scope in [vec!["src".into()], Vec::new(), vec!["./src".into()], vec!["src/*".into()]] {
+        let mut first = writer_graph().nodes.remove(0);
+        first.required_verdict = None;
+        first.write_scope = scope;
+        let mut second = first.clone(); second.id = "second".into();
+        second.worktree = Some(".worktrees/second".into()); second.write_scope = vec!["src/a".into()];
+        let doc = graph(vec![first, second]);
+        let mut owner = FakeOwner::default();
+        owner.observations.push_back(AttemptObservation::Pending { attempt_ref: Some("first".into()) });
+        let mut journal = MemoryJournal::default();
+        let run = advance(&doc, &mut owner, &mut journal).unwrap();
+        assert_eq!(owner.calls.len(), 1);
+        assert_eq!(run.checkpoint.nodes[1].state, NodeState::Pending);
+        owner.observations.extend(["done", "done"].map(|text| terminal_with_result(AttemptOutcome::Succeeded, text)));
+        assert!(advance(&doc, &mut owner, &mut journal).unwrap().checkpoint.successful());
+    }
+}
+
+#[test]
+fn skipped_writer_does_not_connect_separate_checkouts_during_expansion() {
+    let mut doc = planner(1);
+    doc.integration_branch = Some("integration".into());
+    for (id, scope) in [("skipped", "src/a"), ("active", "src/b")] {
+        let mut writer = writer_graph().nodes.remove(0);
+        writer.id = id.into(); writer.worktree = Some(format!(".worktrees/{id}"));
+        writer.write_scope = vec![scope.into()]; writer.required_verdict = None;
+        doc.nodes.push(writer);
+    }
+    let (plan, _) = validate_plan(&doc).unwrap();
+    let mut owner = fixture_owner(&["invalid"]);
+    let mut journal = MemoryJournal::default();
+    let mut checkpoint = advance(&planner(1), &mut owner, &mut journal).unwrap().checkpoint;
+    loops::reconcile(&mut checkpoint, &plan);
+    checkpoint.nodes.iter_mut().find(|n| n.id == "skipped").unwrap().state = NodeState::Skipped;
+    let planner = plan.nodes.iter().find(|n| n.id == "plan").unwrap();
+    let mut child = slice("required", &["src"]); child["access"] = json!("worktree_write"); child["worktree"] = json!(".worktrees/new");
+    assert!(plans::settle(planner, &doc, &mut checkpoint, Some(&capture(&result(vec![child]))), &Default::default()), "{:?}", checkpoint.pause_reason);
+    assert_eq!(checkpoint.expansions[0].nodes[0].worktree.as_deref(), Some(".worktrees/active"));
+}
+
+#[test]
+fn planner_prompt_uses_wire_kinds_and_required_field_names() {
+    let prompt = plans::prompt(&planner(2).nodes[0]);
+    assert!(prompt.contains(r#"["task","plan","gate"]"#));
+    assert!(prompt.contains("`worktree`"));
+    assert!(prompt.contains("`inputs`"));
+    assert!(prompt.contains("`acceptance_checks`"));
+}
+
+#[test]
+fn continuation_rejects_original_pr_delivery_before_integration_rewrite() {
+    let mut doc = writer_graph();
+    doc.integration_branch = Some("integration".into());
+    doc.nodes[0].delivery = Some(provenant_records::run::DeliveryMode::Pr);
+    let run = advance(&doc, &mut fixture_owner(&[STOP]), &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert!(run.checkpoint.pause_reason.unwrap().contains("requires integrate or no delivery"));
+    assert!(run.checkpoint.expansions.is_empty());
+}
+
+#[test]
+fn oversized_nested_fragment_id_names_the_source_and_child() {
+    let mut doc = planner(1);
+    doc.nodes[0].id = "p".repeat(40);
+    doc.nodes.truncate(1);
+    let name = "c".repeat(23);
+    let run = advance(&doc, &mut fixture_owner(&[&result(vec![slice(&name, &["src"])])]), &mut MemoryJournal::default()).unwrap();
+    let reason = run.checkpoint.pause_reason.unwrap();
+    assert!(reason.contains(&name) && reason.contains("64 bytes"), "{reason}");
+    assert!(run.checkpoint.expansions.is_empty());
+}
 
 #[test]
 fn plan_rejects_invalid_and_over_bound_fragments_without_admitting_consumers() {
@@ -226,6 +362,30 @@ fn plan_inside_loop_keeps_round_membership_after_checkpoint_serialisation() {
 }
 
 #[test]
+fn planner_cannot_add_separate_writer_checkouts_to_one_loop() {
+    let mut doc = planner(2);
+    let plan = serde_json::to_value(&doc.nodes[0]).unwrap();
+    doc.nodes = serde_json::from_value(json!([{
+        "id":"iteration","kind":"loop","access":"read_only","loop":{
+            "max_rounds":1,"until":"check","body":[plan,
+                {"id":"check","kind":"gate","access":"read_only","depends_on":["plan"],"condition":{"type":"budget"}}
+            ]
+        }
+    }])).unwrap();
+    doc.integration_branch = Some("integration".into());
+    let nodes = ["a", "b"].into_iter().map(|id| {
+        let mut child = slice(id, &[&format!("src/{id}")]);
+        child["access"] = json!("worktree_write");
+        child["worktree"] = json!(format!(".worktrees/{id}"));
+        child
+    }).collect();
+    let run = advance(&doc, &mut fixture_owner(&[&result(nodes)]), &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert!(run.checkpoint.pause_reason.unwrap().contains("loop writers must share one worktree"));
+    assert!(run.checkpoint.expansions.is_empty());
+}
+
+#[test]
 fn nested_plan_rewires_all_consumers_and_keeps_original_digest() {
     let doc = planner(1);
     let mut nested = slice("nested", &["src"]);
@@ -245,7 +405,7 @@ fn nested_plan_rewires_all_consumers_and_keeps_original_digest() {
 }
 
 #[test]
-fn invalid_planner_result_and_handoff_remain_paused_when_every_attempt_has_settled() {
+fn invalid_planner_result_remains_paused_when_every_attempt_has_settled() {
     let doc = graph(vec![planner(1).nodes.remove(0)]);
     let mut owner = fixture_owner(&["not a fragment"]);
     let mut journal = MemoryJournal::default();
@@ -254,13 +414,6 @@ fn invalid_planner_result_and_handoff_remain_paused_when_every_attempt_has_settl
     assert!(!run.checkpoint.successful());
     assert!(run.checkpoint.nodes.iter().all(|n| n.state.settled()));
     assert_eq!(advance(&doc, &mut owner, &mut journal).unwrap().status, GraphStatus::Paused);
-    let mut doc = writer_graph();
-    doc.nodes[0].required_verdict = None;
-    let mut owner = fixture_owner(&["```handoff\n{}\n```"]);
-    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
-    assert!(run.checkpoint.pause_reason.unwrap().contains("invalid handoff"));
-    assert_eq!(owner.calls.len(), 1);
 }
 
 #[test]

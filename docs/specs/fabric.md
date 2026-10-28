@@ -402,15 +402,22 @@ limits and the host ceiling before saving any addition. Invalid, missing or
 over-bound fragments must pause with a node-specific reason and admit no
 consumers. Validated additions must retain the original plan digest, stable
 namespaced node IDs and existing attempt keys across checkpoint replay.
+The bounded fragment JSON must survive refusal in the checkpoint so a limit
+extension can retry admission without rerunning the planner. Namespaced IDs
+must fit within 64 bytes; refusals name the source and child to shorten.
 Consumers must wait for all added work. Plans within loop rounds must retain
-their round membership after persistence.
+their round membership and the loop's shared writer checkout after persistence.
 
 Disjoint scoped writers in separate registered checkouts may run concurrently.
-Overlapping scopes, including transitive overlaps and identical checkouts,
-must share one checkout and serial admission. Such components require a graph
-integration branch; their writers use existing integrate delivery and the
+Planner-emitted overlapping scopes, including transitive overlaps and identical
+checkouts, must share one checkout and serial admission. Such components require
+a graph integration branch; their writers use existing integrate delivery and the
 graph owns at most one final PR. Write scope is a scheduling declaration and
 part of the brief; existing worktree confinement remains the write boundary.
+The admission fence checks every writer, including original document nodes;
+an unspecified or noncanonical scope overlaps all scopes. Skipped or blocked
+writers do not constrain checkout selection for later fragments. Worktree
+custody excludes concurrent managed writers across graphs.
 
 A successful writer task may report a structured `handoff` block with schema
 version 1, status `stopped_early` and a non-empty note of at most 4096 bytes.
@@ -419,6 +426,8 @@ checkout, carrying the handoff and original completion contract. Consumers'
 selected outputs must follow the continuation. Prose alone must never trigger
 continuation. Provider or delivery failures remain failures. Graph writer
 checkouts must survive settlement for subsequent work.
+Malformed optional handoffs produce output warnings and preserve the writer's
+completion verdict contract; they must not pause a successful graph.
 
 The per-graph `continuations` limit defaults to 2; 0 disables admission of
 continuations. Exhaustion must pause before consumers or final delivery.

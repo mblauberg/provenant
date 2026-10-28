@@ -196,6 +196,9 @@ definitions under `checkpoint.expansions`, and `checkpoint.remaining`.
 Dependencies and selected inputs in a fragment use local IDs. A planner may
 declare `task`, `plan`, `synthesise` or `gate` children. Gates use the existing
 condition schema. Presets and review shapes remain future extensions.
+Planner prompts use the JSON kind names and require `worktree` for writers,
+`inputs` for synthesis, and `acceptance_checks` for agent children. Keep the
+planner ID, `--` and child ID within the 64-byte node ID limit.
 
 For writers, create and register their worktrees first. Add
 `"integration_branch": "integration"` to the graph and optionally
@@ -205,6 +208,9 @@ branch must differ from the checked-out writer branch. Overlapping literal
 file/directory scopes share the first writer's checkout and run serially with
 `integrate:integration`; disjoint scopes in separate checkouts may run together.
 Scopes use `.` for the whole repository and do not accept globs or `..`.
+The admission fence also covers original graph writers; omitted scopes are
+conservative and overlap all scopes. Skipped recovery writers do not constrain
+later checkout selection. Plans inside loops must keep one writer checkout.
 
 A writer that has committed a useful partial result can finish successfully
 with this structured note instead of its completion verdict:
@@ -220,6 +226,8 @@ completion contract; consumers wait for it and read its selected outputs.
 Use integrate delivery or no delivery for these writers. Graph checkouts are
 retained for later work and explicit cleanup. Plain prose and failed provider
 attempts do not trigger continuation.
+Malformed optional handoffs are ignored with an output warning. The writer
+still needs its configured completion verdict unless it emits a valid handoff.
 
 The graph allows two continuations by default. Configure `continuations` in
 the graph's `limits` or host graph policy; 0 disables them. To extend a paused
@@ -229,10 +237,16 @@ graph within its host ceiling:
 provenant fabric graph resume --document graph.json --extend limits.continuations=3
 ```
 
+Planner fragments refused for a structural limit are retained in the
+checkpoint. Extend the named limit, for example `--extend limits.nodes=64`,
+to retry admission after reopening the graph. Invalid fragments still require
+a corrected plan in a new graph; increasing a limit cannot repair their JSON.
+
 Invalid planner output pauses with an explicit reason; correct the brief or
-fragment bounds and start with a new graph ID. No invalid fragment is saved or
-partly admitted. Status retains the original handoff if a continuation cannot
-fit; it can resume after the relevant limit is extended.
+fragment configuration and start with a new graph ID. Raw fragment JSON is
+retained for retry, but no invalid expansion is admitted. Status retains the
+original handoff if a continuation cannot fit; it can resume after the relevant
+limit is extended.
 
 ### Repeat review and repair
 

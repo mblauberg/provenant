@@ -343,6 +343,9 @@ fn not_delivered(delivered: &bool) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeProgress {
+    /// Bounded planner JSON retained until admission succeeds, including across resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1277,6 +1280,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .nodes
                     .iter()
                     .map(|node| NodeProgress {
+                        fragment: None,
                         handoff: None,
                         expansion_pause: None,
                         loop_asks: Vec::new(),
@@ -1432,7 +1436,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             && checkpoint
                 .nodes
                 .iter()
-                .any(|n| n.id == node.id && n.handoff.is_some())
+                .any(|n| n.id == node.id && (n.handoff.is_some() || n.fragment.is_some()))
             && plans::settle(node, &expanded, &mut checkpoint, None, &effective_limits)
         {
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
@@ -1599,7 +1603,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     && checkpoint.nodes.iter().enumerate().any(|(index, other)| {
                         index != node_index
                             && other.state == NodeState::Running
-                            && other.worktree == node.worktree
+                            && plan.nodes.iter().any(|peer| {
+                                peer.id == other.id && plans::writers_conflict(node, peer)
+                            })
                     })
                 {
                     break;

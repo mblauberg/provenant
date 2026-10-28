@@ -44,7 +44,8 @@ struct Handoff {
 pub(super) fn prompt(node: &GraphNode) -> String {
     let mut prompt = node.prompt.clone();
     if let Some(spec) = &node.plan {
-        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...]}}. Emit 1..{} nodes, using only {:?}. Each agent node requires id, goal or brief, access, write_scope (relative literal files/directories), acceptance_checks and local depends_on. Route defaults to {{\"alias\":\"senior\"}}. Writers require an existing registered worktree. Gate nodes use the graph gate condition schema. Dependencies and inputs name fragment-local IDs. Do not emit presets or review shapes.", spec.max_nodes, spec.kinds));
+        let kinds = serde_json::to_string(&spec.kinds).unwrap_or_default();
+        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...]}}. Emit 1..{} nodes, using only {kinds}. Each agent node requires id, goal or brief, access, write_scope (relative literal files/directories), `acceptance_checks` and local depends_on. Route defaults to {{\"alias\":\"senior\"}}. Writers require the `worktree` key naming an existing registered worktree. Synthesise nodes require `inputs` selecting dependency outputs. Gate nodes use the graph gate condition schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes. Do not emit presets or review shapes.", spec.max_nodes));
     }
     prompt
 }
@@ -188,26 +189,43 @@ fn append(document: &mut GraphDocument, expansion: &Expansion) {
         }));
 }
 
+fn valid_scope(scope: &str) -> bool {
+    scope == "."
+        || (!scope.is_empty()
+            && !scope
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+            && !scope.contains(['\\', '*', '?', '[', ']']))
+}
+
 fn overlaps(left: &[String], right: &[String]) -> bool {
-    left.iter().any(|a| {
-        right.iter().any(|b| {
-            a == "."
-                || b == "."
-                || a == b
-                || a.starts_with(&format!("{b}/"))
-                || b.starts_with(&format!("{a}/"))
+    left.is_empty()
+        || right.is_empty()
+        || left.iter().chain(right).any(|scope| !valid_scope(scope))
+        || left.iter().any(|a| {
+            right.iter().any(|b| {
+                a == "."
+                    || b == "."
+                    || a == b
+                    || a.starts_with(&format!("{b}/"))
+                    || b.starts_with(&format!("{a}/"))
+            })
         })
-    })
+}
+
+pub(super) fn writers_conflict(left: &PlannedNode, right: &PlannedNode) -> bool {
+    left.access == AccessMode::WorktreeWrite
+        && right.access == AccessMode::WorktreeWrite
+        && (left.worktree == right.worktree || overlaps(&left.write_scope, &right.write_scope))
 }
 
 fn fragment(
     node: &PlannedNode,
     document: &GraphDocument,
-    capture: Option<&crate::result_capture::CapturedResult>,
+    checkpoint: &GraphCheckpoint,
+    json: &str,
 ) -> Result<Expansion, String> {
     let spec = node.plan.as_ref().ok_or("missing plan configuration")?;
-    let capture = capture.ok_or("planner result missing")?;
-    let json = block(capture, "fragment")?.ok_or("fragment block missing")?;
     let mut fragment: Fragment =
         serde_json::from_str(json).map_err(|e| format!("invalid fragment: {e}"))?;
     if fragment.schema_version != 1
@@ -233,13 +251,7 @@ fn fragment(
                 || child.write_scope.is_empty()
                 || child.acceptance_checks.is_empty()
                 || child.acceptance_checks.iter().any(|s| s.trim().is_empty())
-                || child.write_scope.iter().any(|s| {
-                    s != "."
-                        && (s.is_empty()
-                            || s.split('/')
-                                .any(|part| part.is_empty() || part == "." || part == "..")
-                            || s.contains(['\\', '*', '?', '[', ']']))
-                })
+                || child.write_scope.iter().any(|s| !valid_scope(s))
             {
                 return Err("fragment agent requires goal or brief, relative literal write_scope and acceptance_checks".into());
             }
@@ -320,6 +332,12 @@ fn fragment(
     }
     let id = |name: &str| format!("{}--{name}", node.id);
     for child in &mut nodes {
+        if id(&child.id).len() > 64 {
+            return Err(format!(
+                "child {} of planner {} exceeds the namespaced node ID limit of 64 bytes; shorten either ID",
+                child.id, node.id
+            ));
+        }
         child.id = id(&child.id);
         child.depends_on = child.depends_on.iter().map(|name| id(name)).collect();
         if child.depends_on.is_empty() {
@@ -331,7 +349,7 @@ fn fragment(
         child.on_fail = child.on_fail.as_deref().map(id);
         child.round = None;
     }
-    coordinate(&mut nodes, document)?;
+    coordinate(&mut nodes, document, checkpoint)?;
     Ok(Expansion {
         source: node.id.clone(),
         continuation: false,
@@ -339,7 +357,11 @@ fn fragment(
     })
 }
 
-fn coordinate(nodes: &mut [GraphNode], document: &GraphDocument) -> Result<(), String> {
+fn coordinate(
+    nodes: &mut [GraphNode],
+    document: &GraphDocument,
+    checkpoint: &GraphCheckpoint,
+) -> Result<(), String> {
     let paths: std::collections::BTreeSet<_> = nodes
         .iter()
         .filter(|n| n.access == AccessMode::WorktreeWrite)
@@ -355,6 +377,10 @@ fn coordinate(nodes: &mut [GraphNode], document: &GraphDocument) -> Result<(), S
             .iter()
             .filter(|n| {
                 n.access == AccessMode::WorktreeWrite
+                    && !checkpoint.nodes.iter().any(|progress| {
+                        progress.id == n.id
+                            && matches!(progress.state, NodeState::Skipped | NodeState::Blocked)
+                    })
                     && members.iter().any(|child| {
                         n.worktree == child.worktree || overlaps(&n.write_scope, &child.write_scope)
                     })
@@ -419,6 +445,12 @@ fn continuation(
         .cloned()
         .ok_or("continuation source missing")?;
     child.id = format!("{}--continue", node.id);
+    if child.id.len() > 64 {
+        return Err(format!(
+            "continuation {} exceeds the node ID limit of 64 bytes; shorten the source ID",
+            child.id
+        ));
+    }
     child.title = None;
     child.depends_on = vec![node.id.clone()];
     child.after_expansion.clear();
@@ -427,13 +459,13 @@ fn continuation(
         "\n\nContinue this work in the same worktree. Stopped-early handoff:\n{note}"
     ));
     // Integrate retains the shared checkout and leaves the graph owning its PR.
+    if child.delivery == Some(provenant_records::run::DeliveryMode::Pr) {
+        return Err("honest-stop continuation requires integrate or no delivery".into());
+    }
     if let Some(target) = &document.integration_branch {
         child.delivery = Some(provenant_records::run::DeliveryMode::Integrate(
             target.clone(),
         ));
-    }
-    if child.delivery == Some(provenant_records::run::DeliveryMode::Pr) {
-        return Err("honest-stop continuation requires integrate or no delivery".into());
     }
     child.round = None;
     Ok(Expansion {
@@ -493,7 +525,20 @@ pub(super) fn settle(
         return false;
     };
     let addition = if node.plan.is_some() {
-        fragment(node, document, capture)
+        let json = if let Some(capture) = capture {
+            block(capture, "fragment")
+                .and_then(|json| json.ok_or_else(|| "fragment block missing".into()))
+                .map(|json| {
+                    checkpoint.nodes[index].fragment = Some(json.to_owned());
+                    json.to_owned()
+                })
+        } else {
+            checkpoint.nodes[index]
+                .fragment
+                .clone()
+                .ok_or_else(|| "planner result missing".into())
+        };
+        json.and_then(|json| fragment(node, document, checkpoint, &json))
     } else if writer(node) {
         let handoff = capture
             .map(handoff)
@@ -504,7 +549,15 @@ pub(super) fn settle(
                 continuation(node, document, checkpoint, &note, limits)
             }
             Ok(None) => return false,
-            Err(reason) => Err(reason),
+            Err(reason) => {
+                if let Some(outputs) = &mut checkpoint.nodes[index].outputs {
+                    outputs.warnings.push(bounded(
+                        &format!("ignored optional handoff: {reason}"),
+                        MAX_ADVANCE_ERROR_BYTES,
+                    ));
+                }
+                return false;
+            }
         }
     } else {
         return false;
@@ -512,6 +565,19 @@ pub(super) fn settle(
     let result = addition.and_then(|addition| {
         let mut preview = document.clone();
         append(&mut preview, &addition);
+        let mut loop_writers = std::collections::BTreeMap::new();
+        for writer in preview
+            .nodes
+            .iter()
+            .filter(|n| n.access == AccessMode::WorktreeWrite)
+        {
+            if let Some(round) = &writer.round
+                && let Some(previous) = loop_writers.insert(&round.loop_id, &writer.worktree)
+                && previous != &writer.worktree
+            {
+                return Err("loop writers must share one worktree".into());
+            }
+        }
         let (plan, _) = validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
         if let Some(reason) =
             structural_limit_reason(&preview, &plan, limits, &checkpoint.extensions)
@@ -522,6 +588,7 @@ pub(super) fn settle(
     });
     match result {
         Ok((addition, plan, preview)) => {
+            checkpoint.nodes[index].fragment = None;
             checkpoint.nodes[index].expansion_pause = None;
             if checkpoint
                 .pause_reason
