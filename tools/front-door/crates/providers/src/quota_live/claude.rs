@@ -3,6 +3,7 @@ use provenant_os::fs::{Directory, PublishMode};
 use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 
 // No Debug/Serialize: an identity can carry an access token only in memory.
+#[derive(Default)]
 pub(super) struct Identity {
     fingerprint: Option<String>,
     token: Option<String>,
@@ -56,7 +57,11 @@ fn may_refresh(
     // Refresh tokens are single-use. Compare only in memory: refreshing a
     // cloned fixed login would invalidate the default session's shared token.
     let fixed = store(fixed)?;
-    let default = store(default)?;
+    let default = match store(default) {
+        Ok(value) => value,
+        Err(ProbeFailure::ProbeDirectory) => return Err(ProbeFailure::ProbeDirectory),
+        Err(_) => return Ok(false),
+    };
     let fixed = fixed
         .pointer("/claudeAiOauth/refreshToken")
         .and_then(Value::as_str);
@@ -92,17 +97,44 @@ fn status_fingerprint(result: Result<ExecOutcome, ProbeFailure>) -> Result<Strin
         ProbeFailure::ProbeDirectory => error,
         _ => ProbeFailure::Network,
     })?;
-    if !clean(&out) || out.termination != Termination::Exit(0) {
+    if !clean(&out) || !matches!(out.termination, Termination::Exit(_)) {
         return Err(ProbeFailure::Network);
     }
     let state: Value =
         serde_json::from_slice(&out.stdout.bytes).map_err(|_| ProbeFailure::Network)?;
+    if state.get("loggedIn").and_then(Value::as_bool) == Some(false)
+        || state
+            .get("email")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err(ProbeFailure::Auth);
+    }
+    if out.termination != Termination::Exit(0) {
+        return Err(ProbeFailure::Network);
+    }
     state
         .get("email")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(|s| fingerprint(s, 16))
-        .ok_or(ProbeFailure::Network)
+        .ok_or(ProbeFailure::Auth)
+}
+
+fn default_identity(result: Result<Identity, ProbeFailure>) -> Result<Identity, ProbeFailure> {
+    match result {
+        Ok(identity) => Ok(identity),
+        Err(ProbeFailure::ProbeDirectory) => Err(ProbeFailure::ProbeDirectory),
+        Err(_) => Ok(Identity::default()),
+    }
+}
+
+fn credential_open_error(error: std::io::Error) -> ProbeFailure {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        ProbeFailure::Auth
+    } else {
+        ProbeFailure::Network
+    }
 }
 
 fn refresh(
@@ -205,7 +237,7 @@ impl LiveQuota {
             keychain_output(out)?
         } else {
             let file =
-                fs::File::open(dir.join(".credentials.json")).map_err(|_| ProbeFailure::Network)?;
+                fs::File::open(dir.join(".credentials.json")).map_err(credential_open_error)?;
             let mut bytes = Vec::new();
             file.take(LIMIT as u64 + 1)
                 .read_to_end(&mut bytes)
@@ -284,7 +316,8 @@ impl LiveQuota {
         details: &mut QuotaDetails,
     ) -> Result<Value, ProbeFailure> {
         if self.claude_default.borrow().is_none() {
-            let default = self.claude_identity(&self.home.join(".claude"), deadline)?;
+            let default =
+                default_identity(self.claude_identity(&self.home.join(".claude"), deadline))?;
             *self.claude_default.borrow_mut() = Some(default);
         }
         let mut fixed = self.claude_identity(&account.identity_dir, deadline)?;
@@ -403,6 +436,74 @@ mod tests {
         assert_eq!(
             status_fingerprint(Err(ProbeFailure::Malformed)),
             Err(ProbeFailure::Network)
+        );
+    }
+
+    #[test]
+    fn signed_out_status_and_optional_default_are_classified() {
+        use super::*;
+        let outcome = |json: &[u8], code, timed_out| ExecOutcome {
+            termination: Termination::Exit(code),
+            stdout: provenant_os::exec::CapturedStream {
+                bytes: json.to_vec(),
+                ..Default::default()
+            },
+            stderr: Default::default(),
+            timed_out,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 0,
+        };
+        for json in [br#"{"loggedIn":false}"#.as_slice(), br#"{}"#] {
+            assert_eq!(
+                status_fingerprint(Ok(outcome(json, 1, false))),
+                Err(ProbeFailure::Auth)
+            );
+        }
+        assert_eq!(
+            status_fingerprint(Ok(outcome(b"invalid", 1, false))),
+            Err(ProbeFailure::Network)
+        );
+        assert_eq!(
+            status_fingerprint(Ok(outcome(br#"{"loggedIn":false}"#, 1, true))),
+            Err(ProbeFailure::Network)
+        );
+        let fixed = Identity {
+            fingerprint: Some("fixed".into()),
+            token: Some("fake".into()),
+            expires: Some(5000),
+        };
+        for error in [ProbeFailure::Auth, ProbeFailure::Network] {
+            let default = default_identity(Err(error)).unwrap();
+            assert!(
+                default.fingerprint.is_none()
+                    && default.token.is_none()
+                    && default.expires.is_none()
+            );
+            assert!(freshest("fixed", &fixed, &default, 1000).is_some());
+        }
+        assert!(matches!(
+            default_identity(Err(ProbeFailure::ProbeDirectory)),
+            Err(ProbeFailure::ProbeDirectory)
+        ));
+        assert_eq!(
+            credential_open_error(std::io::ErrorKind::NotFound.into()),
+            ProbeFailure::Auth
+        );
+        assert_eq!(
+            credential_open_error(std::io::ErrorKind::PermissionDenied.into()),
+            ProbeFailure::Network
+        );
+        assert_eq!(
+            may_refresh(Path::new("fixed"), Path::new("default"), |p| {
+                if p == Path::new("fixed") {
+                    Ok(serde_json::json!({}))
+                } else {
+                    Err(ProbeFailure::Network)
+                }
+            }),
+            Ok(false)
         );
     }
 

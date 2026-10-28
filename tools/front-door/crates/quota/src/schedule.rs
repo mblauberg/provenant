@@ -87,7 +87,7 @@ pub fn backoff(failure: ProbeFailure, failures: u64, retry_after_seconds: Option
         ProbeFailure::Network | ProbeFailure::RateLimited => 120_u64
             .saturating_mul(1_u64 << failures.saturating_sub(1).min(5))
             .min(3600),
-        ProbeFailure::Auth => 3600,
+        ProbeFailure::Auth => 900,
         ProbeFailure::MissingCli | ProbeFailure::Disabled => 86400,
         ProbeFailure::Malformed | ProbeFailure::ProbeDirectory => 120,
     };
@@ -619,7 +619,7 @@ mod tests {
         assert_eq!(backoff(ProbeFailure::Network, 1, None), 120);
         assert_eq!(backoff(ProbeFailure::RateLimited, 50, None), 3600);
         assert_eq!(backoff(ProbeFailure::Network, 1, Some(999999)), 86400);
-        assert_eq!(backoff(ProbeFailure::Auth, 1, None), 3600);
+        assert_eq!(backoff(ProbeFailure::Auth, 1, None), 900);
         assert_eq!(backoff(ProbeFailure::MissingCli, 1, None), 86400);
         assert_eq!(backoff(ProbeFailure::ProbeDirectory, 1, None), 120);
     }
