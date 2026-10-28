@@ -169,7 +169,9 @@ Admission audit (#2088):
   A legacy source cannot prove attempt membership for new inheritance.
   Retained continuation rows, including unversioned ones, replay their sealed
   binding without copying a lane-proposed source. Forged continuation
-  operations cannot create a chair row under a lane-chosen ID.
+  operations cannot create a chair row under a lane-chosen ID, including the
+  host's early operation replay after reopening the lane store. The regression
+  also replays a retained legacy continuation through that entrypoint.
 - Root replay with the same operation ID and a different submitting chair
   retains the original immutable request. Even repair of a missing host row
   seals the original chair and digest; a conflicting row is refused.

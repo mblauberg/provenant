@@ -905,6 +905,33 @@ mod tests {
     #[test]
     fn continuation_cannot_copy_a_chair_to_a_lane_chosen_replay_run()
     -> Result<(), Box<dyn std::error::Error>> {
+        // Run the host entrypoint outside inherited lane submission mode,
+        // without changing the process environment shared by other tests.
+        if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
+            use provenant_os::exec::{
+                ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+            };
+            let argv = vec![
+                std::env::current_exe()?.into_os_string(),
+                "--exact".into(),
+                "run::children::tests::continuation_cannot_copy_a_chair_to_a_lane_chosen_replay_run".into(),
+                "--nocapture".into(),
+            ];
+            let env: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| key != provenant_core::RUN_STATE_DIRECTORY_ENV)
+                .collect();
+            let cwd = std::env::current_dir()?;
+            let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+            options.env = Some(&env);
+            options.stdout = StreamPolicy::Capture { limit: 65536 };
+            options.stderr = StreamPolicy::Capture { limit: 65536 };
+            let out = SystemExecutor::new(1)?.execute(options)?;
+            assert!(
+                out.termination == Termination::Exit(0) && !out.timed_out,
+                "{out:?}"
+            );
+            return Ok(());
+        }
         let temp = tempfile::tempdir()?;
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
@@ -927,7 +954,8 @@ mod tests {
             )
         })
         .map_err(|f| f.message)?;
-        child.request.parent = Some(child.attempts[0].attempt_id);
+        let prior = child.attempts[0].attempt_id;
+        child.request.parent = Some(prior);
         child.run_id = RunId::from_bytes([90; 16]);
         child.operation_id = OperationId::parse("forged-continuation-replay")?;
         child.attempts[0].attempt_id = AttemptId::from_bytes([91; 16]);
@@ -947,7 +975,17 @@ mod tests {
             assets: &cwd,
             cwd: &cwd,
         };
-        let result = launch_on_host(&session, child.run_id, &edge, &call, None, None, None);
+        // The host's early operation replay adopts the lane's stored run ID.
+        // Authenticate it before copying any chair association.
+        let result = continue_attempt(
+            &session,
+            &edge,
+            prior,
+            child.operation_id.clone(),
+            child.attempts[0].prompt.clone(),
+            0,
+            &call,
+        );
         with_chair_index(&roots, &call, |index, c| {
             assert!(
                 index
@@ -960,6 +998,54 @@ mod tests {
         let failure = result.unwrap_err();
         assert_eq!(failure.status, Status::Refused);
         assert!(failure.message.contains("host-derived"), "{failure:?}");
+        assert_eq!(
+            session
+                .store
+                .operation(&child.operation_id, &call)?
+                .unwrap()
+                .run_id,
+            child.run_id,
+            "replay must authenticate the stored ID rather than silently rekey it"
+        );
+        // A retained legacy destination seal replays without trusting the
+        // lane-local source again. Old records remain readable as well.
+        with_chair_index(&roots, &call, |index, c| {
+            index.inherit(
+                session.context.project_id,
+                (parent, digest),
+                child.run_id,
+                &child.request,
+                c,
+            )
+        })
+        .map_err(|f| f.message)?;
+        let (replayed, _) = continue_attempt(
+            &session,
+            &edge,
+            prior,
+            child.operation_id.clone(),
+            child.attempts[0].prompt.clone(),
+            0,
+            &call,
+        )
+        .map_err(|f| f.message)?;
+        assert_eq!(replayed.run_id, child.run_id);
+        assert_eq!(session.store.request(child.run_id, &call)?, child.request);
+        with_chair_index(&roots, &call, |index, c| {
+            let binding = index
+                .read(session.context.project_id, child.run_id, c)?
+                .unwrap();
+            assert_eq!(binding.request_digest, child.request.digest()?);
+            assert_eq!(
+                binding.chair,
+                index
+                    .read(session.context.project_id, parent, c)?
+                    .unwrap()
+                    .chair
+            );
+            Ok(())
+        })
+        .map_err(|f| f.message)?;
         Ok(())
     }
 
