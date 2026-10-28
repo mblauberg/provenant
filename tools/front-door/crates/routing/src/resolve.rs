@@ -1568,6 +1568,7 @@ fn selection_receipt(
         roll: draw.roll,
         total_weight: draw.total_weight,
         pick: format!("{}/{}", route.adapter, route.model),
+        reason: None,
         redraws: Vec::new(),
     }
 }
@@ -1581,8 +1582,33 @@ fn select_pool(
     excluded_members: &[ModelId],
 ) -> Result<PoolPick, RoutingError> {
     let mut classified = classify_pool(members, request, context, excluded_members, true)?;
-    let draw = match draw_pool(name, &classified, seed) {
-        Ok(draw) => draw,
+    let (draw, fallback) = match draw_pool(name, &classified, seed) {
+        Ok(draw)
+            if !matches!(
+                classified.routes[draw.index]
+                    .as_ref()
+                    .map(|route| &route.readiness),
+                Some(RouteReadiness::Ready { .. })
+            ) && classified.candidates.iter().any(|candidate| {
+                candidate.exclusion.as_deref() == Some("capacity cooldown")
+                    && matches!(candidate.readiness, Some(RouteReadiness::Ready { .. }))
+            }) =>
+        {
+            let normal = classify_pool(members, request, context, excluded_members, false)?;
+            let normal_draw = draw_pool(name, &normal, seed)?;
+            if matches!(
+                normal.routes[normal_draw.index]
+                    .as_ref()
+                    .map(|route| &route.readiness),
+                Some(RouteReadiness::Ready { .. })
+            ) {
+                classified = normal;
+                (normal_draw, true)
+            } else {
+                (draw, false)
+            }
+        }
+        Ok(draw) => (draw, false),
         Err(error)
             if classified
                 .candidates
@@ -1591,12 +1617,7 @@ fn select_pool(
         {
             classified = classify_pool(members, request, context, excluded_members, false)?;
             let draw = draw_pool(name, &classified, seed).map_err(|_| error)?;
-            let detail = &mut classified.candidates[draw.index].pacing_detail;
-            *detail = Some(format!(
-                "{}; all eligible candidates cooling, normal selection",
-                detail.as_deref().unwrap_or("capacity cooldown")
-            ));
-            draw
+            (draw, true)
         }
         Err(error) => return Err(error),
     };
@@ -1606,7 +1627,10 @@ fn select_pool(
         .and_then(Option::as_ref)
         .cloned()
         .ok_or(RoutingError::Catalogue)?;
-    let receipt = selection_receipt(name, &classified, &draw, &route);
+    let mut receipt = selection_receipt(name, &classified, &draw, &route);
+    if fallback {
+        receipt.reason = Some("all eligible candidates cooling, normal selection".into());
+    }
     Ok(PoolPick { route, receipt })
 }
 

@@ -4,7 +4,10 @@
 //! host keeps only a placement record under `fabric/remote-runs/`, never a
 //! copy of the peer's run state.
 use super::watch::{self, Scope};
-use super::{Condition, Edge, Fail, Reply, Status, condition_met, render_lanes, reply, state_name};
+use super::{
+    Condition, Edge, Fail, Reply, Status, condition_met, render_lanes_with_cooldowns, reply,
+    state_name,
+};
 use crate::{
     Cancel, Dispatch, Lanes, Output, Part,
     fabric::{Context, PeerFailure},
@@ -617,7 +620,7 @@ fn render_with_waits(
     selected: &[(HostId, AttemptId)],
     state: &std::path::Path,
 ) -> (Value, String) {
-    let (mut data, human) = render_lanes(lanes, waits, None, state);
+    let (mut data, human) = render_lanes_with_cooldowns(lanes, waits, None, state);
     if let Some(rows) = data["lanes"].as_array_mut() {
         for (row, lane) in rows.iter_mut().zip(lanes) {
             let host = selected
@@ -1089,7 +1092,8 @@ pub(super) fn host_lanes(
         .collect();
     let selected: Vec<_> = lanes.iter().map(|lane| (id, lane.attempt_id)).collect();
     let (data, human) = if selected.is_empty() {
-        let (mut data, human) = render_lanes(&[], &[], None, edge.roots.state.as_path());
+        let (mut data, human) =
+            render_lanes_with_cooldowns(&[], &[], None, edge.roots.state.as_path());
         data["host"] = json!(id);
         (data, format!("host {id}\n{human}"))
     } else {

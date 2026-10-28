@@ -1915,6 +1915,7 @@ mod route_tests {
                 roll,
                 total_weight: 10_000,
                 pick: format!("{adapter}/{model}"),
+                reason: None,
                 redraws: Vec::new(),
             }),
         }

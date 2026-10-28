@@ -227,6 +227,53 @@ impl run::Providers for Registry<'_> {
             .adapter
             .failure_diagnostic(stderr)
     }
+    fn decode_with_context(
+        &self,
+        route: &run::RouteRecord,
+        stdout: &[u8],
+        exit: &ExitObservation,
+        provider_state: &Path,
+        context: &run::HolderContext,
+    ) -> Result<run::Decoded, String> {
+        let (configuration_root, _) = context.disk_roots();
+        // A child store must never write host capacity evidence.
+        if configuration_root != context.roots.state_root {
+            return Registry::default().decode(route, stdout, exit, provider_state);
+        }
+        let mut inputs = provenant_core::RootInputs::new(
+            context.roots.home.clone(),
+            context.roots.checkout.clone(),
+        );
+        inputs.state_dir = Some(configuration_root.to_path_buf());
+        let roots = match inputs.resolve(&provenant_os::fs::SystemPathResolver) {
+            Ok(roots) => roots,
+            Err(_) => {
+                let mut decoded = self.decode(route, stdout, exit, provider_state)?;
+                if decoded
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("provider capacity: "))
+                {
+                    let reason = decoded.reason.get_or_insert_with(String::new);
+                    let mut end = reason
+                        .len()
+                        .min(8192 - "; capacity cooldown configuration unavailable".len());
+                    while !reason.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    reason.truncate(end);
+                    reason.push_str("; capacity cooldown configuration unavailable");
+                }
+                return Ok(decoded);
+            }
+        };
+        let registry = Registry {
+            roots: Some(&roots),
+            state_root: Some(configuration_root),
+            ..Default::default()
+        };
+        registry.decode_inner(route, stdout, exit, provider_state, true)
+    }
     fn prepare(
         &self,
         task: &run::TaskRequest,
@@ -257,6 +304,18 @@ impl run::Providers for Registry<'_> {
         stdout: &[u8],
         exit: &ExitObservation,
         provider_state: &Path,
+    ) -> Result<run::Decoded, String> {
+        self.decode_inner(route, stdout, exit, provider_state, false)
+    }
+}
+impl Registry<'_> {
+    fn decode_inner(
+        &self,
+        route: &run::RouteRecord,
+        stdout: &[u8],
+        exit: &ExitObservation,
+        provider_state: &Path,
+        host_settlement: bool,
     ) -> Result<run::Decoded, String> {
         let is_claude = route.provider.as_deref() == Some("claude");
         let failed = |reason: &str| run::Decoded {
@@ -504,20 +563,27 @@ impl run::Providers for Registry<'_> {
                 _ => None,
             })
         {
+            let mut capacity_config_failed = false;
             if description == "provider capacity"
-                && std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_none()
-                && let (Some(state_root), Some(roots)) =
-                    (provider_state.ancestors().nth(5), self.roots)
-                && let Ok(config) =
-                    provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+                && (host_settlement
+                    || std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_none())
+                && let Some(roots) = self.roots
             {
-                // Capacity evidence is advisory; failure must not affect settlement.
-                let _ = crate::quota::persist_capacity_cooldown(
-                    state_root,
-                    route,
-                    jiff::Timestamp::now().as_second(),
-                    config.domains.routing.capacity_cooldown_seconds,
-                );
+                match provenant_config::read_with_domains(roots, &crate::domains::SECTIONS) {
+                    Ok(config) => {
+                        let duration = config.domains.routing.capacity_cooldown_seconds;
+                        if duration != 0 {
+                            // Capacity evidence is advisory; failure must not affect settlement.
+                            let _ = crate::quota::persist_capacity_cooldown(
+                                self.state_root.unwrap_or_else(|| roots.state.as_path()),
+                                route,
+                                jiff::Timestamp::now().as_second(),
+                                duration,
+                            );
+                        }
+                    }
+                    Err(_) => capacity_config_failed = true,
+                }
             }
             decoded.outcome = outcome;
             let mut reason = provenant_confinement::redact::known_shapes(message.as_bytes())
@@ -529,12 +595,18 @@ impl run::Providers for Registry<'_> {
             } else {
                 String::new()
             };
-            let mut end = reason.len().min(8192 - prefix.len());
+            let config_note = if capacity_config_failed {
+                "; capacity cooldown configuration unavailable"
+            } else {
+                ""
+            };
+            let mut end = reason.len().min(8192 - prefix.len() - config_note.len());
             while !reason.is_char_boundary(end) {
                 end -= 1;
             }
             reason.truncate(end);
             reason.insert_str(0, &prefix);
+            reason.push_str(config_note);
             decoded.reason = Some(reason);
         }
         if let Some(ProviderEvent::DeniedNote { action }) = events
@@ -1431,7 +1503,13 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             let waits = session.store.lane_waits(&rows, &call);
             let now = now(&clock)?;
             let human = if command.all {
-                render_lanes(&rows, &waits, next, session.context.state_root.as_path()).1
+                render_lanes_with_cooldowns(
+                    &rows,
+                    &waits,
+                    next,
+                    session.context.state_root.as_path(),
+                )
+                .1
             } else {
                 compact_status(&rows, &waits, now)
             };
@@ -2680,7 +2758,7 @@ fn report(
                 .service()
                 .lanes(&lane_query(session, &[target], true, 100, 0, call)?, call)?;
             let waits = session.store.lane_waits(&page.lanes, call);
-            let (data, human) = render_lanes(
+            let (data, human) = render_lanes_with_cooldowns(
                 &page.lanes,
                 &waits,
                 None,
@@ -2927,6 +3005,20 @@ fn render_lanes(
     if rows.is_empty() {
         human.push_str("no matching lanes\n");
     }
+    (
+        json!({ "lanes": rows, "next_cursor": next.map(|n| n.to_string()) }),
+        human,
+    )
+}
+
+/// Read optional host cooldowns at the composition edge, outside lane rendering.
+fn render_lanes_with_cooldowns(
+    lanes: &[run::AttemptRecord],
+    waits: &[run::LaneWait],
+    next: Option<u64>,
+    root: &Path,
+) -> (Value, String) {
+    let (mut data, mut human) = render_lanes(lanes, waits, next, root);
     let cooldowns = match (
         crate::quota::read_cache_at(root),
         SystemClock::new().wall_now(),
@@ -2936,10 +3028,8 @@ fn render_lanes(
         }
         _ => Vec::new(),
     };
-    (
-        json!({ "lanes": rows, "next_cursor": next.map(|n| n.to_string()), "capacity_cooldowns": cooldowns }),
-        human,
-    )
+    data["capacity_cooldowns"] = json!(cooldowns);
+    (data, human)
 }
 fn render_cooldowns(
     records: &[provenant_quota::AccountRecord],
@@ -3123,7 +3213,7 @@ fn render_settled(
     let waits = settled_waits(&clock, &cancel, |call| {
         session.store.lane_waits(lanes, call)
     });
-    Ok(render_lanes(
+    Ok(render_lanes_with_cooldowns(
         lanes,
         &waits,
         None,
@@ -3349,14 +3439,14 @@ fn lanes_wait_entry(
             Err(fail) if fail.kind == ErrorKind::Contention => {
                 if Instant::now() >= deadline {
                     let (mut data, human) =
-                        render_lanes(&[], &[], None, edge.roots.state.as_path());
+                        render_lanes_with_cooldowns(&[], &[], None, edge.roots.state.as_path());
                     data["condition_met"] = json!(false);
                     return Ok((data, human, true));
                 }
                 watch::pause(LOCAL_POLL, deadline);
                 if Instant::now() >= deadline {
                     let (mut data, human) =
-                        render_lanes(&[], &[], None, edge.roots.state.as_path());
+                        render_lanes_with_cooldowns(&[], &[], None, edge.roots.state.as_path());
                     data["condition_met"] = json!(false);
                     return Ok((data, human, true));
                 }
@@ -3420,7 +3510,7 @@ fn lanes_inner(
     };
     let Some(store) = store else {
         let root = execution_state(edge.roots, edge.home, edge.assets)?;
-        let (mut data, human) = render_lanes(&[], &[], None, root.as_path());
+        let (mut data, human) = render_lanes_with_cooldowns(&[], &[], None, root.as_path());
         if command.wait.is_some() || command.watch.is_some() {
             // No store means no lanes, so there is nothing left to wait for.
             data["condition_met"] = json!(true);
@@ -3515,7 +3605,8 @@ fn lanes_inner(
         (lanes, page.next)
     };
     let waits = session.store.lane_waits(&lanes, &call);
-    let (data, human) = render_lanes(&lanes, &waits, next, session.context.state_root.as_path());
+    let (data, human) =
+        render_lanes_with_cooldowns(&lanes, &waits, next, session.context.state_root.as_path());
     Ok((data, human, false))
 }
 
@@ -5957,7 +6048,7 @@ mod tests {
     #[test]
     fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_core::{ActorId, ProjectId, RootInputs};
+        use provenant_core::{ActorId, RootInputs};
         use provenant_os::exec::ExecOptions;
         use provenant_os::exec::Executor;
         use provenant_os::exec::StreamPolicy;
@@ -6051,7 +6142,7 @@ mod tests {
         let call = request(&clock, &cancel).map_err(|f| f.message)?;
         let context = run::ExecutionContext {
             state_root: roots.state.clone(),
-            project_id: ProjectId::from_bytes([1; 16]),
+            project_id: provenant_core::ProjectId::from_bytes([1; 16]),
             actor_id: ActorId::from_bytes([2; 16]),
             read_prompts: true,
         };
@@ -7323,6 +7414,7 @@ mod tests {
         std::fs::create_dir_all(roots.state.as_path())?;
         let registry = Registry {
             roots: Some(&roots),
+            state_root: Some(Path::new("/dev/null")),
             ..Default::default()
         };
         let route = run::RouteRecord {
@@ -7335,19 +7427,82 @@ mod tests {
         let stream = br#"{"type":"turn.failed","error":{"message":"at capacity","codex_error_info":"server_overloaded"}}"#;
         let mut exit = clean_exit();
         exit.termination = Some(provenant_os::exec::Termination::Exit(1));
-        // The fifth ancestor is /dev/null, which cannot contain quota state.
+        // /dev/null cannot contain quota state.
         assert!(
             crate::quota::persist_capacity_cooldown(Path::new("/dev/null"), &route, 100, 600)
                 .is_err()
         );
         let decoded = registry
-            .decode(&route, stream, &exit, Path::new("/dev/null/a/b/c/d/e"))
+            .decode_inner(&route, stream, &exit, Path::new("/nonexistent"), true)
             .unwrap();
         assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
         assert_eq!(
             decoded.reason.as_deref(),
             Some("provider capacity: at capacity")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn capacity_guardian_context_records_and_reports_config_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        std::fs::create_dir_all(&state)?;
+        let context = run::HolderContext {
+            schema_version: 1,
+            roots: run::RootSeed {
+                home: temp.path().join("home"),
+                checkout: temp.path().join("checkout"),
+                state_root: state.clone(),
+            },
+            project_id: provenant_core::ProjectId::from_bytes([1; 16]),
+            actor_id: ActorId::from_bytes([2; 16]),
+            run_id: RunId::from_bytes([3; 16]),
+            attempt_id: AttemptId::from_bytes([4; 16]),
+            host_delivery: None,
+            launch: None,
+            sealed: None,
+        };
+        let route = run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6.1-sol".into()),
+            account_key: Some("key".into()),
+            account_label: Some("label".into()),
+            ..Default::default()
+        };
+        let stream = br#"{"type":"turn.failed","error":{"message":"at capacity","codex_error_info":"server_overloaded"}}"#;
+        let mut exit = clean_exit();
+        exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+        let registry = Registry::default();
+        let decode = || {
+            registry.decode_with_context(&route, stream, &exit, Path::new("/nonexistent"), &context)
+        };
+        std::fs::write(state.join("config.toml"), "invalid = [")?;
+        let failed = decode()?;
+        assert_eq!(failed.outcome, run::Outcome::ModelUnavailable);
+        assert!(
+            failed
+                .reason
+                .unwrap_or_default()
+                .contains("capacity cooldown configuration unavailable")
+        );
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version = 1\nprofile = 'balanced'\n[domains.routing]\ncapacity_cooldown_seconds = 0\n",
+        )?;
+        let disabled = decode()?;
+        assert_eq!(
+            disabled.reason.as_deref(),
+            Some("provider capacity: at capacity")
+        );
+        assert!(!state.join("quota").exists());
+        std::fs::remove_file(state.join("config.toml"))?;
+        decode()?;
+        let record = provenant_quota::AccountRecord::decode(&std::fs::read(
+            state.join("quota/key/codex.json"),
+        )?)?;
+        assert_eq!(record.capacity_cooldowns.len(), 1);
         Ok(())
     }
 

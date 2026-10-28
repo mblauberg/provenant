@@ -3042,13 +3042,64 @@ fn capacity_cooldowns_apply_only_to_draws_and_expire() -> Result<(), Box<dyn std
     ctx.capacity_cooldowns = &both;
     let fallback = resolve(&query, &ctx)?;
     let receipt = fallback.pool_selection.unwrap();
-    assert!(receipt.candidates.iter().any(|c| {
-        c.pacing_detail
-            .as_deref()
-            .is_some_and(|d| d.contains("all eligible candidates cooling"))
-    }));
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("all eligible candidates cooling, normal selection")
+    );
     ctx.now = provenant_core::WallTime::from_micros(110_000_000)?;
     let expired = resolve(&query, &ctx)?.pool_selection.unwrap();
     assert!(expired.candidates.iter().all(|c| c.exclusion.is_none()));
+    Ok(())
+}
+
+#[test]
+fn cooling_ready_candidate_beats_unavailable_candidate() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pools": {"trial": [
+            {"model":"codex/gpt-6-luna", "weight":1, "efforts":["high"]},
+            {"model":"claude/claude-sonnet-5-5", "weight":1, "efforts":["high"]}
+        ]}
+    }))?;
+    let registry = [
+        provenant_providers::Registration {
+            quota_source: None,
+            ..provenant_providers::codex::REGISTRATION
+        },
+        provenant_providers::Registration {
+            quota_source: None,
+            ..provenant_providers::claude::REGISTRATION
+        },
+    ];
+    let availability = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let cooldowns = [provenant_quota::CapacityCooldown {
+        account: provenant_quota::AccountScope {
+            adapter: "codex".into(),
+            account_key: "opaque-account".into(),
+            label: "test".into(),
+        },
+        model: "gpt-6-luna".into(),
+        observed_unix_seconds: 90,
+        expires_unix_seconds: 110,
+    }];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.registry = &registry;
+    ctx.availability = &availability;
+    ctx.access = &access;
+    ctx.capacity_cooldowns = &cooldowns;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    let selected = resolve(&query, &ctx)?;
+    assert_eq!(selected.model, "gpt-6-luna");
+    assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
+    assert_eq!(
+        selected.pool_selection.unwrap().reason.as_deref(),
+        Some("all eligible candidates cooling, normal selection")
+    );
     Ok(())
 }

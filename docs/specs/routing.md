@@ -38,6 +38,8 @@ and the receipt explains the fallback. Explicit model dispatches and resumes ign
 capacity cooldowns. Quota refusals remain separate and continue to apply. The host
 setting `domains.routing.capacity_cooldown_seconds` defaults to 600 seconds; zero disables new cooldowns.
 `quota` and `lanes` show live cooldowns and their remaining time.
+- Test: `crates/quota/src/schedule.rs::tests::report_shows_only_live_capacity_cooldowns`;
+  `crates/cli/src/run.rs::tests::lanes_show_only_live_capacity_cooldowns`
 
 ### One resolution, bounded alternatives
 

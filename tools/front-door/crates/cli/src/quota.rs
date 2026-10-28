@@ -337,6 +337,9 @@ pub(crate) fn persist_capacity_cooldown(
     now_unix_seconds: i64,
     duration_seconds: u64,
 ) -> Result<(), EdgeError> {
+    if duration_seconds == 0 {
+        return Ok(());
+    }
     let adapter = route
         .provider
         .as_deref()

@@ -103,6 +103,19 @@ fn fixture() -> Result {
             ),
         )?;
     }
+    if prompt.contains("fixture capacity") {
+        writeln!(
+            io::stdout(),
+            "{}",
+            json!({"type":"thread.started","thread_id":session})
+        )?;
+        writeln!(
+            io::stdout(),
+            "{}",
+            json!({"type":"turn.failed","error":{"message":"at capacity","codex_error_info":"server_overloaded"}})
+        )?;
+        return Ok(());
+    }
     for frame in [
         json!({"type":"thread.started","thread_id":session}),
         json!({"type":"item.completed","item":{"type":"agent_message","text":"OK"}}),
@@ -342,6 +355,114 @@ fn codex_dispatch_observes_rollout() -> Result {
         rig.assert_legacy_unchanged()?;
         cleanup.disarm();
     }
+    Ok(())
+}
+
+fn capacity_holder_persists_and_explicit_and_resume_ignore_cooldown() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
+        fs::create_dir_all(rig.home.join(path))?;
+    }
+    fs::write(rig.home.join(".rustup/settings.toml"), "")?;
+    let bin = rig.root.join("provider/bin");
+    fs::create_dir_all(&bin)?;
+    rig.copy_executable(&std::env::current_exe()?, &bin.join("codex"))?;
+    fs::write(
+        rig.root.join("codex/auth.json"),
+        br#"{"tokens":{"account_id":"fixture-one"}}"#,
+    )?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    let prompt = rig.root.join("prompt.txt");
+    fs::write(&prompt, "fixture capacity")?;
+    let out = rig.command(&[
+        "dispatch",
+        "--model",
+        "codex/gpt-6-luna",
+        "--effort",
+        "low",
+        "--operation-id",
+        "capacity-first",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+        "--wait",
+        "5s",
+        "--json",
+    ])?;
+    assert_eq!(code(&out), 0, "{out:?}");
+    let data: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let run = data["data"]["run_id"].as_str().ok_or("run")?;
+    let lanes = rig.command(&["lanes", "--id", run, "--json"])?;
+    let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    let id = lanes["data"]["lanes"][0]["attempt_id"]
+        .as_str()
+        .ok_or("attempt")?;
+    assert_eq!(
+        lanes["data"]["lanes"][0]["state"], "model_unavailable",
+        "{lanes}"
+    );
+    assert_eq!(
+        lanes["data"]["capacity_cooldowns"][0]["model"], "gpt-6-luna",
+        "{lanes}"
+    );
+    fs::write(&prompt, "reply OK")?;
+    let explicit = rig.command(&[
+        "dispatch",
+        "--model",
+        "codex/gpt-6-luna",
+        "--effort",
+        "low",
+        "--operation-id",
+        "capacity-explicit",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+        "--wait",
+        "5s",
+        "--json",
+    ])?;
+    assert_eq!(code(&explicit), 0, "{explicit:?}");
+    let explicit: Value = serde_json::from_slice(&explicit.stdout.bytes)?;
+    let explicit_run = explicit["data"]["run_id"].as_str().ok_or("explicit run")?;
+    let explicit = rig.command(&["lanes", "--id", explicit_run, "--json"])?;
+    let explicit: Value = serde_json::from_slice(&explicit.stdout.bytes)?;
+    assert_eq!(
+        explicit["data"]["lanes"][0]["state"], "succeeded",
+        "{explicit}"
+    );
+    let resumed = rig.command(&[
+        "resume",
+        id,
+        "--no-fallback",
+        "--operation-id",
+        "capacity-resume",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+        "--wait",
+        "5s",
+        "--json",
+    ])?;
+    assert_eq!(code(&resumed), 0, "{resumed:?}");
+    let resumed: Value = serde_json::from_slice(&resumed.stdout.bytes)?;
+    assert_eq!(resumed["data"]["continuation"], "provider", "{resumed}");
+    let resumed_run = resumed["data"]["run_id"].as_str().ok_or("resumed run")?;
+    let resumed = rig.command(&["lanes", "--id", resumed_run, "--json"])?;
+    let resumed: Value = serde_json::from_slice(&resumed.stdout.bytes)?;
+    assert_eq!(
+        resumed["data"]["lanes"][0]["state"], "succeeded",
+        "{resumed}"
+    );
+    assert_eq!(
+        resumed["data"]["lanes"][0]["applied_route"]["model"], "codex/gpt-6-luna",
+        "{resumed}"
+    );
+    cleanup.disarm();
     Ok(())
 }
 fn claude_fixture() -> Result<TestRig> {
@@ -905,13 +1026,17 @@ fn codex_capacity_settles_without_quota_refusal() -> Result {
     let stdout = format!(
         "{{\"type\":\"thread.started\",\"thread_id\":\"01234567-89ab-cdef-0123-456789abcdef\"}}\n{{\"type\":\"turn.failed\",\"error\":{{\"message\":\"{message}\",\"codex_error_info\":\"server_overloaded\"}}}}\n"
     );
-    let (rig, terminal) = persisted_attempt(
+    let (rig, terminal) = persisted_attempt_with(
         "codex",
         "codex/gpt-6.1-sol",
         ("work", "codex-fixture"),
         stdout.as_bytes(),
         b"",
         1,
+        PersistedAttemptOptions {
+            host_registry: true,
+            ..Default::default()
+        },
     )?;
     assert!(matches!(
         terminal.state,
@@ -923,7 +1048,21 @@ fn codex_capacity_settles_without_quota_refusal() -> Result {
     assert!(
         matches!(&terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason == &format!("provider capacity: {message}"))
     );
-    assert!(!rig.state.join("quota/codex-fixture/codex.json").exists());
+    let record = provenant_quota::AccountRecord::decode(&fs::read(
+        rig.state.join("quota/codex-fixture/codex.json"),
+    )?)?;
+    assert!(record.refusals.is_empty());
+    assert_eq!(record.capacity_cooldowns.len(), 1);
+    assert_eq!(record.capacity_cooldowns[0].model, "gpt-6.1-sol");
+    assert_eq!(
+        record.capacity_cooldowns[0].account.account_key,
+        "codex-fixture"
+    );
+    assert_eq!(
+        record.capacity_cooldowns[0].expires_unix_seconds
+            - record.capacity_cooldowns[0].observed_unix_seconds,
+        600
+    );
     Ok(())
 }
 
@@ -970,6 +1109,7 @@ fn persisted_attempt(
 
 #[derive(Default)]
 struct PersistedAttemptOptions {
+    host_registry: bool,
     writer: bool,
     extra_task: bool,
     nonterminal: bool,
@@ -1228,7 +1368,10 @@ fn persisted_attempt_with(
             attempt_id,
             &attempt,
             &exit,
-            &provenant_cli::run::Registry::default(),
+            &provenant_cli::run::Registry {
+                roots: options.host_registry.then_some(&roots),
+                ..Default::default()
+            },
             &call,
         )?
     };
@@ -2005,6 +2148,7 @@ fn main() -> ExitCode {
                 "agy_denied_command_reaches_result_and_terminal_reason",
                 "agy_denial_result_reaches_terminal_reason",
                 "codex_capacity_settles_without_quota_refusal",
+                "capacity_holder_persists_and_explicit_and_resume_ignore_cooldown",
             ],
             |name| {
                 let result = match name {
@@ -2056,6 +2200,9 @@ fn main() -> ExitCode {
                     }
                     "codex_capacity_settles_without_quota_refusal" => {
                         codex_capacity_settles_without_quota_refusal()
+                    }
+                    "capacity_holder_persists_and_explicit_and_resume_ignore_cooldown" => {
+                        capacity_holder_persists_and_explicit_and_resume_ignore_cooldown()
                     }
                     _ => opencode_free_pool_cools_second_model(),
                 };

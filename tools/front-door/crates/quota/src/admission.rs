@@ -372,6 +372,7 @@ mod admission_tests {
             roll: 0,
             total_weight: 1,
             pick: "opencode/opencode-go/mimo-v2.6-flash".into(),
+            reason: None,
             redraws: vec![],
         });
         let mut record = record(QuotaStatus::Available);
