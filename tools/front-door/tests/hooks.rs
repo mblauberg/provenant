@@ -52,26 +52,20 @@ fn recorded_claude_events_use_native_protocol_and_never_touch_legacy_state() -> 
     rig.assert_legacy_unchanged()
 }
 #[test]
-fn bash_guard_denies_process_control_and_bad_input() -> Result {
+fn bash_guard_denies_bad_input_and_allows_process_control() -> Result {
     let rig = TestRig::new()?;
     let host: serde_json::Value = serde_json::from_slice(&recording("host-deny-json.json")?)?;
     assert_eq!(host["permission_denials"][0]["tool_name"], "Bash");
-    assert!(
-        host["result"]
-            .as_str()
-            .ok_or("recorded host result")?
-            .contains("process control is refused")
-    );
     let mut input: serde_json::Value = serde_json::from_slice(&recording("pre-tool-use.json")?)?;
-    input["tool_input"]["command"] = "pkill -f claude".into();
-    for (index, bytes) in [
-        serde_json::to_vec(&input)?,
-        b"{".to_vec(),
-        vec![b' '; 1024 * 1024 + 1],
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    input["tool_input"]["command"] = "pkill -f claude; sleep 30; $CMD".into();
+    let output = rig.execute(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &["hook", "claude", "pre-tool-use"],
+        Some(&serde_json::to_vec(&input)?),
+    )?;
+    assert_eq!(code(&output), 0);
+    assert!(output.stdout.bytes.is_empty());
+    for bytes in [b"{".to_vec(), vec![b' '; 1024 * 1024 + 1]] {
         let output = rig.execute(
             Path::new(env!("CARGO_BIN_EXE_provenant")),
             &["hook", "claude", "pre-tool-use"],
@@ -80,12 +74,6 @@ fn bash_guard_denies_process_control_and_bad_input() -> Result {
         assert_eq!(code(&output), 0);
         let deny: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
         assert_eq!(deny["hookSpecificOutput"]["permissionDecision"], "deny");
-        if index == 0 {
-            assert_eq!(
-                deny["hookSpecificOutput"]["permissionDecisionReason"],
-                provenant_confinement::shell_command::DENY_REASON
-            );
-        }
         assert_eq!(
             output.stdout.bytes.iter().filter(|b| **b == b'\n').count(),
             1
@@ -115,18 +103,19 @@ fn bash_guard_rules_deny_with_a_remedy_and_follow_config() -> Result {
             .as_str()
             .map(str::to_owned))
     };
-    let remedy = decide("git stash")?.ok_or("git stash allowed")?;
-    assert!(remedy.contains("WIP commit"), "{remedy}");
-    assert!(decide("git stash push -m tag")?.is_none());
-    assert!(decide("sleep 30")?.is_some());
+    let remedy = decide("git push --force origin main")?.ok_or("force push allowed")?;
+    assert!(remedy.contains("open a PR"), "{remedy}");
+    assert!(decide("git push --force origin topic")?.is_none());
+    assert!(decide("git stash")?.is_none());
+    assert!(decide("rm -rf ~")?.is_some());
 
     fs::create_dir_all(&rig.state)?;
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version = 1\n[domains.guard]\ndeny = ['sleep-poll']\n",
+        "schema_version = 1\n[domains.guard]\ndeny = ['rm-root']\n",
     )?;
-    assert!(decide("git stash")?.is_none());
-    assert!(decide("sleep 30")?.is_some());
+    assert!(decide("git push --force origin main")?.is_none());
+    assert!(decide("rm -rf ~")?.is_some());
     Ok(())
 }
 #[test]
@@ -134,11 +123,11 @@ fn unreadable_guard_config_keeps_the_default_rules_on() -> Result {
     let rig = TestRig::new()?;
     let mut input: serde_json::Value = serde_json::from_slice(&recording("pre-tool-use.json")?)?;
     input["cwd"] = rig.project.to_str().ok_or("project path")?.into();
-    input["tool_input"]["command"] = "git stash".into();
+    input["tool_input"]["command"] = "git push --force origin main".into();
     fs::create_dir_all(&rig.state)?;
     // A directory at `config.toml` is a deterministic read failure.
     for config in [
-        Some("schema_version = 1\n[domains.guard]\ndeny = 'sleep-poll'\n"),
+        Some("schema_version = 1\n[domains.guard]\ndeny = 'force-push'\n"),
         Some("schema_version = 1\n[domains.guard\n"),
         None,
     ] {

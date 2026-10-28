@@ -1,98 +1,34 @@
 //! Conservative bounded inspection of direct harness shell commands.
 //! Custody and OS confinement remain authoritative; this is no shell evaluator.
-use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefusalReason {
-    ProcessControl,
-    DynamicCommandName,
-    Expansion,
-    Unparseable,
+/// Input the walk cannot follow: incomplete or overdeep syntax.
+#[derive(Debug)]
+struct Unparseable;
+
+/// The simple commands in `command`, as words with the command name first.
+/// Wrappers and shells are looked through, so `sudo git push -f` and
+/// `bash -c 'git push -f'` both yield `git push -f`. A command name is the last
+/// path component. `None` when the syntax is incomplete or overdeep: callers
+/// allow what they cannot read. Scripts, aliases, functions and other languages
+/// are not interpreted.
+pub fn commands(command: &str) -> Option<Vec<Vec<String>>> {
+    inspect(command, 0).ok()
 }
-
-pub const DENY_REASON: &str = "Pattern and group process control is refused; targeted `kill [-SIGNAL] PID` with literal PIDs above 1 is allowed. Use `provenant cancel TARGET` for owned work.";
-
-impl RefusalReason {
-    pub const fn message(self) -> &'static str {
-        match self {
-            Self::ProcessControl => DENY_REASON,
-            Self::DynamicCommandName => {
-                "A dynamic command name is refused. Write the command path literally."
-            }
-            Self::Expansion => {
-                "An unbounded expansion is refused. Write the command name literally."
-            }
-            Self::Unparseable => {
-                "Shell syntax the guard cannot parse is refused. Simplify the command."
-            }
-        }
-    }
-}
-
-#[derive(Debug, Error)]
-#[error("{}", .0.message())]
-pub struct ShellRefusal(pub RefusalReason);
-
-impl ShellRefusal {
-    const fn unparseable() -> Self {
-        Self(RefusalReason::Unparseable)
-    }
-    const fn expansion() -> Self {
-        Self(RefusalReason::Expansion)
-    }
-}
-
-/// Refuse process control wherever bash would run it as a command: after
-/// separators and keywords, behind wrappers such as `sudo` and `xargs`, in
-/// `$(...)`, backticks, process substitution and unquoted heredocs, and in
-/// bodies handed to shells. The same names as arguments, as in `rg pkill`,
-/// stay usable. Dynamic expansion cannot establish a command name, so `$CMD`
-/// in command position is refused, as is incomplete or overdeep syntax. When an
-/// interpreter reads commands from stdin, as in `echo kill 1 | sh`, any
-/// process-control word in the line is refused. `kill` with an optional
-/// signal and literal PIDs above 1 is allowed, as are `kill -0` probes. Scripts, aliases, functions and other languages are not interpreted.
-pub fn check(command: &str) -> Result<(), ShellRefusal> {
-    inspect(command, 0).map(drop)
-}
-/// The simple commands the same walk finds, as words with the command name
-/// first. Wrappers and shells are looked through, so `sudo git stash` and
-/// `bash -c 'git stash'` both yield `git stash`. Fails as `check` does.
-pub fn commands(command: &str) -> Result<Vec<Vec<String>>, ShellRefusal> {
-    inspect(command, 0)
-}
-fn inspect(command: &str, depth: usize) -> Result<Vec<Vec<String>>, ShellRefusal> {
+fn inspect(command: &str, depth: usize) -> Result<Vec<Vec<String>>, Unparseable> {
     if depth > 8 || command.len() > 1024 * 1024 || command.contains('\0') {
-        return Err(ShellRefusal::unparseable());
+        return Err(Unparseable);
     }
     let mut lexer = Lexer {
         chars: command.chars().collect(),
         at: 0,
-        seen: Vec::new(),
         commands: Vec::new(),
-        data_reaches_shell: false,
     };
     lexer.list(depth, Until::End)?;
-    if lexer.data_reaches_shell {
-        for text in &lexer.seen {
-            if data_names_control(text)? {
-                return Err(ShellRefusal(RefusalReason::ProcessControl));
-            }
-        }
-    }
     Ok(lexer.commands)
 }
-const PROCESS_CONTROL: [&str; 8] = [
-    "kill",
-    "pkill",
-    "killall",
-    "killall5",
-    "skill",
-    "fuser",
-    "killpg",
-    "pidfd_send_signal",
-];
 /// Commands any of whose operands may be command text; each is inspected as a
-/// command line. The first `INTERPRETERS` read commands from stdin without one.
+/// command line. The first `INTERPRETERS` take a `-c` body and positional
+/// parameters after it.
 const INTERPRETERS: usize = 11;
 const SHELLS: [&str; 24] = [
     "sh", "bash", "zsh", "dash", "ksh", "mksh", "fish", "csh", "tcsh", "source", ".", "eval",
@@ -187,7 +123,6 @@ const WRAPPERS: [(&str, &[&str]); 18] = [
 ];
 const ENV: usize = 2;
 const COMMAND: usize = 4;
-const XARGS: usize = 10;
 const FIND: usize = WRAPPERS.len() - 1;
 const FIND_ACTIONS: [&str; 4] = ["-exec", "-execdir", "-ok", "-okdir"];
 /// Keywords after which the next word is again in command position.
@@ -217,12 +152,6 @@ enum Position {
     Argument,
     /// The name after `function`; the body follows in command position.
     Name,
-    /// After a literal `kill`: an optional signal, then literal PIDs above 1.
-    Kill,
-    /// The value of `kill -s` or `-n`.
-    KillSignal,
-    /// After at least one PID, which only further PIDs may follow.
-    KillPids,
 }
 #[derive(Clone, Copy, Default)]
 enum Redirect {
@@ -245,8 +174,8 @@ struct Scope {
     position: Position,
     redirect: Redirect,
     find: bool,
-    /// An interpreter's operand count, and whether one was dynamic.
-    interpreter: Option<(usize, bool)>,
+    /// The command is a shell that takes `-c BODY`.
+    interpreter: bool,
     cases: usize,
     heredocs: Vec<Heredoc>,
     /// The words of the current simple command, once its name is known.
@@ -260,7 +189,6 @@ struct Word {
     text: String,
     started: bool,
     quoted: bool,
-    dynamic: bool,
     /// Length of the literal unquoted prefix, once quoting or expansion began.
     plain: Option<usize>,
 }
@@ -300,11 +228,8 @@ impl Word {
 struct Lexer {
     chars: Vec<char>,
     at: usize,
-    /// Decoded words and heredoc bodies, for the data rule.
-    seen: Vec<String>,
     /// Finished simple commands, including those inside shell bodies.
     commands: Vec<Vec<String>>,
-    data_reaches_shell: bool,
 }
 impl Lexer {
     fn next(&mut self) -> Option<char> {
@@ -320,9 +245,9 @@ impl Lexer {
         self.at += usize::from(found);
         found
     }
-    fn list(&mut self, depth: usize, until: Until) -> Result<(), ShellRefusal> {
+    fn list(&mut self, depth: usize, until: Until) -> Result<(), Unparseable> {
         if depth > 8 {
-            return Err(ShellRefusal::unparseable());
+            return Err(Unparseable);
         }
         let mut scope = Scope::default();
         let mut word = Word::default();
@@ -331,7 +256,7 @@ impl Lexer {
                 break false;
             };
             match character {
-                '\\' => match self.next().ok_or_else(ShellRefusal::unparseable)? {
+                '\\' => match self.next().ok_or(Unparseable)? {
                     // A backslash-newline is a line continuation: bash removes both.
                     '\n' => {}
                     escaped => {
@@ -389,31 +314,24 @@ impl Lexer {
         self.finish(&mut scope, &mut word, depth)?;
         self.end_command(&mut scope)?;
         if until != Until::End && !closed {
-            return Err(ShellRefusal::unparseable());
+            return Err(Unparseable);
         }
         Ok(())
     }
-    fn single_quoted(&mut self, word: &mut Word, ansi: bool) -> Result<(), ShellRefusal> {
+    fn single_quoted(&mut self, word: &mut Word, ansi: bool) -> Result<(), Unparseable> {
         loop {
-            match self.next().ok_or_else(ShellRefusal::unparseable)? {
+            match self.next().ok_or(Unparseable)? {
                 '\'' => return Ok(()),
                 '\\' if ansi => {
-                    let escaped = self.next().ok_or_else(ShellRefusal::unparseable)?;
+                    let escaped = self.next().ok_or(Unparseable)?;
                     word.push(escaped);
                 }
                 character => word.push(character),
             }
         }
     }
-    /// Close a simple command: a `kill` without PIDs is refused, and an interpreter
-    /// without a literal operand reads commands from stdin.
-    fn end_command(&mut self, scope: &mut Scope) -> Result<(), ShellRefusal> {
-        if matches!(scope.position, Position::Kill | Position::KillSignal) {
-            return Err(ShellRefusal(RefusalReason::ProcessControl));
-        }
-        if let Some((operands, dynamic)) = scope.interpreter {
-            self.data_reaches_shell |= operands == 0 || dynamic;
-        }
+    /// Close a simple command and reset the scope for the next one.
+    fn end_command(&mut self, scope: &mut Scope) -> Result<(), Unparseable> {
         if !scope.argv.is_empty() {
             self.commands.push(std::mem::take(&mut scope.argv));
         }
@@ -425,16 +343,16 @@ impl Lexer {
         };
         Ok(())
     }
-    fn double_quoted(&mut self, word: &mut Word, depth: usize) -> Result<(), ShellRefusal> {
+    fn double_quoted(&mut self, word: &mut Word, depth: usize) -> Result<(), Unparseable> {
         if depth > 8 {
-            return Err(ShellRefusal::unparseable());
+            return Err(Unparseable);
         }
         word.special();
         word.quoted = true;
         loop {
-            match self.next().ok_or_else(ShellRefusal::unparseable)? {
+            match self.next().ok_or(Unparseable)? {
                 '"' => return Ok(()),
-                '\\' => match self.next().ok_or_else(ShellRefusal::unparseable)? {
+                '\\' => match self.next().ok_or(Unparseable)? {
                     '\n' => {}
                     escaped => {
                         if !"$`\"\\".contains(escaped) {
@@ -455,9 +373,9 @@ impl Lexer {
     /// An expansion after `$`. Substitutions inside it are inspected; the raw
     /// text is kept so bodies handed to shells are inspected again. Inside
     /// double quotes, single quotes in `${...}` are literal.
-    fn dollar(&mut self, word: &mut Word, depth: usize, quoted: bool) -> Result<(), ShellRefusal> {
+    fn dollar(&mut self, word: &mut Word, depth: usize, quoted: bool) -> Result<(), Unparseable> {
         if depth > 8 {
-            return Err(ShellRefusal::unparseable());
+            return Err(Unparseable);
         }
         let start = self.at - 1;
         if self.eat('(') {
@@ -466,10 +384,10 @@ impl Lexer {
         let mut inner = Word::default();
         if self.eat('{') {
             loop {
-                match self.next().ok_or_else(ShellRefusal::unparseable)? {
+                match self.next().ok_or(Unparseable)? {
                     '}' => break,
                     '\\' => {
-                        self.next().ok_or_else(ShellRefusal::unparseable)?;
+                        self.next().ok_or(Unparseable)?;
                     }
                     '\'' if !quoted => self.single_quoted(&mut inner, false)?,
                     '"' => self.double_quoted(&mut inner, depth + 1)?,
@@ -485,7 +403,6 @@ impl Lexer {
             self.single_quoted(&mut inner, true)?;
         }
         word.special();
-        word.dynamic = true;
         word.text.extend(&self.chars[start..self.at]);
         Ok(())
     }
@@ -495,10 +412,9 @@ impl Lexer {
         depth: usize,
         until: Until,
         start: usize,
-    ) -> Result<(), ShellRefusal> {
+    ) -> Result<(), Unparseable> {
         self.list(depth + 1, until)?;
         word.special();
-        word.dynamic = true;
         word.text.extend(&self.chars[start..self.at]);
         Ok(())
     }
@@ -519,9 +435,8 @@ impl Lexer {
     }
     /// Consume the bodies of heredocs whose line just ended. A quoted
     /// delimiter keeps the body literal; otherwise its substitutions run.
-    fn heredocs(&mut self, scope: &mut Scope, depth: usize) -> Result<(), ShellRefusal> {
+    fn heredocs(&mut self, scope: &mut Scope, depth: usize) -> Result<(), Unparseable> {
         for heredoc in std::mem::take(&mut scope.heredocs) {
-            let mut body = String::new();
             while self.at < self.chars.len() {
                 let (line, end) = self.heredoc_line(heredoc.quoted);
                 let compared = if heredoc.strip_tabs {
@@ -533,15 +448,13 @@ impl Lexer {
                     self.at = (end + 1).min(self.chars.len());
                     break;
                 }
-                body.push_str(&line);
-                body.push('\n');
                 if heredoc.quoted {
                     self.at = (end + 1).min(self.chars.len());
                     continue;
                 }
                 let mut inner = Word::default();
                 while self.at < end {
-                    match self.next().ok_or_else(ShellRefusal::unparseable)? {
+                    match self.next().ok_or(Unparseable)? {
                         '\\' => self.at += 1,
                         '$' => self.dollar(&mut inner, depth, true)?,
                         '`' => {
@@ -554,7 +467,6 @@ impl Lexer {
                 // A substitution may run past the line; resume after its line.
                 while self.next().is_some_and(|c| c != '\n') {}
             }
-            self.seen.push(body);
         }
         Ok(())
     }
@@ -584,15 +496,11 @@ impl Lexer {
         scope: &mut Scope,
         word: &mut Word,
         depth: usize,
-    ) -> Result<(), ShellRefusal> {
+    ) -> Result<(), Unparseable> {
         let word = std::mem::take(word);
         if !word.started {
             return Ok(());
         }
-        if self.seen.len() >= 16_384 {
-            return Err(ShellRefusal::unparseable());
-        }
-        self.seen.push(word.text.clone());
         match std::mem::replace(&mut scope.redirect, Redirect::None) {
             Redirect::Target => return Ok(()),
             Redirect::Heredoc { strip_tabs } => {
@@ -621,21 +529,7 @@ impl Lexer {
             }
             Position::Command if keyword(&["function"]) => Position::Name,
             Position::Name => Position::Command,
-            Position::Kill | Position::KillSignal | Position::KillPids if word.plain.is_some() => {
-                return Err(ShellRefusal(RefusalReason::ProcessControl));
-            }
-            Position::Kill if text == "-0" => Position::Argument,
-            Position::Kill if text == "-s" || text == "-n" => Position::KillSignal,
-            Position::Kill if text.strip_prefix('-').is_some_and(is_signal) => Position::Kill,
-            Position::KillSignal if is_signal(text.trim_start_matches('-')) => Position::Kill,
-            Position::Kill | Position::KillPids if is_pid(text) => Position::KillPids,
-            Position::KillSignal | Position::Kill | Position::KillPids => {
-                return Err(ShellRefusal(RefusalReason::ProcessControl));
-            }
             Position::Wrapped(COMMAND) if text == "-v" || text == "-V" => Position::Argument,
-            Position::Wrapped(XARGS) if !text.starts_with('-') && text.contains("{}") => {
-                return Err(ShellRefusal::unparseable());
-            }
             Position::Wrapped(wrapper)
                 if text == "--"
                     || word.plain.is_none() && duration(text)
@@ -665,17 +559,11 @@ impl Lexer {
                 Position::Wrapped(wrapper)
             }
             Position::Shell => {
-                if let Some((operands, dynamic)) = &mut scope.interpreter
-                    && !text.starts_with('-')
-                {
-                    *operands += 1;
-                    *dynamic |= word.dynamic;
-                }
                 // After `sh -c BODY`, further words are positional parameters.
-                if !scope.shell_body {
+                if !scope.shell_body && !text.starts_with('-') {
                     self.commands.extend(inspect(text, depth + 1)?);
                 }
-                if scope.interpreter.is_some() {
+                if scope.interpreter {
                     let option = word.plain.is_none() && text.starts_with('-');
                     if option && !text.starts_with("--") && text.contains('c') {
                         scope.shell_c = true;
@@ -695,7 +583,7 @@ impl Lexer {
                 Position::Argument
             }
             Position::Command | Position::Wrapped(_) => {
-                let next = self.command(scope, &word)?;
+                let next = self.command(scope, &word);
                 if matches!(next, Position::Argument) {
                     // `find -exec CMD` starts a second command in this scope.
                     if !scope.argv.is_empty() {
@@ -709,52 +597,21 @@ impl Lexer {
         };
         Ok(())
     }
-    /// Classify a command word: refuse process control, follow wrappers and
-    /// shells. Brace and glob forms count when any expansion could match.
-    fn command(&mut self, scope: &mut Scope, word: &Word) -> Result<Position, ShellRefusal> {
-        if word.dynamic {
-            return Err(ShellRefusal(RefusalReason::DynamicCommandName));
-        }
-        let mut expansions = Vec::new();
-        expand_braces(&word.text, &mut expansions)?;
+    /// Classify a command word: follow wrappers and shells.
+    fn command(&mut self, scope: &mut Scope, word: &Word) -> Position {
         // zsh expands a leading `=` to the command's path.
-        let names: Vec<&str> = expansions
-            .iter()
-            .map(|expansion| expansion.rsplit('/').next().unwrap_or_default())
-            .map(|name| name.trim_start_matches('='))
-            .collect();
-        if names == ["kill"] {
-            // `xargs kill` takes its PIDs from stdin.
-            if matches!(scope.position, Position::Wrapped(XARGS)) {
-                return Err(ShellRefusal(RefusalReason::ProcessControl));
-            }
-            return Ok(Position::Kill);
+        let name = word.text.rsplit('/').next().unwrap_or_default();
+        let name = name.trim_start_matches('=');
+        if let Some(shell) = SHELLS.iter().position(|item| *item == name) {
+            scope.interpreter = shell < INTERPRETERS;
+            return Position::Shell;
         }
-        let named = |list: &[&str]| {
-            list.iter()
-                .position(|item| names.iter().any(|name| may_name(name, item)))
-        };
-        if named(&PROCESS_CONTROL).is_some() {
-            return Err(ShellRefusal(RefusalReason::ProcessControl));
+        if let Some(wrapper) = WRAPPERS.iter().position(|(item, _)| *item == name) {
+            return Position::Wrapped(wrapper);
         }
-        if let Some(shell) = named(&SHELLS) {
-            scope.interpreter = (shell < INTERPRETERS).then_some((0, false));
-            return Ok(Position::Shell);
-        }
-        if let Some(wrapper) = named(&WRAPPERS.map(|(name, _)| name)) {
-            return Ok(Position::Wrapped(wrapper));
-        }
-        scope.find |= named(&["find"]).is_some();
-        Ok(Position::Argument)
+        scope.find |= name == "find";
+        Position::Argument
     }
-}
-/// A signal name or number such as `9`, `TERM` or `SIGHUP`.
-fn is_signal(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric())
-}
-/// A literal PID above 1; zero and negatives address process groups, and 1 is init.
-fn is_pid(text: &str) -> bool {
-    text.bytes().all(|b| b.is_ascii_digit()) && text.parse::<u32>().is_ok_and(|pid| pid > 1)
 }
 /// Durations and counts such as `timeout 5s` stay in wrapper position.
 fn duration(text: &str) -> bool {
@@ -763,271 +620,109 @@ fn duration(text: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_digit() || ".smhd".contains(c))
 }
-/// Text that may reach an interpreter as data, such as `echo kill 1 | sh`,
-/// is checked for any process-control word, quotes removed.
-fn data_names_control(text: &str) -> Result<bool, ShellRefusal> {
-    let text: String = text.chars().filter(|c| !"'\"\\".contains(*c)).collect();
-    for word in text.split(|c: char| c.is_whitespace() || ";|&()<>`$".contains(c)) {
-        let mut expansions = Vec::new();
-        expand_braces(word, &mut expansions)?;
-        for expansion in &expansions {
-            let name = expansion.rsplit('/').next().unwrap_or_default();
-            if PROCESS_CONTROL
-                .iter()
-                .any(|control| may_name(name, control))
-            {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-/// Bash brace expansion of one word, bounded. Braces without a top-level
-/// comma stay literal, as in bash.
-fn expand_braces(word: &str, out: &mut Vec<String>) -> Result<(), ShellRefusal> {
-    if out.len() > 256 || word.matches('{').count() > 64 {
-        return Err(ShellRefusal::expansion());
-    }
-    let bytes = word.as_bytes();
-    for open in (0..bytes.len()).filter(|&i| bytes[i] == b'{') {
-        let (mut nesting, mut commas) = (0, vec![]);
-        for close in open..bytes.len() {
-            match bytes[close] {
-                b'{' => nesting += 1,
-                b',' if nesting == 1 => commas.push(close),
-                b'}' => {
-                    nesting -= 1;
-                    if nesting == 0 && !commas.is_empty() {
-                        let bounds = std::iter::once(open)
-                            .chain(commas.iter().copied())
-                            .chain(std::iter::once(close));
-                        let bounds: Vec<_> = bounds.collect();
-                        for pair in bounds.windows(2) {
-                            let alternative = format!(
-                                "{}{}{}",
-                                &word[..open],
-                                &word[pair[0] + 1..pair[1]],
-                                &word[close + 1..]
-                            );
-                            expand_braces(&alternative, out)?;
-                        }
-                        return Ok(());
-                    }
-                    if nesting == 0 {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    out.push(word.to_owned());
-    Ok(())
-}
-/// Whether the glob `name` may match `control`: `?` matches one character,
-/// `[...]` one character of its set (negated sets, ranges and classes such as
-/// `[:alpha:]` match any), `*` any text. A name of only `*` and `?`, such as
-/// `*`, is not refused, so ordinary glob arguments stay usable.
-fn may_name(name: &str, control: &str) -> bool {
-    if !name.contains(['*', '?', '[']) {
-        return name == control;
-    }
-    let mut pattern = Vec::new();
-    let mut characters = name.chars();
-    while let Some(character) = characters.next() {
-        let token = match character {
-            '?' => Token::One(None),
-            '*' if matches!(pattern.last(), Some(Token::Any)) => continue,
-            '*' => Token::Any,
-            '[' if name.contains(']') => {
-                let (mut set, mut any) = (String::new(), false);
-                while let Some(inner) = characters.next() {
-                    if inner == ']' && !set.is_empty() {
-                        break;
-                    }
-                    if inner == '[' && matches!(characters.clone().next(), Some(':' | '.' | '=')) {
-                        let mut previous = inner;
-                        for class in characters.by_ref() {
-                            if class == ']' && matches!(previous, ':' | '.' | '=') {
-                                break;
-                            }
-                            previous = class;
-                        }
-                        any = true;
-                    }
-                    set.push(inner);
-                }
-                if any || set.starts_with(['!', '^']) || set.contains('-') {
-                    Token::One(None)
-                } else {
-                    Token::One(Some(set))
-                }
-            }
-            literal => Token::One(Some(literal.to_string())),
-        };
-        pattern.push(token);
-    }
-    pattern
-        .iter()
-        .any(|token| matches!(token, Token::One(Some(_))))
-        && matches_glob(&pattern, &control.chars().collect::<Vec<_>>())
-}
-enum Token {
-    /// One character, from the set when one is known.
-    One(Option<String>),
-    Any,
-}
-/// Linear in the pattern: `reachable[i]` holds when the tokens so far can
-/// consume exactly `text[..i]`.
-fn matches_glob(pattern: &[Token], text: &[char]) -> bool {
-    let mut reachable = vec![false; text.len() + 1];
-    reachable[0] = true;
-    for token in pattern {
-        let mut next = vec![false; text.len() + 1];
-        match token {
-            Token::Any => {
-                if let Some(first) = reachable.iter().position(|&r| r) {
-                    next[first..].fill(true);
-                }
-            }
-            Token::One(set) => {
-                for (i, character) in text.iter().enumerate() {
-                    next[i + 1] =
-                        reachable[i] && set.as_ref().is_none_or(|set| set.contains(*character));
-                }
-            }
-        }
-        if !next.contains(&true) {
-            return false;
-        }
-        reachable = next;
-    }
-    reachable[text.len()]
-}
 #[cfg(test)]
 mod tests {
     // Parsing performance tests measure elapsed wall time.
     #![allow(clippy::disallowed_methods)]
 
     use super::*;
-    #[test]
-    fn process_control_never_obtains_authority_from_shell_wrapping() {
-        for command in [
-            "sudo /usr/bin/pkill -f claude",
-            "sh -c 'ki\"\"llall -9 42'",
-            "ps | xargs kill",
-            "killall codex",
-            "${CMD} 42",
-            "pki\\\nll 1",
-            "k?ll 1",
-            "/bin/k[i]ll 1",
-            "k{i,}ll 1",
-            "pk*l 1",
-            "/bin/[k][i][l][l] 1",
-            "{kill,x} 1",
-            "/bin/[k]* 1",
-        ] {
-            assert!(check(command).is_err(), "{command}");
-        }
-        for command in [
-            "echo hook-capture && git status --short",
-            "ls *.rs src/[ab]* {a,b}.txt",
-            "rm -f build/* && echo done",
-            "cp a{,.bak} && mkdir -p src/{a,b}",
-        ] {
-            assert!(check(command).is_ok(), "{command}");
-        }
-    }
-    #[test]
-    fn refusals_report_their_reason() {
-        let braces = "{a,b}".repeat(65);
-        for (command, reason) in [
-            ("pkill -f claude", RefusalReason::ProcessControl),
-            ("$CMD 1", RefusalReason::DynamicCommandName),
-            (braces.as_str(), RefusalReason::Expansion),
-            ("echo \"open", RefusalReason::Unparseable),
-        ] {
-            assert_eq!(check(command).expect_err(command).0, reason, "{command}");
-        }
+
+    fn names(command: &str) -> Vec<String> {
+        commands(command)
+            .unwrap_or_else(|| panic!("unparseable: {command}"))
+            .into_iter()
+            .map(|argv| argv[0].clone())
+            .collect()
     }
     #[test]
     fn every_command_position_is_inspected() {
         for command in [
-            "echo $(pkill 1)",
-            "echo \"`pkill x`\"",
-            "cat <(pkill 1)",
-            "echo \"${x:-$(pkill 1)}\"",
-            "sudo -u root pkill 1",
-            "sudo --user root pkill 1",
-            "env FOO=1 pkill 1",
-            "env -i pkill 1",
-            "env -S 'pkill 1'",
-            "{env,-i} pkill 1",
-            "timeout 5 pkill 1",
-            "timeout -s TERM 5s pkill 1",
-            "nice -n 5 pkill 1",
-            "xargs -I {} pkill {}",
-            "X=1 pkill 1",
-            "X+=1 pkill 1",
-            ">out pkill 1",
-            "true &>/dev/null; pkill 1",
-            "echo ok\npkill 1",
-            "find . -name x -exec pkill {} \\;",
-            "find . -exec true \\; -exec pkill {} \\;",
-            "if true; then pkill 1; fi",
-            "for p in 1; do pkill $p; done",
-            "(pkill 1)",
-            "{ pkill 1; }",
-            "f() { pkill 1; }",
-            "case x in a) pkill 1;; esac",
-            "echo \"$(case x in a) pkill 1;; esac)\"",
-            "bash -lc 'echo ok; pkill 1'",
-            "eval 'pkill 1'",
-            "su -c 'pkill 1'",
-            "trap 'pkill 1' EXIT",
-            "cat <<EOF\n$(pkill 1)\nEOF",
-            "echo \"$(cat <<EOF\n`pkill 1`\nEOF\n)\"",
-            "$CMD 1",
-            "\"$HOME/bin/tool\" 1",
-            "$(which tool) 1",
-            "echo kill 1 | sh",
-            "cat <<EOF\nEO\\\nF\npkill 1\nEOF",
-            "function f { pkill 1; }; f",
-            "/bin/[[:alpha:]]ill 1",
-            "/bin/[[:alpha:][:digit:]]ill 1",
-            "env -P /bin pkill 1",
-            "sudo -R /x pkill 1",
-            "=pkill 1",
-            "echo \"${x:-'}\"; pkill 1; echo \"'}\"",
-            "arch -arm64 pkill 1",
-            "gtimeout 5 pkill 1",
-            "kill",
-            "kill -9",
-            "kill -s KILL",
-            "kill 0",
-            "kill 1",
-            "sudo kill -9 1",
-            "kill -1",
-            "kill -- -1",
-            "kill 1 -1",
-            "kill -9 $PID",
-            "kill $(pgrep x)",
-            "kill \"1\"",
-            "xargs kill 123",
-            "echo 1 | xargs kill -9",
-            "pkill x",
-            "killall5",
-            "skill x",
-            "killpg 1",
-            "echo kill 1 | bash",
-            "printf kill | xargs -I{} {} 1",
-            "source <(echo x)",
-            "bash <<'EOF'\nkill 1\nEOF",
-            "printf 'ki\"\"ll 1' | bash",
-            "echo $(",
-            "echo \"open",
+            "echo $(mark 1)",
+            "echo \"`mark x`\"",
+            "cat <(mark 1)",
+            "echo \"${x:-$(mark 1)}\"",
+            "sudo -u root mark 1",
+            "sudo --user root mark 1",
+            "env FOO=1 mark 1",
+            "env -i mark 1",
+            "env -S 'mark 1'",
+            "timeout 5 mark 1",
+            "timeout -s TERM 5s mark 1",
+            "nice -n 5 mark 1",
+            "xargs -I {} mark {}",
+            "X=1 mark 1",
+            "X+=1 mark 1",
+            ">out mark 1",
+            "true &>/dev/null; mark 1",
+            "echo ok\nmark 1",
+            "find . -name x -exec mark {} \\;",
+            "find . -exec true \\; -exec mark {} \\;",
+            "if true; then mark 1; fi",
+            "for p in 1; do mark $p; done",
+            "(mark 1)",
+            "{ mark 1; }",
+            "f() { mark 1; }",
+            "case x in a) mark 1;; esac",
+            "bash -lc 'echo ok; mark 1'",
+            "eval 'mark 1'",
+            "su -c 'mark 1'",
+            "trap 'mark 1' EXIT",
+            "cat <<EOF\n$(mark 1)\nEOF",
+            "echo \"$(cat <<EOF\n`mark 1`\nEOF\n)\"",
+            "cat <<EOF\nEO\\\nF\nmark 1\nEOF",
+            "function f { mark 1; }; f",
+            "env -P /bin mark 1",
+            "sudo -R /x mark 1",
+            "=mark 1",
+            "echo \"${x:-'}\"; mark 1; echo \"'}\"",
+            "arch -arm64 mark 1",
+            "gtimeout 5 mark 1",
+            "/usr/bin/mark 1",
+            "\"$HOME/bin/mark\" 1",
         ] {
-            assert!(check(command).is_err(), "{command}");
+            assert!(names(command).contains(&"mark".to_owned()), "{command}");
+        }
+    }
+    #[test]
+    fn commands_carry_their_words_and_nothing_else() {
+        for (command, expected) in [
+            (
+                "git push -f origin main",
+                vec![vec!["git", "push", "-f", "origin", "main"]],
+            ),
+            ("sudo git stash", vec![vec!["git", "stash"]]),
+            ("bash -c 'git stash' _ 'echo'", vec![vec!["git", "stash"]]),
+            (
+                "echo git reset --hard",
+                vec![vec!["echo", "git", "reset", "--hard"]],
+            ),
+            (
+                "a 1 && b 2 | c",
+                vec![vec!["a", "1"], vec!["b", "2"], vec!["c"]],
+            ),
+            ("rm -rf \"$HOME\"", vec![vec!["rm", "-rf", "$HOME"]]),
+        ] {
+            assert_eq!(commands(command).unwrap(), expected, "{command}");
+        }
+    }
+    #[test]
+    fn process_control_dynamic_names_and_sleeps_are_ordinary_commands() {
+        for (command, name) in [
+            ("pkill -f claude", "pkill"),
+            ("killall codex", "killall"),
+            ("kill -9 $PID", "kill"),
+            ("kill 1", "kill"),
+            ("sleep 30", "sleep"),
+            ("$CMD 1", "$CMD"),
+        ] {
+            assert_eq!(names(command), [name], "{command}");
+        }
+        assert_eq!(names("echo kill 1 | sh"), ["echo"]);
+    }
+    #[test]
+    fn incomplete_or_overdeep_input_is_unreadable() {
+        for command in ["echo $(", "echo \"open", "echo ${x:-", &"(".repeat(20)] {
+            assert!(commands(command).is_none(), "{command}");
         }
     }
     #[test]
@@ -1045,53 +740,12 @@ mod tests {
             format!("{} 1", "{".repeat(20_000)),
         ] {
             let started = Instant::now();
-            let _ = check(&command);
+            let _ = commands(&command);
             assert!(
                 started.elapsed() < Duration::from_secs(1),
                 "{}",
                 &command[..16]
             );
-        }
-    }
-    #[test]
-    fn arguments_and_ordinary_expansion_stay_usable() {
-        for command in [
-            "rg pkill src",
-            "echo kill",
-            "man kill",
-            "git commit -m \"handle kill signal\"",
-            "export PATH=\"$HOME/.cargo/bin:$PATH\"",
-            "PATH=\"$HOME/bin:$PATH\" cargo test",
-            "for f in *.rs; do echo \"$f\"; done",
-            "git commit -m \"$(cat <<'EOF'\nStop the kill path (don't kill it)\nEOF\n)\"",
-            "cat <<EOF\nkill 1 $HOME\nEOF",
-            "cargo test 2>&1 | tail -5",
-            "grep -n kill src/*.rs # kill",
-            "echo $HOME",
-            "ls > out.txt 2>/dev/null",
-            "timeout 60 cargo test kill_handler",
-            "xargs -I{} cp {} \"$DEST\"",
-            "find . -name kill -print",
-            "[ -f x ] && echo ok",
-            "while read -r line; do echo \"$line\"; done < file",
-            "echo 'single $(kill 1)'",
-            "bash -c 'cargo test'",
-            "sudo -u \"$USER\" make",
-            "echo $((1 + (2 * 3)))",
-            "VAR=$(git rev-parse HEAD) && echo \"$VAR\"",
-            "rg -l foo | xargs rg kill",
-            "find . -name '*.rs' | xargs grep -n pkill",
-            "bash scripts/x.sh && git commit -m 'fix kill path'",
-            "command -v pkill",
-            "while kill -0 \"$PID\"; do sleep 1; done",
-            "kill 84322",
-            "kill -9 123 456",
-            "kill -TERM 42",
-            "kill -s KILL 42",
-            "kill -s -HUP 42",
-            "sudo kill -HUP 42 && echo ok",
-        ] {
-            assert!(check(command).is_ok(), "{command}");
         }
     }
 }

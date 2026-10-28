@@ -1,44 +1,28 @@
-//! Workflow-breaking git and shell patterns, as a compiled rule table over the
+//! Irreversible git and shell actions, as a compiled rule table over the
 //! simple commands that `shell_command` finds. Config chooses which rules are
 //! on; there are no user patterns. A rule only ever reads argv and the
 //! filesystem layout, so an unrecognised shape allows rather than denies.
 use crate::shell_command;
 use provenant_config::{DomainConfig, DomainSection, SectionError};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
-/// A rule id and the one-line remedy shown when it denies.
-pub const RULES: [(&str, &str); 7] = [
-    (
-        "stash",
-        "Bare `git stash` is refused. Commit a WIP commit, or use `git stash push -m TAG`.",
-    ),
-    (
-        "reset-hard",
-        "`git reset --hard` is refused. Commit or `git stash push -m TAG` first, or reset in a disposable linked worktree.",
-    ),
-    (
-        "clean-force",
-        "`git clean -f` is refused. Preview with `git clean -n` and delete the named files yourself.",
-    ),
+/// A rule id and the one-line alternative shown when it denies.
+pub const RULES: [(&str, &str); 3] = [
     (
         "force-push",
-        "Force push is refused. Use `git push --force-with-lease` on your own branch.",
+        "Force push to the default branch is refused. Push your own branch and open a PR; `git push --force-with-lease` is fine on a topic branch.",
     ),
     (
-        "no-verify",
-        "`--no-verify` is refused. Fix what the hook reports instead of skipping it.",
+        "rm-root",
+        "Recursively removing the home directory, the repository root or a parent of either is refused. Name the files or the subdirectory to delete.",
     ),
     (
-        "primary-checkout",
-        "Branch changes in the primary checkout are refused. Use a linked worktree: `provenant worktree create`.",
-    ),
-    (
-        "sleep-poll",
-        "Foreground `sleep` polling is refused. Use a background wait or `provenant lanes --wait`.",
+        "rm-state",
+        "Deleting Provenant state is refused. Remove a lane with `provenant worktree remove`, or delete a named subdirectory.",
     ),
 ];
-const DEFAULT_DENY: &str = r#"deny = ["stash", "reset-hard", "clean-force", "force-push", "primary-checkout", "sleep-poll"]
+const DEFAULT_DENY: &str = r#"deny = ["force-push", "rm-root", "rm-state"]
 "#;
 
 /// `[domains.guard]`: the rule ids that deny. Omit an id to turn its rule off.
@@ -50,12 +34,7 @@ pub struct GuardConfig {
 impl Default for GuardConfig {
     fn default() -> Self {
         Self {
-            // `no-verify` is opt-in: CI is the gate.
-            deny: RULES
-                .iter()
-                .filter(|(id, _)| *id != "no-verify")
-                .map(|(id, _)| (*id).to_owned())
-                .collect(),
+            deny: RULES.iter().map(|(id, _)| (*id).to_owned()).collect(),
         }
     }
 }
@@ -77,68 +56,177 @@ impl DomainConfig for GuardConfig {
 }
 pub const SECTION: DomainSection = DomainSection::new::<GuardConfig>("guard", |_| DEFAULT_DENY);
 
-/// The remedy of the first enabled rule that any command in `command` breaks.
-/// `cwd` locates the primary-checkout rule. Unparseable input is not this
-/// module's concern: `shell_command::commands` already refuses it.
-pub fn violation(command: &str, cwd: &Path, config: &GuardConfig) -> Option<&'static str> {
-    let commands = shell_command::commands(command).ok()?;
+/// Where a command runs and the directories it must not remove. A rule whose
+/// directory is unknown allows.
+pub struct Context<'a> {
+    pub cwd: &'a Path,
+    pub home: Option<&'a Path>,
+    pub state: Option<&'a Path>,
+}
+
+/// The alternative of the first enabled rule that any command in `command`
+/// breaks. Unparseable input allows.
+pub fn violation(command: &str, ctx: &Context, config: &GuardConfig) -> Option<&'static str> {
+    let commands = shell_command::commands(command)?;
     commands.iter().find_map(|argv| {
         RULES
             .iter()
             .filter(|(id, _)| config.deny.iter().any(|on| on == id))
-            .find(|(id, _)| breaks(id, argv, cwd))
+            .find(|(id, _)| breaks(id, argv, ctx))
             .map(|(_, remedy)| *remedy)
     })
 }
-fn breaks(rule: &str, argv: &[String], cwd: &Path) -> bool {
+fn breaks(rule: &str, argv: &[String], ctx: &Context) -> bool {
     let Some((name, args)) = argv.split_first() else {
         return false;
     };
-    if name == "sleep" {
-        return rule == "sleep-poll" && sleeps_long(args);
-    }
-    if name != "git" {
-        return false;
-    }
-    let git = Git::parse(args);
-    let scan = git.scan(git.rest);
-    match (rule, git.sub) {
-        ("no-verify", sub) => {
-            scan.long("no-verify") || (sub == "commit" && scan.short.contains(&'n'))
+    match (rule, name.as_str()) {
+        ("force-push", "git") => {
+            let git = Git::parse(args);
+            git.sub == "push" && forces_default_branch(&git, ctx.cwd)
         }
-        ("stash", "stash") => match git.rest.first().map(String::as_str) {
-            None | Some("pop" | "save") => true,
-            Some("push") => {
-                let pushed = git.scan(&git.rest[1..]);
-                !(pushed.short.contains(&'m') || pushed.long("message"))
-            }
-            Some(first) => first.starts_with('-'),
-        },
-        ("reset-hard", "reset") => scan.long("hard"),
-        ("clean-force", "clean") => {
-            (scan.long("force") || scan.short.contains(&'f'))
-                && !(scan.long("dry-run") || scan.short.contains(&'n'))
+        ("rm-root", "rm") => {
+            let repo = Repo::at(ctx.cwd).map(|repo| repo.root);
+            let protected: Vec<&Path> = ctx.home.into_iter().chain(repo.as_deref()).collect();
+            removes_any(args, ctx, &protected)
         }
-        ("force-push", "push") => {
-            scan.long("force")
-                || scan.short.contains(&'f')
-                || scan
-                    .positional
-                    .iter()
-                    .any(|a| a.len() > 1 && a.starts_with('+'))
-        }
-        ("primary-checkout", "switch") => git.in_primary(cwd),
-        ("primary-checkout", "checkout") => {
-            let creates = scan.short.iter().any(|c| "bBd".contains(*c))
-                || scan.long("orphan")
-                || scan.long("detach");
-            let restores = scan.short.contains(&'p') || scan.long("patch") || scan.dashes;
-            (creates || (!restores && scan.positional.iter().any(|a| *a != ".")))
-                && git.in_primary(cwd)
-        }
+        ("rm-state", "rm") => removes_any(args, ctx, ctx.state.as_slice()),
         _ => false,
     }
 }
+
+/// Whether a forced `git push` can move the default branch: by a flag or a
+/// `+refspec` naming it, or naming nothing while the default branch is checked out.
+fn forces_default_branch(git: &Git, cwd: &Path) -> bool {
+    let scan = Scan::parse(
+        git.rest,
+        "o",
+        &["repo", "receive-pack", "exec", "push-option"],
+    );
+    let forced = scan.long("force") || scan.long("force-with-lease") || scan.short.contains(&'f');
+    let repo = Repo::at(&git.dir(cwd));
+    let is_default = |branch: &str| {
+        matches!(branch, "main" | "master")
+            || repo
+                .as_ref()
+                .and_then(Repo::default_branch)
+                .is_some_and(|default| default == branch)
+    };
+    let current = || repo.as_ref().and_then(Repo::current_branch);
+    // The first operand is the remote.
+    let refspecs = scan.positional.get(1..).unwrap_or_default();
+    if scan.long("all") || scan.long("mirror") {
+        return forced;
+    }
+    if refspecs.is_empty() {
+        return forced && current().is_some_and(|branch| is_default(&branch));
+    }
+    refspecs.iter().any(|spec| {
+        let plus = spec.starts_with('+');
+        let spec = spec.trim_start_matches('+');
+        let destination = spec.rsplit(':').next().unwrap_or(spec);
+        let branch = destination
+            .strip_prefix("refs/heads/")
+            .unwrap_or(destination);
+        let branch = if branch == "HEAD" {
+            current().unwrap_or_default()
+        } else {
+            branch.to_owned()
+        };
+        (forced || plus) && is_default(&branch)
+    })
+}
+
+/// Whether `rm` removes recursively a path that is, or contains, a protected one.
+fn removes_any(args: &[String], ctx: &Context, protected: &[&Path]) -> bool {
+    let scan = Scan::parse(args, "", &[]);
+    if !(scan.short.contains(&'r') || scan.short.contains(&'R') || scan.long("recursive")) {
+        return false;
+    }
+    let protected: Vec<PathBuf> = protected.iter().map(|path| normal(path)).collect();
+    scan.positional.iter().any(|target| {
+        let target = resolve(target, ctx);
+        protected.iter().any(|path| path.starts_with(&target))
+    })
+}
+/// The absolute, normalised path a `rm` operand names; `~` and `$HOME` are the
+/// home directory.
+fn resolve(target: &str, ctx: &Context) -> PathBuf {
+    let home_relative = ["~", "$HOME", "${HOME}"].iter().find_map(|prefix| {
+        target
+            .strip_prefix(prefix)
+            .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+    });
+    match (home_relative, ctx.home) {
+        (Some(rest), Some(home)) => normal(&home.join(rest.trim_start_matches('/'))),
+        _ => normal(&ctx.cwd.join(target)),
+    }
+}
+/// `path` without `.` and `..` components, with symlinks resolved when it exists.
+fn normal(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    std::fs::canonicalize(&out).unwrap_or(out)
+}
+
+/// The checkout holding a directory: its root, and the Git directories that
+/// name its branch and its default branch.
+struct Repo {
+    root: PathBuf,
+    git_dir: PathBuf,
+    common_dir: PathBuf,
+}
+impl Repo {
+    /// No repository, or any read failure, answers `None`.
+    fn at(dir: &Path) -> Option<Self> {
+        let dir = std::fs::canonicalize(dir).ok()?;
+        let (root, dot) = dir.ancestors().find_map(|root| {
+            let dot = root.join(".git");
+            std::fs::symlink_metadata(&dot)
+                .ok()
+                .map(|meta| (root, (dot, meta)))
+        })?;
+        let (dot, meta) = dot;
+        let (git_dir, common_dir) = if meta.is_dir() {
+            (dot.clone(), dot)
+        } else {
+            // A linked worktree's `.git` is a file naming its own Git directory.
+            let text = std::fs::read_to_string(&dot).ok()?;
+            let git_dir = root.join(text.strip_prefix("gitdir:")?.trim());
+            let common = std::fs::read_to_string(git_dir.join("commondir"))
+                .map_or_else(|_| git_dir.clone(), |name| git_dir.join(name.trim()));
+            (git_dir, common)
+        };
+        Some(Self {
+            root: root.to_owned(),
+            git_dir,
+            common_dir,
+        })
+    }
+    fn current_branch(&self) -> Option<String> {
+        let head = std::fs::read_to_string(self.git_dir.join("HEAD")).ok()?;
+        Some(head.trim().strip_prefix("ref: refs/heads/")?.to_owned())
+    }
+    /// The branch `origin/HEAD` names, when the clone recorded one.
+    fn default_branch(&self) -> Option<String> {
+        let head =
+            std::fs::read_to_string(self.common_dir.join("refs/remotes/origin/HEAD")).ok()?;
+        Some(
+            head.trim()
+                .strip_prefix("ref: refs/remotes/origin/")?
+                .to_owned(),
+        )
+    }
+}
+
 struct Git<'a> {
     dirs: Vec<&'a str>,
     sub: &'a str,
@@ -184,29 +272,29 @@ impl<'a> Git<'a> {
             rest: args.get(at + 1..).unwrap_or_default(),
         }
     }
-    /// Whether the directory git runs in is inside a primary checkout.
-    fn in_primary(&self, cwd: &Path) -> bool {
-        is_primary(&self.dirs.iter().fold(cwd.to_path_buf(), |d, c| d.join(c)))
+    /// The directory git runs in.
+    fn dir(&self, cwd: &Path) -> PathBuf {
+        self.dirs.iter().fold(cwd.to_path_buf(), |d, c| d.join(c))
     }
-    fn scan(&self, args: &'a [String]) -> Scan<'a> {
-        let (short_values, long_values): (&str, &[&str]) = match self.sub {
-            "commit" => (
-                "mFCctu",
-                &["message", "file", "author", "date", "cleanup", "template"],
-            ),
-            "clean" => ("e", &["exclude"]),
-            "push" => ("o", &["repo", "receive-pack", "exec", "push-option"]),
-            "stash" => ("m", &["message"]),
-            "checkout" => ("bB", &["orphan", "conflict", "pathspec-from-file"]),
-            _ => ("", &[]),
-        };
+}
+/// Options and operands of one command, up to and after `--`.
+#[derive(Default)]
+struct Scan<'a> {
+    short: Vec<char>,
+    longs: Vec<&'a str>,
+    positional: Vec<&'a String>,
+}
+impl<'a> Scan<'a> {
+    /// `short_values` and `long_values` name the options that take a separate value.
+    fn parse(args: &'a [String], short_values: &str, long_values: &[&str]) -> Self {
         let mut scan = Scan::default();
+        let mut dashes = false;
         let mut tokens = args.iter();
         while let Some(token) = tokens.next() {
-            if scan.dashes {
+            if dashes {
                 scan.positional.push(token);
             } else if token == "--" {
-                scan.dashes = true;
+                dashes = true;
             } else if let Some(long) = token.strip_prefix("--") {
                 let (name, attached) = long
                     .split_once('=')
@@ -231,16 +319,6 @@ impl<'a> Git<'a> {
         }
         scan
     }
-}
-/// Options and operands of one git subcommand, up to and after `--`.
-#[derive(Default)]
-struct Scan<'a> {
-    short: Vec<char>,
-    longs: Vec<&'a str>,
-    positional: Vec<&'a String>,
-    dashes: bool,
-}
-impl Scan<'_> {
     /// Whether `full` was given, in full or as an abbreviation git would accept
     /// (any prefix of at least two characters).
     fn long(&self, full: &str) -> bool {
@@ -249,185 +327,267 @@ impl Scan<'_> {
             .any(|given| given.len() >= 2 && full.starts_with(given))
     }
 }
-/// Whether `dir` is inside a repository whose `.git` is a directory, as in a
-/// primary checkout; a linked worktree's `.git` is a file. No repository, or
-/// any read failure, answers false.
-fn is_primary(dir: &Path) -> bool {
-    std::fs::canonicalize(dir)
-        .unwrap_or_default()
-        .ancestors()
-        .map(|d| d.join(".git"))
-        .find_map(|git| std::fs::symlink_metadata(git).ok())
-        .is_some_and(|meta| meta.is_dir())
-}
-/// `sleep 5`, `sleep 1m` and `sleep infinity` poll; short pauses do not.
-fn sleeps_long(args: &[String]) -> bool {
-    let seconds: f64 = args
-        .iter()
-        .map(|arg| {
-            if arg == "infinity" {
-                return f64::INFINITY;
-            }
-            let (number, unit) =
-                arg.split_at(arg.find(|c: char| c.is_alphabetic()).unwrap_or(arg.len()));
-            let scale = match unit {
-                "" | "s" => 1.0,
-                "m" => 60.0,
-                "h" => 3600.0,
-                "d" => 86400.0,
-                _ => 0.0,
-            };
-            number.parse::<f64>().unwrap_or(0.0) * scale
-        })
-        .sum();
-    seconds >= 5.0
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn denies(command: &str, cwd: &Path) -> bool {
-        violation(command, cwd, &GuardConfig::default()).is_some()
+    fn base() -> PathBuf {
+        std::fs::canonicalize(std::env::temp_dir()).unwrap()
     }
-    fn repo(linked: bool) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        let git = dir.path().join(".git");
-        if linked {
-            std::fs::write(git, "gitdir: /elsewhere\n").unwrap();
-        } else {
-            std::fs::create_dir(git).unwrap();
+
+    /// `home/project` is a checkout on `topic`; `home/state` is the state dir.
+    fn tree() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir_in(base()).unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        for path in ["home/project/.git", "home/state/runs", "other"] {
+            std::fs::create_dir_all(root.join(path)).unwrap();
         }
-        dir
+        std::fs::write(
+            root.join("home/project/.git/HEAD"),
+            "ref: refs/heads/topic\n",
+        )
+        .unwrap();
+        (dir, root)
+    }
+    fn denies_in(command: &str, root: &Path, cwd: &str, config: &GuardConfig) -> bool {
+        let (home, state) = (root.join("home"), root.join("home/state"));
+        let cwd = root.join(cwd);
+        let ctx = Context {
+            cwd: &cwd,
+            home: Some(&home),
+            state: Some(&state),
+        };
+        violation(command, &ctx, config).is_some()
+    }
+    fn denies(command: &str, root: &Path) -> bool {
+        denies_in(command, root, "home/project", &GuardConfig::default())
     }
 
     #[test]
-    fn destructive_forms_are_denied_and_safe_forms_allowed() {
-        let primary = repo(false);
-        let cwd = primary.path();
-        for denied in [
+    fn only_irreversible_forms_are_refused() {
+        let (_dir, root) = tree();
+        for allowed in [
             "git stash",
-            "git stash pop",
-            "git stash -u",
-            "git stash push",
-            "git -C x stash",
-            "sudo git stash && echo ok",
-            "bash -c 'git stash'",
             "git reset --hard",
-            "git reset --hard HEAD~1",
             "git clean -fd",
-            "git clean --force",
-            "git push --force",
-            "git push -f origin main",
-            "git push origin +main",
             "git checkout main",
-            "git checkout -b topic",
-            "git switch main",
             "git switch -c topic",
-            "git clean -f -enode_modules -x",
-            "git reset --har",
-            "git clean --for",
-            "git -Cx stash",
-            "git -c a=b -C. -Cx stash",
-            "bash -c 'git stash' _ 'echo'",
-            "git stash push -u",
-            "git checkout -b",
-            "git checkout --orphan x",
-            "sleep 5",
+            "git commit --no-verify -m x",
+            "git push --force origin topic",
+            "git push --force-with-lease origin topic",
+            "git push -f",
+            "git push origin main",
             "sleep 30",
-            "sleep 1m",
-            "while true; do sleep 10; done",
+            "pkill -f cargo",
+            "kill -9 $PID",
+            "$CMD run",
+            "echo kill 1 | sh",
+            "rm -rf build",
+            "rm -rf ~/scratch /tmp/x",
+            "rm -rf home/state/runs/one",
+            "rm -f ~",
+            "rm ~",
+            "echo rm -rf ~",
+            "rg 'git push -f origin main' docs",
         ] {
-            assert!(denies(denied, cwd), "{denied}");
+            assert!(!denies(allowed, &root), "{allowed}");
+        }
+    }
+
+    #[test]
+    fn force_pushes_to_the_default_branch_are_refused() {
+        let (_dir, root) = tree();
+        for denied in [
+            "git push --force origin main",
+            "git push -f origin master",
+            "git push origin +main",
+            "git push --force-with-lease origin main",
+            "git push --force-with-lease=main origin main",
+            "git push -fu origin main",
+            "git push origin +HEAD:main",
+            "git push origin +topic:refs/heads/main",
+            "git push -f origin :main",
+            "git push --force --all",
+            "git push --force --mirror origin",
+            "git -C home/project push -f origin main",
+            "sudo git push -f origin main",
+            "bash -c 'git push -f origin main'",
+            "git push --for origin main",
+        ] {
+            assert!(
+                denies_in(denied, &root, ".", &GuardConfig::default()),
+                "{denied}"
+            );
         }
         for allowed in [
-            "git stash push -m tag",
-            "git stash push -mtag",
-            "git stash push --message=tag",
-            "git stash push --mess tag",
-            "git clean -n -fenode_modules",
-            "git commit -mchange",
-            "git commit -m 'is -n here'",
-            "git checkout -p README.md",
-            "git checkout --patch",
-            "git push --force-with-lease=main",
-            "bash -c 'printf \"%s\\n\" \"$1\"' _ 'git stash'",
-            "git stash list",
-            "git commit --no-verify -m x",
-            "git commit -nm x",
-            "git push --no-verify",
-            "git push --no-ver",
-            "git commit -n -mmsg",
-            "git stash apply abc123",
-            "git stash drop",
-            "git reset --soft HEAD~1",
-            "git reset HEAD file",
-            "git clean -n",
-            "git clean -nfd",
-            "git push --force-with-lease",
             "git push origin main",
-            "git commit -m x",
-            "git checkout -- path/file",
-            "git checkout HEAD -- file",
-            "git checkout",
-            "git status",
-            "sleep 1",
-            "sleep 0.5",
-            "rg 'git stash' docs",
-            "echo git reset --hard",
+            "git push origin HEAD:main",
+            "git push --force origin topic",
+            "git push -f origin HEAD:topic",
+            "git push --force-with-lease origin +topic",
+            "git push origin main:topic --force",
+            "git push -f",
         ] {
-            assert!(!denies(allowed, cwd), "{allowed}");
+            assert!(!denies(allowed, &root), "{allowed}");
         }
     }
 
     #[test]
-    fn branch_changes_are_refused_only_in_a_primary_checkout() {
-        let linked = repo(true);
-        assert!(!denies("git checkout main", linked.path()));
-        assert!(!denies("git switch -c topic", linked.path()));
-        let primary = repo(false);
-        assert!(denies("git checkout main", primary.path()));
-        let nested = primary.path().join("a");
-        std::fs::create_dir(&nested).unwrap();
-        assert!(denies("git switch main", &nested));
-        assert!(denies("git -C a checkout main", primary.path()));
-        let inner = linked.path().join("sub");
-        std::fs::create_dir(&inner).unwrap();
-        assert!(!denies("git -C sub checkout main", linked.path()));
-        let nested_linked = tempfile::tempdir().unwrap();
-        std::fs::create_dir(nested_linked.path().join(".git")).unwrap();
-        let work = nested_linked.path().join("w/x");
-        std::fs::create_dir_all(&work).unwrap();
-        std::fs::write(nested_linked.path().join("w/.git"), "gitdir: /e\n").unwrap();
-        assert!(!denies("git switch main", &work));
-        assert!(denies("git -C../.. switch main", &work));
-        assert!(denies("git -C .. -C .. switch main", &work));
-        let outside = tempfile::tempdir().unwrap();
-        assert!(!denies("git checkout main", outside.path()));
+    fn a_bare_force_push_follows_the_checked_out_branch() {
+        let (_dir, root) = tree();
+        let head = root.join("home/project/.git/HEAD");
+        std::fs::write(&head, "ref: refs/heads/main\n").unwrap();
+        for denied in [
+            "git push -f",
+            "git push --force origin",
+            "git push -f origin HEAD",
+        ] {
+            assert!(denies(denied, &root), "{denied}");
+        }
+        assert!(!denies("git push origin", &root));
+        // The default branch is whatever `origin/HEAD` names, besides main and master.
+        std::fs::write(&head, "ref: refs/heads/trunk\n").unwrap();
+        assert!(!denies("git push -f", &root));
+        let origin = root.join("home/project/.git/refs/remotes/origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::write(origin.join("HEAD"), "ref: refs/remotes/origin/trunk\n").unwrap();
+        assert!(denies("git push -f", &root));
+        assert!(denies("git push -f origin trunk", &root));
+    }
+
+    #[test]
+    fn a_linked_worktree_reads_its_own_head_and_the_common_default_branch() {
+        let (_dir, root) = tree();
+        let common = root.join("home/project/.git");
+        let git_dir = common.join("worktrees/lane");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/trunk\n").unwrap();
+        std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+        let lane = root.join("home/lane");
+        std::fs::create_dir_all(&lane).unwrap();
+        std::fs::write(
+            lane.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        let config = GuardConfig::default();
+        assert!(!denies_in("git push -f", &root, "home/lane", &config));
+        let origin = common.join("refs/remotes/origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::write(origin.join("HEAD"), "ref: refs/remotes/origin/trunk\n").unwrap();
+        assert!(denies_in("git push -f", &root, "home/lane", &config));
+    }
+
+    #[test]
+    fn recursive_removal_of_home_or_the_repository_root_is_refused() {
+        let (_dir, root) = tree();
+        let home = root.join("home");
+        let project = home.join("project");
+        for denied in [
+            "rm -rf ~".to_owned(),
+            "rm -rf ~/".to_owned(),
+            "rm -rf $HOME".to_owned(),
+            "rm -rf \"$HOME\"".to_owned(),
+            "rm -rf ${HOME}/".to_owned(),
+            "rm -Rf ~".to_owned(),
+            "rm -r -f ~".to_owned(),
+            "rm --recursive --force ~".to_owned(),
+            "rm -rf -- ~".to_owned(),
+            "rm -rf /".to_owned(),
+            "rm -rf .".to_owned(),
+            "rm -rf ..".to_owned(),
+            "rm -rf ../project".to_owned(),
+            "rm -rf ./".to_owned(),
+            "rm -rf x ~".to_owned(),
+            "sudo rm -rf ~".to_owned(),
+            "bash -c 'rm -rf ~'".to_owned(),
+            format!("rm -rf {}", home.display()),
+            format!("rm -rf {}", project.display()),
+            format!("rm -rf {}/..", project.display()),
+            format!("rm -rf {}", root.display()),
+        ] {
+            assert!(denies(&denied, &root), "{denied}");
+        }
+        // From a subdirectory the repository root is still the nearest `.git`.
+        std::fs::create_dir(project.join("src")).unwrap();
+        let config = GuardConfig::default();
+        assert!(denies_in("rm -rf ..", &root, "home/project/src", &config));
+        assert!(!denies_in("rm -rf .", &root, "home/project/src", &config));
+        assert!(!denies_in("rm -rf src", &root, "home/project", &config));
+        assert!(!denies_in(
+            "rm -rf ../other",
+            &root,
+            "home/project",
+            &config
+        ));
+    }
+
+    #[test]
+    fn deleting_provenant_state_is_refused() {
+        let (_dir, root) = tree();
+        let state = root.join("home/state");
+        for denied in [
+            format!("rm -rf {}", state.display()),
+            "rm -rf ~/state".to_owned(),
+            "rm -rf ../state".to_owned(),
+            "rm -rf $HOME/state/".to_owned(),
+        ] {
+            let only_state = GuardConfig {
+                deny: vec!["rm-state".into()],
+            };
+            assert!(
+                denies_in(&denied, &root, "home/project", &only_state),
+                "{denied}"
+            );
+        }
+        assert!(!denies("rm -rf ~/state/runs", &root));
+        assert!(!denies("rm -rf ../state/runs/one", &root));
+        // Without a known state directory the rule has nothing to protect.
+        let ctx = Context {
+            cwd: &root,
+            home: None,
+            state: None,
+        };
+        assert!(violation("rm -rf ~/state", &ctx, &GuardConfig::default()).is_none());
+    }
+
+    #[test]
+    fn each_refusal_names_the_alternative() {
+        for (id, remedy) in RULES {
+            assert!(remedy.contains("refused"), "{id}");
+            assert!(remedy.contains('`') || remedy.contains("Name"), "{id}");
+        }
     }
 
     #[test]
     fn config_turns_rules_off_and_rejects_unknown_ids() {
-        let cwd = Path::new("/");
-        let only_stash = GuardConfig {
-            deny: vec!["stash".into()],
+        let (_dir, root) = tree();
+        let only_rm = GuardConfig {
+            deny: vec!["rm-root".into()],
         };
-        assert!(violation("git stash", cwd, &only_stash).is_some());
-        assert!(violation("git reset --hard", cwd, &only_stash).is_none());
-        assert!(violation("sleep 9", cwd, &GuardConfig { deny: vec![] }).is_none());
-        let opt_in = GuardConfig {
-            deny: vec!["no-verify".into()],
-        };
-        assert!(violation("git commit --no-verify", cwd, &opt_in).is_some());
+        assert!(denies_in("rm -rf ~", &root, ".", &only_rm));
+        assert!(!denies_in("git push -f origin main", &root, ".", &only_rm));
+        assert!(!denies_in(
+            "rm -rf ~",
+            &root,
+            ".",
+            &GuardConfig { deny: vec![] }
+        ));
         let bad = GuardConfig {
-            deny: vec!["nope".into()],
+            deny: vec!["stash".into()],
         };
         assert_eq!(bad.validate().len(), 1);
         assert!(GuardConfig::default().validate().is_empty());
     }
 
     #[test]
-    fn unparseable_input_allows_here_and_is_left_to_the_shell_check() {
-        assert!(violation("git stash $(", Path::new("/"), &GuardConfig::default()).is_none());
+    fn unparseable_input_allows() {
+        let ctx = Context {
+            cwd: Path::new("/"),
+            home: None,
+            state: None,
+        };
+        assert!(violation("git push -f origin main $(", &ctx, &GuardConfig::default()).is_none());
     }
 }
