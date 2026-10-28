@@ -273,6 +273,32 @@ struct StoreSnapshot {
 }
 
 impl LaneSnapshot {
+    /// Find the reservation's canonical attempt, including nested stores. The
+    /// Run owner checks terminal state and binding before releasing custody.
+    pub(crate) fn settle_landed_writer(
+        &self,
+        recovery: provenant_supervisor::custody::Recovery,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            budget: WaitBudget::cli(clock.mono_now(), 5)?,
+            cancel: &cancel,
+        };
+        for observed in &self.stores {
+            let Some(store) = &observed.store else {
+                continue;
+            };
+            match store.record(recovery.scope().attempt, &call) {
+                Ok(_) => return Ok(store.settle_landed_writer(recovery, &call)?),
+                Err(provenant_run::RunError::NotFound) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err("writer reservation has no canonical attempt".into())
+    }
+
     pub(crate) fn get(&self, path: &Path) -> Option<&bool> {
         self.is_current().then(|| self.states.get(path)).flatten()
     }
@@ -394,7 +420,13 @@ pub(crate) fn lane_states(
         stores: Vec::new(),
         stale: std::cell::Cell::new(false),
     };
-    scan_terminal(&context, (home, assets), &mut snapshot, 0)?;
+    scan_terminal(
+        &context,
+        (home, assets),
+        roots.state.as_path(),
+        &mut snapshot,
+        0,
+    )?;
     for (path, terminal) in &mut snapshot.states {
         if *terminal {
             *terminal = snapshot.terminal_times.get(path).is_some_and(|finished| {
@@ -408,6 +440,7 @@ pub(crate) fn lane_states(
 fn scan_terminal(
     context: &ExecutionContext,
     (home, assets): (&Path, &Path),
+    host_state: &Path,
     snapshot: &mut LaneSnapshot,
     depth: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -423,7 +456,8 @@ fn scan_terminal(
     };
     let root = Directory::open_anchor(context.state_root.as_path())?;
     let database_before = optional_metadata(&root, OsStr::new("run.sqlite3"))?;
-    let store = RunStore::open_disk_read_only(context, &call)?;
+    let store = RunStore::open_disk_read_only(context, &call)?
+        .map(|store| store.with_writer_registry(host_state));
     let version = store
         .as_ref()
         .map(|store| store.data_version(&call))
@@ -517,7 +551,7 @@ fn scan_terminal(
             context.state_root.as_path().join("children").join(name),
         )?
         .state;
-        scan_terminal(&child, (home, assets), snapshot, depth + 1)?;
+        scan_terminal(&child, (home, assets), host_state, snapshot, depth + 1)?;
     }
     snapshot.stores.push(StoreSnapshot {
         path: context.state_root.as_path().to_owned(),

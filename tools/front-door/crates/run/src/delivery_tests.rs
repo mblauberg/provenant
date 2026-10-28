@@ -1853,3 +1853,238 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     assert!(git(&lane, &["ls-remote", "origin", "refs/heads/interrupted"])?.is_empty());
     Ok(())
 }
+
+fn registered_landed_writer_fixture(
+    fixture: &PrepareFixture,
+) -> std::result::Result<ExecutionContext, Box<dyn std::error::Error>> {
+    struct Free;
+    impl provenant_confinement::worktrees::WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[std::path::PathBuf],
+        ) -> std::collections::BTreeMap<
+            std::path::PathBuf,
+            provenant_confinement::worktrees::WorkerState,
+        > {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .collect()
+        }
+    }
+    use provenant_core::{CancelToken, Clock, RootInputs};
+    use provenant_os::clock::SystemClock;
+    let mut execution = tests::context(&fixture.root)?;
+    let mut inputs = RootInputs::new(fixture.root.join("home"), fixture.root.join("checkout"));
+    inputs.state_dir = Some(execution.state_root.as_path().into());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    std::fs::create_dir_all(roots.state.as_path())?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(
+        roots.state.as_path(),
+        std::fs::Permissions::from_mode(0o700),
+    )?;
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    execution.project_id = provenant_confinement::worktrees::with_context(
+        &roots,
+        &fixture.root.join("home"),
+        &fixture.writer.project,
+        &clock,
+        &cancel,
+        |context| {
+            let context = provenant_confinement::worktrees::WorktreeContext {
+                workers: &Free,
+                ..*context
+            };
+            let owner = provenant_confinement::worktrees::WorktreeOwner {
+                attempt_id: None,
+                operation_id: None,
+                branch: "lane".into(),
+                base: String::new(),
+                host: provenant_core::HostId::from_bytes([3; 16]),
+                created_at: clock
+                    .wall_now()
+                    .map_err(|_| provenant_confinement::worktrees::WorktreeError::InvalidOutput)?,
+                origin: provenant_confinement::worktrees::WorktreeOrigin::Adopted,
+                label: None,
+            };
+            let head = provenant_confinement::run_utility(
+                context.executor,
+                provenant_confinement::GitRead::RevParseHead,
+                context.repo,
+                context.utility,
+                context.utility_budget,
+                &cancel,
+            )?;
+            let owner = provenant_confinement::worktrees::WorktreeOwner {
+                base: String::from_utf8_lossy(&head.stdout.bytes).trim().into(),
+                ..owner
+            };
+            provenant_confinement::worktrees::adopt(
+                &context,
+                &fixture.writer.worktree,
+                &owner,
+                &cancel,
+            )?;
+            Ok(context.binding.project_id())
+        },
+    )?;
+    Ok(execution)
+}
+
+#[derive(Clone, Copy)]
+enum LandedWriterFenceCase {
+    Terminal,
+    Nonterminal,
+    WrongScope,
+    WrongWriter,
+    WrongAttempt,
+    MissingQuarantine,
+}
+
+#[test]
+fn land_settlement_clears_terminal_writer_reservation()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    landed_writer_fence_fixture(LandedWriterFenceCase::Terminal)
+}
+
+#[test]
+fn land_settlement_refuses_nonterminal_writer()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    landed_writer_fence_fixture(LandedWriterFenceCase::Nonterminal)
+}
+
+#[test]
+fn land_settlement_refuses_mismatched_or_incomplete_writer_evidence()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for case in [
+        LandedWriterFenceCase::WrongScope,
+        LandedWriterFenceCase::WrongWriter,
+        LandedWriterFenceCase::WrongAttempt,
+        LandedWriterFenceCase::MissingQuarantine,
+    ] {
+        landed_writer_fence_fixture(case)?;
+    }
+    Ok(())
+}
+
+fn landed_writer_fence_fixture(
+    case: LandedWriterFenceCase,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::fs::Directory;
+    use provenant_supervisor::custody::{self, WriterBinding};
+    let fixture = PrepareFixture::new()?;
+    let execution = registered_landed_writer_fixture(&fixture)?;
+    let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
+    let call = tests::call(&clock, &cancel);
+    let store = RunStore::open(&execution, &call)?;
+    let mut input = tests::input();
+    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    let record = store.mark_starting(
+        &store.record(id, &call)?,
+        &tests::route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let scope = RunStore::scope(&record);
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    if !matches!(case, LandedWriterFenceCase::Nonterminal) {
+        let mut exit = tests::exit();
+        exit.scope = scope;
+        tests::seal_observation(&store, &input, &exit)?;
+        store.publish_terminal(id, record.revision, &tests::publication(), &exit, &call)?;
+    }
+    if !matches!(case, LandedWriterFenceCase::MissingQuarantine) {
+        let archive = artifacts::subdir(&attempt, std::ffi::OsStr::new("quarantine"), true)?;
+        artifacts::seal(
+            &archive,
+            "manifest.json",
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "scope": scope,
+                "kind": "quarantine_manifest",
+            }))?,
+            RECORD_LIMIT,
+        )?;
+    }
+    let mut launch = crate::prepare_writer(
+        &fixture.writer,
+        &store.writer_registry,
+        execution.project_id,
+    )?;
+    let binding = WriterBinding::from_verified(
+        launch.worktree.repo().root_dir(),
+        launch.worktree.repo().private_dir(),
+        launch.branch.as_str(),
+        launch.base,
+    )?;
+    let directory = launch.custody.take().ok_or("writer custody")?.0;
+    drop(provenant_supervisor::fixture::acquire_writer_with_binding(
+        directory,
+        scope,
+        binding,
+        call.budget,
+        &cancel,
+        &clock,
+    )?);
+    let reservation = store
+        .writer_registry
+        .join("worktrees")
+        .join(execution.project_id.to_string())
+        .join(provenant_confinement::worktrees::state_dir_name(
+            &fixture.writer.worktree,
+        ))
+        .join("reservation.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
+    let metadata = attempt.metadata()?;
+    value["launch_state"] = "never_spawned".into();
+    value["unresolved_cleanup"] = false.into();
+    value["census_incomplete"] = false.into();
+    value["attempt_device"] = metadata.device.into();
+    value["attempt_inode"] = metadata.inode.into();
+    match case {
+        LandedWriterFenceCase::WrongScope => {
+            value["scope"]["generation"] = (scope.generation + 1).into();
+        }
+        LandedWriterFenceCase::WrongWriter => {
+            value["binding"]["branch"] = "refs/heads/other".into();
+        }
+        LandedWriterFenceCase::WrongAttempt => {
+            value["attempt_inode"] = (metadata.inode + 1).into();
+        }
+        _ => {}
+    }
+    std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
+    let before = std::fs::read(&reservation)?;
+    let recovery = custody::acquire_recovery(
+        Directory::open_anchor(reservation.parent().ok_or("custody directory")?)?,
+        call.budget,
+        &cancel,
+        &clock,
+    )?;
+    let result = store.settle_landed_writer(recovery, &call);
+    if matches!(case, LandedWriterFenceCase::Terminal) {
+        result?;
+        assert!(!reservation.exists());
+        assert!(reservation.with_file_name("settlement.json").is_file());
+        assert!(artifacts::read_sealed(&attempt, "release.json", RECORD_LIMIT)?.is_some());
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal { .. }
+        ));
+    } else {
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&reservation)?, before);
+        if !matches!(case, LandedWriterFenceCase::WrongAttempt) {
+            assert!(artifacts::read_sealed(&attempt, "release.json", RECORD_LIMIT)?.is_none());
+        }
+    }
+    assert!(fixture.writer.worktree.exists());
+    Ok(())
+}

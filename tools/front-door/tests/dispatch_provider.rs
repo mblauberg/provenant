@@ -957,6 +957,34 @@ fn persisted_attempt(
     stderr: &[u8],
     exit_code: i64,
 ) -> Result<(TestRig, provenant_run::AttemptRecord)> {
+    persisted_attempt_with(
+        provider,
+        model,
+        (label, key),
+        stdout,
+        stderr,
+        exit_code,
+        PersistedAttemptOptions::default(),
+    )
+}
+
+#[derive(Default)]
+struct PersistedAttemptOptions {
+    writer: bool,
+    extra_task: bool,
+    nonterminal: bool,
+    lost_before_route: bool,
+}
+
+fn persisted_attempt_with(
+    provider: &str,
+    model: &str,
+    (label, key): (&str, &str),
+    stdout: &[u8],
+    stderr: &[u8],
+    exit_code: i64,
+    options: PersistedAttemptOptions,
+) -> Result<(TestRig, provenant_run::AttemptRecord)> {
     use provenant_core::{
         ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, RootInputs, RunId, TaskId,
         WaitBudget,
@@ -1014,7 +1042,7 @@ fn persisted_attempt(
         pool_selection: None,
     };
     let prompt = "reply OK";
-    let prepared = PreparedRun {
+    let mut prepared = PreparedRun {
         run_id,
         operation_id: OperationId::parse(&format!("{provider}-cooldown"))?,
         request: CanonicalRequest {
@@ -1056,6 +1084,22 @@ fn persisted_attempt(
         }],
         created_at: clock.wall_now()?,
     };
+    if options.writer {
+        prepared.request.tasks[0].writer = Some(provenant_records::run::WriterRequest {
+            project: rig.project.clone(),
+            worktree: rig.project.join(".worktrees/receipt-writer"),
+        });
+    }
+    if options.extra_task {
+        let mut task = prepared.request.tasks[0].clone();
+        task.task_id = TaskId::from_bytes([27; 16]);
+        prepared.attempts.push(NewAttempt {
+            task_id: task.task_id,
+            attempt_id: AttemptId::from_bytes([28; 16]),
+            prompt: prompt.into(),
+        });
+        prepared.request.tasks.push(task);
+    }
     store.create(&prepared, &call)?;
     let started_at = clock.wall_now()?;
     let mut running = store.record(attempt_id, &call)?;
@@ -1072,6 +1116,26 @@ fn persisted_attempt(
         rusqlite::params![2_i64, running_bytes, attempt_id.to_string()],
     )?;
 
+    if options.nonterminal {
+        return Ok((rig, running));
+    }
+
+    if options.lost_before_route {
+        running.applied_route = None;
+        running.resolved_route = None;
+        running.state = provenant_run::AttemptState::Terminal {
+            outcome: provenant_run::Outcome::Lost,
+            exit_code: None,
+            finished_at: clock.wall_now()?,
+            reason: Some("lost before recording a route".into()),
+        };
+        let bytes = CanonicalV1::bytes(&running)?.as_bytes().to_vec();
+        database.execute(
+            "UPDATE attempts SET terminal=1,record=?1 WHERE id=?2",
+            rusqlite::params![bytes, attempt_id.to_string()],
+        )?;
+        return Ok((rig, running));
+    }
     let attempt_dir = roots
         .state
         .as_path()
@@ -1135,14 +1199,207 @@ fn persisted_attempt(
     stderr_file.write_all(stderr)?;
     stderr_file.sync_all()?;
     let attempt = Directory::open_anchor(&attempt_dir)?;
-    let terminal = store.finish(
-        attempt_id,
-        &attempt,
-        &exit,
-        &provenant_cli::run::Registry::default(),
-        &call,
-    )?;
+    let terminal = if options.writer {
+        // Publish real terminal artifacts through the production commit path.
+        // No launch grants are recorded, matching older writer attempts.
+        store.publish_terminal(
+            attempt_id,
+            running.revision,
+            &provenant_run::TerminalPublication {
+                outcome: provenant_run::Outcome::Succeeded,
+                finished_at: clock.wall_now()?,
+                started_at: running.started_at,
+                provider_ms: None,
+                reason: None,
+                result: "OK",
+                complete: true,
+                redacted: false,
+                resolved_route: Some(applied.clone()),
+                applied_route: Some(applied.clone()),
+                observed_route: Some(applied),
+                usage: Default::default(),
+                session: None,
+            },
+            &exit,
+            &call,
+        )?
+    } else {
+        store.finish(
+            attempt_id,
+            &attempt,
+            &exit,
+            &provenant_cli::run::Registry::default(),
+            &call,
+        )?
+    };
     Ok((rig, terminal))
+}
+
+fn receipt_output_resolves_run_task_and_attempt() -> Result {
+    let (rig, terminal) = persisted_attempt(
+        "codex",
+        "codex/gpt-6.1-sol",
+        ("work", "fixture"),
+        b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n",
+        b"",
+        0,
+    )?;
+    let run = terminal.run_id.to_string();
+    let task = terminal.task_id.to_string();
+    let attempt = terminal.attempt_id.to_string();
+    let targets = [
+        run.clone(),
+        format!("{run}/{task}"),
+        format!("{run}/{task}/{attempt}"),
+    ];
+    let actor = provenant_run::fact(terminal.clone())?
+        .reviewer
+        .ok_or("reviewer fact")?
+        .actor_id;
+    let receipt = format!(
+        "Reviewer: codex/gpt-6.1-sol@unknown (openai; resolved from explicit), run {run}/{task}/{attempt}"
+    );
+    let attribution =
+        format!("Reviewer provenance: unknown, actor {actor}, model unknown, family unknown");
+    let expected = format!("{receipt}\n{attribution}\n");
+    for target in &targets {
+        let human = rig.command(&["output", target, "--part", "receipt"])?;
+        assert_eq!(
+            code(&human),
+            0,
+            "{}",
+            String::from_utf8_lossy(&human.stderr.bytes)
+        );
+        assert_eq!(String::from_utf8(human.stdout.bytes)?, expected);
+        let output = rig.command(&["output", target, "--part", "receipt", "--json"])?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(data["data"]["receipt"], receipt);
+        assert_eq!(data["data"]["reviewer_provenance"], attribution);
+        assert_eq!(data["data"]["reviewer"]["provenance"], "unknown");
+        assert_eq!(data["data"]["reviewer"]["actor_id"], actor.to_string());
+        assert_eq!(data["data"]["run_id"], run);
+        assert_eq!(data["data"]["task_id"], task);
+        assert_eq!(data["data"]["attempt_id"], attempt);
+        assert_eq!(data["data"]["resolved_from"], "explicit");
+        assert_eq!(data["data"]["role"], "reviewer");
+    }
+    Ok(())
+}
+
+fn receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts() -> Result {
+    for options in [
+        PersistedAttemptOptions {
+            writer: true,
+            ..Default::default()
+        },
+        PersistedAttemptOptions {
+            extra_task: true,
+            ..Default::default()
+        },
+        PersistedAttemptOptions {
+            nonterminal: true,
+            ..Default::default()
+        },
+    ] {
+        let writer = options.writer;
+        let ambiguous = options.extra_task;
+        let (rig, record) = persisted_attempt_with(
+            "codex",
+            "codex/gpt-6.1-sol",
+            ("work", "fixture"),
+            b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n",
+            b"",
+            0,
+            options,
+        )?;
+        let exact = format!("{}/{}/{}", record.run_id, record.task_id, record.attempt_id);
+        let target = if ambiguous {
+            record.run_id.to_string()
+        } else {
+            exact.clone()
+        };
+        let output = rig.command(&["output", &target, "--part", "receipt", "--json"])?;
+        let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        if writer {
+            assert_eq!(code(&output), 0, "{data}");
+            assert_eq!(data["data"]["role"], "writer");
+            let line = data["data"]["receipt"].as_str().ok_or("receipt line")?;
+            assert!(line.starts_with("Writer: codex/gpt-6.1-sol@unknown (openai;"));
+            let human = rig.command(&["output", &exact, "--part", "receipt"])?;
+            assert_eq!(code(&human), 0);
+            assert_eq!(data["data"]["reviewer"]["provenance"], "observed");
+            assert_eq!(data["data"]["reviewer"]["family"], "openai");
+            let provenance = data["data"]["reviewer_provenance"]
+                .as_str()
+                .ok_or("provenance line")?;
+            assert_eq!(
+                String::from_utf8(human.stdout.bytes)?,
+                format!("{line}\n{provenance}\n")
+            );
+        } else if ambiguous {
+            assert_ne!(code(&output), 0, "{data}");
+            assert_eq!(data["error"]["code"], "CONFLICT");
+            assert!(
+                data["error"]["message"]
+                    .as_str()
+                    .ok_or("message")?
+                    .contains("exactly one attempt")
+            );
+            let exact_output = rig.command(&["output", &exact, "--part", "receipt"])?;
+            assert_eq!(code(&exact_output), 0);
+        } else {
+            assert_ne!(code(&output), 0, "{data}");
+            assert_eq!(data["error"]["code"], "NONTERMINAL");
+            assert_eq!(
+                data["error"]["message"],
+                "receipt requires a settled attempt"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn receipt_output_reports_unknown_route_for_settled_lost_attempt() -> Result {
+    let (rig, record) = persisted_attempt_with(
+        "codex",
+        "codex/gpt-6.1-sol",
+        ("work", "fixture"),
+        b"",
+        b"",
+        0,
+        PersistedAttemptOptions {
+            lost_before_route: true,
+            ..Default::default()
+        },
+    )?;
+    let target = format!("{}/{}/{}", record.run_id, record.task_id, record.attempt_id);
+    let output = rig.command(&["output", &target, "--part", "receipt", "--json"])?;
+    let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(code(&output), 0, "{data}");
+    for field in ["adapter", "model", "effort", "family", "resolved_from"] {
+        assert_eq!(data["data"][field], "unknown", "{field}: {data}");
+    }
+    assert_eq!(data["data"]["reviewer"]["provenance"], "unknown");
+    let actor = provenant_run::fact(record)?
+        .reviewer
+        .ok_or("reviewer fact")?
+        .actor_id;
+    assert_eq!(data["data"]["reviewer"]["actor_id"], actor.to_string());
+    let human = rig.command(&["output", &target, "--part", "receipt"])?;
+    assert_eq!(code(&human), 0);
+    assert_eq!(
+        String::from_utf8(human.stdout.bytes)?,
+        format!(
+            "Reviewer: unknown@unknown (unknown; resolved from unknown), run {target}\nReviewer provenance: unknown, actor {actor}, model unknown, family unknown\n"
+        )
+    );
+    Ok(())
 }
 
 fn agy_denial_result_reaches_terminal_reason() -> Result {
@@ -1731,6 +1988,9 @@ fn main() -> ExitCode {
         provenant_supervisor::fixture::run_libtest(
             &args,
             &[
+                "receipt_output_reports_unknown_route_for_settled_lost_attempt",
+                "receipt_output_resolves_run_task_and_attempt",
+                "receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts",
                 "owned_dispatch_retains_failed_attempt_and_replays",
                 "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation",
                 "codex_dispatch_observes_rollout",
@@ -1748,6 +2008,15 @@ fn main() -> ExitCode {
             ],
             |name| {
                 let result = match name {
+                    "receipt_output_reports_unknown_route_for_settled_lost_attempt" => {
+                        receipt_output_reports_unknown_route_for_settled_lost_attempt()
+                    }
+                    "receipt_output_resolves_run_task_and_attempt" => {
+                        receipt_output_resolves_run_task_and_attempt()
+                    }
+                    "receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts" => {
+                        receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts()
+                    }
                     "owned_dispatch_retains_failed_attempt_and_replays" => {
                         owned_dispatch_retains_failed_attempt_and_replays()
                     }

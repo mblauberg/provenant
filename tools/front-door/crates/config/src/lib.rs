@@ -47,7 +47,8 @@ use serde::{Deserialize, Serialize, Serializer};
 use std::{collections::BTreeMap, fmt, path::PathBuf};
 use thiserror::Error;
 
-/// Errors never contain TOML text, rejected values or parser input excerpts.
+/// Errors contain no TOML text or parser excerpts; only numeric graph policy
+/// values may be included when rejected.
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("cannot encode config path at {path}")]
@@ -79,11 +80,13 @@ pub enum ConfigError {
     UnsupportedVersion { location: Location },
     #[error("config exceeds collection bounds at {location}")]
     CollectionLimit { location: Location },
-    #[error("invalid domain configuration at {location}: {source}")]
+    #[error("invalid domain configuration at {location}: {source}{rejected}")]
     Domain {
         location: Location,
         #[source]
         source: SectionError,
+        /// Safe numeric graph policy value, when available.
+        rejected: Box<String>,
     },
     #[error("config edit refused: {reason}")]
     Edit { reason: &'static str },

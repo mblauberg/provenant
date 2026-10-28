@@ -221,8 +221,11 @@ push|reconcile`. A terminal without MCP cancels with `provenant cancel ATTEMPT`.
   `fabric_run`'s `status` operation; see
   [worker-liveness.md](worker-liveness.md) for degraded runs. Size alone proves
   nothing.
-- On a terminal result, record `adapter/model@effort` from the receipt; derive
-  family from it. Native subagents record `claude/<model>@<effort> (anthropic;
+- On a terminal review, record the exact provenance line from
+  `provenant output RUN/TASK/ATTEMPT --part receipt`. Reviews use `Reviewer:`;
+  writer provenance uses `Writer:`. Include the following `Reviewer provenance:`
+  line for the canonical actor and observed attribution. Preserve `unknown` route,
+  effort, family and resolution evidence rather than guessing them. Native subagents record `claude/<model>@<effort> (anthropic;
   resolved)` from the Agent tool's model parameter, never from self-report.
 
 ## Fabric dispatch brief template
@@ -236,6 +239,7 @@ Scope/paths: <target and allowed paths; for review, $PROVENANT_LANE_BASE..$PROVE
 Constraints: <authority, isolation, governing skill and stop condition>
 Output: <shape, length and durable evidence location>
 Verification: <checks; for review, the rubric path or full rubric>
+Review provenance: the chair records `provenant output RUN/TASK/ATTEMPT --part receipt` after settlement.
 Cargo (Fabric lanes): Fabric supplies lane-private CARGO_TARGET_DIR,
 CARGO_BUILD_BUILD_DIR and CARGO_HOME. Do not override them. For lint-only
 runs, writer lanes may set both build directories to
