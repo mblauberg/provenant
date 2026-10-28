@@ -697,3 +697,103 @@ impl Catalogue {
             .any(|member| member.free && member.model == *id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AccessContext, Fallback, RouteChoice, RouteRequest, RoutingContext, resolve};
+    use provenant_providers::{AvailabilityRecord, REGISTRY};
+    use provenant_records::{RouteEligibility, RouteReadiness};
+
+    #[test]
+    fn bundled_go_models_resolve_and_only_flash_models_have_provisional_pool_weights()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let catalogue = Catalogue::bundled()?;
+        let config = RoutingConfig::default();
+        let model_names = ["deepseek-v4.1-flash", "glm-5.3-flash", "mimo-v2.6-flash"];
+        let availability = [AvailabilityRecord {
+            schema_version: 1,
+            adapter: "opencode".into(),
+            executable: "/fixture/opencode".into(),
+            version: "fixture".into(),
+            fixture_ref: "test".into(),
+            catalogue_revision: catalogue.revision().into(),
+            account_key: Some("go".into()),
+            observed_models: model_names
+                .iter()
+                .map(|name| format!("opencode-go/{name}"))
+                .collect(),
+            observed_unix_seconds: 80,
+            expires_unix_seconds: 120,
+        }];
+        let access = [AccessContext {
+            adapter: "opencode",
+            disclosure_ref: "policy",
+            confinement_ref: "grant",
+        }];
+        let context = RoutingContext {
+            catalogue: &catalogue,
+            config: &config,
+            registry: REGISTRY,
+            availability: &availability,
+            quota: &[],
+            access: &access,
+            now: provenant_core::WallTime::from_micros(100_000_000)?,
+            host: "test-host",
+        };
+        for name in model_names {
+            let model = ModelId::parse(&format!("opencode/opencode-go/{name}"))?;
+            let entry = catalogue.model(&model).ok_or("Go model missing")?;
+            assert_eq!(entry.trains_on_prompts, Some(false));
+            assert!(entry.efforts.is_empty());
+            assert!(entry.evidence_ref.contains("opencode-go-models.md"));
+            let route = resolve(
+                &RouteRequest {
+                    choice: RouteChoice::Model(model.clone()),
+                    effort: None,
+                    confidential: true,
+                    allow_free: false,
+                    fallback: Fallback::None,
+                },
+                &context,
+            )?;
+            assert_eq!(route.model, format!("opencode-go/{name}"));
+            assert_eq!(route.eligibility, RouteEligibility::Eligible);
+            assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+            let memberships: Vec<_> = catalogue
+                .pools
+                .iter()
+                .filter_map(|(pool, members)| {
+                    members
+                        .iter()
+                        .find(|member| member.model == model)
+                        .map(|member| (pool.as_str(), member))
+                })
+                .collect();
+            let pools: &[(&str, u8)] = match name {
+                "deepseek-v4.1-flash" => &[("junior", 2), ("senior", 1)],
+                "glm-5.3-flash" => &[("junior", 1), ("senior", 1)],
+                _ => &[],
+            };
+            if !pools.is_empty() {
+                assert_eq!(
+                    memberships
+                        .iter()
+                        .map(|(pool, member)| (*pool, member.weight))
+                        .collect::<Vec<_>>(),
+                    pools
+                );
+                for (_, member) in memberships {
+                    assert!(!member.free);
+                    assert!(member.effort.is_none());
+                    assert!(member.efforts.is_empty());
+                }
+            } else {
+                assert!(memberships.is_empty(), "{name} must await a trial");
+            }
+        }
+        assert_eq!(catalogue.pacing["opencode_paid"], PacingPolicy::Pace);
+        assert_eq!(catalogue.pacing["opencode_free"], PacingPolicy::Max);
+        Ok(())
+    }
+}

@@ -56,6 +56,48 @@ pub struct Limits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weekly_anchor: Option<String>,
 }
+impl Settings {
+    /// The Console's Zen allowance shares a login with Go, but never its quota
+    /// or pacing identity. Derive it in memory without changing registrations.
+    pub fn with_derived_accounts(&self) -> Self {
+        let mut settings = self.clone();
+        for spec in provenant_records::ADAPTER_SPECS {
+            let Some((key, _)) = spec.free_account else {
+                continue;
+            };
+            if settings
+                .entries
+                .values()
+                .any(|entry| entry.adapter == spec.name && entry.key == key)
+            {
+                continue;
+            }
+            let Some(mut entry) = settings
+                .entries
+                .values()
+                .find(|entry| entry.adapter == spec.name)
+                .cloned()
+            else {
+                continue;
+            };
+            entry.key = key.into();
+            entry.label = key.into();
+            entry.plan = None;
+            entry.limits = None;
+            entry.billing_anchor = None;
+            entry.display_name = None;
+            entry.hidden = false;
+            entry.order = None;
+            entry.headline = None;
+            let mut id = format!("{}-{key}", spec.name);
+            while settings.entries.contains_key(&id) {
+                id.push('_');
+            }
+            settings.entries.insert(id, entry);
+        }
+        settings
+    }
+}
 impl Registration {
     /// Compares the probed organisation with the recorded one. Both present and
     /// different refuses; an absent probe never refuses. `Ok(Some(org))` is a

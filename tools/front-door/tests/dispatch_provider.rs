@@ -150,6 +150,7 @@ fn opencode_dispatch_observes_v2_wal_session() -> Result {
         let prompt = rig.root.join("prompt.md");
         for (operation, text, expected) in [
             ("opencode-success", "reply OK", "succeeded"),
+            ("opencode-zen", "reply OK", "succeeded"),
             (
                 "opencode-unavailable",
                 "model unavailable",
@@ -160,9 +161,19 @@ fn opencode_dispatch_observes_v2_wal_session() -> Result {
             fs::write(&prompt, text)?;
             let model = if expected == "model_unavailable" {
                 "opencode/opencode/misspelt-free"
+            } else if operation == "opencode-zen" {
+                "opencode/opencode/beam-free"
             } else {
                 "opencode/opencode-go/beam-free"
             };
+            let provider = if model.starts_with("opencode/opencode-go/") {
+                "opencode-go"
+            } else {
+                "opencode"
+            };
+            db.execute("UPDATE session_message SET data = ?1", [
+                serde_json::to_string(&json!({"model": {"providerID": provider, "id": "beam-free"}, "finish": "stop"}))?
+            ])?;
             let out = rig.command(&[
                 "dispatch",
                 "--model",
@@ -183,12 +194,17 @@ fn opencode_dispatch_observes_v2_wal_session() -> Result {
             let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
             let lane = &lanes["data"]["lanes"][0];
             assert_eq!(lane["state"], expected, "{lane}");
+            let account = if provider == "opencode-go" {
+                "go"
+            } else {
+                "zen"
+            };
+            assert_eq!(lane["account"], account, "{lane}");
+            assert_eq!(lane["applied_route"]["account_label"], account, "{lane}");
+            assert_eq!(lane["applied_route"]["account_key"], account, "{lane}");
             if expected == "succeeded" {
                 assert_eq!(lane["transcript"]["session"], "ses_x");
-                assert_eq!(
-                    lane["observed_route"]["model"],
-                    "opencode/opencode-go/beam-free"
-                );
+                assert_eq!(lane["observed_route"]["model"], model);
                 assert_eq!(lane["observed_route"]["source"], "opencode_session");
             } else if expected == "quota_limited" {
                 assert!(

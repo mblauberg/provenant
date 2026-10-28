@@ -49,6 +49,7 @@ impl Admission<'_> {
         // Only the adapter's own keyless free pool spans models.
         let in_free = |pool: Option<&str>| free.is_some() && pool == free;
         let snapshot = record.and_then(|r| r.snapshot.as_ref());
+        let go_model = route.adapter == "opencode" && route.model.starts_with("opencode-go/");
         let fresh = snapshot.is_some_and(|s| {
             s.observed_unix_seconds <= self.now_unix_seconds
                 && self
@@ -70,12 +71,20 @@ impl Admission<'_> {
                 snapshot.status,
                 QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
             ) && snapshot.windows.iter().any(|w| {
-                self.pools
+                (self
+                    .pools
                     .iter()
                     .any(|pool| matches_pool(&route.adapter, &w.pool, pool))
+                    || (go_model
+                        && ["five_hour", "seven_day", "thirty_day"].contains(&w.pool.as_str())))
                     && w.used_basis_points >= 10000
-                    && w.resets_unix_seconds
+                    && (w
+                        .resets_unix_seconds
                         .is_none_or(|r| r > self.now_unix_seconds)
+                        || snapshot
+                            .details
+                            .as_ref()
+                            .is_some_and(|d| d.calibration_active(&w.pool, self.now_unix_seconds)))
             }) {
                 return Err(QuotaError::Refused("allowance exhausted"));
             }
@@ -270,6 +279,64 @@ mod admission_tests {
         });
         record
     }
+    #[test]
+    fn go_calibration_is_rechecked_before_launch_without_free_pool_bindings() {
+        let mut route = route();
+        route.adapter = "opencode".into();
+        route.model = "opencode-go/mimo-v2.6-flash".into();
+        route.account_key = Some("go".into());
+        route.pool_selection = Some(provenant_records::RouteSelectionReceipt {
+            pool: "senior".into(),
+            candidates: vec![],
+            roll: 0,
+            total_weight: 1,
+            pick: "opencode/opencode-go/mimo-v2.6-flash".into(),
+            redraws: vec![],
+        });
+        let mut record = record(QuotaStatus::Available);
+        record.account = AccountScope {
+            adapter: "opencode".into(),
+            account_key: "go".into(),
+            label: "go".into(),
+        };
+        let snapshot = record.snapshot.as_mut().unwrap();
+        snapshot.account = record.account.clone();
+        snapshot.windows.clear();
+        let raw = [record];
+        let check = |records: &[AccountRecord], now| {
+            Admission {
+                policies: crate::source::TEST_POLICIES,
+                now_unix_seconds: now,
+                records,
+                pools: &[],
+            }
+            .check(&route)
+        };
+        assert!(check(&raw, 1000).is_ok());
+        let mut settings = Settings::default();
+        settings.calibration.insert(
+            "go".into(),
+            Calibration {
+                five_hour: Some(43),
+                seven_day: Some(17),
+                thirty_day: Some(59),
+                expires: "1970-01-01T00:18:20Z".into(),
+            },
+        );
+        let mut active = raw.clone();
+        settings.apply_calibration(&mut active, 1000);
+        assert!(check(&active, 1000).is_ok());
+        assert!(check(&active, 1100).is_ok());
+        settings.calibration.get_mut("go").unwrap().five_hour = Some(100);
+        let mut exhausted = raw.clone();
+        settings.apply_calibration(&mut exhausted, 1000);
+        exhausted[0].snapshot.as_mut().unwrap().windows[0].resets_unix_seconds = Some(999);
+        assert!(matches!(
+            check(&exhausted, 1000),
+            Err(QuotaError::Refused("allowance exhausted"))
+        ));
+    }
+
     #[test]
     fn opencode_free_refusal_cools_the_identity_pool_across_models() {
         let mut route = route();

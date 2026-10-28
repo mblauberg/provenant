@@ -522,6 +522,7 @@ fn execute(
     let Some(tick) = tick else {
         let mut records = read_cache(roots)?;
         add_configured(&mut records, &configured);
+        settings.apply_calibration(&mut records, now);
         let mut report =
             schedule::report(&policies, &records, &detected, &query, now, report_path)?;
         decorate(&mut report, &entries, &settings.display);
@@ -640,6 +641,7 @@ fn execute(
         .map_err(|_| EdgeError::Time)?
         .as_timestamp()
         .as_second();
+    settings.apply_calibration(&mut records, now);
     let mut report = schedule::report(
         &policies,
         &records,
@@ -827,6 +829,20 @@ fn quota_human(report: &QuotaReport) -> String {
             row.account.label, row.account.adapter
         ));
         if let Some(snapshot) = &row.snapshot {
+            if let Some(details) = &snapshot.details {
+                if let Some(source) = &details.source {
+                    human.push_str(&format!("; source: {}", source.escape_debug()));
+                }
+                if let Some(coverage) = &details.coverage {
+                    human.push_str(&format!("; coverage: {}", coverage.escape_debug()));
+                    if coverage == "partial" {
+                        human.push_str(" (lower bound, this host only)");
+                    }
+                }
+                if let Some(expiry) = details.calibration_expires_unix_seconds {
+                    human.push_str(&format!("; dashboard calibration until {expiry}"));
+                }
+            }
             if matches!(row.status, QuotaStatus::Stale | QuotaStatus::AuthRequired) {
                 human.push_str(" (last known)");
             }
@@ -1005,6 +1021,73 @@ mod tests {
         assert!(dir.open_verified_directory(OsStr::new("anese")).is_ok());
         clean_orphan_dirs(&dir)?;
         assert!(dir.open_verified_directory(OsStr::new("anese")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn quota_human_and_json_display_partial_ledger_with_calibration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let account = AccountScope {
+            adapter: "opencode".into(),
+            account_key: "go".into(),
+            label: "go".into(),
+        };
+        let mut record = AccountRecord::empty(account.clone());
+        record.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: account.clone(),
+            revision: 0,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: 100,
+            source_ref: "quota.provider.opencode".into(),
+            authority_ref: None,
+            windows: vec![QuotaWindow {
+                pool: "five_hour".into(),
+                used_basis_points: 401,
+                resets_unix_seconds: None,
+                window_seconds: Some(18_000),
+            }],
+            details: None,
+        });
+        let mut records = vec![record];
+        let mut settings = Settings::default();
+        settings.calibration.insert(
+            "go".into(),
+            Calibration {
+                five_hour: Some(43),
+                seven_day: Some(17),
+                thirty_day: Some(59),
+                expires: "2026-11-04T00:00:00Z".into(),
+            },
+        );
+        settings.apply_calibration(&mut records, 100);
+        let report = schedule::report(
+            &provenant_providers::quota_policies(provenant_providers::REGISTRY),
+            &records,
+            &[Detection {
+                adapter: "opencode".into(),
+                accounts: Some(vec![account]),
+                status: QuotaStatus::Available,
+            }],
+            &QuotaQuery { adapter: None },
+            100,
+            "/report.json".into(),
+        )?;
+        let human = quota_human(&report);
+        assert!(
+            human.contains("source: local-ledger; coverage: partial (lower bound, this host only)"),
+            "{human}"
+        );
+        assert!(human.contains("43.00% used"), "{human}");
+        let json = serde_json::to_value(&report)?;
+        assert_eq!(
+            json["accounts"][0]["snapshot"]["details"]["coverage"],
+            "partial"
+        );
+        assert_eq!(
+            json["accounts"][0]["snapshot"]["windows"][0]["used_basis_points"],
+            4300
+        );
         Ok(())
     }
 

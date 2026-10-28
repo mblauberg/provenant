@@ -97,7 +97,7 @@ impl LiveQuota {
     /// under the `state` root and `home` as each probe's `HOME`.
     pub fn new(state: &Path, home: &Path, settings: &Settings) -> Result<Self, QuotaError> {
         let mut accounts = Vec::new();
-        for registration in settings.entries.values() {
+        for registration in settings.with_derived_accounts().entries.values() {
             let dir = &registration.directory;
             if !dir.is_absolute()
                 || dir
@@ -307,6 +307,12 @@ impl QuotaEffects for LiveQuota {
             "codex" => self.codex(account, deadline)?,
             "cursor" => self.cursor(account, deadline)?,
             "agy" => self.agy(account, deadline, &mut details)?,
+            "opencode" if account.scope.account_key == "zen" => {
+                details.note = Some(
+                    "Observed free-limit refusals only; allowance and daily reset unknown".into(),
+                );
+                json!({})
+            }
             "opencode" => {
                 details.note = Some("Local estimate, this machine only; calibrated Go caps, other hosts not counted".into());
                 opencode::capture(&account.identity_dir, &account.options, now(), deadline)?
@@ -547,5 +553,67 @@ mod tests {
             .claude(&account, None, now() + 60, &mut QuotaDetails::default())
             .unwrap_err();
         assert_eq!(serde_json::to_value(failure).unwrap(), "probe_directory");
+    }
+}
+
+#[cfg(test)]
+mod zen_tests {
+    use super::*;
+    use provenant_quota::{QuotaProbeInput, QuotaStatus, Refusal};
+
+    #[test]
+    fn zen_is_derived_and_uses_refusals_without_reading_go_ledger() {
+        let settings: Settings = serde_json::from_value(json!({
+            "entries": {"paid": {
+                "adapter": "opencode", "label": "go", "key": "go",
+                "directory": "/fixture/opencode", "plan": "go"
+            }}
+        }))
+        .unwrap();
+        let live = LiveQuota::new(
+            Path::new("/fixture/state"),
+            Path::new("/fixture/home"),
+            &settings,
+        )
+        .unwrap();
+        let accounts = live.accounts().unwrap();
+        assert_eq!(accounts.len(), 2);
+        assert!(accounts.iter().any(|scope| scope.account_key == "go"));
+        let zen = accounts
+            .iter()
+            .find(|scope| scope.account_key == "zen")
+            .unwrap();
+        assert_eq!(zen.label, "zen");
+        let derived = settings.with_derived_accounts();
+        assert_eq!(derived.with_derived_accounts().entries.len(), 2);
+        let mut previous = AccountRecord::empty(zen.clone());
+        previous.refusals.push(Refusal {
+            account: zen.clone(),
+            model: "opencode/beam-free".into(),
+            pool: Some("opencode-free".into()),
+            observed_unix_seconds: 100,
+            resets_unix_seconds: None,
+        });
+        for at in [101, 3700] {
+            let plan = crate::quota::plan(
+                "opencode",
+                zen,
+                &QuotaProbeInput {
+                    now_unix_seconds: at,
+                    deadline_unix_seconds: at + 30,
+                    authority_ref: None,
+                },
+            )
+            .unwrap();
+            let capture = live.capture(&plan, Some(&previous)).unwrap();
+            let snapshot = crate::quota::decode(&plan, &capture).unwrap();
+            assert_eq!(snapshot.status, QuotaStatus::Unknown);
+            assert!(
+                snapshot
+                    .windows
+                    .iter()
+                    .all(|window| window.resets_unix_seconds.is_none())
+            );
+        }
     }
 }
