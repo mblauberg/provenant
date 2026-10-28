@@ -778,7 +778,11 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     // telemetry, including on an otherwise empty state root.
     let usage_roots = if matches!(
         verb.as_str(),
-        "workflow session show" | "workflow session diff" | "console projects" | "console sessions"
+        "workflow session show"
+            | "workflow session diff"
+            | "console projects"
+            | "console sessions"
+            | "console overview"
     ) {
         None
     } else {

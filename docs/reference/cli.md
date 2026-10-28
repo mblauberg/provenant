@@ -2680,6 +2680,16 @@ bounds are null. Positional arguments have no long flag.
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
+## `provenant console overview`
+
+| Argument | Contract |
+|---|---|
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
 ## `provenant console projects`
 
 | Argument | Contract |

@@ -17,7 +17,9 @@ pub use claims::*;
 pub use db::{Request, RetryWait, Store, ThreadWait};
 pub use events::*;
 pub use federation::*;
-pub use human_inbox::{HumanAcknowledgement, HumanClosure};
+pub use human_inbox::{
+    HumanAcknowledgement, HumanClosure, PendingHumanRequest, PendingHumanRequests,
+};
 pub use landing::*;
 pub use messages::*;
 pub use tasks::*;
