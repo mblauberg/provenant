@@ -1,9 +1,13 @@
 //! Disk-pressure pauses are scoped to native identities below one provider.
-use crate::census::{Ancestry, Census, ProcessIdentity};
+use crate::census::ProcessIdentity;
+#[cfg(any(test, target_os = "macos"))]
+use crate::census::{Ancestry, Census};
 use crate::custody::Scope;
+#[cfg(any(test, target_os = "macos"))]
 use provenant_os::fs::{Directory, PublishMode};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+#[cfg(any(test, target_os = "macos"))]
 use std::io;
 
 pub(crate) const PAUSE_FILE: &str = "disk-paused.json";
@@ -18,6 +22,7 @@ pub(crate) struct PauseJournal {
 }
 
 impl PauseJournal {
+    #[cfg(any(test, target_os = "macos"))]
     fn persist(&self, directory: &Directory) -> io::Result<()> {
         let bytes = serde_json::to_vec(self).map_err(io::Error::other)?;
         if bytes.len() as u64 > crate::custody::RECORD_LIMIT {
@@ -31,12 +36,14 @@ impl PauseJournal {
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
 #[derive(Default)]
 pub(crate) struct PausedBuilds {
     identities: BTreeSet<ProcessIdentity>,
     journal: Option<(Directory, Scope, ProcessIdentity)>,
 }
 
+#[cfg(any(test, target_os = "macos"))]
 impl PausedBuilds {
     pub(crate) fn bind(
         &mut self,
@@ -131,6 +138,7 @@ impl PausedBuilds {
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn is_build(command: &str) -> bool {
     matches!(
         command,
