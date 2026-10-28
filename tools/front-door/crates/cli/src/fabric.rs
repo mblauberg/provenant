@@ -84,8 +84,12 @@ pub enum Graph {
     },
     /// Resume a task graph from its document
     Resume {
+        /// Project-local graph document
         #[arg(long)]
         document: PathBuf,
+        /// Raise a limit or budget (KEY=VALUE); may be repeated
+        #[arg(long, value_name = "KEY=VALUE")]
+        extend: Vec<String>,
     },
 }
 

@@ -65,6 +65,32 @@ head. Publishing defaults on; disable it with
 configuration `[knobs] "lanes.publish" = false`. Read-only lanes retain their
 existing open-network gh read access.
 
+For a project, the host can configure an advisory GitHub CLI deny list in
+`projects/<ProjectId>/github.json` under its state root. The project ID is
+host-local. Find it in the `projects` array of `provenant quota usage --json`,
+matched to the repository's Git common directory. For example:
+
+```json
+{
+  "deny_verbs": ["release create", "workflow run"],
+  "deny_labels": ["ci"]
+}
+```
+
+Both lists default to empty. A denied verb matches a command token prefix. For
+pull request and issue creation and editing, label checks recognise long label
+flags with separate or `=` values, including comma-separated lists. For
+creation, they also recognise `-l` with separate, `=` or attached values. A
+policy label and each value in a comma-separated list are trimmed; empty policy
+labels are ignored. A refusal exits 1 and prints `github.deny_verbs` or
+`github.deny_labels` on standard error; other commands continue to the host's
+GitHub CLI. The shim and policy are active only when publishing is available,
+so disabling publishing or running without the host's gh configuration leaves
+the policy inactive. This is an advisory guard against accidental use, not a
+security boundary: a lane can invoke the real `gh` directly or use another
+GitHub API client. Use GitHub permissions and repository rules to enforce
+restrictions.
+
 After a settled writer without delivery, run:
 
 ```sh
@@ -96,7 +122,9 @@ worktrees retain their existing GC policy.
 `provenant resume ATTEMPT --prompt-file followup.md` generates and prints an
 operation ID; supply `--operation-id ID` for a planned retry. It pins the prior
 attempt's applied provider, model and account, including when dispatch selected
-a named route pool. Targets accept unique hex prefixes of at least eight
+a named route pool. A model capacity failure appears as `model_unavailable`
+with its reason in lanes; resume can continue its provider session when supported.
+Targets accept unique hex prefixes of at least eight
 characters and `RUN/ATTEMPT`; an ambiguous prefix lists candidates. Resume
 starts fresh by default when continuation state is unavailable, preserving authority with
 original context and the previous result attached. Ownership must match the

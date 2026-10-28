@@ -60,6 +60,8 @@ pub(crate) enum Error {
     Budget,
     #[error("{0}")]
     GcObservation(&'static str),
+    #[error("writer reservation retained: {0}")]
+    WriterRecovery(String),
     #[error("cannot read disk space: {0}")]
     DiskSpace(std::io::Error),
     #[error("invalid worktree removal scope")]
@@ -92,6 +94,7 @@ impl Error {
                 | WorktreeError::GitOperationInProgress
                 | WorktreeError::LiveWriter
                 | WorktreeError::UnknownWriter
+                | WorktreeError::IncompleteCensus
                 | WorktreeError::Primary
                 | WorktreeError::IdentityChanged
                 | WorktreeError::PrimaryMoved,
@@ -631,7 +634,10 @@ pub(crate) fn land_cleanup(
                 return Ok(landed);
             };
             landed.registered = true;
-            if project.starts_with(&lane.path) {
+            if std::env::current_dir()
+                .map_err(roots::RootError::from)?
+                .starts_with(&lane.path)
+            {
                 landed.kept = Some(
                     "this command runs inside that worktree; run it from another checkout".into(),
                 );
@@ -643,6 +649,21 @@ pub(crate) fn land_cleanup(
                     lane.head
                 ));
                 return Ok(landed);
+            }
+            match context
+                .workers
+                .observe_roots(std::slice::from_ref(&lane.path))
+                .get(&lane.path)
+            {
+                Some(worktrees::WorkerState::Free) => {}
+                Some(worktrees::WorkerState::Live) => {
+                    landed.kept = Some(WorktreeError::LiveWriter.to_string());
+                    return Ok(landed);
+                }
+                _ => {
+                    landed.kept = Some(WorktreeError::IncompleteCensus.to_string());
+                    return Ok(landed);
+                }
             }
             let project_id = context.binding.project_id();
             let settings = config
@@ -656,6 +677,19 @@ pub(crate) fn land_cleanup(
                 regenerable.push("target".into());
             }
             let snapshot = crate::gc_support::lane_states(&roots, &home, &assets, project_id).ok();
+            if let Err(error) = clear_landed_writer(
+                context,
+                &lane,
+                snapshot.as_ref(),
+                &provenant_config::ProjectGcSettings {
+                    regenerable: regenerable.clone(),
+                    ..settings.clone()
+                },
+                cancel,
+            ) {
+                landed.kept = Some(error.to_string());
+                return Ok(landed);
+            }
             // A branch landed by hand may never have had a lane, so unlike a
             // sweep this accepts a worktree no lane used. A live or unobservable
             // lane, or a stale scan, still refuses.
@@ -720,6 +754,68 @@ pub(crate) fn land_cleanup(
             Ok(landed)
         },
     )
+}
+
+/// Recover only a verified abandoned writer. A merge alone is not evidence
+/// that a guardian stopped; supervisor and the canonical Run owner decide that.
+fn clear_landed_writer(
+    context: &WorktreeContext<'_>,
+    lane: &worktrees::WorktreeInfo,
+    snapshot: Option<&crate::gc_support::LaneSnapshot>,
+    output: &provenant_config::ProjectGcSettings,
+    cancel: &CancelToken,
+) -> Result<(), Error> {
+    use provenant_supervisor::custody::{self, CustodyError};
+    let state = context
+        .project_state
+        .open_verified_directory(OsStr::new(&worktrees::state_dir_name(&lane.path)))?;
+    match state.metadata_at(OsStr::new("reservation.json"), false) {
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
+    match context
+        .workers
+        .observe_roots(std::slice::from_ref(&lane.path))
+        .get(&lane.path)
+    {
+        Some(worktrees::WorkerState::Free) => {}
+        Some(worktrees::WorkerState::Live) => return Err(WorktreeError::LiveWriter.into()),
+        _ => return Err(WorktreeError::IncompleteCensus.into()),
+    }
+    let verified = provenant_confinement::repo::verify_worktree(context.repo, &lane.path)
+        .map_err(WorktreeError::from)?;
+    let branch = lane.branch.as_deref().ok_or(WorktreeError::UnknownWriter)?;
+    let acquire = || -> Result<_, Error> {
+        let recovery = custody::acquire_recovery(
+            state.try_clone()?,
+            WaitBudget::nonblocking(context.clock.mono_now()),
+            cancel,
+            context.clock,
+        )
+        .map_err(|error| Error::WriterRecovery(error.to_string()))?;
+        recovery
+            .writer_base(
+                verified.repo().root_dir(),
+                verified.repo().private_dir(),
+                branch,
+            )
+            .map_err(|error| Error::WriterRecovery(error.to_string()))?;
+        worktrees::check_removal_preconditions(context, &verified, output, cancel)?;
+        Ok(recovery)
+    };
+    match acquire()?.withdraw_prepared() {
+        Ok(()) => return Ok(()),
+        Err(CustodyError::Fenced) => {}
+        Err(error) => return Err(Error::WriterRecovery(error.to_string())),
+    }
+    let recovery = acquire()?;
+    snapshot
+        .ok_or(Error::GcObservation(
+            "cannot inspect canonical writer attempts",
+        ))?
+        .settle_landed_writer(recovery)
+        .map_err(|error| Error::WriterRecovery(error.to_string()))
 }
 
 /// How long an event caller (settlement or landing) waits for a busy

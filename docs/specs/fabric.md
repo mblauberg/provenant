@@ -201,9 +201,9 @@ their `operation_id`.
 
 ## Bounded graphs and route fallback
 
-A graph is bounded (8 routes per node, 64 nodes, 256 edges, 64 KiB per
-prompt, 256 KiB in total), with each attempt bounded by
-`limits.graph_timeout_seconds`.
+A graph must obey the configured structural limits and budgets. Each attempt
+is also bounded by `limits.graph_timeout_seconds`. The [host runbook](../runbooks/fabric-hosts.md#configure-hosts)
+describes defaults, ceilings, budget telemetry and resuming a paused graph.
 
 Each node has an optional task `title`, defaulting to its ID; titles use the
 shared task title validation and appear in lanes and graph status. A node may
@@ -225,7 +225,8 @@ detect tampering. Cancelling a graph persists the admission fence first.
 ### Fallback only for unavailability
 
 Only a terminal `auth_required`, `usage_limited` or `adapter_unavailable`
-moves a node to the next route. Task failure, input requirements and uncertain
+moves a node to the next route. Model capacity failures are treated as model
+unavailability for this purpose. Task failure, input requirements and uncertain
 launches never fall back; after launch only read-only nodes may fall back. A failed
 writer keeps its worktree. Graph writers deliver only when their node explicitly requests it.
 - Why: retrying a writer elsewhere would duplicate edits.

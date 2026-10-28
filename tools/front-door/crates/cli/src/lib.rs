@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod bench;
 pub mod check;
+pub mod console;
 pub mod domains;
 pub mod fabric;
 pub mod quota;
@@ -975,6 +976,7 @@ mod tests {
         valid(&["output", &attempt, "--trace"]);
         valid(&["telemetry", "trace", "--peers", "--run", &"11".repeat(16)]);
         invalid(&["output", &attempt, "--trace", "--part", "prompt"]);
+        invalid(&["output", &attempt, "--trace", "--part", "receipt"]);
         invalid(&["output", &attempt, "--trace", "--tail", "1"]);
         valid(&["output", &"11".repeat(16)]);
         valid(&["output", &"11".repeat(16), "--host", "workshop"]);

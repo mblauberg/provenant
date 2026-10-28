@@ -138,6 +138,13 @@ marks it. A revision whose text fails its hash is refused with `HISTORY`.
 
 ### Explicit chairs are discoverable
 
+Catalogue composition uses the bounded discovery reader with a shared entry
+budget. Every enumerated session-directory entry consumes that budget, even if
+its name is invalid or it has no discovery record. Reaching the budget reports
+truncation without reading a further entry; an exact fit is conservatively
+reported as truncated. The original discovery reader retains its existing limit
+and error behaviour for other callers.
+
 **Contract for later slices:** `discovery.json` is advisory. The checkpoint and
 revision manifest commit before the separate discovery replacement. Failure of
 that replacement returns a successful save with a warning; the next save repairs
