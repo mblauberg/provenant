@@ -337,6 +337,13 @@ must fail the gate regardless of its threshold. Majority requires strictly more 
 count requires at least the configured positive count. Budget gates must check
 settled attempt usage at evaluation time against the effective host budgets, including saved
 extensions, and fail on unknown or partial usage for a configured metric.
+CI gates check the configured pull request or branch through the host's check
+status interface. Passed checks pass; failed checks fail; missing or unavailable
+checks fail with reason `unavailable`. Pending checks leave the gate waiting,
+and fail with reason `timeout` after the configured timeout (two hours by
+default). The checkpoint retains the first observation time, last state and
+check summary. Replay restores waiting without querying the host; graph advances
+re-evaluate the gate. There is no automatic background re-check.
 Gates must save their decision before dependants run and retain it on replay,
 even if budgets change. Gates expose `PASS` or `FAIL` as their typed verdict.
 

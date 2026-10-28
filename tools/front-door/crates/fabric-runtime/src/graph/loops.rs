@@ -411,6 +411,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 round: n.round.clone(),
                 loop_decision_actor: None,
                 gate: None,
+                ci: None,
                 title: Some(n.title.as_deref().unwrap_or(&n.id).into()),
                 worktree: n.worktree.clone(),
                 id: n.id.clone(),

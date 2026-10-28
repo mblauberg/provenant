@@ -73,6 +73,48 @@ fn counts(project: &Path, number: &str) -> Option<Vec<Check>> {
     .ok()?;
     serde_json::from_slice(&output.stdout.bytes).ok()
 }
+
+/// Graph gates use the same bounded check reader as `pr status`. gh returns
+/// non-zero for pending and failed checks, so valid JSON is authoritative.
+pub(crate) fn observe_ci(
+    project: &Path,
+    target: &str,
+) -> provenant_fabric_runtime::graph::CiObservation {
+    summarise_ci(counts(project, target))
+}
+
+fn summarise_ci(checks: Option<Vec<Check>>) -> provenant_fabric_runtime::graph::CiObservation {
+    use provenant_fabric_runtime::graph::{CiObservation, CiState};
+    let Some(checks) = checks else {
+        return CiObservation {
+            state: CiState::Unavailable,
+            summary: "checks unavailable".into(),
+        };
+    };
+    let passed = checks
+        .iter()
+        .filter(|c| matches!(c.bucket.as_str(), "pass" | "skipping"))
+        .count();
+    let failed = checks
+        .iter()
+        .filter(|c| matches!(c.bucket.as_str(), "fail" | "cancel"))
+        .count();
+    let pending = checks.iter().filter(|c| c.bucket == "pending").count();
+    let total = checks.len();
+    let state = if total == 0 || passed + failed + pending != total {
+        CiState::Unavailable
+    } else if failed > 0 {
+        CiState::Failed
+    } else if pending > 0 {
+        CiState::Pending
+    } else {
+        CiState::Passed
+    };
+    CiObservation {
+        state,
+        summary: format!("checks={passed}/{total} fail={failed} pending={pending}"),
+    }
+}
 fn open_numbers(project: &Path) -> Result<Vec<u64>> {
     #[derive(Deserialize)]
     struct Listed {
@@ -170,5 +212,35 @@ pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
             )
         }
         Err(error) => fail(LEAF, Outcome::Error, "PR", &error.to_string(), globals),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provenant_fabric_runtime::graph::CiState;
+
+    #[test]
+    fn gate_check_buckets_fail_closed() {
+        let observe = |buckets: &[&str]| {
+            summarise_ci(Some(
+                buckets
+                    .iter()
+                    .map(|bucket| Check {
+                        bucket: (*bucket).into(),
+                    })
+                    .collect(),
+            ))
+        };
+        assert_eq!(observe(&["pass", "skipping"]).state, CiState::Passed);
+        assert_eq!(observe(&["pass", "pending"]).state, CiState::Pending);
+        assert_eq!(observe(&["pending", "fail"]).state, CiState::Failed);
+        assert_eq!(observe(&[]).state, CiState::Unavailable);
+        assert_eq!(observe(&["pass", "unexpected"]).state, CiState::Unavailable);
+        assert_eq!(summarise_ci(None).state, CiState::Unavailable);
+        assert_eq!(
+            observe(&["pass", "pending"]).summary,
+            "checks=1/2 fail=0 pending=1"
+        );
     }
 }

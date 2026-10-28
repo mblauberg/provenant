@@ -14,6 +14,9 @@ use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use thiserror::Error;
 
+#[cfg(test)]
+#[path = "graph/ci_tests.rs"]
+mod ci_tests;
 mod loops;
 mod plans;
 pub use loops::{LoopAsk, LoopDecision, LoopRound, LoopScope, LoopSpec, close_resolved_loop_asks};
@@ -209,6 +212,46 @@ pub enum GateCondition {
     },
     /// Check the effective host graph budget, including saved extensions.
     Budget,
+    Ci {
+        target: String,
+        required: CiRequired,
+        #[serde(default = "default_ci_timeout")]
+        timeout_seconds: u64,
+    },
+}
+
+fn default_ci_timeout() -> u64 {
+    7200
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiRequired {
+    Passed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiState {
+    Passed,
+    Failed,
+    Pending,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CiObservation {
+    pub state: CiState,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CiEvidence {
+    pub first_observed_seconds: u64,
+    pub state: CiState,
+    pub summary: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,6 +405,8 @@ pub struct NodeProgress {
     pub loop_decision_actor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<GateResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci: Option<CiEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// Retain the writer checkout for chair inspection after a failed launch.
@@ -587,6 +632,11 @@ pub struct NodeInput<'a> {
     pub required_verdict: Option<&'a str>,
 }
 
+/// Narrow read-only host interface for CI checks.
+pub trait CiStatus {
+    fn observe_ci(&mut self, target: &str) -> CiObservation;
+}
+
 /// `observe_or_start` must be idempotent by `AttemptKey`. It starts the run
 /// only when that key has no accepted operation, and otherwise observes it.
 /// A `stored_ref` from the checkpoint names an accepted attempt: observe it as
@@ -595,6 +645,11 @@ pub struct NodeInput<'a> {
 /// launch duplicate work. Provider launch and terminal publication remain run's responsibility.
 pub trait AttemptOwner {
     type Error: Error + 'static;
+
+    /// A host without CI support fails closed.
+    fn ci_status(&mut self) -> Option<&mut dyn CiStatus> {
+        None
+    }
 
     /// The actor this owner submits as, recorded before the first submit.
     fn actor(&self) -> String;
@@ -1289,6 +1344,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         round: node.round.clone(),
                         loop_decision_actor: node.loop_body.as_ref().map(|_| owner.actor()),
                         gate: None,
+                        ci: None,
                         id: node.id.clone(),
                         title: Some(node.title.as_deref().unwrap_or(&node.id).to_owned()),
                         worktree: node.worktree.clone(),
@@ -1549,7 +1605,48 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             if structural_pause.is_some() || checkpoint.pause_reason.is_some() {
                 continue;
             }
-            let reason = gate_failure(condition, node, &checkpoint, &positions, &effective_budget);
+            let reason = if let GateCondition::Ci {
+                target,
+                timeout_seconds,
+                ..
+            } = condition
+            {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let prior = checkpoint.nodes[node_index].ci.as_ref();
+                let first = prior.map_or(now, |e| e.first_observed_seconds);
+                if prior.is_some() && now.saturating_sub(first) >= *timeout_seconds {
+                    Some("timeout".into())
+                } else {
+                    let observation = owner.ci_status().map_or_else(
+                        || CiObservation {
+                            state: CiState::Unavailable,
+                            summary: "CI status unavailable".into(),
+                        },
+                        |host| host.observe_ci(target),
+                    );
+                    let state = observation.state;
+                    checkpoint.nodes[node_index].ci = Some(CiEvidence {
+                        first_observed_seconds: first,
+                        state,
+                        summary: observation.summary,
+                    });
+                    match state {
+                        CiState::Pending => {
+                            checkpoint.nodes[node_index].state = NodeState::Running;
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                            continue;
+                        }
+                        CiState::Passed => None,
+                        CiState::Failed => Some("failed".into()),
+                        CiState::Unavailable => Some("unavailable".into()),
+                    }
+                }
+            } else {
+                gate_failure(condition, node, &checkpoint, &positions, &effective_budget)
+            };
             let progress = &mut checkpoint.nodes[node_index];
             progress.state = if reason.is_none() {
                 NodeState::Succeeded
@@ -2003,6 +2100,7 @@ fn gate_failure(
             };
             (!passed).then(|| format!("verdict threshold not met: {matched}/{total} matched"))
         }
+        GateCondition::Ci { .. } => unreachable!("CI is observed by the host"),
         GateCondition::Budget => {
             // An explicit check must fail closed even if admission only warns.
             let mut budget = budget.clone();
@@ -2528,6 +2626,22 @@ fn validate_flat_plan(
                     return Err("invalid verdict gate");
                 }
             }
+            Some(GateCondition::Ci {
+                target,
+                timeout_seconds,
+                ..
+            }) => {
+                if target.trim().is_empty()
+                    || target.trim() != target
+                    || target.starts_with('-')
+                    || target.contains(['\n', '\r'])
+                    || target.len() > 1024
+                    || !(1..=604800).contains(timeout_seconds)
+                    || !node.inputs.is_empty()
+                {
+                    return Err("invalid CI gate target or timeout");
+                }
+            }
             Some(GateCondition::Budget) if !node.inputs.is_empty() => {
                 return Err("budget gate has no selected inputs");
             }
@@ -2968,7 +3082,16 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         if node.condition.is_some() {
             let valid = match (&progress.gate, progress.state) {
                 (None, NodeState::Pending | NodeState::Blocked | NodeState::Skipped) => {
-                    progress.outputs.is_none()
+                    progress.outputs.is_none() && progress.ci.is_none()
+                }
+                (None, NodeState::Running) => {
+                    matches!(node.condition, Some(GateCondition::Ci { .. }))
+                        && progress
+                            .ci
+                            .as_ref()
+                            .is_some_and(|ci| ci.state == CiState::Pending)
+                        && progress.outputs.is_none()
+                        && dependency_state(node, plan, checkpoint, &positions).is_none()
                 }
                 (Some(result), NodeState::Succeeded | NodeState::Failed) => {
                     result.passed == (progress.state == NodeState::Succeeded)
@@ -2979,10 +3102,18 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 }
                 _ => false,
             };
-            if !valid || !progress.attempts.is_empty() || progress.advance_error.is_some() {
+            if !valid
+                || !progress.attempts.is_empty()
+                || progress.advance_error.is_some()
+                || (progress.ci.is_some()
+                    && !matches!(node.condition, Some(GateCondition::Ci { .. })))
+                || (matches!(node.condition, Some(GateCondition::Ci { .. }))
+                    && progress.gate.is_some()
+                    && progress.ci.is_none())
+            {
                 return Err(GraphError::BadCheckpoint);
             }
-        } else if progress.gate.is_some() {
+        } else if progress.gate.is_some() || progress.ci.is_some() {
             return Err(GraphError::BadCheckpoint);
         }
         if progress.state == NodeState::Skipped
