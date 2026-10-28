@@ -2255,6 +2255,7 @@ struct BoundGraphOwner<'a> {
     integration_base: Option<provenant_core::GitOid>,
     budget: WaitBudget,
     cancel: &'a CancelToken,
+    prices: Option<Option<provenant_telemetry::PriceTable>>,
 }
 
 pub(crate) fn advance_settled_graphs(
@@ -2328,6 +2329,7 @@ fn advance_graphs_after_settlement(
                 integration_base: execution.integration_base,
                 budget,
                 cancel: &cancel,
+                prices: None,
             };
             let graph_config = &factory.context.config.graph;
             let limits = execution
@@ -2342,6 +2344,7 @@ fn advance_graphs_after_settlement(
                 &mut owner,
                 &mut journal,
                 &limits,
+                &graph_config.limit_ceiling,
                 &graph_config.budget,
             )?;
             Ok(())
@@ -2944,35 +2947,38 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             usage.output_excluding_reasoning,
             usage.reasoning,
         ];
+        let tokens_partial = categories.iter().any(Option::is_none);
         let tokens = categories.iter().any(Option::is_some).then(|| {
             categories
                 .into_iter()
                 .flatten()
                 .fold(0u64, u64::saturating_add)
         });
-        let cost_micro_usd =
+        let prices = self.prices.get_or_insert_with(|| {
             std::fs::read_to_string(self.factory.assets.join("config/telemetry-prices.toml"))
                 .ok()
                 .and_then(|text| {
                     toml_edit::de::from_str::<provenant_telemetry::ConfiguredPrices>(&text).ok()
                 })
                 .and_then(|config| provenant_telemetry::validate_prices(&config).ok())
-                .and_then(|prices| {
-                    provenant_run::fact(record.clone()).ok().and_then(|fact| {
-                        provenant_telemetry::stats([fact], &prices, Default::default()).ok()
-                    })
+        });
+        let cost = prices
+            .as_ref()
+            .and_then(|prices| {
+                provenant_run::fact(record.clone()).ok().and_then(|fact| {
+                    provenant_telemetry::stats([fact], prices, Default::default()).ok()
                 })
-                .and_then(|report| {
-                    report
-                        .totals
-                        .cost
-                        .known_lower_bound
-                        .map(|money| money.microdollars)
-                });
+            })
+            .map(|report| report.totals.cost);
+        let cost_partial = cost.as_ref().is_none_or(|cost| cost.complete.is_none());
+        let cost_micro_usd =
+            cost.and_then(|cost| cost.known_lower_bound.map(|money| money.microdollars));
         Ok(provenant_fabric_runtime::graph::AttemptUsage {
             tokens,
             cost_micro_usd,
             wall_time_seconds: record.provider_ms.map(|ms| ms.saturating_add(999) / 1000),
+            tokens_partial,
+            cost_partial,
         })
     }
     fn observe_or_start(
@@ -3350,6 +3356,7 @@ impl Factory {
                 integration_base,
                 budget,
                 cancel,
+                prices: None,
             };
             let graph_config = &self.context.config.graph;
             let limits = document
@@ -3364,30 +3371,12 @@ impl Factory {
                     GraphInput::Resume { extend, .. } => extend.as_slice(),
                     _ => &[],
                 };
-                for extension in extensions
-                    .iter()
-                    .filter(|extension| extension.starts_with("limits."))
-                {
-                    let (key, value) =
-                        extension.split_once('=').ok_or(FacadeError::InvalidInput)?;
-                    let value: usize = value.parse().map_err(|_| FacadeError::InvalidInput)?;
-                    let mut fields = serde_json::Map::new();
-                    fields.insert(
-                        key.trim_start_matches("limits.").to_owned(),
-                        serde_json::json!(value),
-                    );
-                    let overrides: provenant_fabric_runtime::graph::GraphLimitOverrides =
-                        serde_json::from_value(serde_json::Value::Object(fields))
-                            .map_err(|_| FacadeError::InvalidInput)?;
-                    overrides
-                        .resolve(graph_config)
-                        .map_err(|reason| FacadeError::DispatchRefused { reason })?;
-                }
                 provenant_fabric_runtime::graph::resume_with_budget(
                     document,
                     &mut owner,
                     &mut journal,
                     &limits,
+                    &graph_config.limit_ceiling,
                     &graph_config.budget,
                     extensions,
                 )
@@ -3397,13 +3386,19 @@ impl Factory {
                     &mut owner,
                     &mut journal,
                     &limits,
+                    &graph_config.limit_ceiling,
                     &graph_config.budget,
                 )
             };
             let run = run.map_err(|error| match error {
                 provenant_fabric_runtime::graph::GraphError::Run(error) => error,
-                provenant_fabric_runtime::graph::GraphError::Invalid(_) => {
-                    FacadeError::InvalidInput
+                provenant_fabric_runtime::graph::GraphError::Invalid(reason) => {
+                    FacadeError::DispatchRefused {
+                        reason: format!("invalid graph: {reason}"),
+                    }
+                }
+                provenant_fabric_runtime::graph::GraphError::Extension(reason) => {
+                    FacadeError::DispatchRefused { reason }
                 }
                 provenant_fabric_runtime::graph::GraphError::PlanChanged => FacadeError::Conflict,
                 _ => FacadeError::StateCorrupt,

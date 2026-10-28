@@ -148,6 +148,9 @@ edges = 4096
 [domains.fabric.graph.limit_ceiling]
 nodes = 1024
 
+[domains.fabric.graph.budget]
+unknown_usage = "warn" # or "pause"
+
 [domains.fabric.graph.budget.per_node]
 tokens = 100000
 cost_usd = 5.0
@@ -160,25 +163,32 @@ wall_time_seconds = 7200
 ```
 
 Limits also include `routes_per_node`, `node_prompt_bytes`,
-`graph_prompt_bytes`, `expansion_depth`, `fan_out_width`, `loop_rounds`,
-`continuations` and `concurrency`. The defaults are 16 routes, 256 KiB per
-node prompt, 4 MiB per graph, expansion depth 4, fan-out 32, five loop rounds
-and three continuations. When concurrency is unset, host lane caps apply.
-The ceiling defaults to the same values as the limits and can be raised to
+`graph_prompt_bytes`, `expansion_depth`, `fan_out_width` and `concurrency`.
+The defaults are 16 routes, 256 KiB per node prompt, 4 MiB per graph,
+expansion depth 4 and fan-out 32. Set concurrency to 0 to use host lane caps.
+Fan-out counts direct dependants of a node; expansion depth is the longest
+dependency chain in edges, with root nodes at depth 0.
+Each omitted ceiling defaults to its configured limit and can be raised to
 allow a graph document to request a higher value. Budget fields are optional;
 unset fields have no budget. Costs are in US dollars.
 
 A graph document can set a `limits` object with any of these fields. Values
 must be positive and no higher than the corresponding configured ceiling.
 When a structural limit or budget is reached, graph status reports `paused` and
-the checkpoint records the reason. Running attempts can finish. Resume with,
-for example, `provenant fabric graph resume graph.json --extend limits.nodes=600`
+the checkpoint records the reason. A paused command exits successfully; scripts
+should inspect the status. Running attempts can finish. Resume with,
+for example, `provenant fabric graph resume --document graph.json --extend limits.nodes=600`
 or `--extend per_graph.tokens=2000000`. Repeat `--extend` for multiple values.
-Extensions set new absolute values, must increase the existing value, and are
-recorded in the checkpoint. Limit extensions must also fit the configured
-ceiling. Token counts and estimated cost use available attempt telemetry;
-missing usage or prices cannot contribute to a budget. Wall time is checked
-on graph advancement and attempt settlement.
+Extensions set absolute ceilings and are recorded in the checkpoint. The
+effective value is the greater of the configured value and the extension, so
+replaying an extension or retrying the same `--extend` is a no-op. Limit
+extensions must also fit the configured ceiling. Token counts and estimated
+cost use attempt telemetry. Missing or partial usage is reported as unknown
+in graph status and the checkpoint's usage events. By default,
+`unknown_usage = "warn"` continues with a visible warning; set it to `"pause"`
+to pause instead. Wall time uses
+the sum of observed provider run times, excluding time spent paused or idle,
+and is checked on graph advancement and attempt settlement.
 
 ## SSH and peer protocol
 

@@ -77,11 +77,13 @@ pub enum ConfigError {
     UnsupportedVersion { location: Location },
     #[error("config exceeds collection bounds at {location}")]
     CollectionLimit { location: Location },
-    #[error("invalid domain configuration at {location}: {source}")]
+    #[error("invalid domain configuration at {location}: {source}{rejected}")]
     Domain {
         location: Location,
         #[source]
         source: SectionError,
+        /// Safe numeric graph policy value, when available.
+        rejected: Box<String>,
     },
     #[error("config edit refused: {reason}")]
     Edit { reason: &'static str },
