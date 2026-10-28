@@ -217,6 +217,8 @@ pub enum SessionError {
         "session discovery identity does not match the registered chair; repeat workflow session save <id> with the same options and add --rebind to explicitly replace the binding"
     )]
     DiscoveryIdentity,
+    #[error("summary update requires a bound chair identity")]
+    ChairIdentityRequired,
     #[error("summary revision is stale; current revision is {current_revision}")]
     SummaryStale { current_revision: u64 },
     #[error("{0}")]
@@ -1125,6 +1127,53 @@ mod tests {
         );
         drop(lock);
         assert!(saved(&selected, &current).warnings.is_empty());
+    }
+    #[test]
+    fn summary_requires_chair_and_rechecks_identity_after_preflight() {
+        use provenant_core::{ActorId, HostId};
+        let (_temp, root, project) = setup();
+        let host = HostId::from_bytes([3; 16]);
+        let original =
+            store(&root, project, "chair").with_chair(host, ActorId::from_bytes([4; 16]));
+        let rebound = store(&root, project, "chair")
+            .with_chair(host, ActorId::from_bytes([5; 16]))
+            .with_rebind(true);
+        let unbound = store(&root, project, "chair");
+        let text = "---\nprovenant_summary:\n  schema_version: 1\n  revision: 1\n  updated_at: \"2026-10-28T03:00:00Z\"\n  now: \"First\"\n  next: \"Next\"\n  needs_you: []\n  risk: \"None\"\n---\nBody\n";
+        saved(&original, text);
+        let clock = clock(10);
+        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+        let patch = || SummaryPatch {
+            now: Some("changed".into()),
+            ..Default::default()
+        };
+        let before = original.read().unwrap();
+        let history = original.revisions().unwrap();
+        let discovery = original.discovery().unwrap();
+        assert!(matches!(
+            unbound.update_summary(patch(), 1, budget, &CancelToken::new(), &clock),
+            Err(SessionError::ChairIdentityRequired)
+        ));
+        assert_eq!(original.read().unwrap(), before);
+        assert_eq!(original.revisions().unwrap(), history);
+        assert_eq!(original.discovery().unwrap(), discovery);
+
+        original.validate_chair().unwrap();
+        // Rebind after preflight and before the old chair acquires the lock.
+        saved(&rebound, text);
+        let before = original.read().unwrap();
+        let history = original.revisions().unwrap();
+        let discovery = unbound.discovery().unwrap();
+        // A stale revision would otherwise return SummaryStale from the edit
+        // closure, before the publication path can check the new binding.
+        let result = original.update_summary(patch(), 999, budget, &CancelToken::new(), &clock);
+        assert!(
+            matches!(&result, Err(SessionError::DiscoveryIdentity)),
+            "{result:?}"
+        );
+        assert_eq!(original.read().unwrap(), before);
+        assert_eq!(original.revisions().unwrap(), history);
+        assert_eq!(unbound.discovery().unwrap(), discovery);
     }
     #[test]
     fn summary_save_race() {

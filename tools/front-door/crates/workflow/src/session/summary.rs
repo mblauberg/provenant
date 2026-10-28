@@ -31,6 +31,8 @@ pub struct SummaryPatch {
 }
 
 impl super::SessionStore {
+    /// Update only as the explicitly bound chair; discovery identity is checked
+    /// again under the checkpoint lock before the summary is read or changed.
     pub fn update_summary(
         &self,
         patch: SummaryPatch,
@@ -39,6 +41,9 @@ impl super::SessionStore {
         cancel: &provenant_core::CancelToken,
         clock: &dyn provenant_core::Clock,
     ) -> Result<(Summary, super::Saved), super::SessionError> {
+        if self.chair.is_none() {
+            return Err(super::SessionError::ChairIdentityRequired);
+        }
         if patch.now.is_none()
             && patch.next.is_none()
             && patch.needs_you.is_none()
