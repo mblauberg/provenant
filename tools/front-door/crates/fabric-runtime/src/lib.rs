@@ -16,3 +16,6 @@ pub use provenant_records::result_capture;
 pub mod runs;
 #[cfg(test)]
 mod test_support;
+
+/// Store failures shared with host composition edges.
+pub use provenant_fabric_store::Error as StoreError;

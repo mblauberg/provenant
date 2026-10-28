@@ -13,21 +13,35 @@ stores chair associations, with execution facts owned by Run ([fabric](fabric.md
 itself. Grammar and bounds are in the generated [CLI
 reference](../reference/cli.md). Paths are relative to `tools/front-door/`.
 
-## Cargo registry seed
+## Cargo home seed
 
-An opted-in macOS writer may seed its private Cargo registry from the host
-registry. It must never replace an existing registry or publish a partially
-cloned tree. Unsupported entries or clone failures must fall back without
+An opted-in macOS writer may seed its private Cargo registry and Git store from
+the host stores independently. It must never replace an existing store or publish
+a partially cloned tree. Unsupported entries or clone failures must fall back without
 blocking the lane. Each attempt must report the seed outcome and reason in
-`cargo-setup.json` on a best-effort basis.
+`cargo-setup.json` and `cargo-git-setup.json` on a best-effort basis.
 - Why: a seed must preserve lane isolation and leave Cargo usable when cloning
   is unavailable, while making the outcome observable.
 - Test: `crates/run/src/cargo_seed.rs::tests::existing_registry_is_never_replaced`;
   `::failed_clone_removes_partial_tree`; `::registry_clone_is_private`;
+  `::git_seed_is_independent_and_preserves_existing_stores`; `::git_clone_is_private`;
   `crates/run/src/writer.rs::cargo_setup_tests::cargo_setup_record_reports_writer_and_read_only_outcomes`;
   `src/compose_tests.rs::writer_dispatch_uses_lane_cache_and_narrow_provider_state`;
   `::read_only_dispatch_applies_bound_git_and_project_writes`
 - Owner: `crates/run/src/cargo_seed.rs`, `crates/run/src/writer.rs`
+
+## Cargo target seed
+
+An opted-in macOS writer with a fresh target may clone the newest host target
+generation matching the complete `rustc -vV` output and host triple. Preparation
+must never execute a writer-controlled toolchain outside confinement and must
+fall back when the lane compiler cannot be verified. Mismatches
+and clone failures leave the target empty and are reported in
+`cargo-target-setup.json`. Existing targets are retained. A clone is private and
+writable; no lane may write the published generation. Preparation holds the
+store lock until cloning finishes, so GC cannot remove the source mid-clone.
+- Test: `crates/run/src/cargo_seed.rs::tests`; `crates/run/src/target_seed.rs::lane_probe_tests`; `crates/run/src/writer.rs::cargo_setup_tests`; `crates/cli/src/run/provider.rs::configured_grants_cannot_expose_host_indexes`; `crates/run/src/target_seed_gc.rs::tests::active_clone_lock_prevents_collection`; `src/compose_tests.rs::writer_dispatch_uses_lane_cache_and_narrow_provider_state`
+- Owner: `crates/run/src/cargo_seed.rs`, `crates/run/src/target_seed.rs`
 
 ## Operation IDs
 
@@ -58,12 +72,33 @@ prompts.
 ## Work correlation lookup
 
 `run::WorkIndex` owns immutable membership in `<host-state>/work-index.sqlite3`.
-Only the trusted host store seals its minted attempt IDs, from root dispatch,
-resume or continuation, before marking them Starting. Nested attempts are never
-sealed: their IDs originate in a lane-writable store. Trusted nested membership
-requires host-owned child enrolment, which is a separate contract.
+The trusted host seals root, resume and continuation attempts before marking
+them Starting. New nested dispatches use host-verifiable derived IDs. Their
+canonical request carries `child_attempt_id_version: 1`. The child run ID is
+the first 16 bytes of SHA-256 over `provenant-child-run-v1\0`, then the raw
+project and parent attempt IDs, the SHA-256 digest of the operation ID's UTF-8
+bytes, and the canonical request digest. Each attempt ID is the
+first 16 bytes of SHA-256 over `provenant-child-attempt-v1\0` followed by the raw,
+fixed-width project, parent attempt, run, task and canonical request digest
+bytes, in that order. The namespace comes from the host's project and sealed
+parent context. The host checks every proposed ID during child validation and
+checks both run and attempt identities again at launch and sealing. A mismatch refuses
+launch before membership capture, so rewriting a queued child ID cannot claim
+a sibling's membership or poison its launch. A lane cannot claim a historical
+run namespace by choosing its run ID and recomputing the public attempt hash.
 
-The constructor is crate-private until a trusted reader path is implemented.
+This scheme avoids rekeying lane-published records and IDs already returned to
+callers. There is no migration of existing child records: an absent version
+marker preserves legacy launch behaviour and explicit `Unindexed` coverage.
+An unknown version refuses launch. Removing the marker only loses indexing;
+it never adopts a lane-proposed ID as trusted membership. Replays preserve the
+original version, including repair of legacy prepared operations. Calling the
+ordinary start path on a child store cannot seal membership. Only host child
+launch from a validated versioned request can seal nested membership.
+
+Opening and sealing remain crate-private. The public `validate_work` reader
+accepts only the configured host `StateRoot`; CLI/MCP bind it to their trusted
+project identity and pass its coverage to Fabric before a Fabric transaction.
 Identical captures replay; disagreements and permanent capture errors refuse
 handoff. Contention or cancellation leaves the attempt queued for retry.
 Repository identity is the verified canonical Git common directory. Head is the
@@ -74,14 +109,18 @@ successful launch nor workflow authority.
 `WorkSelector` requires project and run, with optional task, attempt, repository
 and head constraints. Reads check at most 64 candidates and 64 KiB per record,
 using the same byte bound as writes. `Verified` requires a task or attempt;
-run-only reads return `Partial` because there is no trusted complete member list.
-Missing nested, historical and unprepared work returns `Unindexed`. Contradictory
+run-only matches are at best `Partial` because there is no trusted complete member list.
+Legacy or missing nested, historical and unprepared work, including an empty
+run-only selection, returns `Unindexed`. Contradictory
 facts return `Mismatch`, ahead of unavailable repository/head facts and unindexed
-coverage. `Limit` never proves absence. Lookups traverse no child roots and accept
+coverage, including run-only selectors. A mismatch observed among the first 64
+candidates also wins over `Limit`; otherwise `Limit` never proves absence. Lookups traverse no child roots and accept
 no caller-supplied store locator. Configured grants cannot expose the host index,
 its companions or lock. Membership survives lane-local record removal. Index
 growth is unbounded and is not counted towards the disk floor.
 
+- Why: caller claims cannot establish membership or hide a known contradiction,
+  and a waiting index reader must not block unrelated Fabric writers.
 - Test: `crates/run/src/correlation.rs::tests`; `crates/cli/src/run/provider.rs::configured_grants_cannot_expose_host_indexes`
 - Owner: `crates/run/src/correlation.rs`, `crates/run/src/launch.rs`
 

@@ -115,8 +115,27 @@ fn invalid_hook_candidates_do_not_block_valid_answers() {
         [HumanAnswerId::from_bytes([1;16]).to_string()]).unwrap();
     store.db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.attempts','invalid') AS BLOB) WHERE answer=?1",
         [HumanAnswerId::from_bytes([2;16]).to_string()]).unwrap();
-    let valid = store
-        .read_queued_human_answers(&target, deadline())
+    assert!(
+        store
+            .read_human_answers(&target, 50, MAX_LOCAL_OFFER_BYTES, deadline())
+            .is_err()
+    );
+    assert!(
+        store
+            .read_queued_human_answers(&target, deadline())
+            .is_err()
+    );
+    store.db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.state','offered') AS BLOB) WHERE answer=?1",
+        [HumanAnswerId::from_bytes([1;16]).to_string()]).unwrap();
+    assert!(
+        store
+            .read_offered_human_answers(&target, deadline())
+            .is_err()
+    );
+    store.db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.state','queued') AS BLOB) WHERE answer=?1",
+        [HumanAnswerId::from_bytes([1;16]).to_string()]).unwrap();
+    let (valid, _, _) = store
+        .read_hook_answer_page(&target, AnswerDeliveryState::Queued, None, deadline())
         .unwrap();
     assert_eq!(valid.items.len(), 1);
     assert_eq!(valid.items[0].answer.id, HumanAnswerId::from_bytes([3; 16]));
@@ -141,6 +160,138 @@ fn invalid_hook_candidates_do_not_block_valid_answers() {
             .items
             .is_empty()
     );
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Native deadlines are part of this store API.
+fn hook_page_reports_individually_oversized_answer_and_revisits_overflow() {
+    use std::time::{Duration, Instant};
+    const CHILD: &str = "PROVENANT_OVERSIZED_PAGE_TEST";
+    let oversized_id = HumanAnswerId::from_bytes([3; 16]);
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::human_inbox::hook_page_reports_individually_oversized_answer_and_revisits_overflow", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            stderr.matches(&format!(
+                "answer delivery: answer {oversized_id} exceeds internal page limit; retained for Fabric mail"
+            )).count(),
+            1,
+            "{stderr}"
+        );
+        return;
+    }
+    let f = Fixture::new();
+    let store = f.open();
+    let target = AnswerTarget {
+        host: HostId::from_bytes([8; 16]),
+        project: project(),
+        actor: actor(2),
+        session: "chair".into(),
+    };
+    for (n, size) in [(1, 70_000), (2, 70_000), (3, 140_000)] {
+        let id = HumanAnswerId::from_bytes([n; 16]);
+        let request = HumanRequestId::from_bytes([n; 16]);
+        let answer: HumanAnswer = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"id":id,"request_id":request,"request_revision":1,
+            "action":"reply","option_id":null,"text":"x".repeat(size),"actor":actor(3),
+            "channel":"cli","answered_at":f.now(),"operation_id":format!("answer-{n}")
+        }))
+        .unwrap();
+        let delivery = AnswerDelivery {
+            schema_version: 1,
+            answer_id: id,
+            target_host: target.host,
+            target_session: target.session.clone(),
+            target_actor: target.actor,
+            transport: AnswerTransport::FabricMail,
+            message_id: message(&f, n).id,
+            state: AnswerDeliveryState::Queued,
+            attempts: 0,
+            last_attempt_at: None,
+            acknowledged_at: None,
+            error: None,
+        };
+        store
+            .db
+            .execute(
+                "INSERT INTO human_requests VALUES(?1,?2,1,'chair','answered',?3)",
+                params![project().to_string(), request.to_string(), b"{}".as_slice()],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO human_answers VALUES(?1,?2,?3,?4)",
+                params![
+                    project().to_string(),
+                    id.to_string(),
+                    request.to_string(),
+                    encode(&answer).unwrap()
+                ],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO human_answer_outbox VALUES(?1,?2,?3)",
+                params![
+                    project().to_string(),
+                    id.to_string(),
+                    encode(&delivery).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (first, next, oversized) = store
+        .read_hook_answer_page(&target, AnswerDeliveryState::Queued, None, deadline)
+        .unwrap();
+    assert_eq!(first.items.len(), 1);
+    assert_eq!(first.items[0].answer.id, HumanAnswerId::from_bytes([1; 16]));
+    assert!(first.truncated);
+    assert!(oversized.is_empty());
+    let (second, _, oversized) = store
+        .read_hook_answer_page(
+            &target,
+            AnswerDeliveryState::Queued,
+            next.as_deref(),
+            deadline,
+        )
+        .unwrap();
+    assert_eq!(second.items.len(), 1);
+    assert_eq!(
+        second.items[0].answer.id,
+        HumanAnswerId::from_bytes([2; 16])
+    );
+    assert!(second.truncated);
+    assert_eq!(oversized, vec![oversized_id.to_string()]);
+    let existing_id = HumanAnswerId::from_bytes([1; 16]).to_string();
+    store.db.execute(
+        "UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.error','prior failure') AS BLOB) WHERE answer=?1",
+        [&existing_id],
+    ).unwrap();
+    let marked = Store::mark_hook_undeliverable_once(
+        &f.root,
+        &target,
+        &[existing_id.clone(), oversized_id.to_string()],
+        deadline,
+    )
+    .unwrap();
+    assert_eq!(marked, vec![oversized_id.to_string()]);
+    let error: String = store.db.query_row(
+        "SELECT json_extract(CAST(record AS TEXT),'$.error') FROM human_answer_outbox WHERE answer=?1",
+        [&existing_id], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(error, "prior failure");
 }
 
 #[test]
@@ -333,6 +484,9 @@ fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
         chair_session_id: "chair-a".into(),
         chair_actor: actor(2),
         request: RequestDraft {
+            work: None,
+            deadline: None,
+            supersedes: None,
             kind: RequestKind::Question,
             title: "Question".into(),
             body: "What next?".into(),
@@ -341,6 +495,7 @@ fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
             recommended_option_id: None,
             proceeding_with: None,
         },
+        work_coverage: None,
         state: RequestState::Open,
         answer_id: None,
         closure_reason: None,
@@ -604,4 +759,65 @@ fn local_delivery_fresh_process() -> Result<()> {
     assert!(!f.path().with_extension("sqlite3-wal").exists());
     assert!(!f.path().with_extension("sqlite3-shm").exists());
     Ok(())
+}
+
+#[test]
+fn request_correlation_expiry_filter_precedes_page_limit() {
+    let mut f = Fixture::new();
+    let store = f.open();
+    let mut value: HumanRequest = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"id":HumanRequestId::from_bytes([1;16]),"revision":1,
+        "operation_id":"fixture","created_at":f.now(),"updated_at":f.now(),
+        "project_id":project(),"project_key":null,"owner_host":HostId::from_bytes([8;16]),
+        "chair_session_id":"chair-a","chair_actor":actor(2),
+        "request":{"kind":"question","title":"Next","body":"What next?"},
+        "state":"open","answer_id":null,"closure_reason":null
+    }))
+    .unwrap();
+    for n in 1..=5 {
+        value.id = HumanRequestId::from_bytes([n; 16]);
+        value.request.deadline = if n == 1 || n == 4 {
+            Some(
+                f.now()
+                    .checked_add(provenant_core::DurationMicros::from_micros(1))
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        store.create_human_request(&value, &f.request()).unwrap();
+    }
+    f.clock
+        .advance(provenant_core::DurationMicros::from_micros(1))
+        .unwrap();
+    let call = f.request();
+    let mut after = None;
+    for n in [2, 3, 5] {
+        let page = store
+            .human_requests(project(), None, false, after, 1, &call)
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, HumanRequestId::from_bytes([n; 16]));
+        assert_eq!(page.items[0].state, RequestState::Open);
+        assert_eq!(page.truncated, n != 5);
+        after = Some(page.items[0].id);
+    }
+    let all = store
+        .human_requests(project(), None, true, None, 10, &call)
+        .unwrap();
+    assert_eq!(all.items.len(), 5);
+    assert_eq!(all.items[0].state, RequestState::Expired);
+    assert_eq!(all.items[3].state, RequestState::Expired);
+    let pending = store.pending_human_requests(10, 1_048_576, &call).unwrap();
+    assert_eq!(pending.items.len(), 3);
+    let owner_host = HostId::from_bytes([8; 16]).to_string();
+    assert!(
+        pending
+            .items
+            .iter()
+            .all(|item| item.owner_host.as_deref() == Some(owner_host.as_str()))
+    );
+    let bounded = store.pending_human_requests(1, 1_048_576, &call).unwrap();
+    assert!(bounded.items.is_empty());
+    assert!(bounded.truncated);
 }

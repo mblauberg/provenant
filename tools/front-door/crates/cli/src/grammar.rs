@@ -784,6 +784,8 @@ pub struct Stats {
 }
 #[derive(Debug, Subcommand)]
 pub enum Worktree {
+    /// Build and publish a host-owned Cargo target seed from origin/main
+    SeedBuild,
     /// Record custody and ownership for an existing linked worktree
     Adopt {
         /// Existing linked worktree in this project

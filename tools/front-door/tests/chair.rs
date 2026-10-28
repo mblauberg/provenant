@@ -583,6 +583,7 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
             run_id,
             operation_id: OperationId::parse("chair-snapshot")?,
             request: run::CanonicalRequest {
+                child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,

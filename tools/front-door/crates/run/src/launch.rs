@@ -367,9 +367,19 @@ impl RunStore {
         run: RunId,
         request: &CanonicalRequest,
         record: &AttemptRecord,
-    ) -> Option<&'static str> {
-        if record.run_id != run {
+    ) -> Result<Option<&'static str>> {
+        self.check_child_run_id(run, request, &record.operation_id)?;
+        Ok(if record.run_id != run {
             Some("child attempt run does not match")
+        } else if crate::correlation::child_attempt_id(
+            self.context.project_id,
+            run,
+            request,
+            record.task_id,
+        )?
+        .is_some_and(|id| id != record.attempt_id)
+        {
+            Some("child attempt ID does not match host derivation")
         } else if !request
             .tasks
             .iter()
@@ -385,7 +395,7 @@ impl RunStore {
             Some("child task already launched")
         } else {
             None
-        }
+        })
     }
     /// Count lane-writable records, including terminal attempts. The task
     /// index is untrusted and must not hide duplicate decoded task IDs.
@@ -410,7 +420,7 @@ impl RunStore {
                     AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
                 let raw: Vec<u8> = row.get(1)?;
                 let record: AttemptRecord = decode(&raw)?;
-                if let Some(reason) = self.child_attempt_reason(run, request, &record) {
+                if let Some(reason) = self.child_attempt_reason(run, request, &record)? {
                     attempts.refusals.insert(id, reason);
                     continue;
                 }
@@ -448,6 +458,7 @@ impl RunStore {
                 "a child run cannot continue an attempt",
             ));
         }
+        self.check_child_run_id(run, &request, &self.run(run, call)?.operation_id)?;
         let attempts = self.child_attempts(run, &request, call)?;
         if let Some(reason) = attempts.refusals.values().next() {
             return Err(RunError::Validation(reason));
@@ -579,7 +590,8 @@ impl RunStore {
     /// may have rewritten its store since, so a request whose digest no longer
     /// matches is refused rather than launched. For the same reason the child
     /// launches for the store's sealed requester, never the actor the child's
-    /// run record names.
+    /// run record names. Versioned child IDs must match the host derivation;
+    /// legacy attempts without a version remain unindexed.
     pub fn start_child(
         &self,
         run: RunId,
@@ -656,7 +668,10 @@ impl RunStore {
                     "child request changed after validation",
                 ));
             }
-            Some((_, requester)) => requester,
+            Some((_, requester)) => {
+                self.check_child_run_id(run, &request, &self.run(run, call)?.operation_id)?;
+                requester
+            }
             None => self.run(run, call)?.actor_id,
         };
         let resume = request
@@ -706,21 +721,21 @@ impl RunStore {
                     .wall_now()
                     .map_err(|_| RunError::Validation("wall clock"))
             };
-            let child_reason = child_reason.or_else(|| {
-                if child.is_none() {
-                    None
-                } else if let Some(reason) = self.child_attempt_reason(run, &request, &record) {
-                    Some(reason)
-                } else if child_attempts
-                    .as_ref()
-                    .and_then(|attempts| attempts.counts.get(&record.task_id))
-                    .is_some_and(|count| *count > 1)
-                {
-                    Some("child task has more than one attempt")
-                } else {
-                    None
-                }
-            });
+            let child_reason = if child_reason.is_some() {
+                child_reason
+            } else if child.is_none() {
+                None
+            } else if let Some(reason) = self.child_attempt_reason(run, &request, &record)? {
+                Some(reason)
+            } else if child_attempts
+                .as_ref()
+                .and_then(|attempts| attempts.counts.get(&record.task_id))
+                .is_some_and(|count| *count > 1)
+            {
+                Some("child task has more than one attempt")
+            } else {
+                None
+            };
             if let Some(reason) = child_reason {
                 match self.withdraw(
                     id,
@@ -898,7 +913,7 @@ impl RunStore {
                 self.record_skipped_routes(id, &plan.skipped_routes, call)?;
             }
             // Capture errors leave the claim available to this or another launcher.
-            self.seal_work(&record, &plan, call)?;
+            self.seal_work(&record, &plan, child.map(|_| &request), call)?;
             let record = match self.mark_starting_with_priority(
                 &record,
                 &plan.route,
@@ -1099,7 +1114,13 @@ impl RunStore {
                     .map_err(|e| HandOff::Uncertain(e.to_string()))?;
                 return Err(local(&error));
             }
-            match confinement.command(&plan.argv, &id, call.cancel, &directory()?) {
+            match confinement.command(
+                &plan.argv,
+                &plan.environment,
+                &id,
+                call.cancel,
+                &directory()?,
+            ) {
                 Ok(argv) => plan.argv = argv,
                 Err(error) => {
                     lease

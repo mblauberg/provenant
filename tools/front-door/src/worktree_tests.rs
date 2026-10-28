@@ -1094,6 +1094,7 @@ pub(super) fn writer_run(
         run_id: provenant_core::RunId::from_bytes([seed.wrapping_add(2); 16]),
         operation_id: provenant_core::OperationId::parse(operation)?,
         request: provenant_run::CanonicalRequest {
+            child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,
@@ -1207,6 +1208,7 @@ impl provenant_run::Providers for WriterProvider {
                 writer: Some(writer),
                 home: self.home.clone(),
                 cargo_registry_seed: false,
+                state_root: std::path::PathBuf::from("/fixture/state"),
             }),
             observed_head: None,
             repository: None,
@@ -3556,6 +3558,7 @@ fn verify_lane_profile(
         // stop the child, from the scope and requester it held at hand-off.
         let attempt = child.join(format!("runs/{run}/attempts/{attempt_id}"));
         let mut finished = store.record(attempt_id, &call)?;
+        let original = finished.clone();
         let mut sibling = finished.clone();
         finished.state = provenant_run::AttemptState::Terminal {
             outcome: provenant_run::Outcome::Rejected,
@@ -3676,6 +3679,25 @@ fn verify_lane_profile(
             "UPDATE runs SET record=?1 WHERE id=?2",
             rusqlite::params![owner, run.to_string()],
         )?;
+        // The forged terminal row bypassed Run's terminal transaction, leaving
+        // admission held. Restore the running row so the guardian can settle
+        // it before the next profile starts. Restore the trigger in the same
+        // transaction, before the row is visible again.
+        let trigger: String = db.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='immutable_terminal_update'",
+            [],
+            |row| row.get(0),
+        )?;
+        db.execute_batch("BEGIN; DROP TRIGGER immutable_terminal_update;")?;
+        db.execute(
+            "UPDATE attempts SET record=?1, terminal=0 WHERE id=?2",
+            rusqlite::params![
+                provenant_records::CanonicalV1::bytes(&original)?.as_bytes(),
+                attempt_id.to_string()
+            ],
+        )?;
+        db.execute_batch(&trigger)?;
+        db.execute_batch("COMMIT")?;
     }
     let record = await_terminal(&store, attempt_id, &call)?;
     let provenant_run::AttemptState::Terminal { reason, .. } = &record.state else {

@@ -4,7 +4,7 @@ mod admission;
 mod artifacts;
 mod controls;
 mod correlation;
-pub use correlation::{WORK_INDEX_FILE, WorkCoverage, WorkIndex, WorkSelector};
+pub use correlation::{WORK_INDEX_FILE, WorkCoverage, WorkIndex, WorkSelector, validate_work};
 mod db;
 mod delivery;
 mod disk;
@@ -24,6 +24,8 @@ mod transcript;
 pub use service::{DispatchRequest, DispatchTask, ErrorKind, Service};
 pub use transcript::locate as locate_transcript;
 mod cargo_seed;
+pub mod target_seed;
+pub mod target_seed_gc;
 mod writer;
 
 pub use admission::{

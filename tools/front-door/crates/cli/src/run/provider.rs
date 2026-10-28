@@ -646,6 +646,12 @@ fn prepare_with(
         ) {
             return Err("write grants overlap a host index".into());
         }
+        if !target_seeds_protected(
+            roots.state.as_path(),
+            &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
+        ) {
+            return Err("write grants overlap the host target seed store".into());
+        }
         if let Some(head) = &task.head {
             spec.env.push(("PROVENANT_LANE_HEAD".into(), head.into()));
             if let Some(base) = &task.base {
@@ -740,6 +746,7 @@ fn prepare_with(
                 writer,
                 home: home.clone(),
                 cargo_registry_seed: config.domains.fabric.lanes.cargo_seed.enabled,
+                state_root: roots.state.as_path().to_path_buf(),
             }),
         });
     }
@@ -1597,6 +1604,29 @@ fn host_indexes_protected(
         })
 }
 
+fn target_seeds_protected(
+    state: &Path,
+    grants: &[provenant_confinement::permissions::WriteGrant],
+) -> bool {
+    let resolve = |path: &Path| {
+        provenant_core::PathResolver::resolve_existing_ancestor(
+            &provenant_os::fs::SystemPathResolver,
+            path,
+        )
+        .ok()
+    };
+    let Some(store) = resolve(&run::target_seed::store_path(state)) else {
+        return false;
+    };
+    grants.iter().all(|grant| {
+        resolve(&grant.path).is_some_and(|root| {
+            !root.starts_with(&store)
+                && !(store.starts_with(&root)
+                    && (grant.scope == PathScope::Subtree || root.is_dir()))
+        })
+    })
+}
+
 #[test]
 fn configured_grants_cannot_expose_host_indexes() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::permissions::WriteGrant;
@@ -1630,6 +1660,19 @@ fn configured_grants_cannot_expose_host_indexes() -> Result<(), Box<dyn std::err
         scope: PathScope::Exact,
     };
     assert!(!host_indexes_protected(temp.path(), &[grant]));
+    for path in [
+        "/state",
+        "/state/cargo-target-seeds",
+        "/state/cargo-target-seeds/generations/a/target",
+    ] {
+        let grant = WriteGrant {
+            source: run::WriteSource::WriteRoot,
+            path: path.into(),
+            scope: PathScope::Subtree,
+        };
+        assert!(!target_seeds_protected(Path::new("/state"), &[grant]));
+    }
+    assert!(target_seeds_protected(Path::new("/state"), &[]));
     Ok(())
 }
 
@@ -2837,6 +2880,7 @@ mod tests {
                 run_id,
                 operation_id: paths.operation_id.clone(),
                 request: run::CanonicalRequest {
+                    child_attempt_id_version: None,
                     chair: None,
                     fresh_continuation: None,
                     schema_version: 1,

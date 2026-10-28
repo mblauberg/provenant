@@ -1921,6 +1921,17 @@
                   "maxLength": 8192,
                   "type": "string"
                 },
+                "deadline": {
+                  "anyOf": [
+                    {
+                      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$",
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "kind": {
                   "enum": [
                     "decision",
@@ -1977,9 +1988,121 @@
                     }
                   ]
                 },
+                "supersedes": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "expect_revision": {
+                          "maximum": 18446744073709551615,
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "id": {
+                          "$ref": "#/$defs/Id"
+                        }
+                      },
+                      "required": [
+                        "expect_revision",
+                        "id"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "title": {
                   "maxLength": 256,
                   "type": "string"
+                },
+                "work": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "attempt_id": {
+                          "anyOf": [
+                            {
+                              "$ref": "#/$defs/Id"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "head": {
+                          "anyOf": [
+                            {
+                              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "repository": {
+                          "anyOf": [
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "relative_to_root": {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "encoding": {
+                                      "enum": [
+                                        "utf8",
+                                        "native_bytes"
+                                      ],
+                                      "type": "string"
+                                    },
+                                    "path": {
+                                      "maxLength": 4096,
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "encoding",
+                                    "path"
+                                  ],
+                                  "type": "object"
+                                }
+                              },
+                              "required": [
+                                "relative_to_root"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "run_id": {
+                          "$ref": "#/$defs/Id"
+                        },
+                        "task_id": {
+                          "anyOf": [
+                            {
+                              "$ref": "#/$defs/Id"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "run_id"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 }
               },
               "required": [

@@ -60,9 +60,41 @@ and takes no option or text. Record `chat`, `console`, `phone_remote`, `cli` or
 Every successful mutation returns an operation ID. Preserve the ID, input and
 viewed revision when retrying after an uncertain reply. A changed operation or
 actor conflicts. For a new answer after a conflict, inspect the item first.
-An item cannot be edited into a new choice; close it as superseded, then post a
-new request. Historical answers remain visible. See generated
+To replace a viewed item, add `"supersedes":{"id":"REQUEST_ID","expect_revision":N}`
+to the new request JSON. Posting creates the replacement and supersedes that
+revision in one transaction, including the operation receipt. Host, project,
+chair actor and chair session must match. Stale revisions and already closed
+items conflict. Concurrent replacements have one winner. Saved answers, their
+delivery state and historical request revisions remain visible; supersession
+does not retract an answer already queued or consumed. The old item's closure
+reason names the replacement; the new request retains the backward link. See generated
 [CLI](../reference/cli.md) and [MCP](../reference/mcp-tools.md) references for syntax.
+
+## Work links
+
+The request JSON for CLI `ask --file` and MCP `fabric_inbox` `ask` accepts
+optional `work`, containing required `run_id` and optional `task_id`,
+`attempt_id`, `repository` and `head`. Repository uses the existing absolute-path
+wire format, for example
+`{"relative_to_root":{"encoding":"utf8","path":"repo/.git"}}` for `/repo/.git`.
+Supply the canonical Git common directory, shared by linked worktrees. Head is
+an exact 40- or 64-character Git object ID observed at launch.
+
+Creation validates these claims through Run's host-sealed membership lookup for
+the current project. A lookup result of `mismatch` is refused. The saved
+`work_coverage` reports the lookup result: `verified`, `partial`, `unindexed`,
+`repository_unavailable`, `head_unavailable` or `limit`. It is omitted when no work
+was supplied. Run-only selection is at best partial. Observed contradictions are refused,
+including run-only and capped lookups. A limit without an observed contradiction
+leaves remaining candidates unknown. Nested, historical and unprepared
+work may be unindexed. Neither case establishes membership or grants authority.
+No Git probes, child-store traversal or later promotion of coverage occurs.
+Item, history and list JSON preserve the links and creation-time coverage;
+callers cannot supply coverage. `request.work` always contains claims; only
+`verified` coverage permits a work link or task-label join. Other results must be
+labelled unverified and must not become navigable work. Use the records owner's
+`verified_work()` accessor and the binding [Fabric contract](../specs/fabric.md#human-requests).
+Task labels remain a future overview concern.
 
 ## Consume once
 
@@ -172,8 +204,17 @@ Internal candidate pages cap at 128 KiB; adapters must fit their final protocol
 output within 8 KiB, skipping oversized candidates without hiding smaller ones.
 Within its delivery deadline, the hook advances past each scanned page that has
 no answer fitting the final output. The cursor includes invalid and oversized
-rows, so a full undeliverable head page cannot hide later answers. Oversized
-answer diagnostics name the answer ID; skipped answers keep their delivery state.
+rows, so a full undeliverable head page cannot hide later answers. An answer
+proved too large for any hook envelope is marked on its delivery record and
+excluded from later hook scans, unless the record already has an error. Its
+diagnostic names the answer ID; its delivery state and Fabric mail copy remain
+available. Answers that might fit in a different hook context remain eligible
+for later scans.
+
+The hook does not migrate the local store. After upgrading to a version with a
+new local delivery index, run a normal inbox command to migrate the store before
+the hook can offer answers. Until then the hook reports that the local delivery
+index is unavailable; Fabric mail remains available.
 
 Claude's installed `PreToolUse` hook offers answers on Bash calls. Guard denials and
 exit-2 fallback take precedence. Allowed calls may receive `additionalContext`
@@ -213,7 +254,23 @@ stay closed; there is no background polling or provider launch.
 
 Use `inbox close` with a reason and expected revision to withdraw, supersede or
 expire an item. Closure grants no approval and does not discard its answer or
-pending delivery. Expiry is an explicit operation; no timer infers it.
+pending delivery. A request may also carry `"deadline":"2033-05-18T03:33:20.000000Z"` in CLI or
+MCP request JSON. This is explicit UTC with six fractional digits and must be
+in the future when created. An elapsed deadline refuses the entire creation,
+including any supersession. At or after
+the deadline an unresolved item reads as `expired` with reason `deadline elapsed`,
+disappears from the open
+list and refuses new answers. Use `inbox REQUEST_ID` or `inbox --state all` to
+see it. Answered, confirmed, overridden and closed items retain their state,
+answer and delivery, even after the deadline. Expiry does not infer approval.
+
+No timer or background write runs: expiry is a projection of the saved deadline
+at read time. It does not change revisions, history, update timestamps or
+operation receipts; replay returns the original receipt. History retains the
+saved state. Bounded overview scans also omit expired candidates; those
+candidates still consume the scan budget and may leave coverage partial. Refresh explicitly to observe elapsed deadlines. Manual closure
+remains available, and a replacement can supersede an unresolved item whose
+deadline has elapsed. Requests without deadlines behave as before.
 
 ## Limits and recovery
 

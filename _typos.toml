@@ -265,6 +265,8 @@ specializations = "specializations"
 "unrecognized" = "unrecognized"
 
 [type.swift.extend-identifiers]
+# Foundation URL property.
+"standardized" = "standardized"
 "JSONSerialization" = "JSONSerialization"
 "NotificationCenter" = "NotificationCenter"
 "center" = "center"
