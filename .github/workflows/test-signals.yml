@@ -76,6 +76,39 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: scripts/run-stress-tests "$BASE_SHA" "$HEAD_SHA"
 
+  harness-stress:
+    name: Nightly harness stress (${{ matrix.os }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Install nextest
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-nextest@0.9.149
+      - name: Stress harness binaries
+        working-directory: tools/front-door
+        env:
+          PROVENANT_CONFINEMENT_REQUIRED: "1"
+          TMPDIR: ${{ runner.temp }}
+        run: >-
+          cargo nextest run --profile ci --workspace --locked
+          --features provenant-providers/recording --stress-count 5 --retries 0
+          -E 'binary(=worktrees) | binary(=custody) | binary(=dispatch_provider) |
+          binary(=process) | binary(=pr) | binary(=publication) | binary(=fake_provider)'
+
   mutation-tests:
     name: Advisory mutation signals
     runs-on: ubuntu-latest
