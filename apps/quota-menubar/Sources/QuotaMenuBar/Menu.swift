@@ -79,45 +79,85 @@ enum QuotaMenu {
     static func entries(for model: QuotaModel, now: Date) -> [MenuEntry] {
         entries(report: model.report, error: model.error, updatedAt: model.updatedAt,
                 refreshing: model.isRefreshing || model.report?.isRefreshing(now: now) == true,
-                lanes: LaneBoard.attention(model.lanes, now: now), stateRoot: model.stateRoot, now: now)
+                lanes: [], stateRoot: model.stateRoot, now: now, overview: model.overview,
+                overviewError: model.overviewError, overviewUpdatedAt: model.overviewUpdatedAt)
     }
 
     static func entries(report: QuotaReport?, error: String?, updatedAt: Date?, refreshing: Bool,
-                        lanes: [AttentionLane], stateRoot: URL, now: Date) -> [MenuEntry] {
+                        lanes: [AttentionLane], stateRoot: URL, now: Date, overview: ConsoleOverview? = nil,
+                        overviewError: String? = nil, overviewUpdatedAt: Date? = nil) -> [MenuEntry] {
         let freshness = refreshing ? "Refreshing…" : updatedAt.map { "Updated \(Fmt.ago($0, now: now))" }
         var entries: [MenuEntry] = [.title(title, freshness)]
+        entries += overviewEntries(overview, error: overviewError, updatedAt: overviewUpdatedAt, now: now)
         entries += notices(report: report, error: error)
         if let report, !report.accounts.isEmpty {
-            // Hidden accounts are left out; ordered ones come first, the rest stay together by provider.
             let listed = report.listed(now: now)
+            let available = listed.filter { $0.rank(now) != 3 }
+            let spent = listed.filter { $0.rank(now) == 3 }
             if !listed.isEmpty { entries.append(.separator) }
-            entries += listed.map { .item(account($0, now: now, alert: report.alertPercent, headline: report.leading($0))) }
-        }
-        if !lanes.isEmpty {
-            entries += [.separator, .header("Needs attention")]
-            entries += lanes.prefix(attentionLimit).map { item in
-                .item(MenuItemSpec(title: item.lane.route, subtitle: "\(item.kind.title) · \(Fmt.ago(item.since, now: now))",
-                                   icon: .mark(mark(item.kind), tint(item.kind)),
-                                   action: .open(LaneBoard.runDirectory(item.lane, stateRoot: stateRoot)),
-                                   help: "Open the run directory"))
-            }
-            if lanes.count > attentionLimit {
-                entries.append(.item(MenuItemSpec(title: "\(lanes.count - attentionLimit) more", enabled: false)))
+            entries += available.map { .item(account($0, now: now, alert: report.alertPercent, headline: report.leading($0))) }
+            if !spent.isEmpty {
+                entries.append(.item(MenuItemSpec(title: "Spent accounts", value: "\(spent.count)",
+                    icon: .ring(1, .red), submenu: spent.map {
+                        .item(account($0, now: now, alert: report.alertPercent, headline: report.leading($0)))
+                    })))
             }
         }
         entries += [
             .separator,
             .item(MenuItemSpec(title: "Refresh", icon: .symbol("arrow.clockwise"), enabled: !refreshing, action: .refresh)),
-            .item(MenuItemSpec(title: "Open Report Folder", icon: .symbol("folder"), enabled: report != nil,
-                               action: report.map { .open(URL(fileURLWithPath: $0.reportPath).deletingLastPathComponent()) })),
-            .item(MenuItemSpec(title: "Customise", icon: .symbol("slider.horizontal.3"), enabled: report != nil,
-                               submenu: report.map { customise($0, stateRoot: stateRoot) })),
-            .separator,
-            .item(MenuItemSpec(title: "Quit Quota", icon: .symbol("power"), action: .quit)),
-            // ⌘R and ⌘Q work while the menu is open without a shortcut column widening every row.
+            .item(MenuItemSpec(title: "Open Console", subtitle: "Console is not installed yet · use provenant inbox",
+                               icon: .symbol("macwindow"), enabled: false)),
+            .item(MenuItemSpec(title: "Settings", icon: .symbol("slider.horizontal.3"), submenu:
+                (report.map { customise($0, stateRoot: stateRoot) } ?? []) + [
+                    .item(MenuItemSpec(title: "Open Report Folder", enabled: report != nil,
+                        action: report.map { .open(URL(fileURLWithPath: $0.reportPath).deletingLastPathComponent()) })),
+                    .item(MenuItemSpec(title: "Quit Quota", action: .quit)),
+                ])),
             .item(MenuItemSpec(title: "Refresh", shortcut: "r", hidden: true, enabled: !refreshing, action: .refresh)),
             .item(MenuItemSpec(title: "Quit Quota", shortcut: "q", hidden: true, action: .quit)),
         ]
+        return entries
+    }
+
+    static func overviewEntries(_ overview: ConsoleOverview?, error: String?, updatedAt: Date?, now: Date) -> [MenuEntry] {
+        var entries: [MenuEntry] = []
+        if let overview {
+            let partial = overview.coverage.inbox == "partial"
+            let count = overview.counts.needsYou.map { "\(partial ? "At least " : "")\($0) needs you" } ?? "Needs you unavailable"
+            entries += [.separator, .header(count)]
+            entries += overview.needsYou.prefix(3).map { request in
+                let context = [request.projectLabel, request.taskLabel].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+                return .item(MenuItemSpec(title: clip(request.title ?? "Untitled request"), subtitle: context.isEmpty ? nil : clip(context),
+                                          icon: .mark("questionmark", .blue), enabled: false))
+            }
+            if overview.needsYou.count > 3 {
+                entries.append(.note("\(overview.needsYou.count - 3) more · use provenant inbox", nil))
+            }
+            if overview.coverage.runs != "complete" { entries.append(.note("Local runs: \(overview.coverage.runs)", .orange)) }
+            if overview.coverage.inbox != "complete" { entries.append(.note("Local inbox: \(overview.coverage.inbox)", .orange)) }
+            if !overview.lanes.isEmpty {
+                let running = overview.counts.running.map(String.init) ?? "?"
+                let attention = overview.counts.attention.map(String.init) ?? "?"
+                let prefix = overview.coverage.runs == "partial" ? "At least " : ""
+                entries.append(.header("\(prefix)\(running) running · \(attention) attention"))
+                entries += overview.lanes.prefix(5).map { lane in
+                    let title = lane.taskLabel.flatMap { $0.isEmpty ? nil : $0 } ?? "Untitled task"
+                    let state = lane.attention ? "Needs attention" : Fmt.human(lane.state)
+                    let context = [lane.projectLabel, state].compactMap { $0 }.joined(separator: " · ")
+                    return .item(MenuItemSpec(title: clip(title), subtitle: clip(context),
+                                              icon: .mark(lane.attention ? "exclamationmark" : "circle", lane.attention ? .orange : .secondary),
+                                              enabled: false))
+                }
+                if overview.lanes.count > 5 { entries.append(.note("More local work available in the console", nil)) }
+            }
+            entries.append(.note("Local overview · nested and remote work unavailable", nil))
+        }
+        if error != nil {
+            let age = updatedAt.map { " · last updated \(Fmt.ago($0, now: now))" } ?? ""
+            entries += [.separator, .item(MenuItemSpec(title: "Overview unavailable", subtitle: "Couldn’t refresh\(age)",
+                                                        icon: .mark("exclamationmark", .orange), enabled: false))]
+        }
         return entries
     }
 
@@ -190,10 +230,10 @@ enum QuotaMenu {
                 row.dimValue = true
                 row.icon = .ring(used / 100, .secondary)
                 let when = account.observedAt.map { "last checked \(Fmt.ago($0, now: now))" }
-                parts = [windowName(shown), account.status == .stale ? when ?? "out of date" : account.statusTitle.lowercased()]
+                parts = [windowName(shown), account.status == .stale ? when ?? "out of date" : account.status == .unknown && account.error != nil ? "couldn’t check" : account.statusTitle.lowercased()]
             } else {
                 row.icon = .mark("questionmark", .secondary)
-                parts = [account.error.map { clip(Fmt.sentence($0)) } ?? account.statusTitle]
+                parts = [account.status == .unknown && account.error != nil ? "Couldn’t check" : account.statusTitle]
             }
         }
         row.subtitle = parts.compactMap { $0 }.joined(separator: " · ")
