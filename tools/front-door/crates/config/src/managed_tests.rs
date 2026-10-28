@@ -3902,171 +3902,37 @@ fn disabling_gc_agent_reinstall_stops_exact_or_missing_owned_plists() {
 }
 
 #[test]
-fn disk_guard_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
-    for state in ["unchanged", "modified", "missing"] {
-        let modified = state == "modified";
-        let mut f = Fixture::new();
-        f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-            .resolve(&Resolver)
-            .unwrap();
-        f.targets.disk_guard_agent = Some(b"rendered plist\n".to_vec());
-        let plist = disk_guard_agent_plist(f.targets.roots.state.as_path()).unwrap();
-        assert_eq!(
-            plist,
-            f.home
-                .join("Library/LaunchAgents/dev.provenant.disk-guard.plist")
-        );
-        let plan = f.plan();
-        assert!(plan.actions().iter().any(|action| {
-            action.selector == "disk-guard-agent" && action.path.to_path_buf().unwrap() == plist
-        }));
-        assert!(!plist.exists());
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let ctx = context(&clock, &cancel);
-        install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-        assert!(f.plan().actions().is_empty());
-        assert!(
-            read_receipt(&f.targets)
-                .unwrap()
-                .unwrap()
-                .entries
-                .iter()
-                .any(|entry| entry.selector == "disk-guard-agent")
-        );
-        if modified {
-            fs::write(&plist, b"user edited plist\n").unwrap();
-            let release = f.release();
-            assert!(matches!(
-                Snapshots::capture(&release, &f.targets)
-                    .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots)),
-                Err(InstallError::Conflict(path)) if path == plist
-            ));
-        }
-        if state == "missing" {
-            fs::remove_file(&plist).unwrap();
-        }
-        let mut reporter = DiskGuardStopReporter::default();
-        let result = uninstall(&f.targets, &ctx, &mut reporter).unwrap();
-        assert_eq!(reporter.0, usize::from(!modified));
-        assert_eq!(
-            result
-                .actions
-                .iter()
-                .filter(|action| action.selector == "disk-guard-agent")
-                .count(),
-            usize::from(!modified)
-        );
-        assert_eq!(plist.exists(), modified);
-        assert_eq!(
-            result.findings.iter().any(|finding| {
-                finding.rule == "relinquished_modified_entry"
-                    && finding.path.to_path_buf().unwrap() == plist
-            }),
-            modified
-        );
-    }
-}
-
-#[derive(Default)]
-struct DiskGuardStopReporter(usize);
-impl InstallReporter for DiskGuardStopReporter {
-    fn preview(&mut self, _: &[Action]) -> io::Result<()> {
-        Ok(())
-    }
-    fn before_remove(&mut self, action: &Action) -> io::Result<()> {
-        if action.selector == "disk-guard-agent" {
-            self.0 += 1;
-        }
-        Ok(())
-    }
-}
-
-#[test]
-fn disabling_disk_guard_agent_reinstall_stops_exact_or_missing_owned_plists() {
-    for state in ["unchanged", "modified", "missing"] {
-        let mut f = Fixture::new();
-        f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-            .resolve(&Resolver)
-            .unwrap();
-        f.targets.disk_guard_agent = Some(b"rendered plist\n".to_vec());
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let ctx = context(&clock, &cancel);
-        install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-        let plist = disk_guard_agent_plist(f.targets.roots.state.as_path()).unwrap();
-        match state {
-            "modified" => fs::write(&plist, b"user edited plist\n").unwrap(),
-            "missing" => fs::remove_file(&plist).unwrap(),
-            _ => {}
-        }
-        f.targets.disk_guard_agent = None;
-        let plan = f.plan();
-        let removable = state != "modified";
-        assert_eq!(
-            plan.actions()
-                .iter()
-                .any(|action| action.selector == "disk-guard-agent"),
-            removable
-        );
-        let mut reporter = DiskGuardStopReporter::default();
-        let preview = install(&plan, &ctx, &mut reporter, &Smoke, true).unwrap();
-        assert!(preview.dry_run);
-        assert_eq!(reporter.0, 0);
-        let outcome = install(&plan, &ctx, &mut reporter, &Smoke, false).unwrap();
-        assert_eq!(reporter.0, usize::from(removable));
-        assert_eq!(plist.exists(), !removable);
-        assert_eq!(
-            outcome.findings.iter().any(|finding| {
-                finding.rule == "relinquished_modified_entry"
-                    && finding.path.to_path_buf().unwrap() == plist
-            }),
-            !removable
-        );
-        assert!(
-            !read_receipt(&f.targets)
-                .unwrap()
-                .unwrap()
-                .entries
-                .iter()
-                .any(|entry| entry.selector == "disk-guard-agent")
-        );
-    }
-}
-
-#[test]
-fn missing_disk_guard_agent_is_stopped_only_when_the_last_harness_is_removed() {
-    let mut f = Fixture::new();
-    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
-        .unwrap();
-    f.targets.harnesses = Targets::new(
-        f.targets.roots.clone(),
-        &f.home,
-        &[Harness::Claude, Harness::Codex],
-    )
-    .harnesses;
-    f.targets.disk_guard_agent = Some(b"rendered plist\n".to_vec());
+fn retired_disk_guard_is_not_managed_by_install_or_uninstall() {
+    let f = Fixture::new();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let ctx = context(&clock, &cancel);
     install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    fs::remove_file(disk_guard_agent_plist(f.targets.roots.state.as_path()).unwrap()).unwrap();
-    let mut reporter = DiskGuardStopReporter::default();
-    let codex = f.targets.harnesses.pop().unwrap();
-    uninstall(&f.targets, &ctx, &mut reporter).unwrap();
-    assert_eq!(reporter.0, 0);
+    let mut receipt: InstallReceipt = read_receipt(&f.targets).unwrap().unwrap();
+    let plist = f
+        .home
+        .join("Library/LaunchAgents/dev.provenant.disk-guard.plist");
+    fs::create_dir_all(plist.parent().unwrap()).unwrap();
+    fs::write(&plist, b"old plist").unwrap();
+    receipt.entries.push(OwnedEntry {
+        path: AbsolutePath::new(&plist).unwrap(),
+        harness: None,
+        selector: "disk-guard-agent".into(),
+        expected: owned(&Value::File {
+            bytes: b"old plist".to_vec(),
+            mode: 0o600,
+        })
+        .unwrap(),
+    });
+    fs::write(f.receipt(), serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let plan = f.plan();
     assert!(
-        read_receipt(&f.targets)
-            .unwrap()
-            .unwrap()
-            .entries
+        !plan
+            .actions()
             .iter()
-            .any(|entry| entry.selector == "disk-guard-agent")
+            .any(|action| action.selector == "disk-guard-agent")
     );
-    f.targets.harnesses = vec![codex];
-    uninstall(&f.targets, &ctx, &mut reporter).unwrap();
-    assert_eq!(reporter.0, 1);
+    install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
     assert!(
         !read_receipt(&f.targets)
             .unwrap()
@@ -4075,6 +3941,14 @@ fn missing_disk_guard_agent_is_stopped_only_when_the_last_harness_is_removed() {
             .iter()
             .any(|entry| entry.selector == "disk-guard-agent")
     );
+    let outcome = uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
+    assert!(
+        !outcome
+            .actions
+            .iter()
+            .any(|action| action.selector == "disk-guard-agent")
+    );
+    assert!(plist.exists(), "retirement belongs to the process edge");
 }
 
 #[test]

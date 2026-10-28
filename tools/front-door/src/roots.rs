@@ -229,7 +229,11 @@ fn home() -> Result<PathBuf, RootError> {
     if !home.is_absolute() {
         return Err(RootError::Home);
     }
-    Ok(fs::canonicalize(home)?)
+    let home = fs::canonicalize(home).map_err(|_| RootError::Home)?;
+    if !home.is_dir() {
+        return Err(RootError::Home);
+    }
+    Ok(home)
 }
 
 #[cfg(test)]

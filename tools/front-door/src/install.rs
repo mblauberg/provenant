@@ -8,25 +8,15 @@ use provenant_config::{
     InstallReporter, ManualInclude, Targets,
 };
 use provenant_core::{CancelToken, Clock, WaitBudget};
+use provenant_fabric_runtime::peer_agent::{AgentError, launchctl};
 use provenant_os::clock::SystemClock;
 use provenant_records::{CommandError, CommandResult, Harness, Outcome};
 use serde::Serialize;
+use std::ffi::OsStr;
 use std::{
-    collections::BTreeMap,
-    ffi::OsStr,
     io,
     path::{Path, PathBuf},
 };
-
-#[derive(Clone, Copy, Debug, Default)]
-struct InstallCounts {
-    links: usize,
-    hooks: usize,
-    mcp: usize,
-    notes: usize,
-    findings: usize,
-    other: usize,
-}
 
 #[derive(Debug)]
 enum EdgeError {
@@ -56,12 +46,6 @@ fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
                 .map_err(EdgeError::Peer)?;
         let config = provenant_config::read_with_domains(&targets.roots, &cli::domains::SECTIONS)
             .map_err(|error| EdgeError::Install(InstallError::Config(error)))?;
-        if config.disk_guard.enabled {
-            targets.disk_guard_agent = Some(
-                super::disk_guard_agent::render(&program, state, &config.disk_guard)
-                    .map_err(EdgeError::Peer)?,
-            );
-        }
         if config.gc.schedule {
             targets.gc_agent = Some(
                 super::gc_agent::render(&program, state, &config.gc).map_err(EdgeError::Peer)?,
@@ -133,18 +117,13 @@ impl PreviewReporter {
         action: &Action,
         stop: impl FnOnce(&Path) -> io::Result<()>,
     ) -> io::Result<()> {
-        if matches!(
-            action.selector.as_str(),
-            "peer-agent" | "gc-agent" | "disk-guard-agent"
-        ) {
+        if matches!(action.selector.as_str(), "peer-agent" | "gc-agent") {
             let home = self
                 .home
                 .as_deref()
                 .ok_or_else(|| io::Error::other("missing agent home"))?;
             let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
-            let expected = if action.selector == "disk-guard-agent" {
-                super::disk_guard_agent::plist(&home)
-            } else if action.selector == "gc-agent" {
+            let expected = if action.selector == "gc-agent" {
                 super::gc_agent::plist(&home)
             } else {
                 provenant_fabric_runtime::peer_agent::plist(&home)
@@ -161,9 +140,7 @@ impl PreviewReporter {
 impl InstallReporter for PreviewReporter {
     fn before_remove(&mut self, action: &Action) -> io::Result<()> {
         self.before_remove_with(action, |home| {
-            if action.selector == "disk-guard-agent" {
-                super::disk_guard_agent::stop(home).map_err(io::Error::other)
-            } else if action.selector == "gc-agent" {
+            if action.selector == "gc-agent" {
                 super::gc_agent::stop(home).map_err(io::Error::other)
             } else {
                 provenant_fabric_runtime::peer_agent::stop(home).map_err(io::Error::other)
@@ -184,14 +161,14 @@ impl InstallReporter for PreviewReporter {
 #[derive(Debug, Serialize)]
 struct InstallData {
     outcome: Option<InstallOutcome>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     completed: Vec<Action>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     remaining: Vec<Action>,
     #[serde(skip_serializing_if = "Option::is_none")]
     peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gc_agent: Option<super::gc_agent::Installed>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    disk_guard_agent: Option<super::disk_guard_agent::Installed>,
 }
 impl InstallData {
     fn empty() -> Self {
@@ -201,22 +178,15 @@ impl InstallData {
             remaining: Vec::new(),
             peer_agent: None,
             gc_agent: None,
-            disk_guard_agent: None,
         }
     }
     fn success(outcome: InstallOutcome) -> Self {
-        let completed = if outcome.dry_run {
-            Vec::new()
-        } else {
-            outcome.actions.clone()
-        };
         Self {
             outcome: Some(outcome),
-            completed,
+            completed: Vec::new(),
             remaining: Vec::new(),
             peer_agent: None,
             gc_agent: None,
-            disk_guard_agent: None,
         }
     }
     fn failure(error: &InstallError) -> Self {
@@ -231,7 +201,6 @@ impl InstallData {
                 remaining: remaining.clone(),
                 peer_agent: None,
                 gc_agent: None,
-                disk_guard_agent: None,
             },
             _ => Self::empty(),
         }
@@ -261,12 +230,17 @@ fn error_class(error: &InstallError) -> (Outcome, &'static str) {
         | InstallError::ReceiptDecode(_)
         | InstallError::Encode(_)
         | InstallError::PathWire(_) => (Outcome::Invalid, "INSTALL_INVALID"),
-        InstallError::Fs(_) | InstallError::Preview(_) | InstallError::Smoke(_) => {
-            (Outcome::Error, "INSTALL_ERROR")
-        }
+        InstallError::Fs(_)
+        | InstallError::Preview(_)
+        | InstallError::Smoke(_)
+        | InstallError::AgentRetirement(_) => (Outcome::Error, "INSTALL_ERROR"),
     }
 }
 pub(super) fn install_error(command: &str, error: &InstallError, globals: &cli::Globals) -> u8 {
+    let result = install_error_result(command, error);
+    super::emit(&result, globals, "", false)
+}
+fn install_error_result(command: &str, error: &InstallError) -> CommandResult<InstallData> {
     let (status, code) = error_class(error);
     let mut result = CommandResult::new(command, status, InstallData::failure(error));
     result.error = Some(CommandError {
@@ -276,7 +250,7 @@ pub(super) fn install_error(command: &str, error: &InstallError, globals: &cli::
         repair: matches!(error, InstallError::Partial { .. })
             .then(|| "Resolve the failure and re-apply the same install command".into()),
     });
-    super::emit(&result, globals, "", false)
+    result
 }
 fn edge_error(command: &str, error: EdgeError, globals: &cli::Globals) -> u8 {
     match error {
@@ -323,81 +297,17 @@ fn output_install(
     result: Result<InstallOutcome, InstallError>,
     peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
     gc_agent: Option<super::gc_agent::Installed>,
-    disk_guard_agent: Option<super::disk_guard_agent::Installed>,
     globals: &cli::Globals,
 ) -> u8 {
     match result {
         Ok(outcome) => {
-            let label = |target: &HarnessTarget| {
-                format!(
-                    "{:?} ({})",
-                    target.harness,
-                    target
-                        .skills_dir
-                        .parent()
-                        .unwrap_or(&target.skills_dir)
-                        .display()
-                )
-            };
-            let target_name = |path: &Path| {
-                summaries
-                    .iter()
-                    .find(|target| {
-                        path.starts_with(&target.skills_dir)
-                            || path == target.mcp_file
-                            || target.hook_file.as_deref() == Some(path)
-                            || target.instruction.as_deref().is_some_and(|p| {
-                                p == path || p.with_file_name("HARNESS.md") == path
-                            })
-                    })
-                    .map(label)
-                    .unwrap_or_else(|| install_target(path).to_owned())
-            };
-            let mut counts = BTreeMap::<String, InstallCounts>::new();
-            for target in summaries {
-                counts.entry(label(target)).or_default();
-            }
-            for action in &outcome.actions {
-                let target = action
-                    .path
-                    .to_path_buf()
-                    .map(|path| target_name(&path))
-                    .unwrap_or_else(|_| "target".into());
-                let selector = action.selector.to_ascii_lowercase();
-                let target_counts = counts.entry(target).or_default();
-                if selector.contains("hook") {
-                    target_counts.hooks += 1;
-                } else if selector.contains("mcp") {
-                    target_counts.mcp += 1;
-                } else if matches!(
-                    action.before.as_ref().or(action.after.as_ref()),
-                    Some(provenant_records::OwnedValue::Link { .. })
-                ) {
-                    target_counts.links += 1;
-                } else {
-                    target_counts.other += 1;
-                }
-            }
-            for manual in &outcome.manual_includes {
-                let target = manual
-                    .path
-                    .to_path_buf()
-                    .map(|path| target_name(&path))
-                    .unwrap_or_else(|_| "target".into());
-                counts.entry(target).or_default().notes += 1;
-            }
-            for finding in &outcome.findings {
-                let target = finding
-                    .path
-                    .to_path_buf()
-                    .map(|path| target_name(&path))
-                    .unwrap_or_else(|_| "target".into());
-                counts.entry(target).or_default().findings += 1;
-            }
-            if counts.is_empty() {
-                counts.entry("target".into()).or_default();
-            }
-            let mut human = format!("{command}:\n");
+            let mut human = format!(
+                "{command}: {} changes; {} targets; {} findings; {} manual includes\n",
+                outcome.actions.len(),
+                summaries.len(),
+                outcome.findings.len(),
+                outcome.manual_includes.len(),
+            );
             if !outcome
                 .findings
                 .iter()
@@ -410,55 +320,18 @@ fn output_install(
                 human.push_str("  Home moved; old paths left untouched\n");
             }
             for finding in &outcome.findings {
-                if finding.rule == "state_root_moved"
-                    && let Ok(path) = finding.path.to_path_buf()
-                {
+                let path = finding
+                    .path
+                    .to_path_buf()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default();
+                if finding.rule == "state_root_moved" {
                     human.push_str(&format!(
-                        "  State root moved from {}; old paths left untouched\n",
-                        path.display()
+                        "  State root moved from {path}; old paths left untouched\n"
                     ));
+                } else {
+                    human.push_str(&format!("  {}: {path}\n", finding.rule));
                 }
-                if let Ok(path) = finding.path.to_path_buf()
-                    && matches!(
-                        path.file_name().and_then(OsStr::to_str),
-                        Some("dev.provenant.peer.plist" | "dev.provenant.gc.plist")
-                    )
-                {
-                    human.push_str(&format!(
-                        "  LaunchAgent plist: preserved {} ({})\n",
-                        path.display(),
-                        finding.rule
-                    ));
-                }
-            }
-            for action in &outcome.actions {
-                if matches!(action.selector.as_str(), "peer-agent" | "gc-agent") {
-                    let path = action
-                        .path
-                        .to_path_buf()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default();
-                    human.push_str(&format!(
-                        "  LaunchAgent plist: {:?} {path}\n",
-                        action.disposition
-                    ));
-                }
-            }
-            for finding in &outcome.findings {
-                human.push_str(&format!(
-                    "  finding: {} ({:?})\n",
-                    finding.rule,
-                    finding.path.to_path_buf().ok()
-                ));
-            }
-            for (target, count) in counts {
-                if !summaries.is_empty() && !summaries.iter().any(|item| label(item) == target) {
-                    continue;
-                }
-                human.push_str(&format!(
-                    "  {target}: {} changed links, {} changed hooks, {} changed MCP, {} notes; {} other\n",
-                    count.links, count.hooks, count.mcp, count.notes, count.other
-                ));
             }
             for manual in &outcome.manual_includes {
                 let path = manual
@@ -475,20 +348,18 @@ fn output_install(
                     "manual include required: add {include} to {path}\n"
                 ));
             }
-            if let Some(agent) = &peer_agent {
-                human.push_str(&format!("peer agent: {}\n", agent.describe()));
+            if let Some(provenant_fabric_runtime::peer_agent::Installed::Failed { message }) =
+                &peer_agent
+            {
+                human.push_str(&format!("peer agent: failed: {message}\n"));
             }
-            if let Some(agent) = &gc_agent {
-                human.push_str(&format!("scheduled gc: {}\n", agent.describe()));
+            if let Some(super::gc_agent::Installed::Failed { message }) = &gc_agent {
+                human.push_str(&format!("scheduled gc: failed: {message}\n"));
             }
             let read_only = outcome.dry_run;
-            if let Some(agent) = &disk_guard_agent {
-                human.push_str(&format!("disk guard: {}\n", agent.describe()));
-            }
             let mut data = InstallData::success(outcome);
             data.peer_agent = peer_agent;
             data.gc_agent = gc_agent;
-            data.disk_guard_agent = disk_guard_agent;
             super::emit(
                 &CommandResult::new(command, Outcome::Ok, data),
                 globals,
@@ -497,28 +368,6 @@ fn output_install(
             )
         }
         Err(error) => install_error(command, &error, globals),
-    }
-}
-
-fn install_target(path: &Path) -> &'static str {
-    let path = path.to_string_lossy();
-    if path.contains("/.claude-") {
-        "Claude account"
-    } else if path.contains("/.claude/")
-        || path.ends_with("/.claude")
-        || path.ends_with("/.claude.json")
-    {
-        provenant_providers::claude::REGISTRATION.display_name
-    } else if path.contains("/.codex/") || path.ends_with("/.codex") {
-        provenant_providers::codex::REGISTRATION.display_name
-    } else if path.contains("/.cursor/") || path.ends_with("/.cursor") {
-        provenant_providers::cursor::REGISTRATION.display_name
-    } else if path.contains("/.config/opencode/") {
-        provenant_providers::opencode::REGISTRATION.display_name
-    } else if path.contains("/.config/agents/") {
-        "Agents"
-    } else {
-        "Other"
     }
 }
 
@@ -696,7 +545,6 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
         return edge_error("install", error, globals);
     }
     let gc_enabled = targets.gc_agent.is_some();
-    let disk_guard_enabled = targets.disk_guard_agent.is_some();
     let mut reporter = PreviewReporter {
         home: Some(home.clone()),
     };
@@ -743,6 +591,10 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
                 &smoke,
                 env!("PROVENANT_TARGET_TRIPLE"),
             )?;
+        }
+        if !args.dry_run && provenant_fabric_runtime::peer_agent::eligible(&state, &home) {
+            retire_disk_guard(&home)
+                .map_err(|error| InstallError::AgentRetirement(error.to_string()))?;
         }
         for batch in batches {
             // Publish one receipt target at a time, using config's existing lock and ownership rules.
@@ -814,27 +666,7 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
         )),
         _ => None,
     };
-    let disk_guard_agent = match &result {
-        Ok(outcome) if !outcome.dry_run => Some(super::disk_guard_agent::install(
-            &state,
-            &home,
-            outcome
-                .actions
-                .iter()
-                .any(|action| action.selector == "disk-guard-agent"),
-            disk_guard_enabled,
-        )),
-        _ => None,
-    };
-    output_install(
-        "install",
-        &summaries,
-        result,
-        peer_agent,
-        gc_agent,
-        disk_guard_agent,
-        globals,
-    )
+    output_install("install", &summaries, result, peer_agent, gc_agent, globals)
 }
 
 struct UpgradeRunner {
@@ -1121,11 +953,15 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
     let mut reporter = PreviewReporter {
         home: Some(targets.home.clone()),
     };
+    if provenant_fabric_runtime::peer_agent::eligible(targets.roots.state.as_path(), &targets.home)
+        && let Err(error) = retire_disk_guard(&targets.home)
+    {
+        return edge_error("uninstall", EdgeError::Peer(error), globals);
+    }
     output_install(
         "uninstall",
         &[],
         cli::install::execute_uninstall(&args, &targets, &context, &mut reporter),
-        None,
         None,
         None,
         globals,
@@ -1191,6 +1027,169 @@ mod tests {
                 .is_err()
         );
         assert_eq!(stops, 2);
+        Ok(())
+    }
+}
+
+fn retire_disk_guard(home: &Path) -> Result<(), AgentError> {
+    retire_disk_guard_with(home, launchctl)
+}
+
+fn retire_disk_guard_with(
+    home: &Path,
+    mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
+) -> Result<(), AgentError> {
+    let plist = home.join("Library/LaunchAgents/dev.provenant.disk-guard.plist");
+    match std::fs::symlink_metadata(&plist) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    // Keep the old checker's recovery custody until it has resumed its builds.
+    // Holding the same lock also prevents a final pause racing with bootout.
+    let _recovery = legacy_guard_ready(home)?;
+    let service = format!(
+        "gui/{}/dev.provenant.disk-guard",
+        provenant_os::fs::effective_uid()
+    );
+    if run(&["print".as_ref(), service.as_ref()], home)?.0 {
+        let (ok, error) = run(&["bootout".as_ref(), service.as_ref()], home)?;
+        if !ok {
+            return Err(AgentError::Launchctl("bootout", error));
+        }
+    }
+    std::fs::remove_file(plist)?;
+    Ok(())
+}
+
+fn legacy_guard_ready(home: &Path) -> io::Result<provenant_os::fs::LockGuard> {
+    use provenant_os::fs::LockMode;
+    let path = home.join(".local/share/provenant/v1/disk-guard");
+    let guard = provenant_config::private_directory(&path, true).map_err(io::Error::other)?;
+    let repair = "run `provenant gc --apply`, let the existing disk guard resume its saved builds, then retry";
+    let lock = guard
+        .try_lock("guard.lock".as_ref(), LockMode::Exclusive)
+        .map_err(|error| {
+            io::Error::other(format!(
+                "disk guard still owns recovery custody: {error}; {repair}"
+            ))
+        })?;
+    for name in ["paused.json", "state.json"] {
+        let bytes = match guard.read_stable(name.as_ref(), 1024 * 1024) {
+            Ok(bytes) => bytes,
+            Err(error) if error.is_not_found() => continue,
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "cannot inspect disk guard recovery: {error}; {repair}"
+                )));
+            }
+        };
+        let state: serde_json::Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        if !state["paused"].as_array().is_some_and(Vec::is_empty) {
+            return Err(io::Error::other(format!(
+                "disk guard has saved paused builds in {}; {repair}",
+                path.join(name).display()
+            )));
+        }
+        // paused.json superseded the earlier state.json in the old checker.
+        break;
+    }
+    Ok(lock)
+}
+
+#[cfg(test)]
+mod retired_disk_guard_tests {
+    #[allow(unused_imports)] // The worktree driver includes this module without libtest.
+    use super::*;
+
+    #[test]
+    fn retirement_stops_and_deletes_the_old_agent_once() {
+        let home = tempfile::tempdir().unwrap();
+        let plist = home
+            .path()
+            .join("Library/LaunchAgents/dev.provenant.disk-guard.plist");
+        std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        std::fs::write(&plist, b"old plist").unwrap();
+        let mut calls = Vec::new();
+        for _ in 0..2 {
+            retire_disk_guard_with(home.path(), |args, _| {
+                calls.push(args[0].to_owned());
+                let path = home.path().join(".local/share/provenant/v1/disk-guard");
+                assert!(
+                    path.is_dir(),
+                    "retirement must establish recovery custody before bootout"
+                );
+                let directory = provenant_os::fs::Directory::open_anchor(&path).unwrap();
+                assert!(
+                    directory
+                        .try_lock("guard.lock".as_ref(), provenant_os::fs::LockMode::Exclusive)
+                        .is_err()
+                );
+                Ok((true, String::new()))
+            })
+            .unwrap();
+        }
+        assert_eq!(calls, [OsStr::new("print"), OsStr::new("bootout")]);
+        assert!(!plist.exists());
+    }
+
+    #[test]
+    fn failed_bootout_preserves_the_plist_for_retry() {
+        let home = tempfile::tempdir().unwrap();
+        let plist = home
+            .path()
+            .join("Library/LaunchAgents/dev.provenant.disk-guard.plist");
+        std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        std::fs::write(&plist, b"old plist").unwrap();
+        let result = retire_disk_guard_with(home.path(), |args, _| {
+            Ok((args[0] == "print", "busy".into()))
+        });
+        assert!(matches!(result, Err(AgentError::Launchctl("bootout", _))));
+        assert!(plist.exists());
+    }
+}
+
+#[cfg(test)]
+mod legacy_pause_retirement_tests {
+    #[allow(unused_imports)]
+    use super::*;
+    #[test]
+    fn retirement_keeps_a_guard_with_saved_paused_builds_and_names_recovery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir()?;
+        let plist = home
+            .path()
+            .join("Library/LaunchAgents/dev.provenant.disk-guard.plist");
+        std::fs::create_dir_all(plist.parent().ok_or("plist parent")?)?;
+        std::fs::write(&plist, "old plist")?;
+        let guard = home.path().join(".local/share/provenant/v1/disk-guard");
+        std::fs::create_dir_all(&guard)?;
+        std::fs::set_permissions(&guard, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(guard.join("paused.json"), br#"{"paused":[{"pid":42}]}"#)?;
+        let mut calls = 0;
+        let result = retire_disk_guard_with(home.path(), |_, _| {
+            calls += 1;
+            Ok((true, String::new()))
+        });
+        assert!(matches!(result, Err(AgentError::Io(_))));
+        let error = result.err().ok_or("retired paused guard")?;
+        let result =
+            install_error_result("install", &InstallError::AgentRetirement(error.to_string()));
+        let mut rendered = Vec::new();
+        provenant_cli::render(
+            &result,
+            provenant_cli::RenderMode::Human {
+                text: "",
+                read_only: false,
+            },
+            &mut rendered,
+        )?;
+        let rendered = String::from_utf8(rendered)?;
+        assert!(rendered.contains("saved paused builds"), "{rendered}");
+        assert!(rendered.contains("provenant gc --apply"), "{rendered}");
+        assert_eq!(calls, 0, "the existing checker must keep recovery custody");
+        assert!(plist.exists());
         Ok(())
     }
 }

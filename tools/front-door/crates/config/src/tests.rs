@@ -1299,3 +1299,18 @@ fn wrong_value_type_in_a_serde_decoded_section_still_reports_type() {
         );
     }
 }
+
+#[test]
+fn retired_disk_guard_configuration_is_rejected() {
+    let roots = roots();
+    assert!(matches!(
+        load(
+            &roots,
+            Some(b"schema_version=1\n[disk_guard]\nenabled=false".as_slice())
+        ),
+        Err(ConfigError::Schema {
+            rule: "unknown_key",
+            ..
+        })
+    ));
+}

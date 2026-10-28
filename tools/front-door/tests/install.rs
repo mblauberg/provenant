@@ -12,40 +12,6 @@ use support::{Result, TestRig, code};
 
 struct FixtureSmoke(VersionInfo);
 
-#[test]
-fn healthy_disk_guard_bypasses_unrelated_startup_and_writes_nothing() -> Result {
-    let rig = TestRig::new()?;
-    fs::create_dir_all(&rig.state)?;
-    fs::write(rig.state.join("config.toml"), b"invalid toml, never read")?;
-    let binary = Path::new(env!("CARGO_BIN_EXE_provenant"));
-    let output = rig.execute_os(
-        binary,
-        &[
-            "disk-guard".into(),
-            "--state-dir".into(),
-            rig.state.clone().into_os_string(),
-            "--warn".into(),
-            "3B".into(),
-            "--pause".into(),
-            "1B".into(),
-            "--resume".into(),
-            "2B".into(),
-            "--processes".into(),
-        ],
-        None,
-    )?;
-    assert_eq!(
-        code(&output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    assert!(output.stdout.bytes.is_empty());
-    assert!(output.stderr.bytes.is_empty());
-    assert_eq!(fs::read_dir(&rig.state)?.count(), 1);
-    Ok(())
-}
-
 impl ReleaseSmoke for FixtureSmoke {
     fn check(&self, _: &Release, _: &CancelToken) -> io::Result<VersionInfo> {
         Ok(self.0.clone())
@@ -1419,6 +1385,92 @@ exec env HOME='{}' PROVENANT_STATE_DIR='{}' CODEX_HOME='{}' CLAUDE_CONFIG_DIR='{
                 .source_digest
         );
         assert_eq!(receipt.harnesses, vec![provenant_records::Harness::Codex]);
+    }
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::print_stderr)]
+fn install_compacts_routine_output_and_keeps_json_actions_once() -> Result {
+    let executable = std::env::current_exe()?;
+    let rig = TestRig::in_directory(executable.parent().ok_or("test executable parent")?)?;
+    let stage = staged(&rig)?;
+    let preview = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &args(&stage, true),
+        None,
+    )?;
+    assert_eq!(code(&preview), 0);
+    let mut human_args = args(&stage, true);
+    human_args.retain(|arg| arg != "--json");
+    let human = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &human_args,
+        None,
+    )?;
+    assert_eq!(code(&human), 0);
+    let applied = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &args(&stage, false),
+        None,
+    )?;
+    assert_eq!(
+        code(&applied),
+        0,
+        "{}",
+        String::from_utf8_lossy(&applied.stderr.bytes)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&applied.stdout.bytes)?;
+    let text = String::from_utf8(human.stdout.bytes.clone())?;
+    eprintln!(
+        "install bytes: preview JSON={}, human={}, applied JSON={}",
+        preview.stdout.bytes.len(),
+        human.stdout.bytes.len(),
+        applied.stdout.bytes.len()
+    );
+    assert!(text.contains("changes; 1 targets;"), "{text}");
+    assert!(!text.contains("changed links"), "{text}");
+    assert!(!text.contains("peer agent:"), "{text}");
+    assert!(!text.contains("scheduled gc:"), "{text}");
+    assert!(
+        report["data"]["outcome"]["actions"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty())
+    );
+    assert!(report["data"].get("completed").is_none());
+    assert!(report["data"].get("remaining").is_none());
+    assert!(report["data"].get("disk_guard_agent").is_none());
+    Ok(())
+}
+
+#[test]
+fn invalid_install_home_names_the_repair() -> Result {
+    let mut rig = TestRig::new()?;
+    let stage = staged(&rig)?;
+    let file = rig.root.join("home-file");
+    fs::write(&file, "not a directory")?;
+    for invalid in [
+        PathBuf::from("relative-home"),
+        rig.root.join("missing-home"),
+        file,
+    ] {
+        for (key, value) in &mut rig.env {
+            if key == "HOME" {
+                *value = invalid.clone().into_os_string();
+            }
+        }
+        let output = rig.execute_os(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &args(&stage, true),
+            None,
+        )?;
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(value["status"], "invalid", "{value}");
+        assert_eq!(value["error"]["code"], "HOME", "{value}");
+        assert_eq!(
+            value["error"]["repair"],
+            "Set HOME to your absolute home directory, then rerun `provenant install`."
+        );
     }
     Ok(())
 }

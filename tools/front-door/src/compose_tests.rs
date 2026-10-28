@@ -283,3 +283,47 @@ fn denied(path: &Path) -> Result {
     );
     Ok(())
 }
+
+#[test]
+fn actionable_failures_have_specific_repairs_without_unrelated_advice() {
+    for (command, code, message, expected) in [
+        (
+            "install",
+            "HOME",
+            "HOME must be an absolute directory",
+            Some("Set HOME to your absolute home directory, then rerun `provenant install`."),
+        ),
+        (
+            "gc",
+            "GC",
+            "cache is unreadable",
+            Some(
+                "Run `provenant gc --apply --json` to inspect failed paths and retry incomplete collection.",
+            ),
+        ),
+        (
+            "dispatch",
+            "REFUSED",
+            "insufficient disk space: 99 bytes available, floor 100 bytes; run `provenant gc --free-floor 100B`",
+            Some("Run `provenant gc --apply`, then retry when free space reaches gc.free_floor."),
+        ),
+        ("config show", "CONFIG", "invalid configuration", None),
+    ] {
+        let mut error = provenant_records::CommandError {
+            code: code.into(),
+            message: message.into(),
+            cause: None,
+            repair: None,
+        };
+        super::apply_repair(command, &mut error, true);
+        assert_eq!(error.repair.as_deref(), expected);
+        if command == "dispatch" {
+            assert!(
+                error
+                    .message
+                    .contains("99 bytes available, floor 100 bytes")
+            );
+            assert!(error.message.ends_with("provenant gc --apply`"));
+        }
+    }
+}

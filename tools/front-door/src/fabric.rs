@@ -2249,9 +2249,10 @@ fn advance_graphs_after_settlement(
     )?;
     // A lane's settlement must not stop unrelated graphs from advancing.
     // Settlement records its own retention reason on the attempt.
+    let pressure_error = crate::disk_guard::settlement_gc(settled).err();
     let settlement_error = settle_owned_worktree(settled, &roots, workers, None).err();
     let settlement_reason = settlement_error.as_ref().map(|error| error.to_string());
-    let mut first_error = settlement_error;
+    let mut first_error = settlement_error.or_else(|| pressure_error.map(Into::into));
     for id in FileJournal::graph_ids(&roots.state, settled.project_id)? {
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
             let Some(execution) =
