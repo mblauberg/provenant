@@ -72,6 +72,7 @@ enum Completion<'a> {
         delivery: Option<&'a crate::HostDeliveryContext>,
         /// Request digest the host sealed at launch.
         sealed: Option<&'a provenant_core::Digest>,
+        holder_context: &'a HolderContext,
     },
     Recovered(Option<&'a custody::Recovery>),
 }
@@ -80,6 +81,12 @@ impl Completion<'_> {
         match self {
             Self::Live { custody, .. } => Some(custody),
             Self::Recovered(custody) => *custody,
+        }
+    }
+    fn holder_context(&self) -> Option<&HolderContext> {
+        match self {
+            Self::Live { holder_context, .. } => Some(holder_context),
+            Self::Recovered(_) => None,
         }
     }
 }
@@ -248,6 +255,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
                     custody: recovery,
                     delivery: context.host_delivery.as_ref(),
                     sealed: context.sealed.as_ref().map(|sealed| &sealed.request_digest),
+                    holder_context: &context,
                 },
                 self.providers,
                 &call(&SystemClock, &cancel).map_err(custody_error)?,
@@ -448,20 +456,28 @@ impl RunStore {
             },
             (Some(route), false) => {
                 let stdout = read_sealed(attempt, "stdout.log", CAPTURE_LIMIT)?.unwrap_or_default();
-                providers
-                    .decode(
-                        route,
-                        &stdout,
-                        exit,
-                        &self
-                            .context
-                            .state_root
-                            .as_path()
-                            .join("runs")
-                            .join(record.run_id.to_string())
-                            .join("attempts")
-                            .join(id.to_string())
-                            .join("provider-state"),
+                let provider_state = self
+                    .context
+                    .state_root
+                    .as_path()
+                    .join("runs")
+                    .join(record.run_id.to_string())
+                    .join("attempts")
+                    .join(id.to_string())
+                    .join("provider-state");
+                completion
+                    .holder_context()
+                    .map_or_else(
+                        || providers.decode(route, &stdout, exit, &provider_state),
+                        |context| {
+                            providers.decode_with_context(
+                                route,
+                                &stdout,
+                                exit,
+                                &provider_state,
+                                context,
+                            )
+                        },
                     )
                     .map_err(RunError::ProviderEvidence)?
             }

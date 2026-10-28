@@ -14,6 +14,7 @@ pub struct PendingHumanRequest {
     pub project_key: Option<String>,
     pub title: String,
     pub chair_session_id: Option<String>,
+    pub owner_host: Option<String>,
 }
 
 pub struct PendingHumanRequests {
@@ -190,7 +191,10 @@ impl Store {
                  CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
                    THEN r.session END,
                  CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
-                   THEN json_type(CAST(r.record AS TEXT),'$.chair_session_id') END
+                   THEN json_type(CAST(r.record AS TEXT),'$.chair_session_id') END,
+                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+                   AND json_type(CAST(r.record AS TEXT),'$.owner_host')='text'
+                   THEN json_extract(CAST(r.record AS TEXT),'$.owner_host') END
                  FROM sized s JOIN human_requests r ON r.project=s.project AND r.id=s.id ORDER BY s.project,s.id",
             )?;
             let mut rows = statement.query(params![rows_limit + 1, MAX_RECORD_BYTES as i64, max_bytes.min(1_048_576) as i64])?;
@@ -219,6 +223,7 @@ impl Store {
                 let title: Option<String> = row.get(8)?;
                 let chair_session_id: Option<String> = row.get(9)?;
                 let session_type: Option<String> = row.get(10)?;
+                let owner_host: Option<String> = row.get(11)?;
                 if version != Some(1)
                     || record_project.as_deref() != Some(&project_id)
                     || record_id.as_deref() != Some(&id)
@@ -235,6 +240,7 @@ impl Store {
                     project_key,
                     title,
                     chair_session_id,
+                    owner_host,
                 });
             }
             Ok(PendingHumanRequests { items, truncated, bytes_read })

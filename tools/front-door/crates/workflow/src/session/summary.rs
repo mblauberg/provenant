@@ -30,7 +30,105 @@ pub struct SummaryPatch {
     pub risk: Option<String>,
 }
 
+/// A changed field, with its values in the requested order.
+#[derive(Debug, Serialize)]
+pub struct SummaryChange<T> {
+    pub from: T,
+    pub to: T,
+}
+
+/// Comparison of retained summary revisions. Missing revisions are listed so a
+/// pruned baseline cannot be mistaken for an unchanged summary.
+#[derive(Debug, Serialize)]
+pub struct SummaryDiff {
+    pub from: u64,
+    pub to: u64,
+    pub unavailable: Vec<u64>,
+    pub now: Option<SummaryChange<String>>,
+    pub next: Option<SummaryChange<String>>,
+    pub needs_you: Option<SummaryIdChanges>,
+    pub risk: Option<SummaryChange<String>>,
+}
+
+/// Request IDs added to and removed from the summary, in sorted order.
+#[derive(Debug, Serialize)]
+pub struct SummaryIdChanges {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+fn changed<T: PartialEq + Clone>(from: &T, to: &T) -> Option<SummaryChange<T>> {
+    (from != to).then(|| SummaryChange {
+        from: from.clone(),
+        to: to.clone(),
+    })
+}
+
 impl super::SessionStore {
+    /// Compare summary revision IDs found in the bounded retained checkpoint
+    /// history. Repeated identical summaries from ordinary saves are allowed.
+    pub fn summary_diff(
+        &self,
+        from: u64,
+        to: Option<u64>,
+    ) -> Result<SummaryDiff, super::SessionError> {
+        let (current, history) = self.summary_snapshot()?;
+        let to = match to {
+            Some(to) => to,
+            None => parse_summary(&current)?.ok_or(SummaryError)?.revision,
+        };
+        let mut left: Option<Summary> = None;
+        let mut right: Option<Summary> = None;
+        let mut any_summary = false;
+        for text in history.iter().chain(std::iter::once(&current)) {
+            // Invalid summaries may be saved with a warning. They do not
+            // prevent comparison of other retained revisions.
+            let Ok(Some(summary)) = parse_summary(text) else {
+                continue;
+            };
+            any_summary = true;
+            for (wanted, slot) in [(from, &mut left), (to, &mut right)] {
+                if summary.revision == wanted {
+                    if slot.as_ref().is_some_and(|previous| previous != &summary) {
+                        return Err(super::SessionError::History);
+                    }
+                    *slot = Some(summary.clone());
+                }
+            }
+        }
+        if !any_summary {
+            return Err(SummaryError.into());
+        }
+        let mut unavailable = Vec::new();
+        if left.is_none() {
+            unavailable.push(from);
+        }
+        if right.is_none() && to != from {
+            unavailable.push(to);
+        }
+        let mut result = SummaryDiff {
+            from,
+            to,
+            unavailable,
+            now: None,
+            next: None,
+            needs_you: None,
+            risk: None,
+        };
+        if let (Some(left), Some(right)) = (left, right) {
+            result.now = changed(&left.now, &right.now);
+            result.next = changed(&left.next, &right.next);
+            let old: std::collections::BTreeSet<_> = left.needs_you.iter().cloned().collect();
+            let new: std::collections::BTreeSet<_> = right.needs_you.iter().cloned().collect();
+            let added: Vec<_> = new.difference(&old).cloned().collect();
+            let removed: Vec<_> = old.difference(&new).cloned().collect();
+            if !added.is_empty() || !removed.is_empty() {
+                result.needs_you = Some(SummaryIdChanges { added, removed });
+            }
+            result.risk = changed(&left.risk, &right.risk);
+        }
+        Ok(result)
+    }
     /// Update only as the explicitly bound chair; discovery identity is checked
     /// again under the checkpoint lock before the summary is read or changed.
     pub fn update_summary(

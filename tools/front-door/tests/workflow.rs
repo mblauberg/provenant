@@ -235,12 +235,21 @@ fn chair_summary_guarded_update() -> Result {
             .contains("8192-byte")
     );
     let missing = call(&rig, &["chair", "summary", "show", "missing-chair"], 1)?;
+    assert_eq!(missing["status"], "failed");
+    assert_eq!(missing["error"]["code"], "MISSING");
     assert!(
         missing["error"]["message"]
             .as_str()
             .unwrap_or_default()
             .contains("missing-chair")
     );
+    let missing_diff = call(
+        &rig,
+        &["chair", "summary", "diff", "missing-chair", "--from", "1"],
+        1,
+    )?;
+    assert_eq!(missing_diff["status"], "failed");
+    assert_eq!(missing_diff["error"]["code"], "MISSING");
     Ok(())
 }
 

@@ -9,6 +9,8 @@ use std::os::unix::ffi::OsStrExt;
 
 mod overview;
 
+pub use overview::summary_comparison;
+
 #[derive(Debug, Subcommand)]
 pub enum Console {
     /// Summarise local attention and running work
