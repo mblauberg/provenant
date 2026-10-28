@@ -39,6 +39,36 @@ prompts.
 - Test: `crates/run/src/service_tests.rs::task_title_roundtrip`
 - Owner: `crates/run/src/service.rs`, `crates/records/src/run.rs`
 
+## Work correlation lookup
+
+`run::WorkIndex` owns immutable membership in `<host-state>/work-index.sqlite3`.
+Only the trusted host store seals its minted attempt IDs, from root dispatch,
+resume or continuation, before marking them Starting. Nested attempts are never
+sealed: their IDs originate in a lane-writable store. Trusted nested membership
+requires host-owned child enrolment, which is a separate contract.
+
+The constructor is crate-private until a trusted reader path is implemented.
+Identical captures replay; disagreements and permanent capture errors refuse
+handoff. Contention or cancellation leaves the attempt queued for retry.
+Repository identity is the verified canonical Git common directory. Head is the
+host-observed launch HEAD for readers; writer heads and unavailable Git facts
+remain explicitly unproven. Membership proves neither chair-session ownership,
+successful launch nor workflow authority.
+
+`WorkSelector` requires project and run, with optional task, attempt, repository
+and head constraints. Reads check at most 64 candidates and 64 KiB per record,
+using the same byte bound as writes. `Verified` requires a task or attempt;
+run-only reads return `Partial` because there is no trusted complete member list.
+Missing nested, historical and unprepared work returns `Unindexed`. Contradictory
+facts return `Mismatch`, ahead of unavailable repository/head facts and unindexed
+coverage. `Limit` never proves absence. Lookups traverse no child roots and accept
+no caller-supplied store locator. Configured grants cannot expose the host index,
+its companions or lock. Membership survives lane-local record removal. Index
+growth is unbounded and is not counted towards the disk floor.
+
+- Test: `crates/run/src/correlation.rs::tests`; `crates/cli/src/run/provider.rs::configured_grants_cannot_expose_host_indexes`
+- Owner: `crates/run/src/correlation.rs`, `crates/run/src/launch.rs`
+
 ## Chair associations
 
 Local CLI and MCP submissions seal a chair's host and Fabric inbox actor with

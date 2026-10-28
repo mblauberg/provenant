@@ -523,7 +523,7 @@ fn prepare_with(
         let child_state = state_root
             .join("children")
             .join(paths.attempt_id.to_string());
-        let (plan, observed_head) = match confinement_request(
+        let (plan, observed_head, repository) = match confinement_request(
             project_id,
             ConfinementRoots {
                 cwd: &cwd,
@@ -540,8 +540,17 @@ fn prepare_with(
             publishing_gh.is_some(),
         )
         .and_then(|request| match writer.as_ref() {
-            Some(_) => ConfinedPlan::new(request)
-                .map(|plan| (plan, None))
+            Some(writer) => ConfinedPlan::new(request)
+                .map(|plan| {
+                    (
+                        plan,
+                        None,
+                        provenant_records::AbsolutePath::new(
+                            writer.worktree.repo().common_git_dir(),
+                        )
+                        .ok(),
+                    )
+                })
                 .map_err(|error| error.to_string()),
             None => read_only_plan(roots, project_id, &cwd, &git, request),
         }) {
@@ -631,11 +640,11 @@ fn prepare_with(
                 continue;
             }
         };
-        if !chair_index_protected(
+        if !host_indexes_protected(
             roots.state.as_path(),
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
         ) {
-            return Err("write grants overlap the host chair index".into());
+            return Err("write grants overlap a host index".into());
         }
         if let Some(head) = &task.head {
             spec.env.push(("PROVENANT_LANE_HEAD".into(), head.into()));
@@ -724,6 +733,7 @@ fn prepare_with(
             cwd: spec.cwd,
             route: provider,
             observed_head,
+            repository,
             confinement: Some(run::LaunchConfinement {
                 plan,
                 profile: spec.profile,
@@ -1557,7 +1567,7 @@ struct ConfinementRoots<'a> {
     prompt_file: Option<&'a Path>,
 }
 
-fn chair_index_protected(
+fn host_indexes_protected(
     state: &Path,
     grants: &[provenant_confinement::permissions::WriteGrant],
 ) -> bool {
@@ -1568,38 +1578,48 @@ fn chair_index_protected(
         )
         .ok()
     };
-    ["", "-wal", "-shm", "-journal"].iter().all(|suffix| {
-        let Some(path) = resolve(&state.join("fabric").join(format!("host.sqlite3{suffix}")))
-        else {
-            return false;
-        };
-        grants.iter().all(|grant| {
-            resolve(&grant.path).is_some_and(|root| match grant.scope {
-                PathScope::Exact => root != path && !(root.is_dir() && path.starts_with(root)),
-                PathScope::Subtree => !path.starts_with(root),
+    ["fabric/host.sqlite3", run::WORK_INDEX_FILE]
+        .iter()
+        .flat_map(|file| {
+            ["", "-wal", "-shm", "-journal", ".lock"].map(|suffix| format!("{file}{suffix}"))
+        })
+        .all(|file| {
+            let Some(path) = resolve(&state.join(file)) else {
+                return false;
+            };
+            grants.iter().all(|grant| {
+                resolve(&grant.path).is_some_and(|root| match grant.scope {
+                    PathScope::Exact => root != path && !(root.is_dir() && path.starts_with(root)),
+                    PathScope::Subtree => !path.starts_with(root),
+                })
             })
         })
-    })
 }
 
 #[test]
-fn configured_grants_cannot_expose_the_chair_index() -> Result<(), Box<dyn std::error::Error>> {
+fn configured_grants_cannot_expose_host_indexes() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::permissions::WriteGrant;
     for path in [
+        "/state/work-index.sqlite3",
+        "/state/work-index.sqlite3-wal",
+        "/state/work-index.sqlite3-shm",
+        "/state/work-index.sqlite3-journal",
+        "/state/work-index.sqlite3.lock",
         "/state/fabric",
         "/state/fabric/host.sqlite3",
         "/state/fabric/host.sqlite3-wal",
         "/state/fabric/host.sqlite3-shm",
         "/state/fabric/host.sqlite3-journal",
+        "/state/fabric/host.sqlite3.lock",
     ] {
         let grant = WriteGrant {
             source: run::WriteSource::WriteRoot,
             path: path.into(),
             scope: PathScope::Subtree,
         };
-        assert!(!chair_index_protected(Path::new("/state"), &[grant]));
+        assert!(!host_indexes_protected(Path::new("/state"), &[grant]));
     }
-    assert!(chair_index_protected(Path::new("/state"), &[]));
+    assert!(host_indexes_protected(Path::new("/state"), &[]));
     let temp = tempfile::tempdir()?;
     let fabric = temp.path().join("fabric");
     std::fs::create_dir(&fabric)?;
@@ -1608,7 +1628,7 @@ fn configured_grants_cannot_expose_the_chair_index() -> Result<(), Box<dyn std::
         path: fabric,
         scope: PathScope::Exact,
     };
-    assert!(!chair_index_protected(temp.path(), &[grant]));
+    assert!(!host_indexes_protected(temp.path(), &[grant]));
     Ok(())
 }
 
@@ -1728,13 +1748,19 @@ fn host_git_home(host_root: &Path) -> Result<provenant_providers::host::HostProb
 
 /// Verify the selected repository on the host and match the persisted dispatch
 /// project before deriving any Git read authority from that binding.
+type PreparedReadPlan = (
+    ConfinedPlan,
+    Option<provenant_core::GitOid>,
+    Option<provenant_records::AbsolutePath>,
+);
+
 fn read_only_plan(
     roots: &provenant_core::Roots,
     project: ProjectId,
     cwd: &Path,
     git: &Path,
     request: PlanRequest,
-) -> Result<(ConfinedPlan, Option<provenant_core::GitOid>), String> {
+) -> Result<PreparedReadPlan, String> {
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_os::exec::SystemExecutor;
 
@@ -1793,12 +1819,18 @@ fn read_only_plan(
             .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
             .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok());
             run::read_only_plan(&roots.state, &repo, &binding, request)
-                .map(|plan| (plan, head))
+                .map(|plan| {
+                    (
+                        plan,
+                        head,
+                        provenant_records::AbsolutePath::new(repo.common_git_dir()).ok(),
+                    )
+                })
                 .map_err(|error| error.to_string())
         }
         // Non-Git workspaces have no Git metadata or repository exceptions.
         None => ConfinedPlan::new(request)
-            .map(|plan| (plan, None))
+            .map(|plan| (plan, None, None))
             .map_err(|error| error.to_string()),
     }
 }

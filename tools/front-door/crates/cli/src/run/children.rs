@@ -632,6 +632,7 @@ mod tests {
                     route: run::RouteRecord::default(),
                     skipped_routes: vec![],
                     observed_head: None,
+                    repository: None,
                     confinement: None,
                 })
             }
