@@ -755,6 +755,17 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json and
                   "minimum": 1,
                   "type": "integer"
                 },
+                "title": {
+                  "anyOf": [
+                    {
+                      "maxLength": 256,
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "worktree": {
                   "anyOf": [
                     {

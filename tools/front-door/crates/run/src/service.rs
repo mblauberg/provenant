@@ -73,6 +73,13 @@ impl<'a> Service<'a> {
         for mut task in input.tasks {
             task.route = Self::route(task.route)?;
             Self::scan(&task.prompt)?;
+            if task
+                .title
+                .as_ref()
+                .is_some_and(|title| title.is_empty() || title.len() > 256 || title.contains('\0'))
+            {
+                return Err(input_error(ErrorKind::Invalid, "invalid task title"));
+            }
             // A lane's child launches outside the lane's sandbox, so it may not
             // name access its parent never had.
             if input.parent_attempt.is_some() && !task.access.is_default() {
@@ -156,6 +163,7 @@ impl<'a> Service<'a> {
             .map_err(|error| input_error(ErrorKind::Io, error.to_string()))?;
 
             requests.push(TaskRequest {
+                title: task.title,
                 profile: task.profile,
                 task_id: task.task_id,
                 prompt_digest: CanonicalV1::file_digest(task.prompt.as_bytes()),
@@ -433,6 +441,7 @@ impl From<&RunError> for ErrorKind {
 
 /// Prepared transport-independent dispatch input.
 pub struct DispatchTask {
+    pub title: Option<String>,
     pub task_id: provenant_core::TaskId,
     pub prompt: String,
     pub base: Option<String>,

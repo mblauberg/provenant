@@ -915,6 +915,7 @@ fn persisted_attempt(
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                title: None,
                 base: None,
                 base_ref: None,
                 profile: HarnessProfile::default(),

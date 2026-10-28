@@ -28,6 +28,8 @@ pub struct SubmittedTask {
     pub worktree: Option<String>,
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
     pub route: provenant_records::run::RequestedRoute,
     pub timeout_seconds: u64,

@@ -296,6 +296,9 @@ pub struct Dispatch {
     /// Caller-chosen ID that makes retries idempotent
     #[arg(long, default_value = "", value_parser = operation_id, hide = true, hide_default_value = true)]
     pub operation_id: OperationId,
+    /// Short human title for this task
+    #[arg(long, conflicts_with = "manifest")]
+    pub title: Option<String>,
     /// Fabric task this lane serves
     #[arg(long)]
     pub task_id: Option<TaskId>,

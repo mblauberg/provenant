@@ -382,6 +382,7 @@ impl ValidateInput for SubmitInput {
                         WaitTransport::Mcp => MAX_TEXT_BYTES,
                     };
                     bounded_text(&task.prompt, &format!("{path}.prompt"), prompt_limit)?;
+                    optional_text(task.title.as_deref(), &format!("{path}.title"), 256)?;
                     optional_text(
                         task.base.as_deref(),
                         &format!("{path}.base"),
