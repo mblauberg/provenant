@@ -5,10 +5,10 @@ Owner: `crates/workflow` (coverage, receipts, sessions, chair logs, writing),
 Anchor: `crates/workflow/src/coverage.rs`, `crates/workflow/src/store/tests.rs`,
 `crates/workflow/src/session.rs`, `crates/workflow/src/log.rs`, `tests/workflow.rs`
 
-Workflow is a small synchronous policy library: a pure review coverage check,
-a minimal delivery receipt, bounded session checkpoints and a writing
-matcher that runs on JSON rules, with no SQLite, process runner or MCP tool. Pull requests carry their own
-evidence. This spec grants no merge,
+Workflow is a small synchronous library: a pure review coverage check,
+a minimal delivery receipt, bounded session checkpoints, a SQLite-backed chair
+log and a writing matcher that runs on JSON rules, with no process runner or MCP
+tool. Pull requests carry their own evidence. This spec grants no merge,
 install or release authority. Paths are relative to `tools/front-door/`.
 
 ## Review coverage

@@ -60,7 +60,8 @@ const LAYERS: &[(&str, &[&str])] = &[
         &["core", "records", "config", "os", "fabric-store"],
     ),
     ("fabric-mcp", &["core", "records", "fabric-runtime"]),
-    ("workflow", &["core", "records", "os"]),
+    // Chair logs use the lower-level SQLite helper for their durable receipt store.
+    ("workflow", &["core", "records", "os", "sqlite"]),
     (
         "cli",
         &[
