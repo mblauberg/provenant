@@ -80,15 +80,18 @@ enum QuotaMenu {
         entries(report: model.report, error: model.error, updatedAt: model.updatedAt,
                 refreshing: model.isRefreshing || model.report?.isRefreshing(now: now) == true,
                 lanes: [], stateRoot: model.stateRoot, now: now, overview: model.overview,
-                overviewError: model.overviewError, overviewUpdatedAt: model.overviewUpdatedAt)
+                overviewError: model.overviewError, overviewUpdatedAt: model.overviewUpdatedAt,
+                observationError: model.overviewObservationError)
     }
 
     static func entries(report: QuotaReport?, error: String?, updatedAt: Date?, refreshing: Bool,
                         lanes: [AttentionLane], stateRoot: URL, now: Date, overview: ConsoleOverview? = nil,
-                        overviewError: String? = nil, overviewUpdatedAt: Date? = nil) -> [MenuEntry] {
+                        overviewError: String? = nil, overviewUpdatedAt: Date? = nil,
+                        observationError: String? = nil) -> [MenuEntry] {
         let freshness = refreshing ? "Refreshing…" : updatedAt.map { "Updated \(Fmt.ago($0, now: now))" }
         var entries: [MenuEntry] = [.title(title, freshness)]
-        entries += overviewEntries(overview, error: overviewError, updatedAt: overviewUpdatedAt, now: now)
+        entries += overviewEntries(overview, error: overviewError, updatedAt: overviewUpdatedAt, now: now,
+                                   observationError: observationError)
         entries += notices(report: report, error: error)
         if let report, !report.accounts.isEmpty {
             let listed = report.listed(now: now)
@@ -120,7 +123,8 @@ enum QuotaMenu {
         return entries
     }
 
-    static func overviewEntries(_ overview: ConsoleOverview?, error: String?, updatedAt: Date?, now: Date) -> [MenuEntry] {
+    static func overviewEntries(_ overview: ConsoleOverview?, error: String?, updatedAt: Date?, now: Date,
+                                observationError: String? = nil) -> [MenuEntry] {
         var entries: [MenuEntry] = []
         if let overview {
             let count: String
@@ -161,6 +165,11 @@ enum QuotaMenu {
             let age = updatedAt.map { " · last updated \(Fmt.ago($0, now: now))" } ?? ""
             entries += [.separator, .item(MenuItemSpec(title: "Overview unavailable", subtitle: "Couldn’t refresh\(age)",
                                                         icon: .mark("exclamationmark", .orange), enabled: false))]
+        }
+        if let observationError {
+            entries += [.separator, .item(MenuItemSpec(title: "Overview observation limited", subtitle: clip(observationError),
+                                                        icon: .mark("exclamationmark", .orange), enabled: false,
+                                                        help: observationError))]
         }
         return entries
     }

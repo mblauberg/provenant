@@ -29,10 +29,26 @@ final class QuotaModel {
     private(set) var lanes: [Lane] = []
     private(set) var overview: ConsoleOverview?
     private(set) var overviewError: String?
+    private(set) var overviewObservationError: String?
     private(set) var overviewUpdatedAt: Date?
     @ObservationIgnored private var overviewGate = OverviewReadGate()
     @ObservationIgnored private var lanesReadAt: Date?
     @ObservationIgnored private var overviewWatcher: OverviewWatcher?
+    private(set) var observedRoot: URL?
+    @ObservationIgnored private var overviewRerunScheduled = false
+    @ObservationIgnored private var stopped = false
+    typealias OverviewResult = (CLI.Launcher?, Result<ConsoleOverview, CLI.Failure>)
+    typealias OverviewReader = (CLI.Launcher?, @escaping (OverviewResult) -> Void) -> Void
+    @ObservationIgnored private var overviewReader: OverviewReader = { cached, completion in
+        Task { @MainActor in
+            let result = await Task.detached(priority: .background) { CLI.overview(cached) }.value
+            completion(result)
+        }
+    }
+    @ObservationIgnored private var scheduleOverview: (@escaping () -> Void) -> Void = { work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250), execute: DispatchWorkItem(block: work))
+    }
+    @ObservationIgnored private var overviewNow: () -> Date = { .now }
     /// The status item's content, replaced only when it changes.
     private(set) var label = MenuLabel()
     @ObservationIgnored private var timer: Timer?
@@ -54,6 +70,14 @@ final class QuotaModel {
         label = MenuLabel(report: report, failed: false, now: updatedAt)
     }
 
+    /// A controlled reader and scheduler exercise the same refresh path without a CLI or timers.
+    init(overviewReader: @escaping OverviewReader, schedule: @escaping (@escaping () -> Void) -> Void,
+         now: @escaping () -> Date = { .now }) {
+        self.overviewReader = overviewReader
+        self.scheduleOverview = schedule
+        self.overviewNow = now
+    }
+
     init() {
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
@@ -72,30 +96,58 @@ final class QuotaModel {
             MainActor.assumeIsolated { self?.online = path.status == .satisfied; self?.tickOnceOnline() }
         }
         network.start(queue: .main)
-        overviewWatcher = OverviewWatcher(root: stateRoot) { [weak self] in
-            MainActor.assumeIsolated { self?.refreshLanes(force: true) }
-        }
+        observeOverviewRoot()
         refreshLanes(force: true)
         loadCurrent()
     }
 
     /// One read at a time; an invalidation during the read always gets a follow-up.
-    private func refreshLanes(force: Bool = false) {
-        guard !fixture else { return }
-        if !force, !overviewGate.reading, let at = lanesReadAt, Date.now.timeIntervalSince(at) < 10 { return }
+    func refreshLanes(force: Bool = false) {
+        guard !fixture, !stopped, !overviewRerunScheduled else { return }
+        if !force, !overviewGate.reading, let at = lanesReadAt, overviewNow().timeIntervalSince(at) < 10 { return }
         guard overviewGate.begin(force: force) else { return }
-        lanesReadAt = .now
+        lanesReadAt = overviewNow()
         let cached = launcher
-        Task {
-            let (resolved, outcome) = await Task.detached(priority: .background) { CLI.overview(cached) }.value
-            let rerun = overviewGate.finish()
-            launcher = launcher ?? resolved
+        overviewReader(cached) { [weak self] result in
+            guard let self, !self.stopped else { return }
+            let (resolved, outcome) = result
+            let rerun = self.overviewGate.finish()
+            self.launcher = self.launcher ?? resolved
             switch outcome {
-            case .success(let found): overview = found; overviewError = nil; overviewUpdatedAt = .now
-            case .failure(let failure): overviewError = failure.message; log.error("\(failure.message, privacy: .public)")
+            case .success(let found): self.overview = found; self.overviewError = nil; self.overviewUpdatedAt = self.overviewNow()
+            case .failure(let failure): self.overviewError = failure.message; log.error("\(failure.message, privacy: .public)")
             }
-            if rerun { refreshLanes(force: true) }
+            if rerun {
+                self.overviewRerunScheduled = true
+                self.scheduleOverview { [weak self] in
+                    guard let self, !self.stopped else { return }
+                    self.overviewRerunScheduled = false
+                    self.refreshLanes(force: true)
+                }
+            }
         }
+    }
+
+    func observeOverviewRoot() {
+        guard !fixture, !stopped else { return }
+        let root = stateRoot.standardized
+        guard root != observedRoot else { return }
+        overviewWatcher?.stop()
+        overviewObservationError = nil
+        observedRoot = root
+        overviewWatcher = OverviewWatcher(root: root, coverageChanged: { [weak self] error in
+            self?.overviewObservationError = error
+        }) { [weak self] in self?.refreshLanes(force: true) }
+    }
+
+    func stop() {
+        guard !stopped else { return }
+        stopped = true
+        overviewWatcher?.stop(); overviewWatcher = nil
+        watcher?.stop(); watcher = nil
+        timer?.invalidate(); clock?.invalidate()
+        network.cancel()
+        if powerToken != 0 { notify_cancel(powerToken); powerToken = 0 }
     }
 
     var stateRoot: URL { LaneBoard.stateRoot(report: report) }
@@ -141,6 +193,7 @@ final class QuotaModel {
             let (resolved, outcome) = await Task.detached(priority: .utility) {
                 CLI.quota(cached, ["quota", "show", "--json"])
             }.value
+            guard !stopped else { return }
             launcher = resolved
             isRefreshing = false
             switch outcome {
@@ -164,6 +217,7 @@ final class QuotaModel {
         let cached = launcher
         Task {
             let (resolved, failure) = await Task.detached(priority: .userInitiated) { CLI.command(cached, arguments) }.value
+            guard !stopped else { return }
             launcher = resolved ?? launcher
             if let failure {
                 error = failure.message
@@ -173,6 +227,7 @@ final class QuotaModel {
             let (found, outcome) = await Task.detached(priority: .userInitiated) {
                 CLI.quota(resolved ?? cached, ["quota", "show", "--json"])
             }.value
+            guard !stopped else { return }
             launcher = found ?? launcher
             switch outcome {
             case .report(let report): show(report)
@@ -182,7 +237,7 @@ final class QuotaModel {
     }
 
     private func run(_ trigger: Trigger) {
-        guard !fixture else { return }
+        guard !fixture, !stopped else { return }
         guard !isRefreshing else {
             pending = trigger.queued(after: pending)
             return
@@ -195,6 +250,7 @@ final class QuotaModel {
             let (resolved, outcome) = await Task.detached(priority: .utility) {
                 CLI.quota(cached, arguments)
             }.value
+            guard !stopped else { return }
             launcher = resolved
             isRefreshing = false
             switch outcome {
@@ -211,9 +267,12 @@ final class QuotaModel {
     }
 
     /// Runs and the watcher both deliver reports, in either order; an older one never replaces a newer.
-    private func show(_ incoming: QuotaReport) {
+    func show(_ incoming: QuotaReport) {
+        let oldRoot = observedRoot
         let report = self.report.flatMap { shown in incoming.generatedAt < shown.generatedAt ? shown : nil } ?? incoming
         (self.report, error, updatedAt) = (report, nil, .now)
+        observeOverviewRoot()
+        if oldRoot != nil, oldRoot != observedRoot { refreshLanes(force: true) }
         relabel()
         schedule(report.nextDueAt)
     }
@@ -259,12 +318,13 @@ final class QuotaModel {
 
 /// Follows `<state dir>/report.json`. The CLI replaces it by atomic rename, which shows as a write on the
 /// directory, so the source watches the directory and re-arms when the directory itself is removed or moved.
-final class ReportWatcher {
+@MainActor final class ReportWatcher {
     private let file: URL, changed: (Data) -> Void
     private var source: DispatchSourceFileSystemObject?
     private var parent: DispatchSourceFileSystemObject?
     private var parentPath: String?
     private var seen: [Int]?
+    private var stopped = false
 
     init(file: URL, changed: @escaping (Data) -> Void) {
         (self.file, self.changed) = (file, changed)
@@ -274,7 +334,10 @@ final class ReportWatcher {
 
     deinit { source?.cancel(); parent?.cancel() }
 
+    func stop() { stopped = true; source?.cancel(); source = nil; parent?.cancel(); parent = nil }
+
     private func watchParent() {
+        guard !stopped else { return }
         var ancestor = file.deletingLastPathComponent().deletingLastPathComponent()
         while !FileManager.default.fileExists(atPath: ancestor.path), ancestor.path != "/" {
             ancestor.deleteLastPathComponent()
@@ -301,6 +364,7 @@ final class ReportWatcher {
 
     /// Opens the report directory; it may not exist until the first tick creates it.
     func arm() {
+        guard !stopped else { return }
         if parent == nil { watchParent() }
         guard source == nil else { return }
         let fd = open(file.deletingLastPathComponent().path, O_EVTONLY)

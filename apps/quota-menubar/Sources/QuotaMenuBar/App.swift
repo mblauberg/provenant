@@ -18,7 +18,13 @@ enum Main {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menu: StatusMenu?
-    func applicationDidFinishLaunching(_: Notification) { menu = StatusMenu(model: QuotaModel()) }
+    private var model: QuotaModel?
+    func applicationDidFinishLaunching(_: Notification) {
+        let model = QuotaModel()
+        self.model = model
+        menu = StatusMenu(model: model)
+    }
+    func applicationWillTerminate(_: Notification) { model?.stop() }
 }
 
 /// The Provenant mark as a template image, so it follows the menu bar's appearance and tint.

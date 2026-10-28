@@ -47,6 +47,18 @@ A successful lane clears an authentication error for its account and publishes t
 
 The CLI command response is a versioned envelope containing the report. The watched file contains the raw report. The state root is `$PROVENANT_STATE_DIR`, defaulting to `~/.local/share/provenant/v1`; quota state and `report.json` live in its `quota` directory.
 
+## Observation benchmark
+
+The slice's hook timing fixture lives in `Fixtures/bench` alongside the menu observation work. From the repository root, run it against a release CLI with an absolute path:
+
+```bash
+python3 apps/quota-menubar/Fixtures/bench/hook.py /absolute/path/to/provenant --samples 100
+```
+
+The default creates an empty temporary state root and measures an unregistered-session lookup, not answer delivery. To measure delivery, supply `--state-dir /absolute/path/to/disposable-state --cwd /absolute/path/to/project --session SESSION` for a registered chair with an answer available to the hook. The hook records offers in that state, so never use a production state root. Every session sample must contain a non-empty answer-offer page or the fixture refuses to report delivery timings. The results include total child CPU and the child lifetime maximum RSS, not per-invocation peaks. These timings alone do not measure menu memory, idle CPU, change latency, provider probes or SSH.
+
+Run the fixture's deterministic checks with `python3 -m unittest discover -s apps/quota-menubar/Fixtures/bench -p 'test_*.py'`.
+
 ## Render the menu
 
 `--render` draws the menu's content from a saved raw report into a PNG without running the CLI. AppKit draws a real menu only while it is open, so the PNG is a preview at macOS 26 menu metrics. It uses the same entries, attributed titles, icons and information views as the menu, and imitates only the native items' frame and the menu's glass background. `--expand <account id>` shows that account's submenu beside its highlighted row, and `--lanes` adds a saved `provenant lanes --json` page. The clock defaults to `generated_unix_seconds`; `--now` selects another instant. Rendering uses 2x scale unless `--scale` sets another factor.

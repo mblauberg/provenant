@@ -1,7 +1,30 @@
 import XCTest
 @testable import QuotaMenuBar
 
-final class ObservationTests: XCTestCase {
+@MainActor final class ObservationTests: XCTestCase {
+    @MainActor private final class Scheduler {
+        final class Job {
+            let at: TimeInterval, action: @MainActor () -> Void
+            var cancelled = false
+            init(at: TimeInterval, action: @escaping @MainActor () -> Void) { self.at = at; self.action = action }
+        }
+        var now: TimeInterval = 0
+        var jobs: [Job] = []
+        func schedule(_ delay: TimeInterval, _ action: @escaping @MainActor () -> Void) -> () -> Void {
+            let job = Job(at: now + delay, action: action)
+            jobs.append(job)
+            return { job.cancelled = true }
+        }
+        func advance(to time: TimeInterval) {
+            while let job = jobs.filter({ !$0.cancelled && $0.at <= time }).min(by: { $0.at < $1.at }) {
+                job.cancelled = true
+                now = job.at
+                job.action()
+            }
+            now = time
+        }
+    }
+
     func testSingleFlightRerunsOnce() {
         var gate = OverviewReadGate()
         XCTAssertTrue(gate.begin(force: true))
@@ -56,19 +79,56 @@ final class ObservationTests: XCTestCase {
         watcher.stop()
     }
 
-    func testCoalescesBurst() throws {
+    func testCoalescesSustainedChangesWithoutPostponingDelivery() {
+        let scheduler = Scheduler()
+        var count = 0
+        let coalescer = ObservationCoalescer(schedule: scheduler.schedule) { count += 1 }
+        coalescer.invalidate()
+        scheduler.advance(to: 0.1)
+        coalescer.invalidate()
+        scheduler.advance(to: 0.2)
+        coalescer.invalidate()
+        XCTAssertEqual(count, 0)
+        scheduler.advance(to: 0.25)
+        XCTAssertEqual(count, 1)
+        coalescer.invalidate()
+        scheduler.advance(to: 0.5)
+        XCTAssertEqual(count, 2)
+        coalescer.invalidate()
+        coalescer.stop()
+        scheduler.advance(to: 1)
+        XCTAssertEqual(count, 2)
+    }
+
+    func testWatchCapFallsBackToMetadataAndReportsShortfall() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        let project = root.appending(path: "projects/a")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scheduler = Scheduler()
+        var coverage: String?, count = 0
+        let watcher = OverviewWatcher(root: root, coverageChanged: { coverage = $0 }, projectWatchLimit: 0,
+                                      schedule: scheduler.schedule) { count += 1 }
+        XCTAssertNotNil(coverage)
+        try Data("project".utf8).write(to: project.appending(path: "project.json"))
+        watcher.rebuild(notify: true) // the same pass used by the once-per-minute timer
+        scheduler.advance(to: 0.25)
+        XCTAssertEqual(count, 1)
+        watcher.stop()
+    }
+
+    func testOpenFailureReportsShortfallAndRecovery() throws {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        var count = 0
-        let watcher = OverviewWatcher(root: root) { count += 1 }
-        let db = root.appending(path: "run.sqlite3")
-        try Data("one".utf8).write(to: db)
-        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-        try Data("two".utf8).write(to: db)
-        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-        XCTAssertEqual(count, 0)
-        waitUntil { count == 1 }
+        var fail = true, coverage: String?
+        let watcher = OverviewWatcher(root: root, coverageChanged: { coverage = $0 }, opener: { path in
+            fail ? -1 : open(path, O_EVTONLY)
+        }) {}
+        XCTAssertNotNil(coverage)
+        fail = false
+        watcher.rebuild(notify: true)
+        XCTAssertNil(coverage)
         watcher.stop()
     }
 

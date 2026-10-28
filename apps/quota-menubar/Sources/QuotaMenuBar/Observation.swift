@@ -1,13 +1,44 @@
 import Foundation
 
+/// One scheduled callback per window, measured from its first event. Later events cannot postpone it.
+@MainActor final class ObservationCoalescer {
+    typealias Scheduler = @MainActor (TimeInterval, @escaping @MainActor () -> Void) -> () -> Void
+    private let schedule: Scheduler, changed: () -> Void
+    private var cancel: (() -> Void)?
+
+    init(schedule: @escaping Scheduler = ObservationCoalescer.mainSchedule, changed: @escaping () -> Void) {
+        self.schedule = schedule
+        self.changed = changed
+    }
+
+    static func mainSchedule(_ delay: TimeInterval, _ action: @escaping @MainActor () -> Void) -> () -> Void {
+        let work = DispatchWorkItem { MainActor.assumeIsolated { action() } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        return { work.cancel() }
+    }
+
+    func invalidate() {
+        guard cancel == nil else { return }
+        cancel = schedule(0.25) { [weak self] in
+            guard let self else { return }
+            self.cancel = nil
+            self.changed()
+        }
+    }
+
+    func stop() { cancel?(); cancel = nil }
+}
+
 /// Filesystem metadata is an invalidation hint; the CLI remains the owner of the data.
-final class OverviewWatcher {
-    private let root: URL, changed: () -> Void
+@MainActor final class OverviewWatcher {
+    private let root: URL
+    private let coverageChanged: (String?) -> Void, opener: (String) -> Int32, projectWatchLimit: Int
     private var sources: [String: DispatchSourceFileSystemObject] = [:]
     private var stamps: [String: Stamp] = [:]
-    private var debounce: DispatchWorkItem?
+    private var coalescer: ObservationCoalescer?
     private var retry: Timer?
     private var stopped = false
+    private var coverage: String?
 
     private struct Stamp: Equatable {
         let inode: UInt64, size: Int64, seconds: Int, nanos: Int
@@ -19,38 +50,48 @@ final class OverviewWatcher {
         }
     }
 
-    init(root: URL, changed: @escaping () -> Void) {
-        self.root = root.standardizedFileURL
-        self.changed = changed
+    init(root: URL, coverageChanged: @escaping (String?) -> Void = { _ in },
+         projectWatchLimit: Int = 64, opener: @escaping (String) -> Int32 = { open($0, O_EVTONLY) },
+         schedule: @escaping ObservationCoalescer.Scheduler = ObservationCoalescer.mainSchedule,
+         changed: @escaping () -> Void) {
+        self.root = root.standardized
+        self.coverageChanged = coverageChanged
+        self.opener = opener
+        self.projectWatchLimit = max(0, projectWatchLimit)
+        coalescer = ObservationCoalescer(schedule: schedule, changed: changed)
         rebuild(notify: false)
         // One bounded recovery attempt per minute for missing directories or unavailable descriptors.
-        let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in self?.rebuild(notify: true) }
+        let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.rebuild(notify: true) }
+        }
         timer.tolerance = 5
         retry = timer
         RunLoop.main.add(timer, forMode: .common)
     }
 
-    deinit { stop() }
+    deinit {
+        retry?.invalidate()
+        sources.values.forEach { $0.cancel() }
+    }
 
     func stop() {
         guard !stopped else { return }
         stopped = true
         retry?.invalidate(); retry = nil
-        debounce?.cancel(); debounce = nil
+        coalescer?.stop(); coalescer = nil
         sources.values.forEach { $0.cancel() }
         sources.removeAll()
     }
 
-    private var files: [String] {
+    func rebuild(notify: Bool) {
+        guard !stopped else { return }
         let databases = [root.appending(path: "run.sqlite3").path, root.appending(path: "fabric/host.sqlite3").path,
                          root.appending(path: "fabric/fabric.sqlite3").path].flatMap { [$0, $0 + "-wal"] }
         let projects = root.appending(path: "projects")
-        let entries = (try? FileManager.default.contentsOfDirectory(at: projects, includingPropertiesForKeys: nil)) ?? []
-        return databases + entries.map { $0.appending(path: "project.json").path }
-    }
-
-    private func rebuild(notify: Bool) {
-        guard !stopped else { return }
+        let projectDirs = ((try? FileManager.default.contentsOfDirectory(at: projects, includingPropertiesForKeys: nil)) ?? [])
+            .sorted { $0.path < $1.path }
+        // Stat every project, even those beyond the watch cap, so the minute fallback can recover missed changes.
+        let files = databases + projectDirs.map { $0.appending(path: "project.json").path }
         let now = Dictionary(uniqueKeysWithValues: files.compactMap { path in Stamp(path).map { (path, $0) } })
         let modified = now != stamps
         for path in Set(stamps.keys).union(now.keys) where stamps[path]?.inode != now[path]?.inode {
@@ -58,10 +99,8 @@ final class OverviewWatcher {
         }
         stamps = now
         // An existing ancestor observes creation of a missing root or fabric directory.
-        var wanted = Set(files.filter { now[$0] != nil })
-        let projects = root.appending(path: "projects")
-        let projectDirs = (try? FileManager.default.contentsOfDirectory(at: projects, includingPropertiesForKeys: nil)) ?? []
-        for directory in [root, root.appending(path: "fabric"), projects] + projectDirs {
+        var wanted = Set(databases.filter { now[$0] != nil })
+        for directory in [root, root.appending(path: "fabric"), projects] + Array(projectDirs.prefix(projectWatchLimit)) {
             var ancestor = directory
             while !FileManager.default.fileExists(atPath: ancestor.path), ancestor.path != "/" {
                 ancestor.deleteLastPathComponent()
@@ -71,33 +110,30 @@ final class OverviewWatcher {
         for path in Array(sources.keys) where !wanted.contains(path) {
             sources.removeValue(forKey: path)?.cancel()
         }
-        for path in wanted where sources[path] == nil {
-            let fd = open(path, O_EVTONLY)
-            guard fd >= 0 else { continue }
+        var shortfall = projectDirs.count > projectWatchLimit
+        for path in wanted.sorted() where sources[path] == nil {
+            let fd = opener(path)
+            guard fd >= 0 else { shortfall = true; continue }
             let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .delete, .rename, .extend], queue: .main)
             source.setEventHandler { [weak self, weak source] in
-                guard let self, let source else { return }
-                if !source.data.isDisjoint(with: [.delete, .rename]) {
-                    self.sources.removeValue(forKey: path)?.cancel()
+                MainActor.assumeIsolated {
+                    guard let self, let source else { return }
+                    if !source.data.isDisjoint(with: [.delete, .rename]) {
+                        self.sources.removeValue(forKey: path)?.cancel()
+                    }
+                    self.rebuild(notify: true)
                 }
-                self.rebuild(notify: true)
             }
             source.setCancelHandler { close(fd) }
             sources[path] = source
             source.resume()
         }
-        if notify && modified { invalidate() }
-    }
-
-    private func invalidate() {
-        debounce?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, !self.stopped else { return }
-            self.debounce = nil
-            self.changed()
+        let newCoverage = shortfall ? "Some changes are checked only once a minute" : nil
+        if newCoverage != coverage {
+            coverage = newCoverage
+            coverageChanged(newCoverage)
         }
-        debounce = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250), execute: work)
+        if notify && modified { coalescer?.invalidate() }
     }
 }
 
