@@ -2265,7 +2265,7 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `attempt` | `{"name": "attempt", "positional": true, "required": true}` |
 | `--host` | `{"name": "host"}` |
-| `--part` | `{"defaults": ["result"], "name": "part", "values": ["result", "prompt", "stderr", "events", "transcript"]}` |
+| `--part` | `{"defaults": ["result"], "name": "part", "values": ["result", "prompt", "stderr", "events", "receipt", "transcript"]}` |
 | `--offset` | `{"conflicts": ["tail"], "defaults": ["0"], "name": "offset"}` |
 | `--tail` | `{"name": "tail"}` |
 | `--max-bytes` | `{"bounds": [1, 65536], "defaults": ["65536"], "name": "max_bytes"}` |
