@@ -14,7 +14,14 @@ use support::{Result, TestRig, code};
 fn fixture() -> Result {
     let args: Vec<_> = std::env::args().collect();
     if args.get(1).is_some_and(|v| v == "--version") {
-        writeln!(io::stdout(), "codex-cli 0.159.0")?;
+        let version = if std::path::Path::new(&args[0]).file_name()
+            == Some(std::ffi::OsStr::new("opencode"))
+        {
+            "opencode v2.2.0"
+        } else {
+            "codex-cli 0.159.0"
+        };
+        writeln!(io::stdout(), "{version}")?;
         return Ok(());
     }
     if args.get(1).is_some_and(|v| v == "auth") {
@@ -23,6 +30,18 @@ fn fixture() -> Result {
             "{}",
             json!({"loggedIn":true,"email":"fixture@example.test"})
         )?;
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|v| v == "run") {
+        let mut prompt = String::new();
+        io::stdin().read_to_string(&mut prompt)?;
+        io::stdout().write_all(if prompt.contains("free limit") {
+            include_bytes!("fixtures/providers/opencode/v2.2.0-free-limit.jsonl")
+        } else if prompt.contains("model unavailable") {
+            include_bytes!("fixtures/providers/opencode/model-unavailable.jsonl")
+        } else {
+            include_bytes!("fixtures/providers/opencode/v2.2.0-success.jsonl")
+        })?;
         return Ok(());
     }
     if args.get(1).is_some_and(|v| v == "-p") {
@@ -93,6 +112,101 @@ fn fixture() -> Result {
     }
     Ok(())
 }
+fn opencode_dispatch_observes_v2_wal_session() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    for custom_data_home in [false, true] {
+        let mut rig = TestRig::new()?;
+        let cleanup = rig.process_cleanup();
+        let data_home = if custom_data_home {
+            let path = rig.root.join("custom-data");
+            rig.env
+                .push(("XDG_DATA_HOME".into(), path.clone().into_os_string()));
+            path
+        } else {
+            rig.home.join(".local/share")
+        };
+        let data = data_home.join("opencode");
+        fs::create_dir_all(&data)?;
+        let db = rusqlite::Connection::open(data.join("opencode.db"))?;
+        // Keep the writer open and disable checkpoints: the assistant row is
+        // committed in the WAL when the guardian's read-only connection opens.
+        db.execute_batch(
+            r#"PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+            CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT);
+            INSERT INTO session_message VALUES ('ses_x', 'assistant',
+            '{"model":{"providerID":"opencode-go","id":"beam-free"},"finish":"stop"}');"#,
+        )?;
+        assert!(fs::metadata(data.join("opencode.db-wal"))?.len() > 0);
+        let bin = rig.root.join("provider/bin");
+        fs::create_dir_all(&bin)?;
+        rig.copy_executable(&std::env::current_exe()?, &bin.join("opencode"))?;
+        rig.env.retain(|(key, _)| key != "PATH");
+        rig.env.push((
+            "PATH".into(),
+            format!("{}:/usr/bin:/bin", bin.display()).into(),
+        ));
+        let prompt = rig.root.join("prompt.md");
+        for (operation, text, expected) in [
+            ("opencode-success", "reply OK", "succeeded"),
+            (
+                "opencode-unavailable",
+                "model unavailable",
+                "model_unavailable",
+            ),
+            ("opencode-limit", "free limit", "quota_limited"),
+        ] {
+            fs::write(&prompt, text)?;
+            let model = if expected == "model_unavailable" {
+                "opencode/opencode/misspelt-free"
+            } else {
+                "opencode/opencode-go/beam-free"
+            };
+            let out = rig.command(&[
+                "dispatch",
+                "--model",
+                model,
+                "--operation-id",
+                operation,
+                "--prompt-file",
+                prompt.to_str().ok_or("prompt")?,
+                "--wait",
+                "5s",
+                "--json",
+            ])?;
+            assert_eq!(code(&out), 0, "{out:?}");
+            let dispatched: Value = serde_json::from_slice(&out.stdout.bytes)?;
+            let run = dispatched["data"]["run_id"].as_str().ok_or("run")?;
+            let lanes = rig.command(&["lanes", "--id", run, "--json"])?;
+            assert_eq!(code(&lanes), 0, "{lanes:?}");
+            let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+            let lane = &lanes["data"]["lanes"][0];
+            assert_eq!(lane["state"], expected, "{lane}");
+            if expected == "succeeded" {
+                assert_eq!(lane["transcript"]["session"], "ses_x");
+                assert_eq!(
+                    lane["observed_route"]["model"],
+                    "opencode/opencode-go/beam-free"
+                );
+                assert_eq!(lane["observed_route"]["source"], "opencode_session");
+            } else if expected == "quota_limited" {
+                assert!(
+                    lane["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.starts_with("Free usage limit reached.")),
+                    "{lane}"
+                );
+            } else {
+                assert_eq!(lane["reason"], "Model unavailable: opencode/misspelt-free");
+            }
+        }
+        rig.assert_legacy_unchanged()?;
+        cleanup.disarm();
+    }
+    Ok(())
+}
+
 fn codex_dispatch_observes_rollout() -> Result {
     for (index, prompt) in ["reply OK", "missing", "mismatch"].iter().enumerate() {
         let mut rig = TestRig::new()?;
@@ -1500,7 +1614,7 @@ fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let result = if args
         .first()
-        .is_some_and(|s| s == "exec" || s == "--version" || s == "auth" || s == "-p")
+        .is_some_and(|s| s == "exec" || s == "run" || s == "--version" || s == "auth" || s == "-p")
     {
         fixture()
     } else {
@@ -1510,6 +1624,7 @@ fn main() -> ExitCode {
                 "owned_dispatch_retains_failed_attempt_and_replays",
                 "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation",
                 "codex_dispatch_observes_rollout",
+                "opencode_dispatch_observes_v2_wal_session",
                 "opus_writer_dispatch_advises_a_cheaper_route",
                 "claude_dispatch_refreshes_registered_account",
                 "graph_settlement_advances_writer_and_account_routed_review",
@@ -1529,6 +1644,9 @@ fn main() -> ExitCode {
                         owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation()
                     }
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
+                    "opencode_dispatch_observes_v2_wal_session" => {
+                        opencode_dispatch_observes_v2_wal_session()
+                    }
                     "opus_writer_dispatch_advises_a_cheaper_route" => {
                         opus_writer_dispatch_advises_a_cheaper_route()
                     }

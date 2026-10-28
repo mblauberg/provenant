@@ -509,7 +509,7 @@ impl LaneState {
 #[derive(Debug, Clone, Args)]
 pub struct Lanes {
     /// Show this attempt ID or RUN[/TASK[/ATTEMPT]] (repeatable)
-    #[arg(long, conflicts_with = "all")]
+    #[arg(long)]
     pub id: Vec<Target>,
     /// List, wait on or watch a configured peer's own lanes, by label or host ID
     #[arg(long, conflicts_with_all = ["id", "cursor"])]
@@ -968,6 +968,8 @@ fn duration_seconds(value: &str) -> Result<u64, &'static str> {
 }
 #[derive(Debug, Args)]
 pub struct Status {
+    /// Show this run, task or attempt ID, including settled lanes
+    pub id: Option<Target>,
     /// Maximum full records per page
     #[arg(long, hide = true, default_value = "50", value_parser = clap::value_parser!(u64).range(1..=100))]
     pub limit: u64,

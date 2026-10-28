@@ -1,0 +1,1 @@
+{"type":"error","sessionID":"ses_x","timestamp":0,"error":{"type":"provider.free-limit","message":"Free usage limit reached. Try again later.","status":429,"response":{"body":"Free usage limit reached. Try again later."}}}

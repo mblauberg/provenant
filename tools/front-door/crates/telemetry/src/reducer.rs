@@ -144,7 +144,9 @@ impl Money {
 pub struct CostTotal {
     /// API-equivalent estimate, not a bill. Absent when any cost is unknown.
     pub complete: Option<Money>,
-    pub known_lower_bound: Money,
+    /// Absent when no attempt is priced and no partial cost is known.
+    pub known_lower_bound: Option<Money>,
+    pub priced_attempts: u64,
     pub missing_attempts: u64,
 }
 #[derive(Clone, Debug, Serialize)]
@@ -252,7 +254,11 @@ impl Accumulator {
             usage: self.usage,
             cost: CostTotal {
                 complete: (self.missing_cost == 0).then(|| known_lower_bound.clone()),
-                known_lower_bound,
+                known_lower_bound: (self.attempts == 0
+                    || self.missing_cost < self.attempts
+                    || self.numerator > 0)
+                    .then_some(known_lower_bound),
+                priced_attempts: self.attempts - self.missing_cost,
                 missing_attempts: self.missing_cost,
             },
             outcomes: self.outcomes,

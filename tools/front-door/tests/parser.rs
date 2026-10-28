@@ -61,6 +61,73 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     ])?;
     let next: serde_json::Value = serde_json::from_slice(&next.stdout.bytes)?;
     assert_eq!(next["data"]["lanes"][0]["attempt_id"], attempts[23]);
+    std::fs::create_dir_all(rig.project.join("config"))?;
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/telemetry-prices.toml"
+        ),
+        rig.project.join("config/telemetry-prices.toml"),
+    )?;
+    let stats = rig.command(&["telemetry", "stats", "--json"])?;
+    assert_eq!(code(&stats), 0);
+    let stats: serde_json::Value = serde_json::from_slice(&stats.stdout.bytes)?;
+    assert!(stats["data"]["totals"]["cost"]["complete"].is_null());
+    assert!(stats["data"]["totals"]["cost"]["known_lower_bound"].is_null());
+    assert_eq!(stats["data"]["totals"]["cost"]["priced_attempts"], 0);
+    assert_eq!(stats["data"]["totals"]["cost"]["missing_attempts"], 25);
+    let stats = rig.command(&["telemetry", "stats"])?;
+    assert_eq!(code(&stats), 0);
+    assert_eq!(
+        String::from_utf8(stats.stdout.bytes)?,
+        "25 attempts, cost unknown (25 attempts missing cost data)\n"
+    );
+    // Named status includes old terminal lanes by run, task or attempt ID.
+    let oldest = &all["data"]["lanes"][24];
+    for key in ["run_id", "attempt_id"] {
+        let id = oldest[key].as_str().ok_or("target ID")?;
+        for target in [id, &id[..8]] {
+            let selected = rig.command(&["status", target, "--json"])?;
+            assert_eq!(code(&selected), 0);
+            let selected: serde_json::Value = serde_json::from_slice(&selected.stdout.bytes)?;
+            assert_eq!(
+                selected["data"]["lanes"]
+                    .as_array()
+                    .ok_or("selected")?
+                    .len(),
+                1
+            );
+            assert_eq!(selected["data"]["lanes"][0]["attempt_id"], attempts[0]);
+        }
+    }
+    let task_target = format!(
+        "{}/{}",
+        oldest["run_id"].as_str().ok_or("run")?,
+        oldest["task_id"].as_str().ok_or("task")?
+    );
+    let task_status = rig.command(&["status", &task_target, "--all", "--json"])?;
+    assert_eq!(code(&task_status), 0);
+    let oldest_run = oldest["run_id"].as_str().ok_or("run ID")?;
+    let selected = rig.command(&["lanes", "--all", "--id", oldest_run, "--json"])?;
+    assert_eq!(code(&selected), 0);
+    let selected: serde_json::Value = serde_json::from_slice(&selected.stdout.bytes)?;
+    assert_eq!(selected["data"]["lanes"][0]["attempt_id"], attempts[0]);
+    for condition in ["any", "all"] {
+        let waited = rig.command(&[
+            "lanes",
+            "--id",
+            oldest_run,
+            "--wait",
+            "1s",
+            "--condition",
+            condition,
+            "--json",
+        ])?;
+        assert_eq!(code(&waited), 0);
+        let waited: serde_json::Value = serde_json::from_slice(&waited.stdout.bytes)?;
+        assert_eq!(waited["data"]["condition_met"], true);
+        assert_eq!(waited["data"]["lanes"][0]["attempt_id"], attempts[0]);
+    }
     // Recovery works from another registered project without --project.
     rig.project = rig.root.join("elsewhere");
     std::fs::create_dir(&rig.project)?;

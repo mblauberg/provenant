@@ -37,6 +37,19 @@ so its streams cannot establish v2 acceptance. OpenCode `step_finish` with
 Recovered retry, nested tool/subagent identity and quota windows remain gaps;
 tests cover them with inputs labelled synthetic.
 
+`opencode/v2.2.0-success.jsonl` and `opencode/v2.2.0-free-limit.jsonl` project
+the secret-free 2.2.0 captures supplied with #1975. Identifiers and timestamps
+are replaced; the success stream has only `step_start` and `text`, and the
+limit uses the nested `provider.free-limit` error. They establish decoder
+shapes, not confinement or live provider availability. Dispatch tests pair
+them with a synthetic `session_message` database with uncheckpointed WAL data.
+
+`opencode/model-unavailable.jsonl` is a synthetic projection of upstream
+2.2.0's `ModelUnavailableError`, mapped to `provider.no-route` by
+[`toSessionError`](https://github.com/anomalyco/opencode/blob/v2.2.0/packages/core/src/session/to-session-error.ts#L88-L100)
+and emitted as a JSON error by the noninteractive CLI. It contains no live
+provider response.
+
 `agy/command-denied.stderr` is the verbatim denial diagnostic reported in
 issue #1776 from three read-only lanes on 2026-10-26. It records only stderr;
 tests combine it with explicitly synthetic stdout frames or empty stdout.

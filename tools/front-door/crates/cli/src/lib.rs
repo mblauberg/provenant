@@ -782,6 +782,9 @@ mod tests {
                 .any(|entry| entry.command == "provenant dispatch")
         );
         valid(&["status"]);
+        valid(&["status", &"a".repeat(32)]);
+        valid(&["status", "abcdef12", "--all"]);
+        valid(&["lanes", "--all", "--id", "abcdef12"]);
         valid(&["status", "--all", "--json"]);
         valid(&["land", "1947"]);
         valid(&["quota"]);
