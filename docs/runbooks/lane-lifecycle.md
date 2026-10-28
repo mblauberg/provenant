@@ -159,6 +159,14 @@ top-level `integration_branch: "integration"` and `delivery: "pr"` for one
 final PR. Delivery failures block dependants or retain the graph advance error;
 `fabric graph resume --document PATH` retries final delivery.
 
+Writer lanes keep the confinement policy compiled at launch. A diagnostic naming
+a policy before v11 at settlement or delivery means that lane retained the old
+shared-object write grants; the host runs a full strict check of the shared
+store before consuming its head. Allow these writers to settle before upgrading
+to the release that introduces private writer object stores, as described in
+the [upgrade procedure](install.md#bootstrap-and-upgrade). Upgrading does not
+force-cancel running lanes.
+
 On macOS, existing hard-linked files in the writable worktree stay readable
 but are write-denied, including inside ignored directories. Excessive denials
 still refuse launch; see the [writer limits and recovery advice](providers.md#writer-lanes).

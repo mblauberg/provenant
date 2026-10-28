@@ -180,6 +180,8 @@ pub enum RunError {
     Plan(#[from] provenant_confinement::PlanError),
     #[error("invalid run record: {0}")]
     Validation(&'static str),
+    #[error("lane object import refused: {0}")]
+    ObjectImportLimit(&'static str),
     #[error("invalid Git base {0:?}: expected a resolvable commit reference")]
     InvalidBase(String),
     #[error("run-store schema version {0} is unsupported")]

@@ -4,15 +4,20 @@ use provenant_confinement::repo::VerifiedRepo;
 use provenant_core::GitOid;
 use provenant_os::{
     exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
-    fs::{Directory, FileKind, LockGuard, LockMode, PublishMode, entry_names},
+    fs::{Directory, FileKind, LockGuard, LockMode, Metadata, PublishMode, entry_names},
 };
 use std::{
     ffi::{OsStr, OsString},
     io::{Read, Write},
-    path::Path,
-    time::Duration,
+    path::{Path, PathBuf},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+const MAX_PACKS: usize = 64;
+const IMPORT_BUDGET: Duration = Duration::from_secs(120);
+const STAGING_PREFIX: &str = ".provenant-object-import-";
+const STALE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_STALE_SWEEP: usize = 32;
 const MAX_FILES: usize = 100_000;
 const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -28,6 +33,31 @@ fn command(
     cwd: &Path,
     args: &[OsString],
     alternate: Option<&Path>,
+) -> Result<Vec<u8>> {
+    command_before(git, git_dir, cwd, args, alternate, None)
+}
+
+// Import deadlines are a host real-time boundary.
+#[allow(clippy::disallowed_methods)]
+fn remaining(deadline: Option<Instant>) -> Result<Duration> {
+    match deadline {
+        Some(deadline) => deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or(RunError::ObjectImportLimit(
+                "total 120 s wall-clock budget exceeded",
+            )),
+        None => Ok(Duration::from_secs(120)),
+    }
+}
+
+fn command_before(
+    git: &Path,
+    git_dir: &Path,
+    cwd: &Path,
+    args: &[OsString],
+    alternate: Option<&Path>,
+    deadline: Option<Instant>,
 ) -> Result<Vec<u8>> {
     let mut env: Vec<(OsString, OsString)> = [
         ("GIT_CONFIG_NOSYSTEM", "1"),
@@ -78,7 +108,7 @@ fn command(
         .chain(args.iter().cloned())
         .collect();
     let executor = SystemExecutor::new(1).map_err(|_| invalid())?;
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(120));
+    let mut options = ExecOptions::new(&argv, cwd, remaining(deadline)?);
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture {
         limit: if args.first().is_some_and(|arg| arg == "for-each-ref") {
@@ -90,6 +120,12 @@ fn command(
     options.stderr = StreamPolicy::Tail { limit: 4096 };
     options.stop_on_output_limit = true;
     let output = executor.execute(options).map_err(|_| invalid())?;
+    if output.timed_out && deadline.is_some() {
+        return Err(RunError::ObjectImportLimit(
+            "total 120 s wall-clock budget exceeded",
+        ));
+    }
+    remaining(deadline)?;
     if output.termination != Termination::Exit(0)
         || output.timed_out
         || output.cancelled
@@ -139,28 +175,32 @@ fn verify(
     cwd: &Path,
     head: GitOid,
     alternate: Option<&Path>,
+    deadline: Option<Instant>,
 ) -> Result<()> {
     // Callers supply a fresh bare view without lane refs or a lane index.
     // --full hashes loose contents and packed objects, including alternates.
-    command(
+    command_before(
         git,
         git_dir,
         cwd,
         &args(&[
             "fsck",
             "--full",
+            "--strict",
             "--no-reflogs",
             "--no-dangling",
             &head.to_string(),
         ]),
         alternate,
+        deadline,
     )?;
-    let kind = command(
+    let kind = command_before(
         git,
         git_dir,
         cwd,
         &args(&["cat-file", "-t", &head.to_string()]),
         alternate,
+        deadline,
     )?;
     if kind != b"commit\n" {
         return Err(invalid());
@@ -168,24 +208,131 @@ fn verify(
     Ok(())
 }
 
-pub(crate) fn verify_graph(git: &Path, git_dir: &Path, cwd: &Path, head: GitOid) -> Result<()> {
-    // Linked worktrees keep their objects in the common directory.
-    let common = command(
-        git,
-        git_dir,
-        cwd,
-        &args(&["rev-parse", "--path-format=absolute", "--git-common-dir"]),
-        None,
+/// The caller supplies the host's common directory, never a worktree admin
+/// directory whose lane-writable commondir could redirect verification.
+pub(crate) fn verify_graph(git: &Path, common_path: &Path, cwd: &Path, head: GitOid) -> Result<()> {
+    VerificationCache::default().verify_graph(git, common_path, cwd, head)
+}
+
+/// Results live only for one delivery. Inspect metadata under the store lock
+/// before every lookup, including loose files for legacy/external host writers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct VerificationCache {
+    generation: Option<(PathBuf, Vec<(PathBuf, Metadata)>)>,
+    heads: Vec<GitOid>,
+}
+
+impl VerificationCache {
+    pub(crate) fn verify_graph(
+        &mut self,
+        git: &Path,
+        common_path: &Path,
+        cwd: &Path,
+        head: GitOid,
+    ) -> Result<()> {
+        let common = Directory::open_anchor(common_path)?;
+        let _lock = object_lock(&common, LockMode::Shared)?;
+        let generation = (common_path.to_path_buf(), store_generation(&common)?);
+        if self.generation.as_ref() != Some(&generation) {
+            self.heads.clear();
+            self.generation = None;
+        } else if self.heads.contains(&head) && !shared_alternates(&common)? {
+            return Ok(());
+        }
+        verify_shared(git, &common, common_path, cwd, head, None)?;
+        if store_generation(&common)? != generation.1 {
+            self.heads.clear();
+            self.generation = None;
+            return Err(RunError::Validation(
+                "shared object store changed during verification",
+            ));
+        }
+        self.generation = Some(generation);
+        self.heads.push(head);
+        Ok(())
+    }
+}
+
+fn shared_alternates(common: &Directory) -> Result<bool> {
+    let objects = common.open_verified_directory(OsStr::new("objects"))?;
+    let info = match objects.open_verified_directory(OsStr::new("info")) {
+        Ok(info) => info,
+        Err(error) if error.is_not_found() => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    match info.metadata_at(OsStr::new("alternates"), false) {
+        Ok(metadata) => Ok(metadata.size != 0),
+        Err(error) if error.is_not_found() => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn store_generation(common: &Directory) -> Result<Vec<(PathBuf, Metadata)>> {
+    fn collect(
+        directory: &Directory,
+        prefix: &Path,
+        result: &mut Vec<(PathBuf, Metadata)>,
+        depth: usize,
+    ) -> Result<()> {
+        if depth > 4 {
+            return Err(invalid());
+        }
+        result.push((prefix.to_path_buf(), directory.metadata()?));
+        for name in entry_names(directory, MAX_FILES)? {
+            let metadata = directory.metadata_at(&name, false)?;
+            let path = prefix.join(&name);
+            if metadata.kind == FileKind::Directory {
+                collect(
+                    &directory.open_verified_directory(&name)?,
+                    &path,
+                    result,
+                    depth + 1,
+                )?;
+            } else if metadata.kind == FileKind::Regular {
+                result.push((path, metadata));
+            } else {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
+    let mut result = Vec::new();
+    // Creating a verification view changes the common directory's metadata,
+    // but its identity still belongs in the generation.
+    let mut identity = common.metadata()?;
+    identity.modified_ns = 0;
+    identity.changed_ns = 0;
+    identity.size = 0;
+    identity.allocated = 0;
+    identity.links = 0;
+    result.push((PathBuf::new(), identity));
+    collect(
+        &common.open_verified_directory(OsStr::new("objects"))?,
+        Path::new("objects"),
+        &mut result,
+        0,
     )?;
-    use std::os::unix::ffi::OsStringExt;
-    let common = common.strip_suffix(b"\n").ok_or_else(invalid)?;
-    let common = OsString::from_vec(common.to_vec());
-    let directory = Directory::open_anchor(Path::new(&common))?;
-    let _lock = object_lock(&directory, LockMode::Shared)?;
-    verify_shared(git, &directory, Path::new(&common), cwd, head)
+    match common.metadata_at(OsStr::new("shallow"), false) {
+        Ok(metadata) if metadata.kind == FileKind::Regular => {
+            result.push(("shallow".into(), metadata))
+        }
+        Ok(_) => return Err(invalid()),
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error.into()),
+    }
+    result.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(result)
 }
 
 fn object_lock(common: &Directory, mode: LockMode) -> Result<LockGuard> {
+    object_lock_before(common, mode, None)
+}
+
+fn object_lock_before(
+    common: &Directory,
+    mode: LockMode,
+    deadline: Option<Instant>,
+) -> Result<LockGuard> {
     use provenant_core::{CancelToken, Clock, WaitBudget};
     let clock = provenant_os::clock::SystemClock::new();
     let name = OsStr::new("provenant-objects.lock");
@@ -197,19 +344,34 @@ fn object_lock(common: &Directory, mode: LockMode) -> Result<LockGuard> {
         Err(error) if error.is_exists() => {}
         Err(error) => return Err(error.into()),
     }
-    Ok(common.lock_existing(
+    let seconds = if deadline.is_some() {
+        remaining(deadline)?.as_secs().max(1)
+    } else {
+        600
+    };
+    let lock = common.lock_existing(
         name,
         mode,
-        WaitBudget::cli(clock.mono_now(), 600).map_err(|_| invalid())?,
+        WaitBudget::cli(clock.mono_now(), seconds).map_err(|_| invalid())?,
         &CancelToken::new(),
         &clock,
-    )?)
+    );
+    remaining(deadline)?;
+    match lock {
+        Ok(lock) => Ok(lock),
+        Err(provenant_os::fs::FsError::LockTimeout { .. }) if deadline.is_some() => {
+            Err(RunError::ObjectImportLimit(
+                "total 120 s wall-clock budget exceeded while waiting for object-store lock",
+            ))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) fn resolve_ref(git: &Path, repo: &VerifiedRepo, reference: &str) -> Result<GitOid> {
     let bytes = command(
         git,
-        repo.private_git_dir(),
+        repo.common_git_dir(),
         repo.root_path(),
         &args(&["rev-parse", "--verify", "--end-of-options", reference]),
         None,
@@ -378,7 +540,13 @@ fn hex(name: &OsStr, length: usize) -> bool {
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c))
 }
 
-fn copy(source: &Directory, destination: &Directory, name: &OsStr, budget: &mut u64) -> Result<()> {
+fn copy(
+    source: &Directory,
+    destination: &Directory,
+    name: &OsStr,
+    budget: &mut u64,
+    deadline: Option<Instant>,
+) -> Result<()> {
     let mut input = source.open_read(name)?;
     let before = input.metadata()?;
     if before.kind != FileKind::Regular || before.links != 1 || before.size > *budget {
@@ -386,7 +554,18 @@ fn copy(source: &Directory, destination: &Directory, name: &OsStr, budget: &mut 
     }
     *budget -= before.size;
     let mut output = destination.create_new(name)?;
-    let count = std::io::copy(&mut (&mut input).take(before.size + 1), &mut output)?;
+    let mut count = 0;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut reader = (&mut input).take(before.size + 1);
+    loop {
+        remaining(deadline)?;
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        output.write_all(&buffer[..read])?;
+        count += read as u64;
+    }
     if count != before.size || !before.unchanged(&input.metadata()?) {
         return Err(invalid());
     }
@@ -402,6 +581,7 @@ fn initialise_view(
     staging: &Directory,
     staging_path: &Path,
     head: GitOid,
+    deadline: Option<Instant>,
 ) -> Result<()> {
     let format = if head.to_string().len() == 64 {
         "sha256"
@@ -416,7 +596,7 @@ fn initialise_view(
         &format!("--object-format={format}"),
     ]);
     init.push(staging_path.to_path_buf().into());
-    command(git, staging_path, cwd, &init, None)?;
+    command_before(git, staging_path, cwd, &init, None, deadline)?;
     // Preserve only the host's trusted shallow boundary. A lane cannot turn a
     // missing parent into an accepted boundary through its private metadata.
     match common.read_stable(OsStr::new("shallow"), 1024 * 1024) {
@@ -444,13 +624,22 @@ fn verify_shared(
     common_path: &Path,
     cwd: &Path,
     head: GitOid,
+    deadline: Option<Instant>,
 ) -> Result<()> {
-    let name = provenant_os::fs::temporary_name()?;
+    let name = staging_name()?;
     common.mkdir(&name, 0o700)?;
     let view = common.open_verified_directory(&name)?;
     let path = common_path.join(&name);
-    let result = initialise_view(git, common, cwd, &view, &path, head)
-        .and_then(|()| verify(git, &path, cwd, head, Some(&common_path.join("objects"))));
+    let result = initialise_view(git, common, cwd, &view, &path, head, deadline).and_then(|()| {
+        verify(
+            git,
+            &path,
+            cwd,
+            head,
+            Some(&common_path.join("objects")),
+            deadline,
+        )
+    });
     let cleanup = crate::artifacts::remove_entry_tree(common, &name);
     result?;
     cleanup?;
@@ -459,6 +648,8 @@ fn verify_shared(
 
 /// `source` belongs to an absent lane; `staging` is fresh, outside every lane's
 /// grants. Never follow its alternates, trust its indices or publish its inodes.
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 fn import_objects(
     git: &Path,
     repo: &VerifiedRepo,
@@ -467,33 +658,42 @@ fn import_objects(
     staging_path: &Path,
     head: GitOid,
 ) -> Result<()> {
-    repo.revalidate().map_err(|_| invalid())?;
-    // A verified loose graph is published as several atomic creations. Keep
-    // concurrent verifiers from observing an incompletely published graph.
-    let _lock = object_lock(repo.common_dir(), LockMode::Exclusive)?;
-    initialise_view(
+    import_before(
         git,
-        repo.common_dir(),
-        repo.root_path(),
+        repo,
+        source,
         staging,
         staging_path,
         head,
-    )?;
-    let objects = staging.open_verified_directory(OsStr::new("objects"))?;
-    let shared = repo.common_git_dir().join("objects");
-    let mut bytes = MAX_BYTES;
-    let mut files = 0_usize;
+        Instant::now() + IMPORT_BUDGET,
+    )
+}
+
+fn import_before(
+    git: &Path,
+    repo: &VerifiedRepo,
+    source: &Directory,
+    staging: &Directory,
+    staging_path: &Path,
+    head: GitOid,
+    deadline: Instant,
+) -> Result<()> {
+    let deadline = Some(deadline);
+    remaining(deadline)?;
+    repo.revalidate().map_err(|_| invalid())?;
+    // Count all packs before copying or invoking Git.
+    let mut packs = 0;
+    let mut files = 0;
+    let mut plan = Vec::new();
     for fanout in entry_names(source, MAX_FILES)? {
+        remaining(deadline)?;
         files += 1;
-        if files > MAX_FILES {
-            return Err(invalid());
-        }
         if !hex(&fanout, 2) && fanout != "pack" {
             continue;
         }
         let from = source.open_verified_directory(&fanout)?;
-        let to = directory(&objects, &fanout)?;
         for name in entry_names(&from, MAX_FILES)? {
+            remaining(deadline)?;
             files += 1;
             if files > MAX_FILES {
                 return Err(invalid());
@@ -510,33 +710,75 @@ fn import_objects(
             if !valid {
                 continue;
             }
-            copy(&from, &to, &name, &mut bytes)?;
             if pack {
-                let mut index = args(&["index-pack", "--strict", "--threads=1"]);
-                index.push(
-                    staging_path
-                        .join("objects")
-                        .join(&fanout)
-                        .join(&name)
-                        .into(),
-                );
-                let digest = command(git, staging_path, repo.root_path(), &index, Some(&shared))?;
-                if digest
-                    != format!(
-                        "{}\n",
-                        name.to_string_lossy()
-                            .trim_start_matches("pack-")
-                            .trim_end_matches(".pack")
-                    )
-                    .as_bytes()
-                {
-                    return Err(invalid());
+                packs += 1;
+                if packs > MAX_PACKS {
+                    return Err(RunError::ObjectImportLimit(
+                        "pack-count cap exceeded (maximum 64)",
+                    ));
                 }
+            }
+            plan.push((fanout.clone(), name, pack));
+        }
+    }
+    initialise_view(
+        git,
+        repo.common_dir(),
+        repo.root_path(),
+        staging,
+        staging_path,
+        head,
+        deadline,
+    )?;
+    let objects = staging.open_verified_directory(OsStr::new("objects"))?;
+    let shared = repo.common_git_dir().join("objects");
+    let mut bytes = MAX_BYTES;
+    for (fanout, name, pack) in plan {
+        remaining(deadline)?;
+        let from = source.open_verified_directory(&fanout)?;
+        let to = directory(&objects, &fanout)?;
+        copy(&from, &to, &name, &mut bytes, deadline)?;
+        if pack {
+            let mut index = args(&["index-pack", "--strict", "--threads=1"]);
+            index.push(
+                staging_path
+                    .join("objects")
+                    .join(&fanout)
+                    .join(&name)
+                    .into(),
+            );
+            let digest = command_before(
+                git,
+                staging_path,
+                repo.root_path(),
+                &index,
+                Some(&shared),
+                deadline,
+            )?;
+            if digest
+                != format!(
+                    "{}\n",
+                    name.to_string_lossy()
+                        .trim_start_matches("pack-")
+                        .trim_end_matches(".pack")
+                )
+                .as_bytes()
+            {
+                return Err(invalid());
             }
         }
         to.sync()?;
     }
-    verify(git, staging_path, repo.root_path(), head, Some(&shared))?;
+    verify(
+        git,
+        staging_path,
+        repo.root_path(),
+        head,
+        Some(&shared),
+        deadline,
+    )?;
+    // Only publication and the final shared check exclude other lanes.
+    let _lock = object_lock_before(repo.common_dir(), LockMode::Exclusive, deadline)?;
     let shared_dir = repo
         .common_dir()
         .open_verified_directory(OsStr::new("objects"))?;
@@ -553,6 +795,7 @@ fn import_objects(
         // pack first so concurrent host readers never see an index alone.
         names.sort_by_key(|name| Path::new(name).extension() == Some(OsStr::new("idx")));
         for name in names {
+            remaining(deadline)?;
             match from.rename_noreplace(&name, &to, &name) {
                 Ok(()) => {}
                 Err(error) if error.is_exists() => {}
@@ -568,10 +811,86 @@ fn import_objects(
         repo.common_git_dir(),
         repo.root_path(),
         head,
+        deadline,
     )
 }
 
+fn staging_name() -> Result<OsString> {
+    let mut name = OsString::from(STAGING_PREFIX);
+    name.push(provenant_os::fs::temporary_name()?);
+    Ok(name)
+}
+
+fn stale_tree_size(
+    parent: &Directory,
+    name: &OsStr,
+    remaining: &mut usize,
+    depth: usize,
+) -> Result<bool> {
+    if depth > 4 || *remaining == 0 {
+        return Ok(false);
+    }
+    *remaining -= 1;
+    let metadata = parent.metadata_at(name, false)?;
+    if metadata.kind != FileKind::Directory {
+        return Ok(true);
+    }
+    let held = parent.open_verified_directory(name)?;
+    for entry in held.entries()? {
+        if !stale_tree_size(&held, &entry?, remaining, depth + 1)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Sweep only this host-owned namespace, at most 32 old directories per import.
+/// The age exceeds the import budget, so an active importer is never swept.
+fn sweep_staging(common: &Directory, now: SystemTime) -> Result<()> {
+    let cutoff = now
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| invalid())?
+        .as_nanos() as i128
+        - STALE_AGE.as_nanos() as i128;
+    let mut swept = 0;
+    let mut entries_left = MAX_FILES;
+    for name in entry_names(common, MAX_FILES)? {
+        let import_staging = name.to_str().is_some_and(|s| {
+            s.starts_with(STAGING_PREFIX)
+                || s.strip_prefix(".provenant-staging.")
+                    .is_some_and(|suffix| hex(OsStr::new(suffix), 24))
+        });
+        if !import_staging {
+            continue;
+        }
+        let metadata = match common.metadata_at(&name, false) {
+            Ok(metadata) => metadata,
+            Err(error) if error.is_not_found() => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.kind == FileKind::Directory && metadata.modified_ns < cutoff {
+            if !stale_tree_size(common, &name, &mut entries_left, 0)? {
+                break;
+            }
+            crate::artifacts::remove_entry_tree(common, &name)?;
+            swept += 1;
+            if swept == MAX_STALE_SWEEP {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::print_stderr)]
+pub(crate) fn legacy_policy_diagnostic() {
+    eprintln!(
+        "warning: legacy pre-v11 Git grants policy retains shared-store write access; running full shared-store verification"
+    );
+}
+
 /// Only the host's sealed launch binding chooses the source, never lane output.
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn settle(
     git: &Path,
     repo: &VerifiedRepo,
@@ -579,16 +898,19 @@ pub(crate) fn settle(
     head: GitOid,
 ) -> Result<()> {
     if let Some(source) = source {
-        let name = provenant_os::fs::temporary_name()?;
+        let deadline = Instant::now() + IMPORT_BUDGET;
+        sweep_staging(repo.common_dir(), SystemTime::now())?;
+        let name = staging_name()?;
         repo.common_dir().mkdir(&name, 0o700)?;
         let staging = repo.common_dir().open_verified_directory(&name)?;
         let staging_path = repo.common_git_dir().join(&name);
-        let result = import_objects(git, repo, source, &staging, &staging_path, head);
+        let result = import_before(git, repo, source, &staging, &staging_path, head, deadline);
         let cleanup = crate::artifacts::remove_entry_tree(repo.common_dir(), &name);
         result?;
         cleanup?;
     } else {
-        verify_graph(git, repo.private_git_dir(), repo.root_path(), head)?;
+        legacy_policy_diagnostic();
+        verify_graph(git, repo.common_git_dir(), repo.root_path(), head)?;
     }
     Ok(())
 }
@@ -644,17 +966,28 @@ pub(crate) fn prepare_bound(
     bind(attempt, scratch)
 }
 
-pub(crate) fn bound_source(attempt: &Directory) -> Result<Option<ObjectSource>> {
-    let bytes = match attempt.read_stable(OsStr::new("writer-objects.json"), crate::RECORD_LIMIT) {
-        Ok(bytes) => bytes,
-        Err(error) if error.is_not_found() => return Ok(None),
-        Err(error) => return Err(error.into()),
+pub(crate) fn legacy_policy(attempt: &Directory) -> Result<bool> {
+    Ok(object_binding(attempt)?.is_none())
+}
+
+fn object_binding(attempt: &Directory) -> Result<Option<ObjectBinding>> {
+    let Some(bytes) =
+        crate::artifacts::read_sealed(attempt, "writer-objects.json", crate::RECORD_LIMIT)?
+    else {
+        return Ok(None);
     };
     let binding: ObjectBinding = crate::db::decode(&bytes)?;
-    let candidate = binding.candidate;
-    if !valid_candidate(&candidate) {
+    if binding.schema_version != 1 || !valid_candidate(&binding.candidate) {
         return Err(invalid());
     }
+    Ok(Some(binding))
+}
+
+pub(crate) fn bound_source(attempt: &Directory) -> Result<Option<ObjectSource>> {
+    let Some(binding) = object_binding(attempt)? else {
+        return Ok(None);
+    };
+    let candidate = binding.candidate;
     // Open every lane-controlled component without following links.
     let temporary = attempt.open_verified_directory(OsStr::new("tmp"))?;
     let scratch = temporary.open_verified_directory(OsStr::new(&candidate))?;

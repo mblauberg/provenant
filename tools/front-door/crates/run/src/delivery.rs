@@ -16,16 +16,20 @@ use std::{
     ffi::{OsStr, OsString},
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
+    sync::Mutex,
     time::Duration,
 };
 
 /// Transport-only context. Debug deliberately omits all environment values.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostDeliveryContext {
     environment: Vec<(Vec<u8>, Vec<u8>)>,
     tools: Option<HostTools>,
     bound: Option<BoundDelivery>,
+    /// Verification belongs to one host operation and never crosses handoff.
+    #[serde(skip)]
+    verification: Mutex<crate::objects::VerificationCache>,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +40,9 @@ struct BoundDelivery {
     lane_branch: String,
     pull_request_repo: Option<String>,
     git_dir: PathBuf,
+    /// Host repository authority, independent of lane-writable `commondir`.
+    #[serde(default)]
+    common_git_dir: Option<PathBuf>,
     host_cwd: PathBuf,
     /// Destination sealed at launch; a later request edit cannot redirect it.
     destination: WriterDeliveryRequest,
@@ -73,6 +80,26 @@ fn publish_pickup(
         .require_durable()
         .map_err(RunError::from)
 }
+// Verification is operation-local host state, absent from handoffs and equality.
+impl Clone for HostDeliveryContext {
+    fn clone(&self) -> Self {
+        Self {
+            environment: self.environment.clone(),
+            tools: self.tools.clone(),
+            bound: self.bound.clone(),
+            verification: Mutex::default(),
+        }
+    }
+}
+impl PartialEq for HostDeliveryContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.environment == other.environment
+            && self.tools == other.tools
+            && self.bound == other.bound
+    }
+}
+impl Eq for HostDeliveryContext {}
+
 impl std::fmt::Debug for HostDeliveryContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("HostDeliveryContext([private handoff])")
@@ -398,6 +425,7 @@ impl HostDeliveryContext {
                 .collect(),
             bound: None,
             tools: None,
+            verification: Mutex::default(),
         }
     }
     /// Preserve normal host credential/config discovery without Git's ambient
@@ -463,6 +491,7 @@ impl HostDeliveryContext {
         request: &WriterDeliveryRequest,
         fetch: bool,
     ) -> Result<Self> {
+        self.verification = Mutex::default();
         validate(request)?;
         self.host_environment(writer)?;
         let stage = Stage::Prepare;
@@ -473,6 +502,7 @@ impl HostDeliveryContext {
             None
         };
         self.tools = Some(HostTools { git, gh });
+        let common_git_dir = self.trusted_common_git_dir(writer, stage)?;
         self.refuse_protected_target(writer, &request.branch)?;
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) && request.remote.is_empty() {
             let branch = self.command(
@@ -495,6 +525,7 @@ impl HostDeliveryContext {
                 pull_request_repo: None,
                 git_dir: std::fs::canonicalize(git_dir)
                     .map_err(|error| prepare_error("git dir", error))?,
+                common_git_dir: Some(common_git_dir),
                 host_cwd: writer.project.clone(),
                 destination: request.clone(),
             });
@@ -573,6 +604,7 @@ impl HostDeliveryContext {
                 .map_err(|error| prepare_error("remote URL", error))?,
             git_dir: std::fs::canonicalize(git_dir)
                 .map_err(|error| prepare_error("git dir", error))?,
+            common_git_dir: Some(common_git_dir),
             host_cwd: writer.project.clone(),
             destination: request.clone(),
         });
@@ -1096,18 +1128,30 @@ impl HostDeliveryContext {
     }
     fn verify_objects(&self, writer: &WriterRequest, head: GitOid, stage: Stage) -> Result<()> {
         let git = &self.tools.as_ref().ok_or(RunError::Delivery(stage))?.git;
-        let directory = if let Some(bound) = &self.bound {
-            bound.git_dir.clone()
-        } else {
-            PathBuf::from(self.command(
-                &writer.worktree,
-                "git",
-                &["rev-parse", "--absolute-git-dir"],
-                stage,
-            )?)
-        };
-        crate::objects::verify_graph(git, &directory, &writer.project, head)
+        let common = self
+            .bound
+            .as_ref()
+            .and_then(|bound| bound.common_git_dir.clone())
+            .map(Ok)
+            .unwrap_or_else(|| self.trusted_common_git_dir(writer, stage))?;
+        self.verification
+            .lock()
+            .map_err(|_| RunError::Delivery(stage))?
+            .verify_graph(git, &common, &writer.project, head)
             .map_err(|_| RunError::Delivery(stage))
+    }
+    fn trusted_common_git_dir(&self, writer: &WriterRequest, stage: Stage) -> Result<PathBuf> {
+        // Old handoffs have no sealed common directory. Resolve through the
+        // protected host checkout, without installing the lane's GIT_DIR.
+        let mut host = self.clone();
+        host.bound = None;
+        let common = host.command(
+            &writer.project,
+            "git",
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            stage,
+        )?;
+        std::fs::canonicalize(common).map_err(|_| RunError::Delivery(stage))
     }
     fn clean(&self, writer: &WriterRequest) -> Result<()> {
         let path = writer.worktree.to_str().ok_or_else(|| {
@@ -1971,6 +2015,7 @@ impl crate::RunStore {
             }
         }
         let host = host.prepare(&writer, &request)?;
+        diagnose_legacy_git_policy(&attempt)?;
         host.clean(&writer)?;
         if host.head(&writer)? != head {
             return Err(RunError::Validation(
@@ -2011,6 +2056,13 @@ impl crate::RunStore {
     }
 }
 
+fn diagnose_legacy_git_policy(attempt: &Directory) -> Result<()> {
+    if crate::objects::legacy_policy(attempt)? {
+        crate::objects::legacy_policy_diagnostic();
+    }
+    Ok(())
+}
+
 /// The live holder calls this only after success and confinement checks. A
 /// sealed start marker prevents repeating external effects after interruption.
 pub(crate) fn deliver_once(
@@ -2020,10 +2072,16 @@ pub(crate) fn deliver_once(
     attempt: &Directory,
     identity: &str,
 ) -> Result<WriterDeliveryReceipt> {
+    *host
+        .verification
+        .lock()
+        .map_err(|_| RunError::Delivery(Stage::Prepare))? =
+        crate::objects::VerificationCache::default();
     if let Some(raw) = crate::artifacts::read_sealed(attempt, "delivery.json", crate::RECORD_LIMIT)?
     {
         return crate::db::decode(&raw);
     }
+    diagnose_legacy_git_policy(attempt)?;
     if host
         .bound
         .as_ref()

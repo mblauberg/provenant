@@ -360,6 +360,7 @@ pub struct Metadata {
     pub size: u64,
     pub allocated: u64,
     pub modified_ns: i128,
+    pub changed_ns: i128,
     pub uid: u32,
     pub mode: u32,
 }
@@ -371,6 +372,7 @@ impl Metadata {
             && self.links == other.links
             && self.size == other.size
             && self.modified_ns == other.modified_ns
+            && self.changed_ns == other.changed_ns
             && self.uid == other.uid
             && self.mode == other.mode
     }
@@ -392,6 +394,7 @@ impl Metadata {
             size: m.size(),
             allocated: m.blocks().saturating_mul(512),
             modified_ns: i128::from(m.mtime()) * 1_000_000_000 + i128::from(m.mtime_nsec()),
+            changed_ns: i128::from(m.ctime()) * 1_000_000_000 + i128::from(m.ctime_nsec()),
             uid: m.uid(),
             mode: m.mode(),
         }

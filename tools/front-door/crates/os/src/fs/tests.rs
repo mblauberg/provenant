@@ -61,6 +61,10 @@ fn stable_read_metadata_refuses_identity_content_and_permission_changes() {
             ..before
         },
         Metadata {
+            changed_ns: before.changed_ns + 1,
+            ..before
+        },
+        Metadata {
             links: before.links + 1,
             ..before
         },
@@ -75,6 +79,29 @@ fn stable_read_metadata_refuses_identity_content_and_permission_changes() {
     ] {
         assert!(!before.unchanged(&changed));
     }
+}
+
+#[test]
+fn restored_mtime_does_not_hide_a_content_change() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("file");
+    std::fs::write(&path, b"data").unwrap();
+    let directory = Directory::open_anchor(temp.path()).unwrap();
+    let before = directory.metadata_at(OsStr::new("file"), false).unwrap();
+    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    let modified = file.metadata().unwrap().modified().unwrap();
+    // Separate the inode changes even on filesystems with a coarser clock.
+    std::thread::sleep(Duration::from_millis(10));
+    file.write_all(b"else").unwrap();
+    file.set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    let after = directory.metadata_at(OsStr::new("file"), false).unwrap();
+    assert!(before.same_identity(&after));
+    assert_eq!(before.size, after.size);
+    assert_eq!(before.modified_ns, after.modified_ns);
+    assert_ne!(before.changed_ns, after.changed_ns);
+    assert!(!before.unchanged(&after));
+    assert_eq!(after, Metadata::from_std(file.metadata().unwrap()));
 }
 
 #[test]

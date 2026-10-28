@@ -6,11 +6,11 @@ use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 use provenant_os::fs::Directory;
 use std::{ffi::OsString, path::Path, time::Duration};
 
-struct PrepareFixture {
+pub(super) struct PrepareFixture {
     _temp: tempfile::TempDir,
     root: std::path::PathBuf,
     environment: Vec<(OsString, OsString)>,
-    writer: WriterRequest,
+    pub(super) writer: WriterRequest,
     request: WriterDeliveryRequest,
 }
 
@@ -190,6 +190,130 @@ fn terminal_archives_a_verified_private_rewind_before_refusing_ancestry()
     );
     assert!(!fixture.root.join("attempt/writer-terminal.json").exists());
     assert_eq!(fixture.prepare()?.head(&fixture.writer)?, previous);
+    Ok(())
+}
+
+#[test]
+fn delivery_reuses_verified_heads_until_the_store_generation_changes()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let wrapper = fixture.root.join("counting-git");
+    let log = fixture.root.join("fsck-calls");
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    fixture.executable(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\nfor arg do\nif [ \"$arg\" = fsck ]; then printf 'fsck\\n' >> {}; break; fi\ndone\nexec {} \"$@\"\n",
+            quote(&log),
+            quote(&executable)
+        ),
+    )?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    let host = fixture.prepare()?;
+    std::fs::write(fixture.writer.worktree.join("blob"), "cached content\n")?;
+    fixture.lane_git(&["add", "blob"])?;
+    fixture.commit(&fixture.writer.worktree, "cache generation")?;
+    std::fs::write(&log, b"")?;
+    let head = host.head(&fixture.writer)?;
+    assert_eq!(host.head(&fixture.writer)?, head);
+    assert_eq!(std::fs::read_to_string(&log)?.lines().count(), 1);
+    host.commit_body(&fixture.writer, head, "delivery")?;
+    host.commit_body(&fixture.writer, head, "delivery")?;
+    // The prepared base and the new head each need one complete check.
+    assert_eq!(std::fs::read_to_string(&log)?.lines().count(), 2);
+    let restored: HostDeliveryContext = serde_json::from_slice(&serde_json::to_vec(&host)?)?;
+    assert_eq!(restored.head(&fixture.writer)?, head);
+    assert_eq!(std::fs::read_to_string(&log)?.lines().count(), 3);
+    let blob = host.command(
+        &fixture.writer.worktree,
+        "git",
+        &["rev-parse", "HEAD:blob"],
+        WriterDeliveryStage::Head,
+    )?;
+    let object = fixture
+        .writer
+        .project
+        .join(".git/objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    use std::os::unix::fs::PermissionsExt;
+    let original = std::fs::metadata(&object)?;
+    let mut bytes = std::fs::read(&object)?;
+    bytes[0] ^= 1;
+    std::fs::set_permissions(&object, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::write(&object, bytes)?;
+    std::fs::File::open(&object)?.set_modified(original.modified()?)?;
+    std::fs::set_permissions(&object, original.permissions())?;
+    let changed = std::fs::metadata(&object)?;
+    assert_eq!(changed.len(), original.len());
+    assert_eq!(changed.modified()?, original.modified()?);
+    assert_eq!(changed.permissions(), original.permissions());
+    assert!(host.head(&fixture.writer).is_err());
+    assert_eq!(std::fs::read_to_string(&log)?.lines().count(), 4);
+    Ok(())
+}
+
+#[test]
+fn delivery_verification_ignores_lane_commondir_for_new_and_legacy_handoffs()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for legacy in [false, true] {
+        let fixture = PrepareFixture::new()?;
+        let host = fixture.prepare()?;
+        std::fs::write(fixture.writer.worktree.join("blob"), "trusted content\n")?;
+        fixture.lane_git(&["add", "blob"])?;
+        fixture.commit(&fixture.writer.worktree, "shared content")?;
+        let head = host.head(&fixture.writer)?;
+        let private = host.command(
+            &fixture.writer.worktree,
+            "git",
+            &["rev-parse", "--absolute-git-dir"],
+            WriterDeliveryStage::Head,
+        )?;
+        let blob = host.command(
+            &fixture.writer.worktree,
+            "git",
+            &["rev-parse", "HEAD:blob"],
+            WriterDeliveryStage::Head,
+        )?;
+        let fake = fixture.root.join("fake.git");
+        fixture.git(&[
+            "clone",
+            "--bare",
+            "--no-hardlinks",
+            fixture.writer.project.to_str().ok_or("project path")?,
+            fake.to_str().ok_or("fake store path")?,
+        ])?;
+        std::fs::write(
+            Path::new(&private).join("commondir"),
+            fake.as_os_str().as_encoded_bytes(),
+        )?;
+        let object = fixture
+            .writer
+            .project
+            .join(".git/objects")
+            .join(&blob[..2])
+            .join(&blob[2..]);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&object, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::write(object, "corrupt real shared object")?;
+        // Deserialisation also proves no warm verification crosses handoff.
+        let mut value = serde_json::to_value(&host)?;
+        if legacy {
+            value["bound"]
+                .as_object_mut()
+                .ok_or("bound delivery")?
+                .remove("common_git_dir");
+        }
+        let restored: HostDeliveryContext = serde_json::from_value(value)?;
+        assert!(
+            restored
+                .commit_body(&fixture.writer, head, "delivery")
+                .is_err()
+        );
+    }
     Ok(())
 }
 
@@ -1459,7 +1583,7 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
     Ok(())
 }
 impl PrepareFixture {
-    fn new() -> std::result::Result<Self, Box<dyn std::error::Error>> {
+    pub(super) fn new() -> std::result::Result<Self, Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = std::fs::canonicalize(temp.path())?;
         let project = root.join("project");
@@ -2342,7 +2466,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     Ok(())
 }
 
-fn registered_landed_writer_fixture(
+pub(super) fn registered_landed_writer_fixture(
     fixture: &PrepareFixture,
 ) -> std::result::Result<ExecutionContext, Box<dyn std::error::Error>> {
     struct Free;

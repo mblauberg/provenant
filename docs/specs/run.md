@@ -475,7 +475,7 @@ without executing its mutable config, and copies canonical loose objects and
 packs into a fresh host-owned snapshot. Traversal
 refuses symlinks and non-regular object files; it copies neither lane alternates
 nor pack indices. The host rebuilds indices with `index-pack --strict` and pins
-the shared store as the only alternate. `fsck --full --no-reflogs --no-dangling
+the shared store as the only alternate. `fsck --full --strict --no-reflogs --no-dangling
 <head>` checks object contents and connectivity before any instruction recovery,
 diff or ancestry read of the branch. Shared-store verification uses a fresh bare
 view with an empty primary object directory and the shared store as its sole
@@ -485,18 +485,25 @@ objects. Ref and unfinished-operation validation remain separate settlement
 checks. A non-commit head or any verification failure
 refuses settlement certification and delivery.
 
-Only a verified snapshot is published, without replacing existing shared files.
-An object-store lock excludes concurrent verification while a loose graph is
-being published. Verification holds the shared side of the same lock.
+Copying, indexing and snapshot verification run in host-owned staging before
+taking the exclusive object-store lock. Only a verified snapshot is published,
+without replacing existing shared files. The exclusive lock covers publication
+and the final shared-store check, excluding concurrent verification while a
+loose graph is being published. Verification holds the shared side of the same
+lock.
 The snapshot lives in the common Git directory, so publication uses atomic
 creation on the repository volume even when lane scratch is on another volume.
 The host verifies the resulting shared graph again before consuming it. Existing object
 files retain their contents, inode and permissions. SHA-1 and SHA-256 repositories
 use the same boundary. Only the host's trusted shallow boundary is preserved;
 lane-supplied boundaries cannot excuse missing history. Import is bounded by
-100,000 directory entries and 2 GiB of source objects; each Git
-verification command has a 120-second deadline. Import snapshots are removed
-after each attempt; ordinary terminal cleanup owns lane scratch.
+100,000 directory entries, 2 GiB of source objects, 64 packs and one 120-second
+wall-clock budget. Exceeding either the pack limit or time budget terminally
+refuses the import with the limit named in the reason. Import snapshots are
+removed after each attempt; a later import sweeps at most 32 host staging
+directories older than 24 hours, with bounded traversal. A pack-count or time
+refusal retains writer custody and private scratch for recovery. Other ordinary
+terminal cleanup owns lane scratch.
 
 After verification, the host publishes the lane branch with a compare-and-swap
 against its launch base. A replay may retain the same verified head; a divergent
@@ -510,8 +517,19 @@ change keeps custody and scratch for recovery.
 Host integration and delivery hash-check the lane and target graphs before
 reading commit messages, merging or pushing. Remote refresh checks the advertised
 OID and full object contents; existence or connectivity-only checks do not prove
-content integrity. Older attempts without a private-store binding receive the
-same full verification against the shared store.
+content integrity. Within one settlement or delivery, a successful check is
+reused only for the same head and shared-store generation. The generation
+includes object and shallow-file identities, sizes, permissions, mtime and
+ctime, so restoring mtime cannot hide a write. Stores with external alternates
+receive a fresh check because their external generation is not tracked. Cached
+results never cross a handoff or a new delivery. Older attempts
+without a private-store binding use the host's verified common Git directory
+directly; lane-writable worktree metadata cannot select the store. Lanes whose
+compiled confinement policy predates v11 retain their old write grants until
+they exit. Settlement and delivery name that legacy policy in a diagnostic and
+run the same full strict verification against the shared store. Operators
+should [drain writers before upgrading](../runbooks/install.md#bootstrap-and-upgrade);
+the host does not force-cancel running lanes.
 - Why: Git's ordinary reads do not prove that stored content matches its OID.
 - Test: `crates/confinement/tests/lane_git_conformance.rs`;
   `crates/providers/src/tests.rs::prepared_git_reads_linked_and_other_repositories`;

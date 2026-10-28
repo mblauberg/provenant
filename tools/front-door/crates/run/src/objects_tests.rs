@@ -11,7 +11,7 @@ use std::{
     os::unix::fs::{MetadataExt, PermissionsExt, symlink},
     path::{Path, PathBuf},
     process::{Command, Output},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 type TestResult<T = ()> = std::result::Result<T, Box<dyn Error>>;
@@ -26,6 +26,7 @@ fn object_source_binding_is_scoped_and_refuses_symlinked_candidates() -> TestRes
     fs::create_dir_all(scratch.join("git-common"))?;
     let held = Directory::open_anchor(&attempt)?;
     assert!(super::bound_source(&held)?.is_none());
+    assert!(super::legacy_policy(&held)?);
     assert!(super::bind(&held, &attempt.join("tmp/../escape")).is_err());
     super::bind(&held, &scratch)?;
     super::bind(&held, &scratch)?;
@@ -38,6 +39,10 @@ fn object_source_binding_is_scoped_and_refuses_symlinked_candidates() -> TestRes
             .same_identity(&Directory::open_anchor(&scratch.join("git-objects"))?.metadata()?)
     );
     fs::rename(&scratch, attempt.join("retained"))?;
+    assert!(
+        !super::legacy_policy(&held)?,
+        "policy detection must not open reclaimed scratch"
+    );
     symlink(attempt.join("retained"), &scratch)?;
     assert!(super::bound_source(&held).is_err());
     Ok(())
@@ -321,7 +326,7 @@ fn private_loose_objects_are_verified_and_imported_for_both_hash_formats() -> Te
         assert_eq!(output.stdout, b"private lane blob\n");
         verify_graph(
             &fixture.git,
-            fixture.worktree.repo().private_git_dir(),
+            fixture.worktree.repo().common_git_dir(),
             &fixture.lane,
             fixture.head,
         )?;
@@ -356,6 +361,140 @@ fn altered_private_pack_refuses_before_publication() -> TestResult {
     fs::write(pack, bytes)?;
     assert!(fixture.import().is_err());
     fixture.assert_not_published();
+    Ok(())
+}
+
+#[test]
+fn excessive_private_pack_count_refuses_before_indexing_or_publication() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let packs = fixture.source.join("pack");
+    fs::create_dir(&packs)?;
+    for number in 0..=super::MAX_PACKS {
+        fs::write(
+            packs.join(format!("pack-{number:040x}.pack")),
+            b"invalid pack",
+        )?;
+    }
+    assert!(matches!(
+        fixture.import(),
+        Err(crate::RunError::ObjectImportLimit(reason))
+            if reason.contains("pack") && reason.contains("64")
+    ));
+    assert!(fs::read_dir(&fixture.staging)?.next().is_none());
+    fixture.assert_not_published();
+    Ok(())
+}
+
+#[test]
+fn private_fifo_object_is_refused_without_waiting_for_a_writer() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let target = object_path(&fixture.source, fixture.blob);
+    fs::remove_file(&target)?;
+    let status = Command::new("/usr/bin/mkfifo").arg(&target).status()?;
+    assert!(status.success());
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let refused = fixture.import().is_err();
+        fixture.assert_not_published();
+        let _ = send.send(refused);
+    });
+    assert!(
+        receive.recv_timeout(Duration::from_secs(5))?,
+        "a FIFO must not be accepted as an object"
+    );
+    assert!(worker.join().is_ok());
+    Ok(())
+}
+
+#[test]
+fn legacy_verification_and_ref_resolution_ignore_tampered_worktree_commondir() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    fixture.import()?;
+    let fake = fixture.root.join("fake.git");
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.root,
+        None,
+        &[
+            "clone",
+            "--bare",
+            "--no-hardlinks",
+            fixture.project.to_str().ok_or("project path")?,
+            fake.to_str().ok_or("fake store path")?,
+        ],
+    )?;
+    verify_graph(&fixture.git, &fake, &fixture.root, fixture.head)?;
+    fs::write(fake.join("refs/heads/lane"), format!("{}\n", fixture.base))?;
+    let blob = object_path(&fixture.common_objects(), fixture.blob);
+    fs::set_permissions(&blob, fs::Permissions::from_mode(0o600))?;
+    fs::write(
+        blob,
+        fs::read(object_path(&fixture.common_objects(), fixture.base_blob))?,
+    )?;
+    fs::write(
+        fixture.worktree.repo().private_git_dir().join("commondir"),
+        format!("{}\n", fake.display()),
+    )?;
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        fixture.head,
+        "a lane-writable commondir must not choose the host's ref database"
+    );
+    // The fake store is valid, but the bound shared store contains corruption.
+    verify_graph(&fixture.git, &fake, &fixture.root, fixture.head)?;
+    assert!(super::settle(&fixture.git, fixture.worktree.repo(), None, fixture.head).is_err());
+    Ok(())
+}
+
+#[test]
+fn stale_import_staging_sweep_is_bounded_and_preserves_fresh_and_unrelated_entries() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let common = temp.path().join("common");
+    fs::create_dir(&common)?;
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000);
+    let old = now - super::STALE_AGE - Duration::from_secs(1);
+    let count = super::MAX_STALE_SWEEP + 3;
+    let mut stale = Vec::new();
+    for number in 0..count {
+        let path = common.join(format!("{}old-{number}", super::STAGING_PREFIX));
+        fs::create_dir(&path)?;
+        fs::write(path.join("partial-pack"), b"crash evidence")?;
+        fs::File::open(&path)?.set_modified(old)?;
+        stale.push(path);
+    }
+    let fresh = common.join(format!("{}fresh", super::STAGING_PREFIX));
+    fs::create_dir(&fresh)?;
+    fs::File::open(&fresh)?.set_modified(now)?;
+    let unrelated = common.join("unrelated-staging");
+    fs::create_dir(&unrelated)?;
+    fs::File::open(&unrelated)?.set_modified(old)?;
+    let ordinary_file = common.join(format!("{}file", super::STAGING_PREFIX));
+    fs::write(&ordinary_file, b"keep")?;
+    fs::File::open(&ordinary_file)?.set_modified(old)?;
+    let outside = temp.path().join("outside");
+    fs::create_dir(&outside)?;
+    fs::write(outside.join("payload"), b"keep")?;
+    fs::File::open(&outside)?.set_modified(old)?;
+    let link = common.join(format!("{}symlink", super::STAGING_PREFIX));
+    symlink(&outside, &link)?;
+    let directory = Directory::open_anchor(&common)?;
+    super::sweep_staging(&directory, now)?;
+    assert_eq!(stale.iter().filter(|path| path.exists()).count(), 3);
+    super::sweep_staging(&directory, now)?;
+    assert!(stale.iter().all(|path| !path.exists()));
+    assert!(fresh.is_dir());
+    assert!(unrelated.is_dir());
+    assert_eq!(fs::read(ordinary_file)?, b"keep");
+    assert!(fs::symlink_metadata(link)?.file_type().is_symlink());
+    assert_eq!(fs::read(outside.join("payload"))?, b"keep");
+    // Imports before this repair used the generic host staging name.
+    let legacy = common.join(provenant_os::fs::temporary_name()?);
+    fs::create_dir(&legacy)?;
+    fs::write(legacy.join("partial-pack"), b"crashed import")?;
+    fs::File::open(&legacy)?.set_modified(old)?;
+    super::sweep_staging(&directory, now)?;
+    assert!(!legacy.exists());
     Ok(())
 }
 
@@ -491,7 +630,7 @@ fn object_verification_ignores_unrelated_unfinished_worktree_metadata() -> TestR
     fixture.import()?;
     verify_graph(
         &fixture.git,
-        fixture.worktree.repo().private_git_dir(),
+        fixture.worktree.repo().common_git_dir(),
         &fixture.lane,
         fixture.head,
     )?;
@@ -518,7 +657,7 @@ fn hash_verification_refuses_a_corrupt_shared_blob_that_cat_file_accepts() -> Te
     assert!(
         verify_graph(
             &fixture.git,
-            fixture.worktree.repo().private_git_dir(),
+            fixture.worktree.repo().common_git_dir(),
             &fixture.lane,
             fixture.head,
         )
@@ -783,5 +922,105 @@ fn shared_branch_publication_compares_base_and_is_idempotent_for_the_same_head()
         &["rev-parse", "refs/heads/lane"],
     )?)?;
     assert_eq!(actual, divergent);
+    Ok(())
+}
+
+#[test]
+fn import_does_not_hold_the_shared_object_lock_during_index_pack() -> TestResult {
+    use provenant_os::fs::LockMode;
+    use std::{ffi::OsStr, time::Instant};
+
+    let mut fixture = Fixture::new("sha1")?;
+    fixture.pack()?;
+    // Establish the stable lock inode before the importer reaches publication.
+    drop(super::object_lock(
+        fixture.worktree.repo().common_dir(),
+        LockMode::Exclusive,
+    )?);
+    let entered = fixture.root.join("index-pack-entered");
+    let resume = fixture.root.join("index-pack-resume");
+    let wrapper = fixture.root.join("blocking-git");
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nfor arg do\ncase \"$arg\" in index-pack)\n: > {}\nattempts=0\nwhile [ ! -e {} ]; do\n[ \"$attempts\" -lt 200 ] || exit 91\n/bin/sleep 0.05\nattempts=$((attempts + 1))\ndone\n;;\nesac\ndone\nexec {} \"$@\"\n",
+            quote(&entered),
+            quote(&resume),
+            quote(&fixture.git),
+        ),
+    )?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+    fixture.git = wrapper;
+    std::thread::scope(|scope| -> TestResult {
+        let importing = scope.spawn(|| fixture.import());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !entered.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let indexing_entered = entered.exists();
+        let lock_available = indexing_entered
+            && fixture
+                .worktree
+                .repo()
+                .common_dir()
+                .try_lock_existing(OsStr::new("provenant-objects.lock"), LockMode::Exclusive)
+                .is_ok();
+        // Resume and join even when the probe fails, so no worker is stranded.
+        fs::write(&resume, b"resume")?;
+        let result = importing.join().map_err(|_| "import thread panicked")?;
+        assert!(indexing_entered, "import never reached index-pack");
+        assert!(lock_available, "index-pack held the shared object lock");
+        result?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+#[test]
+fn import_total_wall_clock_budget_covers_initialisation_and_indexing() -> TestResult {
+    use std::time::Instant;
+
+    let fixture = Fixture::new("sha1")?;
+    fixture.pack()?;
+    let initialised = fixture.root.join("init-entered");
+    let indexed = fixture.root.join("index-entered");
+    let wrapper = fixture.root.join("slow-git");
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nfor arg do\ncase \"$arg\" in\ninit) : > {}; /bin/sleep 0.1;;\nindex-pack) : > {}; /bin/sleep 3;;\nesac\ndone\nexec {} \"$@\"\n",
+            quote(&initialised),
+            quote(&indexed),
+            quote(&fixture.git),
+        ),
+    )?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+    let started = Instant::now();
+    let error = super::import_before(
+        &wrapper,
+        fixture.worktree.repo(),
+        &Directory::open_anchor(&fixture.source)?,
+        &Directory::open_anchor(&fixture.staging)?,
+        &fixture.staging,
+        fixture.head,
+        started + Duration::from_millis(750),
+    )
+    .err()
+    .ok_or("indexing must consume the one total import budget")?;
+    assert!(
+        matches!(error, crate::RunError::ObjectImportLimit(reason) if reason.contains("wall-clock budget"))
+    );
+    assert!(
+        initialised.exists(),
+        "wrapper never initialised the staging view"
+    );
+    assert!(indexed.exists(), "wrapper never reached index-pack");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "import failed to stop indexing promptly"
+    );
+    fixture.assert_not_published();
     Ok(())
 }

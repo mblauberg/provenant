@@ -491,6 +491,20 @@ fn linked_lane_uses_private_objects_and_cannot_mutate_shared_objects() -> Result
             );
             assert_eq!(fs::metadata(target)?.permissions().mode(), mode);
         }
+        let scratch_link = scratch.join("shared-object-link");
+        let output = shell("/bin/ln \"$1\" \"$2\"", target, &scratch_link);
+        assert!(
+            !output.status.success()
+                && String::from_utf8_lossy(&output.stderr).contains("Operation not permitted"),
+            "hard-link into scratch must be refused by Seatbelt for {}: {}",
+            target.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !scratch_link.exists(),
+            "shared object acquired a scratch alias"
+        );
+        assert_eq!(fs::read(target)?, before);
     }
     for name in [
         "HEAD",
@@ -531,6 +545,16 @@ fn linked_lane_uses_private_objects_and_cannot_mutate_shared_objects() -> Result
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    let scratch_source = scratch.join("hard-link-source");
+    let scratch_link = scratch.join("hard-link-control");
+    fs::write(&scratch_source, b"scratch hard-link control")?;
+    let output = shell("/bin/ln \"$1\" \"$2\"", &scratch_source, &scratch_link);
+    assert!(
+        output.status.success(),
+        "scratch hard-link control failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(&scratch_link)?, fs::read(&scratch_source)?);
     let packed_before = fs::read(repo_git.join("packed-refs"))?;
     let tracking_before = ok(git(
         &git_path,
