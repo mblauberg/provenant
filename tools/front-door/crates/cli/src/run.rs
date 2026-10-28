@@ -912,6 +912,7 @@ pub struct Submitted {
     pub task_id: TaskId,
     pub prompt: String,
     pub base: Option<String>,
+    pub head: Option<String>,
     pub route: run::RequestedRoute,
     pub account: Option<String>,
     pub fallback: Vec<String>,
@@ -1117,6 +1118,7 @@ pub fn submit_with_host(
                 task_id: task.task_id,
                 prompt: task.prompt,
                 base: task.base,
+                head: task.head,
                 route: task.route,
                 account: task.account,
                 fallback: fallback(&task.fallback)?,
@@ -1890,6 +1892,7 @@ fn dispatch_inner(
             placed.push(remote::Task {
                 title,
                 base,
+                head: command.head.clone(),
                 prompt,
                 route,
                 account,
@@ -1932,6 +1935,7 @@ fn dispatch_inner(
                 Submitted {
                     title,
                     base,
+                    head: command.head.clone(),
                     task_id,
                     prompt,
                     route,
@@ -2071,6 +2075,7 @@ fn replay_owned_dispatch(
         || task.prompt_digest != CanonicalV1::file_digest(prompt.as_bytes())
         || task.route != route
         || task.account != command.account
+        || task.head != command.head
         || task.base_ref != command.base
         || task.deliver != delivery
         || task.access != lane_access(&command.access, edge.roots.state.as_path())?
@@ -5673,6 +5678,7 @@ mod tests {
                 task_id: TaskId::from_bytes([3; 16]),
                 prompt: "review".into(),
                 base: Some(base.into()),
+                head: None,
                 route: run::RequestedRoute::Model {
                     provider: "fixture".into(),
                     model: "fixture/model".into(),
@@ -5729,6 +5735,7 @@ mod tests {
                 tasks: vec![run::TaskRequest {
                     title: None,
                     base: None,
+                    head: None,
                     base_ref: None,
                     task_id,
                     prompt_digest: CanonicalV1::file_digest(b"p"),

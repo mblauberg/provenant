@@ -50,6 +50,7 @@ pub(super) fn input() -> PreparedRun {
             tasks: vec![TaskRequest {
                 title: None,
                 base: None,
+                head: None,
                 base_ref: None,
                 writer: None,
                 profile: HarnessProfile::default(),

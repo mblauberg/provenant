@@ -1019,6 +1019,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                     .map(|task_id| TaskRequest {
                         title: None,
                         base: None,
+                        head: None,
                         base_ref: None,
                         writer: None,
                         profile: provenant_records::run::HarnessProfile::default(),
@@ -3738,6 +3739,7 @@ fn seed_attempt(
                 tasks: vec![TaskRequest {
                     title: None,
                     base: None,
+                    head: None,
                     base_ref: None,
                     writer: None,
                     profile: provenant_records::run::HarnessProfile::default(),

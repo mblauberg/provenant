@@ -104,6 +104,7 @@ fn create_lane(rig: &TestRig) -> Result<String> {
                 tasks: vec![run::TaskRequest {
                     title: None,
                     base: None,
+                    head: None,
                     base_ref: None,
                     profile: Default::default(),
                     task_id,

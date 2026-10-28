@@ -198,6 +198,12 @@ push|reconcile`. A terminal without MCP cancels with `provenant cancel ATTEMPT`.
   checkout separately for uncommitted edits. They are removed at settlement, so
   put review evidence in the final answer. Peer writers (`--host` with
   `--branch`) get no context files.
+- For a review of a chair-verified commit, pass `--head SHA` and optionally
+  `--base SHA` to dispatch. Both must be full commit SHAs available on the
+  executing host. Without a base, the host records the merge base with
+  `origin/HEAD`; supply a base if that default branch is unavailable. The host
+  injects the resolved range into the brief and exports `PROVENANT_LANE_BASE`
+  and `PROVENANT_LANE_HEAD`. The lane does not need to fetch.
 - A chair running lanes across many wakes follows
   [chair-loop.md](chair-loop.md), including its reviewer git-verb denylist and
   decision council.
@@ -226,7 +232,7 @@ these task-specific fields inline in the Fabric task `prompt`:
 
 ```text
 Goal: <bounded task>
-Scope/paths: <target, base/head and allowed paths>
+Scope/paths: <target and allowed paths; for review, $PROVENANT_LANE_BASE..$PROVENANT_LANE_HEAD>
 Constraints: <authority, isolation, governing skill and stop condition>
 Output: <shape, length and durable evidence location>
 Verification: <checks; for review, the rubric path or full rubric>

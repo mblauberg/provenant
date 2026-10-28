@@ -348,6 +348,9 @@ pub struct Dispatch {
     /// Create or reuse a clean local writer worktree owned by this lane
     #[arg(long, conflicts_with_all = ["worktree", "branch", "host", "manifest"])]
     pub worktree_branch: Option<String>,
+    /// Chair-verified full commit SHA to review (must exist on the executing host)
+    #[arg(long)]
+    pub head: Option<String>,
     /// Git base for attempt history and a new writer branch
     #[arg(long)]
     pub base: Option<String>,

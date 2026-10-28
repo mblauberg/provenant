@@ -46,6 +46,7 @@ const POLL: Duration = Duration::from_secs(2);
 pub(super) struct Task {
     pub(super) title: Option<String>,
     pub(super) base: Option<String>,
+    pub(super) head: Option<String>,
     pub(super) prompt: String,
     pub(super) route: run::RequestedRoute,
     pub(super) account: Option<String>,
@@ -731,11 +732,12 @@ fn submitted_task(
     SubmittedTask {
         title: task.title,
         // A writer's base belongs to its new worktree request.
-        base: if new_worktree.is_none() {
+        base: if new_worktree.is_none() || task.head.is_some() {
             task.base
         } else {
             None
         },
+        head: task.head,
         account: task.account,
         access: if new_worktree.is_some() {
             AccessMode::WorktreeWrite
@@ -1566,6 +1568,7 @@ mod tests {
             Task {
                 title: Some("Make the change".into()),
                 base: Some("main".into()),
+                head: None,
                 prompt: "write the change".into(),
                 route: route.clone(),
                 account: None,
@@ -1611,6 +1614,7 @@ mod tests {
             Task {
                 title: None,
                 base: Some("main".into()),
+                head: None,
                 prompt: "review".into(),
                 route: run::RequestedRoute::Named {
                     name: "utility".into(),
