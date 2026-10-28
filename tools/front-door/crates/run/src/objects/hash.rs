@@ -147,7 +147,8 @@ impl ObjectHash {
     fn finish(self) -> Option<String> {
         Some(match self {
             Self::Sha1(hash) => hash
-                .finalize_cd().ok()?
+                .finalize_cd()
+                .ok()?
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect(),
