@@ -316,15 +316,6 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
     let globals = &inv.globals;
     let command = match inv.command {
         Command::Hook(hook) => return hooks::run(hook, globals),
-        Command::DiskGuard(_) => {
-            return fail(
-                "disk-guard",
-                Outcome::Invalid,
-                "REMOVED",
-                "disk-guard has been removed; running lanes supervise disk pressure",
-                globals,
-            );
-        }
         command => command,
     };
     if let Err(error) = roots::validate_globals(globals) {
@@ -339,13 +330,6 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         return fail(&inv.leaf, status, code, &error.to_string(), globals);
     }
     match command {
-        Command::DiskGuard(_) => fail(
-            "disk-guard",
-            Outcome::Invalid,
-            "REMOVED",
-            "disk-guard has been removed; running lanes supervise disk pressure",
-            globals,
-        ),
         Command::Hosts { command: None } => fabric::hosts(globals, process.workers()),
         Command::Hosts {
             command: Some(command),
