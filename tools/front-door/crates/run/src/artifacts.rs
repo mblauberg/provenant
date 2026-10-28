@@ -109,12 +109,8 @@ impl RunStore {
         let dir = self.attempt_dir(record.run_id, id, false)?;
         let mut file = dir.open_read(OsStr::new("result.md"))?;
         let before = file.metadata()?;
-        if before.kind != FileKind::Regular
-            || before.links != 1
-            || before.mode & 0o077 != 0
-            || before.uid != provenant_os::fs::effective_uid()
-        {
-            return Err(RunError::UnsafePath);
+        if let Some(check) = PathCheck::file(before) {
+            return Err(RunError::unsafe_entry(&dir, OsStr::new("result.md"), check));
         }
         if before.size != artifact.bytes {
             return Err(RunError::ArtifactMismatch);

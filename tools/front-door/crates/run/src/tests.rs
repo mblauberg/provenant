@@ -586,6 +586,17 @@ fn streamed_result_is_verified_and_redacted_across_chunks() -> TestResult {
         .state_root
         .as_path()
         .join(format!("runs/{}/attempts/{id}/result.md", input.run_id));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
+        let expected =
+            std::path::PathBuf::from(format!("runs/{}/attempts/{id}/result.md", input.run_id));
+        assert!(
+            matches!(store.stream_result(id, &call, None), Err(RunError::UnsafePath { path, check: PathCheck::Mode }) if path == expected)
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
     std::fs::write(path, vec![b'x'; text.len()])?;
     assert!(matches!(
         store.stream_result(id, &call, None),
