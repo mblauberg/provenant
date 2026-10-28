@@ -2,4 +2,8 @@
 
 - Graph nodes record typed, bounded outputs and can select outputs from direct
   dependencies for their briefs. Graph status JSON exposes SHA-256 result
-  digests and bounded excerpts. Selected outputs are labelled as untrusted data.
+  digests and bounded excerpts. Selected outputs are delimited as untrusted data.
+- The digest identifies the raw stored result; excerpts and output reads are
+  statefully credential-redacted and may not hash to that digest.
+- Version 1 outputs from earlier checkpoints cannot feed selected inputs.
+  Resume cannot repair them; rerun the graph with a new graph ID.

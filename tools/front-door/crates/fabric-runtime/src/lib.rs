@@ -12,7 +12,7 @@ pub mod hosts;
 pub mod identity;
 pub mod inbox;
 pub mod peer_agent;
-pub mod result_capture;
+pub use provenant_records::result_capture;
 pub mod runs;
 #[cfg(test)]
 mod test_support;

@@ -80,13 +80,16 @@ the task title validation, including the prohibition on control characters.
 brief. The available selectors are `result`, `verdict`, `findings`, `branch`
 and `commit`. Omit `inputs` for ordering without passing data. The result has a
 SHA-256 digest of the complete stored result, a bounded credential-redacted
-excerpt and a run-file path when available. The path is available for a local attempt with a result;
-remote attempts may have no local path. Selected outputs appear in a block
-marked as untrusted data. The rendered brief is bounded by the effective
+excerpt and a run-file path when available. The digest identifies the raw
+stored artifact; hashing the redacted output may yield a different digest.
+The path is available for a local attempt with a result; remote attempts may
+have no local path. Selected outputs appear in a block marked as untrusted
+data. The rendered brief is bounded by the effective
 `node_prompt_bytes` limit; whole input sections that do not fit are omitted.
 If a dependency's outputs are unavailable or use the older version 1 schema,
-advancement reports an error. Inspect the checkpoint's node outputs with
-`provenant fabric graph status --json`.
+the pending dependent node fails with an actionable error. Resume cannot repair
+the older checkpoint; rerun the graph and dependency using a new graph ID.
+Inspect the checkpoint's node outputs with `provenant fabric graph status --json`.
 
 To report findings, include a fenced `findings` block in the result containing
 JSON with `schema_version: 1` and a `findings` array. Each finding has `id`,

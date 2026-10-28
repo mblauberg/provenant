@@ -257,6 +257,9 @@ pub struct NodeProgress {
     pub worktree: Option<String>,
     pub id: String,
     pub state: NodeState,
+    /// An actionable admission or settlement failure, retained for status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advance_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outputs: Option<NodeOutputs>,
     /// One durable row per route actually tried, in route order.
@@ -366,6 +369,7 @@ pub enum AttemptObservation {
         outcome: AttemptOutcome,
         launched: bool,
         result: Option<crate::result_capture::CapturedResult>,
+        result_warning: Option<String>,
         result_path: Option<String>,
         branch: Option<String>,
         commit: Option<String>,
@@ -1037,6 +1041,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         title: Some(node.title.as_deref().unwrap_or(&node.id).to_owned()),
                         worktree: node.worktree.clone(),
                         state: NodeState::Pending,
+                        advance_error: None,
                         outputs: None,
                         attempts: Vec::new(),
                     })
@@ -1143,6 +1148,35 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
 
         let node = &plan.nodes[node_index];
+        let unavailable = node.inputs.iter().find(|input| {
+            positions
+                .get(&input.node)
+                .and_then(|index| checkpoint.nodes[*index].outputs.as_ref())
+                .is_none_or(|outputs| outputs.schema_version != 2)
+        }).map(|input| format!(
+            "node {}: dependency {} has unavailable or version 1 outputs; restart the graph and rerun the dependency to record version 2 outputs; resume cannot repair this checkpoint",
+            node.id, input.node
+        ));
+        if let Some(reason) = &unavailable {
+            let progress = &mut checkpoint.nodes[node_index];
+            progress.advance_error = Some(reason.clone());
+            let last = progress.attempts.last();
+            if last.is_none_or(|attempt| attempt.state == AttemptState::Terminal) {
+                progress.state = NodeState::Failed;
+                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                continue;
+            }
+            if last.is_some_and(|attempt| attempt.attempt_ref.is_none()) {
+                // Submission may already have launched. Never resubmit a changed
+                // prompt or discard an unresolved attempt's custody evidence.
+                progress.advance_error = Some(format!(
+                    "{reason}; attempt reference is unresolved; inspect the run before restarting"
+                ));
+                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                continue;
+            }
+            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+        }
         loop {
             let progress = &checkpoint.nodes[node_index];
             let route_index = match progress.attempts.last() {
@@ -1171,16 +1205,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .map_err(|_| GraphError::Invalid("route count"))?,
             };
 
-            if node.inputs.iter().any(|input| {
-                positions
-                    .get(&input.node)
-                    .and_then(|index| checkpoint.nodes[*index].outputs.as_ref())
-                    .is_none_or(|outputs| outputs.schema_version != 2)
-            }) {
-                return Err(GraphError::Invalid(
-                    "selected dependency outputs unavailable",
-                ));
-            }
             let needs_record = checkpoint.nodes[node_index]
                 .attempts
                 .last()
@@ -1305,6 +1329,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         outcome,
                         launched,
                         result,
+                        result_warning,
                         result_path,
                         branch,
                         commit,
@@ -1314,7 +1339,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         attempt.state = AttemptState::Terminal;
                         attempt.attempt_ref = attempt_ref;
                         // Provider success alone does not satisfy an explicit result contract.
-                        let outcome = if outcome == AttemptOutcome::Succeeded
+                        let outcome = if unavailable.is_some() {
+                            AttemptOutcome::OtherFailure
+                        } else if outcome == AttemptOutcome::Succeeded
                             && node.required_verdict.is_some()
                             && !result
                                 .as_ref()
@@ -1325,8 +1352,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             outcome
                         };
                         attempt.outcome = Some(outcome);
-                        progress.outputs =
-                            Some(make_outputs(result.as_ref(), result_path, branch, commit));
+                        progress.outputs = Some(make_outputs(
+                            result.as_ref(),
+                            node.required_verdict.as_deref(),
+                            result_warning,
+                            result_path,
+                            branch,
+                            commit,
+                        ));
                         match outcome {
                             AttemptOutcome::Succeeded => {
                                 progress.state = NodeState::Succeeded;
@@ -1405,10 +1438,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     } else {
         GraphStatus::Pending
     };
+    let advance_error = checkpoint
+        .nodes
+        .iter()
+        .find_map(|node| node.advance_error.clone());
     Ok(GraphRun {
         status,
         checkpoint,
-        advance_error: None,
+        advance_error,
     })
 }
 
@@ -2063,6 +2100,8 @@ fn bounded(text: &str, max: usize) -> String {
 
 fn make_outputs(
     result: Option<&crate::result_capture::CapturedResult>,
+    required_verdict: Option<&str>,
+    result_warning: Option<String>,
     path: Option<String>,
     branch: Option<String>,
     commit: Option<String>,
@@ -2084,15 +2123,24 @@ fn make_outputs(
         };
         [head, tail]
     });
-    let verdict = windows
-        .as_ref()
-        .and_then(|windows| {
+    if let Some(warning) = result_warning {
+        warnings.push(warning);
+    }
+    let matched = result.is_some_and(|capture| capture.matched_required);
+    let verdict = required_verdict
+        .filter(|_| matched)
+        .map(|line| line.trim().to_owned())
+        .or_else(|| {
             windows
-                .iter()
-                .flat_map(|text| text.lines())
-                .find(|line| line.trim().starts_with("VERDICT:"))
-        })
-        .map(|line| bounded(line.trim(), OUTPUT_FIELD_BYTES));
+                .as_ref()
+                .and_then(|windows| {
+                    windows
+                        .iter()
+                        .flat_map(|text| text.lines())
+                        .find(|line| line.trim().starts_with("VERDICT:"))
+                })
+                .map(|line| bounded(line.trim(), OUTPUT_FIELD_BYTES))
+        });
     let parsed = windows.as_ref().and_then(|windows| {
         windows.iter().find_map(|text| {
             let (_, block) = text.split_once("```findings\n")?;
@@ -2254,6 +2302,9 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 attempt.state == AttemptState::Terminal
                     && attempt.outcome == Some(AttemptOutcome::Succeeded)
             }),
+            NodeState::Failed if progress.advance_error.is_some() => {
+                last.is_none_or(|attempt| attempt.state == AttemptState::Terminal)
+            }
             NodeState::Failed => last.is_some_and(|attempt| {
                 attempt.state == AttemptState::Terminal
                     && match attempt.outcome {
@@ -2416,6 +2467,7 @@ mod tests {
             outcome: AttemptOutcome::Succeeded,
             launched: true,
             result: None,
+            result_warning: None,
             result_path: None,
             branch: None,
             commit: None,
@@ -2475,6 +2527,7 @@ mod tests {
                 outcome: AttemptOutcome::Succeeded,
                 launched: true,
                 result: None,
+                result_warning: None,
                 result_path: None,
                 branch: None,
                 commit: None,
@@ -2822,6 +2875,7 @@ mod tests {
                 outcome: AttemptOutcome::Succeeded,
                 launched: true,
                 result: None,
+                result_warning: None,
                 result_path: None,
                 branch: None,
                 commit: None,
@@ -2871,6 +2925,7 @@ mod tests {
             outcome: AttemptOutcome::Succeeded,
             launched: true,
             result: None,
+            result_warning: None,
             result_path: None,
             branch: None,
             commit: None,
@@ -2920,6 +2975,7 @@ mod tests {
             outcome: AttemptOutcome::Succeeded,
             launched: true,
             result: None,
+            result_warning: None,
             result_path: None,
             branch: None,
             commit: None,
@@ -2996,6 +3052,7 @@ mod tests {
                 outcome: AttemptOutcome::Succeeded,
                 launched: true,
                 result: None,
+                result_warning: None,
                 result_path: None,
                 branch: None,
                 commit: None,
@@ -3087,6 +3144,7 @@ mod tests {
             outcome,
             launched: true,
             result: None,
+            result_warning: None,
             result_path: None,
             branch: None,
             commit: None,
@@ -3099,6 +3157,7 @@ mod tests {
             outcome,
             launched: true,
             result: Some(capture(result)),
+            result_warning: None,
             result_path: None,
             branch: None,
             commit: None,
@@ -3109,6 +3168,120 @@ mod tests {
         let mut capture = crate::result_capture::ResultCapture::new(Some("VERDICT: PASS"));
         capture.push(text.as_bytes());
         capture.finish()
+    }
+
+    #[test]
+    fn matched_required_verdict_takes_precedence_even_in_middle() {
+        let mut review = node("review", route("fixture"));
+        review.required_verdict = Some("VERDICT: FAIL".into());
+        let text = format!(
+            "VERDICT: PASS\n{}\nVERDICT: FAIL\n{}",
+            "x".repeat(5000),
+            "y".repeat(20000)
+        );
+        let mut capture = crate::result_capture::ResultCapture::new(Some("VERDICT: FAIL"));
+        capture.push(text.as_bytes());
+        let mut observation = terminal(AttemptOutcome::Succeeded);
+        if let AttemptObservation::Terminal { result, .. } = &mut observation {
+            *result = Some(capture.finish());
+        }
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([observation]),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![review]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+        assert_eq!(
+            run.checkpoint.nodes[0]
+                .outputs
+                .as_ref()
+                .unwrap()
+                .verdict
+                .as_deref(),
+            Some("VERDICT: FAIL")
+        );
+    }
+
+    #[test]
+    fn stale_parent_outputs_fail_pending_child_and_preserve_running_custody() {
+        let mut child = node("child", route("fixture"));
+        child.depends_on.push("parent".into());
+        child.inputs.push(GraphInput {
+            node: "parent".into(),
+            outputs: vec![OutputKind::Result],
+        });
+        let document = graph(vec![node("parent", route("fixture")), child]);
+        let mut journal = MemoryJournal::default();
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                terminal_with_result(AttemptOutcome::Succeeded, "done"),
+                AttemptObservation::Pending {
+                    attempt_ref: Some("host/attempt".into()),
+                },
+            ]),
+            ..Default::default()
+        };
+        advance(&document, &mut owner, &mut journal).unwrap();
+        let mut stale = journal.0.clone().unwrap();
+        stale.nodes[0].outputs.as_mut().unwrap().schema_version = 1;
+
+        let mut pending = stale.clone();
+        pending.nodes[1].state = NodeState::Pending;
+        pending.nodes[1].attempts.clear();
+        journal.0 = Some(pending);
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(run.checkpoint.nodes[1].state, NodeState::Failed);
+        assert!(
+            run.advance_error
+                .as_deref()
+                .unwrap()
+                .contains("dependency parent")
+        );
+        assert!(
+            run.advance_error
+                .as_deref()
+                .unwrap()
+                .contains("resume cannot repair")
+        );
+        assert_eq!(
+            advance(&document, &mut owner, &mut journal)
+                .unwrap()
+                .checkpoint,
+            run.checkpoint
+        );
+
+        journal.0 = Some(stale.clone());
+        owner
+            .observations
+            .push_back(terminal(AttemptOutcome::Succeeded));
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(
+            owner.stored_refs.last().unwrap().as_deref(),
+            Some("host/attempt")
+        );
+        assert_eq!(run.checkpoint.nodes[1].state, NodeState::Failed);
+        assert_eq!(
+            run.checkpoint.nodes[1].attempts[0].outcome,
+            Some(AttemptOutcome::OtherFailure)
+        );
+
+        stale.nodes[1].attempts[0].attempt_ref = None;
+        journal.0 = Some(stale);
+        let calls = owner.calls.len();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(run.checkpoint.nodes[1].state, NodeState::Running);
+        assert_eq!(owner.calls.len(), calls);
+        assert!(
+            run.advance_error
+                .as_deref()
+                .unwrap()
+                .contains("attempt reference is unresolved")
+        );
     }
 
     #[test]
@@ -3430,6 +3603,7 @@ mod tests {
                     outcome,
                     launched,
                     result: None,
+                    result_warning: None,
                     result_path: None,
                     branch: None,
                     commit: None,
@@ -3741,7 +3915,7 @@ mod tests {
 
     #[test]
     fn output_parsing_is_lenient_and_rendering_is_bounded() {
-        let failed = make_outputs(Some(&capture("no findings")), None, None, None);
+        let failed = make_outputs(Some(&capture("no findings")), None, None, None, None, None);
         assert!(failed.findings.is_empty());
         assert_eq!(failed.warnings, ["findings block missing or invalid"]);
         let oversized = format!(
@@ -3749,7 +3923,7 @@ mod tests {
             "x".repeat(8192)
         );
         assert!(
-            make_outputs(Some(&capture(&oversized)), None, None, None)
+            make_outputs(Some(&capture(&oversized)), None, None, None, None, None)
                 .findings
                 .is_empty()
         );
@@ -3795,7 +3969,7 @@ mod tests {
             "x".repeat(25000)
         );
         let captured = capture(&text);
-        let outputs = make_outputs(Some(&captured), None, None, None);
+        let outputs = make_outputs(Some(&captured), None, None, None, None, None);
         assert_eq!(outputs.verdict.as_deref(), Some("VERDICT: PASS"));
         assert_eq!(outputs.findings[0].id, "F1");
         assert_eq!(outputs.result.unwrap().truncated, Some(true));
@@ -3984,6 +4158,7 @@ mod tests {
                     outcome: AttemptOutcome::Succeeded,
                     launched: true,
                     result: text.map(capture),
+                    result_warning: None,
                     result_path: None,
                     branch: None,
                     commit: None,

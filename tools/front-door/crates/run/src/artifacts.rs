@@ -82,16 +82,14 @@ pub(crate) fn remove_entry_tree(parent: &Directory, name: &OsStr) -> provenant_o
 }
 
 impl RunStore {
-    /// Stream a result through the same stateful credential filter used by
-    /// output reads. The returned digest identifies the original artifact.
-    /// Callers must discard anything emitted if this returns an error, since
-    /// length and digest verification completes only after the final chunk.
+    /// Verify the original artifact before returning bounded, redacted evidence.
+    /// The returned digest identifies the original artifact.
     pub fn stream_result(
         &self,
         id: provenant_core::AttemptId,
         call: &Request<'_>,
-        mut emit: impl FnMut(&[u8]),
-    ) -> Result<provenant_records::FileDigest> {
+        required_verdict: Option<&str>,
+    ) -> Result<provenant_records::result_capture::CapturedResult> {
         use provenant_os::exec::CaptureFilter;
         use sha2::{Digest as _, Sha256};
 
@@ -124,6 +122,7 @@ impl RunStore {
         let mut hash = Sha256::new();
         let mut redactor = provenant_confinement::redact::Redactor::new([])
             .map_err(|_| RunError::Validation("output redaction failed"))?;
+        let mut capture = provenant_records::result_capture::ResultCapture::new(required_verdict);
         let mut buffer = [0u8; 8192];
         let mut total = 0u64;
         loop {
@@ -139,7 +138,7 @@ impl RunStore {
             let safe = redactor
                 .filter(&buffer[..count])
                 .map_err(|_| RunError::Validation("output redaction failed"))?;
-            emit(&safe);
+            capture.push(&safe);
         }
         let digest = provenant_records::FileDigest::from_bytes(hash.finalize().into());
         if total != artifact.bytes
@@ -151,8 +150,12 @@ impl RunStore {
         let safe = redactor
             .finish()
             .map_err(|_| RunError::Validation("output redaction failed"))?;
-        emit(&safe);
-        Ok(digest)
+        capture.push(&safe);
+        let mut result = capture.finish();
+        result.digest = digest.to_string();
+        result.source_truncated =
+            artifact.bytes > provenant_records::result_capture::ResultCapture::HEAD_BYTES as u64;
+        Ok(result)
     }
 
     pub(crate) fn run_dir(&self, run: RunId, create: bool) -> Result<Directory> {

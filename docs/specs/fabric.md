@@ -215,14 +215,19 @@ adapter. Routes require an adapter or alias and may mix these forms in a list.
 
 Settled nodes record version 2 outputs in the checkpoint, exposed by graph
 status JSON. A result's `digest` is `sha256:` followed by the lowercase
-SHA-256 of the complete stored result's raw bytes. The runtime applies
-stateful credential redaction while streaming the result. Its `excerpt` is a
-UTF-8 prefix of at most 4096 bytes of the redacted text, and `truncated`
-indicates that either the stored result or redacted text exceeded that window. A local attempt may
-also have a run-file path. The runtime retains only the excerpt and a 16 KiB
-tail of the redacted text for parsing.
+SHA-256 of the complete stored result's raw bytes. This identifies the stored
+artifact: it is not a hash of the excerpt or of the redacted output returned by
+run output reads, and cannot be verified by hashing those redacted bytes when
+redaction changed the content. The runtime applies stateful credential
+redaction while streaming the result. Its `excerpt` is a UTF-8 prefix of at
+most 4096 bytes of the redacted text, and `truncated` indicates that either the
+stored result or redacted text exceeded that window. A local attempt may also
+have a run-file path. The runtime retains only the excerpt and a 16 KiB tail
+of the redacted text for parsing.
 
-The optional verdict is a `VERDICT:` line in one of those windows. Findings
+When `required_verdict` matches, the recorded verdict is that exact trimmed
+line. Otherwise the optional verdict is a `VERDICT:` line in one of those
+windows, and may be absent. Findings
 use a fenced `findings` JSON block with `schema_version: 1` and a `findings`
 array; each item has `id`, `severity`, `file`, `line`, `summary` and `status`;
 `line` may be null. Parsing only uses complete lines and blocks within a
@@ -240,10 +245,21 @@ bounded by the effective per-node prompt byte limit; whole input sections that
 do not fit are omitted. Selected outputs appear in a delimited block labelled
 as untrusted data, with delimiter collisions escaped. If a selected dependency
 has no recorded outputs, or has version 1 outputs from an older checkpoint,
-advancement reports an error. Version 1 outputs remain visible in status but
-cannot feed selected inputs. Result digests, excerpts and paths are passed
-instead of transcripts.
+the pending dependent node fails with an actionable per-node advance error.
+Version 1 outputs remain visible in status but cannot feed selected inputs.
+Resuming cannot repair those outputs; rerun the graph and dependency under a
+new graph ID. Result digests, excerpts and paths are passed instead of
+transcripts.
 - Why: downstream nodes can use bounded evidence without copying transcripts.
+- Test: `crates/fabric-runtime/src/graph.rs::outputs_feed_direct_dependants_and_survive_replay`;
+  `::output_parsing_is_lenient_and_rendering_is_bounded`;
+  `::findings_and_verdict_at_the_end_of_a_large_result_are_parsed`;
+  `::matched_required_verdict_takes_precedence_even_in_middle`;
+  `::stale_parent_outputs_fail_pending_child_and_preserve_running_custody`;
+  `::upstream_data_boundary_cannot_be_closed_by_result_content`;
+  `crates/records/src/result_capture.rs::hashes_all_bytes_and_keeps_bounded_windows`;
+  `crates/run/src/tests.rs::streamed_result_is_verified_and_redacted_across_chunks`;
+  `src/fabric.rs::graph_owner_fails_node_when_result_integrity_is_lost`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
 ### Checkpoint before launch

@@ -504,26 +504,25 @@ fn streamed_result_is_verified_and_redacted_across_chunks() -> TestResult {
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     let secret = format!("ghp_{}", "a".repeat(36));
-    let text = format!("{} {}\n{}", "x".repeat(8189), secret, "z".repeat(50000));
+    let text = format!("{} {}\n{}", "x".repeat(8189), secret, "z".repeat(1000));
     let mut done = publication();
     done.result = &text;
     store.publish_terminal(id, 1, &done, &exit(), &call)?;
-    let mut safe = Vec::new();
-    let mut largest = 0;
-    let digest = store.stream_result(id, &call, |chunk| {
-        largest = largest.max(chunk.len());
-        safe.extend_from_slice(chunk);
-    })?;
-    assert_eq!(digest, CanonicalV1::file_digest(text.as_bytes()));
-    assert!(largest <= 8192);
-    assert!(!String::from_utf8(safe)?.contains(&secret));
+    let result = store.stream_result(id, &call, None)?;
+    assert_eq!(
+        result.digest,
+        CanonicalV1::file_digest(text.as_bytes()).to_string()
+    );
+    assert!(result.source_truncated);
+    assert!(!result.tail.contains(&secret));
+    assert!(result.tail.contains("[REDACTED]"));
     let path = context
         .state_root
         .as_path()
         .join(format!("runs/{}/attempts/{id}/result.md", input.run_id));
     std::fs::write(path, vec![b'x'; text.len()])?;
     assert!(matches!(
-        store.stream_result(id, &call, |_| {}),
+        store.stream_result(id, &call, None),
         Err(RunError::ArtifactMismatch)
     ));
     Ok(())

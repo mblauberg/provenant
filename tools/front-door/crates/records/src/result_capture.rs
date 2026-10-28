@@ -31,6 +31,8 @@ pub struct CapturedResult {
 }
 
 impl ResultCapture {
+    pub const HEAD_BYTES: usize = HEAD_BYTES;
+
     pub fn new(required_verdict: Option<&str>) -> Self {
         Self {
             hash: Sha256::new(),
