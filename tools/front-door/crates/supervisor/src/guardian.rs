@@ -190,8 +190,9 @@ pub trait DiskPressure {
 }
 
 /// The holder role: the composed terminal publisher runs inside the guardian,
-/// after durable exit and completed cleanup, while the guardian still holds
-/// the writer lease and attempt custody. It must durably publish Run's
+/// after durable exit and completed cleanup. The writer reservation remains,
+/// but its kernel lock is released before external settlement commands run.
+/// It must durably publish Run's
 /// `terminal-commit.json`, `quarantine/manifest.json` and `release.json` in the
 /// attempt directory before returning. Supervisor then verifies those exact
 /// scoped bytes and clears the fence; any failure leaves the fence for
@@ -423,7 +424,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         writer: Some(inherited.writer),
         #[cfg(target_os = "macos")]
         writer_identity,
-        _custody: inherited.custody,
+        _custody: Some(inherited.custody),
         guardian,
         requester: message.requester,
         executable_snapshot: message.executable_snapshot,
@@ -447,7 +448,7 @@ struct Driver<'a> {
     writer: Option<provenant_os::fs::LockGuard>,
     #[cfg(target_os = "macos")]
     writer_identity: provenant_os::fs::Metadata,
-    _custody: provenant_os::fs::LockGuard,
+    _custody: Option<provenant_os::fs::LockGuard>,
     guardian: ProcessIdentity,
     requester: provenant_core::ActorId,
     executable_snapshot: ExecutableSnapshot,
@@ -676,6 +677,7 @@ impl Driver<'_> {
             }
             if exit.is_some() && !host_closed {
                 child.resume_builds();
+                drop(self.provider_lease.take());
                 host_closed = true;
                 if let Some(holder) = self.holder
                     && holder
@@ -1290,14 +1292,26 @@ impl Driver<'_> {
         self.release(&record);
         Ok(())
     }
-    /// Hand the durable exit to the holder and clear the fence only after its
-    /// release attestations verify. Failures keep the fence for recovery;
-    /// they never alter the published exit or become a stop reason.
+    /// Hand the durable exit to the holder without holding writer.lock. The
+    /// reservation keeps a new writer out until release attestations verify.
+    /// Failures leave the durable fence available to a resumed supervisor.
     fn release(&mut self, record: &ProcessExit) {
         let Some(holder) = self.holder else {
             return;
         };
         if record.unresolved_cleanup || self.writer.is_none() {
+            return;
+        }
+        self.reservation.launch_state = LaunchState::Settling;
+        if write_record(
+            &self.writer_dir,
+            "reservation.json",
+            &self.reservation,
+            PublishMode::Replace,
+        )
+        .and_then(|publication| publication.require_durable().map_err(CustodyError::from))
+        .is_err()
+        {
             return;
         }
         let exit = record.durable_observation();
@@ -1308,19 +1322,18 @@ impl Driver<'_> {
             self.writer = Some(lease);
             return;
         };
-        let recovery = crate::custody::Recovery {
+        let mut recovery = crate::custody::Recovery {
             directory,
-            lease,
+            lease: Some(lease),
             reservation: self.reservation.clone(),
             guardian_quiescent: true,
         };
-        // About 30 s in all, so a contended store does not strand custody.
-        let mut delay = Duration::from_millis(50);
-        for attempt in 0..12 {
-            if attempt > 0 {
-                let _ = self.reactor.wait(&[], delay);
-                delay = delay.saturating_mul(2).min(Duration::from_secs(5));
-            }
+        if recovery.release_writer_lock().is_err() {
+            self.writer = recovery.lease.take();
+            return;
+        }
+        drop(self._custody.take());
+        for _ in 0..3 {
             if holder
                 .terminal(&self.holder_context, &self.attempt, &exit, &recovery)
                 .is_err()
@@ -1340,12 +1353,10 @@ impl Driver<'_> {
                     )
                 });
             if verified.is_ok() {
-                let _ = clear_reservation(&self.writer_dir, self.reservation.scope);
-                self.writer = Some(recovery.lease);
+                let _ = recovery.clear_settled_reservation();
                 return;
             }
         }
-        self.writer = Some(recovery.lease);
     }
     /// Retry without a time limit: custody survives ENOSPC and signals until
     /// the immutable exit is durable. process.json exposes publication_pending.

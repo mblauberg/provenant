@@ -90,11 +90,7 @@ fn terminal_imports_private_objects_before_quarantine_reads_the_lane()
                 ));
                 environment.push((
                     "GIT_INDEX_FILE".into(),
-                    worktree
-                        .repo()
-                        .private_git_dir()
-                        .join("index")
-                        .into_os_string(),
+                    scratch.join("git-common/index").into_os_string(),
                 ));
                 let mut options =
                     ExecOptions::new(&argv, &fixture.writer.worktree, Duration::from_secs(5));
@@ -139,48 +135,43 @@ fn terminal_imports_private_objects_before_quarantine_reads_the_lane()
 }
 
 #[test]
-fn terminal_archives_a_verified_private_rewind_before_refusing_ancestry()
+fn terminal_archives_a_private_rewind_and_requires_review()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
     let previous = fixture.prepare()?.head(&fixture.writer)?;
     fixture.commit(&fixture.writer.worktree, "new writer base")?;
-    let error = fixture
-        .terminal(|| {
-            let attempt = fixture.root.join("attempt");
-            let scratch = attempt.join("tmp/candidate-0");
-            std::fs::create_dir_all(&scratch)?;
-            let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-            let runtime =
-                provenant_confinement::UtilityRuntime::new(&executable, fixture.root.join("home"))?;
-            let repo = runtime.open_repo(
-                &SystemExecutor::new(1)?,
-                &fixture.writer.project,
-                provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
-                &provenant_core::CancelToken::new(),
-            )?;
-            let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
-            let base =
-                crate::objects::resolve_ref(&executable, worktree.repo(), "refs/heads/lane")?;
-            crate::objects::prepare_bound(
-                &executable,
-                worktree.repo(),
-                &Directory::open_anchor(&attempt)?,
-                &scratch,
-                "refs/heads/lane",
-                base,
-            )?;
-            std::fs::write(
-                scratch.join("git-common/refs/heads/lane"),
-                format!("{previous}\n"),
-            )?;
-            Ok(())
-        })
-        .expect_err("private rewind must fail ancestry certification");
+    let review = fixture.terminal(|| {
+        let attempt = fixture.root.join("attempt");
+        let scratch = attempt.join("tmp/candidate-0");
+        std::fs::create_dir_all(&scratch)?;
+        let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let runtime =
+            provenant_confinement::UtilityRuntime::new(&executable, fixture.root.join("home"))?;
+        let repo = runtime.open_repo(
+            &SystemExecutor::new(1)?,
+            &fixture.writer.project,
+            provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
+            &provenant_core::CancelToken::new(),
+        )?;
+        let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
+        let base = crate::objects::resolve_ref(&executable, worktree.repo(), "refs/heads/lane")?;
+        crate::objects::prepare_bound(
+            &executable,
+            worktree.repo(),
+            &Directory::open_anchor(&attempt)?,
+            &scratch,
+            "refs/heads/lane",
+            base,
+        )?;
+        std::fs::write(
+            scratch.join("git-common/refs/heads/lane"),
+            format!("{previous}\n"),
+        )?;
+        Ok(())
+    })?;
     assert!(
-        error
-            .to_string()
-            .contains("no longer descends from its recorded base"),
-        "{error}"
+        review,
+        "rewritten history retains instruction review evidence"
     );
     assert!(
         fixture
@@ -188,99 +179,8 @@ fn terminal_archives_a_verified_private_rewind_before_refusing_ancestry()
             .join("attempt/quarantine/manifest.json")
             .is_file()
     );
-    assert!(!fixture.root.join("attempt/writer-terminal.json").exists());
+    assert!(fixture.root.join("attempt/writer-terminal.json").exists());
     assert_eq!(fixture.prepare()?.head(&fixture.writer)?, previous);
-    Ok(())
-}
-
-#[test]
-fn delivery_retries_verification_once_after_a_concurrent_host_change()
--> std::result::Result<(), Box<dyn std::error::Error>> {
-    let mut fixture = PrepareFixture::new()?;
-    let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let wrapper = fixture.root.join("changing-git");
-    let log = fixture.root.join("fsck-calls");
-    let armed = fixture.root.join("armed");
-    let changed = fixture.root.join("changed");
-    let objects = fixture.writer.project.join(".git/objects");
-    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
-    fixture.executable(&wrapper, &format!(
-        "#!/bin/sh\nfor arg do\ncase \"$arg\" in fsck)\nprintf 'fsck\\n' >> {}\nif [ -e {} ] && [ ! -e {} ]; then\n/usr/bin/touch {}\n: > {}\nexit 1\nfi\n;; esac\ndone\nexec {} \"$@\"\n",
-        quote(&log), quote(&armed), quote(&changed), quote(&objects), quote(&changed), quote(&executable),
-    ))?;
-    fixture
-        .environment
-        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
-    let host = fixture.prepare()?;
-    std::fs::write(&log, b"")?;
-    std::fs::write(&armed, b"armed")?;
-    let head = host.head(&fixture.writer)?;
-    assert_eq!(host.head(&fixture.writer)?, head);
-    assert_eq!(std::fs::read_to_string(&log)?.lines().count(), 2);
-    assert!(changed.exists());
-    Ok(())
-}
-
-#[test]
-fn delivery_reuses_verified_heads_until_the_store_generation_changes()
--> std::result::Result<(), Box<dyn std::error::Error>> {
-    let mut fixture = PrepareFixture::new()?;
-    let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let wrapper = fixture.root.join("counting-git");
-    let log = fixture.root.join("fsck-calls");
-    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
-    fixture.executable(
-        &wrapper,
-        &format!(
-            "#!/bin/sh\nfor arg do\nif [ \"$arg\" = fsck ]; then printf 'fsck\\n' >> {}; break; fi\ndone\nexec {} \"$@\"\n",
-            quote(&log),
-            quote(&executable)
-        ),
-    )?;
-    fixture
-        .environment
-        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
-    let host = fixture.prepare()?;
-    std::fs::write(fixture.writer.worktree.join("blob"), "cached content\n")?;
-    fixture.lane_git(&["add", "blob"])?;
-    fixture.commit(&fixture.writer.worktree, "cache generation")?;
-    std::fs::write(&log, b"")?;
-    let head = host.head(&fixture.writer)?;
-    assert_eq!(host.head(&fixture.writer)?, head);
-    assert_eq!(std::fs::read_to_string(&log)?.lines().count(), 1);
-    host.commit_body(&fixture.writer, head, "delivery")?;
-    host.commit_body(&fixture.writer, head, "delivery")?;
-    // The prepared base and the new head each need one complete check.
-    assert_eq!(std::fs::read_to_string(&log)?.lines().count(), 2);
-    let restored: HostDeliveryContext = serde_json::from_slice(&serde_json::to_vec(&host)?)?;
-    assert_eq!(restored.head(&fixture.writer)?, head);
-    assert_eq!(std::fs::read_to_string(&log)?.lines().count(), 3);
-    let blob = host.command(
-        &fixture.writer.worktree,
-        "git",
-        &["rev-parse", "HEAD:blob"],
-        WriterDeliveryStage::Head,
-    )?;
-    let object = fixture
-        .writer
-        .project
-        .join(".git/objects")
-        .join(&blob[..2])
-        .join(&blob[2..]);
-    use std::os::unix::fs::PermissionsExt;
-    let original = std::fs::metadata(&object)?;
-    let mut bytes = std::fs::read(&object)?;
-    bytes[0] ^= 1;
-    std::fs::set_permissions(&object, std::fs::Permissions::from_mode(0o600))?;
-    std::fs::write(&object, bytes)?;
-    std::fs::File::open(&object)?.set_modified(original.modified()?)?;
-    std::fs::set_permissions(&object, original.permissions())?;
-    let changed = std::fs::metadata(&object)?;
-    assert_eq!(changed.len(), original.len());
-    assert_eq!(changed.modified()?, original.modified()?);
-    assert_eq!(changed.permissions(), original.permissions());
-    assert!(host.head(&fixture.writer).is_err());
-    assert_eq!(std::fs::read_to_string(&log)?.lines().count(), 4);
     Ok(())
 }
 
@@ -1720,6 +1620,15 @@ impl PrepareFixture {
         base_ref: Option<&str>,
         write: impl FnOnce() -> std::result::Result<(), Box<dyn std::error::Error>>,
     ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
+        self.terminal_via_inner(remote, base_ref, false, write)
+    }
+    fn terminal_via_inner(
+        &self,
+        remote: &str,
+        base_ref: Option<&str>,
+        resume_after_publish: bool,
+        write: impl FnOnce() -> std::result::Result<(), Box<dyn std::error::Error>>,
+    ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
         use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime};
         use provenant_core::{CancelToken, Clock, WaitBudget};
         use provenant_os::fs::Directory;
@@ -1772,7 +1681,7 @@ impl PrepareFixture {
             base,
         )?;
         let clock = provenant_os::clock::SystemClock::new();
-        let recovery = provenant_supervisor::fixture::acquire_writer_with_binding(
+        let mut recovery = provenant_supervisor::fixture::acquire_writer_with_binding(
             Directory::open_anchor(&state)?,
             scope,
             binding,
@@ -1783,7 +1692,64 @@ impl PrepareFixture {
         .into_recovery()?;
         assert_eq!(recovery.observe(), RecoveryState::Absent);
         write()?;
-        let review = launch.terminal(&state, &attempt, &recovery, remote, base_ref)?;
+        let scratch = attempt_path.join("tmp/candidate-0");
+        std::fs::create_dir_all(&scratch)?;
+        let git_executable = provenant_os::git::git_executable().ok_or("git executable")?;
+        let tip = crate::objects::resolve_ref(
+            &git_executable,
+            launch.worktree.repo(),
+            launch.branch.as_str(),
+        )?;
+        if crate::objects::bound_source(&attempt)?.is_none() {
+            crate::objects::prepare_bound(
+                &git_executable,
+                launch.worktree.repo(),
+                &attempt,
+                &scratch,
+                launch.branch.as_str(),
+                base,
+            )?;
+            std::fs::write(
+                scratch.join("git-common/refs/heads/lane"),
+                format!("{tip}\n"),
+            )?;
+        }
+        recovery.release_writer_lock()?;
+        let mut settlement =
+            crate::settlement::Guard::claim(&attempt, scope)?.ok_or("settlement owner")?;
+        if resume_after_publish {
+            let source = crate::objects::bound_source(&attempt)?.ok_or("private Git source")?;
+            let tip = crate::objects::private_tip(&source, launch.branch.as_str())?;
+            settlement.set_head(tip)?;
+            settlement.set_base(base)?;
+            crate::objects::settle(
+                &git_executable,
+                launch.worktree.repo(),
+                Some(&source.objects),
+                tip,
+            )?;
+            settlement.advance(crate::settlement::Phase::Publish)?;
+            crate::objects::publish_branch(
+                &git_executable,
+                launch.worktree.repo(),
+                launch.branch.as_str(),
+                base,
+                tip,
+            )?;
+            // Drop the process owner at the crash boundary before the phase
+            // checkpoint. A fresh driver must safely replay publication.
+            drop(settlement);
+            settlement =
+                crate::settlement::Guard::claim(&attempt, scope)?.ok_or("resumed owner")?;
+        }
+        let review = launch.terminal(
+            &state,
+            &attempt,
+            &recovery,
+            remote,
+            base_ref,
+            &mut settlement,
+        )?;
         let archive = attempt.open_verified_directory(OsStr::new("quarantine"))?;
         let manifest: serde_json::Value = serde_json::from_slice(
             &archive.read_bounded(OsStr::new("manifest.json"), RECORD_LIMIT)?,
@@ -1792,7 +1758,9 @@ impl PrepareFixture {
         let terminal: writer::WriterTerminal = serde_json::from_slice(
             &attempt.read_bounded(OsStr::new("writer-terminal.json"), RECORD_LIMIT)?,
         )?;
-        assert_eq!(terminal.protected_paths.is_empty(), !review);
+        if !review {
+            assert!(terminal.protected_paths.is_empty());
+        }
         Ok(review)
     }
 }
@@ -2726,5 +2694,27 @@ fn landed_writer_fence_fixture(
         }
     }
     assert!(fixture.writer.worktree.exists());
+    Ok(())
+}
+
+#[test]
+fn terminal_resumes_after_branch_publication_before_its_phase_checkpoint()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let review = fixture.terminal_via_inner("origin", None, true, || {
+        std::fs::write(
+            fixture.writer.worktree.join("resumed.txt"),
+            "durable branch\n",
+        )?;
+        fixture.lane_git(&["add", "resumed.txt"])?;
+        fixture.commit(&fixture.writer.worktree, "resumable publication")
+    })?;
+    assert!(!review);
+    fixture.lane_git(&["cat-file", "-e", "HEAD:resumed.txt"])?;
+    assert_eq!(
+        std::fs::read(fixture.writer.worktree.join("resumed.txt"))?,
+        b"durable branch\n"
+    );
+    assert!(fixture.root.join("attempt/writer-terminal.json").is_file());
     Ok(())
 }

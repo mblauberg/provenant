@@ -684,3 +684,26 @@ pub mod tests {
         }
     }
 }
+
+pub fn current_path(file: &File) -> io::Result<std::path::PathBuf> {
+    use std::os::fd::AsRawFd;
+    #[cfg(target_os = "macos")]
+    {
+        let mut bytes = [0_u8; libc::PATH_MAX as usize];
+        // SAFETY: F_GETPATH writes at most PATH_MAX bytes to this buffer.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, bytes.as_mut_ptr()) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let length = bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(bytes.len());
+        Ok(std::path::PathBuf::from(OsStr::from_bytes(
+            &bytes[..length],
+        )))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+    }
+}

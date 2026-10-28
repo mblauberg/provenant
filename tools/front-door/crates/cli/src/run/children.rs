@@ -150,7 +150,8 @@ impl Holder for HostHolder<'_> {
         });
         Ok(())
     }
-    fn provider_exited(&self, _context: &[u8], reason: Option<StopReason>) -> custody::Result<()> {
+    fn provider_exited(&self, context: &[u8], reason: Option<StopReason>) -> custody::Result<()> {
+        self.inner.provider_exited(context, reason)?;
         self.stop(reason)
     }
     fn terminal(

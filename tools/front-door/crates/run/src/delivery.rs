@@ -16,7 +16,6 @@ use std::{
     ffi::{OsStr, OsString},
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
-    sync::Mutex,
     time::Duration,
 };
 
@@ -27,9 +26,6 @@ pub struct HostDeliveryContext {
     environment: Vec<(Vec<u8>, Vec<u8>)>,
     tools: Option<HostTools>,
     bound: Option<BoundDelivery>,
-    /// Verification belongs to one host operation and never crosses handoff.
-    #[serde(skip)]
-    verification: Mutex<crate::objects::VerificationCache>,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,7 +83,6 @@ impl Clone for HostDeliveryContext {
             environment: self.environment.clone(),
             tools: self.tools.clone(),
             bound: self.bound.clone(),
-            verification: Mutex::default(),
         }
     }
 }
@@ -425,7 +420,6 @@ impl HostDeliveryContext {
                 .collect(),
             bound: None,
             tools: None,
-            verification: Mutex::default(),
         }
     }
     /// Preserve normal host credential/config discovery without Git's ambient
@@ -491,7 +485,6 @@ impl HostDeliveryContext {
         request: &WriterDeliveryRequest,
         fetch: bool,
     ) -> Result<Self> {
-        self.verification = Mutex::default();
         validate(request)?;
         self.host_environment(writer)?;
         let stage = Stage::Prepare;
@@ -1134,10 +1127,7 @@ impl HostDeliveryContext {
             .and_then(|bound| bound.common_git_dir.clone())
             .map(Ok)
             .unwrap_or_else(|| self.trusted_common_git_dir(writer, stage))?;
-        self.verification
-            .lock()
-            .map_err(|_| RunError::Delivery(stage))?
-            .verify_graph(git, &common, &writer.project, head)
+        crate::objects::verify_graph(git, &common, &writer.project, head)
             .map_err(|_| RunError::Delivery(stage))
     }
     fn trusted_common_git_dir(&self, writer: &WriterRequest, stage: Stage) -> Result<PathBuf> {
@@ -2015,7 +2005,6 @@ impl crate::RunStore {
             }
         }
         let host = host.prepare(&writer, &request)?;
-        diagnose_legacy_git_policy(&attempt, &format!("Run {} Attempt {id}", record.run_id))?;
         host.clean(&writer)?;
         if host.head(&writer)? != head {
             return Err(RunError::Validation(
@@ -2056,13 +2045,6 @@ impl crate::RunStore {
     }
 }
 
-fn diagnose_legacy_git_policy(attempt: &Directory, identity: &str) -> Result<()> {
-    if crate::objects::legacy_policy(attempt)? {
-        crate::objects::legacy_policy_diagnostic(identity);
-    }
-    Ok(())
-}
-
 /// The live holder calls this only after success and confinement checks. A
 /// sealed start marker prevents repeating external effects after interruption.
 pub(crate) fn deliver_once(
@@ -2072,16 +2054,10 @@ pub(crate) fn deliver_once(
     attempt: &Directory,
     identity: &str,
 ) -> Result<WriterDeliveryReceipt> {
-    *host
-        .verification
-        .lock()
-        .map_err(|_| RunError::Delivery(Stage::Prepare))? =
-        crate::objects::VerificationCache::default();
     if let Some(raw) = crate::artifacts::read_sealed(attempt, "delivery.json", crate::RECORD_LIMIT)?
     {
         return crate::db::decode(&raw);
     }
-    diagnose_legacy_git_policy(attempt, identity)?;
     if host
         .bound
         .as_ref()

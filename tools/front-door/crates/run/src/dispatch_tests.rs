@@ -5074,7 +5074,12 @@ fn reconcile_unreadable_reservation_only_retains_existing_temporary_data() -> Te
         std::fs::write(custody.join("reservation.json"), b"corrupt")?;
         assert_eq!(store.writer_fence_listing()?.issues.len(), 1);
 
-        let found = store.reconcile(run.run_id, &Fake::default(), &call)?;
+        let found = store.reconcile_with_observer(
+            run.run_id,
+            &Fake::default(),
+            &call,
+            &provenant_supervisor::census::SystemProcessObserver,
+        )?;
         if has_temporary {
             assert!(matches!(found.as_slice(), [
                 (id, Reconciled::TemporaryRetained { path, reason }),
@@ -5166,7 +5171,12 @@ fn reconcile_backfills_legacy_temporary_without_changing_terminal_records() -> T
         assert_eq!(store.open_runs(10, &call)?, expected);
         if path_kind == "directory" {
             assert_eq!(
-                store.reconcile(run.run_id, &Fake::default(), &call)?,
+                store.reconcile_with_observer(
+                    run.run_id,
+                    &Fake::default(),
+                    &call,
+                    &provenant_supervisor::census::SystemProcessObserver
+                )?,
                 vec![(id, Reconciled::TemporaryRemoved)]
             );
             assert!(!temporary.exists());
@@ -5176,7 +5186,12 @@ fn reconcile_backfills_legacy_temporary_without_changing_terminal_records() -> T
             // anchor is repaired, absence clears the hint without a result.
             assert!(
                 store
-                    .reconcile(run.run_id, &Fake::default(), &call)?
+                    .reconcile_with_observer(
+                        run.run_id,
+                        &Fake::default(),
+                        &call,
+                        &provenant_supervisor::census::SystemProcessObserver
+                    )?
                     .is_empty()
             );
         }
@@ -5211,7 +5226,12 @@ fn reconcile_retries_terminal_temporary_removal() -> TestResult {
 
     assert_eq!(store.open_runs(10, &call)?, vec![run.run_id]);
     assert_eq!(
-        store.reconcile(run.run_id, &Fake::default(), &call)?,
+        store.reconcile_with_observer(
+            run.run_id,
+            &Fake::default(),
+            &call,
+            &provenant_supervisor::census::SystemProcessObserver
+        )?,
         vec![(id, Reconciled::TemporaryRemoved)]
     );
     assert!(!temporary.exists());
@@ -5255,7 +5275,12 @@ fn reconcile_preserves_protected_locks_outside_temporary() -> TestResult {
         .collect::<provenant_os::fs::Result<Vec<_>>>()?;
 
     assert_eq!(
-        store.reconcile(run.run_id, &Fake::default(), &call)?,
+        store.reconcile_with_observer(
+            run.run_id,
+            &Fake::default(),
+            &call,
+            &provenant_supervisor::census::SystemProcessObserver
+        )?,
         vec![(id, Reconciled::TemporaryRemoved)]
     );
     assert!(!temporary.exists());
@@ -5304,7 +5329,12 @@ fn reconcile_reports_temporary_removal_failures_and_continues() -> TestResult {
     let removable = store.temporary_path(removed, &call)?;
     std::fs::write(removable.join("payload"), "discard")?;
 
-    let found = store.reconcile(run.run_id, &Fake::default(), &call)?;
+    let found = store.reconcile_with_observer(
+        run.run_id,
+        &Fake::default(),
+        &call,
+        &provenant_supervisor::census::SystemProcessObserver,
+    )?;
     assert!(matches!(found.as_slice(), [
         (id, Reconciled::TemporaryRetained { path, reason }),
         (other, Reconciled::TemporaryRemoved),
@@ -5357,7 +5387,12 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
             )?);
         }
         std::fs::write(temporary.join("keep.lock"), "keep")?;
-        let found = store.reconcile(run.run_id, &Fake::default(), &call)?;
+        let found = store.reconcile_with_observer(
+            run.run_id,
+            &Fake::default(),
+            &call,
+            &provenant_supervisor::census::SystemProcessObserver,
+        )?;
         if reserved {
             assert!(
                 matches!(found.as_slice(), [(attempt, Reconciled::TemporaryRetained { reason, .. })]
@@ -5424,7 +5459,12 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
         )?;
         assert!(!temporary.exists());
         assert_eq!(store.open_runs(10, &call)?, vec![run.run_id]);
-        let found = store.reconcile(run.run_id, &Fake::default(), &call)?;
+        let found = store.reconcile_with_observer(
+            run.run_id,
+            &Fake::default(),
+            &call,
+            &provenant_supervisor::census::SystemProcessObserver,
+        )?;
         if prepared {
             assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
             assert!(store.writer_fences()?.is_empty());
@@ -5497,7 +5537,7 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     std::fs::write(corrupt.join("reservation.json"), b"corrupt")?;
     assert_eq!(store.writer_fence_listing()?.issues.len(), 1);
     assert!(
-        matches!(store.reconcile(run.run_id, &Fake::default(), &call)?.as_slice(),
+        matches!(store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &provenant_supervisor::census::SystemProcessObserver)?.as_slice(),
         [(attempt, Reconciled::Uncertain { reason: UncertainReason::WriterReservationRetained { .. } })]
         if *attempt == id)
     );
@@ -5505,20 +5545,25 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     // Reconcile can withdraw the prepared reservation after its lock is released.
     drop(held);
     assert!(matches!(
-        store.reconcile(run.run_id, &Fake::default(), &call)?.as_slice(),
+        store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &provenant_supervisor::census::SystemProcessObserver)?.as_slice(),
         [(attempt, Reconciled::Withdrawn)] if *attempt == id
     ));
     assert!(store.writer_fences()?.is_empty());
     assert!(candidate.join("x.lock").exists());
     // The unreadable sibling remains a separate barrier until removed.
     assert!(matches!(
-        store.reconcile(run.run_id, &Fake::default(), &call)?.as_slice(),
+        store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &provenant_supervisor::census::SystemProcessObserver)?.as_slice(),
         [(attempt, Reconciled::TemporaryRetained { .. })] if *attempt == id
     ));
     assert!(candidate.join("x.lock").exists());
     std::fs::remove_file(corrupt.join("reservation.json"))?;
     assert_eq!(
-        store.reconcile(run.run_id, &Fake::default(), &call)?,
+        store.reconcile_with_observer(
+            run.run_id,
+            &Fake::default(),
+            &call,
+            &provenant_supervisor::census::SystemProcessObserver
+        )?,
         vec![(id, Reconciled::TemporaryRemoved)]
     );
     assert!(!temporary.exists());
@@ -5559,7 +5604,12 @@ fn reconcile_temporary_removal_never_follows_symlinks() -> TestResult {
         }
         assert_eq!(store.open_runs(10, &call)?, vec![run.run_id]);
         assert_eq!(
-            store.reconcile(run.run_id, &Fake::default(), &call)?,
+            store.reconcile_with_observer(
+                run.run_id,
+                &Fake::default(),
+                &call,
+                &provenant_supervisor::census::SystemProcessObserver
+            )?,
             vec![(id, Reconciled::TemporaryRemoved)]
         );
         assert!(std::fs::symlink_metadata(&temporary).is_err());
@@ -5595,7 +5645,12 @@ fn reconcile_removes_owner_only_temporary_and_retains_shared_modes() -> TestResu
         std::fs::create_dir_all(&nested)?;
         std::fs::write(nested.join("s-1.lock"), "keep")?;
         std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(mode))?;
-        let found = store.reconcile(run.run_id, &Fake::default(), &call)?;
+        let found = store.reconcile_with_observer(
+            run.run_id,
+            &Fake::default(),
+            &call,
+            &provenant_supervisor::census::SystemProcessObserver,
+        )?;
         if mode & 0o077 == 0 {
             assert_eq!(found, vec![(id, Reconciled::TemporaryRemoved)]);
             assert!(std::fs::symlink_metadata(&temporary).is_err());
@@ -6256,10 +6311,14 @@ fn recover_rebooted_writer_inner(
         drop(custody_lock);
     }
     if cancel_run {
-        assert_eq!(
-            store.cancel_with_observer(id, "stop", &call, &observer)?,
+        let receipt = store.cancel_with_observer(id, "stop", &call, &observer)?;
+        assert!(matches!(
+            receipt,
             CancelReceipt::AlreadyTerminal
-        );
+                | CancelReceipt::AlreadyRequested
+                | CancelReceipt::Requested
+        ));
+        store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?;
     } else {
         assert_eq!(
             store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?,
@@ -6381,7 +6440,12 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
         observed: Some(route()),
         ..Fake::default()
     };
-    let found = store.reconcile(batch.run_id, &fake, &call)?;
+    let found = store.reconcile_with_observer(
+        batch.run_id,
+        &fake,
+        &call,
+        &provenant_supervisor::census::SystemProcessObserver,
+    )?;
     assert_eq!(
         found,
         vec![
@@ -6392,7 +6456,16 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
     assert_eq!(terminal(&store, exited, &call)?, Outcome::Succeeded);
     assert!(artifacts::read_sealed(&dir, "release.json", RECORD_LIMIT)?.is_some());
     assert_eq!(terminal(&store, orphan, &call)?, Outcome::Rejected);
-    assert!(store.reconcile(batch.run_id, &fake, &call)?.is_empty());
+    assert!(
+        store
+            .reconcile_with_observer(
+                batch.run_id,
+                &fake,
+                &call,
+                &provenant_supervisor::census::SystemProcessObserver
+            )?
+            .is_empty()
+    );
     Ok(())
 }
 #[test]
@@ -6467,11 +6540,25 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
         observed: Some(route()),
         ..Fake::default()
     };
-    let found = store.reconcile(run.run_id, &fake, &call)?;
+    let found = store.reconcile_with_observer(
+        run.run_id,
+        &fake,
+        &call,
+        &provenant_supervisor::census::SystemProcessObserver,
+    )?;
     assert_eq!(found, vec![(id, Reconciled::Finished)]);
     assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
     assert!(store.writer_fences()?.is_empty());
-    assert!(store.reconcile(run.run_id, &fake, &call)?.is_empty());
+    assert!(
+        store
+            .reconcile_with_observer(
+                run.run_id,
+                &fake,
+                &call,
+                &provenant_supervisor::census::SystemProcessObserver
+            )?
+            .is_empty()
+    );
     Ok(())
 }
 #[test]
@@ -6491,7 +6578,12 @@ fn reconcile_withdraws_a_start_that_died_before_reserving() -> TestResult {
         None,
         &call,
     )?;
-    let found = store.reconcile(run.run_id, &Fake::default(), &call)?;
+    let found = store.reconcile_with_observer(
+        run.run_id,
+        &Fake::default(),
+        &call,
+        &provenant_supervisor::census::SystemProcessObserver,
+    )?;
     assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
     assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
     Ok(())
@@ -6968,6 +7060,50 @@ fn admission_waits_for_a_readable_current_gc_floor() -> TestResult {
         disk.samples.get(),
         2,
         "an unreadable current floor must queue until the next valid observation"
+    );
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResult {
+    use std::{
+        ffi::OsStr,
+        time::{Duration, Instant},
+    };
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let _writer = attempt.try_lock(
+        OsStr::new("writer.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    let started = Instant::now();
+    assert_eq!(
+        store.cancel(id, "bounded cancellation", &call)?,
+        CancelReceipt::Requested
+    );
+    let queued = store.reconcile(run.run_id, &Fake::default(), &call)?;
+    assert!(matches!(queued.as_slice(), [(found, Reconciled::Settling { .. })] if *found == id));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(
+        attempt
+            .read_stable(OsStr::new("cancel.json"), RECORD_LIMIT)?
+            .len()
+            > 10
     );
     Ok(())
 }

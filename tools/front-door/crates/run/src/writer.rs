@@ -1170,6 +1170,7 @@ impl WriterLaunch {
         custody: &provenant_supervisor::custody::Recovery,
         remote: &str,
         base_ref: Option<&str>,
+        settlement: &mut crate::settlement::Driver,
     ) -> Result<bool> {
         if custody.observe() != provenant_supervisor::custody::RecoveryState::Absent {
             return Err(RunError::Validation(
@@ -1187,6 +1188,10 @@ impl WriterLaunch {
                 "read writer custody base",
                 Some(self.worktree.path()),
             ))?;
+        settlement.set_base(base)?;
+        let base = settlement
+            .base()
+            .ok_or(RunError::Validation("settlement base missing"))?;
         // The raw branch OID is only a name until the complete graph has been
         // hash-checked. Do this before instruction recovery, diffs or ancestry.
         let source = crate::objects::bound_source(attempt)?;
@@ -1197,10 +1202,14 @@ impl WriterLaunch {
             self.worktree.repo(),
             self.branch.as_str(),
         )?;
-        let verified_tip = match &source {
-            Some(source) => crate::objects::private_tip(source, self.branch.as_str())?,
-            None => shared_tip,
+        let verified_tip = match settlement.head() {
+            Some(head) => head,
+            None => match &source {
+                Some(source) => crate::objects::private_tip(source, self.branch.as_str())?,
+                None => shared_tip,
+            },
         };
+        settlement.set_head(verified_tip)?;
         let head = self
             .worktree
             .repo()
@@ -1211,13 +1220,23 @@ impl WriterLaunch {
         {
             return Err(RunError::Validation("writer HEAD is not the lane branch"));
         }
-        crate::objects::settle(
-            &git_executable,
-            self.worktree.repo(),
-            source.as_ref().map(|source| &source.objects),
-            verified_tip,
-        )?;
-        if source.is_some() {
+        let import_cancel = CancelToken::new();
+        if settlement.phase() == crate::settlement::Phase::Import {
+            crate::settlement::with_cancellation(attempt, custody.scope(), &import_cancel, || {
+                crate::objects::settle_cancel(
+                    &git_executable,
+                    self.worktree.repo(),
+                    source.as_ref().map(|source| &source.objects),
+                    verified_tip,
+                    Some(&import_cancel),
+                )
+            })?;
+            settlement.advance(crate::settlement::Phase::Publish)?;
+        }
+        if crate::artifacts::read_sealed(attempt, "cancel.json", crate::RECORD_LIMIT)?.is_some() {
+            return Err(RunError::Validation("lane import cancelled"));
+        }
+        if settlement.phase() == crate::settlement::Phase::Publish {
             crate::objects::publish_branch(
                 &git_executable,
                 self.worktree.repo(),
@@ -1225,6 +1244,12 @@ impl WriterLaunch {
                 base,
                 verified_tip,
             )?;
+            // The private index may contain staged edits which the host's
+            // quarantine must observe. Restore it only after receive succeeds.
+            if let Some(source) = &source {
+                crate::objects::restore_index(source, self.worktree.repo())?;
+            }
+            settlement.advance(crate::settlement::Phase::Record)?;
         }
         let utility = runtime(state)?;
         let executor =
@@ -1371,23 +1396,6 @@ impl WriterLaunch {
         )? != tip
         {
             return Err(RunError::Validation("writer HEAD is not the lane branch"));
-        }
-        let ancestry = provenant_confinement::run_utility(
-            &executor,
-            provenant_confinement::GitRead::MergeBaseIsAncestor {
-                ancestor: base,
-                tip,
-            },
-            self.worktree.repo(),
-            &utility,
-            budget()?,
-            &cancel,
-        )
-        .map_err(error("verify writer ancestry", Some(self.worktree.path())))?;
-        if ancestry.termination != provenant_os::exec::Termination::Exit(0) {
-            return Err(RunError::Validation(
-                "writer branch no longer descends from its recorded base",
-            ));
         }
         worktrees::check_writer_terminal(self.worktree.repo())?;
         crate::artifacts::seal(

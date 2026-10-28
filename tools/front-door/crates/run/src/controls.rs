@@ -47,6 +47,8 @@ pub enum Reconciled {
     Queued,
     /// A live guardian still holds custody.
     Held,
+    /// The supervisor is resuming durable settlement in the background.
+    Settling { phase: String },
     /// A durable exit was committed and released.
     Finished,
     /// Leftover temporary data was removed from a terminal attempt.
@@ -1104,11 +1106,8 @@ impl RunStore {
         id: AttemptId,
         reason: &str,
         call: &Request<'_>,
-        observer: &dyn ProcessObserver,
+        _observer: &dyn ProcessObserver,
     ) -> Result<CancelReceipt> {
-        // Half the budget for waiting on the handoff; the rest for the store.
-        let remaining = call.budget.remaining(call.clock.mono_now()).as_micros();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_micros(remaining / 2);
         // A child this host handed to a guardian stops through the directory,
         // scope and requester held then. The lane can rewrite the child's
         // record and launch summary, so neither decides whether or for whom
@@ -1135,17 +1134,6 @@ impl RunStore {
         }
         loop {
             let record = self.record(id, call)?;
-            if let Some(state) = self.settle_rebooted(&record, call, observer)? {
-                return Ok(match state {
-                    Reconciled::Finished => CancelReceipt::AlreadyTerminal,
-                    Reconciled::Uncertain { reason } => CancelReceipt::Unobservable {
-                        reason: reason.to_string(),
-                    },
-                    other => CancelReceipt::Unobservable {
-                        reason: format!("{other:?}"),
-                    },
-                });
-            }
             match record.state {
                 AttemptState::Terminal { .. } => return Ok(CancelReceipt::AlreadyTerminal),
                 AttemptState::Queued => {
@@ -1171,60 +1159,25 @@ impl RunStore {
                 _ => {}
             }
             let dir = self.attempt_dir(record.run_id, id, false)?;
-            match custody::reattach(dir, Self::scope(&record)) {
-                Ok(handle) => {
-                    if let Some(Reconciled::Finished) =
-                        self.settle_unreserved_loss(&record, call, observer, false)?
-                    {
-                        return Ok(CancelReceipt::AlreadyTerminal);
-                    }
-                    return Ok(
-                        match custody::stop(&handle, StopReason::ExplicitCancellation) {
-                            Ok(StopReceipt::Requested) => CancelReceipt::Requested,
-                            Ok(StopReceipt::AlreadyRequested) => CancelReceipt::AlreadyRequested,
-                            Err(error) => CancelReceipt::Unobservable {
-                                reason: error.to_string(),
-                            },
-                        },
-                    );
+            let stopped = match custody::reattach(dir.try_clone()?, Self::scope(&record)) {
+                Ok(handle) => custody::stop(&handle, StopReason::ExplicitCancellation),
+                Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
+                    custody::request_stop(
+                        dir,
+                        Self::scope(&record),
+                        record.verified_owner.unwrap_or(self.context.actor_id),
+                        StopReason::ExplicitCancellation,
+                    )
                 }
-                Err(CustodyError::Filesystem(error))
-                    if error.is_not_found()
-                        && record.state == AttemptState::Starting
-                        && std::time::Instant::now() < deadline =>
-                {
-                    std::thread::park_timeout(std::time::Duration::from_millis(100));
-                }
-                // The handoff window is spent and there is still no launch
-                // summary: settle a launch nobody holds, as reconcile does.
-                Err(CustodyError::Filesystem(error))
-                    if error.is_not_found() && record.state == AttemptState::Starting =>
-                {
-                    // A busy or unreadable custody lock leaves it untouched.
-                    let settled =
-                        self.settle_unlaunched(id, &record, call)
-                            .unwrap_or_else(|error| {
-                                Reconciled::uncertain(UncertainReason::ReconcileFailed {
-                                    error: error.to_string(),
-                                })
-                            });
-                    return Ok(match settled {
-                        Reconciled::Withdrawn => CancelReceipt::Cancelled,
-                        Reconciled::Finished => CancelReceipt::AlreadyTerminal,
-                        Reconciled::Uncertain { reason } => CancelReceipt::Unobservable {
-                            reason: reason.to_string(),
-                        },
-                        other => CancelReceipt::Unobservable {
-                            reason: format!("{other:?}"),
-                        },
-                    });
-                }
-                Err(error) => {
-                    return Ok(CancelReceipt::Unobservable {
-                        reason: error.to_string(),
-                    });
-                }
-            }
+                Err(error) => Err(error),
+            };
+            return Ok(match stopped {
+                Ok(StopReceipt::Requested) => CancelReceipt::Requested,
+                Ok(StopReceipt::AlreadyRequested) => CancelReceipt::AlreadyRequested,
+                Err(error) => CancelReceipt::Unobservable {
+                    reason: error.to_string(),
+                },
+            });
         }
     }
 
@@ -1605,7 +1558,8 @@ impl RunStore {
         providers: &dyn Providers,
         call: &Request<'_>,
     ) -> Result<Vec<(AttemptId, Reconciled)>> {
-        self.reconcile_with_observer(run, providers, call, &SystemProcessObserver)
+        let _ = providers;
+        self.queue_reconcile(run, call)
     }
     pub(crate) fn reconcile_with_observer(
         &self,

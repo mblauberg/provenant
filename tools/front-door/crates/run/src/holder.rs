@@ -295,6 +295,20 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
             .map(drop)
             .map_err(custody_error)
     }
+    fn provider_exited(&self, raw: &[u8], _reason: Option<StopReason>) -> custody::Result<()> {
+        let (context, store) = HolderContext::open(raw).map_err(custody_error)?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        store
+            .write(&call(&clock, &cancel).map_err(custody_error)?, |db| {
+                db.execute(
+                    "DELETE FROM admission WHERE attempt=?1",
+                    [context.attempt_id.to_string()],
+                )?;
+                Ok(())
+            })
+            .map_err(custody_error)
+    }
     fn terminal(
         &self,
         context: &[u8],
@@ -334,14 +348,13 @@ pub(crate) fn release_and_reclaim(
     scope: custody::Scope,
     recovery: &custody::Recovery,
 ) -> custody::Result<()> {
+    custody::publish_release(attempt, scope)?;
+    crate::settlement::complete(attempt, scope).map_err(custody_error)?;
     if object_import_refused(attempt, scope)
         .map_err(custody_error)?
-        .is_some()
+        .is_none()
+        && let Ok(_commit) = recovery.verify_settlement(attempt)
     {
-        return Ok(());
-    }
-    custody::publish_release(attempt, scope)?;
-    if let Ok(_commit) = recovery.verify_settlement(attempt) {
         // Hold the verified custody lock until temporary cleanup finishes.
         let _ = crate::artifacts::remove_unreserved_terminal_temporary(attempt);
     }
@@ -366,12 +379,17 @@ impl RunStore {
             .iter()
             .find(|task| task.task_id == record.task_id)
             .ok_or(RunError::Validation("terminal task missing"))?;
-        let recovery = if let Some(writer) = &task.writer {
+        let mut recovery = if let Some(writer) = &task.writer {
             let directory = self.writer_custody_directory(&record, writer)?;
             self.recover_writer_exit(directory, Self::scope(&record), call)?
         } else {
             None
         };
+        if let Some(recovery) = &mut recovery {
+            recovery
+                .release_writer_lock()
+                .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+        }
         let record = self.finish_in_custody(
             id,
             attempt,
@@ -456,8 +474,17 @@ impl RunStore {
         recovery: custody::Recovery,
     ) -> Result<()> {
         if object_import_refused(attempt, recovery.scope())?.is_some() {
-            return Ok(());
+            custody::publish_release(attempt, recovery.scope())
+                .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
+            let commit = recovery
+                .verify_settlement(attempt)
+                .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
+            crate::settlement::complete(attempt, recovery.scope())?;
+            return recovery
+                .release_preserving_private(commit)
+                .map_err(|error| RunError::Io(std::io::Error::other(error)));
         }
+        crate::settlement::complete(attempt, recovery.scope())?;
         crate::writer::settle_launch_staging(attempt)?;
         custody::publish_release(attempt, recovery.scope())
             .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
@@ -491,6 +518,18 @@ impl RunStore {
         if read_sealed(attempt, "terminal-pending.json", RECORD_LIMIT)?.is_some() {
             return self.recover_terminal(id, exit, call);
         }
+        let (mut settlement, retry_limit) =
+            match crate::settlement::Guard::claim(attempt, exit.scope) {
+                Ok(Some(driver)) => (Some(driver), false),
+                Ok(None) => return Err(RunError::Contention),
+                Err(RunError::ObjectImportLimit(_)) => (None, true),
+                Err(error) => return Err(error),
+            };
+        // Recovery also frees admission when upgrading an older exited run.
+        self.write(call, |db| {
+            db.execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
+            Ok(())
+        })?;
         let finished_at = call
             .clock
             .wall_now()
@@ -619,18 +658,20 @@ impl RunStore {
             .iter()
             .find(|task| task.task_id == record.task_id)
             .ok_or(RunError::Validation("terminal task missing from request"))?;
+        if cancelled {
+            decoded.outcome = Outcome::Cancelled;
+        }
         let mut review_required = false;
-        let mut legacy_policy_note = None;
         if let Some(writer) = &task.writer {
-            if crate::objects::legacy_policy(attempt)? {
-                legacy_policy_note = Some(crate::objects::legacy_policy_diagnostic(&format!(
-                    "Run {} Attempt {id}",
-                    record.run_id
-                )));
-            }
             let refusal = object_import_refused(attempt, exit.scope)?;
             let refused = refusal.is_some();
-            let check = if let Some(reason) = refusal {
+            let check = if cancelled {
+                Ok(false)
+            } else if retry_limit {
+                Err(RunError::ObjectImportLimit(
+                    "settlement exhausted three attempts; private Git retained for host recovery",
+                ))
+            } else if let Some(reason) = refusal {
                 decoded.outcome = Outcome::Failed;
                 decoded.reason = Some(reason);
                 Ok(false)
@@ -646,17 +687,36 @@ impl RunStore {
                                 .as_ref()
                                 .map_or("origin", |deliver| deliver.remote.as_str()),
                             task.base.as_deref(),
+                            settlement.as_mut().ok_or(RunError::Contention)?,
                         )
                     },
                 )
             };
-            match check {
-                Err(error @ (RunError::ObjectStoreBusy | RunError::ObjectVerificationRetry(_))) => {
-                    return Err(error);
+            let check = match check {
+                Err(error) if !matches!(error, RunError::ObjectImportLimit(_)) => {
+                    if crate::artifacts::read_sealed(attempt, "cancel.json", RECORD_LIMIT)?
+                        .is_some()
+                    {
+                        decoded.outcome = Outcome::Cancelled;
+                        decoded.reason = Some("cancelled during Git import".into());
+                        Ok(false)
+                    } else if settlement
+                        .as_ref()
+                        .is_some_and(|driver| driver.attempts() >= 3)
+                    {
+                        Err(RunError::ObjectImportLimit(
+                            "settlement failed after three attempts; private Git retained for host recovery",
+                        ))
+                    } else {
+                        return Err(error);
+                    }
                 }
+                other => other,
+            };
+            match check {
                 Err(error @ RunError::ObjectImportLimit(_)) => {
                     let reason = format!(
-                        "writer object import refused for {}: {error}; private objects and writer custody retained for recovery",
+                        "writer object import refused for {}: {error}; private Git retained for host recovery; live writer custody released",
                         writer.worktree.display()
                     );
                     crate::artifacts::seal(
@@ -790,6 +850,37 @@ impl RunStore {
                 RECORD_LIMIT,
             )?;
         }
+        if cancelled
+            || decoded.outcome == Outcome::Cancelled
+            || object_import_refused(attempt, exit.scope)?.is_some()
+        {
+            let archive =
+                crate::artifacts::subdir(attempt, std::ffi::OsStr::new("quarantine"), true)?;
+            if read_sealed(&archive, "manifest.json", RECORD_LIMIT)?.is_none() {
+                crate::artifacts::seal(
+                    &archive,
+                    "manifest.json",
+                    &crate::db::bytes(&serde_json::json!({
+                        "schema_version": 1, "scope": exit.scope, "kind": "quarantine_manifest",
+                        "disposition": if decoded.outcome == Outcome::Cancelled { "cancelled" } else { "import_refused" }
+                    }))?,
+                    RECORD_LIMIT,
+                )?;
+            }
+        }
+        // Each durable phase gets a fresh short database budget. An import
+        // can outlive the request which started it without exhausting Record.
+        let record_call = Request {
+            clock: call.clock,
+            cancel: call.cancel,
+            budget: WaitBudget::cli(call.clock.mono_now(), 30)
+                .map_err(|_| RunError::Validation("record budget"))?,
+        };
+        let call = &record_call;
+        let cancelled = read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some();
+        if cancelled {
+            decoded.outcome = Outcome::Cancelled;
+        }
         if decoded.result.len() as u64 > RESULT_LIMIT {
             let mut end = RESULT_LIMIT as usize;
             while !decoded.result.is_char_boundary(end) {
@@ -851,14 +942,6 @@ impl RunStore {
                 &format!("Run {}\nAttempt {id}", record.run_id),
             )?;
         }
-        // Terminal state is also published as a run event. Record this host
-        // warning there without changing validation of the provider's result.
-        if let Some(note) = legacy_policy_note {
-            decoded.reason = Some(match decoded.reason.take() {
-                Some(reason) => format!("{reason}; {note}"),
-                None => note,
-            });
-        }
         let publication = TerminalPublication {
             outcome: decoded.outcome,
             finished_at,
@@ -881,7 +964,14 @@ impl RunStore {
         if result_orphan {
             return self.recover_result_only(id, &publication, exit, call);
         }
-        self.publish_terminal(id, record.revision, &publication, exit, call)
+        if let Some(driver) = &mut settlement {
+            driver.advance(crate::settlement::Phase::Record)?;
+        }
+        let terminal = self.publish_terminal(id, record.revision, &publication, exit, call)?;
+        if let Some(driver) = &mut settlement {
+            driver.advance(crate::settlement::Phase::Release)?;
+        }
+        Ok(terminal)
     }
 }
 
@@ -995,39 +1085,11 @@ mod writer_recovery_tests {
     use super::*;
     use crate::tests::{call, clock, context, input, route};
 
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum ImportCase {
-        PackLimit,
-        LockWait,
-        LegacyPolicy,
-    }
-
     #[test]
-    fn object_import_limit_is_terminal_and_retains_private_evidence_and_custody()
+    fn failed_import_becomes_terminal_after_three_attempts_and_releases_custody()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        object_import_refusal_fixture(ImportCase::PackLimit)
-    }
-
-    #[test]
-    fn object_store_lock_timeout_leaves_settlement_nonterminal_and_can_be_retried()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        object_import_refusal_fixture(ImportCase::LockWait)
-    }
-
-    #[test]
-    fn legacy_git_policy_warning_names_run_and_attempt_in_the_terminal_event()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        object_import_refusal_fixture(ImportCase::LegacyPolicy)
-    }
-
-    fn object_import_refusal_fixture(
-        case: ImportCase,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
-        use provenant_os::fs::LockMode;
         use std::ffi::OsStr;
-        let lock_wait = case == ImportCase::LockWait;
-
         let fixture = PrepareFixture::new()?;
         let execution = registered_landed_writer_fixture(&fixture)?;
         let (clock, cancel) = (clock(), CancelToken::new());
@@ -1054,138 +1116,78 @@ mod writer_recovery_tests {
             execution.project_id,
         )?;
         launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
-        let temporary = store.temporary_path(id, &call)?;
-        let candidate = temporary.join("candidate-0");
+        let candidate = store.temporary_path(id, &call)?.join("candidate-0");
         std::fs::create_dir_all(&candidate)?;
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-        if case != ImportCase::LegacyPolicy {
-            crate::objects::prepare_bound(
-                &git,
-                launch.worktree.repo(),
-                &attempt,
-                &candidate,
-                launch.branch.as_str(),
-                launch.base,
-            )?;
-        } else {
-            std::fs::create_dir_all(candidate.join("git-objects"))?;
-        }
-        let packs = candidate.join("git-objects/pack");
-        std::fs::create_dir(&packs)?;
-        for number in 0..if case == ImportCase::PackLimit { 65 } else { 0 } {
-            std::fs::write(packs.join(format!("pack-{number:040x}.pack")), b"untrusted")?;
-        }
-        std::fs::write(candidate.join("recovery.lock"), b"private evidence")?;
-        let (custody_directory, binding) = launch.custody.take().ok_or("writer custody")?;
-        let recovery = provenant_supervisor::fixture::acquire_writer_with_binding(
-            custody_directory,
+        crate::objects::prepare_bound(
+            &git,
+            launch.worktree.repo(),
+            &attempt,
+            &candidate,
+            launch.branch.as_str(),
+            launch.base,
+        )?;
+        let missing = "a".repeat(40);
+        std::fs::write(
+            candidate.join("git-common").join(launch.branch.as_str()),
+            format!("{missing}\n"),
+        )?;
+        let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+        let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+            directory,
             scope,
             binding,
             call.budget,
             &cancel,
             &clock,
-        )?
-        .into_recovery()?;
+        )?;
+        let mut recovery =
+            provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?.into_recovery()?;
+        recovery.release_writer_lock()?;
         let mut observed = crate::tests::exit();
         observed.scope = scope;
         crate::dispatch_tests::seal_exit(&store, &observed)?;
-        let shared_lock = if lock_wait {
-            let common = launch.worktree.repo().common_dir();
-            common.create_new(OsStr::new("provenant-objects.lock"))?;
-            Some(common.try_lock_existing(OsStr::new("provenant-objects.lock"), LockMode::Shared)?)
-        } else {
-            None
-        };
-        if lock_wait {
-            crate::objects::TEST_LOCK_BUDGET.set(Some(std::time::Duration::from_millis(100)));
-        }
-        let first = store.finish_in_custody(
-            id,
-            &attempt,
-            &observed,
-            Completion::Recovered(Some(&recovery)),
-            &crate::dispatch_tests::Fake::default(),
-            &call,
-        );
-        crate::objects::TEST_LOCK_BUDGET.set(None);
-        if lock_wait {
-            assert!(matches!(first, Err(RunError::ObjectStoreBusy)));
-            assert!(!matches!(
-                store.record(id, &call)?.state,
-                AttemptState::Terminal { .. }
-            ));
-            assert!(object_import_refused(&attempt, scope)?.is_none());
-            assert!(read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.is_none());
-            assert!(read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?.is_none());
-            assert!(read_sealed(&attempt, "release.json", RECORD_LIMIT)?.is_none());
-            assert!(candidate.exists());
-            assert_eq!(store.writer_fence_listing()?.reservations.len(), 1);
-            drop(shared_lock);
-            let retried = store.finish_in_custody(
+        for index in 0..3 {
+            let result = store.finish_in_custody(
                 id,
                 &attempt,
                 &observed,
                 Completion::Recovered(Some(&recovery)),
                 &crate::dispatch_tests::Fake::default(),
                 &call,
-            )?;
-            assert!(matches!(retried.state, AttemptState::Terminal { .. }));
-            assert!(read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?.is_some());
-            assert!(object_import_refused(&attempt, scope)?.is_none());
-            return Ok(());
-        }
-        let failed = first?;
-        if case == ImportCase::LegacyPolicy {
-            let events = store.events(0, 64, Some(id), &call)?;
-            assert!(events.iter().any(|event| matches!(&event.change, AttemptState::Terminal { reason: Some(reason), .. }
-                if reason.contains("legacy pre-v11 Git grants policy") && reason.contains(&run.run_id.to_string()) && reason.contains(&id.to_string())
-            )));
-            assert!(
-                matches!(&failed.state, AttemptState::Terminal { reason: Some(reason), .. } if reason.contains("legacy pre-v11"))
             );
-            return Ok(());
+            if index < 2 {
+                assert!(matches!(
+                    result,
+                    Err(RunError::OperationIo {
+                        operation: "import lane Git objects",
+                        ..
+                    })
+                ));
+            } else {
+                assert!(
+                    matches!(result?.state, AttemptState::Terminal { outcome: Outcome::Failed, reason: Some(reason), .. } if reason.contains("three attempts"))
+                );
+            }
         }
-        assert!(matches!(
-            &failed.state,
-            AttemptState::Terminal { outcome: Outcome::Failed, reason: Some(reason), .. }
-                if reason.contains("pack") && reason.contains("64")
-        ));
-        assert!(object_import_refused(&attempt, scope)?.is_some());
-        assert!(
-            object_import_refused(
-                &attempt,
-                custody::Scope {
-                    generation: scope.generation + 1,
-                    ..scope
-                }
-            )
-            .is_err()
-        );
-        let archive = attempt.open_verified_directory(OsStr::new("quarantine"))?;
-        assert!(read_sealed(&archive, "manifest.json", RECORD_LIMIT)?.is_none());
-        assert!(read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?.is_none());
-        release_and_reclaim(&attempt, scope, &recovery)?;
+        let active: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM admission WHERE attempt=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(active, 0);
         store.settle_recovered(&attempt, recovery)?;
-        assert_eq!(
-            std::fs::read(candidate.join("recovery.lock"))?,
-            b"private evidence"
+        assert!(store.writer_fences()?.is_empty());
+        assert!(
+            candidate.join("git-common/HEAD").is_file(),
+            "refused private Git remains recoverable"
         );
-        assert_eq!(std::fs::read_dir(&packs)?.count(), 65);
-        assert!(read_sealed(&attempt, "release.json", RECORD_LIMIT)?.is_none());
-        assert_eq!(store.writer_fence_listing()?.reservations.len(), 1);
-        // Retrying a completed refusal preserves its outcome and the fence.
-        assert_eq!(
-            store.finish(
-                id,
-                &attempt,
-                &observed,
-                &crate::dispatch_tests::Fake::default(),
-                &call
-            )?,
-            failed
+        assert!(
+            attempt
+                .read_stable(OsStr::new("release.json"), RECORD_LIMIT)?
+                .len()
+                > 10
         );
-        assert!(candidate.exists());
-        assert_eq!(store.writer_fence_listing()?.reservations.len(), 1);
         Ok(())
     }
 
