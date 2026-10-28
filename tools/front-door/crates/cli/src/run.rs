@@ -2555,7 +2555,7 @@ fn launch_on_host(
     edge: &Edge<'_>,
     call: &run::Request<'_>,
     host: Option<&run::HostLaunchContext>,
-    validated: Option<&run::CanonicalRequest>,
+    validated: Option<&run::ValidatedChild>,
     ready: Option<&run::PreparedStart>,
 ) -> Result<Vec<run::Started>, Fail> {
     let inherited_host = host.is_some();
@@ -2581,7 +2581,7 @@ fn launch_on_host(
     };
     let read;
     let request = match validated {
-        Some(request) => request,
+        Some(request) => &**request,
         None => {
             read = session.store.request(run, call)?;
             &read
@@ -2715,6 +2715,18 @@ fn launch_on_host(
             sealed: Some(run::SealedTask {
                 request_digest,
                 task_id: attempt.task_id,
+                effective_network: validated.and_then(|child| {
+                    request
+                        .tasks
+                        .iter()
+                        .find(|task| task.task_id == attempt.task_id)
+                        .map(|task| {
+                            child
+                                .effective_task(task)
+                                .access
+                                .network(task.writer.is_some())
+                        })
+                }),
             }),
         }
         .encode()

@@ -441,7 +441,10 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
         if valid && case == "read-only default child of a quiet writer" {
             let validated = result.as_ref().unwrap();
             assert_eq!(
-                validated.tasks[0].access.network(false),
+                validated
+                    .effective_task(&validated.tasks[0])
+                    .access
+                    .network(false),
                 NetworkAccess::Provider,
                 "{case}: expected Provider network"
             );
@@ -996,7 +999,7 @@ fn host_refuses_writer_child_after_request_rewrite() -> TestResult {
 
     // Rewrite both lane-writable copies so the host's validated digest is
     // the remaining boundary against adding writer authority before launch.
-    let mut swapped = validated.clone();
+    let mut swapped = (*validated).clone();
     swapped.tasks[0].writer = Some(WriterRequest {
         project: "/project".into(),
         worktree: "/project/.worktrees/child".into(),
@@ -1063,7 +1066,7 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     let validated = store.validate_child(record.run_id, parent, &parent_task, 1, 2, &call)?;
 
     // The lane swaps its sealed request and the recorded digest together.
-    let mut swapped = validated.clone();
+    let mut swapped = (*validated).clone();
     swapped.tasks[0].access.network = Some(NetworkAccess::Open);
     store.run_dir(record.run_id, false)?.atomic_write(
         std::ffi::OsStr::new("request.json"),
@@ -1100,7 +1103,7 @@ fn host_launches_only_the_validated_child_request() -> TestResult {
     };
     store.start_child(
         record.run_id,
-        &swapped,
+        &ValidatedChild::fixture(swapped),
         &refuse,
         &|_, _| unreachable!(),
         &call,
@@ -1726,7 +1729,7 @@ fn host_view_holds_the_scope_it_hands_to_a_guardian() -> TestResult {
     assert!(store.held_attempts().is_empty());
     store.start_child(
         run.run_id,
-        &run.request,
+        &ValidatedChild::fixture(run.request.clone()),
         &Ready,
         &|_, _| Ok(Vec::new()),
         &call,
@@ -1780,7 +1783,7 @@ fn held_children_reclaim_exited_custody_across_sequential_launches() -> TestResu
         store.create(&run, &call)?;
         store.start_child(
             run.run_id,
-            &run.request,
+            &ValidatedChild::fixture(run.request.clone()),
             &Ready,
             &|_, _| {
                 handoffs.set(handoffs.get() + 1);
@@ -1977,7 +1980,7 @@ fn held_children_are_bounded_and_superseded_handles_are_dropped() -> TestResult 
 
     let started = store.start_child(
         run.run_id,
-        &run.request,
+        &ValidatedChild::fixture(run.request.clone()),
         &Ready,
         &|_, _| {
             Err(RunError::Validation(
@@ -2122,7 +2125,7 @@ fn deferral_stops_the_scan_after_the_first_attempt() -> TestResult {
     let fake = Fake::default();
     let started = store.start_child(
         run.run_id,
-        &run.request,
+        &ValidatedChild::fixture(run.request.clone()),
         &fake,
         &|_, _| unreachable!(),
         &call,

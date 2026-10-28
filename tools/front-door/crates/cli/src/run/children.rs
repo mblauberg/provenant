@@ -196,11 +196,13 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
         return Err("parent request changed after launch".into());
     }
     let parent_depth = parent_request.lane_depth.unwrap_or(1);
-    let parent_task = parent_request
+    let mut parent_task = parent_request
         .tasks
         .iter()
         .find(|task| task.task_id == sealed.task_id)
-        .ok_or("parent task missing from its request")?;
+        .ok_or("parent task missing from its request")?
+        .clone();
+    sealed.apply_network(&mut parent_task);
     let mut inputs =
         provenant_core::RootInputs::new(context.roots.home.clone(), context.roots.checkout.clone());
     inputs.state_dir = Some(launch.configuration_root.clone());
@@ -273,7 +275,7 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
             queued,
             &ChildAuthority {
                 parent: context.attempt_id,
-                task: parent_task,
+                task: &parent_task,
                 depth: parent_depth,
                 maximum,
             },
@@ -358,7 +360,7 @@ fn scan_queued(
     authority: &ChildAuthority<'_>,
     reason: &Stop,
     call: &run::Request<'_>,
-    mut launch: impl FnMut(RunId, &run::CanonicalRequest) -> Result<Vec<run::Started>, Fail>,
+    mut launch: impl FnMut(RunId, &run::ValidatedChild) -> Result<Vec<run::Started>, Fail>,
 ) -> Result<ChildScan, String> {
     let mut scan = ChildScan::default();
     for id in queued {
@@ -671,6 +673,165 @@ mod tests {
     }
 
     #[test]
+    fn inherited_network_survives_holder_context_for_grandchildren()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::permissions::NetworkAccess;
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|f| f.message)?;
+        let (context, mut child) = child_fixture(temp.path(), &clock)?;
+        let store = run::RunStore::open(&context, &call)?;
+        store.create(&child, &call)?;
+        let mut parent = child.request.tasks[0].clone();
+        parent.access.network = Some(NetworkAccess::Provider);
+        let validated = store.validate_child(
+            child.run_id,
+            child.request.parent_attempt.unwrap(),
+            &parent,
+            1,
+            3,
+            &call,
+        )?;
+        let effective = validated.effective_task(&validated.tasks[0]);
+        let sealed = run::SealedTask {
+            request_digest: validated.digest()?,
+            task_id: effective.task_id,
+            effective_network: Some(effective.access.network(false)),
+        };
+        let sealed: run::SealedTask = serde_json::from_slice(&serde_json::to_vec(&sealed)?)?;
+        let mut next_parent = validated.tasks[0].clone();
+        sealed.apply_network(&mut next_parent);
+        child.run_id = RunId::from_bytes([11; 16]);
+        child.operation_id = OperationId::parse("grandchild")?;
+        child.request.parent_attempt = Some(child.attempts[0].attempt_id);
+        child.request.lane_depth = Some(3);
+        child.attempts[0].attempt_id = AttemptId::from_bytes([12; 16]);
+        store.create(&child, &call)?;
+        let grandchild = store.validate_child(
+            child.run_id,
+            child.request.parent_attempt.unwrap(),
+            &next_parent,
+            2,
+            3,
+            &call,
+        )?;
+        assert_eq!(
+            grandchild
+                .effective_task(&grandchild.tasks[0])
+                .access
+                .network(false),
+            NetworkAccess::Provider
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restricted_parent_launches_child_with_inherited_chair()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::permissions::NetworkAccess;
+        use std::cell::Cell;
+        struct Observe(Cell<Option<NetworkAccess>>);
+        impl run::Providers for Observe {
+            fn prepare(
+                &self,
+                task: &run::TaskRequest,
+                _: &str,
+                _: &run::LaunchPaths,
+                _: Option<&run::AttemptRecord>,
+            ) -> Result<run::PreparedLaunch, String> {
+                self.0.set(task.access.network);
+                Ok(run::PreparedLaunch {
+                    provider_lease: None,
+                    argv: vec!["fixture".into()],
+                    environment: vec![],
+                    stdin: vec![],
+                    secret_input: None,
+                    cwd: "/".into(),
+                    route: run::RouteRecord::default(),
+                    skipped_routes: vec![],
+                    observed_head: None,
+                    repository: None,
+                    confinement: None,
+                })
+            }
+            fn decode(
+                &self,
+                _: &run::RouteRecord,
+                _: &[u8],
+                _: &custody::ExitObservation,
+                _: &Path,
+            ) -> Result<run::Decoded, String> {
+                unreachable!("fixture stops at handoff")
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|f| f.message)?;
+        let (roots, session, child, parent) = chair_fixture(temp.path(), &call)?;
+        let admitted = queue_versioned_child(
+            &session,
+            &child,
+            &std::fs::canonicalize(temp.path())?.join("checkout"),
+            &call,
+        )?;
+        let original = session.store.request(admitted.run_id, &call)?;
+        let mut parent_task = child.request.tasks[0].clone();
+        parent_task.access.network = Some(NetworkAccess::Provider);
+        let digest = parent_digest(&roots, session.context.project_id, parent, &call)?;
+        let provider = Observe(Cell::new(None));
+        let handed_off = Cell::new(false);
+        let scan = scan_queued(
+            &session.store,
+            vec![admitted.run_id],
+            &ChildAuthority {
+                parent: child.request.parent_attempt.unwrap(),
+                task: &parent_task,
+                depth: 1,
+                maximum: 2,
+            },
+            &Arc::new(Mutex::new(None)),
+            &call,
+            |id, validated| {
+                inherit_child_chair(&session, &roots, (parent, digest), id, validated, &call)?;
+                session
+                    .store
+                    .start_child(
+                        id,
+                        validated,
+                        &provider,
+                        &|_, _| {
+                            handed_off.set(true);
+                            Err(run::RunError::Validation("fixture observed handoff"))
+                        },
+                        &call,
+                    )
+                    .map_err(Fail::from)
+            },
+        )?;
+        assert!(scan.error.is_none(), "{:?}", scan.error);
+        assert!(handed_off.get());
+        assert_eq!(provider.0.get(), Some(NetworkAccess::Provider));
+        with_chair_index(&roots, &call, |index, c| {
+            let binding = index
+                .read(session.context.project_id, admitted.run_id, c)?
+                .unwrap();
+            assert_eq!(binding.request_digest, original.digest()?);
+            assert_eq!(
+                binding.chair,
+                index
+                    .read(session.context.project_id, parent, c)?
+                    .unwrap()
+                    .chair
+            );
+            Ok(())
+        })
+        .map_err(|f| f.message)?;
+        Ok(())
+    }
+
+    #[test]
     fn child_chair_seals_the_validated_request_despite_a_lane_rewrite()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -695,7 +856,7 @@ mod tests {
         )?;
         // The lane replaces both the bytes and their lane-local digest after
         // validation, before the host writes the association.
-        let mut forged = validated.clone();
+        let mut forged = (*validated).clone();
         forged.child_attempt_id_version = None;
         forged.concurrency = 2;
         std::fs::write(
@@ -1252,12 +1413,20 @@ mod tests {
             child.operation_id = OperationId::parse(&format!("running-child-{index}"))?;
             child.attempts[0].attempt_id = AttemptId::from_bytes([index + 6; 16]);
             store.create(&child, &call)?;
+            let validated = store.validate_child(
+                child.run_id,
+                child.request.parent_attempt.unwrap(),
+                &child.request.tasks[0],
+                1,
+                2,
+                &call,
+            )?;
             // Admit in the context callback, then stop handoff before custody.
             // The launcher's stale Starting withdrawal must leave Running intact.
             assert!(matches!(
                 store.start_child(
                     child.run_id,
-                    &child.request,
+                    &validated,
                     &Ready,
                     &|record, _| {
                         let directory =

@@ -364,7 +364,7 @@ impl<'a> Service<'a> {
         run: RunId,
         providers: &dyn Providers,
         holder: &dyn Fn(&AttemptRecord, provenant_core::ActorId) -> Result<Vec<u8>>,
-        validated: Option<&CanonicalRequest>,
+        validated: Option<&ValidatedChild>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
         match validated {

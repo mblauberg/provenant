@@ -3101,6 +3101,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
             sealed: Some(provenant_run::SealedTask {
                 request_digest: prepared.request.digest()?,
                 task_id: task.task_id,
+                effective_network: None,
             }),
         };
         verify_lane_profile(

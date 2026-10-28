@@ -186,6 +186,14 @@ for reads of existing runs, missing records and older runs are unbound. Display 
 peer executions remain unbound until they retain an originating chair separately
 from the actor owning operation replay. Board and tree rendering are separate.
 
+A child request's digest and derived run and attempt IDs describe the canonical
+request submitted by its requester. Inherited network restrictions are host
+launch policy, not changes to that request. The host validates the effective
+network against the parent, compares the original request digest again at
+launch, and applies the restriction to provider preparation. The effective
+network travels in the host-sealed holder context so that the same bound also
+applies to the child's own children.
+
 Association rows live as long as run metadata. Current GC removes provider
 payloads, logs, events and worktrees; it never removes run/attempt metadata.
 Whole-run collection must delete its association in the same host-owned removal
