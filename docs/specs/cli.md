@@ -278,7 +278,10 @@ branch. Removal carries that head and refuses, under the worktree lock, if the
 worktree's HEAD has moved since it was checked. When the selected project is
 that worktree, cleanup uses the verified primary checkout as its repository
 anchor, process cwd and output project. Canonical paths and NUL-delimited Git
-inventory handle symlink aliases and quoted paths. The landing worker census
+inventory handle symlink aliases and quoted paths. When Git lists a separate
+administrative directory instead of the primary checkout, `land` also checks
+`core.worktree` or a containing checkout. If neither identifies the primary
+checkout, landing reports an inventory error. The landing worker census
 ignores itself and only its ancestor chain through the session leader; other
 observable live processes inside the lane refuse removal. An incomplete census
 or unknown ancestor hop refuses landing with a retry message; each exempted

@@ -152,8 +152,13 @@ an idle delay, even when the worktree stays for delivery pickup. Successful
 settlement, delivery integration and `land` prune eligible worktrees and
 caches. When landing from the merged linked worktree, `land` uses the main
 checkout for cleanup and output so it can remove the selected worktree and its
-branch. It ignores its own caller ancestors through the session leader in the
-worker census, while other observable live processes inside the lane retain it.
+branch. The primary checkout comes from Git's worktree inventory. When Git
+lists a separate administrative directory instead, `land` checks `core.worktree`
+or a containing checkout. An out-of-tree lane needs `core.worktree` set if
+the inventory does not name the primary checkout; otherwise landing reports
+the inventory problem. It ignores its own caller ancestors through the session
+leader in the worker census, while other observable live processes inside the
+lane retain it.
 An incomplete census or unproved ancestor hop refuses landing with a retry
 message; ancestor identities require strictly older native start stamps. The
 land process changes cwd before removal and prints a notice when the invoking
