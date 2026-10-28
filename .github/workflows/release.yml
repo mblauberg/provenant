@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PROVENANT_ROOT: ${{ github.workspace }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Check out tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check release inputs
+        run: |
+          test "$(uname -m)" = arm64
+          test -f "docs/release-notes/$RELEASE_TAG.md"
+      - name: Install pinned toolchain
+        working-directory: tools/front-door
+        run: |
+          toolchain=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+      - name: Build and package
+        working-directory: tools/front-door
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target
+          CARGO_BUILD_BUILD_DIR: ${{ runner.temp }}/cargo-target
+        run: |
+          cargo build --release --locked --bin provenant
+          codesign --force --sign - "$CARGO_TARGET_DIR/release/provenant"
+          cargo run --release --locked --example package-release -- --out "$RUNNER_TEMP/release"
+          archive="$RUNNER_TEMP/provenant-aarch64-apple-darwin.tar.gz"
+          tar -czf "$archive" -C "$RUNNER_TEMP/release" .
+          cd "$RUNNER_TEMP"
+          shasum -a 256 "$(basename "$archive")" > "$archive.sha256"
+      - name: Publish GitHub Release
+        run: |
+          gh release create "$RELEASE_TAG" \
+            "$RUNNER_TEMP/provenant-aarch64-apple-darwin.tar.gz" \
+            "$RUNNER_TEMP/provenant-aarch64-apple-darwin.tar.gz.sha256" \
+            --verify-tag --title "$RELEASE_TAG" \
+            --notes-file "docs/release-notes/$RELEASE_TAG.md"
