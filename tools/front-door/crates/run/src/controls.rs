@@ -1322,7 +1322,16 @@ impl RunStore {
         if !matches!(prior.state, AttemptState::Terminal { .. }) {
             return Err(RunError::Nonterminal);
         }
-        let replay = self.operation(&input.operation_id, call)?.is_some();
+        let operation = self.operation(&input.operation_id, call)?;
+        let replay = operation.is_some();
+        let previous = match &operation {
+            Some(operation) => match self.request(operation.run_id, call) {
+                Ok(request) => Some(request),
+                Err(RunError::NotFound) if operation.state == OperationState::Prepared => None,
+                Err(error) => return Err(error),
+            },
+            None => None,
+        };
         if !replay && writer.is_none() {
             self.check_continuation_writer(input.prior, call)?;
         }
@@ -1348,11 +1357,15 @@ impl RunStore {
             destination.open_pr |= prior.open_pr;
             deliver = Some(destination);
         }
-        let prepared = PreparedRun {
+        let mut prepared = PreparedRun {
             run_id: input.run_id,
             operation_id: input.operation_id.clone(),
             request: CanonicalRequest {
-                child_attempt_id_version: None,
+                child_attempt_id_version: previous
+                    .as_ref()
+                    .map_or(request.parent_attempt.map(|_| 1), |request| {
+                        request.child_attempt_id_version
+                    }),
                 chair: request.chair.clone(),
                 fresh_continuation: fresh.map(str::to_owned),
                 schema_version: 1,
@@ -1391,6 +1404,32 @@ impl RunStore {
             }],
             created_at: input.created_at,
         };
+        // Retain an interrupted legacy operation's scheme even if it crashed
+        // before publishing its request. Only the exact old digest qualifies.
+        if previous.is_none()
+            && let Some(operation) = operation
+            && operation.request_digest != prepared.request.digest()?
+        {
+            let mut legacy = prepared.request.clone();
+            legacy.child_attempt_id_version = None;
+            if legacy.digest()? == operation.request_digest {
+                prepared.request = legacy;
+            }
+        }
+        if let Some(run) = crate::correlation::child_run_id(
+            self.context.project_id,
+            &prepared.request,
+            &prepared.operation_id,
+        )? {
+            prepared.run_id = run;
+            prepared.attempts[0].attempt_id = crate::correlation::child_attempt_id(
+                self.context.project_id,
+                run,
+                &prepared.request,
+                prior.task_id,
+            )?
+            .ok_or(RunError::Validation("derived continuation attempt ID"))?;
+        }
         // A replay, prepared or accepted, is answered by `create`, which
         // compares the request digest and adopts a prepared operation's IDs.
         if !replay {
@@ -1405,7 +1444,27 @@ impl RunStore {
                 return Err(RunError::Conflict);
             }
         }
-        let mut ready = if !replay {
+        // Derived final paths are deterministic. Preflight in this call's
+        // fresh staging instead, so an unrecorded directory left by a crash
+        // cannot block retry. Its plan is discarded and launch prepares again.
+        let derived = prepared.request.child_attempt_id_version.is_some();
+        let mut ready = if !replay && derived {
+            if let Some(providers) = providers {
+                let staging = PreparedRun {
+                    run_id: input.run_id,
+                    operation_id: prepared.operation_id.clone(),
+                    request: prepared.request.clone(),
+                    attempts: vec![NewAttempt {
+                        attempt_id: input.attempt_id,
+                        task_id: prior.task_id,
+                        prompt: input.prompt.clone(),
+                    }],
+                    created_at: input.created_at,
+                };
+                drop(self.prepare_fresh_start(&staging, providers, call)?);
+            }
+            None
+        } else if !replay {
             providers
                 .map(|providers| self.prepare_fresh_start(&prepared, providers, call))
                 .transpose()?
@@ -1415,20 +1474,20 @@ impl RunStore {
         let created = self.create(&prepared, call);
         if let Some(ready) = &mut ready {
             let recorded = match &created {
-                Ok(run) => run.run_id == input.run_id,
+                Ok(run) => run.run_id == prepared.run_id,
                 // Publication may fail after reserving the operation. Keep
                 // its staging for recovery, including an unreadable index.
                 Err(_) => self
                     .operation(&input.operation_id, call)
-                    .map(|operation| operation.is_some_and(|op| op.run_id == input.run_id))
+                    .map(|operation| operation.is_some_and(|op| op.run_id == prepared.run_id))
                     .unwrap_or(true),
             };
             if recorded {
-                self.retain_prepared_start(ready, input.run_id);
+                self.retain_prepared_start(ready, prepared.run_id);
             }
         }
         let run = created?;
-        if run.run_id != input.run_id {
+        if run.run_id != prepared.run_id {
             ready = None;
         }
         Ok((run, ready))

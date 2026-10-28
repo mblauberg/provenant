@@ -257,7 +257,9 @@ impl WorkIndex {
     }
 }
 impl RunStore {
-    pub(crate) fn check_child_run_id(
+    /// Check a lane-local run namespace before writing host-owned indexes.
+    /// Legacy requests have no derivation and need an existing host seal.
+    pub fn check_child_run_id(
         &self,
         run: RunId,
         request: &CanonicalRequest,

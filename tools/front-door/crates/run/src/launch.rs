@@ -362,6 +362,22 @@ struct ChildAttempts {
 }
 
 impl RunStore {
+    /// Authenticate a lane-local continuation source before inheriting host
+    /// associations. A legacy request cannot prove attempt membership.
+    pub fn check_child_attempt_id(
+        &self,
+        request: &CanonicalRequest,
+        record: &AttemptRecord,
+    ) -> Result<()> {
+        if request.child_attempt_id_version.is_none() {
+            return Err(RunError::Validation("legacy child attempt identity"));
+        }
+        if let Some(reason) = self.child_attempt_reason(record.run_id, request, record)? {
+            return Err(RunError::Validation(reason));
+        }
+        Ok(())
+    }
+
     fn child_attempt_reason(
         &self,
         run: RunId,
