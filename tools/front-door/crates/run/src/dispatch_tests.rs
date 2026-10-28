@@ -4825,6 +4825,9 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
     value["attempt_inode"] = meta.inode.into();
     std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
     artifacts::subdir(&attempt, std::ffi::OsStr::new("scratch"), true)?;
+    let temporary = path.join("tmp/candidate-0");
+    std::fs::create_dir_all(&temporary)?;
+    std::fs::write(temporary.join("payload.lock"), b"build output")?;
     store.set_temporary_retained(id, true, &call)?;
     let manifest_path = path.join("quarantine/manifest.json");
     let manifest = std::fs::read(&manifest_path)?;
@@ -4837,6 +4840,7 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
         reservation.exists(),
         "failed verification retains the reservation"
     );
+    assert!(temporary.exists(), "uncertain custody retains tmp");
     assert_eq!(store.record(id, &call)?, record);
     std::fs::write(manifest_path, manifest)?;
     assert_eq!(
@@ -4852,6 +4856,7 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
         "normal settlement verifies release evidence"
     );
     assert!(!reservation.exists());
+    assert!(!path.join("tmp").exists(), "released tmp is removed");
     assert_eq!(store.record(id, &call)?, record);
     Ok(())
 }
