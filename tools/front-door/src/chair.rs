@@ -616,12 +616,22 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 let project = provenant_config::lookup_project(&resolved.roots, &location)?
                     .ok_or("project not registered")?
                     .project_id();
+                let settings = provenant_config::read_with_domains(
+                    &resolved.roots,
+                    &provenant_cli::domains::SECTIONS,
+                )?
+                .retention;
+                let retention = Retention {
+                    max_age_seconds: settings.chair_log_days * 86400,
+                    max_entries: settings.chair_log_entries,
+                    max_bytes: settings.chair_log_bytes,
+                };
                 let page = LogStore::new(
                     resolved.roots.state,
                     project,
                     HostSessionId::parse(&session)?,
                 )
-                .page(after, limit as usize)?;
+                .page(after, limit as usize, retention, now())?;
                 Ok(serde_json::to_value(page)?)
             }
         }

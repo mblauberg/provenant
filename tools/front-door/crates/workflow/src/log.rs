@@ -1,8 +1,8 @@
 //! Durable per-session chair updates.
 use crate::{persistence, session::HostSessionId};
-use provenant_core::{OperationId, ProjectId, StateRoot};
+use provenant_core::{CancelToken, Clock, OperationId, ProjectId, StateRoot, WaitBudget};
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
-use provenant_records::CanonicalV1;
+use provenant_records::{CanonicalV1, Limits, decode_v1};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 
@@ -70,12 +70,19 @@ pub enum Error {
     Filesystem(#[from] FsError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Decode(#[from] provenant_records::DecodeError),
+    #[error(transparent)]
+    Canonical(#[from] provenant_records::CanonicalError),
+    #[error("chair log entry {sequence} could not be read: {source}")]
+    Entry { sequence: u64, source: Box<Error> },
     #[error("{0}")]
     Invalid(&'static str),
     #[error("operation ID was already used for a different update")]
     Conflict,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Receipt {
     operation_id: OperationId,
     digest: String,
@@ -85,6 +92,7 @@ struct Receipt {
     retained: bool,
 }
 #[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Manifest {
     schema_version: u64,
     receipts: Vec<Receipt>,
@@ -115,7 +123,14 @@ impl LogStore {
     fn load(dir: &Directory) -> Result<Manifest, Error> {
         match dir.read_bounded(OsStr::new("manifest.json"), MANIFEST_LIMIT) {
             Ok(bytes) => {
-                let manifest: Manifest = serde_json::from_slice(&bytes)?;
+                let manifest: Manifest = decode_v1(
+                    bytes.as_slice(),
+                    Limits {
+                        max_bytes: MANIFEST_LIMIT,
+                        max_depth: 64,
+                        max_members: 1_000_000,
+                    },
+                )?;
                 if manifest.schema_version != 1 || manifest.receipts.len() > RECEIPT_LIMIT {
                     return Err(Error::Invalid("invalid chair log manifest"));
                 }
@@ -137,10 +152,78 @@ impl LogStore {
         format!("entry-{sequence:020}.json")
     }
     fn read(dir: &Directory, sequence: u64) -> Result<LogEntry, Error> {
-        Ok(serde_json::from_slice(&dir.read_bounded(
-            OsStr::new(&Self::filename(sequence)),
-            (ENTRY_LIMIT * 2) as u64,
-        )?)?)
+        let read = || -> Result<LogEntry, Error> {
+            Ok(serde_json::from_slice(&dir.read_bounded(
+                OsStr::new(&Self::filename(sequence)),
+                (ENTRY_LIMIT * 2) as u64,
+            )?)?)
+        };
+        read().map_err(|source| Error::Entry {
+            sequence,
+            source: Box::new(source),
+        })
+    }
+    fn lock(dir: &Directory) -> Result<provenant_os::fs::LockGuard, Error> {
+        let clock = provenant_os::clock::SystemClock::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 5)
+            .map_err(|_| Error::Invalid("invalid lock budget"))?;
+        Ok(dir.lock(
+            OsStr::new("log.lock"),
+            LockMode::Exclusive,
+            budget,
+            &CancelToken::new(),
+            &clock,
+        )?)
+    }
+    fn read_lock(dir: &Directory) -> Result<Option<provenant_os::fs::LockGuard>, Error> {
+        let clock = provenant_os::clock::SystemClock::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 5)
+            .map_err(|_| Error::Invalid("invalid lock budget"))?;
+        match dir.lock_existing(
+            OsStr::new("log.lock"),
+            LockMode::Shared,
+            budget,
+            &CancelToken::new(),
+            &clock,
+        ) {
+            Ok(lock) => Ok(Some(lock)),
+            Err(e) if e.is_not_found() => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+    fn expired(receipt: &Receipt, retention: Retention, now: i64) -> bool {
+        now.saturating_sub(receipt.created_at)
+            > retention.max_age_seconds.min(i64::MAX as u64) as i64
+    }
+    /// Apply age retention, returning the number of payloads that would be pruned.
+    pub fn gc(&self, retention: Retention, now: i64, dry_run: bool) -> Result<u64, Error> {
+        let dir = match self.dir(false) {
+            Ok(dir) => dir,
+            Err(e) if e.is_not_found() => return Ok(0),
+            Err(e) => return Err(e.into()),
+        };
+        let _lock = if dry_run {
+            Self::read_lock(&dir)?
+        } else {
+            Some(Self::lock(&dir)?)
+        };
+        let mut manifest = Self::load(&dir)?;
+        let mut count = 0;
+        for receipt in &mut manifest.receipts {
+            if receipt.retained && Self::expired(receipt, retention, now) {
+                receipt.retained = false;
+                count += 1;
+            }
+        }
+        if !dry_run {
+            manifest.total_pruned += count;
+            if count > 0 {
+                Self::publish(&dir, "manifest.json", &serde_json::to_vec(&manifest)?)?;
+            }
+            Self::cleanup(&dir, &manifest)?;
+            dir.sync()?;
+        }
+        Ok(count)
     }
     fn cleanup(dir: &Directory, manifest: &Manifest) -> Result<(), Error> {
         for old in manifest.receipts.iter().filter(|r| !r.retained) {
@@ -171,10 +254,35 @@ impl LogStore {
             return Err(Error::Invalid("invalid chair log retention"));
         }
         let dir = self.dir(true)?;
-        let _lock = dir.try_lock(OsStr::new("log.lock"), LockMode::Exclusive)?;
+        let _lock = Self::lock(&dir)?;
         let mut manifest = Self::load(&dir)?;
         Self::cleanup(&dir, &manifest)?;
-        let digest = CanonicalV1::file_digest(&encoded).to_string();
+        #[derive(Serialize)]
+        struct Payload<'a> {
+            kind: &'a str,
+            markdown: &'a str,
+            request_ids: &'a [String],
+            attempt_ids: &'a [String],
+            issue_ids: &'a [String],
+            pr_ids: &'a [String],
+            channel: &'a str,
+            correction_of: Option<u64>,
+        }
+        let digest = CanonicalV1::record_digest(
+            "chair-log-append",
+            1,
+            &Payload {
+                kind: &input.kind,
+                markdown: &input.markdown,
+                request_ids: &input.request_ids,
+                attempt_ids: &input.attempt_ids,
+                issue_ids: &input.issue_ids,
+                pr_ids: &input.pr_ids,
+                channel: &input.channel,
+                correction_of: input.correction_of,
+            },
+        )?
+        .to_string();
         if let Some(old) = manifest
             .receipts
             .iter()
@@ -257,7 +365,13 @@ impl LogStore {
         dir.sync()?;
         Ok(entry)
     }
-    pub fn page(&self, after: Option<u64>, limit: usize) -> Result<Page, Error> {
+    pub fn page(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+        retention: Retention,
+        now: i64,
+    ) -> Result<Page, Error> {
         if limit == 0 || limit > PAGE_LIMIT {
             return Err(Error::Invalid("chair log page limit must be 1-100"));
         }
@@ -273,12 +387,14 @@ impl LogStore {
             }
             Err(e) => return Err(e.into()),
         };
-        let _lock = dir.try_lock(OsStr::new("log.lock"), LockMode::Exclusive)?;
+        let _lock = Self::read_lock(&dir)?;
         let manifest = Self::load(&dir)?;
         let mut selected = manifest
             .receipts
             .iter()
-            .filter(|r| r.retained && r.sequence > after.unwrap_or(0))
+            .filter(|r| {
+                r.retained && !Self::expired(r, retention, now) && r.sequence > after.unwrap_or(0)
+            })
             .peekable();
         let mut entries = Vec::new();
         let mut bytes = 0;
@@ -299,7 +415,12 @@ impl LogStore {
             entries,
             next_cursor,
             total_appended: manifest.receipts.len() as u64,
-            total_pruned: manifest.total_pruned,
+            total_pruned: manifest.total_pruned
+                + manifest
+                    .receipts
+                    .iter()
+                    .filter(|r| r.retained && Self::expired(r, retention, now))
+                    .count() as u64,
         })
     }
 }
@@ -360,21 +481,36 @@ mod tests {
             store.append(update("op-1", "different"), retention, 2),
             Err(Error::Conflict)
         ));
+        let mut handoff = first.clone();
+        handoff.host = "other-host".into();
+        assert_eq!(store.append(handoff, retention, 2).unwrap().sequence, 1);
+        let expired_view = store.page(None, 100, retention, 102).unwrap();
+        assert!(expired_view.entries.is_empty());
+        assert_eq!(expired_view.total_pruned, 1);
+        assert_eq!(store.gc(retention, 102, true).unwrap(), 1);
+        assert_eq!(
+            store.page(None, 100, retention, 2).unwrap().entries.len(),
+            1
+        );
+
         let mut correction = update("op-2", "correction");
         correction.correction_of = Some(1);
         store.append(correction, retention, 3).unwrap();
-        let page = store.page(None, 1).unwrap();
+        let page = store.page(None, 1, retention, 3).unwrap();
         assert_eq!(page.entries[0].sequence, 1);
         assert_eq!(page.next_cursor, Some(1));
         assert_eq!(
-            store.page(page.next_cursor, 1).unwrap().entries[0]
+            store
+                .page(page.next_cursor, 1, retention, 3)
+                .unwrap()
+                .entries[0]
                 .update
                 .correction_of,
             Some(1)
         );
         store.append(update("op-3", "third"), retention, 4).unwrap();
         let restarted = LogStore::new(root, project, session);
-        let page = restarted.page(None, 100).unwrap();
+        let page = restarted.page(None, 100, retention, 4).unwrap();
         assert_eq!(
             page.entries.iter().map(|e| e.sequence).collect::<Vec<_>>(),
             vec![2, 3]
@@ -384,10 +520,10 @@ mod tests {
         restarted
             .append(update("op-4", "later"), retention, 200)
             .unwrap();
-        let page = restarted.page(None, 100).unwrap();
+        let page = restarted.page(None, 100, retention, 200).unwrap();
         assert_eq!(page.entries.len(), 1);
         assert_eq!(page.total_pruned, 3);
-        assert!(restarted.page(None, 0).is_err());
+        assert!(restarted.page(None, 0, retention, 200).is_err());
         assert!(
             restarted
                 .append(update("large", &"x".repeat(ENTRY_LIMIT)), retention, 201)
@@ -407,8 +543,24 @@ mod tests {
                 )
                 .unwrap();
         }
-        let page = restarted.page(None, 100).unwrap();
+        let page = restarted.page(None, 100, size_retention, 202).unwrap();
         assert_eq!(page.entries.len(), 3);
         assert_eq!(page.total_pruned, 5);
+        assert_eq!(restarted.gc(size_retention, 1203, false).unwrap(), 3);
+        let page = restarted.page(None, 100, size_retention, 1203).unwrap();
+        assert!(page.entries.is_empty());
+        assert_eq!(page.total_pruned, 8);
+        let dir = restarted.dir(false).unwrap();
+        assert!(matches!(
+            LogStore::read(&dir, 1),
+            Err(Error::Entry { sequence: 1, .. })
+        ));
+        LogStore::publish(
+            &dir,
+            "manifest.json",
+            br#"{"schema_version":1,"receipts":[],"total_pruned":0,"total_pruned":1}"#,
+        )
+        .unwrap();
+        assert!(matches!(LogStore::load(&dir), Err(Error::Decode(_))));
     }
 }

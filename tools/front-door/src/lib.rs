@@ -12,6 +12,7 @@ mod disk_guard;
 mod fabric;
 mod gc_agent;
 
+mod chair_log_retention;
 mod gc_support;
 mod handoff;
 mod hook_state;

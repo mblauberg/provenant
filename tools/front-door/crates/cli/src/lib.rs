@@ -612,11 +612,16 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
                             || arg
                                 .get_num_args()
                                 .is_some_and(|range| range.max_values() > 1)),
-                    defaults: arg
-                        .get_default_values()
-                        .iter()
-                        .map(|value| value.to_string_lossy().into_owned())
-                        .collect(),
+                    defaults: if path == "provenant chair log append"
+                        && arg.get_id().as_str() == "operation_id"
+                    {
+                        Vec::new()
+                    } else {
+                        arg.get_default_values()
+                            .iter()
+                            .map(|value| value.to_string_lossy().into_owned())
+                            .collect()
+                    },
                     values: arg
                         .get_value_parser()
                         .possible_values()
@@ -706,6 +711,9 @@ fn constraints(path: &str) -> Vec<String> {
             "prompt is at most 1 MiB; expected generation is 0",
             "operation-id is generated when omitted; supply it for planned retries",
         ],
+        "provenant chair log append" => {
+            &["operation-id is generated when omitted; supply it for planned retries"]
+        }
         "provenant output" => &[
             "target is an ATTEMPT ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT",
             "tail above 500 lines is clamped to 500",
@@ -811,6 +819,29 @@ mod tests {
         ));
         invalid(&["pr", "merge", "1947", "--head", &"a".repeat(40)]);
         invalid(&["pr", "land", "1947", "--head", &"a".repeat(40)]);
+    }
+    #[test]
+    fn chair_log_help_explains_generated_retry_keys() {
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--all"]) else {
+            panic!("catalog");
+        };
+        let Some(command) = catalog
+            .commands
+            .iter()
+            .find(|c| c.command == "provenant chair log append")
+        else {
+            panic!("chair log append help");
+        };
+        assert!(
+            command
+                .constraints
+                .iter()
+                .any(|c| c.contains("supply it for planned retries"))
+        );
+        let Some(operation) = command.arguments.iter().find(|a| a.name == "operation_id") else {
+            panic!("operation ID argument");
+        };
+        assert!(operation.defaults.is_empty());
     }
     #[test]
     fn land_accepts_a_pinned_head_and_hides_it_from_default_help() {

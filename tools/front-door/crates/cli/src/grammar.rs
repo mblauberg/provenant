@@ -215,7 +215,7 @@ pub enum ChairLog {
         #[arg(long)]
         file: String,
         /// Stable retry key; generated when omitted
-        #[arg(long, default_value = "", value_parser = operation_id)]
+        #[arg(long, default_value = "", value_parser = operation_id, hide_default_value = true)]
         operation_id: OperationId,
     },
     /// List a bounded page of updates in sequence order.

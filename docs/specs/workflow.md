@@ -1,9 +1,9 @@
 # Workflow
 
-Owner: `crates/workflow` (coverage, receipts, sessions, writing),
+Owner: `crates/workflow` (coverage, receipts, sessions, chair logs, writing),
 `crates/fabric-runtime/src/handoff/session` (session handoff)
 Anchor: `crates/workflow/src/coverage.rs`, `crates/workflow/src/store/tests.rs`,
-`crates/workflow/src/session.rs`, `tests/workflow.rs`
+`crates/workflow/src/session.rs`, `crates/workflow/src/log.rs`, `tests/workflow.rs`
 
 Workflow is a small synchronous policy library: a pure review coverage check,
 a minimal delivery receipt, bounded session checkpoints and a writing
@@ -317,6 +317,23 @@ following it reaches the store the hook used; one that cannot is not printed.
   `crates/workflow/src/session.rs::the_save_command_carries_a_custom_state_dir_or_refuses_to_show_one`;
   `::the_excerpt_notice_carries_the_state_dir_and_stays_within_the_cap`
 - Owner: `crates/workflow/src/session/state.rs`, `crates/workflow/src/session.rs`, `src/hooks.rs`
+
+## Chair logs
+
+Chair updates are scoped to a project and session. An append with the same
+operation ID and payload must return the original sequence, including after
+payload pruning; a different payload with that ID must be refused. Entries
+are returned in sequence order with bounded pagination. Retention removes
+oldest payloads under the configured age, count and byte limits. A correction
+is a new entry referencing an earlier sequence, which may have been pruned.
+Lanes must not append chair updates. Listing must not create state or require
+write access.
+- Why: retries must not duplicate updates, and inactive or long-lived sessions
+  must remain bounded without preventing read-only use.
+- Test: `crates/workflow/src/log.rs::log_operation_replay_pagination_correction_pruning_and_restart`;
+  `tests/workflow.rs::chair_log_cli_replay_and_pages`;
+  `::chair_log_cli_retention_replay_and_lane_refusal`
+- Owner: `crates/workflow/src/log.rs`, `src/chair.rs`
 
 ## Session handoff
 

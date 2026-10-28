@@ -56,8 +56,9 @@ the returned `next_cursor`; a byte limit may shorten a page. Entries are
 limited to 16 KiB. Log contents are not copied into demand telemetry.
 
 Each append applies the per-session age, count and size limits documented in
-[configuration](configuration.md#lane-cache-collection). Old payloads are
-removed, while operation receipts and aggregate appended/pruned counts survive.
+[configuration](configuration.md#lane-cache-collection). Listing hides entries
+older than the age limit, and full `gc` removes their payloads even for idle
+sessions. Operation receipts and aggregate appended/pruned counts survive.
 The receipt store is bounded to 100,000 operations per session; once full,
 new appends are refused to preserve replay guarantees.
 

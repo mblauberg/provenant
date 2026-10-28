@@ -2,4 +2,5 @@
 
 - Chair sessions can append replay-safe updates and corrections, and read bounded
   pages. Configurable per-session retention prunes old payloads while preserving
-  operation receipts and aggregate counts.
+  operation receipts and aggregate counts. Lists respect age retention, and
+  full GC removes expired payloads from idle sessions.

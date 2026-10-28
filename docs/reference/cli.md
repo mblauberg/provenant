@@ -2686,7 +2686,7 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `--session` | `{"name": "session", "required": true}` |
 | `--file` | `{"name": "file", "required": true}` |
-| `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
+| `--operation-id` | `{"name": "operation_id"}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
@@ -2695,6 +2695,9 @@ bounds are null. Positional arguments have no long flag.
 
 ```json
 {
+  "constraints": [
+    "operation-id is generated when omitted; supply it for planned retries"
+  ],
   "groups": [
     {
       "arguments": [
