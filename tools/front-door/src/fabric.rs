@@ -5409,6 +5409,7 @@ mod peer_tests {
             executable_search_path: Vec::new(),
             git: provenant_os::git::git_executable().ok_or("git")?,
             codex_home: None,
+            cargo_build_jobs: None,
             fixture_state_write: false,
         });
         let error = advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)

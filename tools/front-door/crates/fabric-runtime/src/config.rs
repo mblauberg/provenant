@@ -117,6 +117,10 @@ impl Default for GraphLimits {
 pub struct Lanes {
     pub priority: LanePriority,
     pub cargo_seed: CargoSeed,
+    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
+    pub max_concurrent_builds: Option<u64>,
+    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
+    pub cargo_build_jobs: Option<u64>,
 }
 
 /// Optional host Cargo seeds for writer lanes.
@@ -386,6 +390,14 @@ impl DomainConfig for FabricConfig {
                 reject(format!("lanes.priority.{name}"));
             }
         }
+        for key in (provenant_config::LaneBuildSettings {
+            max_concurrent_builds: self.lanes.max_concurrent_builds,
+            cargo_build_jobs: self.lanes.cargo_build_jobs,
+        })
+        .invalid_keys()
+        {
+            reject(format!("lanes.{key}"));
+        }
         errors
     }
 }
@@ -407,6 +419,25 @@ pub const SECTION: DomainSection = DomainSection::new::<FabricConfig>("fabric", 
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn lane_build_settings_validate_shared_bounds_and_auto() {
+        let lanes: Lanes =
+            serde_json::from_str(r#"{"max_concurrent_builds": -1, "cargo_build_jobs": -1}"#)
+                .unwrap();
+        assert_eq!(lanes.max_concurrent_builds, None);
+        assert_eq!(lanes.cargo_build_jobs, None);
+        let mut config = config();
+        config.lanes.max_concurrent_builds = Some(0);
+        config.lanes.cargo_build_jobs = Some(1025);
+        let errors = config.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "lanes.max_concurrent_builds")
+        );
+        assert!(errors.iter().any(|e| e.field == "lanes.cargo_build_jobs"));
+    }
 
     #[test]
     fn inbox_identity_uses_agent_then_harness_then_client_defaults() {

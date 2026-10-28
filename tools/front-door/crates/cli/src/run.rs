@@ -2606,6 +2606,7 @@ fn launch_on_host(
             git: provenant_os::git::git_executable()
                 .ok_or_else(|| Fail::new(Status::Refused, ErrorKind::Git, "Git unavailable"))?,
             codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+            cargo_build_jobs: std::env::var("CARGO_BUILD_JOBS").ok(),
             #[cfg(feature = "fixture")]
             fixture_state_write: false,
         },
@@ -7896,6 +7897,7 @@ mod tests {
             executable_search_path: Vec::new(),
             git: PathBuf::from("/usr/bin/git"),
             codex_home: None,
+            cargo_build_jobs: None,
             #[cfg(feature = "fixture")]
             fixture_state_write: false,
         });

@@ -34,6 +34,8 @@ pub struct HostLaunchContext {
     pub executable_search_path: Vec<PathBuf>,
     pub git: PathBuf,
     pub codex_home: Option<PathBuf>,
+    #[serde(default)]
+    pub cargo_build_jobs: Option<String>,
     /// Synthetic fake-provider evidence; absent from installed builds.
     #[cfg(feature = "fixture")]
     #[serde(default)]
@@ -179,6 +181,12 @@ struct LaneResources<'a> {
     context: &'a HolderContext,
 }
 impl Resources for LaneResources<'_> {
+    fn pressure(&self) -> std::io::Result<Option<provenant_os::sys::resources::MemoryPressure>> {
+        self.resources.pressure()
+    }
+    fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+        self.resources.guardian_identity()
+    }
     fn memory(&self) -> std::io::Result<provenant_os::sys::resources::MemorySample> {
         self.resources.memory()
     }
@@ -189,7 +197,13 @@ impl Resources for LaneResources<'_> {
 fn custody_error(error: RunError) -> CustodyError {
     match error {
         RunError::HostClock => CustodyError::AdmissionClock,
+        RunError::BuildSettings => CustodyError::AdmissionBuildSettings,
+        RunError::GuardianIdentityUnavailable => CustodyError::AdmissionGuardianIdentity,
         RunError::DiskFloor { free, floor } => CustodyError::AdmissionDisk { free, floor },
+        RunError::MemoryPressure { level } => CustodyError::AdmissionMemoryPressure { level },
+        RunError::BuildSlots { active, limit } => {
+            CustodyError::AdmissionBuildSlots { active, limit }
+        }
         other => CustodyError::Io(std::io::Error::other(other.to_string())),
     }
 }
@@ -769,6 +783,18 @@ mod host_clock_tests {
     use super::*;
 
     #[test]
+    fn admission_failures_reach_guardian_as_typed_causes() {
+        assert!(matches!(
+            custody_error(RunError::BuildSettings),
+            CustodyError::AdmissionBuildSettings
+        ));
+        assert!(matches!(
+            custody_error(RunError::GuardianIdentityUnavailable),
+            CustodyError::AdmissionGuardianIdentity
+        ));
+    }
+
+    #[test]
     fn an_unreadable_host_clock_reaches_the_guardian_as_itself() {
         assert!(matches!(
             custody_error(RunError::HostClock),
@@ -810,6 +836,7 @@ mod disk_admission_tests {
                 executable_search_path: Vec::new(),
                 git: "/usr/bin/git".into(),
                 codex_home: None,
+                cargo_build_jobs: None,
                 #[cfg(feature = "fixture")]
                 fixture_state_write: false,
             }),

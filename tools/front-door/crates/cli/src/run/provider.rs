@@ -666,6 +666,22 @@ fn prepare_with(
                 spec.env.push(("PROVENANT_LANE_BASE".into(), base.into()));
             }
         }
+        let jobs = provenant_config::LaneBuildSettings {
+            max_concurrent_builds: config.domains.fabric.lanes.max_concurrent_builds,
+            cargo_build_jobs: config.domains.fabric.lanes.cargo_build_jobs,
+        }
+        .jobs();
+        set_cargo_jobs(
+            &mut spec.env,
+            registry
+                .host
+                .and_then(|host| host.cargo_build_jobs.as_deref()),
+            jobs,
+        );
+        if adapter.id() == "claude" {
+            spec.configure_claude_shell(scratch)
+                .map_err(|error| error.to_string())?;
+        }
         if let Some(gh) = publishing_gh.as_ref() {
             let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
                 .map_err(|error| error.to_string())?;
@@ -763,6 +779,38 @@ fn prepare_with(
         .map(|skipped| format!("{}: {}", skipped.route, skipped.detail))
         .collect::<Vec<_>>()
         .join("; "))
+}
+
+fn set_cargo_jobs(
+    env: &mut Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    inherited: Option<&str>,
+    jobs: u64,
+) {
+    if !env.iter().any(|(name, _)| name == "CARGO_BUILD_JOBS") {
+        env.push((
+            "CARGO_BUILD_JOBS".into(),
+            inherited
+                .map_or_else(|| jobs.to_string(), str::to_owned)
+                .into(),
+        ));
+    }
+}
+
+#[cfg(test)]
+mod cargo_jobs_tests {
+    use super::set_cargo_jobs;
+    #[test]
+    fn cargo_jobs_respect_supplied_environment() {
+        let mut env = vec![("CARGO_BUILD_JOBS".into(), "7".into())];
+        set_cargo_jobs(&mut env, Some("9"), 3);
+        assert_eq!(env[0].1, "7");
+        let mut env = Vec::new();
+        set_cargo_jobs(&mut env, Some("9"), 3);
+        assert_eq!(env[0].1, "9");
+        let mut env = Vec::new();
+        set_cargo_jobs(&mut env, None, 3);
+        assert_eq!(env[0].1, "3");
+    }
 }
 
 /// A candidate that did not launch, typed by why it was skipped.
@@ -2655,6 +2703,7 @@ mod tests {
             executable_search_path: vec![temp.path().into()],
             git: "/usr/bin/git".into(),
             codex_home: None,
+            cargo_build_jobs: None,
             #[cfg(feature = "fixture")]
             fixture_state_write: false,
         };

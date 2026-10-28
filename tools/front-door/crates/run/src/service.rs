@@ -500,7 +500,11 @@ impl From<&RunError> for ErrorKind {
             RunError::Writer(_)
             | RunError::Confinement(_)
             | RunError::Refused
-            | RunError::DiskFloor { .. } => Self::Refused,
+            | RunError::DiskFloor { .. }
+            | RunError::MemoryPressure { .. }
+            | RunError::BuildSlots { .. }
+            | RunError::BuildSettings
+            | RunError::GuardianIdentityUnavailable => Self::Refused,
             RunError::Validation(_) | RunError::InvalidBase(_) | RunError::TooLarge { .. } => {
                 Self::Invalid
             }

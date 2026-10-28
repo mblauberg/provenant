@@ -36,6 +36,14 @@ class ReferenceTests(unittest.TestCase):
         for text in files.values():
             self.assertIn('scripts/generate-reference', text.splitlines()[0])
 
+    def test_host_build_reference_uses_registry_values(self):
+        text = GEN['config_reference']({'knobs': {}, 'host_lane_build_settings': {
+            'path': 'domains.fabric.lanes', 'settings': {'example': {
+                'default': 'dynamic fixture', 'effect': 'fixture effect', 'min': 2, 'max': 9,
+            }},
+        }})
+        self.assertIn('| `example` | dynamic fixture | fixture effect (2 to 9). |', text)
+
     def test_cli_contract_keeps_constraints_groups_and_argument_metadata(self):
         contract = {'name': 'mode', 'long': 'mode', 'required': True,
                     'repeatable': False, 'defaults': ['read-only'],
