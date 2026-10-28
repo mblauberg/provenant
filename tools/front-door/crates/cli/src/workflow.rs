@@ -70,7 +70,7 @@ pub enum Session {
         /// Markdown checkpoint file, or `-` for standard input.
         #[arg(long)]
         file: String,
-        /// Compatibility option; chair identity uses the configured Fabric label
+        /// Chair harness client; falls back to active harness environment markers
         #[arg(long, value_parser = crate::install::harness_parser())]
         client: Option<provenant_records::Harness>,
         /// Replace the registered chair binding and record its previous identity
@@ -156,7 +156,7 @@ pub struct Handoff {
     /// Source session ID; defaults to CLAUDE_CODE_SESSION_ID, then CLAUDE_SESSION_ID
     #[arg(long)]
     pub session_id: Option<String>,
-    /// Compatibility option; uses the same configured chair actor as session save
+    /// Source chair harness client; falls back to active harness environment markers
     #[arg(long, value_parser = crate::install::harness_parser())]
     pub client: Option<provenant_records::Harness>,
 }
@@ -504,25 +504,13 @@ fn unreachable_read() -> Result<Value, Error> {
     Err(invalid("session reads require the read-only context"))
 }
 
-/// Chair identity is independent of transport/client defaults. Read the stored
-/// configuration so an MCP edge's client override cannot change the binding.
+/// Use the same derivation as the chair's Fabric inbox.
 pub fn session_actor(
     context: &crate::fabric::Context,
-    _client: Option<provenant_records::Harness>,
+    client: Option<provenant_records::Harness>,
 ) -> Result<ActorId, String> {
-    let config = provenant_config::read_with_domains(&context.roots, &crate::domains::SECTIONS)
-        .map_err(|e| e.to_string())?
-        .domains
-        .fabric;
-    let explicit = std::env::var_os("PROVENANT_AGENT_LABEL").filter(|v| !v.is_empty());
-    let label = match explicit.as_ref() {
-        Some(label) => label
-            .to_str()
-            .ok_or_else(|| "agent label must be UTF-8".to_owned())?,
-        None if !config.agent_label.is_empty() => &config.agent_label,
-        None => &config.client_label,
-    };
-    provenant_fabric_runtime::identity::Address::new(context.identity.host, label)
+    context
+        .inbox_address(client)
         .map(|address| address.actor)
         .map_err(|e| e.to_string())
 }
@@ -716,6 +704,18 @@ fn human_text(command: &str, data: &Value) -> String {
         }
     };
     match command {
+        "workflow session save" => {
+            let mut text = crate::terse(data);
+            for warning in data["warnings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                text.push_str(&format!("\nwarning: {warning}"));
+            }
+            with_newline(&text)
+        }
         "workflow session diff" => match data["text"].as_str() {
             Some("") => "no differences\n".to_owned(),
             Some(text) => with_newline(text),
@@ -813,6 +813,17 @@ pub fn run(cmd: Workflow, globals: &Globals, roots: &Roots, home: &Path, cwd: &P
 mod tests {
     use super::catalogue_family;
     use provenant_routing::Catalogue;
+
+    #[test]
+    fn human_save_output_includes_discovery_warnings() {
+        let text = super::human_text(
+            "workflow session save",
+            &serde_json::json!({
+                "saved_bytes": 5, "warnings": ["repeat the same command (including --rebind) to repair discovery"]
+            }),
+        );
+        assert!(text.contains("warning: repeat the same command (including --rebind)"));
+    }
 
     #[test]
     fn family_comes_from_the_catalogue_and_is_unknown_otherwise() {

@@ -11,6 +11,7 @@ pub(super) struct ChairIdentity {
 
 const DISCOVERY: &str = "discovery.json";
 const DISCOVERY_LIMIT: u64 = 4096;
+const REBIND_LIMIT: usize = 8;
 
 /// One per-session index entry, stored in `discovery.json`. Unknown provider,
 /// summary, lifecycle and lane facts are not inferred from a checkpoint save.
@@ -25,8 +26,35 @@ pub struct SessionDiscovery {
     pub created_at: UtcMicros,
     pub last_saved_at: UtcMicros,
     pub checkpoint: Revision,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rebound_from: Option<ChairRebind>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "rebind_history"
+    )]
+    pub rebound_from: Vec<ChairRebind>,
+}
+
+// Accept the previous single-hop record and upgrade it on the next save.
+fn rebind_history<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<ChairRebind>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum History {
+        Many(Vec<ChairRebind>),
+        One(ChairRebind),
+    }
+    let history = match Option::<History>::deserialize(deserializer)? {
+        Some(History::Many(history)) => history,
+        Some(History::One(previous)) => vec![previous],
+        None => Vec::new(),
+    };
+    if history.len() > REBIND_LIMIT {
+        return Err(serde::de::Error::custom(
+            "chair rebind history exceeds 8 entries",
+        ));
+    }
+    Ok(history)
 }
 
 /// The previous binding and when an operator explicitly replaced it.
@@ -166,18 +194,20 @@ impl SessionStore {
                 created_at: now,
                 last_saved_at: now,
                 checkpoint: checkpoint.clone(),
-                rebound_from: None,
+                rebound_from: Vec::new(),
             })
         })?;
         if let Some(chair) = &self.chair
             && self.rebind
             && (record.host != chair.host || record.chair_actor != chair.actor)
         {
-            record.rebound_from = Some(ChairRebind {
+            record.rebound_from.push(ChairRebind {
                 host: record.host,
                 actor: record.chair_actor,
                 changed_at: now,
             });
+            let excess = record.rebound_from.len().saturating_sub(REBIND_LIMIT);
+            record.rebound_from.drain(..excess);
             record.host = chair.host;
             record.chair_actor = chair.actor;
         }

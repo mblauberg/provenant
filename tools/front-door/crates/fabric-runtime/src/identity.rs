@@ -29,6 +29,21 @@ pub fn validate_label(label: &str) -> Result<(), IdentityError> {
     Ok(())
 }
 
+/// Every chair writes under the actor that reads its Fabric inbox.
+pub fn inbox_address(
+    host: HostId,
+    config: &crate::config::FabricConfig,
+    agent_override: Option<&std::ffi::OsStr>,
+    client: Option<&str>,
+) -> Result<Address, IdentityError> {
+    let label = match agent_override.filter(|value| !value.is_empty()) {
+        Some(value) => value.to_str().ok_or(IdentityError::Encoding)?,
+        None if !config.agent_label.is_empty() => &config.agent_label,
+        None => client.unwrap_or(&config.client_label),
+    };
+    Address::new(host, label)
+}
+
 /// A separate federation namespace, never a host-local ProjectId. The source
 /// is config's canonical common directory (or canonical non-Git directory).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,25 +133,16 @@ impl Identity {
         cwd: &Path,
         config: &crate::config::FabricConfig,
         agent_override: Option<&std::ffi::OsStr>,
+        client: Option<&str>,
         key: Option<CrossHostProjectKey>,
     ) -> Result<Self, IdentityError> {
-        let agent = match agent_override.filter(|value| !value.is_empty()) {
-            Some(value) => value.to_str().ok_or(IdentityError::Encoding)?,
-            None => {
-                if config.agent_label.is_empty() {
-                    &config.client_label
-                } else {
-                    &config.agent_label
-                }
-            }
-        };
         validate_label(&config.client_label)?;
         let federation = key.map(|key| bind_federated_project(binding, key));
         Ok(Self {
             project: binding.project_id(),
             host,
-            inbox: Address::new(host, agent)?,
-            client: config.client_label.clone(),
+            inbox: inbox_address(host, config, agent_override, client)?,
+            client: client.unwrap_or(&config.client_label).to_owned(),
             cwd: AbsolutePath::new(cwd).map_err(|_| IdentityError::Encoding)?,
             common_dir: AbsolutePath::new(binding.common_dir())
                 .map_err(|_| IdentityError::Encoding)?,

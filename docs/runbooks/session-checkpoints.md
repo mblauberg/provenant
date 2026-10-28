@@ -8,14 +8,24 @@ and read it with `provenant workflow session show SESSION`. Each checkpoint is
 limited to 256 KiB. Session hooks and hand-off prompts can include a shorter
 excerpt.
 
-CLI, MCP callers, hooks and handoff derive chair identity from the host and the
-explicit agent label, falling back to the configured Fabric agent/client label.
-`--client` does not change that identity. Hooks inject the same save command
-shown above. Lanes cannot save or register chairs (`IN_LANE`).
+CLI, MCP callers, hooks and handoff use the same Fabric inbox actor: host plus
+`PROVENANT_AGENT_LABEL`, configured `fabric.agent_label`, the harness client,
+then configured `fabric.client_label` (default `agent`), in that order.
+Pass `--client claude` or `--client codex` to select the harness explicitly.
+Hook-generated save commands carry their installing harness's `--client`.
+Without it, `CODEX_THREAD_ID` identifies Codex; `CLAUDECODE=1`,
+`CLAUDE_CODE_SESSION_ID` or `CLAUDE_SESSION_ID` identifies Claude. If both
+families have markers, pass `--client`; no harness is inferred.
+Configuration directory variables are not active harness markers.
+Unlabelled Claude and Codex chairs on one host have different inbox actors.
+Lanes cannot save or register chairs (`IN_LANE`).
 
-An old client-dependent binding or a changed label can return `IDENTITY`.
-Recover with `provenant workflow session save SESSION --file FILE --rebind`;
-the record keeps the previous host/actor and change time. Corrupt discovery JSON
+An old binding under `agent` or a changed label can return `IDENTITY`.
+Before retrying handoff, or to recover a save, run
+`provenant workflow session save SESSION --file FILE --client HARNESS --rebind`;
+the record keeps the last 8 previous host/actor bindings and change times.
+Legacy single-hop audit records upgrade to a list on the next save.
+Corrupt discovery JSON
 returns `HISTORY`; unreadable discovery files return `IO`. Restore a readable
 discovery record from backup before retrying those errors.
 

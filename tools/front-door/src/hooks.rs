@@ -44,14 +44,15 @@ struct AdvisoryInput {
 pub fn run(hook: Hook, globals: &Globals) -> u8 {
     let started = Instant::now();
     let deadline = started + LOCAL_BUDGET;
+    let client = hook.spec().registration.harness;
     match hook.spec().handler {
         Handler::ChairPrompt => crate::chair::hook(false, globals),
         Handler::ChairStart => crate::chair::hook(true, globals),
         Handler::Guard => guard(globals, deadline),
-        Handler::PreCompact => advisory(Moment::PreCompact, globals, started),
-        Handler::Compact => advisory(Moment::Compact, globals, started),
-        Handler::SessionStart => advisory(Moment::Restart, globals, started),
-        Handler::Stop => advisory(Moment::Stop, globals, started),
+        Handler::PreCompact => advisory(Moment::PreCompact, globals, started, client),
+        Handler::Compact => advisory(Moment::Compact, globals, started, client),
+        Handler::SessionStart => advisory(Moment::Restart, globals, started, client),
+        Handler::Stop => advisory(Moment::Stop, globals, started, client),
         Handler::WorktreeCreate => crate::hook_worktree::create(globals),
         Handler::WorktreeRemove => crate::hook_worktree::remove(globals),
         Handler::PrePush => {
@@ -168,7 +169,12 @@ fn guard_policy(globals: &Globals, cwd: &Path) -> GuardPolicy {
 }
 // Advisory work is abandoned when its real-time host deadline expires.
 #[allow(clippy::disallowed_methods)]
-fn advisory(moment: Moment, globals: &Globals, started: Instant) -> u8 {
+fn advisory(
+    moment: Moment,
+    globals: &Globals,
+    started: Instant,
+    client: Option<provenant_records::Harness>,
+) -> u8 {
     // Reading lane and PR state can take longer than a checkpoint read, so
     // these hooks hold a wider budget; the registered host timeouts are 5s.
     let deadline = started + SESSION_BUDGET;
@@ -204,7 +210,8 @@ fn advisory(moment: Moment, globals: &Globals, started: Instant) -> u8 {
     let spawned = std::thread::Builder::new()
         .name("checkpoint-hook".into())
         .spawn(move || {
-            let result = checkpoint(moment, &selected, &host.cwd, &input, deadline).map_err(|_| ());
+            let result =
+                checkpoint(moment, &selected, &host.cwd, &input, deadline, client).map_err(|_| ());
             let _ = tx.send(result);
         });
     if spawned.is_err() {
@@ -297,6 +304,7 @@ fn checkpoint(
     cwd: &Path,
     input: &[u8],
     deadline: Instant,
+    client: Option<provenant_records::Harness>,
 ) -> Result<provenant_workflow::session::HookContext, Error> {
     use provenant_workflow::session;
     let (roots, project) = project_id(globals, cwd)?;
@@ -381,6 +389,7 @@ fn checkpoint(
         session::Advice {
             digest: &digest,
             commands: &session::CommandPrefix::new(globals.state_dir.as_deref(), cwd),
+            client,
         },
     ))
 }

@@ -129,6 +129,7 @@ impl Context {
             cwd,
             &config,
             std::env::var_os("PROVENANT_AGENT_LABEL").as_deref(),
+            harness_client(None).map(|harness| harness.spec().name),
             key,
         )?;
         Ok(Self {
@@ -140,6 +141,17 @@ impl Context {
             home: home.to_path_buf(),
             cwd: cwd.to_path_buf(),
         })
+    }
+    pub fn inbox_address(
+        &self,
+        client: Option<provenant_records::Harness>,
+    ) -> Result<provenant_fabric_runtime::identity::Address, IdentityError> {
+        provenant_fabric_runtime::identity::inbox_address(
+            self.identity.host,
+            &self.config,
+            std::env::var_os("PROVENANT_AGENT_LABEL").as_deref(),
+            harness_client(client).map(|harness| harness.spec().name),
+        )
     }
     pub fn text(&self, text: &str) -> Result<(), EdgeError> {
         if text.len() as u64 > self.config.limits.body_bytes {
@@ -284,6 +296,26 @@ impl Context {
         }
         Ok(lease.lease_seconds)
     }
+}
+
+/// Configuration directories do not identify the active harness. Conflicting
+/// inherited markers require an explicit client rather than guessing a chair.
+fn harness_client(
+    explicit: Option<provenant_records::Harness>,
+) -> Option<provenant_records::Harness> {
+    use provenant_records::Harness;
+    explicit.or_else(|| {
+        let present = |name| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+        let codex = present("CODEX_THREAD_ID");
+        let claude = std::env::var("CLAUDECODE").is_ok_and(|value| value == "1")
+            || present("CLAUDE_CODE_SESSION_ID")
+            || present("CLAUDE_SESSION_ID");
+        match (codex, claude) {
+            (true, false) => Some(Harness::Codex),
+            (false, true) => Some(Harness::Claude),
+            _ => None,
+        }
+    })
 }
 /// A peer call failure: the stable error plus, for transport failures, the
 /// peer and cause. The detail is message text only; the wire codes are unchanged.

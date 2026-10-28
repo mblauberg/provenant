@@ -146,14 +146,22 @@ checkpoint and explicitly report stale metadata before using it.
 
 `workflow session save SESSION` registers the caller's exact Fabric host,
 bound project, supplied host session ID and trusted actor as a chair.
-Every writing edge derives the actor from the host and `PROVENANT_AGENT_LABEL`,
-then configured `fabric.agent_label`, then configured `fabric.client_label`.
-Transport defaults do not participate: `--client HARNESS` remains a source
-harness hint and does not change chair identity, including for MCP callers.
-Hooks inject `provenant workflow session save SESSION --file <checkpoint.md>`;
-this uses the same derivation as saves with `--client` and source checkpoint
-saves during `session handoff`. Handoff validates the binding before peer
-delivery. Lanes (`context.in_lane`) are refused before saving or registering a
+Every writing edge uses Fabric's shared inbox derivation: host plus the first
+nonempty label from `PROVENANT_AGENT_LABEL`, configured `fabric.agent_label`,
+the harness client, then configured `fabric.client_label` (default `agent`).
+The client is explicit `--client HARNESS` when supplied. Hook-generated save
+commands pass the installing harness as `--client claude` or `--client codex`.
+Otherwise, a nonempty `CODEX_THREAD_ID` identifies Codex; `CLAUDECODE=1`,
+`CLAUDE_CODE_SESSION_ID` or `CLAUDE_SESSION_ID` identifies Claude.
+If both families have markers, no harness is inferred: supply `--client`.
+Configuration directory variables do not identify an active harness.
+With the same labels and client, the chair actor equals its Fabric inbox actor;
+unlabelled Claude and Codex chairs on the same host have different actors.
+The same derivation applies to CLI saves, MCP and source checkpoint saves
+during `session handoff`. Hooks include the client in
+`provenant workflow session save SESSION --file <checkpoint.md> --client HARNESS`.
+Handoff validates the binding before peer delivery.
+Lanes (`context.in_lane`) are refused before saving or registering a
 chair, including when they request `--rebind`. The workflow
 owner stores a per-session index entry in
 `workflow/projects/<project>/sessions/<session>/discovery.json` (at most 4 KiB):
@@ -165,7 +173,7 @@ owner stores a per-session index entry in
 | `chair_actor` | Canonical Fabric actor; only an explicit `save --rebind` may replace it or the host |
 | `created_at`, `last_saved_at` | Canonical RFC3339 UTC with microseconds; first registration and latest save whose discovery was published, including unchanged saves |
 | `checkpoint` | The complete current `Revision`: revision, parent, SHA-256, bytes and saved time |
-| `rebound_from` | Optional previous host/actor and `changed_at`; latest explicit binding change, preserved by ordinary saves |
+| `rebound_from` | Optional list of the last 8 previous host/actor bindings and `changed_at`, oldest first; preserved by ordinary saves. Legacy single-hop objects remain readable and become lists on save |
 
 The discovery key is scoped to this host's state directory. Separate host state
 directories can contain the same project/session ID without collision. Shared
@@ -197,10 +205,13 @@ files return an error. A crash on the first save can leave a readable checkpoint
 without registration, which remains unknown until an explicit save succeeds.
 Unreadable discovery metadata blocks a save before replacing checkpoint or
 history. An explicit host/actor mismatch is refused as `IDENTITY`, with an error
-naming `--rebind`. To recover an older client-dependent binding or deliberately
-change labels, run `provenant workflow session save SESSION --file FILE --rebind`.
+naming `workflow session save <id> --file <checkpoint.md> --rebind` (also for
+handoff refusals). To recover an older binding under `agent` or deliberately
+change labels, run
+`provenant workflow session save SESSION --file FILE --client HARNESS --rebind`.
 This records the previous identity and change time under the checkpoint lock.
-If discovery publication warns, repeat that command to commit the new binding.
+Human and JSON saves report discovery warnings. If publication warns, repeat
+the same command, including `--rebind` when used, to commit the new binding.
 For unreadable discovery, restore a readable record from backup before retrying;
 `--rebind` does not bypass corrupt metadata or a project/session key mismatch.
 The next save reconciles revisions and publishes the corresponding entry;

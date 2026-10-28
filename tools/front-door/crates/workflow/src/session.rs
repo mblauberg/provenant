@@ -212,7 +212,7 @@ pub enum SessionError {
     #[error("session revision history is unreadable or does not match its recorded hash")]
     History,
     #[error(
-        "session discovery identity does not match the registered chair; save with --rebind to explicitly replace the binding"
+        "session discovery identity does not match the registered chair; first run workflow session save <id> --file <checkpoint.md> --rebind to explicitly replace the binding"
     )]
     DiscoveryIdentity,
 }
@@ -365,7 +365,12 @@ impl SessionStore {
         if let Some(record) = self.saved_discovery(discovery, &current, now)
             && let Err(error) = publish_discovery(&dir, &record)
         {
-            warnings.push(format!("checkpoint saved; discovery publication failed: {error}; repeat the save to repair discovery"));
+            let rebind = if self.rebind {
+                " (including --rebind)"
+            } else {
+                ""
+            };
+            warnings.push(format!("checkpoint saved; discovery publication failed: {error}; repeat the same command{rebind} to repair discovery"));
         }
         // The history is durable, so these files are unreachable. A failed
         // delete leaves an orphan that the next save removes.
@@ -820,48 +825,127 @@ mod tests {
     }
 
     #[test]
-    fn discovery_publication_failure_warns_after_manifest_commit_and_next_save_repairs() {
+    fn rebind_keeps_eight_changes_and_upgrades_single_hop_records() {
         use provenant_core::{ActorId, HostId};
         let (_temp, root, project) = setup();
-        let selected = store(&root, project, "chair")
-            .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([4; 16]));
-        for first_save in [true, false] {
-            let clock = clock(10);
-            let saved = selected
-                .save_revision_with(
-                    if first_save { b"first" } else { b"second" },
-                    WaitBudget::cli(clock.mono_now(), 1).unwrap(),
-                    &CancelToken::new(),
-                    &clock,
-                    |dir, record| {
-                        // Inject failure at the actual second publication boundary.
-                        assert_eq!(
-                            load(dir).unwrap().revisions.last(),
-                            Some(&record.checkpoint)
-                        );
-                        Err(SessionError::Deadline)
-                    },
-                )
-                .unwrap();
-            assert_eq!(saved.warnings.len(), 1);
-            assert!(saved.warnings[0].contains("checkpoint saved; discovery publication failed"));
-            let expected = if first_save { "first" } else { "second" };
-            assert_eq!(selected.read().unwrap().unwrap().markdown, expected);
-            if first_save {
-                assert!(selected.discovery().unwrap().is_none());
-            } else {
+        let host = HostId::from_bytes([3; 16]);
+        let selected = |actor| {
+            store(&root, project, "chair")
+                .with_chair(host, ActorId::from_bytes([actor; 16]))
+                .with_rebind(true)
+        };
+        saved(&selected(0), "notes");
+        for actor in 1..=10 {
+            saved(&selected(actor), "notes");
+        }
+        let record = selected(10).discovery().unwrap().unwrap().record;
+        assert_eq!(record.rebound_from.len(), 8);
+        assert_eq!(record.rebound_from[0].actor, ActorId::from_bytes([2; 16]));
+        assert_eq!(record.rebound_from[7].actor, ActorId::from_bytes([9; 16]));
+        saved(&selected(10).with_rebind(false), "same chair");
+        assert_eq!(
+            selected(10)
+                .discovery()
+                .unwrap()
+                .unwrap()
+                .record
+                .rebound_from,
+            record.rebound_from
+        );
+        // Old single-hop JSON remains readable and is retained on migration.
+        let mut legacy = serde_json::to_value(&record).unwrap();
+        legacy["rebound_from"] = serde_json::to_value(&record.rebound_from[7]).unwrap();
+        let discovery = path(&root, project, "chair").join("discovery.json");
+        std::fs::write(&discovery, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        saved(&selected(11), "notes");
+        let record = selected(11).discovery().unwrap().unwrap().record;
+        assert_eq!(record.rebound_from.len(), 2);
+        assert_eq!(record.rebound_from[0].actor, ActorId::from_bytes([9; 16]));
+        assert_eq!(record.rebound_from[1].actor, ActorId::from_bytes([10; 16]));
+        assert!(std::fs::metadata(discovery).unwrap().len() <= 4096);
+    }
+
+    #[test]
+    fn hook_save_commands_preserve_the_installing_harness() {
+        let (_temp, root, project) = setup();
+        for (harness, fixture) in [
+            (provenant_records::Harness::Claude, FIXTURES[0].0),
+            (provenant_records::Harness::Codex, FIXTURES[2].0),
+        ] {
+            let response = hook_context_with(
+                &root,
+                project,
+                HookEvent::SessionStart,
+                fixture.as_bytes(),
+                &clock(0),
+                DurationMicros::ZERO,
+                Advice {
+                    digest: "",
+                    commands: &CommandPrefix::default(),
+                    client: Some(harness),
+                },
+            );
+            let text = context(&response);
+            assert!(
+                text.contains(&format!(
+                    "--file <checkpoint.md> --client {}",
+                    harness.spec().name
+                )),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_publication_failure_warns_after_manifest_commit_and_next_save_repairs() {
+        use provenant_core::{ActorId, HostId};
+        for rebind in [false, true] {
+            let (_temp, root, project) = setup();
+            let selected = store(&root, project, "chair")
+                .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([4; 16]))
+                .with_rebind(rebind);
+            for first_save in [true, false] {
+                let clock = clock(10);
+                let saved = selected
+                    .save_revision_with(
+                        if first_save { b"first" } else { b"second" },
+                        WaitBudget::cli(clock.mono_now(), 1).unwrap(),
+                        &CancelToken::new(),
+                        &clock,
+                        |dir, record| {
+                            // Inject failure at the actual second publication boundary.
+                            assert_eq!(
+                                load(dir).unwrap().revisions.last(),
+                                Some(&record.checkpoint)
+                            );
+                            Err(SessionError::Deadline)
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(saved.warnings.len(), 1);
+                assert!(
+                    saved.warnings[0].contains("checkpoint saved; discovery publication failed")
+                );
+                assert!(saved.warnings[0].contains("repeat the same command"));
+                assert_eq!(saved.warnings[0].contains("including --rebind"), rebind);
+                let expected = if first_save { "first" } else { "second" };
+                assert_eq!(selected.read().unwrap().unwrap().markdown, expected);
+                if first_save {
+                    assert!(selected.discovery().unwrap().is_none());
+                } else {
+                    assert_eq!(
+                        selected.discovery().unwrap().unwrap().consistency,
+                        DiscoveryConsistency::CheckpointChanged
+                    );
+                }
+                let repaired = super::tests::saved(&selected, expected);
+                assert!(repaired.unchanged);
+                assert!(repaired.warnings.is_empty());
                 assert_eq!(
                     selected.discovery().unwrap().unwrap().consistency,
-                    DiscoveryConsistency::CheckpointChanged
+                    DiscoveryConsistency::Current
                 );
             }
-            let repaired = super::tests::saved(&selected, expected);
-            assert!(repaired.unchanged);
-            assert!(repaired.warnings.is_empty());
-            assert_eq!(
-                selected.discovery().unwrap().unwrap().consistency,
-                DiscoveryConsistency::Current
-            );
         }
     }
     #[test]
@@ -1529,6 +1613,7 @@ mod tests {
             Advice {
                 digest: "",
                 commands,
+                client: None,
             },
         )
     }

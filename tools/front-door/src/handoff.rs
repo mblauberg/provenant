@@ -1234,7 +1234,10 @@ mod tests {
             provenant_core::HostId::from_bytes([4; 16]),
             provenant_core::ActorId::from_bytes([6; 16]),
         );
-        assert_eq!(checkpoint_identity(&other).err().unwrap().code, "IDENTITY");
+        let refusal = checkpoint_identity(&other).err().unwrap();
+        assert_eq!(refusal.code, "IDENTITY");
+        assert!(refusal.message.contains("workflow session save"));
+        assert!(refusal.message.contains("--rebind"));
     }
 
     #[test]

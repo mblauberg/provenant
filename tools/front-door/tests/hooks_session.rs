@@ -185,7 +185,7 @@ fn hints_from_a_hook_on_a_custom_store_carry_its_state_dir() -> Result {
     let prefix = format!("provenant --state-dir '{state}'");
     assert!(
         text.contains(&format!(
-            "Save: {prefix} workflow session save custom-session --file <checkpoint.md>"
+            "Save: {prefix} workflow session save custom-session --file <checkpoint.md> --client claude"
         )),
         "{text}"
     );

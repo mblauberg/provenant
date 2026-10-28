@@ -449,14 +449,7 @@ pub fn mcp(
                 .ok_or(EdgeError::Invalid)?
                 .to_owned();
             context.identity.client = context.config.client_label.clone();
-            if context.config.agent_label.is_empty()
-                && std::env::var_os("PROVENANT_AGENT_LABEL").is_none_or(|v| v.is_empty())
-            {
-                context.identity.inbox = provenant_fabric_runtime::identity::Address::new(
-                    context.identity.host,
-                    &context.config.client_label,
-                )?;
-            }
+            context.identity.inbox = context.inbox_address(Some(client))?;
         }
         stdio::serve(&mut Stdin::new(), &mut Stdout, factory)?;
         Ok(())
