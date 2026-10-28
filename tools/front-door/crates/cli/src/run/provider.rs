@@ -1381,6 +1381,21 @@ struct ConfinementRoots<'a> {
     prompt_file: Option<&'a Path>,
 }
 
+/// Read access to the primary checkout's project scratch (`.provenant/scratch`, or
+/// `.agent-run`), where briefs and graph documents live. Git excludes it, so a
+/// writer's linked worktree does not hold it. A link is never followed.
+fn project_scratch_reads(project: &Path) -> Vec<PathGrant> {
+    [".provenant/scratch", ".agent-run"]
+        .map(|name| project.join(name))
+        .into_iter()
+        .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()))
+        .map(|path| PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        })
+        .collect()
+}
+
 /// Dispatch write roots, plus host-configured shared run state for writers only.
 fn write_roots(
     access: &run::LaneAccess,
@@ -1432,6 +1447,12 @@ fn confinement_request(
             private_state: Some(grant(roots.private_state)),
             read_roots: std::iter::once(grant(roots.assets))
                 .chain(writer.is_none().then(|| grant(roots.cwd)))
+                .chain(
+                    writer
+                        .and_then(|writer| writer.worktree.repo().common_git_dir().parent())
+                        .into_iter()
+                        .flat_map(project_scratch_reads),
+                )
                 .chain(access.read_roots.iter().map(|path| grant(path)))
                 .chain(roots.prompt_file.map(|path| PathGrant {
                     path: path.to_owned(),
@@ -3351,6 +3372,33 @@ mod tests {
                     .any(|grant| { grant.path == prompt.parent().expect("attempt") })
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn writers_read_the_primary_checkouts_untracked_scratch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let project = tempfile::tempdir()?;
+        let root = project.path();
+        assert!(project_scratch_reads(root).is_empty());
+        std::fs::create_dir_all(root.join(".provenant/scratch"))?;
+        std::fs::create_dir(root.join(".agent-run"))?;
+        std::fs::create_dir(root.join(".provenant/other"))?;
+        let paths = |grants: Vec<PathGrant>| -> Vec<PathBuf> {
+            assert!(grants.iter().all(|grant| grant.scope == PathScope::Subtree));
+            grants.into_iter().map(|grant| grant.path).collect()
+        };
+        assert_eq!(
+            paths(project_scratch_reads(root)),
+            [root.join(".provenant/scratch"), root.join(".agent-run")]
+        );
+        // A link could point the grant anywhere.
+        std::fs::remove_dir(root.join(".agent-run"))?;
+        std::os::unix::fs::symlink("/", root.join(".agent-run"))?;
+        assert_eq!(
+            paths(project_scratch_reads(root)),
+            [root.join(".provenant/scratch")]
+        );
         Ok(())
     }
 

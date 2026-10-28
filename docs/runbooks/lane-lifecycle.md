@@ -56,7 +56,11 @@ Custody, policy or launch refusals still need their named cause addressed.
 
 Put graph documents and briefs in `.provenant/scratch/`, or `.agent-run/` when
 that root already exists. Graph setup creates `graphs/` and excludes the
-scratch root through `.git/info/exclude`. A bare `--document plan.json` resolves
+scratch root through `.git/info/exclude`. Every lane can read it:
+read-only lanes through their working directory, writers through a read grant on
+the primary checkout's scratch, since their linked worktree lacks untracked
+files. `--read-root DIR` grants any other directory; `--prompt-file` grants its
+file. A bare `--document plan.json` resolves
 there when no current-directory file exists. Explicit project-local paths
 also work. A graph can use node `delivery: "integrate:integration"` with
 top-level `integration_branch: "integration"` and `delivery: "pr"` for one
