@@ -14,9 +14,3 @@ CLI run, dispatch, cancel and resume generate and print operation IDs when
 omitted; explicit IDs remain available for planned retries. Run and attempt
 targets accept unique hex prefixes of at least eight characters and
 `RUN/ATTEMPT`. Cancel and reconcile infer project scope from the run record.
-
-## Fixes
-
-Resuming a named route keeps the prior attempt's applied provider, model and
-account instead of drawing the pool again. Refused continuation requests no
-longer expose attempt IDs that were never recorded.
