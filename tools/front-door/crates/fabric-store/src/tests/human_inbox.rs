@@ -115,8 +115,27 @@ fn invalid_hook_candidates_do_not_block_valid_answers() {
         [HumanAnswerId::from_bytes([1;16]).to_string()]).unwrap();
     store.db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.attempts','invalid') AS BLOB) WHERE answer=?1",
         [HumanAnswerId::from_bytes([2;16]).to_string()]).unwrap();
-    let valid = store
-        .read_queued_human_answers(&target, deadline())
+    assert!(
+        store
+            .read_human_answers(&target, 50, MAX_LOCAL_OFFER_BYTES, deadline())
+            .is_err()
+    );
+    assert!(
+        store
+            .read_queued_human_answers(&target, deadline())
+            .is_err()
+    );
+    store.db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.state','offered') AS BLOB) WHERE answer=?1",
+        [HumanAnswerId::from_bytes([1;16]).to_string()]).unwrap();
+    assert!(
+        store
+            .read_offered_human_answers(&target, deadline())
+            .is_err()
+    );
+    store.db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.state','queued') AS BLOB) WHERE answer=?1",
+        [HumanAnswerId::from_bytes([1;16]).to_string()]).unwrap();
+    let (valid, _, _) = store
+        .read_hook_answer_page(&target, AnswerDeliveryState::Queued, None, deadline())
         .unwrap();
     assert_eq!(valid.items.len(), 1);
     assert_eq!(valid.items[0].answer.id, HumanAnswerId::from_bytes([3; 16]));
@@ -141,6 +160,119 @@ fn invalid_hook_candidates_do_not_block_valid_answers() {
             .items
             .is_empty()
     );
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Native deadlines are part of this store API.
+fn hook_page_reports_individually_oversized_answer_and_revisits_overflow() {
+    use std::time::{Duration, Instant};
+    const CHILD: &str = "PROVENANT_OVERSIZED_PAGE_TEST";
+    let oversized_id = HumanAnswerId::from_bytes([3; 16]);
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::human_inbox::hook_page_reports_individually_oversized_answer_and_revisits_overflow", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "answer delivery: skipping invalid answer {oversized_id}"
+            )),
+            "{stderr}"
+        );
+        return;
+    }
+    let f = Fixture::new();
+    let store = f.open();
+    let target = AnswerTarget {
+        host: HostId::from_bytes([8; 16]),
+        project: project(),
+        actor: actor(2),
+        session: "chair".into(),
+    };
+    for (n, size) in [(1, 70_000), (2, 70_000), (3, 140_000)] {
+        let id = HumanAnswerId::from_bytes([n; 16]);
+        let request = HumanRequestId::from_bytes([n; 16]);
+        let answer: HumanAnswer = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"id":id,"request_id":request,"request_revision":1,
+            "action":"reply","option_id":null,"text":"x".repeat(size),"actor":actor(3),
+            "channel":"cli","answered_at":f.now(),"operation_id":format!("answer-{n}")
+        }))
+        .unwrap();
+        let delivery = AnswerDelivery {
+            schema_version: 1,
+            answer_id: id,
+            target_host: target.host,
+            target_session: target.session.clone(),
+            target_actor: target.actor,
+            transport: AnswerTransport::FabricMail,
+            message_id: message(&f, n).id,
+            state: AnswerDeliveryState::Queued,
+            attempts: 0,
+            last_attempt_at: None,
+            acknowledged_at: None,
+            error: None,
+        };
+        store
+            .db
+            .execute(
+                "INSERT INTO human_requests VALUES(?1,?2,1,'chair','answered',?3)",
+                params![project().to_string(), request.to_string(), b"{}".as_slice()],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO human_answers VALUES(?1,?2,?3,?4)",
+                params![
+                    project().to_string(),
+                    id.to_string(),
+                    request.to_string(),
+                    encode(&answer).unwrap()
+                ],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO human_answer_outbox VALUES(?1,?2,?3)",
+                params![
+                    project().to_string(),
+                    id.to_string(),
+                    encode(&delivery).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (first, next, oversized) = store
+        .read_hook_answer_page(&target, AnswerDeliveryState::Queued, None, deadline)
+        .unwrap();
+    assert_eq!(first.items.len(), 1);
+    assert_eq!(first.items[0].answer.id, HumanAnswerId::from_bytes([1; 16]));
+    assert!(first.truncated);
+    assert!(oversized.is_empty());
+    let (second, _, oversized) = store
+        .read_hook_answer_page(
+            &target,
+            AnswerDeliveryState::Queued,
+            next.as_deref(),
+            deadline,
+        )
+        .unwrap();
+    assert_eq!(second.items.len(), 1);
+    assert_eq!(
+        second.items[0].answer.id,
+        HumanAnswerId::from_bytes([2; 16])
+    );
+    assert!(second.truncated);
+    assert_eq!(oversized, vec![oversized_id.to_string()]);
 }
 
 #[test]

@@ -219,7 +219,7 @@ fn guard_reply(
         let commands = CommandPrefix::new(selected.state_dir.as_deref(), &cwd);
         let at = SystemClock::new().wall_now()?;
         let page = {
-            let Some(store) = Store::open_read_only(&resolved.roots.state, deadline)? else {
+            let Some(store) = Store::open_hook_delivery(&resolved.roots.state, deadline)? else {
                 return Ok(None);
             };
             select_answers(&store, &target, at, &event_name, &commands, deadline)?
@@ -307,16 +307,12 @@ fn fit_answers(
         truncated: page.truncated,
     };
     for item in page.items {
-        let id = item.answer.id;
         output.items.push(item);
         if answer_output(&output, event_name, commands)
             .is_none_or(|bytes| bytes.len() > MAX_OFFER_BYTES)
         {
             output.items.pop();
             output.truncated = true;
-            diagnostic(&format!(
-                "answer delivery: answer {id} exceeds escaped hook budget; retained for Fabric mail"
-            ));
         }
     }
     output
@@ -334,8 +330,31 @@ fn select_answers(
     for state in [AnswerDeliveryState::Queued, AnswerDeliveryState::Offered] {
         let mut after = None;
         loop {
-            let (mut page, next) =
+            let (mut page, next, mut oversized) =
                 store.read_hook_answer_page(target, state, after.as_deref(), deadline)?;
+            for item in &page.items {
+                let singleton = Page {
+                    items: vec![item.clone()],
+                    truncated: false,
+                };
+                // Include the offer metadata that will appear in the final envelope.
+                if prepare_answers(singleton, at, event_name, commands)?
+                    .items
+                    .is_empty()
+                {
+                    oversized.push(item.answer.id.to_string());
+                }
+            }
+            if !oversized.is_empty() {
+                for id in store.mark_hook_undeliverable(target, &oversized, deadline)? {
+                    diagnostic(&format!(
+                        "answer delivery: answer {id} exceeds escaped hook budget; retained for Fabric mail"
+                    ));
+                }
+                page.items
+                    .retain(|item| !oversized.contains(&item.answer.id.to_string()));
+                page.truncated = true;
+            }
             page.truncated |= truncated;
             let fitted = prepare_answers(page, at, event_name, commands)?;
             if !fitted.items.is_empty() {
@@ -984,6 +1003,137 @@ mod answer_delivery_tests {
     }
 
     #[test]
+    fn hook_walks_oversized_offered_head_to_retry_and_fits_mixed_page() -> Result<(), Error> {
+        use provenant_core::{ProjectId, RootInputs};
+        use provenant_fabric_store::{Request, ThreadWait};
+        use provenant_os::fs::SystemPathResolver;
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let mut inputs = RootInputs::new(base.join("home"), base.join("assets"));
+        inputs.state_dir = Some(base.join("state"));
+        let root = inputs.resolve(&SystemPathResolver)?.state;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let store = Store::open(
+            &root,
+            &Request {
+                clock: &clock,
+                cancel: &cancel,
+                backoff: &ThreadWait,
+                budget: WaitBudget::cli(clock.mono_now(), 1)?,
+            },
+        )?;
+        let db = rusqlite::Connection::open(root.as_path().join("fabric/fabric.sqlite3"))?;
+        let target = AnswerTarget {
+            host: provenant_core::HostId::from_bytes([1; 16]),
+            project: ProjectId::from_bytes([4; 16]),
+            session: "chair".into(),
+            actor: provenant_core::ActorId::from_bytes([2; 16]),
+        };
+        let insert = |item: &AnswerOffer| -> Result<(), Error> {
+            db.execute(
+                "INSERT INTO human_requests VALUES(?1,?2,1,'chair','answered',?3)",
+                rusqlite::params![
+                    target.project.to_string(),
+                    item.answer.request_id.to_string(),
+                    b"{}".as_slice()
+                ],
+            )?;
+            db.execute(
+                "INSERT INTO human_answers VALUES(?1,?2,?3,?4)",
+                rusqlite::params![
+                    target.project.to_string(),
+                    item.answer.id.to_string(),
+                    item.answer.request_id.to_string(),
+                    serde_json::to_vec(&item.answer)?
+                ],
+            )?;
+            db.execute(
+                "INSERT INTO human_answer_outbox VALUES(?1,?2,?3)",
+                rusqlite::params![
+                    target.project.to_string(),
+                    item.answer.id.to_string(),
+                    serde_json::to_vec(&item.delivery)?
+                ],
+            )?;
+            Ok(())
+        };
+        for byte in 1..=16 {
+            let mut large = offer(&"\"".repeat(3500), byte);
+            large.delivery.state = AnswerDeliveryState::Offered;
+            large.delivery.attempts = 1;
+            large.delivery.last_attempt_at = Some(clock.wall_now()?);
+            insert(&large)?;
+        }
+        let mut retry = offer("retry", 17);
+        retry.delivery.state = AnswerDeliveryState::Offered;
+        retry.delivery.attempts = 1;
+        retry.delivery.last_attempt_at = Some(clock.wall_now()?);
+        insert(&retry)?;
+        let deadline = Instant::now() + LOCAL_BUDGET;
+        let (head, next, _) =
+            store.read_hook_answer_page(&target, AnswerDeliveryState::Offered, None, deadline)?;
+        assert_eq!(head.items.len(), 16);
+        let (offered, _, _) = store.read_hook_answer_page(
+            &target,
+            AnswerDeliveryState::Offered,
+            next.as_deref(),
+            deadline,
+        )?;
+        assert_eq!(offered.items, vec![retry.clone()]);
+        let selected = select_answers(
+            &store,
+            &target,
+            clock.wall_now()?,
+            "PreToolUse",
+            &CommandPrefix::default(),
+            deadline,
+        )?;
+        assert_eq!(selected.items, vec![retry]);
+        assert!(selected.truncated);
+        assert!(next.is_some());
+
+        db.execute("DELETE FROM human_answer_outbox", [])?;
+        db.execute("DELETE FROM human_answers", [])?;
+        db.execute("DELETE FROM human_requests", [])?;
+        insert(&offer(&"\"".repeat(3500), 1))?;
+        let small = offer("small", 2);
+        insert(&small)?;
+        let selected = select_answers(
+            &store,
+            &target,
+            clock.wall_now()?,
+            "PreToolUse",
+            &CommandPrefix::default(),
+            Instant::now() + LOCAL_BUDGET,
+        )?;
+        assert_eq!(selected.items.len(), 1);
+        assert_eq!(selected.items[0].answer, small.answer);
+        assert!(selected.truncated);
+        let (remaining, _, _) = store.read_hook_answer_page(
+            &target,
+            AnswerDeliveryState::Queued,
+            None,
+            Instant::now() + LOCAL_BUDGET,
+        )?;
+        assert_eq!(remaining.items.len(), 1);
+        assert_eq!(remaining.items[0].answer, small.answer);
+        let queued = store.read_queued_human_answers(&target, Instant::now() + LOCAL_BUDGET)?;
+        assert_eq!(queued.items.len(), 2);
+        // An acknowledgement between the page read and offer commit wins.
+        db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.state','acknowledged','$.acknowledged_at','2026-10-28T00:00:00.000000Z') AS BLOB) WHERE answer=?1", [small.answer.id.to_string()])?;
+        let committed = Store::offer_human_answers_once(
+            &root,
+            &target,
+            selected,
+            clock.wall_now()?,
+            Instant::now() + LOCAL_BUDGET,
+        )?;
+        assert!(committed.items.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn committed_offer_survives_worker_response_timeout() -> Result<(), Error> {
         use provenant_core::{ProjectId, RootInputs};
         use provenant_fabric_store::{Request, ThreadWait};
@@ -1038,6 +1188,7 @@ mod answer_delivery_tests {
             ],
         )?;
         let (release, stalled) = mpsc::channel();
+        let (committed, commit_observed) = mpsc::channel();
         let (done, completion) = mpsc::channel();
         let worker_root = root.clone();
         let worker_target = target.clone();
@@ -1052,9 +1203,10 @@ mod answer_delivery_tests {
                         truncated: false,
                     },
                     at,
-                    Instant::now() + LOCAL_BUDGET,
+                    Instant::now() + std::time::Duration::from_secs(3600),
                 )?;
                 // Hold the response after commit until the receiver has timed out.
+                committed.send(())?;
                 stalled.recv()?;
                 let _ = done.send(());
                 Ok(answer_output(
@@ -1065,9 +1217,12 @@ mod answer_delivery_tests {
             })
             .is_none()
         );
+        // A slow commit must finish before the response is released. A failed
+        // commit disconnects this channel and fails the test directly.
+        commit_observed.recv()?;
         release.send(())?;
-        completion.recv_timeout(LOCAL_BUDGET)?;
-        let deadline = Instant::now() + LOCAL_BUDGET;
+        completion.recv()?;
+        let deadline = Instant::now() + std::time::Duration::from_secs(3600);
         let retry = store.read_offered_human_answers(&target, deadline)?;
         assert_eq!(retry.items.len(), 1);
         assert_eq!(retry.items[0].delivery.state, AnswerDeliveryState::Offered);

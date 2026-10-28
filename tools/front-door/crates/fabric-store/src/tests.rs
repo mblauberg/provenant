@@ -1346,7 +1346,7 @@ fn run_chair_migration_preserves_mail_and_rejects_older_readers() {
     store
         .db
         .execute_batch(
-            "DROP INDEX human_queued_delivery; DROP INDEX human_local_delivery; DROP TABLE run_chairs; PRAGMA user_version=8;",
+            "DROP INDEX human_hook_queued; DROP INDEX human_hook_pending; DROP INDEX human_queued_delivery; DROP INDEX human_local_delivery; DROP TABLE run_chairs; PRAGMA user_version=8;",
         )
         .unwrap();
     drop(store);
