@@ -270,6 +270,23 @@ impl LaunchConfinement {
                 "warning: could not record Cargo setup: {error}"
             );
         }
+        let git_outcome = match &self.plan.permissions().mode {
+            AccessMode::WorktreeWrite(authority) => crate::cargo_seed::seed_git(
+                self.cargo_registry_seed,
+                &self.home,
+                &authority.cargo_cache().path,
+            ),
+            AccessMode::ReadOnly => crate::cargo_seed::Outcome::skipped("read_only_lane"),
+        };
+        if let Err(error) =
+            record_cargo_setup_file(attempt_dir, "cargo-git-setup.json", &git_outcome)
+        {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: could not record Cargo Git setup: {error}"
+            );
+        }
         let directories = required_anchors(self.plan.permissions(), &self.profile, writer)
             .into_iter()
             .map(AnchoredDirectory::open_canonical)
@@ -292,10 +309,18 @@ fn record_cargo_setup(
     directory: &Directory,
     outcome: &crate::cargo_seed::Outcome,
 ) -> std::result::Result<(), String> {
+    record_cargo_setup_file(directory, "cargo-setup.json", outcome)
+}
+
+fn record_cargo_setup_file(
+    directory: &Directory,
+    name: &str,
+    outcome: &crate::cargo_seed::Outcome,
+) -> std::result::Result<(), String> {
     let bytes = serde_json::to_vec(outcome).map_err(|error| error.to_string())?;
     directory
         .atomic_write(
-            OsStr::new("cargo-setup.json"),
+            OsStr::new(name),
             ".cargo-setup-",
             &bytes,
             provenant_os::fs::PublishMode::Replace,
@@ -321,6 +346,12 @@ mod cargo_setup_tests {
             .unwrap();
             assert_eq!(record["status"], "skipped");
             assert_eq!(record["reason"], reason);
+            record_cargo_setup_file(&directory, "cargo-git-setup.json", &outcome).unwrap();
+            let git_record: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(tmp.path().join("cargo-git-setup.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(git_record["reason"], reason);
         }
         std::fs::remove_file(tmp.path().join("cargo-setup.json")).unwrap();
         std::fs::create_dir(tmp.path().join("cargo-setup.json")).unwrap();

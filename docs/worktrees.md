@@ -109,7 +109,7 @@ build runs. Worktree removal and `provenant gc` remove this directory with the
 cache. Read-only lanes have no lane cache and get no variable.
 
 On macOS, a host may opt writer lanes into cloning the host Cargo registry
-into a fresh private Cargo home by hand-editing its state `config.toml` (this
+and Git store into a fresh private Cargo home by hand-editing its state `config.toml` (this
 setting is not supported by `provenant config set`):
 
 ```toml
@@ -117,18 +117,19 @@ setting is not supported by `provenant config set`):
 enabled = true
 ```
 
-The default is false. Only `~/.cargo/registry` is seeded; Cargo Git stores and
-build targets are unchanged. Existing lane registries are retained. Cloning
+The default is false. `~/.cargo/registry` and `~/.cargo/git` are seeded independently;
+build targets are unchanged. Existing lane stores are retained. Cloning
 requires filesystem support for copy-on-write clones and falls back to an
 empty registry when unavailable or a source entry cannot be cloned. A symlink
-or other unsupported entry anywhere in the host registry causes the whole seed
-to fall back on every fresh lane until the entry is removed or the registry is
-recreated. Inspect the host registry and the `registry_contains_unsupported_entry`
-reason in the attempt record to diagnose this. Other platforms skip this
-setting. Each attempt's `cargo-setup.json` records a `status` (`seeded`,
+or other unsupported entry anywhere in a host store causes that whole store
+to fall back on every fresh lane until the entry is removed or the store is
+recreated. Inspect the host store and the `registry_contains_unsupported_entry`
+or `git_contains_unsupported_entry` reason in the attempt record to diagnose this.
+Other platforms skip this setting. Each attempt's `cargo-setup.json` (registry)
+and `cargo-git-setup.json` (Git) record a `status` (`seeded`,
 `skipped`, or `fallback`) and a `reason`. If the record cannot be written, the
 host emits a warning and the lane still runs. A `durability_unconfirmed` reason
-means the registry was published but its directory sync failed. Read-only lanes
+means the store was published but its directory sync failed. Read-only lanes
 retain their existing read-only registry access.
 
 `provenant worktree remove` deletes only the removed worktree's own lane cache,

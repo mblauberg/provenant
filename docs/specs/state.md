@@ -85,9 +85,9 @@ duplicate keys and multiline plain scalars; only `true` and `false` resolve.
 
 ## Configuration
 
-### Cargo registry seed opt-in
+### Cargo home seed opt-in
 
-The per-host Cargo registry seed switch must default off and must have no
+The per-host Cargo home seed switch must default off and must have no
 effect outside macOS. Its scope and manual configuration are described in
 the [worktree guide](../worktrees.md).
 - Why: cloning is an optional host-specific optimisation, not a prerequisite
