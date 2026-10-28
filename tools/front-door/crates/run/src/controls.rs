@@ -730,17 +730,39 @@ impl RunStore {
                 .iter()
                 .find(|task| task.task_id == record.task_id)
                 .and_then(|task| task.writer.as_ref());
-            let directory = match writer {
-                Some(writer) => provenant_os::fs::Directory::open_anchor(
-                    &self
+            let (directory, expected_slot) = match writer {
+                Some(writer) => {
+                    let expected = self
                         .writer_registry
                         .join("worktrees")
                         .join(self.context.project_id.to_string())
                         .join(provenant_confinement::worktrees::state_dir_name(
                             &writer.worktree,
-                        )),
-                )?,
-                None => attempt.try_clone()?,
+                        ));
+                    let readable = self
+                        .writer_fences()?
+                        .into_iter()
+                        .find(|fence| fence.scope == Self::scope(record));
+                    let slot = match readable {
+                        Some(fence) => fence
+                            .reservation
+                            .parent()
+                            .ok_or_else(|| {
+                                RunError::unsafe_path(
+                                    fence.reservation.clone(),
+                                    PathCheck::Containment,
+                                )
+                            })?
+                            .to_path_buf(),
+                        None => expected.clone(),
+                    };
+                    match provenant_os::fs::Directory::open_anchor(&slot) {
+                        Ok(directory) => (directory, slot == expected),
+                        Err(error) if error.is_not_found() => return Ok(None),
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                None => (attempt.try_clone()?, true),
             };
             let recovery = match custody::acquire_recovery(
                 directory.try_clone()?,
@@ -755,7 +777,7 @@ impl RunStore {
                 {
                     return Ok(None);
                 }
-                Err(CustodyError::InvalidRecord) => {
+                Err(CustodyError::InvalidRecord) if expected_slot => {
                     #[cfg(test)]
                     let recovered = provenant_supervisor::fixture::acquire_reboot_recovery_with(
                         directory,
