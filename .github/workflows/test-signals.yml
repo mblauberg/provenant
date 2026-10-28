@@ -101,13 +101,15 @@ jobs:
       - name: Stress harness binaries
         working-directory: tools/front-door
         env:
-          PROVENANT_CONFINEMENT_REQUIRED: "1"
           TMPDIR: ${{ runner.temp }}
-        run: >-
-          cargo nextest run --profile ci --workspace --locked
-          --features provenant-providers/recording --stress-count 5 --retries 0
-          -E 'binary(=worktrees) | binary(=custody) | binary(=dispatch_provider) |
-          binary(=process) | binary(=pr) | binary(=publication) | binary(=fake_provider)'
+        # Confinement is mandatory only where Seatbelt exists; the variable is
+        # checked for presence, so it must be absent on Linux.
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then export PROVENANT_CONFINEMENT_REQUIRED=1; fi
+          cargo nextest run --profile ci --workspace --locked \
+            --features provenant-providers/recording --stress-count 5 --retries 0 \
+            -E 'binary(=worktrees) | binary(=custody) | binary(=dispatch_provider) |
+            binary(=process) | binary(=pr) | binary(=publication) | binary(=fake_provider)'
 
   mutation-tests:
     name: Advisory mutation signals
