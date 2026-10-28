@@ -548,7 +548,15 @@ fn linked_lane_uses_private_objects_and_cannot_mutate_shared_objects() -> Result
     let scratch_source = scratch.join("hard-link-source");
     let scratch_link = scratch.join("hard-link-control");
     fs::write(&scratch_source, b"scratch hard-link control")?;
-    let output = shell("/bin/ln \"$1\" \"$2\"", &scratch_source, &scratch_link);
+    // The real lane policy denies file-link everywhere, including scratch.
+    // An allow-all native profile proves the same executable and filesystem
+    // support hard links, without weakening the lane-policy denial above.
+    let output = Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "/bin/ln"])
+        .arg(&scratch_source)
+        .arg(&scratch_link)
+        .current_dir(&lane)
+        .output()?;
     assert!(
         output.status.success(),
         "scratch hard-link control failed: {}",
