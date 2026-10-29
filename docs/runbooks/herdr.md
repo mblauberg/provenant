@@ -1,6 +1,7 @@
 # Herdr panes
 
 Owner: orchestrate
+Anchor: skills/orchestrate/SKILL.md
 Source: local CLI inspection, 15 July 2026. Recheck installed help before use.
 
 Herdr observes interactive work and sends fire-and-forget steering. Fabric owns
