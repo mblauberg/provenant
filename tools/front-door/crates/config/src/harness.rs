@@ -577,7 +577,7 @@ pub(crate) fn capture(
                         .selector
                         .strip_prefix(crate::shared_settings::PREFIX)?;
                     match &entry.expected {
-                        OwnedValue::Selector { value } => Some((key.to_owned(), value.clone())),
+                        OwnedValue::Selector { value, .. } => Some((key.to_owned(), value.clone())),
                         _ => None,
                     }
                 })
@@ -607,7 +607,11 @@ pub(crate) fn capture(
                     path: wire.clone(),
                     harness: Some(target.harness),
                     selector: format!("{}{key}", crate::shared_settings::PREFIX),
-                    expected: OwnedValue::Selector { value },
+                    expected: OwnedValue::Selector {
+                        value,
+                        extra: Default::default(),
+                    },
+                    extra: Default::default(),
                 });
             }
             if synced.bytes != old {
