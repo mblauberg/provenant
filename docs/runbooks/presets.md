@@ -405,13 +405,13 @@ parameters and holds the pattern's nodes and exports:
 ```json
 {"id":"plan","kind":"plan","access":"read_only","prompt":"Slice the work",
  "plan":{"kinds":["task"],"max_nodes":6,"patterns":[
-   {"name":"generator-evaluator",
+   {"name":"generator",
     "parameters":{
       "worktree":{"type":"string"},
       "scope":{"type":"list","default":["."]}
     },
     "nodes":[
-      {"id":"write","prompt":"Implement ${scope}","access":"worktree_write",
+      {"id":"write","prompt":"Implement the change","access":"worktree_write",
        "worktree":"${worktree}","write_scope":"${scope}",
        "acceptance_checks":["The change is verified"]}
     ],
@@ -421,7 +421,10 @@ parameters and holds the pattern's nodes and exports:
 
 Parameter schemas use the preset forms `type` (`string`, `integer`, `number`,
 `boolean`, `list` or `table`), `default`, `min`, `max`, `enum` and `doc`. A
-parameter without a default is required. The fragment names a listed pattern
+parameter without a default is required. `min` and `max` are inclusive numeric
+bounds for numbers, character counts for
+strings, and element counts for lists; they do not constrain booleans or tables.
+The fragment names a listed pattern
 and supplies values; it cannot supply nodes, `access`, `role`, `source` or
 `read_roots`. Those fields stay fixed in the pattern definition, and a
 placeholder in one of them is refused, so a parameter cannot widen them.
@@ -435,7 +438,7 @@ The fragment adds a `patterns` array next to `nodes`. An instance has a local
 
 ```json
 {"schema_version":1,"nodes":[],"patterns":[
-  {"id":"impl","pattern":"generator-evaluator",
+  {"id":"impl","pattern":"generator",
    "parameters":{"worktree":"/absolute/path/to/writer","scope":["src"]}}
 ]}
 ```

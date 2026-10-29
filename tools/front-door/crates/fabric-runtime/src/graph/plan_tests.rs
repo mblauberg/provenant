@@ -209,9 +209,18 @@ fn planner_prompt_uses_wire_kinds_and_required_field_names() {
 
 #[test]
 fn planner_prompt_names_only_the_nodes_allow_listed_patterns() {
-    let prompt = plans::prompt(&pattern_planner(4).nodes[0]);
+    let mut doc = pattern_planner(4);
+    let parameters = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0].parameters;
+    parameters.get_mut("label").unwrap().default = None;
+    parameters.get_mut("retries").unwrap().allowed = vec![json!(1), json!(2)];
+    let prompt = plans::prompt(&doc.nodes[0]);
     assert!(prompt.contains("Allowed patterns: generator"));
     assert!(prompt.contains("label:string"));
+    assert!(prompt.contains("required"));
+    assert!(prompt.contains("default=1"));
+    assert!(prompt.contains("enum=[1,2]"));
+    assert!(prompt.contains("min=0"));
+    assert!(prompt.contains("max=2"));
     assert!(prompt.contains("\"patterns\""));
     assert!(prompt.contains("Do not emit other presets or review shapes"));
 }
@@ -262,6 +271,9 @@ fn plan_rejects_invalid_and_over_bound_fragments_without_admitting_consumers() {
         assert_eq!(run.status, GraphStatus::Paused, "{output}");
         assert!(run.checkpoint.pause_reason.as_ref().unwrap().contains(reason), "{:?}", run.checkpoint.pause_reason);
         assert!(run.checkpoint.expansions.is_empty());
+        if reason == "allow-list" || reason == "access" || reason == "read_roots" {
+            assert!(run.checkpoint.pause_reason.as_ref().unwrap().contains("generator"));
+        }
         assert_eq!(owner.calls.len(), 1);
         assert_eq!(advance(&planner(1), &mut owner, &mut journal).unwrap().status, GraphStatus::Paused);
         assert_eq!(resume(&planner(1), &mut owner, &mut journal).unwrap().status, GraphStatus::Paused);
@@ -416,6 +428,48 @@ fn pattern_expansion_counts_against_the_graph_node_limit() {
         run.checkpoint.pause_reason
     );
     assert!(run.checkpoint.expansions.is_empty());
+}
+
+#[test]
+fn pattern_parameter_admission_errors() {
+    for (parameters, reason) in [
+        (json!({"unknown": 1}), "no parameter unknown"),
+        (json!([]), "parameters must be a table"),
+        (json!({"retries": 2}), "must be one of"),
+        (json!({}), "requires parameter label"),
+    ] {
+        let mut doc = pattern_planner(4);
+        let schema = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0].parameters;
+        schema.get_mut("label").unwrap().default = None;
+        schema.get_mut("retries").unwrap().allowed = vec![json!(1)];
+        let parameters = if reason == "requires parameter label" { parameters } else if let Some(mut map) = parameters.as_object().cloned() { map.insert("label".into(), json!("ok")); Value::Object(map) } else { parameters };
+        let mut owner = fixture_owner(&[&pattern_result(json!({"id":"impl", "pattern":"generator", "parameters":parameters}))]);
+        let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(run.status, GraphStatus::Paused);
+        assert!(run.checkpoint.pause_reason.unwrap().contains(reason));
+    }
+}
+
+#[test]
+fn pattern_template_authority_and_types_are_validated() {
+    for (field, value) in [("access", json!("${label}")), ("role", json!("${label}")), ("write_scope", json!("${label}"))] {
+        let mut doc = pattern_planner(4);
+        doc.nodes[0].plan.as_mut().unwrap().patterns[0].nodes[0][field] = value;
+        assert!(plans::validate_spec(&doc.nodes[0]).is_err(), "{field}");
+    }
+}
+
+#[test]
+fn pattern_children_obey_plan_node_and_kind_limits() {
+    let instance = json!({"id":"impl", "pattern":"generator"});
+    let mut owner = fixture_owner(&[&pattern_result(instance.clone())]);
+    let run = advance(&pattern_planner(2), &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.pause_reason.unwrap().contains("expands to"));
+    let mut doc = pattern_planner(4);
+    doc.nodes[0].plan.as_mut().unwrap().kinds = vec![NodeKind::Gate];
+    let mut owner = fixture_owner(&[&pattern_result(instance)]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.pause_reason.unwrap().contains("was not declared"));
 }
 
 #[test]

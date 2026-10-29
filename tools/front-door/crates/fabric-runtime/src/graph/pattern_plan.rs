@@ -95,13 +95,21 @@ pub(super) fn validate(pattern: &PatternSpec) -> Result<(), &'static str> {
             return Err("plan pattern node");
         }
         let mut sensitive = Vec::new();
-        for key in ["role", "source", "read_roots"] {
+        for key in [
+            "kind",
+            "access",
+            "role",
+            "source",
+            "read_roots",
+            "route",
+            "routes",
+        ] {
             if let Some(value) = node.get(key) {
                 placeholders(value, &mut sensitive)?;
             }
         }
         if !sensitive.is_empty() {
-            return Err("plan pattern cannot vary role, source or read roots by parameter");
+            return Err("plan pattern cannot vary fixed authority fields by parameter");
         }
         let mut names = Vec::new();
         placeholders(node, &mut names)?;
@@ -111,6 +119,30 @@ pub(super) fn validate(pattern: &PatternSpec) -> Result<(), &'static str> {
         {
             return Err("plan pattern uses an undeclared parameter");
         }
+    }
+    let samples = pattern
+        .parameters
+        .iter()
+        .map(|(name, parameter)| {
+            let value = parameter
+                .default
+                .clone()
+                .or_else(|| parameter.allowed.first().cloned())
+                .unwrap_or_else(|| match parameter.kind {
+                    PatternParameterKind::String => Value::String("sample".into()),
+                    PatternParameterKind::Integer | PatternParameterKind::Number => {
+                        serde_json::json!(0)
+                    }
+                    PatternParameterKind::Boolean => serde_json::json!(false),
+                    PatternParameterKind::List => serde_json::json!([]),
+                    PatternParameterKind::Table => serde_json::json!({}),
+                });
+            (name.clone(), value)
+        })
+        .collect();
+    for node in &pattern.nodes {
+        let value = interpolate(node, &samples).map_err(|_| "plan pattern interpolation")?;
+        serde_json::from_value::<GraphNode>(value).map_err(|_| "plan pattern node template")?;
     }
     Ok(())
 }
