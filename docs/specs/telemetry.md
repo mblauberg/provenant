@@ -5,7 +5,8 @@ Anchor: `crates/telemetry/src/tests.rs`, `crates/telemetry/src/usage/tests.rs`,
 `crates/telemetry/src/native.rs`, `crates/telemetry/src/ingest/tests.rs`,
 `crates/telemetry/src/mileage.rs`, `crates/telemetry/src/chair/tests.rs`,
 `tests/usage.rs`, `tests/telemetry_native.rs`, `tests/telemetry_ingest.rs`,
-`tests/telemetry_mileage.rs`, `tests/chair.rs`
+`tests/telemetry_mileage.rs`, `tests/chair.rs`,
+`crates/telemetry/tests/telemetry_pipeline.rs`, `tests/telemetry_pipeline_cli.rs`
 
 Telemetry summarises run's terminal attempt records into per-route outcomes,
 usage and API-equivalent cost (the cost of the same tokens at published API
@@ -218,6 +219,78 @@ unreadable peer is listed with its error and the rest of the export is still wri
 - Test: `crates/telemetry/src/tests.rs::trace_groups_hosts_and_links_a_child_to_its_parent_across_them`;
   `crates/cli/src/run/remote.rs::peer_export_asks_every_configured_peer_for_its_lanes`
 - Owner: `crates/telemetry/src/`
+
+## Offline post-merge outcomes and suggestions
+
+`telemetry stats --outcomes` adds an offline `pipeline` report. `--suggest`
+also requests the same report with advisory comparisons. The reducer reads
+first-parent history of `--main-ref` (default `main`) through the shared Git
+executable resolver. It never fetches or changes the checkout. A merge subject
+`Merge pull request #N` joins to a graph checkpoint's PR or a retained context
+PR. Without a PR, an exact `Closes #N` body line joins the work item. Ambiguous
+matches and rows without a graph or matching merge remain `unattributed`.
+
+Origin merges come from first-parent history; reachable non-merge descendants
+also include changes delivered through later pull requests.
+The configurable `--outcome-days` window defaults to 14 days after merge.
+Reverts identify the merge by the canonical revert trailer or its quoted
+subject. Follow-up commits count once when their subject starts with `fix`,
+`bugfix` or `hotfix` (case insensitive), and a removed or replaced line blames
+to a line the merge introduced. Blame identities handle shifted line numbers;
+renames, insertion-only fixes, binary files and later edits that have already
+replaced the original line are outside this conservative matcher. These are
+escaped-defect signals, not proof of causality. Reverts are not counted again
+as follow-up fixes.
+
+An optional `--ci-file` accepts the recorded main-branch run-list JSON described
+in the runbook. A failed run joins the nearest preceding merge in its head's
+first-parent ancestry, within the window. Identical head, workflow and creation
+time rows count once. Without this file, `ci` is `not_measured` and per-row CI
+counts are null. A supplied empty file measures zero runs; it does not prove
+that the export covers every workflow or date.
+
+Ranking compares pattern, lens (explicit context lens, otherwise role) and
+model separately within risk-tier and task-kind strata. Retained context extras
+supply these strata where present; absent values stay `unknown`. This change
+adds no context capture. Nodes combine selected attempts' costs, including
+retries. A node attributes to a model only when every selected attempt names
+the same model; mixed or missing identities stay `unknown` for model ranking.
+Only leaf source findings enter the
+confirmed and false-positive counts: graph-local IDs join `accepted` and
+`rejected` verifier dispositions, deduplicated across verifier copies.
+Conflicting, deferred or absent dispositions, ambiguous source IDs and missing
+checkpoints remain unmeasured. Verifier copies contribute their costs and no
+extra findings.
+
+Arms show confirmed findings per API-equivalent dollar, false-positive rate,
+and the fraction of distinct mature attributed merges with any escaped signal.
+Only mature merges enter an attributed ranking cohort. The default minimum is
+20 distinct graphs and mature merges per arm (`--min-samples`). Unknown costs,
+missing dispositions or CI input and smaller arms are `insufficient`.
+Without CI input, escaped-rate values and intervals are null; its retained
+numerator counts only the observed Git signals.
+Rates have 95% Wilson intervals. The confirmed-per-dollar interval scales the
+Wilson confirmed share by observed dispositions per dollar, conditional on
+observed costs; it does not model cost variability or finding correlation.
+Raw finding volume never determines preference. Advice requires separated
+confirmed-per-dollar intervals and no higher observed false-positive or
+escaped-defect rates in the same stratum.
+
+A suggestion includes both sample counts, intervals, references to its full
+arm evidence and an RFC3339 expiry, default 14 days (`--expiry-days`). Reports
+never apply changes. Pattern and lens choices have no scheduled write path.
+The current model-policy CLI also cannot schedule an arbitrary model choice:
+`route override set` schedules pacing only. Suggestions therefore have
+`accept: null` and explain that they are advisory. Graph node asks and the
+#2179 whole-patch-read measurement remain outstanding under #2011; there is no
+read-event source for that measurement.
+
+- Why: post-merge quality and verified value need evidence coverage, comparable
+  cohorts and an explicit decision before changing policy.
+- Test: `crates/telemetry/tests/telemetry_pipeline.rs`;
+  `tests/telemetry_pipeline_cli.rs`
+- Owner: `crates/telemetry/src/outcome.rs`, `crates/telemetry/src/suggest.rs`,
+  `crates/cli/src/run.rs`
 
 ## Demand counters are lossy and private
 

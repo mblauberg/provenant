@@ -126,6 +126,44 @@ extra setting; `usage.project_attribution` only adds the project.
 
 ## Offline timeline
 
+For offline pipeline comparisons, export the chair's main-branch CI history
+and pass the file to the local report:
+
+```sh
+gh run list --branch main --limit 1000 --json headSha,conclusion,createdAt,workflowName > main-ci.json
+provenant telemetry stats --suggest --ci-file main-ci.json --main-ref main --json
+```
+
+The export must cover the merges and following observation windows being
+compared. Increase the limit or export additional pages for a busy repository.
+The telemetry command itself uses no network. Omit `--ci-file` to inspect local
+reverts and line-overlapping follow-up fixes with CI marked `not_measured`.
+Use `--outcomes` instead of `--suggest` to request the same outcome and ranking
+evidence. `--since` and `--until` select attempt facts, while `--outcome-days`
+sets the post-merge observation window (default 14 days).
+
+`pipeline.outcomes.rows` retains originating graph, pattern, lens and model
+alongside counts; unmatched evidence stays `unattributed`.
+`pipeline.ranking.arms` shows sample counts, cost coverage, verifier counts,
+rates and 95% intervals by risk tier and task kind. Missing strata are
+`unknown`. Ranking waits for the full observation window and at least 20
+graphs and mature merges per arm. Set `--min-samples`, `--outcome-days` and
+`--expiry-days` to change these defaults; expiry is 14 days.
+
+Review `pipeline.ranking.suggestions` with its referenced arm evidence before
+making a routing decision. Each suggestion has counts, intervals and expiry.
+`accept: null` means the choice is advisory: there is currently no scheduled
+pattern, lens or arbitrary model-choice command. The report writes no override
+and posts no graph ask. `route override set` is a pacing override and must not
+be used as a model-choice command. See the
+[telemetry spec](../specs/telemetry.md#offline-post-merge-outcomes-and-suggestions)
+for the conservative line matcher and coverage limits.
+
+Whole-patch read counts remain unavailable because provider telemetry supplies
+no read-event source; token counts cannot stand in for that measurement.
+
+## Attempt timeline
+
 `provenant telemetry trace [--out FILE] [--since 604800] [--run ID] [--peers]`
 writes retained attempts as Chrome Trace Event JSON (default
 `provenant-trace.json`), with one process per host and one thread per attempt;
