@@ -33,6 +33,7 @@ jobs:
       - name: Run script tests
         run: |
           scripts/test-assertion-diff
+          scripts/test-cleanup-signals
           scripts/test-find-changed-tests
           scripts/test-run-stress-tests
       - name: Check PR test assertions

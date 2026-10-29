@@ -1,0 +1,54 @@
+#!/bin/sh
+set -eu
+# shellcheck source=scripts/test-git-env.sh disable=SC1091
+. "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)/test-git-env.sh"
+scripts=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/cleanup-signals.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+mkdir -p "$tmp/bin" "$tmp/state" "$tmp/repo/bench/tasks"
+cat > "$tmp/bin/cargo" <<'EOF'
+#!/bin/sh
+exit 7
+EOF
+chmod +x "$tmp/bin/cargo"
+PATH="$tmp/bin:$PATH" "$scripts/run-mutants" HEAD HEAD > "$tmp/mutants.out"
+grep -F 'Mutation run incomplete' "$tmp/mutants.out" >/dev/null
+if grep -F 'No mutants' "$tmp/mutants.out" >/dev/null; then exit 1; fi
+
+git -C "$tmp/repo" init -q
+git -C "$tmp/repo" config user.name Fixture
+git -C "$tmp/repo" config user.email fixture@example.test
+printf 'original\n' > "$tmp/repo/file"
+git -C "$tmp/repo" add file
+git -C "$tmp/repo" commit -qm initial
+parent=$(git -C "$tmp/repo" rev-parse HEAD)
+cat > "$tmp/repo/bench/tasks/task.toml" <<EOF
+repo = "."
+parent_sha = "$parent"
+merge_sha = "$parent"
+prompt = "fixture"
+hidden_test_command = "true"
+split = "acceptance"
+EOF
+printf 'invalid patch\n' > "$tmp/repo/bench/tasks/task.patch"
+python3 -c 'import hashlib,sys; h=hashlib.sha256(); [(h.update(open(p,"rb").read()),h.update(b"\0")) for p in sys.argv[1:]]; print(h.hexdigest())' "$tmp/repo/bench/tasks/task.toml" "$tmp/repo/bench/tasks/task.patch" > "$tmp/repo/bench/tasks/task.toml.verified"
+cat > "$tmp/bin/provenant" <<'EOF'
+#!/bin/sh
+case "$1 $2" in
+  'root --json') printf '{"data":{"state_directory":"%s"}}\n' "$FIXTURE_STATE" ;;
+  'worktree create') git -C "$7" worktree add -q "$7/.worktrees/$3" "$5" ;;
+  'worktree remove') exit 1 ;;
+  'dispatch --project') [ "${FAIL_DISPATCH:-0}" = 0 ] || exit 9; printf '{"data":{"run_id":"run"}}\n' ;;
+  'telemetry stats') printf '{"data":null}\n' ;;
+esac
+EOF
+chmod +x "$tmp/bin/provenant"
+export FIXTURE_STATE="$tmp/state" PROVENANT_BIN="$tmp/bin/provenant"
+(cd "$tmp/repo" && FAIL_DISPATCH=1 "$scripts/bench" run --route fixture)
+(cd "$tmp/repo" && "$scripts/bench" run --route fixture)
+printf '%s\n' 'diff --git a/file b/file' '--- a/file' '+++ b/file' '@@ -1 +1 @@' '-original' '+changed' > "$tmp/repo/bench/tasks/task.patch"
+python3 -c 'import hashlib,sys; h=hashlib.sha256(); [(h.update(open(p,"rb").read()),h.update(b"\0")) for p in sys.argv[1:]]; print(h.hexdigest())' "$tmp/repo/bench/tasks/task.toml" "$tmp/repo/bench/tasks/task.patch" > "$tmp/repo/bench/tasks/task.toml.verified"
+(cd "$tmp/repo" && "$scripts/bench" run --route fixture)
+python3 -c 'import json,sys; rows=[json.loads(x) for x in open(sys.argv[1])]; assert [r["reason"] for r in rows] == ["dispatch failed (exit 9)", "hidden patch failed to apply", None]; assert [r["pass"] for r in rows] == [None, None, True]' "$tmp/state/bench.jsonl"
+echo 'cleanup signal fixtures passed'

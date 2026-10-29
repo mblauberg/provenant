@@ -173,11 +173,17 @@ run)
         else
             printf '{"data":null}\n' > "$tmp/stats.json"
         fi
-        git -C "$worktree" apply --unidiff-zero "$patch"
         passed=false
-        if [ "$dispatch_exit" -eq 0 ] && (cd "$worktree" && sh -c "$command") > "$tmp/test.log" 2>&1; then passed=true; fi
+        reason=
+        if [ "$dispatch_exit" -ne 0 ]; then
+            reason="dispatch failed (exit $dispatch_exit)"
+        elif ! git -C "$worktree" apply --unidiff-zero "$patch"; then
+            reason='hidden patch failed to apply'
+        elif (cd "$worktree" && sh -c "$command") > "$tmp/test.log" 2>&1; then
+            passed=true
+        fi
         seconds=$(( $(date +%s) - start ))
-        python3 - "$task" "$route" "$model" "$passed" "$seconds" "$tmp/stats.json" >> "$ledger" <<'PY'
+        python3 - "$task" "$route" "$model" "$passed" "$seconds" "$tmp/stats.json" "$reason" >> "$ledger" <<'PY'
 import json,sys
 report=json.load(open(sys.argv[6])).get("data")
 totals=None if report is None else report["totals"]
@@ -187,7 +193,7 @@ tokens=None if totals is None or missing else sum(item["known"] for item in cate
 complete=None if totals is None else totals["cost"]["complete"]
 cost=None if complete is None else complete["usd"]
 turns=None if totals is None else totals["attempts"]
-print(json.dumps({"task":sys.argv[1],"route":sys.argv[2],"model":sys.argv[3],"pass":sys.argv[4]=="true","tokens":tokens,"cost":cost,"turns":turns,"seconds":int(sys.argv[5])},separators=(",",":")))
+print(json.dumps({"task":sys.argv[1],"route":sys.argv[2],"model":sys.argv[3],"pass":None if sys.argv[7] else sys.argv[4]=="true","reason":sys.argv[7] or None,"tokens":tokens,"cost":cost,"turns":turns,"seconds":int(sys.argv[5])},separators=(",",":")))
 PY
         git -C "$tmp/repo" worktree remove --force "$worktree" >/dev/null
         rm -rf "$tmp"
