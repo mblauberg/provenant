@@ -137,8 +137,13 @@ bounded_input! {
         Read {
             after: Option<i64>,
             limit: u64,
+            /// Read this exact chair session's mailbox instead of the agent's own.
+            session: Option<String>,
         },
-        MarkRead { through: i64 },
+        MarkRead {
+            through: i64,
+            session: Option<String>,
+        },
     }
 }
 
@@ -474,6 +479,15 @@ impl<'a> LocalCoordination<'a> {
         }
     }
 
+    /// A chair session's control mail has its own mailbox and cursor, so no
+    /// other session that shares this agent label can read or consume it.
+    fn mailbox(&self, session: Option<&str>) -> ActorId {
+        match session {
+            Some(session) => crate::identity::chair_session_mailbox(self.project, session),
+            None => self.actor,
+        }
+    }
+
     fn request<'b>(&'b self, cancel: &'b CancelToken) -> Request<'b> {
         Request {
             clock: self.clock,
@@ -644,11 +658,17 @@ impl CoordinationApi for LocalCoordination<'_> {
                     id,
                 })
             }
-            MailInput::Read { after, limit, .. } => {
-                let prior_cursor = self.store.mail_cursor(self.project, self.actor, &request)?;
-                let page =
-                    self.store
-                        .read_mail(self.project, self.actor, after, limit, &request)?;
+            MailInput::Read {
+                after,
+                limit,
+                session,
+                ..
+            } => {
+                let mailbox = self.mailbox(session.as_deref());
+                let prior_cursor = self.store.mail_cursor(self.project, mailbox, &request)?;
+                let page = self
+                    .store
+                    .read_mail(self.project, mailbox, after, limit, &request)?;
                 let page = bounded_page(page.items, page.truncated)?;
                 let cursor = page
                     .items
@@ -661,10 +681,13 @@ impl CoordinationApi for LocalCoordination<'_> {
                     cursor,
                 })
             }
-            MailInput::MarkRead { through, .. } => {
+            MailInput::MarkRead {
+                through, session, ..
+            } => {
+                let mailbox = self.mailbox(session.as_deref());
                 self.store
-                    .mark_mail_read(self.project, self.actor, through, &request)?;
-                let cursor = self.store.mail_cursor(self.project, self.actor, &request)?;
+                    .mark_mail_read(self.project, mailbox, through, &request)?;
+                let cursor = self.store.mail_cursor(self.project, mailbox, &request)?;
                 Ok(MailResult::MarkedRead {
                     extra: Default::default(),
                     cursor,
@@ -1553,6 +1576,7 @@ mod tests {
                     extra: Default::default(),
                     after: Some(0),
                     limit: 10,
+                    session: None,
                 },
                 fixture.budget(),
                 &cancel,

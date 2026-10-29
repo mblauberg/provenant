@@ -1,5 +1,9 @@
 use super::*;
-use provenant_core::{HostId, MonoTime, PathResolver, ProjectId, RootInputs, TestClock, WallTime};
+use crate::coordination::{CoordinationApi, LocalCoordination, MailInput, MailResult};
+use provenant_core::{
+    ActorId, HostId, MonoTime, PathResolver, ProjectId, RootInputs, TestClock, ThreadPause,
+    WaitBudget, WallTime,
+};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -1448,11 +1452,11 @@ fn steer(text: &str, id: &str) -> InboxInput {
         operation_id: op(id),
     }
 }
-fn control_route(f: &Fixture, provider: Option<Harness>, launch: LaunchKind) -> ControlRoute {
+fn control_route(provider: Option<Harness>, launch: LaunchKind) -> ControlRoute {
     ControlRoute {
         provider,
         launch,
-        recipient: (launch == LaunchKind::Chair).then_some(f.identity.inbox.actor),
+        registered: launch == LaunchKind::Chair,
         target: "target".into(),
     }
 }
@@ -1471,20 +1475,14 @@ fn control(
         other => panic!("{other:?}"),
     }
 }
-fn mailbox(f: &Fixture) -> Vec<provenant_fabric_store::Delivery> {
+fn mailbox(f: &Fixture, recipient: ActorId) -> Vec<provenant_fabric_store::Delivery> {
     let request = Request {
         clock: &f.clock,
         cancel: &f.cancel,
     };
     Store::open(&f.root, &request)
         .unwrap()
-        .read_mail(
-            f.identity.project,
-            f.identity.inbox.actor,
-            Some(0),
-            50,
-            &request,
-        )
+        .read_mail(f.identity.project, recipient, Some(0), 50, &request)
         .unwrap()
         .items
 }
@@ -1492,7 +1490,7 @@ fn mailbox(f: &Fixture) -> Vec<provenant_fabric_store::Delivery> {
 #[test]
 fn chair_message_queues_mail_replays_and_refuses_a_conflicting_reuse() {
     let f = Fixture::new();
-    let route = || control_route(&f, None, LaunchKind::Chair);
+    let route = || control_route(None, LaunchKind::Chair);
     let first = control(
         &f,
         route(),
@@ -1518,33 +1516,102 @@ fn chair_message_queues_mail_replays_and_refuses_a_conflicting_reuse() {
         conflict,
         Err(InboxError::Mutation { ref source, .. }) if source.code() == "operation_conflict"
     ));
-    let mail = mailbox(&f);
+    let mail = mailbox(&f, chair_session_mailbox(f.identity.project, "session-a"));
     assert_eq!(mail.len(), 1);
     assert!(mail[0].message.body.contains("look at CI"));
     assert!(mail[0].message.body.contains("not an approval"));
 }
 
 #[test]
+fn chair_mail_is_isolated_to_its_exact_session() {
+    let f = Fixture::new();
+    let route = || control_route(None, LaunchKind::Chair);
+    // Both sessions run under one agent label, so they share one actor.
+    control(
+        &f,
+        route(),
+        chair_message("session-a", "for A only", "msg-a"),
+    )
+    .unwrap();
+    control(
+        &f,
+        route(),
+        chair_message("session-b", "for B only", "msg-b"),
+    )
+    .unwrap();
+    let coordination = LocalCoordination::open(
+        &f.root,
+        f.identity.project,
+        f.identity.inbox.actor,
+        &f.clock,
+        &ThreadPause,
+        &f.cancel,
+    )
+    .unwrap();
+    let budget = WaitBudget::cli(f.clock.mono_now(), 5).unwrap();
+    let read = |session: Option<&str>, after: Option<i64>| match coordination
+        .mail(
+            MailInput::Read {
+                extra: Default::default(),
+                after,
+                limit: 50,
+                session: session.map(str::to_owned),
+            },
+            budget,
+            &f.cancel,
+        )
+        .unwrap()
+    {
+        MailResult::Read { page, .. } => page.items,
+        other => panic!("{other:?}"),
+    };
+    // The agent's own mailbox, which both sessions share, holds neither message.
+    assert!(read(None, Some(0)).is_empty());
+    let (a, b) = (
+        read(Some("session-a"), Some(0)),
+        read(Some("session-b"), Some(0)),
+    );
+    assert_eq!(a.len(), 1);
+    assert!(a[0].message.body.contains("for A only"));
+    assert_eq!(b.len(), 1);
+    assert!(b[0].message.body.contains("for B only"));
+    // B consumes its own mail. A's mail and durable cursor are untouched.
+    coordination
+        .mail(
+            MailInput::MarkRead {
+                extra: Default::default(),
+                through: b[0].seq,
+                session: Some("session-b".into()),
+            },
+            budget,
+            &f.cancel,
+        )
+        .unwrap();
+    assert!(read(Some("session-b"), None).is_empty());
+    assert_eq!(read(Some("session-a"), None).len(), 1);
+}
+
+#[test]
 fn unsupported_steer_refuses_before_any_side_effect() {
     let f = Fixture::new();
     for provider in provenant_records::ADAPTER_SPECS.iter().map(|spec| spec.id) {
-        let route = control_route(&f, Some(provider), LaunchKind::Lane);
+        let route = control_route(Some(provider), LaunchKind::Lane);
         let receipt = control(&f, route, steer("slow down", "steer-1")).unwrap();
         assert_eq!(receipt.state, ControlState::Unsupported, "{provider:?}");
         assert_eq!(receipt.transport, None);
         assert_eq!(receipt.message_id, None);
     }
     // Nothing was recorded, so the ID is still free for a different request.
-    let route = control_route(&f, None, LaunchKind::Lane);
+    let route = control_route(None, LaunchKind::Lane);
     let receipt = control(&f, route, steer("other text", "steer-1")).unwrap();
     assert_eq!(receipt.state, ControlState::Unsupported);
-    assert!(mailbox(&f).is_empty());
+    assert!(mailbox(&f, f.identity.inbox.actor).is_empty());
 }
 
 #[test]
 fn control_text_is_bounded_and_nonblank() {
     let f = Fixture::new();
-    let route = || control_route(&f, None, LaunchKind::Chair);
+    let route = || control_route(None, LaunchKind::Chair);
     for text in [
         "".to_owned(),
         "  \n".to_owned(),

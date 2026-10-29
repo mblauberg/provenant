@@ -268,6 +268,18 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
           "operation_id": {
             "$ref": "#/$defs/OperationId"
           },
+          "session": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "pattern": "^[a-z0-9]([a-z0-9_-]|\\.[a-z0-9_-])*\\.?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "through": {
             "maximum": 9223372036854775807,
             "minimum": 0,
@@ -302,6 +314,18 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
           },
           "op": {
             "const": "read"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "pattern": "^[a-z0-9]([a-z0-9_-]|\\.[a-z0-9_-])*\\.?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [

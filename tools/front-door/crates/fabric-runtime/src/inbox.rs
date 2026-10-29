@@ -4,10 +4,10 @@ use crate::{
         CoordinationError,
         input::{InputError, ValidateInput},
     },
-    identity::Identity,
+    identity::{Identity, chair_session_mailbox},
 };
 use provenant_core::{
-    ActorId, AttemptId, CancelToken, Clock, HumanAnswerId, HumanRequestId, MessageId, OperationId,
+    AttemptId, CancelToken, Clock, HumanAnswerId, HumanRequestId, MessageId, OperationId,
     StateRoot, WaitTransport,
 };
 use provenant_fabric_store::{Request, Store};
@@ -230,6 +230,18 @@ pub enum InboxResult {
         truncated: bool,
         coverage: String,
     },
+}
+
+impl InboxResult {
+    /// An unsupported control receipt is a refusal at every edge, not a success.
+    pub fn unsupported_control(&self) -> Option<&ControlReceipt> {
+        match self {
+            Self::Control { receipt } if receipt.state == ControlState::Unsupported => {
+                Some(receipt)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Owner response, including domain refusals without losing their stable code.
@@ -671,8 +683,8 @@ pub struct ControlRoute {
     /// Adapter of the attempt; unknown for a chair session.
     pub provider: Option<Harness>,
     pub launch: LaunchKind,
-    /// Mail recipient, present only for an exact registered chair.
-    pub recipient: Option<ActorId>,
+    /// True only for an exact registered chair. Its mail goes to that session's mailbox.
+    pub registered: bool,
     /// Exact target text echoed in the receipt.
     pub target: String,
 }
@@ -776,7 +788,7 @@ impl<'a> InboxService<'a> {
                         self.control_lookup.ok_or(InboxError::OwnerUnavailable)?(&input, &request)?;
                     let support = self.support(&route);
                     // Refused before any side effect, so nothing is recorded.
-                    if !support.delivers() || route.recipient.is_none() {
+                    if !support.delivers() || !route.registered {
                         return Ok(self.control_receipt(&input, &id, &route, support, None));
                     }
                     Some((route, support))
@@ -856,18 +868,25 @@ impl<'a> InboxService<'a> {
         support: ControlSupport,
         request: &Request<'_>,
     ) -> Result<InboxResult, InboxError> {
-        let (recipient, text, channel, kind) = match (input, route.recipient) {
-            (InboxInput::ChairMessage { text, channel, .. }, Some(recipient)) => {
-                (recipient, text, Some(*channel), "chair_message")
-            }
-            (InboxInput::Steer { text, .. }, Some(recipient)) => (recipient, text, None, "steer"),
+        // Only a registered chair receives mail, and only in its own session mailbox.
+        let (recipient, text, channel) = match input {
+            InboxInput::ChairMessage {
+                session,
+                text,
+                channel,
+                ..
+            } if route.registered => (
+                chair_session_mailbox(self.identity.project, session),
+                text,
+                *channel,
+            ),
             _ => return Err(InboxError::Invalid("control target")),
         };
         let at = self.clock.wall_now().map_err(CoordinationError::from)?;
         let message_id = MessageId::from_bytes(entropy()?);
         let body = serde_json::to_string(&serde_json::json!({
             "schema_version": 1,
-            "kind": kind,
+            "kind": "chair_message",
             "target": route.target,
             "channel": channel,
             "text": text,

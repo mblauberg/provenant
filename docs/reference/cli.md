@@ -667,12 +667,19 @@ Accepted by every command, before or after the subcommand.
 |---|---|
 | `--after` | `{"name": "after"}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["100"], "name": "limit"}` |
+| `--session` | `{"name": "session"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
 ```json
 {
   "groups": [
+    {
+      "arguments": [],
+      "multiple": true,
+      "name": "Read",
+      "required": false
+    },
     {
       "arguments": [
         "after",
@@ -691,6 +698,7 @@ Accepted by every command, before or after the subcommand.
 | Argument | Contract |
 |---|---|
 | `through` | `{"name": "through", "positional": true, "required": true}` |
+| `--session` | `{"name": "session"}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |

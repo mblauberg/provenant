@@ -1934,6 +1934,21 @@ mod tests {
         invalid(&["steer", attempt, "--text-stdin", "--approve"]);
     }
     #[test]
+    fn mail_cursors_can_be_scoped_to_one_chair_session() {
+        valid(&["fabric", "mail", "read", "--session", "chair-a"]);
+        valid(&[
+            "fabric",
+            "mail",
+            "mark-read",
+            "3",
+            "--session",
+            "chair-a",
+            "--operation-id",
+            "mark-1",
+        ]);
+        invalid(&["fabric", "mail", "read", "--session"]);
+    }
+    #[test]
     fn full_help_publishes_provider_controls_and_scoped_help_does_not() {
         let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--all", "--json"]) else {
             panic!("catalog")

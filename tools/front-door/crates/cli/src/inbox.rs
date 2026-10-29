@@ -82,7 +82,7 @@ pub fn resolve_control(
                     .and_then(|name| provenant_records::AdapterSpec::get(&name))
                     .map(|spec| spec.id),
                 launch: LaunchKind::Lane,
-                recipient: None,
+                registered: false,
                 target: attempt.to_string(),
             })
         }
@@ -101,7 +101,7 @@ pub fn resolve_control(
             Ok(ControlRoute {
                 provider: None,
                 launch: LaunchKind::Chair,
-                recipient: Some(record.chair_actor),
+                registered: true,
                 target: format!("{}/{}/{}", record.host, record.project_id, session),
             })
         }
@@ -718,15 +718,15 @@ pub fn run(
             if receipt.state == provenant_records::control::ControlState::Unsupported =>
         {
             // Refused before any side effect; the receipt still names the reason.
-            let reason = format!("control unsupported: {}", receipt.reason);
+            let message = receipt.refusal_message();
             let mut result = CommandResult::new(
                 path,
                 Outcome::Refused,
                 Some(InboxResult::Control { receipt }),
             );
             result.error = Some(CommandError {
-                code: "control_unsupported".into(),
-                message: reason,
+                code: provenant_records::control::CONTROL_UNSUPPORTED.into(),
+                message,
                 cause: None,
                 repair: Some(
                     "Read `provenant help --all --json` provider_controls for what each provider supports; use resume to continue a lane."

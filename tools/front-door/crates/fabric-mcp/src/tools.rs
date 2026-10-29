@@ -9,6 +9,7 @@ pub use provenant_fabric_runtime::coordination::{
     MailInput, Mutation, TaskInput,
 };
 use provenant_fabric_runtime::inbox::{InboxError, InboxInput};
+use provenant_records::control::CONTROL_UNSUPPORTED;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -853,10 +854,18 @@ impl ToolCall {
             ($owner:ident, $method:ident, $input:ident) => {{ response(tool_name, service.$owner.$method($input, budget, cancel)?) }};
         }
         let result = match self {
-            Self::Inbox(input, host) => response(
-                tool_name,
-                service.facade.inbox_owner(input, host, budget, cancel)?,
-            ),
+            Self::Inbox(input, host) => {
+                let result = service.facade.inbox_owner(input, host, budget, cancel)?;
+                // Refused as the CLI refuses it, with the receipt kept as structured data.
+                if let Some(receipt) = result.unsupported_control() {
+                    return Err(ServiceError::Cli {
+                        code: CONTROL_UNSUPPORTED.into(),
+                        message: receipt.refusal_message(),
+                        data: serde_json::to_value(receipt)?,
+                    });
+                }
+                response(tool_name, result)
+            }
             Self::Console(input) => {
                 response(tool_name, service.facade.console(input, budget, cancel)?)
             }

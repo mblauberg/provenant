@@ -300,15 +300,20 @@ guidance recorded as Fabric mail, labelled as carrying no authority. Both are
 refused inside a lane and are local to the host; the MCP form is `fabric_inbox`
 `steer` and `chair_message`.
 
-`chair message` resolves SESSION to the exact registered host, project and chair
-actor, queues one Fabric mail message and returns `state: queued` with
-`transport: fabric_mail`. A chair session records no provider, so its path is
-the provider-neutral mail path. The session reads and acknowledges mail in the
-usual way; the hook does not inject these messages.
+`chair message` resolves SESSION to the exact registered host and project, queues
+one Fabric mail message to that session's own mailbox and returns `state: queued`
+with `transport: fabric_mail`. A chair session records no provider, so its path
+is the provider-neutral mail path. Sessions that share an agent label share an
+actor, so the message is not addressed to that actor. The session reads it with
+`provenant fabric mail read --session SESSION` (MCP `fabric_mail` `read` with
+`session`) and marks it read with `mark-read --session`, which keeps its own
+cursor. The agent's default mailbox and other sessions do not show it. The hook
+does not inject these messages.
 
 `steer` reads the attempt's recorded adapter and refuses with
 `state: unsupported`, outcome `refused` and error code `control_unsupported`
-when the lane row does not deliver. No lane adapter delivers today (live steering
+when the lane row does not deliver. Over MCP the same refusal is an error
+response with that code and the receipt as its data, not a successful reply. No lane adapter delivers today (live steering
 is a gap; `resume` is terminal continuation), so `steer` records nothing and its
 receipt names the reason. Nothing is recorded for a refusal, so its operation ID
 stays free.

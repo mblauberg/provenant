@@ -199,7 +199,7 @@ fn build_strict() -> Vec<Value> {
             "Send and read mail with explicit cursors.",
             json!({
                 "send":{"recipients":recipients,"kind":choices(&["note","request","response"]),"body":text(MAX_TEXT_BYTES),"artifacts":artifacts,"reply_to?":nullable(reference("MessageRef")),"task?":nullable(reference("MessageRef"))},
-                "read":{"after?":nullable(seq.clone()),"limit":page.clone()},"mark_read":{"through":seq.clone()}
+                "read":{"after?":nullable(seq.clone()),"limit":page.clone(),"session?":nullable(inbox_session.clone())},"mark_read":{"through":seq.clone(),"session?":nullable(inbox_session.clone())}
             }),
         ),
         (

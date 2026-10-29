@@ -155,6 +155,16 @@ pub struct ControlReceipt {
     pub message_id: Option<MessageId>,
 }
 
+/// Stable refusal code for an unsupported control receipt. Every edge that
+/// reports one, CLI or MCP, uses this code and `ControlReceipt::refusal_message`.
+pub const CONTROL_UNSUPPORTED: &str = "control_unsupported";
+
+impl ControlReceipt {
+    pub fn refusal_message(&self) -> String {
+        format!("control unsupported: {}", self.reason)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
