@@ -915,6 +915,8 @@ pub enum StatsBy {
     Pr,
     Issue,
     Graph,
+    Node,
+    Pattern,
     Preset,
     Role,
 }

@@ -6302,6 +6302,8 @@ fn stats_inner(
         Some(crate::StatsBy::Pr) => "pr",
         Some(crate::StatsBy::Issue) => "issue",
         Some(crate::StatsBy::Graph) => "graph",
+        Some(crate::StatsBy::Node) => "node",
+        Some(crate::StatsBy::Pattern) => "pattern",
         Some(crate::StatsBy::Preset) => "preset",
         Some(crate::StatsBy::Role) => "role",
         None => "all",
@@ -6319,6 +6321,8 @@ fn stats_inner(
         let key = match by {
             crate::StatsBy::Issue => provenant_telemetry::ContextKey::Issue,
             crate::StatsBy::Graph => provenant_telemetry::ContextKey::GraphId,
+            crate::StatsBy::Node => provenant_telemetry::ContextKey::NodeId,
+            crate::StatsBy::Pattern => provenant_telemetry::ContextKey::Pattern,
             crate::StatsBy::Preset => provenant_telemetry::ContextKey::Preset,
             crate::StatsBy::Role => provenant_telemetry::ContextKey::Role,
             crate::StatsBy::Pr => unreachable!("handled above"),
@@ -6354,10 +6358,11 @@ fn stats_inner(
     for graph in &graph_quality {
         if graph["checkpoint"] == "read" {
             human.push_str(&format!(
-                "graph {}: verdicts={} findings={} repair_rounds={} partial_signals={}\n",
+                "graph {}: verdicts={} findings={} initial_rounds={} repair_rounds={} partial_signals={}\n",
                 graph["graph_id"].as_str().unwrap_or("unknown"),
                 graph["verdicts"],
                 graph["findings"].as_u64().unwrap_or(0),
+                graph["initial_rounds"].as_u64().unwrap_or(0),
                 graph["repair_rounds"].as_u64().unwrap_or(0),
                 graph["partial_signals"]
             ));
@@ -6461,8 +6466,7 @@ fn graph_quality_rows(
             }
         };
         let mut verdicts = BTreeMap::<String, u64>::new();
-        let mut findings = 0u64;
-        let mut rounds = std::collections::BTreeSet::new();
+        let (findings, initial_rounds, repair_rounds) = graph_quality_counts(&checkpoint.nodes);
         for node in &checkpoint.nodes {
             if let Some(gate) = &node.gate {
                 *verdicts
@@ -6482,13 +6486,6 @@ fn graph_quality_rows(
                 .and_then(|outputs| outputs.verdict.as_ref())
             {
                 *verdicts.entry(verdict.to_ascii_lowercase()).or_default() += 1;
-            }
-            findings += node
-                .outputs
-                .as_ref()
-                .map_or(0, |outputs| outputs.findings.len() as u64);
-            if let Some(round) = &node.round {
-                rounds.insert((round.loop_id.clone(), round.round));
             }
         }
         let mut partial = BTreeMap::<String, u64>::new();
@@ -6512,11 +6509,39 @@ fn graph_quality_rows(
             "successful": checkpoint.successful(),
             "verdicts": verdicts,
             "findings": findings,
-            "repair_rounds": rounds.len(),
+            "initial_rounds": initial_rounds,
+            "repair_rounds": repair_rounds,
             "partial_signals": partial,
         }));
     }
     Ok(rows)
+}
+
+fn graph_quality_counts(
+    nodes: &[provenant_fabric_runtime::graph::NodeProgress],
+) -> (u64, usize, usize) {
+    let findings = nodes
+        .iter()
+        .filter(|node| node.children.is_empty())
+        .map(|node| {
+            node.outputs
+                .as_ref()
+                .map_or(0, |outputs| outputs.findings.len() as u64)
+        })
+        .sum();
+    let mut executed = std::collections::BTreeSet::new();
+    for node in nodes {
+        let Some(round) = &node.round else {
+            continue;
+        };
+        let attempted = node.attempts.iter().any(|attempt| attempt.launched);
+        if attempted || node.gate.is_some() {
+            executed.insert((round.loop_id.clone(), round.round));
+        }
+    }
+    let initial = executed.iter().filter(|(_, round)| *round == 1).count();
+    let repairs = executed.iter().filter(|(_, round)| *round > 1).count();
+    (findings, initial, repairs)
 }
 
 fn totals_cache_read_share(totals: &provenant_telemetry::Totals) -> Option<f64> {
@@ -7033,6 +7058,35 @@ mod lane_depth_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn graph_quality_counts_only_executed_repair_rounds_and_leaf_findings() {
+        use provenant_fabric_runtime::graph::NodeProgress;
+        let node = |value| serde_json::from_value::<NodeProgress>(value).unwrap();
+        let findings = json!({
+            "schema_version": 1,
+            "findings": [{"id":"F1", "severity":"P2", "file":"a.rs", "line":1, "summary":"finding", "status":"open"}],
+            "warnings": []
+        });
+        let checkpoint_nodes = vec![
+            node(
+                json!({"id":"composite", "state":"succeeded", "children":["child"], "attempts":[], "outputs":findings}),
+            ),
+            node(json!({"id":"child", "state":"succeeded", "attempts":[], "outputs":findings})),
+            node(
+                json!({"id":"initial", "state":"succeeded", "attempts":[], "round":{"loop_id":"loop","round":1,"node_id":"initial","until":false}, "gate":{"passed":true}}),
+            ),
+            node(
+                json!({"id":"repair", "state":"succeeded", "attempts":[{"launched":true,"key":{"graph_id":"g","node_id":"repair","route_index":0},"route":{"alias":"utility"},"state":"terminal","launch_actor":"actor"}], "round":{"loop_id":"loop","round":2,"node_id":"repair","until":false}}),
+            ),
+            node(
+                json!({"id":"configured_only", "state":"pending", "attempts":[], "round":{"loop_id":"loop","round":3,"node_id":"configured_only","until":false}}),
+            ),
+        ];
+        assert_eq!(graph_quality_counts(&checkpoint_nodes), (1, 1, 1));
+    }
+
     #[test]
     fn model_policy_results_check_sections_and_bound_continuations()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -7727,7 +7781,6 @@ mod tests {
         Ok(())
     }
 
-    use super::*;
     use provenant_run::Providers;
     use provenant_supervisor::custody::CaptureTotals;
     use provenant_supervisor::custody::PublicationState;

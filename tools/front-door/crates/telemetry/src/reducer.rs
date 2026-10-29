@@ -414,30 +414,11 @@ impl Accumulator {
     fn record_weighted(
         &mut self,
         fact: &AttemptFact,
+        usage: Usage,
         numerator: u128,
         missing: bool,
         subscription: bool,
-        weight_millionths: u32,
     ) -> Result<(), TelemetryError> {
-        let scale = |value: Option<u64>| -> Result<Option<u64>, TelemetryError> {
-            value
-                .map(|value| {
-                    u64::try_from(u128::from(value) * u128::from(weight_millionths) / 1_000_000)
-                        .map_err(|_| TelemetryError::Overflow)
-                })
-                .transpose()
-        };
-        let mut usage = fact.usage.clone();
-        usage.uncached_input = scale(usage.uncached_input)?;
-        usage.cache_read = scale(usage.cache_read)?;
-        usage.cache_write = scale(usage.cache_write)?;
-        usage.cache_write_1h = scale(usage.cache_write_1h)?;
-        usage.output_excluding_reasoning = scale(usage.output_excluding_reasoning)?;
-        usage.reasoning = scale(usage.reasoning)?;
-        let numerator = numerator
-            .checked_mul(u128::from(weight_millionths))
-            .ok_or(TelemetryError::Overflow)?
-            / 1_000_000;
         self.record_usage(
             &usage,
             Some(fact.terminal_state),
@@ -466,6 +447,41 @@ impl Accumulator {
             outcomes: self.outcomes,
         })
     }
+}
+
+/// Split an integer metric across sorted allocations, assigning fractional
+/// remainder units to earlier keys so that the parts always add back to it.
+fn weighted_parts<T>(value: T, weights: &[u32]) -> Result<Vec<T>, TelemetryError>
+where
+    T: Copy + TryFrom<u128> + Into<u128>,
+{
+    let value = value.into();
+    let mut parts = weights
+        .iter()
+        .map(|weight| {
+            value
+                .checked_mul(u128::from(*weight))
+                .map(|weighted| weighted / 1_000_000)
+                .ok_or(TelemetryError::Overflow)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let assigned = parts
+        .iter()
+        .try_fold(0u128, |sum, part| sum.checked_add(*part))
+        .ok_or(TelemetryError::Overflow)?;
+    let remainder = value
+        .checked_sub(assigned)
+        .ok_or(TelemetryError::Overflow)?;
+    for part in parts
+        .iter_mut()
+        .take(usize::try_from(remainder).unwrap_or(usize::MAX))
+    {
+        *part += 1;
+    }
+    parts
+        .into_iter()
+        .map(|part| T::try_from(part).map_err(|_| TelemetryError::Overflow))
+        .collect()
 }
 
 /// What a usage record costs at the price table's rates.
@@ -567,6 +583,76 @@ fn groups<K, G>(
     map.into_iter()
         .map(|(key, total)| Ok(group(key, total.finish()?)))
         .collect()
+}
+
+fn reconcile_group_costs(
+    groups: &mut [ContextGroup],
+    numerator: u128,
+) -> Result<(), TelemetryError> {
+    let target = Money::from_numerator(numerator)?.microdollars;
+    let current = groups
+        .iter()
+        .try_fold(0u128, |sum, group| {
+            sum.checked_add(u128::from(
+                group
+                    .totals
+                    .cost
+                    .known_lower_bound
+                    .as_ref()
+                    .map_or(0, |m| m.microdollars),
+            ))
+        })
+        .ok_or(TelemetryError::Overflow)?;
+    if current < u128::from(target) {
+        let mut remainder = u128::from(target) - current;
+        for group in groups.iter_mut() {
+            if remainder == 0 {
+                break;
+            }
+            adjust_group_money(group, 1)?;
+            remainder -= 1;
+        }
+    } else if current > u128::from(target) {
+        let mut remainder = current - u128::from(target);
+        for group in groups.iter_mut().rev() {
+            let available = group
+                .totals
+                .cost
+                .known_lower_bound
+                .as_ref()
+                .map_or(0, |m| m.microdollars);
+            let decrement = u64::try_from(remainder.min(u128::from(available)))
+                .map_err(|_| TelemetryError::Overflow)?;
+            if decrement > 0 {
+                adjust_group_money(group, -i128::from(decrement))?;
+                remainder -= u128::from(decrement);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn adjust_group_money(group: &mut ContextGroup, delta: i128) -> Result<(), TelemetryError> {
+    fn adjust(money: &mut Money, delta: i128) -> Result<(), TelemetryError> {
+        let value = i128::from(money.microdollars)
+            .checked_add(delta)
+            .filter(|n| *n >= 0)
+            .ok_or(TelemetryError::Overflow)?;
+        money.microdollars = u64::try_from(value).map_err(|_| TelemetryError::Overflow)?;
+        money.usd = format!(
+            "{}.{:06}",
+            money.microdollars / 1_000_000,
+            money.microdollars % 1_000_000
+        );
+        Ok(())
+    }
+    if let Some(money) = &mut group.totals.cost.known_lower_bound {
+        adjust(money, delta)?;
+    }
+    if let Some(money) = &mut group.totals.cost.complete {
+        adjust(money, delta)?;
+    }
+    Ok(())
 }
 
 /// Reduces selected facts without I/O. Invalid duplicates are refused, never
@@ -716,15 +802,67 @@ fn stats_inner(
             .or_else(|| {
                 external_groups.and_then(|groups| {
                     groups.get(&fact.attempt_id).map(|values| {
-                        values
+                        if values.iter().any(|value| value.weight_millionths.is_none()) {
+                            // An ambiguous allocation describes one unknown share, not
+                            // one full attempt per linked pull request.
+                            return vec![(None, None)];
+                        }
+                        let mut values = values
                             .iter()
-                            .map(|value| (Some(value.value.clone()), value.weight_millionths))
-                            .collect::<Vec<_>>()
+                            .map(|value| {
+                                (
+                                    Some(value.value.clone()),
+                                    value.weight_millionths.unwrap_or_default(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        values.sort_by(|a, b| a.0.cmp(&b.0));
+                        let mut allocated = 0u32;
+                        for (_, weight) in &values {
+                            if *weight > 1_000_000 || allocated > 1_000_000 - *weight {
+                                return vec![(None, None)];
+                            }
+                            allocated += *weight;
+                        }
+                        if allocated < 1_000_000 {
+                            values.push((None, 1_000_000 - allocated));
+                        }
+                        values.retain(|(_, weight)| *weight > 0);
+                        values
+                            .into_iter()
+                            .map(|(value, weight)| (value, Some(weight)))
+                            .collect()
                     })
                 })
             });
         if let Some(values) = group_values {
-            for (value, weight) in values {
+            let weighted = values.iter().all(|(_, weight)| weight.is_some());
+            let weights = values
+                .iter()
+                .filter_map(|(_, weight)| *weight)
+                .collect::<Vec<_>>();
+            let distributed = if weighted {
+                let distribute = |value: Option<u64>| -> Result<Vec<Option<u64>>, TelemetryError> {
+                    value.map_or_else(
+                        || Ok(vec![None; weights.len()]),
+                        |n| Ok(weighted_parts(n, &weights)?.into_iter().map(Some).collect()),
+                    )
+                };
+                let usage = &fact.usage;
+                let uncached = distribute(usage.uncached_input)?;
+                let read = distribute(usage.cache_read)?;
+                let write = distribute(usage.cache_write)?;
+                let write_1h = distribute(usage.cache_write_1h)?;
+                let output = distribute(usage.output_excluding_reasoning)?;
+                let reasoning = distribute(usage.reasoning)?;
+                let numerators = weighted_parts(cost.numerator, &weights)?;
+                Some((
+                    uncached, read, write, write_1h, output, reasoning, numerators,
+                ))
+            } else {
+                None
+            };
+            for (index, (value, weight)) in values.into_iter().enumerate() {
                 if value
                     .as_ref()
                     .is_some_and(|value| value.trim().is_empty() || value.len() > 256)
@@ -733,16 +871,26 @@ fn stats_inner(
                 }
                 let size = value.as_ref().map_or(0, String::len);
                 let group = budget.group(&mut context_groups, value, size)?;
-                if let Some(weight) = weight {
-                    if weight > 1_000_000 {
+                if weight.is_some() {
+                    let Some((uncached, read, write, write_1h, output, reasoning, numerators)) =
+                        distributed.as_ref()
+                    else {
                         return Err(TelemetryError::InvalidFact("external group weight"));
-                    }
+                    };
+                    let usage = Usage {
+                        uncached_input: uncached[index],
+                        cache_read: read[index],
+                        cache_write: write[index],
+                        cache_write_1h: write_1h[index],
+                        output_excluding_reasoning: output[index],
+                        reasoning: reasoning[index],
+                    };
                     group.record_weighted(
                         &fact,
-                        cost.numerator,
+                        usage,
+                        numerators[index],
                         cost.missing_cost,
                         cost.subscription,
-                        weight,
                     )?;
                 } else {
                     group.record(&fact, cost.numerator, cost.missing_cost, cost.subscription)?;
@@ -793,19 +941,26 @@ fn stats_inner(
         totals,
     })?;
     daily.sort_by(|a, b| (&a.day, report_key(&a.route)).cmp(&(&b.day, report_key(&b.route))));
+    let grouped_numerator = context_groups
+        .values()
+        .try_fold(0u128, |sum, group| sum.checked_add(group.numerator))
+        .ok_or(TelemetryError::Overflow)?;
+    let context_groups = if context_key.is_some() || external_groups.is_some() {
+        let mut result = groups(context_groups, |value, totals| ContextGroup {
+            value,
+            totals,
+        })?;
+        reconcile_group_costs(&mut result, grouped_numerator)?;
+        Some(result)
+    } else {
+        None
+    };
     Ok(StatsReport {
         scope: "supervised_terminal_attempts",
         prices: prices.identity.clone(),
         totals: total.finish()?,
         routes,
-        context_groups: if context_key.is_some() || external_groups.is_some() {
-            Some(groups(context_groups, |value, totals| ContextGroup {
-                value,
-                totals,
-            })?)
-        } else {
-            None
-        },
+        context_groups,
         daily_accounts: window.detail.then_some(daily),
         window,
         latest_task_outcomes,

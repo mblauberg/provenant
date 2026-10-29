@@ -971,3 +971,94 @@ fn external_groups_include_only_joined_facts() {
     assert_eq!(groups[0].totals.usage.uncached_input.known, 25);
     assert_eq!(groups[1].totals.usage.uncached_input.known, 75);
 }
+
+#[test]
+fn ambiguous_external_allocations_are_counted_once_as_unknown() {
+    let fact = fact(1, Some(10));
+    let mut labels = BTreeMap::new();
+    labels.insert(
+        fact.attempt_id,
+        ["owner/repo#42", "owner/repo#43"]
+            .into_iter()
+            .map(|value| ExternalGroup {
+                value: value.into(),
+                weight_millionths: None,
+            })
+            .collect(),
+    );
+    let report =
+        stats_by_external_key([fact], &prices(Some(1)), Window::default(), &labels).unwrap();
+    let groups = report.context_groups.unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].value, None);
+    assert_eq!(groups[0].totals.usage.uncached_input.known, 10);
+    assert_eq!(report.totals.usage.uncached_input.known, 10);
+}
+
+#[test]
+fn zero_weight_external_rows_leave_the_share_unknown() {
+    let fact = fact(1, Some(10));
+    let mut labels = BTreeMap::new();
+    labels.insert(
+        fact.attempt_id,
+        vec![ExternalGroup {
+            value: "owner/repo#0".into(),
+            weight_millionths: Some(0),
+        }],
+    );
+    let report =
+        stats_by_external_key([fact], &prices(Some(1)), Window::default(), &labels).unwrap();
+    let groups = report.context_groups.unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].value, None);
+    assert_eq!(groups[0].totals.usage.uncached_input.known, 10);
+}
+
+#[test]
+fn fractional_tokens_and_cost_remainders_reconcile_by_sorted_key() {
+    let mut fact = fact(1, Some(1));
+    // One input token at a rate of one microdollar per million tokens leaves
+    // a fractional numerator that must be divided without losing its unit.
+    fact.usage.cache_read = Some(1_000_000);
+    let mut labels = BTreeMap::new();
+    labels.insert(
+        fact.attempt_id,
+        vec![
+            ExternalGroup {
+                value: "b".into(),
+                weight_millionths: Some(500_000),
+            },
+            ExternalGroup {
+                value: "a".into(),
+                weight_millionths: Some(500_000),
+            },
+        ],
+    );
+    let report =
+        stats_by_external_key([fact], &prices(Some(1)), Window::default(), &labels).unwrap();
+    let groups = report.context_groups.unwrap();
+    assert_eq!(groups[0].value.as_deref(), Some("a"));
+    assert_eq!(groups[0].totals.usage.uncached_input.known, 1);
+    assert_eq!(groups[1].totals.usage.uncached_input.known, 0);
+    let grouped_read: u64 = groups
+        .iter()
+        .map(|group| group.totals.usage.cache_read.known)
+        .sum();
+    assert_eq!(grouped_read, 1_000_000);
+    let grouped_cost: u64 = groups
+        .iter()
+        .map(|group| {
+            group
+                .totals
+                .cost
+                .known_lower_bound
+                .as_ref()
+                .unwrap()
+                .microdollars
+        })
+        .sum();
+    assert_eq!(
+        grouped_cost,
+        report.totals.cost.known_lower_bound.unwrap().microdollars
+    );
+}

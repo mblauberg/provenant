@@ -1821,6 +1821,16 @@ mod tests {
         }
     }
     #[test]
+    fn telemetry_stats_parses_every_grouping_dimension() {
+        for dimension in ["pr", "issue", "graph", "node", "pattern", "preset", "role"] {
+            let invocation = valid(&["telemetry", "stats", "--by", dimension]);
+            let Command::Telemetry(Telemetry::Stats(stats)) = invocation.command else {
+                panic!("telemetry stats");
+            };
+            assert!(stats.by.is_some(), "{dimension}");
+        }
+    }
+    #[test]
     fn paging_recovery_and_removal_require_explicit_scopes() {
         invalid(&["lanes", "--condition", "all"]);
         invalid(&["lanes", "--wait", "1", "--cursor", "next"]);
