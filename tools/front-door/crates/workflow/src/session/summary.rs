@@ -188,7 +188,7 @@ impl super::SessionStore {
         match self.begin_update(&dir, patch, expected, operation_id, budget, cancel, clock)? {
             Begun::Replayed(outcome) => Ok(outcome),
             Begun::Pending(pending) => self
-                .finish_pending(&dir, pending)
+                .finish_pending(&dir, *pending)
                 .map(|receipt| receipt.outcome(false)),
         }
     }
@@ -290,7 +290,7 @@ impl super::SessionStore {
             PENDING,
             &serde_json::to_vec(&pending).map_err(|_| super::SessionError::Journal)?,
         )?;
-        Ok(Begun::Pending(pending))
+        Ok(Begun::Pending(Box::new(pending)))
     }
 
     /// Complete a journaled summary update, if one is pending. Called under
@@ -389,7 +389,7 @@ fn read_receipts(dir: &super::Directory) -> Result<Receipts, super::SessionError
 
 pub(super) enum Begun {
     Replayed(SummaryOutcome),
-    Pending(Pending),
+    Pending(Box<Pending>),
 }
 
 /// The result of a summary update, original or replayed from its receipt.

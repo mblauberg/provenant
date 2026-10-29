@@ -1745,7 +1745,7 @@ mod tests {
                     path(&root_of(chair), chair.project, "chair").join("summary-pending.json"),
                 )
                 .unwrap();
-                chair.finish_pending(&dir, pending).unwrap();
+                chair.finish_pending(&dir, *pending).unwrap();
                 publish(&dir, "summary-pending.json", &journal).unwrap();
             }
         }
