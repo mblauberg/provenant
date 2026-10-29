@@ -456,10 +456,13 @@ pub fn config_page(
     }
     paginate(scan, selector, page)
 }
+/// `accounts` names the registered directories, so a finding inside one says
+/// which account drifted and how `accounts sync` repairs it.
 pub fn install_page(
     inspection: provenant_config::InstallInspection,
     home: &Path,
     state: &Path,
+    accounts: &[provenant_config::AccountHome],
     selector: impl Serialize,
     page: &Page,
 ) -> Result<CheckPage, CheckError> {
@@ -487,11 +490,51 @@ pub fn install_page(
                     .map_err(|_| CheckError::Evidence("invalid install finding path"))?,
             )
         };
+        let account = accounts
+            .iter()
+            .filter(|account| path.starts_with(&account.home))
+            .max_by_key(|account| account.home.components().count());
+        let message = match (finding.rule.as_str(), account) {
+            ("missing_account_directory" | "unusable_account_directory", Some(account)) => {
+                format!(
+                    "account {} ({}): registered directory is missing or unusable",
+                    account.label,
+                    account.harness.spec().name
+                )
+            }
+            ("unsynced_account", Some(account)) => format!(
+                "account {} ({}): managed content is not installed; run `provenant accounts sync`",
+                account.label,
+                    account.harness.spec().name
+            ),
+            ("account_missing_entry", Some(account)) => format!(
+                "account {} ({}): lacks managed content its sibling accounts have; run `provenant accounts sync`",
+                account.label,
+                    account.harness.spec().name
+            ),
+            ("settings_drift", _) => format!(
+                "shared setting is out of step ({}); run `provenant accounts sync`",
+                finding.detail.as_deref().unwrap_or("unknown")
+            ),
+            ("settings_conflict", _) => format!(
+                "shared setting was edited locally ({}); run `provenant accounts sync --adopt <account>` to keep it or `--force-settings` to overwrite it",
+                finding.detail.as_deref().unwrap_or("unknown")
+            ),
+            (_, Some(account)) => format!(
+                "account {} ({}): managed installation differs from its recorded identity",
+                account.label,
+                    account.harness.spec().name
+            ),
+            ("account_missing_entry", None) => {
+                "target lacks managed content its sibling targets have; run `provenant accounts sync`".into()
+            }
+            _ => "managed installation differs from its recorded identity".into(),
+        };
         scan.finding(
             &finding.rule,
             &Path::new(prefix).join(relative),
             1,
-            "managed installation differs from its recorded identity",
+            &message,
         )?;
     }
     paginate(scan, selector, page)

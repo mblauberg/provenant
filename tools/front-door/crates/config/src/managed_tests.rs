@@ -124,6 +124,9 @@ impl InstallReporter for Reporter {
 }
 struct Smoke;
 
+#[path = "account_sync_tests.rs"]
+mod account_sync;
+
 #[test]
 fn peer_agent_accepts_a_symlinked_home() {
     let mut f = Fixture::new();

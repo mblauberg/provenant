@@ -19,11 +19,27 @@ struct Identity {
     label: String,
     signin: SigninStatus,
 }
+/// Whether one registered account holds the managed settings, hooks and skills
+/// of the installed release. `accounts sync` repairs any state but `synced`.
+#[derive(Serialize, Deserialize)]
+struct Managed {
+    adapter: String,
+    label: String,
+    state: provenant_config::AccountState,
+    /// Findings inside the account's directory; `check install` names each.
+    findings: u64,
+}
 #[derive(Serialize, Deserialize)]
 struct Report {
     claude: Vec<Identity>,
     /// The macOS login-session peer agent.
     peer_agent: provenant_fabric_runtime::peer_agent::Status,
+    /// Every registered account of every adapter.
+    #[serde(default)]
+    managed: Vec<Managed>,
+    /// Why `managed` could not be read, when it could not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed_error: Option<String>,
 }
 fn executable(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
@@ -103,7 +119,37 @@ fn presence(home: &Path, config: &Path) -> CredentialPresence {
         _ => CredentialPresence::Unavailable,
     }
 }
-fn local(home: &Path, state: &Path) -> Result<Report, Box<dyn std::error::Error>> {
+/// Reads the receipt and the files it owns, never a credential. A configuration
+/// or receipt defect is reported in place of rows rather than failing doctor.
+fn managed(roots: &provenant_core::Roots, home: &Path) -> (Vec<Managed>, Option<String>) {
+    let config = match provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
+    {
+        Ok(config) => config,
+        Err(error) => return (Vec::new(), Some(error.to_string())),
+    };
+    let mut targets = provenant_config::Targets::new(roots.clone(), home, &[]);
+    targets.accounts = provenant_cli::accounts::homes(&config.domains.accounts);
+    targets.shared_settings = crate::install::shared_settings(&config.domains.accounts, home)
+        .ok()
+        .flatten();
+    match provenant_config::inspect_accounts(&targets) {
+        Ok(statuses) => (
+            statuses
+                .into_iter()
+                .map(|status| Managed {
+                    adapter: status.harness.spec().name.to_owned(),
+                    label: status.label,
+                    state: status.state,
+                    findings: status.findings.len() as u64,
+                })
+                .collect(),
+            None,
+        ),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    }
+}
+fn local(home: &Path, roots: &provenant_core::Roots) -> Result<Report, Box<dyn std::error::Error>> {
+    let state = roots.state.as_path();
     let mut identities = vec![("default (~/.claude)".to_owned(), home.join(".claude"))];
     for entry in fs::read_dir(home)? {
         let entry = entry?;
@@ -158,16 +204,19 @@ fn local(home: &Path, state: &Path) -> Result<Report, Box<dyn std::error::Error>
         };
         claude.push(Identity { label, signin });
     }
+    let (managed, managed_error) = managed(roots, home);
     Ok(Report {
         claude,
         peer_agent: provenant_fabric_runtime::peer_agent::status(state, home),
+        managed,
+        managed_error,
     })
 }
 fn inspect(globals: &Globals, host: Option<&str>) -> Result<Report, Box<dyn std::error::Error>> {
     let resolved = roots::resolve(globals, roots::Workspace::Home, roots::Product::Optional)?;
     let home = resolved.home;
     let Some(host) = host else {
-        return local(&home, resolved.roots.state.as_path());
+        return local(&home, &resolved.roots);
     };
     let ssh = executable("ssh").ok_or("SSH executable is unavailable")?;
     let argv = [
@@ -203,6 +252,17 @@ fn inspect(globals: &Globals, host: Option<&str>) -> Result<Report, Box<dyn std:
                 || row.label.chars().any(char::is_control)
                 || row.signin.token_validity != "unverified"
         })
+        || remote.data.managed.len() > 128
+        || remote.data.managed.iter().any(|row| {
+            [&row.adapter, &row.label].iter().any(|text| {
+                text.is_empty() || text.len() > 128 || text.chars().any(char::is_control)
+            })
+        })
+        || remote
+            .data
+            .managed_error
+            .as_ref()
+            .is_some_and(|text| text.len() > 1024 || text.chars().any(char::is_control))
     {
         return Err("invalid remote doctor report".into());
     }
@@ -225,6 +285,32 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
                     text.push_str(" (status probe could not confirm sign-in)");
                 }
                 text.push_str("; token validity unverified\n");
+            }
+            // Without a receipt there is nothing to be out of step with.
+            for row in report
+                .managed
+                .iter()
+                .filter(|row| row.state != provenant_config::AccountState::NotInstalled)
+            {
+                let state = serde_json::to_value(row.state)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "unknown".into());
+                text.push_str(&format!("managed [{} {}]: {state}", row.adapter, row.label));
+                if !matches!(
+                    row.state,
+                    provenant_config::AccountState::Synced
+                        | provenant_config::AccountState::NotInstalled
+                ) {
+                    text.push_str(&format!(
+                        "; {} findings; run `provenant accounts sync`",
+                        row.findings
+                    ));
+                }
+                text.push('\n');
+            }
+            if let Some(error) = &report.managed_error {
+                text.push_str(&format!("managed: unavailable: {error}\n"));
             }
             let state = serde_json::to_value(report.peer_agent)
                 .ok()
@@ -268,6 +354,7 @@ mod tests {
     fn doctor_report_requires_the_peer_agent() {
         let report: super::Report =
             serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped"}"#).unwrap();
+        assert!(report.managed.is_empty() && report.managed_error.is_none());
         assert_eq!(
             report.peer_agent,
             provenant_fabric_runtime::peer_agent::Status::Stopped

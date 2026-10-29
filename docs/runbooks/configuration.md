@@ -442,8 +442,39 @@ Each Claude account directory must be exactly `~/.claude-<label>`, already exist
 and be signed in separately. Labels and directories must be distinct, with no
 nested account directories. The current `CLAUDE_CONFIG_DIR` must match a
 registration. When unset, `~/.claude` is the sign-in source only; it cannot be
-registered or used as a switch target. Credentials and settings are never copied
-between directories.
+registered or used as a switch target. Credentials and identity are never
+copied between directories. Provenant's own hooks, skills and MCP entry, and
+the allow-listed shared settings below, are kept identical in every registered
+directory by `install`, `accounts register` and `accounts sync` (see the
+[install runbook](install.md#account-sync)).
+
+Shared Claude settings are configured under `[domains.accounts]`:
+
+```toml
+[domains.accounts.shared_settings]
+source = "/Users/me/.claude/settings.json"   # default: ~/.claude/settings.json when it exists
+keys = ["permissions", "env", "statusLine", "enabledPlugins",
+        "outputStyle", "includeCoAuthoredBy", "cleanupPeriodDays"]   # the default allow-list
+
+[domains.accounts.entries.claude-work.settings]   # wins over the source for this account
+outputStyle = "verbose"
+```
+
+`source` is a JSON file; with no source file and no per-account `settings`,
+nothing is synced. Only keys in `keys` are synced, and a per-account `settings`
+key must be in `keys`. Identity and credential keys (`apiKeyHelper`,
+`awsAuthRefresh`, `awsCredentialExport`, `forceLoginMethod`,
+`forceLoginOrgUUID`, `otelHeadersHelper`) and `hooks` are refused even when
+listed. So is any key, or variable name inside `env`, that contains an `auth`,
+`credential`, `token`, `oauth`, `secret` or `password` word, an `api key`,
+`access key` or `private key` pair, or, after lower-casing and dropping
+separators and digits, any of `token`, `secret`, `password`, `passwd`,
+`credential`, `oauth`, `apikey`, `authtoken`, `privatekey`, `session`,
+`cookie` or `bearer`. The substring rule also catches glued names such as
+`ANTHROPICAUTHTOKEN`, `token2` and `oauth2`, and accepts some false positives;
+the one exemption is the default key `includeCoAuthoredBy`. The message names
+the key and the rule that matched. A refused configuration stops install,
+upgrade and sync, never uninstall.
 
 ```sh
 provenant config set chair.switch_accounts '["work-spare","personal-spare"]'
