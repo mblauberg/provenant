@@ -354,24 +354,78 @@ provenant fabric graph resume --document graph.json \
   --extend loop.repair-review.rounds=4
 ```
 
-Loop extensions and decisions require an exhausted loop. A decision adds at most
-`max_extension_rounds` (default five); set this positive field in the `loop`
-object to choose another cap. The total remains at most 1024 rounds. The runtime
-checks the full expansion against effective host limits before saving an
-extension. A refused extension leaves the original rounds available for stop or
-accept. Saved allowances are absolute, so retrying this command retains four
-total rounds.
-Use `--extend loop.repair-review.decision=stop` to fail the loop, or
-`--extend loop.repair-review.decision=accept` to accept the existing outputs
-and continue. Budget and structural limit extensions may also be needed.
+Loop extensions require an exhausted loop. `--extend loop.repair-review.rounds=4`
+sets the absolute round allowance. `--extend loop.repair-review.decision=stop`
+fails the loop, while `--extend loop.repair-review.decision=accept` accepts its
+current outputs and continues. The runtime checks the expanded graph against
+host limits before saving an extension. A loop can also set
+`max_extension_rounds` (default five) to cap an inbox extension; the total
+rounds remain at most 1024.
 
-To request a human decision on exhaustion, add `decision_session` to the
-`loop` object with the exact originating chair session ID. The inbox offers
-stop, extend by one round or accept as is; a JSON reply can extend by a positive
-number of rounds within the safety bounds. Run graph resume after answering. See
-[exhausted graph loops](human-inbox.md#exhausted-graph-loops) for the answer
-commands and replay behaviour. Without `decision_session`, use the explicit
-resume extensions above.
+### Decide nodes and graph asks
+
+Graphs use one checkpointed ask protocol for human decisions. Add a read-only
+`decide` node to ask a chair to choose an option, then route its verdict through
+a verdict gate:
+
+```json
+{
+  "schema_version": 1,
+  "graph_id": "choose-repair",
+  "decision_session": "CHAIR_SESSION_ID",
+  "nodes": [
+    {
+      "id": "choice",
+      "kind": "decide",
+      "access": "read_only",
+      "decide": {
+        "question": "Which repair should proceed?",
+        "options": [
+          {"id": "repair", "label": "Repair"},
+          {"id": "defer", "label": "Defer"}
+        ]
+      }
+    },
+    {
+      "id": "route-choice",
+      "kind": "gate",
+      "access": "read_only",
+      "depends_on": ["choice"],
+      "inputs": [{"node": "choice", "outputs": ["verdict"]}],
+      "condition": {"type": "verdict", "expected": "repair", "threshold": "all"},
+      "on_fail": "defer"
+    },
+    {
+      "id": "defer",
+      "kind": "task",
+      "access": "read_only",
+      "prompt": "Record that this work is deferred.",
+      "route": {"alias": "senior"}
+    }
+  ]
+}
+```
+
+Use the graph's `decision_session` or set `session` on the decide node. A decide
+node may also set a `default` option and positive `timeout_seconds`; the timeout
+requires a default and the graph takes that option at the saved deadline. A
+chosen option ID becomes the node's verdict. An answer that does not name an
+option is rejected and the graph asks again with the reason. Decide nodes run
+without an attempt and do not use graph concurrency.
+
+The same ask primitive handles exhausted loops and graph pauses. A loop may set
+`decision_session` in its `loop` object; its ask offers stop, extend or accept.
+An extension can add one round, or a JSON reply can add a positive number up to
+`max_extension_rounds` and host limits. A graph-level `decision_session` also
+lets a budget or structural pause ask to resume, cancel or apply budget
+extensions. To extend a budget in the inbox, reply with
+`{"decision":"extend","extensions":["budget.per_graph.tokens=2000000"]}`.
+Asks are keyed by ID in the checkpoint, so several can be open and retries
+reuse the same request. Answer through the inbox, then run
+`provenant fabric graph resume --document graph.json` to advance the checkpoint.
+See [graph asks in the inbox runbook](human-inbox.md#exhausted-graph-loops) for
+answer shapes and replay behaviour. Without a configured decision session, use
+the explicit resume extensions above.
 
 ### Inspect findings and recover a graph
 
