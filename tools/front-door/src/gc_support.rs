@@ -273,32 +273,6 @@ struct StoreSnapshot {
 }
 
 impl LaneSnapshot {
-    /// Find the reservation's canonical attempt, including nested stores. The
-    /// Run owner checks terminal state and binding before releasing custody.
-    pub(crate) fn settle_landed_writer(
-        &self,
-        recovery: provenant_supervisor::custody::Recovery,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let clock = SystemClock;
-        let cancel = CancelToken::new();
-        let call = provenant_run::Request {
-            clock: &clock,
-            budget: WaitBudget::cli(clock.mono_now(), 5)?,
-            cancel: &cancel,
-        };
-        for observed in &self.stores {
-            let Some(store) = &observed.store else {
-                continue;
-            };
-            match store.record(recovery.scope().attempt, &call) {
-                Ok(_) => return Ok(store.settle_landed_writer(recovery, &call)?),
-                Err(provenant_run::RunError::NotFound) => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Err("writer reservation has no canonical attempt".into())
-    }
-
     pub(crate) fn get(&self, path: &Path) -> Option<&bool> {
         self.is_current().then(|| self.states.get(path)).flatten()
     }

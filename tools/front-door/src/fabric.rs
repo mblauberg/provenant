@@ -3957,16 +3957,12 @@ fn settle_owned_worktree(
                                 ..Default::default()
                             },
                             |path| {
-                                let guard = worktrees::cache_writer_guard(
-                                    context.binding,
-                                    context.project_state,
-                                    path,
-                                    lane.branch.as_deref(),
-                                )?;
+                                let guard =
+                                    worktrees::cache_writer_guard(context.project_state, path)?;
                                 if !terminal(path) || !no_live(path) {
                                     return Err(worktrees::WorkerState::Unknown);
                                 }
-                                Ok(guard)
+                                Ok(Some(guard))
                             },
                         )
                         .map_err(|error| crate::worktrees::Error::Permissions(*error.source))?;

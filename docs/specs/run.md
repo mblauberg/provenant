@@ -529,8 +529,8 @@ never share a worktree.
    and passes the plan to supervisor. A lost acknowledgement records
    `launch_unknown`, keeps capacity and the reservation, and is never replayed.
 3. Supervisor observes provider exit and releases host build capacity. Once
-   cleanup proves quiescence, it releases the live writer lock before settlement.
-   The durable reservation still excludes another writer from this worktree.
+   cleanup proves quiescence, it retains the worktree writer lock through settlement.
+   Read-only attempts may release their attempt-local lock.
 4. Settlement imports objects, publishes the branch, records the outcome and
    releases the reservation through the durable phases below.
 5. A run closes only when every task and registered child is terminal.
@@ -541,7 +541,9 @@ excludes a second driver. A dead owner can be replaced after checking its boot,
 PID and start identity. An unknown process observation protects its owner for
 at most ten minutes from the claim. The replacement continues the recorded phase; it does
 not restart the provider. Journal locks cover only short reads and durable
-updates. No settlement lock or writer lock spans an external command.
+updates. No settlement journal lock spans an external command. The worktree
+writer flock spans import and publication, so lifecycle mutations cannot race
+terminal settlement.
 
 | Phase | Durable effect and replay |
 | --- | --- |
@@ -908,7 +910,7 @@ in [nested lanes, MCP and hooks](routing.md#nested-lanes-mcp-and-hooks).
 - Alias coercion, old-root scans, record migration or a state deletion
   command.
 
-## Lane-owned worktrees and adoption
+## Lane-owned worktrees and Git membership
 
 Dispatch may opt into local lifecycle ownership with `--worktree-branch BRANCH
 [--base REF]`, exclusive with `--worktree` and peer `--branch`. Creation uses
@@ -923,15 +925,11 @@ atomic `WorktreeOwner`: optional attempt and operation IDs, short branch,
 pinned base OID, host, creation time, origin (`lane` or `adopted`) and optional
 owner label. `load_owner` and `save_owner` require a verified linked worktree.
 
-`worktree adopt PATH [--owner LABEL]` proves common-repository registration
-and the Git backlink, acquires repository and writer locks, refuses live or
-reserved writers and publishes the ordinary custody identity plus an adopted
-owner. Ownership never grants deletion authority by itself. Existing explicit
-`--worktree` dispatches keep their existing lifecycle.
-Adoption does not mistake an incomplete native census for a live writer. As
-with ordinary mutations, an exclusive writer lock and absent reservation prove
-custody; an observed live process still refuses, and callers requiring a
-complete census still refuse unknown observations.
+Git's inventory and verified common-directory/backlink membership admit
+existing linked checkouts without an adoption step. Canonical paths locate
+persistent exclusion slots; neither old `identity.json` nor registry reservation
+records gate admission. Ownership metadata only controls lane lifecycle cleanup.
+Per-attempt supervisor evidence still controls recovery of launched work.
 
 Owned lane settlement may prune its own clean checkout only after success
 without requested delivery, or after successful delivery, and when its exact
@@ -956,7 +954,7 @@ is silently skipped. Other failures may add a fixed, redacted
 or change an adopted worktree's receipt. Concurrent refreshes of the same
 branch may race and produce a warning.
 - Why: a lane may reclaim only work it owns and commits proven retained elsewhere.
-- Test: `crates/confinement/src/worktrees.rs::adopted_owner_proves_membership_and_enables_custody`;
+- Test: `crates/confinement/src/worktrees.rs::git_inventory_accepts_unregistered_and_recreated_worktrees`;
   `::owned_cleanup_refuses_dirty_unmerged_and_adopted_trees`;
   `tests/dispatch_provider.rs::owned_dispatch_creates_and_replays_after_pruning`;
   `tools/front-door/src/gc_support.rs::writer_tracking_refresh_handles_remote_branch_absence_and_failure`;

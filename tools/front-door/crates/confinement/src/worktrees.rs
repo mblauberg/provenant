@@ -6,8 +6,7 @@ mod owner;
 pub use context::with_context;
 pub use gc::{WorktreeGcPolicy, WorktreeGcReport, collect};
 pub use owner::{
-    WorktreeOrigin, WorktreeOwner, adopt, load_owner, prune_owned, save_lane_owner_when_free,
-    save_owner,
+    WorktreeOrigin, WorktreeOwner, load_owner, prune_owned, save_lane_owner_when_free, save_owner,
 };
 
 use crate::repo::{
@@ -20,11 +19,9 @@ use crate::utility::{
 };
 use provenant_config::ProjectBinding;
 use provenant_core::Clock;
-use provenant_core::{CancelToken, GitOid, ProjectId, RelativePath, WaitBudget, hex};
+use provenant_core::{CancelToken, GitOid, RelativePath, WaitBudget, hex};
 use provenant_os::exec::{ExecOutcome, Executor, Termination};
-use provenant_os::fs::{
-    Directory, FsError, LockGuard, LockMode, Metadata, PublishMode, canonicalize,
-};
+use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode, canonicalize};
 use provenant_os::pid::{CwdObservation, CwdObserver, SystemCwdObserver};
 use provenant_records::{PathWire, PathWireError};
 use provenant_supervisor::census::{
@@ -44,11 +41,8 @@ use thiserror::Error;
 const MAX_WORKTREES: usize = 10_000;
 const MAX_BRANCHES: usize = 10_000;
 const MAX_STATE_RECORD: u64 = 64 * 1024;
-const WORKTREE_IDENTITY_SCHEMA: u64 = 3;
 const REPOSITORY_LOCK: &str = "worktrees.lock";
 const WRITER_LOCK: &str = "writer.lock";
-const RESERVATION: &str = "reservation.json";
-const IDENTITY: &str = "identity.json";
 const WORKTREE_ROOT: &str = ".worktrees";
 
 #[derive(Debug, Error)]
@@ -83,6 +77,8 @@ pub enum WorktreeError {
     IgnoredPaths(String),
     #[error("worktree has an in-progress Git operation")]
     GitOperationInProgress,
+    #[error("worktree writer lock busy")]
+    LockBusy,
     #[error("worktree writer is live")]
     LiveWriter,
     #[error("worktree writer is live: process {0} has its working directory inside the tree")]
@@ -93,14 +89,8 @@ pub enum WorktreeError {
     IncompleteCensus,
     #[error("worktree writer or registration is unknown")]
     UnknownWriter,
-    #[error("worktree registration is stale: the recorded {field} differs from the tree")]
-    RegistrationMismatch { field: &'static str },
     #[error("Git marks the worktree {}", if *.locked { "locked" } else { "prunable" })]
     GitEntryHeld { locked: bool },
-    #[error("worktree has a writer reservation")]
-    ReservationPresent,
-    #[error("worktree registration record is missing or unreadable")]
-    UnreadableRecord,
     #[error("worktree operation was cancelled")]
     Cancelled,
     #[error("worktree branch is checked out")]
@@ -140,41 +130,21 @@ impl WorktreeError {
     /// Refusals that mean Provenant cannot prove who owns the tree. Callers
     /// that retain such a tree treat every one of them alike.
     pub fn is_custody_unknown(&self) -> bool {
-        matches!(
-            self,
-            Self::UnknownWriter
-                | Self::RegistrationMismatch { .. }
-                | Self::GitEntryHeld { .. }
-                | Self::ReservationPresent
-                | Self::UnreadableRecord
-        )
+        matches!(self, Self::UnknownWriter | Self::GitEntryHeld { .. })
     }
 
     /// The operator's next step for a refusal that has one.
     pub fn repair(&self) -> Option<&'static str> {
         Some(match self {
-            Self::StaleRegistration => {
-                "if the checkout exists, run `provenant worktree adopt PATH --owner NAME` from outside the tree"
-            }
-            Self::RegistrationMismatch { .. } => {
-                "run `provenant worktree adopt PATH --owner NAME` from outside the tree to \
-                 replace the stale registration; it still refuses while a writer is live"
-            }
-            Self::UnreadableRecord => {
-                "run `provenant worktree adopt PATH --owner NAME` from outside the tree to \
-                 rewrite the registration record"
-            }
+            Self::StaleRegistration => "run `git worktree prune`, then retry",
             Self::GitEntryHeld { locked: true } => "run `git worktree unlock <path>`, then retry",
             Self::GitEntryHeld { locked: false } => {
                 "run `git worktree prune` to clear the missing checkout, or restore its directory, then retry"
             }
-            Self::ReservationPresent => {
-                "wait for the lane that reserved the tree to finish (see `provenant status`), then retry"
-            }
             Self::LiveProcess(_) => {
                 "stop that process or change its directory out of the tree, then run `provenant worktree list` and retry"
             }
-            Self::LiveWriter => {
+            Self::LockBusy | Self::LiveWriter => {
                 "run `provenant status` and wait for the writer holding the lock to finish, then retry"
             }
             Self::Dirty => {
@@ -300,6 +270,7 @@ pub enum WorktreeCondition {
 #[serde(rename_all = "snake_case")]
 pub enum WriterState {
     Free,
+    Busy,
     Live,
     Unknown,
 }
@@ -380,7 +351,7 @@ pub enum RetainReason {
     NoUniqueCommit,
     LiveWriter,
     UnknownWriter,
-    StaleRegistration,
+    LockBusy,
     Changed,
     GitFailure,
     Unregistered,
@@ -406,6 +377,7 @@ pub struct DiscardedRef {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkerState {
     Free,
+    Busy,
     Live,
     Unknown,
 }
@@ -705,48 +677,6 @@ pub(crate) struct GitWorktree {
     pub(crate) bare: bool,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WorktreeIdentity {
-    schema_version: u64,
-    active: bool,
-    project_id: ProjectId,
-    root_device: u64,
-    root_inode: u64,
-    path_digest: String,
-    branch: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    git_identity: Option<GitIdentity>,
-    #[serde(default, skip_serializing_if = "is_zero")]
-    device_refreshes: u64,
-}
-
-fn is_zero(value: &u64) -> bool {
-    *value == 0
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GitIdentity {
-    common_device: u64,
-    common_inode: u64,
-    private_device: u64,
-    private_inode: u64,
-}
-
-impl GitIdentity {
-    fn capture(tree: &VerifiedWorktree) -> Self {
-        let common = tree.repo().common_identity();
-        let private = tree.repo().private_identity();
-        Self {
-            common_device: common.device,
-            common_inode: common.inode,
-            private_device: private.device,
-            private_inode: private.inode,
-        }
-    }
-}
-
 pub(crate) fn parse_worktree_list(bytes: &[u8]) -> Result<Vec<GitWorktree>, WorktreeError> {
     let mut result = Vec::new();
     let mut fields: Vec<Vec<u8>> = Vec::new();
@@ -1007,30 +937,10 @@ fn path_digest(path: &Path) -> String {
     hex(&digest)
 }
 
-/// The registry entry name for the canonical worktree `path`, below
+/// The exclusion slot name for the canonical worktree `path`, below
 /// `<state>/worktrees/<project>/`.
 pub fn state_dir_name(path: &Path) -> OsString {
     path_digest(path).into()
-}
-
-fn identity_for(
-    context: &WorktreeContext<'_>,
-    path: &Path,
-    branch: &GitRefName,
-    tree: &VerifiedWorktree,
-) -> WorktreeIdentity {
-    let root_identity = tree.identity();
-    WorktreeIdentity {
-        schema_version: WORKTREE_IDENTITY_SCHEMA,
-        active: true,
-        project_id: context.binding.project_id(),
-        root_device: root_identity.device,
-        root_inode: root_identity.inode,
-        path_digest: path_digest(path),
-        branch: branch.as_str().to_owned(),
-        git_identity: Some(GitIdentity::capture(tree)),
-        device_refreshes: 0,
-    }
 }
 
 fn read_bounded(directory: &Directory, name: &OsStr, limit: u64) -> Result<Vec<u8>, FsError> {
@@ -1047,66 +957,6 @@ fn read_bounded(directory: &Directory, name: &OsStr, limit: u64) -> Result<Vec<u
                 source,
             },
         })
-}
-
-fn write_identity(
-    directory: &Directory,
-    identity: &WorktreeIdentity,
-    mode: PublishMode,
-) -> Result<(), WorktreeError> {
-    let bytes = serde_json::to_vec(identity).map_err(|_| WorktreeError::InvalidOutput)?;
-    directory
-        .atomic_write(OsStr::new(IDENTITY), ".identity-", &bytes, mode)?
-        .require_durable()
-        .map_err(|_| WorktreeError::RegistrationUnconfirmed)
-}
-
-fn writer_state(
-    context: &WorktreeContext<'_>,
-    path: &Path,
-    branch: &GitRefName,
-    root_identity: Metadata,
-) -> WorkerState {
-    let name = state_dir_name(path);
-    let directory = match context.project_state.open_verified_directory(&name) {
-        Ok(directory) => directory,
-        Err(_) => return WorkerState::Unknown,
-    };
-    let bytes = match read_bounded(&directory, OsStr::new(IDENTITY), MAX_STATE_RECORD) {
-        Ok(bytes) => bytes,
-        Err(_) => return WorkerState::Unknown,
-    };
-    let identity: WorktreeIdentity = match serde_json::from_slice(&bytes) {
-        Ok(identity) => identity,
-        Err(_) => return WorkerState::Unknown,
-    };
-    if identity.schema_version != WORKTREE_IDENTITY_SCHEMA
-        || !identity.active
-        || identity.project_id != context.binding.project_id()
-        || identity.root_device != root_identity.device
-        || identity.root_inode != root_identity.inode
-        || identity.path_digest != path_digest(path)
-        || identity.branch != branch.as_str()
-    {
-        return WorkerState::Unknown;
-    }
-    if match directory.metadata_at(OsStr::new(RESERVATION), false) {
-        Ok(_) => true,
-        Err(error) if error.is_not_found() => false,
-        Err(_) => true,
-    } {
-        return WorkerState::Unknown;
-    }
-    match directory.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive) {
-        Ok(_guard) => match directory.metadata_at(OsStr::new(RESERVATION), false) {
-            Ok(_) => WorkerState::Unknown,
-            Err(error) if error.is_not_found() => WorkerState::Free,
-            Err(_) => WorkerState::Unknown,
-        },
-        Err(error) if error.raw_os_error().is_some() => WorkerState::Unknown,
-        Err(FsError::LockTimeout { .. }) => WorkerState::Live,
-        Err(_) => WorkerState::Unknown,
-    }
 }
 
 /// A writer must pass this check before its terminal result is accepted.
@@ -1182,9 +1032,19 @@ fn worktree_dirty_at(
 
 struct LockedWorktree {
     verified: VerifiedWorktree,
-    state: Directory,
-    identity: WorktreeIdentity,
     writer: Option<LockGuard>,
+}
+
+/// Canonical paths locate exclusion slots, never identity records. Keep slots
+/// after removal so concurrent callers cannot lock different inodes.
+fn writer_directory(project_state: &Directory, path: &Path) -> Result<Directory, WorktreeError> {
+    let name = state_dir_name(path);
+    match project_state.mkdir(&name, 0o700) {
+        Ok(()) => project_state.sync()?,
+        Err(error) if error.is_exists() => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(project_state.open_verified_directory(&name)?)
 }
 
 /// Verify a registered worktree and probe its own effective Git configuration,
@@ -1202,172 +1062,10 @@ fn verify_probed_worktree(
     Ok(tree)
 }
 
-fn read_worktree_identity(
-    context: &WorktreeContext<'_>,
-    entry: &GitWorktree,
-    require_active: bool,
-    cancel: &CancelToken,
-) -> Result<(VerifiedWorktree, Directory, WorktreeIdentity), WorktreeError> {
-    if entry.locked || entry.prunable {
-        return Err(WorktreeError::GitEntryHeld {
-            locked: entry.locked,
-        });
-    }
-    let verified =
-        verify_probed_worktree(context, &entry.path, cancel).map_err(|error| match error {
-            WorktreeError::Repository(
-                RepoError::InvalidGitMarker
-                | RepoError::InvalidRegistration
-                | RepoError::InvalidGitDirectory,
-            ) => WorktreeError::RegistrationMismatch {
-                field: "worktree git directory",
-            },
-            other => other,
-        })?;
-    let canonical = canonicalize(verified.path())?;
-    let name = state_dir_name(&canonical);
-    let state = context
-        .project_state
-        .open_verified_directory(&name)
-        .map_err(|_| WorktreeError::UnreadableRecord)?;
-    // A detached checkout still has custody over the same registered tree.
-    // Preserve its recorded branch in the tombstone without claiming that a
-    // writer may use that branch while HEAD is detached.
-    let branch = match &entry.branch {
-        Some(branch) => branch.clone(),
-        None => GitRefName::new(read_identity(&state)?.branch)
-            .map_err(|_| WorktreeError::UnreadableRecord)?,
-    };
-    let identity = refresh_identity(
-        &state,
-        context.binding.project_id(),
-        &verified,
-        &canonical,
-        &branch,
-        require_active,
-    )?;
-    Ok((verified, state, identity))
-}
-
-// The caller holds the exclusive repository lock and has checked Git's list.
-fn refresh_identity(
-    state: &Directory,
-    project: ProjectId,
-    verified: &VerifiedWorktree,
-    canonical: &Path,
-    branch: &GitRefName,
-    require_active: bool,
-) -> Result<WorktreeIdentity, WorktreeError> {
-    let mut identity = read_identity(state)?;
-    identity.check(project, None, canonical, branch.as_str(), require_active)?;
-    // Legacy records have no Git identities: the one-time upgrade accepts the
-    // improbable risk of a recreated path reusing its root inode during a
-    // device change, after current Git membership has been verified.
-    identity.check_tree(verified)?;
-    if identity.root_device != verified.identity().device {
-        verified.repo().revalidate()?;
-        identity.root_device = verified.identity().device;
-        identity.git_identity = Some(GitIdentity::capture(verified));
-        identity.device_refreshes = identity
-            .device_refreshes
-            .checked_add(1)
-            .ok_or(WorktreeError::InvalidOutput)?;
-        write_identity(state, &identity, PublishMode::Replace)?;
-    }
-    Ok(identity)
-}
-
-fn read_identity(state: &Directory) -> Result<WorktreeIdentity, WorktreeError> {
-    let bytes = read_bounded(state, OsStr::new(IDENTITY), MAX_STATE_RECORD)
-        .map_err(|_| WorktreeError::UnreadableRecord)?;
-    serde_json::from_slice(&bytes).map_err(|_| WorktreeError::UnreadableRecord)
-}
-
-impl WorktreeIdentity {
-    fn check_tree(&self, tree: &VerifiedWorktree) -> Result<(), WorktreeError> {
-        let root = tree.identity();
-        if self.root_inode != root.inode {
-            return Err(WorktreeError::RegistrationMismatch {
-                field: "root inode",
-            });
-        }
-        if let Some(recorded) = &self.git_identity {
-            let current = GitIdentity::capture(tree);
-            let matches = |old_device, old_inode, new_device, new_inode| {
-                old_inode == new_inode
-                    && (old_device == new_device
-                        || (self.root_device != root.device
-                            && provenant_supervisor::custody::same_device_rebinding(
-                                self.root_device,
-                                old_device,
-                                root.device,
-                                new_device,
-                            )))
-            };
-            if !matches(
-                recorded.common_device,
-                recorded.common_inode,
-                current.common_device,
-                current.common_inode,
-            ) {
-                return Err(WorktreeError::RegistrationMismatch {
-                    field: "common git directory",
-                });
-            }
-            if !matches(
-                recorded.private_device,
-                recorded.private_inode,
-                current.private_device,
-                current.private_inode,
-            ) {
-                return Err(WorktreeError::RegistrationMismatch {
-                    field: "worktree git directory",
-                });
-            }
-        }
-        Ok(())
-    }
-    /// Names the first recorded field that differs from the tree, so the
-    /// refusal can say what went stale. `root` is absent before the tree
-    /// exists.
-    fn check(
-        &self,
-        project: ProjectId,
-        root: Option<provenant_os::fs::Metadata>,
-        path: &Path,
-        branch: &str,
-        require_active: bool,
-    ) -> Result<(), WorktreeError> {
-        let field = if self.schema_version != WORKTREE_IDENTITY_SCHEMA {
-            "schema version"
-        } else if require_active && !self.active {
-            "active state"
-        } else if self.project_id != project {
-            "project"
-        } else if root.is_some_and(|root| self.root_device != root.device) {
-            "root device"
-        } else if root.is_some_and(|root| self.root_inode != root.inode) {
-            "root inode"
-        } else if self.path_digest != path_digest(path) {
-            "path"
-        } else if self.branch != branch {
-            "branch"
-        } else {
-            return Ok(());
-        };
-        Err(WorktreeError::RegistrationMismatch { field })
-    }
-}
-
-/// Turns a verified, registered worktree into the supervisor's writer custody:
-/// its `state/worktrees/<ProjectId>/<digest>` directory and a binding that
-/// names the worktree and Git directory by identity, never by raw path. The
-/// registration must still be active, for this project and branch, so a
-/// launch cannot claim custody of a worktree Provenant did not create. A
-/// missing state record is `NotFound`; every other failure is a named custody reason.
+/// Git's inventory and linked-worktree verification establish membership.
+/// Supervisor keeps per-attempt process evidence in the exclusion slot.
 pub fn writer_custody(
     project_state: &Directory,
-    project: ProjectId,
     worktree: &VerifiedWorktree,
     branch: &GitRefName,
     base: GitOid,
@@ -1375,47 +1073,20 @@ pub fn writer_custody(
 ) -> Result<(Directory, WriterBinding), WorktreeError> {
     worktree.repo().revalidate()?;
     let canonical = canonicalize(worktree.path())?;
-    // No state record at all means `provenant worktree create` never made this
-    // tree; callers report that apart from a damaged or stale record.
-    let mut state = project_state
-        .open_verified_directory(&state_dir_name(&canonical))
-        .map_err(|error| {
-            if error.is_not_found() {
-                WorktreeError::NotFound
-            } else {
-                WorktreeError::UnreadableRecord
-            }
-        })?;
-    let mut identity = read_identity(&state)?;
-    if identity.root_device != worktree.identity().device {
-        let _registry =
-            project_state.try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)?;
-        state = project_state
-            .open_verified_directory(&state_dir_name(&canonical))
-            .map_err(|_| WorktreeError::UnreadableRecord)?;
-        let entries = parse_worktree_list(&worktree_list()?)?;
-        if !entries.iter().any(|entry| {
-            !entry.locked
-                && !entry.prunable
-                && !entry.bare
-                && entry.branch.as_ref() == Some(branch)
-                && canonicalize(&entry.path).ok().as_deref() == Some(canonical.as_path())
-        }) {
-            return Err(WorktreeError::RegistrationMismatch {
-                field: "Git worktree registration",
-            });
-        }
-        worktree.repo().revalidate()?;
-        identity = refresh_identity(&state, project, worktree, &canonical, branch, true)?;
+    let entries = parse_worktree_list(&worktree_list()?)?;
+    let entry = entries
+        .iter()
+        .find(|entry| !entry.bare && canonicalize(&entry.path).ok().as_deref() == Some(&canonical))
+        .ok_or(WorktreeError::NotFound)?;
+    if entry.locked || entry.prunable {
+        return Err(WorktreeError::GitEntryHeld {
+            locked: entry.locked,
+        });
     }
-    identity.check(
-        project,
-        Some(worktree.identity()),
-        &canonical,
-        branch.as_str(),
-        true,
-    )?;
-    identity.check_tree(worktree)?;
+    if entry.branch.as_ref() != Some(branch) {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    let state = writer_directory(project_state, &canonical)?;
     let binding = WriterBinding::from_verified(
         worktree.repo().root_dir(),
         worktree.repo().private_dir(),
@@ -1426,39 +1097,52 @@ pub fn writer_custody(
     Ok((state, binding))
 }
 
-fn ensure_unreserved(state: &Directory) -> Result<(), WorktreeError> {
-    match state.metadata_at(OsStr::new(RESERVATION), false) {
-        Ok(_) => Err(WorktreeError::ReservationPresent),
-        Err(error) if error.is_not_found() => Ok(()),
-        Err(_) => Err(WorktreeError::UnreadableRecord),
-    }
-}
-
 fn lock_worktree_for_mutation(
     context: &WorktreeContext<'_>,
     entry: &GitWorktree,
     cancel: &CancelToken,
 ) -> Result<LockedWorktree, WorktreeError> {
-    let (verified, state, identity) = read_worktree_identity(context, entry, true, cancel)?;
-    ensure_unreserved(&state)?;
-    let writer = match state.lock(
-        OsStr::new(WRITER_LOCK),
-        LockMode::Exclusive,
-        WaitBudget::nonblocking(context.clock.mono_now()),
-        cancel,
-        context.clock,
-    ) {
-        Ok(guard) => guard,
-        Err(FsError::LockTimeout { .. }) => return Err(WorktreeError::LiveWriter),
-        Err(FsError::Cancelled { .. }) => return Err(WorktreeError::Cancelled),
-        Err(_) => return Err(WorktreeError::UnknownWriter),
+    lock_worktree(context, entry, cancel, false)
+}
+
+fn lock_worktree(
+    context: &WorktreeContext<'_>,
+    entry: &GitWorktree,
+    cancel: &CancelToken,
+    preview: bool,
+) -> Result<LockedWorktree, WorktreeError> {
+    if entry.locked || entry.prunable {
+        return Err(WorktreeError::GitEntryHeld {
+            locked: entry.locked,
+        });
+    }
+    let verified = verify_probed_worktree(context, &entry.path, cancel)?;
+    let writer = if preview {
+        cache_writer_probe(context.project_state, verified.path()).map_err(|state| match state {
+            WorkerState::Busy => WorktreeError::LockBusy,
+            _ => WorktreeError::UnknownWriter,
+        })?
+    } else {
+        let state = writer_directory(context.project_state, verified.path())?;
+        let writer = match state.lock(
+            OsStr::new(WRITER_LOCK),
+            LockMode::Exclusive,
+            WaitBudget::nonblocking(context.clock.mono_now()),
+            cancel,
+            context.clock,
+        ) {
+            Ok(guard) => guard,
+            Err(FsError::LockTimeout { .. }) => return Err(WorktreeError::LockBusy),
+            Err(FsError::Cancelled { .. }) => return Err(WorktreeError::Cancelled),
+            Err(_) => return Err(WorktreeError::UnknownWriter),
+        };
+        Some(writer)
     };
-    ensure_unreserved(&state)?;
     let canonical = canonicalize(verified.path())?;
     let observations = context
         .workers
         .observe_roots(std::slice::from_ref(&canonical));
-    // The writer lock and the absence of a reservation are the custody proof.
+    // The writer lock establishes exclusion.
     // A census gap does not make a free lease live; only a positive
     // observation of a live process refuses. Landing also needs this root
     // observed free, which a process the kernel refuses to describe does not
@@ -1471,13 +1155,9 @@ fn lock_worktree_for_mutation(
         WorkerState::Unknown if context.workers.requires_complete_census() => {
             Err(WorktreeError::IncompleteCensus)
         }
-        WorkerState::Free | WorkerState::Unknown => Ok(LockedWorktree {
-            verified,
-            state,
-            identity,
-            writer: Some(writer),
-        }),
+        WorkerState::Free | WorkerState::Unknown => Ok(LockedWorktree { verified, writer }),
         WorkerState::Live => Err(live_refusal(context.workers, &canonical)),
+        WorkerState::Busy => Err(WorktreeError::LockBusy),
     }
 }
 
@@ -1557,7 +1237,6 @@ pub fn fast_forward(
         });
     }
     repo.revalidate()?;
-    locked.identity.check_tree(&locked.verified)?;
     let actual = run_git(context, repo, GitRead::RevParseHead, cancel)?;
     if exit_code(&actual)? != 0 || parse_oid(trim_ascii(&actual.stdout.bytes))? != current.head {
         return Err(WorktreeError::IdentityChanged);
@@ -1612,30 +1291,28 @@ pub fn list(
             .get(&path)
             .copied()
             .unwrap_or(WorkerState::Unknown);
-        let (dirty, writer) = match (entry.branch.as_ref(), path == primary) {
-            (Some(_), true) => (
+        let (dirty, writer) = if path == primary {
+            (
                 worktree_dirty_at(context, context.repo, cancel)
                     .unwrap_or(WorktreeCondition::Unknown),
                 combine_worker_state(WorkerState::Unknown, observed),
-            ),
-            (Some(branch), false) => match read_worktree_identity(context, entry, true, cancel) {
-                Ok((worktree, _, _)) => (
+            )
+        } else {
+            match verify_probed_worktree(context, &path, cancel) {
+                Ok(worktree) => (
                     worktree_dirty_at(context, worktree.repo(), cancel)
                         .unwrap_or(WorktreeCondition::Unknown),
-                    combine_worker_state(
-                        writer_state(context, &path, branch, worktree.identity()),
-                        observed,
-                    ),
+                    if entry.locked || entry.prunable {
+                        WriterState::Unknown
+                    } else {
+                        combine_worker_state(
+                            disk_writer_state(context.project_state, &path),
+                            observed,
+                        )
+                    },
                 ),
-                Err(_) => (
-                    verify_probed_worktree(context, &path, cancel)
-                        .ok()
-                        .and_then(|tree| worktree_dirty_at(context, tree.repo(), cancel).ok())
-                        .unwrap_or(WorktreeCondition::Unknown),
-                    WriterState::Unknown,
-                ),
-            },
-            (None, _) => (WorktreeCondition::Unknown, WriterState::Unknown),
+                Err(_) => (WorktreeCondition::Unknown, WriterState::Unknown),
+            }
         };
         result.push(WorktreeInfo {
             path,
@@ -1651,68 +1328,56 @@ pub fn list(
 pub(crate) fn combine_worker_state(state: WorkerState, native: WorkerState) -> WriterState {
     match (state, native) {
         (WorkerState::Live, _) | (_, WorkerState::Live) => WriterState::Live,
+        (WorkerState::Busy, _) | (_, WorkerState::Busy) => WriterState::Busy,
         (WorkerState::Unknown, _) | (_, WorkerState::Unknown) => WriterState::Unknown,
         (WorkerState::Free, WorkerState::Free) => WriterState::Free,
     }
 }
 
-/// Registration observation for disk reports. Missing or unsafe state stays
-/// unknown; existing writer locks are opened read-only and never created.
-pub(crate) fn disk_writer_state(
-    binding: &ProjectBinding,
-    project_state: &Directory,
-    path: &Path,
-    branch: Option<&str>,
-) -> WorkerState {
-    cache_writer_guard(binding, project_state, path, branch)
-        .map(|_guard| WorkerState::Free)
-        .unwrap_or_else(|state| state)
+/// Observe exclusion without creating state during listing or disk reports.
+pub(crate) fn disk_writer_state(project_state: &Directory, path: &Path) -> WorkerState {
+    match cache_writer_probe(project_state, path) {
+        Ok(_) => WorkerState::Free,
+        Err(state) => state,
+    }
 }
 
-/// Hold writer exclusion for an idle cache. Missing or unsafe registration and
-/// reservations are unobservable; a busy existing lock identifies a live writer.
-pub fn cache_writer_guard(
-    binding: &ProjectBinding,
+/// Probe an existing exclusion slot without creating state during preview.
+pub fn cache_writer_probe(
     project_state: &Directory,
     path: &Path,
-    branch: Option<&str>,
-) -> Result<LockGuard, WorkerState> {
-    let observe = || -> Result<LockGuard, WorktreeError> {
-        let directory = project_state.open_verified_directory(&state_dir_name(path))?;
-        let bytes = read_bounded(&directory, OsStr::new(IDENTITY), MAX_STATE_RECORD)?;
-        let identity: WorktreeIdentity =
-            serde_json::from_slice(&bytes).map_err(|_| WorktreeError::UnknownWriter)?;
-        let root = Directory::open_anchor(path)?.metadata()?;
-        if identity.schema_version != WORKTREE_IDENTITY_SCHEMA
-            || !identity.active
-            || identity.project_id != binding.project_id()
-            || identity.root_device != root.device
-            || identity.root_inode != root.inode
-            || identity.path_digest != path_digest(path)
-            || Some(identity.branch.as_str()) != branch
-        {
-            return Err(WorktreeError::UnknownWriter);
-        }
-        let unreserved = || {
-            matches!(directory.metadata_at(OsStr::new(RESERVATION), false),
-            Err(error) if error.is_not_found())
-        };
-        match directory.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive) {
-            Ok(guard) if unreserved() => Ok(guard),
-            Err(FsError::LockTimeout { .. }) => Err(WorktreeError::LiveWriter),
-            _ => Err(WorktreeError::UnknownWriter),
-        }
+) -> Result<Option<LockGuard>, WorkerState> {
+    let directory = match project_state.open_verified_directory(&state_dir_name(path)) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(_) => return Err(WorkerState::Unknown),
     };
-    observe().map_err(|error| match error {
-        WorktreeError::LiveWriter => WorkerState::Live,
-        _ => WorkerState::Unknown,
-    })
+    match directory.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive) {
+        Ok(guard) => Ok(Some(guard)),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(FsError::LockTimeout { .. }) => Err(WorkerState::Busy),
+        Err(_) => Err(WorkerState::Unknown),
+    }
+}
+
+/// Hold writer exclusion for cache mutation. Membership comes from the
+/// caller's Git inventory; the slot supplies only exclusion.
+pub fn cache_writer_guard(
+    project_state: &Directory,
+    path: &Path,
+) -> Result<LockGuard, WorkerState> {
+    let directory = writer_directory(project_state, path).map_err(|_| WorkerState::Unknown)?;
+    directory
+        .try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
+        .map_err(|error| match error {
+            FsError::LockTimeout { .. } => WorkerState::Busy,
+            _ => WorkerState::Unknown,
+        })
 }
 
 /// Create a clean linked checkout at a pinned commit. A failed or killed
 /// `worktree add` is rolled back (see `roll_back_failed_add`). Failed
-/// registration after Git succeeds leaves a visible tree with unknown state;
-/// no guessed rollback.
+/// verification after Git succeeds leaves a visible tree for inspection.
 pub fn create(
     context: &WorktreeContext<'_>,
     request: WorktreeCreate,
@@ -1825,43 +1490,13 @@ pub fn create(
             return Err(WorktreeError::UnknownWriter);
         }
     }
-    let state_name = state_dir_name(&target);
-    let prior_state = match context.project_state.metadata_at(&state_name, false) {
-        Ok(_) => {
-            let state = context.project_state.open_verified_directory(&state_name)?;
-            ensure_unreserved(&state)?;
-            // The tree is not made yet, so only a retired record may be reused.
-            let prior = read_identity(&state)?;
-            prior.check(
-                context.binding.project_id(),
-                None,
-                &target,
-                branch.as_str(),
-                false,
-            )?;
-            if prior.active {
-                return Err(WorktreeError::RegistrationMismatch {
-                    field: "active state",
-                });
-            }
-            let writer = match state.lock(
-                OsStr::new(WRITER_LOCK),
-                LockMode::Exclusive,
-                WaitBudget::nonblocking(context.clock.mono_now()),
-                cancel,
-                context.clock,
-            ) {
-                Ok(guard) => guard,
-                Err(FsError::LockTimeout { .. }) => return Err(WorktreeError::LiveWriter),
-                Err(FsError::Cancelled { .. }) => return Err(WorktreeError::Cancelled),
-                Err(_) => return Err(WorktreeError::UnknownWriter),
-            };
-            ensure_unreserved(&state)?;
-            Some((state, writer))
-        }
-        Err(error) if error.is_not_found() => None,
-        Err(_) => return Err(WorktreeError::UnknownWriter),
-    };
+    let state = writer_directory(context.project_state, &target)?;
+    let _writer = state
+        .try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
+        .map_err(|error| match error {
+            FsError::LockTimeout { .. } => WorktreeError::LockBusy,
+            other => other.into(),
+        })?;
     let named_root = context
         .repo
         .root_dir()
@@ -1914,30 +1549,6 @@ pub fn create(
     if worktree_dirty_at(context, verified.repo(), cancel)? != WorktreeCondition::Clean {
         return Err(WorktreeError::RegistrationUnconfirmed);
     }
-    let (state, _writer) = match prior_state {
-        Some((state, writer)) => (state, writer),
-        None => {
-            match context.project_state.metadata_at(&state_name, false) {
-                Ok(_) => return Err(WorktreeError::UnknownWriter),
-                Err(error) if error.is_not_found() => {}
-                Err(_) => return Err(WorktreeError::UnknownWriter),
-            }
-            context.project_state.mkdir(&state_name, 0o700)?;
-            context.project_state.sync()?;
-            let state = context.project_state.open_verified_directory(&state_name)?;
-            let writer = state.lock(
-                OsStr::new(WRITER_LOCK),
-                LockMode::Exclusive,
-                WaitBudget::nonblocking(context.clock.mono_now()),
-                cancel,
-                context.clock,
-            )?;
-            ensure_unreserved(&state)?;
-            (state, writer)
-        }
-    };
-    let identity = identity_for(context, &target, &branch, &verified);
-    write_identity(&state, &identity, PublishMode::Replace)?;
     let worker = context.workers.observe_roots(std::slice::from_ref(&target));
     let writer = worker.get(&target).copied().unwrap_or(WorkerState::Unknown);
     Ok(WorktreeInfo {
@@ -1948,6 +1559,7 @@ pub fn create(
         writer: match writer {
             WorkerState::Free => WriterState::Free,
             WorkerState::Live => WriterState::Live,
+            WorkerState::Busy => WriterState::Busy,
             WorkerState::Unknown => WriterState::Unknown,
         },
     })
@@ -2211,12 +1823,6 @@ fn checked_out_elsewhere(
     Ok(false)
 }
 
-fn tombstone_identity(locked: &LockedWorktree) -> Result<(), WorktreeError> {
-    let mut identity = locked.identity.clone();
-    identity.active = false;
-    write_identity(&locked.state, &identity, PublishMode::Replace)
-}
-
 fn remove_tree(
     context: &WorktreeContext<'_>,
     entry: &GitWorktree,
@@ -2302,7 +1908,6 @@ fn remove_tree_when(
         cancel,
     )?;
     context.repo.revalidate()?;
-    tombstone_identity(&locked)?;
     // Keep writer exclusion through cache detachment and verified deletion.
     // Cleanup remains best-effort after Git has removed the worktree.
     let info = WorktreeInfo {
@@ -2424,10 +2029,8 @@ fn retain_reason(error: &WorktreeError) -> RetainReason {
         WorktreeError::Dirty | WorktreeError::IgnoredPaths(_) => RetainReason::Dirty,
         WorktreeError::GitOperationInProgress => RetainReason::GitOperationInProgress,
         WorktreeError::LiveWriter | WorktreeError::LiveProcess(_) => RetainReason::LiveWriter,
+        WorktreeError::LockBusy => RetainReason::LockBusy,
         WorktreeError::Cancelled | WorktreeError::IncompleteCensus => RetainReason::UnknownWriter,
-        WorktreeError::RegistrationMismatch { .. } | WorktreeError::UnreadableRecord => {
-            RetainReason::StaleRegistration
-        }
         error if error.is_custody_unknown() => RetainReason::UnknownWriter,
         WorktreeError::CheckedOut => RetainReason::CheckedOut,
         WorktreeError::IdentityChanged => RetainReason::Changed,
@@ -2898,6 +2501,296 @@ mod lifecycle_tests {
     struct FreeWorkers;
 
     #[test]
+    fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Error>> {
+        for existing_slot in [false, true] {
+            let fixture = Fixture::new()?;
+            fs::write(fixture.root.join(".gitignore"), ".worktrees/\ntarget/\n")?;
+            fixture.run(&["add", ".gitignore"])?;
+            fixture.run(&["commit", "-m", "ignore build output"])?;
+            let test = TestContext::new(&fixture)?;
+            let context = test.context();
+            let path = fixture.root.join(".worktrees/native");
+            fixture.run(&[
+                "worktree",
+                "add",
+                "-b",
+                "native",
+                path.to_str().ok_or("path")?,
+            ])?;
+            fs::create_dir(path.join("target"))?;
+            fs::write(path.join("target/artifact"), "cached output")?;
+            let slot = context
+                .project_state
+                .current_path()?
+                .join(state_dir_name(&path));
+            if existing_slot {
+                writer_directory(context.project_state, &path)?;
+            }
+            assert!(
+                cache_writer_probe(context.project_state, &path)
+                    .map_err(|_| "probe failed")?
+                    .is_none()
+            );
+            let lanes = list(&context, &cancel())?;
+            let regenerable = ["target".into()];
+            let policy = WorktreeGcPolicy {
+                upstream: None,
+                terminal: &|_| false,
+                no_live_lanes: &|_| true,
+                regenerable: &regenerable,
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: true,
+                foreign_merged_clean: false,
+                foreign_idle_before_ns: None,
+            };
+            let preview = collect(&context, &lanes, &policy, &cancel())?;
+            assert_eq!(preview.idle_output.len(), 1);
+            assert_eq!(preview.idle_output[0].reason, "would_remove");
+            assert!(path.join("target/artifact").is_file());
+            assert_eq!(slot.exists(), existing_slot);
+            assert!(!slot.join(WRITER_LOCK).exists());
+            let applied = collect(
+                &context,
+                &lanes,
+                &WorktreeGcPolicy {
+                    dry_run: false,
+                    ..policy
+                },
+                &cancel(),
+            )?;
+            assert_eq!(applied.idle_output.len(), 1);
+            assert!(!path.join("target").exists());
+            assert!(slot.join(WRITER_LOCK).is_file());
+            let held =
+                cache_writer_guard(context.project_state, &path).map_err(|_| "guard failed")?;
+            assert!(matches!(
+                cache_writer_probe(context.project_state, &path),
+                Err(WorkerState::Busy)
+            ));
+            drop(held);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn git_inventory_accepts_unregistered_and_recreated_worktrees() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test = TestContext::new(&fixture)?;
+        let context = test.context();
+        let path = fixture.root.join(".worktrees/native");
+        fixture.run(&[
+            "worktree",
+            "add",
+            "-b",
+            "native",
+            path.to_str().ok_or("path")?,
+        ])?;
+        let name = state_dir_name(&path);
+        assert!(
+            context
+                .project_state
+                .open_verified_directory(&name)
+                .is_err()
+        );
+        let inventory = || {
+            Ok(
+                run_git(&context, &fixture.repo, GitRead::WorktreeList, &cancel())?
+                    .stdout
+                    .bytes,
+            )
+        };
+        let bind = |branch: &str| -> Result<_, WorktreeError> {
+            writer_custody(
+                context.project_state,
+                &verify_worktree(&fixture.repo, &path)?,
+                &GitRefName::branch(branch).map_err(|_| WorktreeError::InvalidRequest)?,
+                fixture.head().map_err(|_| WorktreeError::InvalidOutput)?,
+                inventory,
+            )
+        };
+        assert_eq!(
+            list(&context, &cancel())?
+                .iter()
+                .find(|tree| tree.path == path)
+                .ok_or("tree")?
+                .writer,
+            WriterState::Free
+        );
+        assert!(
+            context
+                .project_state
+                .open_verified_directory(&name)
+                .is_err(),
+            "listing creates no state"
+        );
+        let (state, _) = bind("native")?;
+        assert!(
+            state
+                .metadata_at(OsStr::new("identity.json"), false)
+                .is_err()
+        );
+        assert!(matches!(bind("other"), Err(WorktreeError::IdentityChanged)));
+        // Legacy identity and registry reservations are never membership gates.
+        fs::write(
+            state.current_path()?.join("identity.json"),
+            b"invalid old schema and inode",
+        )?;
+        fs::write(
+            state.current_path()?.join("reservation.json"),
+            b"legacy registry data",
+        )?;
+        fixture.run(&["worktree", "remove", path.to_str().ok_or("path")?])?;
+        fixture.run(&[
+            "worktree",
+            "add",
+            "-b",
+            "recreated",
+            path.to_str().ok_or("path")?,
+        ])?;
+        bind("recreated")?;
+        let outcome = remove(
+            &context,
+            WorktreeRemove::Name {
+                name: "recreated".into(),
+                discard: false,
+                integration: None,
+                expected_head: None,
+            },
+            &cancel(),
+        )?;
+        assert_eq!(outcome.removed.len(), 1);
+        // Reusing a removed path has no tombstone/schema/branch refusal.
+        create(
+            &context,
+            WorktreeCreate {
+                branch: "native".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn writer_lock_busy_is_distinct_from_observed_live_process() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test = TestContext::new(&fixture)?;
+        let context = test.context();
+        let info = create(
+            &context,
+            WorktreeCreate {
+                branch: "busy".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        let state = writer_directory(context.project_state, &info.path)?;
+        let before = state.metadata_at(OsStr::new(WRITER_LOCK), false)?;
+        let held = state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?;
+        let request = || WorktreeRemove::Name {
+            name: "busy".into(),
+            discard: false,
+            integration: None,
+            expected_head: None,
+        };
+        let error = remove(&context, request(), &cancel())
+            .err()
+            .ok_or("removed busy tree")?;
+        assert!(matches!(error, WorktreeError::LockBusy));
+        assert!(error.to_string().contains("lock busy"));
+        assert!(!error.to_string().contains("live"));
+        assert_eq!(
+            list(&context, &cancel())?
+                .iter()
+                .find(|tree| tree.path == info.path)
+                .ok_or("tree")?
+                .writer,
+            WriterState::Busy
+        );
+        let report = collect(
+            &context,
+            &list(&context, &cancel())?,
+            &WorktreeGcPolicy {
+                upstream: Some(fixture.head()?),
+                terminal: &|_| true,
+                no_live_lanes: &|_| true,
+                regenerable: &[],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: true,
+                foreign_merged_clean: false,
+                foreign_idle_before_ns: None,
+            },
+            &cancel(),
+        )?;
+        assert!(
+            report
+                .worktrees
+                .retained
+                .iter()
+                .any(|tree| tree.reason == RetainReason::LockBusy)
+        );
+        drop(held);
+        let live = WorktreeContext {
+            workers: &NamedLive,
+            ..test.context()
+        };
+        assert!(matches!(
+            remove(&live, request(), &cancel()),
+            Err(WorktreeError::LiveProcess(_))
+        ));
+        remove(&context, request(), &cancel())?;
+        assert!(before.same_identity(&state.metadata_at(OsStr::new(WRITER_LOCK), false)?));
+        Ok(())
+    }
+
+    #[test]
+    fn foreign_gc_checks_whole_tree_idleness_before_pruning_output() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fs::write(fixture.root.join(".gitignore"), "target/\n")?;
+        fixture.run(&["add", ".gitignore"])?;
+        fixture.run(&["commit", "-m", "ignore output"])?;
+        let test = TestContext::new(&fixture)?;
+        let context = test.context();
+        let path = fixture._temp.path().join("foreign");
+        fixture.run(&[
+            "worktree",
+            "add",
+            "-b",
+            "foreign",
+            path.to_str().ok_or("path")?,
+        ])?;
+        fs::create_dir(path.join("target"))?;
+        fs::write(path.join("target/artifact"), "old output")?;
+        fs::File::open(path.join("target/artifact"))?.set_modified(std::time::UNIX_EPOCH)?;
+        fs::File::open(path.join("target"))?.set_modified(std::time::UNIX_EPOCH)?;
+        let lanes = list(&context, &cancel())?;
+        let report = collect(
+            &context,
+            &lanes,
+            &WorktreeGcPolicy {
+                upstream: Some(fixture.head()?),
+                terminal: &|_| false,
+                no_live_lanes: &|_| true,
+                regenerable: &["target".into()],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: false,
+                foreign_merged_clean: true,
+                foreign_idle_before_ns: Some(1),
+            },
+            &cancel(),
+        )?;
+        assert!(report.worktrees.removed.is_empty());
+        assert_eq!(
+            fs::read_to_string(path.join("target/artifact"))?,
+            "old output"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn source_fast_forward_advances_clean_tree_and_preserves_ignored_output()
     -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
@@ -3027,7 +2920,7 @@ mod lifecycle_tests {
                 "diverged" => assert!(
                     matches!(error, WorktreeError::SourceDiverged { current, target: requested } if current == before && requested == target)
                 ),
-                "leased" => assert!(matches!(error, WorktreeError::LiveWriter)),
+                "leased" => assert!(matches!(error, WorktreeError::LockBusy)),
                 _ => unreachable!(),
             }
             let after = read_worktrees(&context, &cancel())?
@@ -3125,7 +3018,7 @@ mod lifecycle_tests {
         };
         assert!(matches!(
             save_lane_owner_when_free(&context, &tree, &next, &cancel()),
-            Err(WorktreeError::LiveWriter)
+            Err(WorktreeError::LockBusy)
         ));
         assert_eq!(load_owner(&tree)?, Some(owner.clone()));
         drop(held);
@@ -3140,526 +3033,6 @@ mod lifecycle_tests {
         save_owner(&tree, &owner)?;
         assert!(save_lane_owner_when_free(&context, &tree, &next, &cancel()).is_err());
         assert_eq!(load_owner(&tree)?, Some(owner));
-        Ok(())
-    }
-
-    #[test]
-    fn adopted_owner_proves_membership_and_enables_custody() -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
-        let test = TestContext::new(&fixture)?;
-        let context = test.context();
-        let native = fixture.root.join(".worktrees/native");
-        fixture.run(&[
-            "worktree",
-            "add",
-            "-b",
-            "native",
-            native.to_str().ok_or("path")?,
-        ])?;
-        let tree = verify_worktree(&fixture.repo, &native)?;
-        assert!(load_owner(&tree)?.is_none());
-        let owner = WorktreeOwner {
-            attempt_id: None,
-            operation_id: None,
-            branch: "native".into(),
-            base: fixture.head()?.to_string(),
-            host: provenant_core::HostId::from_bytes([3; 16]),
-            created_at: context.clock.wall_now()?,
-            origin: WorktreeOrigin::Adopted,
-            label: Some("manual".into()),
-        };
-        let lane_owner = WorktreeOwner {
-            origin: WorktreeOrigin::Lane,
-            operation_id: Some("not-adopted".parse()?),
-            ..owner.clone()
-        };
-        assert!(matches!(
-            adopt(&context, &native, &lane_owner, &cancel()),
-            Err(WorktreeError::InvalidRequest)
-        ));
-        assert!(load_owner(&tree)?.is_none());
-        // A failed owner publication must not register custody identity.
-        let owner_path = tree.repo().private_git_dir().join("provenant-owner.json");
-        fs::create_dir(&owner_path)?;
-        assert!(adopt(&context, &native, &owner, &cancel()).is_err());
-        let state = context
-            .project_state
-            .open_verified_directory(&state_dir_name(&native))?;
-        assert!(
-            state
-                .read_bounded(OsStr::new(IDENTITY), MAX_STATE_RECORD)
-                .is_err_and(|error| error.is_not_found())
-        );
-        fs::remove_dir(owner_path)?;
-        adopt(&context, &native, &owner, &cancel())?;
-        assert_eq!(load_owner(&tree)?, Some(owner.clone()));
-        assert_eq!(
-            list(&context, &cancel())?
-                .into_iter()
-                .find(|tree| tree.path == native)
-                .ok_or("native missing")?
-                .writer,
-            WriterState::Free
-        );
-        let foreign = Fixture::new()?;
-        let foreign_path = foreign.root.join(".worktrees/foreign");
-        foreign.run(&[
-            "worktree",
-            "add",
-            "-b",
-            "foreign",
-            foreign_path.to_str().ok_or("path")?,
-        ])?;
-        assert!(adopt(&context, &foreign_path, &owner, &cancel()).is_err());
-        assert!(adopt(&context, &fixture.root, &owner, &cancel()).is_err());
-        let state = context
-            .project_state
-            .open_verified_directory(&state_dir_name(&native))?;
-        state
-            .atomic_write(
-                OsStr::new(RESERVATION),
-                ".test-",
-                b"{}",
-                PublishMode::Replace,
-            )?
-            .require_durable()?;
-        assert!(adopt(&context, &native, &owner, &cancel()).is_err());
-        Ok(())
-    }
-
-    /// A worker observer that sees one named process inside every root.
-    struct NamedLive;
-    impl WorkerObserver for NamedLive {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
-            roots
-                .iter()
-                .cloned()
-                .map(|root| (root, WorkerState::Live))
-                .collect()
-        }
-
-        fn live_process(&self, _root: &Path) -> Option<ObservedProcess> {
-            Some(ObservedProcess {
-                pid: 4242,
-                command: Some("zsh".into()),
-            })
-        }
-    }
-
-    #[test]
-    fn re_added_tree_is_named_stale_and_adopt_replaces_it_only_when_free()
-    -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
-        let test = TestContext::new(&fixture)?;
-        let context = test.context();
-        let info = create(
-            &context,
-            WorktreeCreate {
-                branch: "stale".into(),
-                base: None,
-            },
-            &cancel(),
-        )?;
-        let path = info.path.clone();
-        let path_text = path.to_str().ok_or("path")?;
-        // Plain Git recreates the tree at the registered path, so the record
-        // survives while the root inode and branch it names are gone.
-        fixture.run(&["worktree", "remove", path_text])?;
-        fixture.run(&["worktree", "add", "-b", "stale-again", path_text])?;
-        let custody = || -> Result<_, Box<dyn Error>> {
-            let tree = verify_worktree(&fixture.repo, &path)?;
-            let branch = GitRefName::branch("stale-again")?;
-            Ok(writer_custody(
-                context.project_state,
-                context.binding.project_id(),
-                &tree,
-                &branch,
-                fixture.head()?,
-                || Err(WorktreeError::InvalidOutput),
-            ))
-        };
-        let refusal = custody()?.err().ok_or("stale tree gained custody")?;
-        assert!(
-            matches!(refusal, WorktreeError::RegistrationMismatch { field }
-                if field == "root inode" || field == "branch"),
-            "{refusal}"
-        );
-        assert!(
-            refusal
-                .with_repair()
-                .contains("provenant worktree adopt PATH --owner NAME")
-        );
-
-        let owner = WorktreeOwner {
-            attempt_id: None,
-            operation_id: None,
-            branch: "stale-again".into(),
-            base: fixture.head()?.to_string(),
-            host: provenant_core::HostId::from_bytes([3; 16]),
-            created_at: context.clock.wall_now()?,
-            origin: WorktreeOrigin::Adopted,
-            label: Some("chair".into()),
-        };
-        // A live process refuses adoption and is named; custody is unchanged.
-        let live = NamedLive;
-        let live_context = WorktreeContext {
-            workers: &live,
-            ..test.context()
-        };
-        let refused = adopt(&live_context, &path, &owner, &cancel());
-        assert!(
-            matches!(&refused, Err(WorktreeError::LiveProcess(process))
-                if process.pid == 4242 && process.command.as_deref() == Some("zsh")),
-            "{refused:?}"
-        );
-        assert!(
-            refused
-                .err()
-                .is_some_and(|error| error.to_string().contains("4242 (zsh)"))
-        );
-        // A held writer lock refuses it too, however free the tree looks.
-        let state = context
-            .project_state
-            .open_verified_directory(&state_dir_name(&path))?;
-        let held = state.lock(
-            OsStr::new(WRITER_LOCK),
-            LockMode::Exclusive,
-            WaitBudget::nonblocking(context.clock.mono_now()),
-            &cancel(),
-            context.clock,
-        )?;
-        assert!(matches!(
-            adopt(&context, &path, &owner, &cancel()),
-            Err(WorktreeError::LiveWriter)
-        ));
-        drop(held);
-        assert!(matches!(
-            custody()?,
-            Err(WorktreeError::RegistrationMismatch { .. })
-        ));
-
-        adopt(&context, &path, &owner, &cancel())?;
-        assert!(custody()?.is_ok());
-        Ok(())
-    }
-
-    #[test]
-    fn registration_refreshes_device_but_rejects_changed_inodes() -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
-        let test = TestContext::new(&fixture)?;
-        let context = test.context();
-        let info = create(
-            &context,
-            WorktreeCreate {
-                branch: "refresh-device".into(),
-                base: None,
-            },
-            &cancel(),
-        )?;
-        let state = context
-            .project_state
-            .open_verified_directory(&state_dir_name(&info.path))?;
-        let original = read_identity(&state)?;
-        let entry = read_worktrees(&context, &cancel())?
-            .into_iter()
-            .find(|entry| entry.path == info.path)
-            .ok_or("missing worktree")?;
-        let mut legacy = original.clone();
-        legacy.root_device ^= 1;
-        legacy.git_identity = None;
-        write_identity(&state, &legacy, PublishMode::Replace)?;
-        {
-            let _lock = repository_lock(&context, LockMode::Exclusive, &cancel())?;
-            read_worktree_identity(&context, &entry, true, &CancelToken::new())?;
-        }
-        let refreshed = read_identity(&state)?;
-        assert_eq!(refreshed.root_device, original.root_device);
-        assert_eq!(refreshed.device_refreshes, 1);
-        assert!(refreshed.git_identity.is_some());
-        let mut changed_device = refreshed.clone();
-        changed_device.root_device ^= 1;
-        write_identity(&state, &changed_device, PublishMode::Replace)?;
-        list(&context, &cancel())?;
-        let refreshed = read_identity(&state)?;
-        assert_eq!(refreshed.root_device, original.root_device);
-        assert_eq!(refreshed.device_refreshes, 2);
-        let mut launch_record = refreshed.clone();
-        launch_record.root_device ^= 1;
-        write_identity(&state, &launch_record, PublishMode::Replace)?;
-        let tree = verify_worktree(context.repo, &info.path)?;
-        let branch = entry.branch.as_ref().ok_or("missing branch")?;
-        writer_custody(
-            context.project_state,
-            context.binding.project_id(),
-            &tree,
-            branch,
-            info.head,
-            || {
-                Ok(
-                    run_git(&context, context.repo, GitRead::WorktreeList, &cancel())?
-                        .stdout
-                        .bytes,
-                )
-            },
-        )?;
-        let refreshed = read_identity(&state)?;
-        assert_eq!(refreshed.root_device, original.root_device);
-        assert_eq!(refreshed.device_refreshes, 3);
-        let mut changed = refreshed.clone();
-        changed.root_inode ^= 1;
-        write_identity(&state, &changed, PublishMode::Replace)?;
-        let error = read_worktree_identity(&context, &entry, true, &CancelToken::new())
-            .err()
-            .ok_or("changed inode accepted")?;
-        assert!(matches!(
-            error,
-            WorktreeError::RegistrationMismatch {
-                field: "root inode"
-            }
-        ));
-        assert!(
-            error
-                .with_repair()
-                .contains("provenant worktree adopt PATH --owner NAME")
-        );
-        changed = refreshed;
-        changed.root_device ^= 1;
-        changed
-            .git_identity
-            .as_mut()
-            .ok_or("missing git identity")?
-            .private_inode ^= 1;
-        write_identity(&state, &changed, PublishMode::Replace)?;
-        let error = read_worktree_identity(&context, &entry, true, &CancelToken::new())
-            .err()
-            .ok_or("changed gitdir accepted")?;
-        assert!(matches!(
-            error,
-            WorktreeError::RegistrationMismatch {
-                field: "worktree git directory"
-            }
-        ));
-        assert!(
-            error
-                .with_repair()
-                .contains("provenant worktree adopt PATH --owner NAME")
-        );
-        let lanes = list(&context, &cancel())?;
-        let report = collect(
-            &context,
-            &lanes,
-            &WorktreeGcPolicy {
-                upstream: None,
-                terminal: &|_| true,
-                no_live_lanes: &|_| true,
-                regenerable: &[],
-                keep: &[],
-                written_before_ns: i128::MAX,
-                dry_run: false,
-                foreign_merged_clean: false,
-                foreign_idle_before_ns: None,
-            },
-            &cancel(),
-        )?;
-        assert!(
-            report
-                .worktrees
-                .retained
-                .iter()
-                .any(|entry| entry.reason == RetainReason::StaleRegistration)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn registration_refresh_refuses_changed_git_identity_and_paths() -> Result<(), Box<dyn Error>> {
-        for scenario in ["common", "gitdir", "gitfile", "symlink"] {
-            let fixture = Fixture::new()?;
-            let test = TestContext::new(&fixture)?;
-            let context = test.context();
-            let info = create(
-                &context,
-                WorktreeCreate {
-                    branch: "identity-check".into(),
-                    base: None,
-                },
-                &cancel(),
-            )?;
-            let entry = read_worktrees(&context, &cancel())?
-                .into_iter()
-                .find(|entry| entry.path == info.path)
-                .ok_or("missing entry")?;
-            let state = context
-                .project_state
-                .open_verified_directory(&state_dir_name(&info.path))?;
-            let mut record = read_identity(&state)?;
-            record.root_device ^= 1;
-            match scenario {
-                "common" => {
-                    record
-                        .git_identity
-                        .as_mut()
-                        .ok_or("missing identity")?
-                        .common_inode ^= 1
-                }
-                "gitdir" => {
-                    record
-                        .git_identity
-                        .as_mut()
-                        .ok_or("missing identity")?
-                        .private_inode ^= 1
-                }
-                "gitfile" => {
-                    let other = create(
-                        &context,
-                        WorktreeCreate {
-                            branch: "other-tree".into(),
-                            base: None,
-                        },
-                        &cancel(),
-                    )?;
-                    let other_tree = verify_worktree(context.repo, &other.path)?;
-                    let marker = info.path.join(".git");
-                    fs::remove_file(&marker)?;
-                    fs::write(
-                        marker,
-                        format!(
-                            "gitdir: {}\n",
-                            other_tree.repo().private_git_dir().display()
-                        ),
-                    )?;
-                }
-                "symlink" => {
-                    let moved = info.path.with_extension("moved");
-                    fs::rename(&info.path, &moved)?;
-                    std::os::unix::fs::symlink(&moved, &info.path)?;
-                }
-                _ => unreachable!(),
-            }
-            write_identity(&state, &record, PublishMode::Replace)?;
-            let _lock = repository_lock(&context, LockMode::Exclusive, &cancel())?;
-            let error = read_worktree_identity(&context, &entry, true, &CancelToken::new())
-                .err()
-                .ok_or_else(|| format!("{scenario} unexpectedly refreshed"))?;
-            match scenario {
-                "common" => assert!(matches!(
-                    error,
-                    WorktreeError::RegistrationMismatch {
-                        field: "common git directory"
-                    }
-                )),
-                "gitdir" | "gitfile" => assert!(matches!(
-                    error,
-                    WorktreeError::RegistrationMismatch {
-                        field: "worktree git directory"
-                    }
-                )),
-                "symlink" => assert!(matches!(
-                    error,
-                    WorktreeError::Repository(_) | WorktreeError::Filesystem(_)
-                )),
-                _ => unreachable!(),
-            }
-            let after = read_identity(&state)?;
-            assert_eq!(after.root_device, record.root_device, "{scenario}");
-            assert_eq!(
-                after.device_refreshes, record.device_refreshes,
-                "{scenario}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn registration_refresh_refuses_worktree_from_another_common_dir() -> Result<(), Box<dyn Error>>
-    {
-        let fixture = Fixture::new()?;
-        let foreign = Fixture::new()?;
-        let test = TestContext::new(&fixture)?;
-        let foreign_test = TestContext::new(&foreign)?;
-        let context = test.context();
-        let foreign_context = foreign_test.context();
-        let info = create(
-            &foreign_context,
-            WorktreeCreate {
-                branch: "foreign".into(),
-                base: None,
-            },
-            &cancel(),
-        )?;
-        let entry = read_worktrees(&foreign_context, &cancel())?
-            .into_iter()
-            .find(|entry| entry.path == info.path)
-            .ok_or("missing foreign entry")?;
-        assert!(matches!(
-            verify_worktree(context.repo, &info.path),
-            Err(RepoError::InvalidRegistration)
-        ));
-        let foreign_state = foreign_context
-            .project_state
-            .open_verified_directory(&state_dir_name(&info.path))?;
-        let mut record = read_identity(&foreign_state)?;
-        record.project_id = context.binding.project_id();
-        record.root_device ^= 1;
-        let name = state_dir_name(&info.path);
-        context.project_state.mkdir(&name, 0o700)?;
-        let state = context.project_state.open_verified_directory(&name)?;
-        write_identity(&state, &record, PublishMode::Replace)?;
-        let _lock = repository_lock(&context, LockMode::Exclusive, &cancel())?;
-        assert!(matches!(
-            read_worktree_identity(&context, &entry, true, &CancelToken::new()),
-            Err(WorktreeError::RegistrationMismatch { .. })
-        ));
-        let after = read_identity(&state)?;
-        assert_eq!(after.root_device, record.root_device);
-        assert_eq!(after.device_refreshes, record.device_refreshes);
-        Ok(())
-    }
-
-    #[test]
-    fn custody_refusals_name_their_reason_and_repair() -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
-        let test = TestContext::new(&fixture)?;
-        let context = test.context();
-        let info = create(
-            &context,
-            WorktreeCreate {
-                branch: "named".into(),
-                base: None,
-            },
-            &cancel(),
-        )?;
-        let path_text = info.path.to_str().ok_or("path")?;
-        let entry = || -> Result<_, Box<dyn Error>> {
-            read_worktrees(&context, &cancel())?
-                .into_iter()
-                .find(|entry| entry.path == info.path)
-                .ok_or_else(|| "worktree missing".into())
-        };
-        fixture.run(&["worktree", "lock", path_text])?;
-        let locked = read_worktree_identity(&context, &entry()?, true, &CancelToken::new()).err();
-        assert!(matches!(
-            locked,
-            Some(WorktreeError::GitEntryHeld { locked: true })
-        ));
-        assert!(locked.is_some_and(|error| error.with_repair().contains("git worktree unlock")));
-        fixture.run(&["worktree", "unlock", path_text])?;
-
-        let state = context
-            .project_state
-            .open_verified_directory(&state_dir_name(&info.path))?;
-        state
-            .atomic_write(
-                OsStr::new(IDENTITY),
-                ".test-",
-                b"not json",
-                PublishMode::Replace,
-            )?
-            .require_durable()?;
-        let unreadable =
-            read_worktree_identity(&context, &entry()?, true, &CancelToken::new()).err();
-        assert!(matches!(unreadable, Some(WorktreeError::UnreadableRecord)));
-        assert!(unreadable.is_some_and(|error| error.with_repair().contains("worktree adopt")));
         Ok(())
     }
 
@@ -3918,6 +3291,25 @@ mod lifecycle_tests {
         }
     }
 
+    /// A worker observer that sees one named process inside every root.
+    struct NamedLive;
+    impl WorkerObserver for NamedLive {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Live))
+                .collect()
+        }
+
+        fn live_process(&self, _root: &Path) -> Option<ObservedProcess> {
+            Some(ObservedProcess {
+                pid: 4242,
+                command: Some("zsh".into()),
+            })
+        }
+    }
+
     struct UnknownWorkers;
 
     #[test]
@@ -3957,7 +3349,7 @@ mod lifecycle_tests {
 
     #[test]
     fn detached_removal_keeps_dirty_unmerged_and_live_work() -> Result<(), Box<dyn Error>> {
-        for scenario in ["dirty", "unmerged", "live", "reserved", "changed-head"] {
+        for scenario in ["dirty", "unmerged", "live", "changed-head"] {
             let fixture = Fixture::new()?;
             let test = TestContext::new(&fixture)?;
             let mut context = test.context();
@@ -3978,19 +3370,6 @@ mod lifecycle_tests {
                     &["commit", "--allow-empty", "-m", "detached work"],
                 )?,
                 "live" => context.workers = &NamedLive,
-                "reserved" => {
-                    let state = context
-                        .project_state
-                        .open_verified_directory(&state_dir_name(&info.path))?;
-                    state
-                        .atomic_write(
-                            OsStr::new(RESERVATION),
-                            ".test-",
-                            b"{}",
-                            PublishMode::Replace,
-                        )?
-                        .require_durable()?;
-                }
                 _ => {}
             }
             let request = |discard| WorktreeRemove::Name {
@@ -4007,7 +3386,6 @@ mod lifecycle_tests {
                     "dirty" => matches!(error, WorktreeError::Dirty),
                     "unmerged" => matches!(error, WorktreeError::DetachedUnmerged { .. }),
                     "live" => matches!(error, WorktreeError::LiveProcess(_)),
-                    "reserved" => matches!(error, WorktreeError::ReservationPresent),
                     "changed-head" => matches!(error, WorktreeError::IdentityChanged),
                     _ => false,
                 },
@@ -4023,71 +3401,6 @@ mod lifecycle_tests {
                 assert!(!info.path.exists());
             }
         }
-        Ok(())
-    }
-
-    #[test]
-    fn adopt_fresh_worktree_with_incomplete_native_census() -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
-        let test = TestContext::new(&fixture)?;
-        let mut context = test.context();
-        context.workers = &UnknownWorkers;
-        let path = fixture.root.join(".worktrees/fresh");
-        fixture.run(&[
-            "worktree",
-            "add",
-            "-b",
-            "fresh",
-            path.to_str().ok_or("path")?,
-        ])?;
-        let owner = WorktreeOwner {
-            attempt_id: None,
-            operation_id: None,
-            branch: "fresh".into(),
-            base: fixture.head()?.to_string(),
-            host: provenant_core::HostId::from_bytes([3; 16]),
-            created_at: context.clock.wall_now()?,
-            origin: WorktreeOrigin::Adopted,
-            label: Some("manual".into()),
-        };
-        struct StrictCensus;
-        impl WorkerObserver for StrictCensus {
-            fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
-                UnknownWorkers.observe_roots(roots)
-            }
-            fn requires_complete_census(&self) -> bool {
-                true
-            }
-        }
-        let strict = WorktreeContext {
-            workers: &StrictCensus,
-            ..test.context()
-        };
-        assert!(matches!(
-            adopt(&strict, &path, &owner, &cancel()),
-            Err(WorktreeError::IncompleteCensus)
-        ));
-        let info = adopt(&context, &path, &owner, &cancel())?;
-        assert_eq!(info.writer, WriterState::Free);
-        assert_eq!(
-            load_owner(&verify_worktree(&fixture.repo, &path)?)?,
-            Some(owner)
-        );
-        let state = context
-            .project_state
-            .open_verified_directory(&state_dir_name(&path))?;
-        let _held = state.lock(
-            OsStr::new(WRITER_LOCK),
-            LockMode::Exclusive,
-            WaitBudget::nonblocking(context.clock.mono_now()),
-            &cancel(),
-            context.clock,
-        )?;
-        let owner = load_owner(&verify_worktree(&fixture.repo, &path)?)?.ok_or("owner")?;
-        assert!(matches!(
-            adopt(&context, &path, &owner, &cancel()),
-            Err(WorktreeError::LiveWriter)
-        ));
         Ok(())
     }
 
@@ -4567,12 +3880,13 @@ mod lifecycle_tests {
                 "{scenario}"
             );
             assert_eq!(path.exists(), scenario != "apply", "{scenario}");
-            assert!(
-                matches!(
-                    context.project_state.open_verified_directory(&state_dir_name(&path)),
-                    Err(error) if error.is_not_found()
-                ),
-                "temporary state remains after {scenario}"
+            assert_eq!(
+                context
+                    .project_state
+                    .open_verified_directory(&state_dir_name(&path))
+                    .is_ok(),
+                !matches!(scenario, "default" | "preview" | "live-lane" | "unmerged"),
+                "exclusion state after {scenario}"
             );
             assert!(
                 branch_exists(&fixture, "native"),
@@ -5427,8 +4741,11 @@ mod lifecycle_tests {
                 assert!(final_writer_held.get());
             }
             assert!(
-                matches!(context.project_state.open_verified_directory(&state_name), Err(error) if error.is_not_found()),
-                "temporary state remains after {scenario}"
+                context
+                    .project_state
+                    .open_verified_directory(&state_name)
+                    .is_ok(),
+                "exclusion slot must remain after {scenario}"
             );
         }
         Ok(())
@@ -6559,117 +5876,6 @@ mod lifecycle_tests {
         );
         fs::write(created.path.join("notes.txt"), "draft\n")?;
         assert_eq!(condition(&cancellation)?, Some(WorktreeCondition::Dirty));
-        Ok(())
-    }
-
-    #[test]
-    fn writer_custody_requires_the_active_registration() -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
-        fixture.run(&["branch", "-M", "main"])?;
-        let test_context = TestContext::new(&fixture)?;
-        let context = test_context.context();
-        let created = create(
-            &context,
-            WorktreeCreate {
-                branch: "feature/custody".to_owned(),
-                base: None,
-            },
-            &cancel(),
-        )?;
-        let worktree = verify_worktree(&fixture.repo, &created.path)?;
-        let project = test_context.binding.project_id();
-        let state_path = fixture
-            ._temp
-            .path()
-            .join("worktrees")
-            .join(project.to_string());
-        let project_state = Directory::open_anchor(&state_path)?;
-        let branch = GitRefName::branch("feature/custody")?;
-        let base = created.head;
-        let (state, _binding) =
-            writer_custody(&project_state, project, &worktree, &branch, base, || {
-                Err(WorktreeError::InvalidOutput)
-            })?;
-        assert!(state.metadata_at(OsStr::new(IDENTITY), false).is_ok());
-        let other = GitRefName::branch("feature/other")?;
-        assert!(matches!(
-            writer_custody(&project_state, project, &worktree, &other, base, || Err(
-                WorktreeError::InvalidOutput
-            )),
-            Err(WorktreeError::RegistrationMismatch { field: "branch" })
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn removal_refuses_live_writer_and_any_reservation_record() -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
-        fixture.run(&["branch", "-M", "main"])?;
-        let test_context = TestContext::new(&fixture)?;
-        let context = test_context.context();
-        let cancellation = cancel();
-        let created = create(
-            &context,
-            WorktreeCreate {
-                branch: "feature/busy".to_owned(),
-                base: None,
-            },
-            &cancellation,
-        )?;
-        let state_name = state_dir_name(&created.path);
-        let state = context.project_state.open_verified_directory(&state_name)?;
-        let held_writer = state.lock(
-            OsStr::new(WRITER_LOCK),
-            LockMode::Exclusive,
-            WaitBudget::nonblocking(test_context.clock.mono_now()),
-            &cancellation,
-            &test_context.clock,
-        )?;
-        assert!(matches!(
-            remove(
-                &context,
-                WorktreeRemove::Name {
-                    name: "feature/busy".to_owned(),
-                    discard: false,
-                    integration: None,
-                    expected_head: None,
-                },
-                &cancellation
-            ),
-            Err(WorktreeError::LiveWriter)
-        ));
-        drop(held_writer);
-
-        let _publication = state.atomic_write(
-            OsStr::new(RESERVATION),
-            ".reservation-",
-            b"malformed reservations remain authoritative",
-            PublishMode::Replace,
-        )?;
-        assert!(matches!(
-            remove(
-                &context,
-                WorktreeRemove::Name {
-                    name: "feature/busy".to_owned(),
-                    discard: false,
-                    integration: None,
-                    expected_head: None,
-                },
-                &cancellation
-            ),
-            Err(WorktreeError::ReservationPresent)
-        ));
-        state.unlink(OsStr::new(RESERVATION))?;
-        remove(
-            &context,
-            WorktreeRemove::Name {
-                name: "feature/busy".to_owned(),
-                discard: false,
-                integration: None,
-                expected_head: None,
-            },
-            &cancellation,
-        )?;
         Ok(())
     }
 

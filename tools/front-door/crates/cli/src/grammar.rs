@@ -994,14 +994,6 @@ pub struct Stats {
 pub enum Worktree {
     /// Build and publish a host-owned Cargo target seed from origin/main
     SeedBuild,
-    /// Record custody and ownership for an existing linked worktree
-    Adopt {
-        /// Existing linked worktree in this project
-        path: PathBuf,
-        /// Human or session owner label
-        #[arg(long, default_value = "manual")]
-        owner: Option<String>,
-    },
     /// Create a worktree on a new branch
     Create {
         /// New branch name

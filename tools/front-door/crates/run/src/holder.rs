@@ -425,7 +425,7 @@ impl RunStore {
         };
         if let Some(recovery) = &mut recovery {
             recovery
-                .release_writer_lock()
+                .prepare_settlement()
                 .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
         }
         let record = self.finish_in_custody(
@@ -451,6 +451,7 @@ impl RunStore {
     ) -> Result<Option<custody::Recovery>> {
         match custody::acquire_recovery(
             directory,
+            scope,
             call.transaction_budget(),
             call.cancel,
             call.clock,
@@ -1326,7 +1327,7 @@ mod writer_recovery_tests {
         )?;
         let mut recovery =
             provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?.into_recovery()?;
-        recovery.release_writer_lock()?;
+        recovery.prepare_settlement()?;
         let mut observed = crate::tests::exit();
         observed.scope = scope;
         crate::dispatch_tests::seal_exit(&store, &observed)?;
@@ -1481,7 +1482,13 @@ mod writer_recovery_tests {
                 .is_err(),
             "another generation's terminal state is not settlement"
         );
-        std::fs::write(custody_dir.path().join("reservation.json"), b"{")?;
+        std::fs::write(
+            custody_dir
+                .path()
+                .join(scope.attempt.to_string())
+                .join("reservation.json"),
+            b"{",
+        )?;
         assert!(
             store
                 .recover_writer_exit(directory()?, scope, &call)

@@ -541,11 +541,10 @@ checkout, landing reports an inventory error. The landing worker census
 ignores itself and only its ancestor chain through the session leader; other
 observable live processes inside the lane refuse removal. An incomplete census
 or unknown ancestor hop refuses landing with a retry message; each exempted
-ancestor requires a strictly older native start stamp. Landing clears a writer reservation only
-through custody recovery: a verified prepared reservation never handed off,
-or an absent writer with a matching canonical terminal attempt, worktree/Git
-binding and verified settlement. Dirty and ignored-output prechecks pass under
-writer exclusion before lease clearance. Unknown, malformed and live reservations stay.
+ancestor requires a strictly older native start stamp. Landing holds the writer
+flock while checking dirty and ignored output and
+removing the checkout. Lock contention reports busy. Per-attempt recovery
+records remain for Run and do not gate removal.
 The branch deletion carries the head too:
 with no registered worktree it refuses a branch that any worktree has
 checked out, is rebasing (paused or not) or is bisecting, as `git branch -d`
@@ -566,8 +565,8 @@ Retrying an already-merged PR bypasses CI and merge and retries safe cleanup.
   `::pr_land_from_lane_ignores_only_its_callers`;
   `::pr_land_refuses_incomplete_worker_census`;
   `::pr_land_canonicalises_quoted_worktree_paths`;
-  `::pr_land_recovers_only_abandoned_prepared_writer_leases`;
-  `::pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores`;
+  `::pr_land_uses_writer_lock_and_preserves_attempt_recovery_evidence`;
+  `::pr_land_preserves_terminal_writer_evidence_in_parent_and_child_stores`;
   `::pr_land_primary_with_separate_git_directory`;
   `::pr_land_refuses_each_unsafe_step_and_reports_the_rest`;
   `::pr_land_changes_nothing_when_the_merge_does_not_happen`;

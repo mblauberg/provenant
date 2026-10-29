@@ -150,7 +150,7 @@ pub(crate) fn handoff(
     }
     let payload = serde_json::to_vec(&message).map_err(|_| CustodyError::InvalidRecord)?;
     crate::process_os::handoff::spawn(
-        &owned.lease.directory,
+        &owned.lease.lock_directory,
         &publication.directory,
         owned.lease.lease.as_ref().ok_or(CustodyError::Fenced)?,
         &publication.custody,
@@ -315,11 +315,8 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     let message: LaunchMessage =
         decode_v1(payload.as_slice(), LAUNCH_LIMITS).map_err(|_| CustodyError::InvalidRecord)?;
     message.capture.validate()?;
-    let mut reservation: Reservation = read_record(
-        &inherited.writer_directory,
-        "reservation.json",
-        RECORD_LIMIT,
-    )?;
+    let evidence = crate::custody::attempt_evidence(&inherited.writer_directory, message.scope)?;
+    let mut reservation: Reservation = read_record(&evidence, "reservation.json", RECORD_LIMIT)?;
     reservation.validate()?;
     if message.priority > 19 || !valid_resolved_route(&message.resolved_route) {
         return Err(CustodyError::InvalidRecord);
@@ -355,7 +352,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     };
     reservation.guardian = Some(guardian.clone());
     Publication::require_durable(write_record(
-        &inherited.writer_directory,
+        &evidence,
         "reservation.json",
         &reservation,
         PublishMode::Replace,
@@ -442,7 +439,8 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         escapee_stop_allowed: false,
         nested_children: hooks.nested_children,
         attempt: inherited.attempt_directory,
-        writer_dir: inherited.writer_directory,
+        writer_dir: evidence,
+        lock_dir: inherited.writer_directory,
         reservation,
         writer: Some(inherited.writer),
         #[cfg(target_os = "macos")]
@@ -467,6 +465,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
 struct Driver<'a> {
     attempt: Directory,
     writer_dir: Directory,
+    lock_dir: Directory,
     reservation: Reservation,
     writer: Option<provenant_os::fs::LockGuard>,
     #[cfg(target_os = "macos")]
@@ -1327,8 +1326,8 @@ impl Driver<'_> {
         self.release(&record);
         Ok(())
     }
-    /// Hand the durable exit to the holder without holding writer.lock. The
-    /// reservation keeps a new writer out until release attestations verify.
+    /// Hand the durable exit to the holder while retaining writer.lock through
+    /// import, publication and verified terminal settlement.
     /// Failures leave the durable fence available to a resumed supervisor.
     fn release(&mut self, record: &ProcessExit) {
         let Some(holder) = self.holder else {
@@ -1359,16 +1358,23 @@ impl Driver<'_> {
         };
         let mut recovery = crate::custody::Recovery {
             directory,
+            lock_directory: match self.lock_dir.try_clone() {
+                Ok(directory) => directory,
+                Err(_) => {
+                    self.writer = Some(lease);
+                    return;
+                }
+            },
             lease: Some(lease),
             reservation: self.reservation.clone(),
             guardian_quiescent: true,
         };
-        if recovery.release_writer_lock().is_err() {
+        if recovery.prepare_settlement().is_err() {
             self.writer = recovery.lease.take();
             return;
         }
         drop(self._custody.take());
-        // Neither writer nor attempt custody locks span a retry wait.
+        // Worktree exclusion spans settlement retries; attempt custody is free.
         let settled = retry_terminal(
             || {
                 if holder

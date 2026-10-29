@@ -24,7 +24,7 @@ pub struct Scope {
 }
 #[derive(Debug, Error)]
 pub enum CustodyError {
-    #[error("worktree is busy")]
+    #[error("worktree writer lock busy")]
     Busy,
     #[error("writer reservation requires recovery")]
     Fenced,
@@ -286,6 +286,7 @@ impl Reservation {
 #[derive(Debug)]
 pub struct CustodyLease {
     pub(crate) directory: Directory,
+    pub(crate) lock_directory: Directory,
     pub(crate) lease: Option<LockGuard>,
     pub(crate) reservation: Reservation,
     launched: bool,
@@ -305,7 +306,7 @@ impl CustodyLease {
     fn ensure_lease(&mut self) -> Result<()> {
         if self.lease.is_none() {
             let clock = provenant_os::clock::SystemClock::new();
-            self.lease = Some(self.directory.lock(
+            self.lease = Some(self.lock_directory.lock(
                 OsStr::new("writer.lock"),
                 LockMode::Exclusive,
                 WaitBudget::cli(clock.mono_now(), 5).map_err(|_| CustodyError::InvalidRecord)?,
@@ -323,6 +324,7 @@ impl CustodyLease {
         validate_anchor(&self.directory, &reservation)?;
         Ok(Recovery {
             directory: self.directory,
+            lock_directory: self.lock_directory,
             lease: Some(self.lease.ok_or(CustodyError::Fenced)?),
             reservation,
             guardian_quiescent: false,
@@ -348,8 +350,8 @@ pub fn acquire_reader(
         clock,
     )
 }
-/// The supplied directory belongs to confinement's verified worktree identity.
-/// Existing reservations always require recovery, even with a free kernel lock.
+/// The supplied directory is a stable exclusion slot, not a registry.
+/// Recovery evidence belongs to the requested attempt, never its predecessor.
 pub fn acquire_writer(
     directory: Directory,
     scope: Scope,
@@ -390,6 +392,8 @@ pub(crate) fn acquire_writer_with_observer(
             FsError::LockTimeout { .. } => CustodyError::Busy,
             other => other.into(),
         })?;
+    let lock_directory = directory;
+    let directory = create_attempt_evidence(&lock_directory, scope)?;
     match directory.metadata_at(OsStr::new("reservation.json"), false) {
         Ok(_) => {
             let reservation: Reservation =
@@ -475,10 +479,41 @@ pub(crate) fn acquire_writer_with_observer(
     )?)?;
     Ok(CustodyLease {
         directory,
+        lock_directory,
         lease: Some(lease),
         reservation,
         launched: false,
     })
+}
+
+/// Open recovery evidence for one attempt without reading the shared lock slot.
+pub fn attempt_evidence(
+    directory: &Directory,
+    scope: Scope,
+) -> provenant_os::fs::Result<Directory> {
+    directory.open_verified_directory(OsStr::new(&scope.attempt.to_string()))
+}
+/// Test for this attempt's retained reservation without interpreting shared-slot records.
+pub fn reservation_present(directory: &Directory, scope: Scope) -> provenant_os::fs::Result<bool> {
+    let evidence = match attempt_evidence(directory, scope) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    match evidence.metadata_at(OsStr::new("reservation.json"), false) {
+        Ok(_) => Ok(true),
+        Err(error) if error.is_not_found() => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+fn create_attempt_evidence(directory: &Directory, scope: Scope) -> Result<Directory> {
+    let name = scope.attempt.to_string();
+    match directory.mkdir(OsStr::new(&name), 0o700) {
+        Ok(()) => directory.sync()?,
+        Err(error) if error.is_exists() => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(attempt_evidence(directory, scope)?)
 }
 
 pub(crate) fn write_record<T: Serialize>(
@@ -1273,11 +1308,11 @@ fn observe_checkpoint(
 }
 
 /// Recovery carries a verified reservation and optional writer exclusion.
-/// Settlement drops the kernel lock while the durable reservation keeps the
-/// worktree fenced against another writer.
+/// Worktree settlement retains the kernel lock through import and publication.
 #[derive(Debug)]
 pub struct Recovery {
     pub(crate) directory: Directory,
+    pub(crate) lock_directory: Directory,
     pub(crate) lease: Option<LockGuard>,
     pub(crate) reservation: Reservation,
     // The guardian's durable cleanup or native reboot proof establishes this.
@@ -1309,6 +1344,7 @@ impl RebootRecovery {
 }
 pub fn acquire_recovery(
     directory: Directory,
+    scope: Scope,
     budget: WaitBudget,
     cancel: &CancelToken,
     clock: &dyn Clock,
@@ -1320,10 +1356,16 @@ pub fn acquire_recovery(
         cancel,
         clock,
     )?;
+    let lock_directory = directory;
+    let directory = attempt_evidence(&lock_directory, scope)?;
     let reservation: Reservation = read_record(&directory, "reservation.json", RECORD_LIMIT)?;
     validate_anchor(&directory, &reservation)?;
+    if reservation.scope.run != scope.run || reservation.scope.attempt != scope.attempt {
+        return Err(CustodyError::Fenced);
+    }
     Ok(Recovery {
         directory,
+        lock_directory,
         lease: Some(lease),
         reservation,
         guardian_quiescent: false,
@@ -1371,6 +1413,8 @@ pub(crate) fn acquire_reboot_recovery_with(
         cancel,
         clock,
     )?;
+    let lock_directory = directory;
+    let directory = attempt_evidence(&lock_directory, scope)?;
     let reservation: Reservation = read_record(&directory, "reservation.json", RECORD_LIMIT)?;
     reservation.validate()?;
     let slot = directory.metadata()?;
@@ -1396,6 +1440,7 @@ pub(crate) fn acquire_reboot_recovery_with(
     }
     Ok(Recovery {
         directory,
+        lock_directory,
         lease: Some(lease),
         reservation,
         guardian_quiescent: false,
@@ -1412,6 +1457,7 @@ pub struct Unreserved {
 /// with [`acquire_recovery`] or [`reattach`].
 pub fn prove_unreserved(
     directory: &Directory,
+    scope: Scope,
     budget: WaitBudget,
     cancel: &CancelToken,
     clock: &dyn Clock,
@@ -1423,12 +1469,15 @@ pub fn prove_unreserved(
         cancel,
         clock,
     )?;
-    for name in ["reservation.json", "launch.json", "process-exit.json"] {
+    for name in ["launch.json", "process-exit.json"] {
         match directory.metadata_at(OsStr::new(name), false) {
             Ok(_) => return Ok(None),
             Err(error) if error.is_not_found() => {}
             Err(error) => return Err(error.into()),
         }
+    }
+    if reservation_present(directory, scope)? {
+        return Ok(None);
     }
     Ok(Some(Unreserved { _lease: lease }))
 }
@@ -1467,33 +1516,58 @@ pub fn list_writer_reservations(directory: &Directory) -> Result<ReservationList
             return Err(CustodyError::InvalidRecord);
         }
         let name = name?;
-        let path = PathBuf::from(&name).join("reservation.json");
-        let entry = || -> Result<Option<WriterReservation>> {
+        let mut scan = || -> Result<()> {
             if directory.metadata_at(&name, false)?.kind != provenant_os::fs::FileKind::Directory {
-                return Ok(None);
+                return Ok(());
             }
-            let child = directory.open_verified_directory(&name)?;
-            let reservation: Reservation =
-                match read_record(&child, "reservation.json", RECORD_LIMIT) {
-                    Ok(reservation) => reservation,
-                    Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
+            let slot = directory.open_verified_directory(&name)?;
+            for (index, attempt) in slot.entries()?.enumerate() {
+                if index >= 10_000 {
+                    return Err(CustodyError::InvalidRecord);
+                }
+                let attempt = attempt?;
+                let path = PathBuf::from(&name).join(&attempt).join("reservation.json");
+                let entry = || -> Result<Option<WriterReservation>> {
+                    // Shared slots may retain retired registry files; only attempt directories hold evidence.
+                    if slot.metadata_at(&attempt, false)?.kind
+                        != provenant_os::fs::FileKind::Directory
+                    {
                         return Ok(None);
                     }
-                    Err(error) => return Err(error),
+                    let child = slot.open_verified_directory(&attempt)?;
+                    let reservation: Reservation =
+                        match read_record(&child, "reservation.json", RECORD_LIMIT) {
+                            Ok(reservation) => reservation,
+                            Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
+                                return Ok(None);
+                            }
+                            Err(error) => return Err(error),
+                        };
+                    validate_anchor(&child, &reservation)?;
+                    if attempt != OsStr::new(&reservation.scope.attempt.to_string()) {
+                        return Err(CustodyError::InvalidRecord);
+                    }
+                    Ok(Some(WriterReservation {
+                        scope: reservation.scope,
+                        reservation: path.clone(),
+                    }))
                 };
-            validate_anchor(&child, &reservation)?;
-            Ok(Some(WriterReservation {
-                scope: reservation.scope,
-                reservation: path.clone(),
-            }))
+                match entry() {
+                    Ok(Some(reservation)) => listing.reservations.push(reservation),
+                    Ok(None) => {}
+                    Err(error) => listing.issues.push(ReservationIssue {
+                        reservation: path,
+                        reason: error.to_string(),
+                    }),
+                }
+            }
+            Ok(())
         };
-        match entry() {
-            Ok(Some(reservation)) => listing.reservations.push(reservation),
-            Ok(None) => {}
-            Err(error) => listing.issues.push(ReservationIssue {
-                reservation: path,
+        if let Err(error) = scan() {
+            listing.issues.push(ReservationIssue {
+                reservation: PathBuf::from(&name).join("reservation.json"),
                 reason: error.to_string(),
-            }),
+            });
         }
     }
     Ok(listing)
@@ -1508,22 +1582,24 @@ impl Recovery {
     pub fn scope(&self) -> Scope {
         self.reservation.scope
     }
-    /// End live writer exclusion before host settlement runs external commands.
-    /// The durable reservation remains, so a new writer cannot enter while this
-    /// attempt imports objects, publishes its branch or records its result.
-    pub fn release_writer_lock(&mut self) -> Result<()> {
+    /// Prove the provider absent before host settlement. Worktree exclusion
+    /// spans import and publication: a reservation is recovery evidence, not
+    /// a substitute for the flock. Read-only attempts may release their lock.
+    pub fn prepare_settlement(&mut self) -> Result<()> {
         if self.observe() != RecoveryState::Absent {
             return Err(CustodyError::Fenced);
         }
-        drop(self.lease.take());
+        if matches!(self.reservation.binding, StoredWriterBinding::ReadOnly) {
+            drop(self.lease.take());
+        }
         Ok(())
     }
-    /// Reacquire only for a short final storage transaction. Re-read the scope
+    /// Reacquire released read-only exclusion for the final storage transaction. Re-read the scope
     /// under the lock rather than trusting a detached recovery's snapshot.
     fn ensure_writer_lock(&mut self) -> Result<()> {
         if self.lease.is_none() {
             let lease = self
-                .directory
+                .lock_directory
                 .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
             let current: Reservation =
                 read_record(&self.directory, "reservation.json", RECORD_LIMIT)?;
@@ -1539,7 +1615,7 @@ impl Recovery {
         }
         Ok(())
     }
-    /// Clear an already verified release without keeping a lock over host work.
+    /// Clear an already verified release while retaining writer exclusion.
     pub(crate) fn clear_settled_reservation(&mut self) -> Result<()> {
         self.ensure_writer_lock()?;
         clear_reservation(&self.directory, self.scope())
@@ -1897,55 +1973,8 @@ impl Recovery {
         if self.observe() != RecoveryState::Absent {
             return Err(CustodyError::Fenced);
         }
-        // Only final scratch settlement and fence clearing need writer exclusion.
+        // Retain exclusion through scratch settlement and fence clearing.
         self.finish_settlement(scratch)
-    }
-}
-
-impl CustodyLease {
-    pub fn advance_attempt(&mut self, next: Scope) -> Result<()> {
-        self.advance_with(next, &SystemProcessObserver)
-    }
-    pub(crate) fn advance_with(
-        &mut self,
-        next: Scope,
-        observer: &dyn ProcessObserver,
-    ) -> Result<()> {
-        self.ensure_lease()?;
-        let previous: Reservation = read_record(&self.directory, "reservation.json", RECORD_LIMIT)?;
-        previous.validate()?;
-        if previous.scope.run != next.run
-            || previous.scope.generation.checked_add(1) != Some(next.generation)
-            || previous.scope.attempt == next.attempt
-        {
-            return Err(CustodyError::InvalidRecord);
-        }
-        if classify_reservation(&previous, observer) != RecoveryState::Absent {
-            return Err(CustodyError::Fenced);
-        }
-        let mut reservation = previous;
-        reservation.scope = next;
-        reservation.launch_state = LaunchState::Prepared;
-        reservation.guardian = None;
-        reservation.provider = None;
-        reservation.attempt_device = None;
-        reservation.attempt_inode = None;
-        reservation.descendants.clear();
-        reservation.omitted_descendants = 0;
-        reservation.census_incomplete = true;
-        reservation.unresolved_cleanup = true;
-        // Poison launch before publication: an error may mean the new
-        // generation is visible but not yet durable. Recovery reloads it.
-        self.launched = true;
-        self.reservation = reservation;
-        Publication::require_durable(write_record(
-            &self.directory,
-            "reservation.json",
-            &self.reservation,
-            PublishMode::Replace,
-        )?)?;
-        self.launched = false;
-        Ok(())
     }
 }
 
