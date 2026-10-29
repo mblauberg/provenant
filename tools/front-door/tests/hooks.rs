@@ -290,6 +290,24 @@ fn check_push_policy(rig: &TestRig) -> Result {
         String::from_utf8_lossy(&output.stderr.bytes)
             .contains("already pushed to the topic branch")
     );
+    let config_path = rig.state.join("config.toml");
+    let original = fs::read_to_string(&config_path)?;
+    fs::write(
+        &config_path,
+        format!("{original}\n[domains.run]\npush_conflict_markers = false\n"),
+    )?;
+    let output = rig.execute(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &["hook", "git", "pre-push", "origin", "fixture"],
+        Some(input.as_bytes()),
+    )?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    fs::write(&config_path, original)?;
     git(rig, &["update-ref", "refs/remotes/origin/main", &conflict])?;
     let fixed = commit(rig, "resolved", "resolved\n")?;
     let input = format!("refs/heads/main {fixed} refs/heads/topic {zero}\n");

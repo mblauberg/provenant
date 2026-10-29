@@ -1,4 +1,5 @@
-//! Config can lower execution ceilings, never relax the recorded safety limits.
+//! Host config may lower or raise probe execution ceilings within the recorded
+//! bounds; the defaults stay conservative.
 use crate::Calibration;
 use provenant_config::{DomainConfig, DomainSection, SectionError};
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,10 @@ pub struct Settings {
 fn default_history_max_bytes() -> u64 {
     crate::DEFAULT_HISTORY_MAX_BYTES
 }
+/// Most accounts a single quota probe tick may run at once.
+pub const MAX_PARALLEL: u64 = 16;
+/// Longest wall budget a quota probe tick may reserve.
+pub const MAX_WALL_BUDGET_SECONDS: u64 = 600;
 /// Which window the menu bar leads with.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Headline {
@@ -70,10 +75,13 @@ impl Default for Settings {
 impl DomainConfig for Settings {
     fn validate(&self) -> Vec<SectionError> {
         let mut errors: Vec<SectionError> = [
-            ("max_parallel", (1..=3).contains(&self.max_parallel)),
+            (
+                "max_parallel",
+                (1..=MAX_PARALLEL).contains(&self.max_parallel),
+            ),
             (
                 "wall_budget_seconds",
-                (1..=55).contains(&self.wall_budget_seconds),
+                (1..=MAX_WALL_BUDGET_SECONDS).contains(&self.wall_budget_seconds),
             ),
         ]
         .into_iter()
@@ -108,7 +116,8 @@ impl DomainConfig for Settings {
         errors
     }
 }
-/// Probe and history ceilings are a boundary: configuration may only lower them.
+/// Probe and history bounds are a boundary: configuration may tune them, but
+/// values outside the recorded ranges refuse the file.
 pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     "quota",
     |_| "max_parallel = 3\nwall_budget_seconds = 55\n\n[display]\nheadline = \"auto\"\nicon = \"most_constrained\"\n",
@@ -122,6 +131,41 @@ mod tests {
         toml_edit::de::from_str(text)
     }
     const BASE: &str = "max_parallel = 3\nwall_budget_seconds = 55\n";
+    #[test]
+    fn probe_ceilings_raise_within_bounds_and_defaults_stay_small() {
+        let defaults = Settings::default();
+        assert_eq!(defaults.max_parallel, 3);
+        assert_eq!(defaults.wall_budget_seconds, 55);
+        assert!(defaults.validate().is_empty());
+        let raised = parse("max_parallel = 8\nwall_budget_seconds = 300\n").unwrap();
+        assert_eq!(raised.max_parallel, 8);
+        assert_eq!(raised.wall_budget_seconds, 300);
+        assert!(raised.validate().is_empty());
+        for (text, field) in [
+            (
+                "max_parallel = 0\nwall_budget_seconds = 55\n",
+                "max_parallel",
+            ),
+            (
+                "max_parallel = 3\nwall_budget_seconds = 0\n",
+                "wall_budget_seconds",
+            ),
+            (
+                "max_parallel = 17\nwall_budget_seconds = 55\n",
+                "max_parallel",
+            ),
+            (
+                "max_parallel = 3\nwall_budget_seconds = 601\n",
+                "wall_budget_seconds",
+            ),
+        ] {
+            let invalid = parse(text).unwrap();
+            assert!(
+                invalid.validate().iter().any(|error| error.field == field),
+                "{text}"
+            );
+        }
+    }
     #[test]
     fn display_defaults_and_valid_values() {
         let s = parse(BASE).unwrap();

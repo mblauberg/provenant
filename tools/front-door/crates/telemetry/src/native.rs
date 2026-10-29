@@ -127,20 +127,18 @@ fn import_subagents(
             entry.map_err(|e| NativeError::Io(format!("cannot read subagents directory: {e}")))?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.ends_with(".jsonl") {
+        if !name.ends_with(".jsonl")
+            || !name.starts_with("agent-")
+            || name.len() <= "agent-.jsonl".len()
+        {
             continue;
         }
-        if !name.starts_with("agent-")
-            || !name.ends_with(".jsonl")
-            || name.len() <= "agent-.jsonl".len()
-            || !entry
-                .file_type()
-                .map_err(|e| NativeError::Io(e.to_string()))?
-                .is_file()
+        if !entry
+            .file_type()
+            .map_err(|e| NativeError::Io(e.to_string()))?
+            .is_file()
         {
-            return Err(
-                "subagents directory contains an invalid or non-regular agent transcript".into(),
-            );
+            return Err("subagent transcript is not a regular file".into());
         }
         if files.len() == MAX_FILES {
             return Err("too many native subagent transcripts".into());

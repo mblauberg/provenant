@@ -813,6 +813,21 @@ pub(crate) fn with_git<T>(
     let _ = anchor.rmdir(&name);
     result
 }
+/// Unreadable config keeps the literal conflict-marker check on. The check is
+/// advisory; the Git boundary and every other pre-push refusal are unchanged.
+fn push_conflict_markers(globals: &Globals, cwd: &Path) -> bool {
+    let Ok(resolved) = crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::At(cwd),
+        crate::roots::Product::Optional,
+    ) else {
+        return true;
+    };
+    provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)
+        .map(|read| read.domains.run.push_conflict_markers)
+        .unwrap_or(true)
+}
+
 fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Error> {
     let bytes = hook_io::read_stdin(INPUT_CAP, deadline)?;
     let text = std::str::from_utf8(&bytes)?;
@@ -839,6 +854,7 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
         });
     }
     let project = crate::roots::selected_project(globals.project.as_deref(), true)?;
+    let check_conflict_markers = push_conflict_markers(globals, &project);
     with_git(|runtime, executor, budget, cancel| {
         let repo = runtime.open_read_repo(executor, &project, budget, cancel)?;
         // The default-branch check contacts the remote and needs a network budget.
@@ -849,6 +865,7 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
             executor,
             budget,
             cancel,
+            check_conflict_markers,
         }
         .check(remote, &updates)
         .map_err(|error| {

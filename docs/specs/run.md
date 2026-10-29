@@ -917,7 +917,10 @@ a clean tree and free writer custody; an explicit base applies at creation.
 Reuse preserves the existing lane owner's creation base and refuses adopted
 owners without changing their records. Operation replay
 returns its original run, including after owned cleanup, and checks changed
-inputs before any worktree creation.
+inputs before any worktree creation. A tracked gitlink whose checkout is not
+initialised has no nested Git configuration, so creation and status accept it;
+a gitlink with a `.git` marker still reports unknown and requires review
+because status could follow lane-controlled nested filters.
 The private Git admin directory holds `provenant-owner.json` as a bounded,
 atomic `WorktreeOwner`: optional attempt and operation IDs, short branch,
 pinned base OID, host, creation time, origin (`lane` or `adopted`) and optional
@@ -957,6 +960,7 @@ or change an adopted worktree's receipt. Concurrent refreshes of the same
 branch may race and produce a warning.
 - Why: a lane may reclaim only work it owns and commits proven retained elsewhere.
 - Test: `crates/confinement/src/worktrees.rs::adopted_owner_proves_membership_and_enables_custody`;
+  `::create_accepts_uninitialised_gitlinks_and_still_rejects_initialised_ones`;
   `::owned_cleanup_refuses_dirty_unmerged_and_adopted_trees`;
   `tests/dispatch_provider.rs::owned_dispatch_creates_and_replays_after_pruning`;
   `tools/front-door/src/gc_support.rs::writer_tracking_refresh_handles_remote_branch_absence_and_failure`;

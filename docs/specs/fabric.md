@@ -86,12 +86,16 @@ Viewer request presentation state is separate from resolution and blocking.
 Viewer names are caller-supplied labels, like agent labels: they are not an
 authentication boundary. A local caller that knows a label can change that
 viewer's state; the direct SQLite access residual above also applies.
+A lane may change only the bounded request presentation fields `seen_revision`,
+`snoozed_until` and `dismissed`; it never changes resolution, answers or the
+blocking state, and summary baselines remain outside a lane.
 Quotas are per project and viewer, with a combined per-project cap. Writes
 reclaim closed or expired request rows. A new summary baseline is refused at
 capacity rather than evicting an existing one.
 - Why: viewing and snoozing do not authorise an answer or unblock work.
-- Test: `crates/fabric-store/src/tests/human_inbox.rs::viewer_isolation`
-- Owner: `crates/fabric-store/src/viewer.rs`
+- Test: `crates/fabric-store/src/tests/human_inbox.rs::viewer_isolation`;
+  `tests/inbox.rs::viewer_cli_isolation_and_render_race`
+- Owner: `crates/fabric-store/src/viewer.rs`, `src/chair.rs`
 
 Human requests, immutable answers, revision history and the delivery outbox
 belong to Fabric. CLI and MCP must use the same service. The service binds
@@ -997,8 +1001,9 @@ land.
 A read-only `plan` node must declare `plan.kinds` and a positive
 `plan.max_nodes` (at most 512). Its result must contain a complete fenced
 `fragment` JSON block, schema version 1, within 12 KiB. Agent children require
-a goal or brief, relative literal write scopes, dependencies and acceptance
-checks; omitted routes resolve through `senior`. Gates use their deterministic
+a goal or brief, dependencies and acceptance checks; writers also require
+relative literal write scopes, while read-only children may omit them. Omitted
+routes resolve through `senior`. Gates use their deterministic
 condition and decide nodes their `decide` object. Supported fragment kinds are
 `task`, `plan`, `synthesise`, `gate` and `decide`.
 The kind allow-list is the extension point for future fragment capabilities;
@@ -1057,6 +1062,7 @@ edge and continuation slots, including when every current attempt has settled.
   `crates/fabric-runtime/src/graph/plan_tests.rs::plan_validates_effective_limits_and_ceiling_before_saving`;
   `::plan_overlapping_writers_share_one_worktree_integrate_and_deliver_once`;
   `::plan_disjoint_writers_are_admitted_while_a_peer_is_running`;
+  `::planner_requires_write_scope_only_for_writers`;
   `::planner_integrate_delivery_needs_the_documents_integration_branch`;
   `::honest_stop_continues_once_on_same_checkout_with_handoff_and_verdict_contract`;
   `::continuation_budget_pauses_then_extends_without_duplicating_prior_work`;

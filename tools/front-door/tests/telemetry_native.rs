@@ -20,6 +20,7 @@ fn native_stats_runs_without_a_project_or_store_and_sanitises_output() -> Result
             "{\"type\":\"assistant\""
         ),
     )?;
+    fs::write(directory.join("notes.jsonl"), "not a subagent transcript\n")?;
     let path = directory.to_str().ok_or("path")?;
     let output = rig.command(&["telemetry", "stats", "--claude-subagents", path])?;
     assert_eq!(
