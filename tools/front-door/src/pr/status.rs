@@ -173,22 +173,14 @@ pub(super) fn required_policy(
     target: &str,
     read: &dyn Fn(&[&str]) -> Option<provenant_os::exec::ExecOutcome>,
 ) -> Option<Policy> {
-    #[derive(Deserialize)]
-    struct Repo {
-        name: String,
-    }
-    #[derive(Deserialize)]
-    struct Owner {
-        login: String,
-    }
+    // `gh pr view` has no base-repository JSON field. The pull request URL
+    // always lives on the base repository (never the head fork), so read the
+    // owner and name from it; this also holds for URL and branch targets.
     #[derive(Deserialize)]
     struct Base {
         #[serde(rename = "baseRefName")]
         branch: String,
-        #[serde(rename = "baseRepository")]
-        repo: Repo,
-        #[serde(rename = "baseRepositoryOwner")]
-        owner: Owner,
+        url: String,
     }
     let bytes = successful(read(&[
         "gh",
@@ -196,10 +188,17 @@ pub(super) fn required_policy(
         "view",
         target,
         "--json",
-        "baseRefName,baseRepository,baseRepositoryOwner",
+        "baseRefName,url",
     ])?)
     .ok()?;
     let base: Base = serde_json::from_slice(&bytes).ok()?;
+    let segments: Vec<&str> = base.url.trim_end_matches('/').split('/').collect();
+    let [.., owner, name, "pull", _] = segments.as_slice() else {
+        return None;
+    };
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
     let encode = |value: &str| -> String {
         value
             .bytes()
@@ -212,11 +211,7 @@ pub(super) fn required_policy(
             })
             .collect()
     };
-    let repo = format!(
-        "repos/{}/{}",
-        encode(&base.owner.login),
-        encode(&base.repo.name)
-    );
+    let repo = format!("repos/{}/{}", encode(owner), encode(name));
     let branch = encode(&base.branch);
     let get = |path: &str, paginate: bool| -> Option<Vec<u8>> {
         let args = if paginate {

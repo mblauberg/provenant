@@ -509,6 +509,58 @@ fn pr_status_waits_for_change_and_preserves_partial_results() -> Result {
 
 fn fake_gh(args: &[String]) -> Result<u8> {
     let call = args.join(" ");
+    // Real gh rejects JSON fields it does not have; so does this fake.
+    if let Some(at) = args.iter().position(|arg| arg == "--json") {
+        let known: &[&str] = match (
+            args.first().map(String::as_str),
+            args.get(1).map(String::as_str),
+        ) {
+            (Some("pr"), Some("view" | "list")) => &[
+                "baseRefName",
+                "baseRefOid",
+                "headRefName",
+                "headRefOid",
+                "headRepository",
+                "headRepositoryOwner",
+                "isCrossRepository",
+                "isDraft",
+                "mergeStateStatus",
+                "mergeable",
+                "number",
+                "reviewDecision",
+                "state",
+                "statusCheckRollup",
+                "title",
+                "url",
+            ],
+            (Some("pr"), Some("checks")) => &[
+                "bucket",
+                "completedAt",
+                "description",
+                "event",
+                "link",
+                "name",
+                "startedAt",
+                "state",
+                "workflow",
+            ],
+            (Some("repo"), Some("view")) => {
+                &["defaultBranchRef", "name", "nameWithOwner", "owner", "url"]
+            }
+            _ => &[],
+        };
+        for field in args
+            .get(at + 1)
+            .map(String::as_str)
+            .unwrap_or("")
+            .split(',')
+        {
+            if !known.is_empty() && !known.contains(&field) {
+                let _ = writeln!(io::stderr(), "Unknown JSON field: {field:?}");
+                return Ok(1);
+            }
+        }
+    }
     writeln!(
         fs::OpenOptions::new()
             .create(true)
@@ -545,8 +597,8 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 return Ok(1);
             }
         }
-        "pr view 1668 --json baseRefName,baseRepository,baseRepositoryOwner" => {
-            io::stdout().write_all(br#"{"baseRefName":"main","baseRepository":{"name":"repo"},"baseRepositoryOwner":{"login":"owner"}}"#)?;
+        "pr view 1668 --json baseRefName,url" => {
+            io::stdout().write_all(br#"{"baseRefName":"main","url":"https://github.com/owner/repo/pull/1668"}"#)?;
         }
         "api repos/owner/repo/branches/main" => {
             if Path::new("ruleset-only").exists() { io::stdout().write_all(br#"{"protected":true}"#)?; }
