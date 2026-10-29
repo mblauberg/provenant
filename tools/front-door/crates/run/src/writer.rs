@@ -50,6 +50,13 @@ fn anchored_error(error: FsError, anchor: &Path) -> RunError {
         other => other.into(),
     }
 }
+/// Retain the anchor for filesystem errors raised by held-directory helpers.
+fn anchor_filesystem(error: RunError, anchor: &Path) -> RunError {
+    match error {
+        RunError::Filesystem(error) => anchored_error(error, anchor),
+        other => other,
+    }
+}
 fn runtime(state: &Path) -> Result<UtilityRuntime> {
     let home = state.join("writer-git-home");
     let directory = Directory::open_anchor(state)?;
@@ -263,9 +270,11 @@ pub fn prepare_writer(
     )
     .map_err(error("parse writer base", Some(&request.worktree)))?;
     let state_dir = Directory::open_anchor(state)?;
-    let projects = crate::artifacts::subdir(&state_dir, OsStr::new("worktrees"), true)?;
+    let projects = crate::artifacts::subdir(&state_dir, OsStr::new("worktrees"), true)
+        .map_err(|error| anchor_filesystem(error, state))?;
     let project_state =
-        crate::artifacts::subdir(&projects, OsStr::new(&project.to_string()), true)?;
+        crate::artifacts::subdir(&projects, OsStr::new(&project.to_string()), true)
+            .map_err(|error| anchor_filesystem(error, state))?;
     let (directory, binding) =
         worktrees::writer_custody(&project_state, &worktree, &branch, base, || {
             let outcome = provenant_confinement::run_utility(

@@ -214,7 +214,7 @@ pub use managed::{
     InstallContext, InstallError, InstallFinding, InstallInspection, InstallOutcome, InstallPlan,
     InstallReporter, ManualInclude, ReleaseSmoke, SelectorChange, Snapshots, Targets,
     inspect_accounts, inspect_install, install, installed_binary, peer_agent_plist,
-    plan_and_install, plan_install, private_directory, release_root, systemd_user_dir,
+    plan_and_install, plan_install, private_directory, release_root, systemd_user_dir, user_dir_in,
     tick_agent_plist, tick_service_path, tick_timer_path, uninstall,
 };
 pub use provenant_records::Harness;

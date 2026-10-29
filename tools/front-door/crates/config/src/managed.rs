@@ -781,7 +781,8 @@ pub fn systemd_user_dir(home: &Path) -> PathBuf {
     user_dir_in(home, std::env::var_os("XDG_CONFIG_HOME"))
 }
 
-fn user_dir_in(home: &Path, config_home: Option<std::ffi::OsString>) -> PathBuf {
+/// [`systemd_user_dir`] with the `XDG_CONFIG_HOME` value supplied by the caller.
+pub fn user_dir_in(home: &Path, config_home: Option<std::ffi::OsString>) -> PathBuf {
     match config_home.map(PathBuf::from) {
         Some(dir) if dir.is_absolute() => dir.join("systemd/user"),
         _ => home.join(".config/systemd/user"),

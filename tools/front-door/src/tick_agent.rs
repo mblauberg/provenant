@@ -2,7 +2,7 @@
 use provenant_fabric_runtime::peer_agent::{self, AgentError, launchctl, systemctl, utf8, xml};
 use serde::Serialize;
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
 };
 
@@ -25,7 +25,11 @@ pub fn plist(home: &Path) -> PathBuf {
 }
 
 pub fn timer(home: &Path) -> PathBuf {
-    provenant_config::systemd_user_dir(home).join(TIMER)
+    timer_in(home, std::env::var_os("XDG_CONFIG_HOME"))
+}
+
+fn timer_in(home: &Path, config_home: Option<OsString>) -> PathBuf {
+    provenant_config::user_dir_in(home, config_home).join(TIMER)
 }
 
 pub fn service(home: &Path) -> PathBuf {
@@ -357,11 +361,11 @@ mod tests {
         assert!(!text.contains("Restart="));
         assert!(render_service(Path::new("/bin/a\nb"), Path::new("/s"), OsStr::new("/p")).is_err());
         assert_eq!(
-            timer(Path::new("/h")),
+            timer_in(Path::new("/h"), None),
             Path::new("/h/.config/systemd/user/provenant-tick.timer")
         );
         assert_eq!(
-            service(Path::new("/h")),
+            timer_in(Path::new("/h"), None).with_file_name("provenant-tick.service"),
             Path::new("/h/.config/systemd/user/provenant-tick.service")
         );
     }

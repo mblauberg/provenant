@@ -3657,9 +3657,9 @@ fn git(rig: &TestRig, cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(output.stdout.bytes)?.trim().into())
 }
 
-/// A Git registration and an advisory claim do not grant writer custody.
+/// A Git worktree registration is enough for writer custody; no Provenant registration is required.
 #[test]
-fn submit_git_worktree_names_the_missing_provenant_registration() -> Result {
+fn submit_git_worktree_needs_no_provenant_registration() -> Result {
     let rig = TestRig::new()?;
     git(
         &rig,
@@ -3705,7 +3705,10 @@ fn submit_git_worktree_names_the_missing_provenant_registration() -> Result {
         "{}",
         String::from_utf8_lossy(&claim.stderr.bytes)
     );
-    for deliver in [None, Some(json!({"remote":"origin","branch":"git-writer"}))] {
+    for (index, deliver) in [None, Some(json!({"remote":"origin","branch":"git-writer"}))]
+        .into_iter()
+        .enumerate()
+    {
         let mut task = json!({
             "prompt":"commit the fix", "access":"worktree_write", "worktree":worktree,
             "route":{"kind":"model","provider":"codex","model":"gpt-6.1-sol","effort":"high"},
@@ -3718,7 +3721,7 @@ fn submit_git_worktree_names_the_missing_provenant_registration() -> Result {
             &rig,
             &[
                 json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                    "name":"fabric_run","arguments":{"op":"submit","operation_id":"git-writer","tasks":[task]}
+                    "name":"fabric_run","arguments":{"op":"submit","operation_id":format!("git-writer-{index}"),"tasks":[task]}
                 }}),
             ],
         )?;
@@ -3726,14 +3729,12 @@ fn submit_git_worktree_names_the_missing_provenant_registration() -> Result {
             .iter()
             .find(|reply| reply["id"] == 1)
             .ok_or("submit reply")?["result"];
-        assert_eq!(result["isError"], true, "{result}");
-        assert_eq!(
+        // Git membership is the registry: custody no longer needs Provenant state,
+        // so the task is admitted and fails later on route availability only.
+        assert_ne!(result["isError"], true, "{result}");
+        assert_ne!(
             result["structuredContent"]["code"], "worktree_unregistered",
             "{result}"
-        );
-        assert_eq!(
-            result["structuredContent"]["path"],
-            worktree.to_str().ok_or("worktree")?
         );
     }
     rig.assert_legacy_unchanged()
