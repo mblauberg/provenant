@@ -361,7 +361,12 @@ with each pattern's level, summary and cost; `preset show NAME` displays merged
 values and their origins; `preset explain NAME` renders the pattern, typed
 parameters, stages and roles without creating state. `extends` selects
 another preset's defaults. A same-name override omits `extends` and supplies
-only its changes. For example:
+only its changes. Stage roles come from a role library (bundled `roles.toml`,
+then user and repository `roles.toml`, then a preset's own `[roles.*]`), listed
+by `preset show --roles`. A role may declare `card`, `family`, `extends` and
+`skill:` `references`; the compiler records each reference's content digest on
+the node, so a replayed graph names the exact guidance it ran with. See the
+presets runbook. For example:
 
 ```toml
 extends = "chain"

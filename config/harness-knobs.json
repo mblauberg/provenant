@@ -32,7 +32,7 @@
     "path": "domains.fabric.graph",
     "settings": {
       "allowed_read_roots": {"type": "string_list", "allowed": "absolute directory paths", "default": "empty (read roots stay inside the project and its registered worktrees)", "effect": "Absolute host directories that graph and preset `read_roots` may name besides the project's own registered worktrees."},
-      "limits.expansion_depth": {"type": "int", "allowed": "1 or more", "default": "32", "effect": "Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 29. Graph documents cannot raise it."}
+      "limits.expansion_depth": {"type": "int", "allowed": "1 or more", "default": "64", "effect": "Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 33. Graph documents cannot raise it."}
     }
   },
   "host_model_policy_settings": {

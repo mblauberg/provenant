@@ -28,6 +28,7 @@ mod pr;
 #[cfg(test)]
 mod pr_land_tests;
 mod preset;
+mod preset_roles;
 #[cfg(test)]
 #[allow(
     dead_code,

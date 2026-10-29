@@ -1,0 +1,4 @@
+## Additions
+### Pipelines and graphs
+
+- Preset stages now draw on a role library: a bundled `roles.toml` plus optional user and repository `roles.toml` files, composed with `extends` and reported with origins by `preset show --roles`. A role carries a short card and `skill:` references that the compiler resolves against the release skills, records by content digest on the node (`role`, `role_digest`) and shows in `run --explain`. The bundled presets use library roles (`plan.scope`, `scout.codebase`, `scout.external`, `lens.NAME`, and more), and `scout-swarm` adds an external scout that researches outward and falls back with a recorded substitution when no `web` route exists. Scoping references for scouts, researcher, architect, acceptance writer and critic ship with the `scope` skill (#2208).

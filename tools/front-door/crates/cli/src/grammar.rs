@@ -161,8 +161,14 @@ pub enum Command {
 pub enum Preset {
     /// List available presets
     List,
-    /// Show effective preset values and their origins
-    Show { name: String },
+    /// Show effective preset values and their origins, or the role library
+    Show {
+        /// Preset name, or with --roles a role name to show
+        name: Option<String>,
+        /// List the role library (cards, tiers, families, references and origins)
+        #[arg(long)]
+        roles: bool,
+    },
     /// Explain when to use a preset, its cost, and its typed parameters
     Explain { name: String },
 }

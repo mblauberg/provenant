@@ -1,0 +1,48 @@
+Graph <id>
+Review shape: deep (by_risk)
+subject  role=plan.review tier=senior family=any kind=- access=read_only worktree=-
+  read_roots: ["<project>"]
+  source: {"commit":"<commit>","type":"commit"}
+lenses  role=- tier=- family=any kind=composite access=read_only worktree=-
+  source: {"node":"subject","type":"node"}
+  inputs: [{"node":"subject","outputs":["result"]}]
+  lens-correctness-spec  role=lens.correctness-spec tier=junior family=distinct_from_writer kind=- access=read_only worktree=-
+    reference: skill:code-review/references/reviewer-context.md <digest>
+    reference: skill:code-review/references/lenses/correctness-spec.md <digest>
+    read_roots: ["<project>","<root>/skills"]
+  lens-design-fit-reuse  role=lens.design-fit-reuse tier=junior family=any kind=- access=read_only worktree=-
+    reference: skill:code-review/references/reviewer-context.md <digest>
+    reference: skill:code-review/references/lenses/design-fit-reuse.md <digest>
+    read_roots: ["<project>","<root>/skills"]
+  lens-simplicity  role=lens.simplicity tier=junior family=any kind=- access=read_only worktree=-
+    reference: skill:code-review/references/reviewer-context.md <digest>
+    reference: skill:code-review/references/lenses/simplicity.md <digest>
+    read_roots: ["<project>","<root>/skills"]
+  lens-conventions-readability  role=lens.conventions-readability tier=junior family=any kind=- access=read_only worktree=-
+    reference: skill:code-review/references/reviewer-context.md <digest>
+    reference: skill:code-review/references/lenses/conventions-readability.md <digest>
+    read_roots: ["<project>","<root>/skills"]
+  lens-tests  role=lens.tests tier=junior family=any kind=- access=read_only worktree=-
+    reference: skill:code-review/references/reviewer-context.md <digest>
+    reference: skill:code-review/references/lenses/tests.md <digest>
+    read_roots: ["<project>","<root>/skills"]
+  exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-design-fit-reuse","outputs":["result","findings"]},{"node":"lens-simplicity","outputs":["result","findings"]},{"node":"lens-conventions-readability","outputs":["result","findings"]},{"node":"lens-tests","outputs":["result","findings"]}]
+verify  role=review.verify tier=senior family=cross_preferred kind=- access=read_only worktree=-
+  read_roots: ["<project>"]
+  source: {"node":"subject","type":"node"}
+  inputs: [{"node":"lenses","outputs":["result"]}]
+synthesis  role=review.synthesis tier=senior family=any kind=synthesise access=read_only worktree=-
+  read_roots: ["<project>"]
+  source: {"node":"subject","type":"node"}
+  inputs: [{"node":"verify","outputs":["result"]}]
+Roles:
+  lens.conventions-readability  origin=bundled digest=<digest>
+  lens.correctness-spec  origin=bundled digest=<digest>
+  lens.design-fit-reuse  origin=bundled digest=<digest>
+  lens.simplicity  origin=bundled digest=<digest>
+  lens.tests  origin=bundled digest=<digest>
+  plan.review  origin=bundled digest=<digest>
+  review.synthesis  origin=bundled digest=<digest>
+  review.verify  origin=bundled digest=<digest>
+Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
+

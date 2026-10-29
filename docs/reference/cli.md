@@ -1810,7 +1810,8 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `name` | `{"name": "name", "positional": true, "required": true}` |
+| `name` | `{"name": "name", "positional": true}` |
+| `--roles` | `{"defaults": ["false"], "name": "roles", "values": ["true", "false"]}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1819,7 +1820,8 @@ Accepted by every command, before or after the subcommand.
   "groups": [
     {
       "arguments": [
-        "name"
+        "name",
+        "roles"
       ],
       "multiple": true,
       "name": "Show",

@@ -1,62 +1,10 @@
+use crate::preset_roles::{RoleLibrary, prompt_file_reference};
 use provenant_fabric_runtime::read_roots::ReadRoots;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
+    path::{Path, PathBuf},
 };
-
-/// Prompt files shared with the code-review skill, keyed by role `prompt_file`.
-const PROMPT_FILES: [(&str, &str); 9] = [
-    (
-        "code-review/reviewer-context",
-        include_str!("../../../skills/code-review/references/reviewer-context.md"),
-    ),
-    (
-        "code-review/lenses/correctness-spec",
-        include_str!("../../../skills/code-review/references/lenses/correctness-spec.md"),
-    ),
-    (
-        "code-review/lenses/design-fit-reuse",
-        include_str!("../../../skills/code-review/references/lenses/design-fit-reuse.md"),
-    ),
-    (
-        "code-review/lenses/simplicity",
-        include_str!("../../../skills/code-review/references/lenses/simplicity.md"),
-    ),
-    (
-        "code-review/lenses/conventions-readability",
-        include_str!("../../../skills/code-review/references/lenses/conventions-readability.md"),
-    ),
-    (
-        "code-review/lenses/tests",
-        include_str!("../../../skills/code-review/references/lenses/tests.md"),
-    ),
-    (
-        "code-review/lenses/security-privacy",
-        include_str!("../../../skills/code-review/references/lenses/security-privacy.md"),
-    ),
-    (
-        "code-review/lenses/concurrency-data-errors",
-        include_str!("../../../skills/code-review/references/lenses/concurrency-data-errors.md"),
-    ),
-    (
-        "code-review/lenses/adversarial",
-        include_str!("../../../skills/code-review/references/lenses/adversarial.md"),
-    ),
-];
-
-fn prompt_file(name: &str) -> Result<&'static str, String> {
-    PROMPT_FILES
-        .iter()
-        .find(|(key, _)| *key == name)
-        .map(|(_, text)| *text)
-        .ok_or_else(|| {
-            format!(
-                "unknown prompt_file {name}; available: {}",
-                PROMPT_FILES.map(|(key, _)| key).join(", ")
-            )
-        })
-}
 
 const DEPTH: usize = 8;
 
@@ -82,6 +30,13 @@ pub struct Layers {
     /// final `review_shape` and `risk_tier` parameters.
     pub review: Option<ShapeSelector>,
     used_shapes: std::cell::RefCell<BTreeSet<String>>,
+    /// The role library: bundled roles, then user and repository `roles.toml`.
+    pub roles: RoleLibrary,
+    /// Named routes the routing configuration defines. `None` skips the
+    /// check that a role's tier names a configured route.
+    pub known_routes: Option<BTreeSet<String>>,
+    used_roles: std::cell::RefCell<BTreeMap<String, Value>>,
+    pub substitutions: std::cell::RefCell<Vec<Value>>,
     entries: BTreeMap<String, Vec<(String, Value)>>,
     errors: BTreeMap<String, Vec<String>>,
     repo_files: BTreeSet<String>,
@@ -93,6 +48,11 @@ pub struct Expansion {
     pub document: Value,
     pub origins: BTreeMap<String, String>,
     pub repo_files: Vec<String>,
+    /// Library roles the graph used: origin, `extends` chain, digest and the
+    /// content digest of each reference.
+    pub roles: BTreeMap<String, Value>,
+    /// Requested routes replaced by a fallback, for example a missing web route.
+    pub substitutions: Vec<Value>,
 }
 
 impl Layers {
@@ -152,6 +112,12 @@ impl Layers {
 
     pub fn load(user: &Path, repo: &Path) -> Result<Self, String> {
         let mut layers = Self::empty();
+        for dir in [user, repo] {
+            // `roles.toml` sits beside the `presets` directory.
+            if let Some(parent) = dir.parent() {
+                layers.roles.add_file(&parent.join("roles.toml"))?;
+            }
+        }
         for (is_repo, dir) in [(false, user), (true, repo)] {
             let entries = match std::fs::read_dir(dir) {
                 Ok(entries) => entries,
@@ -227,6 +193,52 @@ impl Layers {
                 })
             })
             .collect()
+    }
+
+    /// The role library, or one role with its `extends` chain applied.
+    pub fn roles_view(&self, name: Option<&str>) -> Result<Value, String> {
+        let describe = |role: &str| -> Result<Value, String> {
+            let resolved = self.roles.resolve(role, None)?;
+            let profile = &resolved.profile;
+            let mut references = Vec::new();
+            for item in profile
+                .get("references")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let reference = item.get("ref").and_then(Value::as_str).unwrap_or_default();
+                let when = item.get("when").cloned().unwrap_or(Value::Null);
+                // Dynamic references (`${item.name}`) resolve per node.
+                let digest = if reference.contains("${") {
+                    Value::Null
+                } else {
+                    json!(self.roles.reference(reference)?.digest)
+                };
+                references.push(json!({"ref": reference, "when": when, "digest": digest}));
+            }
+            Ok(json!({
+                "name": role,
+                "origin": resolved.origin,
+                "extends": resolved.chain[1..],
+                "kind": profile.get("kind"),
+                "tier": profile.get("tier"),
+                "access": profile.get("access"),
+                "family": profile.get("family"),
+                "purpose": profile.get("purpose"),
+                "card": profile.get("card"),
+                "references": references,
+            }))
+        };
+        match name {
+            Some(name) => describe(name),
+            None => Ok(json!({"roles": self
+                .roles
+                .names()
+                .iter()
+                .map(|role| describe(role))
+                .collect::<Result<Vec<_>, _>>()?})),
+        }
     }
 
     /// The typed interface of a preset, rendered for a reader. Creates no state.
@@ -761,6 +773,8 @@ pub fn expand_with(
     overrides: &[String],
 ) -> Result<Expansion, String> {
     layers.used_shapes.borrow_mut().clear();
+    layers.used_roles.borrow_mut().clear();
+    layers.substitutions.borrow_mut().clear();
     let mut repo_files = Vec::new();
     let (mut config, mut origins) = layers.resolve_inner(name, &mut Vec::new(), &mut repo_files)?;
     for (key, value) in params {
@@ -825,6 +839,23 @@ pub fn expand_with(
             document[key] = interpolate(value, &parameters, prompt, 1)?;
         }
     }
+    let roles: BTreeMap<String, Value> = layers.used_roles.take().into_iter().collect();
+    let substitutions = layers.substitutions.take();
+    for (role, used) in &roles {
+        origins.insert(
+            format!("roles.{role}"),
+            used["origin"].as_str().unwrap_or("").into(),
+        );
+    }
+    // Provenance rides in the graph document so it is hashed into the graph
+    // identity and retained with the run: where each value came from, which
+    // roles (with digests) were used and any route substituted.
+    document["provenance"] = json!({
+        "preset": name,
+        "origins": origins,
+        "roles": roles,
+        "substitutions": substitutions,
+    });
     if serde_json::to_vec(&document)
         .map_err(|e| e.to_string())?
         .len()
@@ -845,6 +876,8 @@ pub fn expand_with(
         document,
         origins,
         repo_files,
+        roles,
+        substitutions,
     })
 }
 
@@ -963,7 +996,12 @@ fn selected_inputs(deps: &[String], outputs: &Value) -> Value {
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "leaf lowering shares the preset's layers, roles and parameters"
+)]
 fn lower_leaf(
+    layers: &Layers,
     entry: &serde_json::Map<String, Value>,
     roles: Option<&Value>,
     parameters: &Value,
@@ -977,14 +1015,22 @@ fn lower_leaf(
         .get("role")
         .map(|value| value.as_str().ok_or("role must be a name"))
         .transpose()?;
+    // A role name may interpolate, for example `lens.${item.name}`.
+    let role = match role {
+        Some(name) if name.contains("${") => Some(
+            interpolate(&json!(name), parameters, prompt, index)?
+                .as_str()
+                .ok_or("role must be a name")?
+                .to_owned(),
+        ),
+        other => other.map(str::to_owned),
+    };
+    let role = role.as_deref();
+    let mut resolved_role = None;
     if let Some(role) = role {
-        profile = roles
-            .and_then(|roles| roles.get(role))
-            .cloned()
-            .ok_or_else(|| format!("unknown preset role: {role}"))?;
-        if !profile.is_object() {
-            return Err(format!("role {role} must be a table"));
-        }
+        let resolved = layers.roles.resolve(role, roles)?;
+        profile = resolved.profile.clone();
+        resolved_role = Some(resolved);
     }
     merge(
         &mut profile,
@@ -1022,6 +1068,12 @@ fn lower_leaf(
             "source",
             "prompt_file",
             "distinct_from",
+            "card",
+            "references",
+            "family",
+            "fallback_tier",
+            "purpose",
+            "dispositions",
         ]
         .contains(&key.as_str())
         {
@@ -1029,6 +1081,35 @@ fn lower_leaf(
         }
     }
     map.insert("id".into(), json!(id));
+    // The brief: card, then the task, then reference text. References are
+    // resolved against the release root and their digests recorded.
+    let mut references = Vec::new();
+    if let Some(list) = map.remove("references") {
+        for item in list.as_array().ok_or("references must be an array")? {
+            let (name, when, inline) = match item {
+                Value::String(name) => (name.as_str(), "", false),
+                Value::Object(table) => (
+                    table
+                        .get("ref")
+                        .and_then(Value::as_str)
+                        .ok_or("each reference needs a ref = \"skill:...\"")?,
+                    table
+                        .get("when")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    table
+                        .get("inline")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                ),
+                _ => return Err("references entries must be tables or names".into()),
+            };
+            if name.is_empty() {
+                continue;
+            }
+            references.push((layers.roles.reference(name)?, when.to_owned(), inline));
+        }
+    }
     if let Some(files) = map.remove("prompt_file") {
         let names: Vec<&str> = match &files {
             Value::String(name) => vec![name.as_str()],
@@ -1038,21 +1119,125 @@ fn lower_leaf(
                 .collect::<Result<_, _>>()?,
             _ => return Err("prompt_file must be a name or a list of names".into()),
         };
-        let mut texts = Vec::new();
         for name in names.into_iter().filter(|name| !name.is_empty()) {
-            texts.push(prompt_file(name)?);
+            references.push((
+                layers.roles.reference(&prompt_file_reference(name)?)?,
+                String::new(),
+                true,
+            ));
         }
-        if !texts.is_empty() {
-            let brief = map
-                .get("prompt")
-                .and_then(Value::as_str)
-                .unwrap_or(prompt)
-                .to_owned();
-            map.insert(
-                "prompt".into(),
-                json!(format!("{brief}\n\n{}", texts.join("\n\n"))),
-            );
+    }
+    let card = map
+        .remove("card")
+        .map(|card| card.as_str().map(str::to_owned).ok_or("card must be text"))
+        .transpose()?;
+    let family = map.remove("family");
+    map.remove("purpose");
+    let fallback_tier = map.remove("fallback_tier");
+    if card.is_some() || !references.is_empty() {
+        let task = map
+            .get("prompt")
+            .and_then(Value::as_str)
+            .unwrap_or(prompt)
+            .to_owned();
+        let mut brief = String::new();
+        if let Some(card) = &card {
+            brief.push_str(card);
+            brief.push_str("\n\n");
         }
+        brief.push_str(&task);
+        let listed: Vec<String> = references
+            .iter()
+            .filter(|(reference, _, inline)| !inline && reference.path.is_some())
+            .map(|(reference, when, _)| {
+                let location = reference
+                    .path
+                    .as_ref()
+                    .map_or(String::new(), |path| format!(" ({})", path.display()));
+                let when = if when.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {when}")
+                };
+                format!("- {}{location}{when}", reference.name)
+            })
+            .collect();
+        if !listed.is_empty() {
+            brief.push_str("\n\nReferences to read when relevant:\n");
+            brief.push_str(&listed.join("\n"));
+        }
+        for (reference, _, _) in references
+            .iter()
+            .filter(|(reference, _, inline)| *inline || reference.path.is_none())
+        {
+            brief.push_str("\n\n");
+            brief.push_str(&reference.text);
+        }
+        map.insert("prompt".into(), json!(brief));
+    }
+    match family.as_ref().and_then(Value::as_str) {
+        None | Some("" | "any") => {}
+        Some("cross_preferred") => {
+            // Recorded as a preference: routing does not yet exclude the
+            // families of upstream attempts, so this is not enforced.
+            map.insert("family".into(), json!("cross_preferred"));
+        }
+        Some("distinct_from_writer") => {
+            map.entry("distinct_from")
+                .or_insert_with(|| json!("writer"));
+        }
+        Some(other) => {
+            return Err(format!(
+                "node {id}: unknown family constraint {other}; use any, cross_preferred or distinct_from_writer"
+            ));
+        }
+    }
+    if let (Some(role), Some(resolved)) = (role, &resolved_role) {
+        let recorded: Vec<Value> = references
+            .iter()
+            .map(|(reference, when, _)| {
+                json!({"ref": reference.name, "when": when, "digest": reference.digest})
+            })
+            .collect();
+        // The whole effective profile (prompt, tier, access, kind, outputs,
+        // inline flags and the rest) plus the content digests of references.
+        let digest = provenant_records::CanonicalV1::file_digest(
+            &serde_json::to_vec(&json!({
+                "role": role,
+                "chain": resolved.chain,
+                "profile": resolved.profile,
+                "references": recorded,
+            }))
+            .map_err(|e| e.to_string())?,
+        )
+        .to_string();
+        map.insert("role_digest".into(), json!(digest));
+        if !recorded.is_empty() {
+            map.insert("references".into(), json!(recorded));
+        }
+        layers.used_roles.borrow_mut().insert(
+            role.to_owned(),
+            json!({
+                "origin": resolved.origin,
+                "extends": resolved.chain,
+                "digest": digest,
+                "references": recorded,
+            }),
+        );
+    }
+    if let Some(requested) = map.get("tier").and_then(Value::as_str).map(str::to_owned)
+        && let Some(fallback) = fallback_tier.as_ref().and_then(Value::as_str)
+        && let Some(routes) = &layers.known_routes
+        && !routes.contains(&requested)
+        && requested != fallback
+    {
+        map.insert("tier".into(), json!(fallback));
+        layers.substitutions.borrow_mut().push(json!({
+            "node": id,
+            "requested": requested,
+            "used": fallback,
+            "reason": format!("route {requested} is not defined in the routing configuration"),
+        }));
     }
     if map.get("distinct_from").is_some_and(|value| value == "") {
         map.remove("distinct_from");
@@ -1377,11 +1562,15 @@ impl StageBuilder<'_> {
                 1,
             )?
             .as_u64()
-            .filter(|count| (1..=32).contains(count))
-            .ok_or("entry count must be 1 to 32")?;
+            .filter(|count| (0..=32).contains(count))
+            .ok_or("entry count must be 0 to 32")?;
             (0..count).map(|_| None).collect()
         };
         let count = items.len();
+        if count == 0 {
+            // A zero count skips the stage; later stages depend on what it would have followed.
+            return Ok(deps.to_vec());
+        }
         let base = object
             .get("id")
             .map(|id| id.as_str().ok_or("entry id must be a string"))
@@ -1583,6 +1772,7 @@ impl StageBuilder<'_> {
             } else {
                 (
                     lower_leaf(
+                        self.layers,
                         &object,
                         self.roles,
                         &self.parameters,
@@ -1758,10 +1948,12 @@ fn configured(globals: &provenant_cli::Globals) -> Result<Layers, String> {
     if !config.is_absolute() {
         return Err("XDG_CONFIG_HOME must be absolute".into());
     }
-    Layers::load(
+    let mut layers = Layers::load(
         &config.join("provenant/presets"),
         &resolved.project.join(".provenant/presets"),
-    )
+    )?;
+    layers.roles.skill_root = Some(resolved.assets.clone());
+    Ok(layers)
 }
 
 fn report(command: &str, result: Result<Value, String>, globals: &provenant_cli::Globals) -> u8 {
@@ -1806,16 +1998,18 @@ fn visit_nodes(
 
 /// The project's primary checkout and registered worktrees, which a graph node
 /// may always read. Outside a repository the project is only its own directory.
-fn discover_read_roots(directory: &Path, allowed: &[String]) -> ReadRoots {
-    let project = crate::handoff::git_text(directory, &["worktree", "list", "--porcelain"])
-        .map(|listing| {
-            listing
-                .lines()
-                .filter_map(|line| line.strip_prefix("worktree "))
-                .map(std::path::PathBuf::from)
-                .collect()
-        })
-        .unwrap_or_else(|_| vec![directory.to_path_buf()]);
+fn discover_read_roots(directory: &Path, allowed: &[String], extra: &[PathBuf]) -> ReadRoots {
+    let mut project: Vec<PathBuf> =
+        crate::handoff::git_text(directory, &["worktree", "list", "--porcelain"])
+            .map(|listing| {
+                listing
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("worktree "))
+                    .map(std::path::PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_else(|_| vec![directory.to_path_buf()]);
+    project.extend(extra.iter().cloned());
     ReadRoots::new(project, allowed)
 }
 
@@ -1937,6 +2131,17 @@ pub(crate) fn bind_run_context(
     Ok(())
 }
 
+/// The family constraint a node carries: `any`, `cross_preferred` (recorded, not enforced) or `distinct_from_writer`.
+fn family(node: &Value) -> String {
+    if let Some(family) = node["family"].as_str() {
+        family.into()
+    } else if node["distinct_from"] == "writer" {
+        "distinct_from_writer".into()
+    } else {
+        "any".into()
+    }
+}
+
 fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
     for node in nodes {
         let field = |name: &str| node.get(name).and_then(Value::as_str).unwrap_or("-");
@@ -1946,15 +2151,29 @@ fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
             .and_then(Value::as_str)
             .unwrap_or("-");
         text.push_str(&format!(
-            "{}{}  role={} tier={} kind={} access={} worktree={}\n",
+            "{}{}  role={} tier={} family={} kind={} access={} worktree={}\n",
             "  ".repeat(indent),
             field("id"),
             field("role"),
             tier,
+            family(node),
             field("kind"),
             field("access"),
             field("worktree")
         ));
+        for reference in node
+            .get("references")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            text.push_str(&format!(
+                "{}  reference: {} {}\n",
+                "  ".repeat(indent),
+                reference["ref"].as_str().unwrap_or("-"),
+                reference["digest"].as_str().unwrap_or("-")
+            ));
+        }
         for key in [
             "write_scope",
             "read_roots",
@@ -2022,7 +2241,26 @@ fn explain(expansion: Expansion, globals: &provenant_cli::Globals) -> u8 {
     if let Some(nodes) = expansion.document["nodes"].as_array() {
         explain_tree(nodes, 0, &mut human);
     }
-    let data = json!({"graph": expansion.document, "origins": expansion.origins, "limits":limits,"execution":metrics,"validation_error":validation_error,"review_shape":expansion.review_shape});
+    if !expansion.roles.is_empty() {
+        human.push_str("Roles:\n");
+        for (role, used) in &expansion.roles {
+            human.push_str(&format!(
+                "  {role}  origin={} digest={}\n",
+                used["origin"].as_str().unwrap_or("-"),
+                used["digest"].as_str().unwrap_or("-")
+            ));
+        }
+    }
+    for substitution in &expansion.substitutions {
+        human.push_str(&format!(
+            "Substituted {}: {} -> {} ({})\n",
+            substitution["node"].as_str().unwrap_or("-"),
+            substitution["requested"].as_str().unwrap_or("-"),
+            substitution["used"].as_str().unwrap_or("-"),
+            substitution["reason"].as_str().unwrap_or("-")
+        ));
+    }
+    let data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"execution":metrics,"validation_error":validation_error,"review_shape":expansion.review_shape});
     let output = if globals.json {
         serde_json::to_vec(&provenant_records::CommandResult::new(
             "run",
@@ -2064,7 +2302,11 @@ pub fn command(command: provenant_cli::Preset, globals: &provenant_cli::Globals)
         match command {
             Preset::List => Ok(json!({"presets": layers.listing()})),
             Preset::Explain { name } => layers.explain(&name),
-            Preset::Show { name } => {
+            Preset::Show { name, roles: true } => layers.roles_view(name.as_deref()),
+            Preset::Show { name: None, .. } => Err("preset show needs a preset name".into()),
+            Preset::Show {
+                name: Some(name), ..
+            } => {
                 let expanded = expand(&layers, &name, "", &[])?;
                 let (values, origins) = layers.resolve(&name)?;
                 let mut origins = origins;
@@ -2128,6 +2370,7 @@ pub fn run(
             provenant_config::read_with_domains(&roots.roots, &provenant_cli::domains::SECTIONS)
                 .map_err(|e| e.to_string())?;
         let mut layers = configured(globals)?;
+        layers.known_routes = Some(config.domains.routing.routes.keys().cloned().collect());
         let review = config.domains.routing.review.clone();
         layers.review = Some(Box::new(move |named, risk| {
             let selected = review.select_shape(named, risk, None, &[])?;
@@ -2146,8 +2389,34 @@ pub fn run(
             Ok(hint)
         }));
         let mut expansion = expand_with(&layers, name, prompt, &params, &request.preset_set)?;
-        let policy =
-            discover_read_roots(&directory, &config.domains.fabric.graph.allowed_read_roots);
+        let skills = roots.assets.join("skills");
+        let mut policy_roots = vec![];
+        if skills.is_dir() {
+            policy_roots.push(skills.clone());
+            // Nodes with `skill:` references may read the release skills, read-only.
+            visit_nodes(
+                expansion.document["nodes"]
+                    .as_array_mut()
+                    .ok_or("missing graph nodes")?,
+                &mut |node| {
+                    if node.get("references").is_some() && node["access"] == "read_only" {
+                        let mut list = node
+                            .get("read_roots")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        list.push(json!(skills));
+                        node["read_roots"] = json!(list);
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        let policy = discover_read_roots(
+            &directory,
+            &config.domains.fabric.graph.allowed_read_roots,
+            &policy_roots,
+        );
         bind_run_context(&mut expansion, &request, &directory, &policy)?;
         Ok(expansion)
     })();
