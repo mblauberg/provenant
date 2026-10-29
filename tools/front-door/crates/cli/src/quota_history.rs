@@ -10,7 +10,7 @@ use provenant_os::fs::Directory;
 use provenant_quota::{HistoryRecord, QuotaSnapshot, decode_lines, encode_line};
 use std::{
     ffi::{OsStr, OsString},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::Path,
 };
 
@@ -46,6 +46,50 @@ fn read_file(directory: &Directory, name: &OsStr, limit: u64) -> Result<Vec<u8>,
     Ok(bytes)
 }
 
+// Walk backwards by blocks until the newest valid reading is found.
+fn last_reading(
+    directory: &Directory,
+    name: &OsStr,
+) -> Result<(Option<HistoryRecord>, bool), EdgeError> {
+    let mut file = match directory.open_read(name) {
+        Ok(file) => file,
+        Err(error) if error.is_not_found() => return Ok((None, false)),
+        Err(error) => return Err(error.into()),
+    };
+    let mut end = file.metadata()?.size.min(READ_LIMIT);
+    let mut pending = Vec::new();
+    let mut torn = false;
+    let mut first = true;
+    while end > 0 {
+        let start = end.saturating_sub(4096);
+        file.seek(SeekFrom::Start(start))
+            .map_err(|source| EdgeError::Read {
+                path: name.into(),
+                source,
+            })?;
+        let mut block = vec![0; (end - start) as usize];
+        file.read_exact(&mut block)
+            .map_err(|source| EdgeError::Read {
+                path: name.into(),
+                source,
+            })?;
+        if first {
+            torn = block.last().is_some_and(|b| *b != b'\n');
+            first = false;
+        }
+        block.extend_from_slice(&pending);
+        while let Some(index) = block.iter().rposition(|b| *b == b'\n') {
+            if let Some(record) = decode_lines(&block[index + 1..]).pop() {
+                return Ok((Some(record), torn));
+            }
+            block.truncate(index);
+        }
+        pending = block;
+        end = start;
+    }
+    Ok((decode_lines(&pending).pop(), torn))
+}
+
 /// Append the snapshot as one record unless it repeats the last reading.
 /// The caller holds `quota.lock`, so lines never interleave. Returns whether
 /// a record was written.
@@ -61,10 +105,9 @@ pub(crate) fn record(
     let current = file_name(snapshot, CURRENT);
     let rotated = file_name(snapshot, ROTATED);
     let half = max_bytes / 2;
-    let current_bytes = read_file(&directory, &current, READ_LIMIT)?;
-    let mut last = decode_lines(&current_bytes).pop();
+    let (mut last, torn) = last_reading(&directory, &current)?;
     if last.is_none() {
-        last = decode_lines(&read_file(&directory, &rotated, READ_LIMIT)?).pop();
+        last = last_reading(&directory, &rotated)?.0;
     }
     let Some(next) = HistoryRecord::observe(last.as_ref(), snapshot) else {
         return Ok(false);
@@ -83,7 +126,7 @@ pub(crate) fn record(
     }
     // Rotation left an empty file. Otherwise a crashed writer may have left an
     // unterminated fragment, which the new line would glue onto and spoil.
-    let torn = !rotated_now && current_bytes.last().is_some_and(|b| *b != b'\n');
+    let torn = !rotated_now && torn;
     let mut file = directory.open_append(&current)?;
     if torn {
         file.write_all(b"\n").map_err(|source| EdgeError::Read {
@@ -346,6 +389,21 @@ mod tests {
             assert!(!text.contains(secret), "{secret}");
         }
         assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o077, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn last_reading_crosses_blocks_and_skips_corrupt_tail() -> TestResult {
+        let (temp, quota) = state()?;
+        let cap = provenant_quota::DEFAULT_HISTORY_MAX_BYTES;
+        record(&quota, &snapshot(100, None, 500, 900), cap)?;
+        let path = temp.path().join("quota/history/k1.claude.jsonl");
+        let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+        file.write_all(&vec![b'x'; 9000])?;
+        drop(file);
+        assert!(!record(&quota, &snapshot(200, None, 500, 900), cap)?);
+        assert!(record(&quota, &snapshot(300, None, 600, 900), cap)?);
+        assert_eq!(read(temp.path(), &Query::default())?.len(), 2);
         Ok(())
     }
 

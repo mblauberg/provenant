@@ -158,6 +158,10 @@ pub(crate) enum EdgeError {
     Adapter,
     #[error("quota report exceeds 1 MiB; filter with --adapter")]
     TooLarge,
+    #[error(
+        "quota history report exceeds 16 MiB; filter with --account, --since or --until, or lower --limit"
+    )]
+    HistoryTooLarge,
     #[error("{0}")]
     Display(String),
     #[error("quota report path is not UTF-8")]
@@ -1321,7 +1325,7 @@ fn history_report(
         "readings": readings,
     });
     if serde_json::to_vec(&data)?.len() as u64 > 16 * MAX_RECORD_BYTES {
-        return Err(EdgeError::TooLarge);
+        return Err(EdgeError::HistoryTooLarge);
     }
     Ok((data, history_human(&records, &prices)))
 }
@@ -1527,7 +1531,7 @@ fn quota_summary(report: &QuotaReport) -> crate::Summary {
         report
             .accounts
             .iter()
-            .filter(|row| state(row) != "current")
+            .filter(|row| !matches!(row.status, QuotaStatus::Available | QuotaStatus::CreditOnly))
             .map(|row| {
                 let pools = row
                     .snapshot
@@ -1543,7 +1547,11 @@ fn quota_summary(report: &QuotaReport) -> crate::Summary {
                 )
             }),
     );
-    let next = (!rows.is_empty()).then(|| "provenant quota tick".to_owned());
+    let next = report
+        .accounts
+        .iter()
+        .any(|row| !matches!(row.status, QuotaStatus::Available | QuotaStatus::CreditOnly))
+        .then(|| "provenant quota tick".to_owned());
     crate::Summary::new(
         format!(
             "quota {}/{} current{}{}",
@@ -1644,6 +1652,52 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_only_flags_accounts_needing_attention() {
+        let row = |status| AccountRow {
+            account: AccountScope {
+                adapter: "test".into(),
+                account_key: "key".into(),
+                label: format!("{status:?}"),
+            },
+            snapshot: None,
+            status,
+            age_seconds: None,
+            next_due_unix_seconds: None,
+            refreshing: false,
+            error: None,
+            capacity_cooldowns: vec![],
+            display: None,
+        };
+        let mut report = QuotaReport {
+            schema_version: 1,
+            generated_unix_seconds: 0,
+            accounts: vec![row(QuotaStatus::Available), row(QuotaStatus::CreditOnly)],
+            sources: vec![],
+            coverage: Coverage { total: 2, known: 2 },
+            refreshing_ids: vec![],
+            next_due_unix_seconds: None,
+            report_path: String::new(),
+            display: Default::default(),
+            display_icon_warning: Some("warning".into()),
+        };
+        let summary = quota_summary(&report);
+        assert_eq!(summary.lines.len(), 2);
+        assert_eq!(summary.next, None);
+        report.accounts.push(row(QuotaStatus::Stale));
+        let summary = quota_summary(&report);
+        assert!(summary.lines.iter().any(|line| line.contains("stale")));
+        assert_eq!(summary.next.as_deref(), Some("provenant quota tick"));
+    }
+
+    #[test]
+    fn history_size_error_names_its_limit_and_filters() {
+        let message = EdgeError::HistoryTooLarge.to_string();
+        assert!(message.contains("16 MiB"));
+        assert!(message.contains("--limit"));
+        assert!(!message.contains("--adapter"));
+    }
 
     #[test]
     fn summary_reports_per_pool_state_when_only_one_pool_is_spent()
