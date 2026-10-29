@@ -181,6 +181,8 @@ pub enum GitRead {
         base: GitOid,
         head: GitOid,
     },
+    /// Staged changes against HEAD with their modes.
+    StagedModes,
     /// Changed paths with their old and new modes (`diff --raw`).
     ChangedModes {
         base: GitOid,
@@ -934,6 +936,16 @@ fn git_args(
             "-z".into(),
             base.to_string().into(),
             head.to_string().into(),
+            "--".into(),
+        ],
+        GitRead::StagedModes => vec![
+            "diff-index".into(),
+            "--cached".into(),
+            "--no-renames".into(),
+            "--raw".into(),
+            "--no-abbrev".into(),
+            "-z".into(),
+            "HEAD".into(),
             "--".into(),
         ],
         GitRead::ChangedModes { base, head } => vec![

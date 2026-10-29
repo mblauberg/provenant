@@ -271,7 +271,7 @@ impl<'a> Git<'a> {
             return Ok(Vec::new());
         }
         let exempt = &exempt.with_symlinks(
-            self.symlink_paths(None)
+            self.symlink_paths(&[base])
                 .map_err(|_| GitEvidenceError::UntrackedOrUnsupportedPath)?,
         );
         // Lists each untracked file, not its directory, whatever
@@ -675,6 +675,32 @@ mod tests {
         dirty.sort();
         // Source stays uncommitted work, and a hard control cannot be listed.
         assert_eq!(dirty, [b".gitattributes".to_vec(), b"src.rs".to_vec()]);
+        Ok(())
+    }
+
+    #[test]
+    fn an_unstaged_symlink_committed_in_the_base_is_still_uncommitted_work()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fs::create_dir_all(fixture.root.join("docs/specs"))?;
+        std::os::unix::fs::symlink("../../AGENTS.md", fixture.root.join("docs/specs/link"))?;
+        fixture.run(&["add", "-f", "docs/specs/link"])?;
+        fixture.run(&["commit", "-m", "link"])?;
+        let base = fixture.head()?;
+        fixture.run(&["rm", "--cached", "docs/specs/link"])?;
+        let token = CancelToken::new();
+        let git = Git::new(
+            &fixture.executor,
+            &fixture.repo,
+            &fixture.runtime,
+            fixture.budget()?,
+            &token,
+        );
+        let listed = ReviewExempt::new(&["docs/specs/"]);
+        // Status names it twice: staged deletion and untracked file.
+        let mut dirty = git.uncommitted_since(base, &listed)?;
+        dirty.dedup();
+        assert_eq!(dirty, [b"docs/specs/link".to_vec()]);
         Ok(())
     }
 

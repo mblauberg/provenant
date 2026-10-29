@@ -66,11 +66,11 @@ impl ProtectedPath {
 
 impl Git<'_> {
     /// Symlinks no review-exempt listing may cover: index entries, plus any
-    /// path that was a symlink in `base` or in HEAD among the paths changed
+    /// path that was a symlink in any of `bases` or in HEAD among the paths changed
     /// between them, so unstaging a committed link does not hide it.
     pub(crate) fn symlink_paths(
         &self,
-        base: Option<GitOid>,
+        bases: &[GitOid],
     ) -> Result<BTreeSet<Vec<u8>>, QuarantineError> {
         let raw = self
             .read(GitRead::IndexEntries { paths: Vec::new() })?
@@ -83,10 +83,14 @@ impl Git<'_> {
                 paths.insert(entry.path.to_vec());
             }
         }
-        if let Some(base) = base {
-            let head = self.head()?;
+        // Staged changes against HEAD, so a committed link removed from the
+        // index without a new commit is still known.
+        let staged = self.read(GitRead::StagedModes)?.stdout.bytes;
+        paths.extend(raw_symlink_paths(&staged)?);
+        let head = self.head()?;
+        for base in bases {
             let raw = self
-                .read(GitRead::ChangedModes { base, head })?
+                .read(GitRead::ChangedModes { base: *base, head })?
                 .stdout
                 .bytes;
             paths.extend(raw_symlink_paths(&raw)?);
@@ -101,7 +105,7 @@ impl Git<'_> {
         &self,
         exempt: &ReviewExempt,
     ) -> Result<Vec<ProtectedPath>, QuarantineError> {
-        let exempt = &exempt.with_symlinks(self.symlink_paths(None)?);
+        let exempt = &exempt.with_symlinks(self.symlink_paths(&[])?);
         let raw = self
             .read(GitRead::IndexEntries { paths: Vec::new() })?
             .stdout
@@ -591,7 +595,7 @@ fn quarantine_instruction_changes(
     exempt: &ReviewExempt,
 ) -> Result<QuarantineOutcome, QuarantineError> {
     let repo = git.repo;
-    let exempt = &exempt.with_symlinks(git.symlink_paths(Some(snapshot.head))?);
+    let exempt = &exempt.with_symlinks(git.symlink_paths(&[snapshot.head, comparison_base])?);
     let archive_identity = quarantine_dir.metadata()?;
     validate_archive(repo.root_identity().device, &archive_identity)?;
     if !snapshot.archive_identity.same_identity(&archive_identity) {
@@ -1453,8 +1457,7 @@ fn matches_tree(git: &Git<'_>, base: GitOid, path: &RepoPath) -> Result<bool, Qu
 }
 
 fn under_agents(path: &Path) -> bool {
-    path.strip_prefix(".agents")
-        .is_ok_and(|relative| !relative.as_os_str().is_empty())
+    under_agents_bytes(path.as_os_str().as_bytes())
 }
 fn under_agents_bytes(path: &[u8]) -> bool {
     path.len() > 8 && path[..8].eq_ignore_ascii_case(b".agents/")
@@ -2060,6 +2063,14 @@ mod custody_integration_tests {
         for path in [".agents", ".agentsx/a", "x/.agents/a"] {
             assert!(!super::under_agents_bytes(path.as_bytes()), "{path}");
         }
+        assert!(super::under_agents(std::path::Path::new(".AGENTS/x")));
+        assert!(!super::under_agents(std::path::Path::new(".AGENTS")));
+        assert_eq!(
+            ProtectedPath::ordinary(".AGENTS/x/rules.md")
+                .map(|p| p.class())
+                .ok(),
+            Some(super::InstructionClass::OrdinaryInstruction)
+        );
         assert!(super::is_protected_evidence_path(
             b".AGENTS/x/Cargo.lock",
             &ReviewExempt::new(&["Cargo.lock", ".agents/"])

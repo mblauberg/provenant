@@ -750,8 +750,8 @@ needs no anchor. The compiled profile may be up to 512 KiB and the error names
 its size.
 
 Accepted risk: a hard link the host itself created inside a lane-writable tree
-is writable through its alias, so a write through the alias modifies the file outside the tree, and launch does not look for it. Host code that
-seeds a lane tree must therefore copy or clone (`clonefile`), never hard-link,
+is writable through its alias, so a write through the alias modifies the file
+outside the tree, and launch does not look for it. Host code that seeds a lane tree must therefore copy or clone (`clonefile`), never hard-link,
 from a shared store. The Cargo target and registry seeds clone, retained
 provider state is copied with hard-link refusal, and the pnpm store is
 read-only to the lane, so no host path creates such a link today.
