@@ -69,7 +69,7 @@ fn resolve_reports_effort_controls_and_nearby_models() -> Result {
     );
     let none = call(
         &rig,
-        &["route", "resolve", "opencode/opencode-go/glm-5.2"],
+        &["route", "resolve", "opencode/opencode-go/glm-5.3-flash"],
         0,
     )?;
     assert_eq!(none["data"]["supported_efforts"], serde_json::json!([]));
@@ -87,7 +87,7 @@ fn resolve_reports_effort_controls_and_nearby_models() -> Result {
             .ok_or("message")?
             .contains("codex/gpt-6-luna")
     );
-    let output = rig.command(&["route", "resolve", "opencode/opencode-go/glm-5.2"])?;
+    let output = rig.command(&["route", "resolve", "opencode/opencode-go/glm-5.3-flash"])?;
     assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("supported efforts: none"));
     Ok(())
 }
@@ -655,12 +655,21 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
     call(&rig, &["route", "--help"], 0)?;
     let listed = call(&rig, &["route", "list", "--adapter", "opencode"], 0)?;
     assert_eq!(listed["command"], "route list");
-    assert!(
-        listed["data"]["models"]
-            .as_array()
-            .ok_or("models")?
-            .iter()
-            .any(|m| m["model"] == "opencode/openrouter/~anthropic/claude-haiku-latest")
+    let mut models: Vec<&str> = listed["data"]["models"]
+        .as_array()
+        .ok_or("models")?
+        .iter()
+        .map(|m| m["model"].as_str().ok_or("model"))
+        .collect::<std::result::Result<_, _>>()?;
+    models.sort_unstable();
+    assert_eq!(
+        models,
+        [
+            "opencode/opencode-go/deepseek-v4.1-flash",
+            "opencode/opencode-go/glm-5.3-flash",
+            "opencode/opencode/deepseek-v4.1-flash-free",
+            "opencode/opencode/glm-5.3-flash-free",
+        ]
     );
     let pool = call(
         &rig,
@@ -676,7 +685,7 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
             "--model",
             "codex/gpt-6.1-terra",
             "--fallback",
-            "opencode/openrouter/~anthropic/claude-haiku-latest,agy/explicit",
+            "opencode/opencode-go/glm-5.3-flash,agy/explicit",
         ],
         0,
     )?;
@@ -688,7 +697,7 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
     );
     assert_eq!(
         resolved["data"]["alternatives"][0]["model"],
-        "openrouter/~anthropic/claude-haiku-latest"
+        "opencode-go/glm-5.3-flash"
     );
     assert_eq!(
         resolved["data"]["exclusions"]
@@ -928,13 +937,10 @@ fn route_config_verbs_edit_inline_domain_tables() -> Result {
 fn named_routes_are_read_only_and_fail_closed() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;
-    let config = "schema_version=1\n[domains.routing.routes.review]\nmodel='opencode/openrouter/~anthropic/claude-haiku-latest'\n";
+    let config = "schema_version=1\n[domains.routing.routes.review]\nmodel='opencode/opencode-go/glm-5.3-flash'\n";
     fs::write(rig.state.join("config.toml"), config)?;
     let resolved = call(&rig, &["route", "resolve", "--route", "review"], 0)?;
-    assert_eq!(
-        resolved["data"]["model"],
-        "openrouter/~anthropic/claude-haiku-latest"
-    );
+    assert_eq!(resolved["data"]["model"], "opencode-go/glm-5.3-flash");
     assert_eq!(fs::read_to_string(rig.state.join("config.toml"))?, config);
     // Only the usage counter may appear beside the config.
     let names = fs::read_dir(&rig.state)?

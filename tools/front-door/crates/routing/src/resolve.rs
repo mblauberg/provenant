@@ -1198,6 +1198,23 @@ fn admissible<'c>(
     }
     Ok(entry)
 }
+/// OpenCode accepts only its catalogued routes. An explicit model outside the
+/// four flash entries is refused with the admitted routes named.
+fn refuse_unlisted_opencode(model: &ModelId, catalogue: &Catalogue) -> Result<(), RoutingError> {
+    if model.adapter() != "opencode" || catalogue.model(model).is_some() {
+        return Ok(());
+    }
+    let admitted = catalogue
+        .models()
+        .iter()
+        .filter(|entry| entry.model.adapter() == "opencode")
+        .map(|entry| entry.model.as_str())
+        .collect::<Vec<_>>();
+    Err(RoutingError::UnlistedOpenCodeModel {
+        model: model.as_str().to_owned(),
+        admitted: admitted.join(", "),
+    })
+}
 fn cooling(model: &ModelId, account: Option<&str>, context: &ValidatedContext<'_>) -> bool {
     let now = context.now_seconds();
     context.capacity_cooldowns.iter().any(|record| {
@@ -1447,6 +1464,7 @@ fn resolve_inner(
 ) -> Result<ResolvedRoute, RoutingError> {
     let (primary, pool_selection) = match &request.choice {
         RouteChoice::Model(model) => {
+            refuse_unlisted_opencode(model, context.catalogue)?;
             if !privacy_allowed(model, request.confidential, context.catalogue) {
                 return Err(RoutingError::ConfidentialModel);
             }
@@ -1518,6 +1536,7 @@ fn resolve_inner(
         .iter()
         .filter(|model| privacy_allowed(model, request.confidential, context.catalogue))
         .map(|model| {
+            refuse_unlisted_opencode(model, context.catalogue)?;
             candidate(
                 model,
                 primary.effort.as_deref(),
