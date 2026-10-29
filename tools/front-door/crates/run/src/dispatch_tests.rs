@@ -5323,12 +5323,16 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
         store.resume(&changed, &call),
         Err(RunError::OperationConflict)
     ));
-    for expected in [0, 1] {
-        assert!(matches!(
-            store.resume(&resume("r2", expected, 30)?, &call),
-            Err(RunError::Conflict)
-        ));
-    }
+    assert!(matches!(
+        store.resume(&resume("r2", 0, 30)?, &call),
+        Err(RunError::GenerationConflict {
+            current_generation: 1
+        })
+    ));
+    assert!(matches!(
+        store.resume(&resume("r2", 1, 30)?, &call),
+        Err(RunError::Conflict)
+    ));
     let next = store.pending_attempts(continued.run_id, &call)?[0].attempt_id;
     let record = store.record(next, &call)?;
     assert_eq!(record.retry_of, Some(prior));
@@ -5544,12 +5548,16 @@ fn resume_replay_finishes_a_prepared_continuation() -> TestResult {
         store.resume(&changed, &call),
         Err(RunError::OperationConflict)
     ));
-    for expected in [0, 1] {
-        assert!(matches!(
-            store.resume(&resume("r2", expected, 30)?, &call),
-            Err(RunError::Conflict)
-        ));
-    }
+    assert!(matches!(
+        store.resume(&resume("r2", 0, 30)?, &call),
+        Err(RunError::GenerationConflict {
+            current_generation: 1
+        })
+    ));
+    assert!(matches!(
+        store.resume(&resume("r2", 1, 30)?, &call),
+        Err(RunError::Conflict)
+    ));
     Ok(())
 }
 

@@ -1295,8 +1295,14 @@ impl ServiceError {
     /// idempotency key; prompts, tokens and raw source errors are omitted.
     pub fn structured_error(&self) -> Value {
         if let Self::Coordination(CoordinationError::Store(error)) = self {
+            if let provenant_fabric_store::Error::Invalid(field) = error {
+                return serde_json::json!({"code":self.code(),"field":field,"message":error.to_string(),"hint":"Check the field and retry."});
+            }
             let facade = FacadeError::from(error);
-            if matches!(facade, FacadeError::UpgradeRequired { .. }) {
+            if matches!(
+                facade,
+                FacadeError::UpgradeRequired { .. } | FacadeError::Io { .. }
+            ) {
                 return Self::Facade(facade).structured_error();
             }
         }
@@ -1332,7 +1338,9 @@ impl ServiceError {
                 serde_json::json!({"code":self.code(),"message":self.to_string()})
             }
             Self::Facade(
-                error @ (FacadeError::Io { .. } | FacadeError::WorktreeUnregistered { .. }),
+                error @ (FacadeError::Io { .. }
+                | FacadeError::WorktreeUnregistered { .. }
+                | FacadeError::GenerationConflict { .. }),
             ) => serde_json::to_value(error)
                 .unwrap_or_else(|_| serde_json::json!({"code":self.code()})),
             Self::Coordination(CoordinationError::Input(error)) => {
@@ -1349,6 +1357,7 @@ impl ServiceError {
             }
             _ => serde_json::json!({"code":self.code()}),
         };
+        detail["code"] = Value::String(self.code().into());
         if self.code() == "busy" {
             detail["retryable"] = Value::Bool(true);
         }

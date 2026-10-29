@@ -623,7 +623,7 @@ impl From<&RunError> for ErrorKind {
             RunError::NotFound => Self::NotFound,
             RunError::Nonterminal => Self::Nonterminal,
             RunError::ProviderStateExpired => Self::ProviderStateExpired,
-            RunError::Conflict => Self::Conflict,
+            RunError::Conflict | RunError::GenerationConflict { .. } => Self::Conflict,
             RunError::Cancelled => Self::Cancelled,
             RunError::DepthExceeded { .. } | RunError::DepthOverflow => Self::LaneDepth,
             RunError::Capacity => Self::QueueFull,

@@ -1097,6 +1097,7 @@ pub fn coordination_outcome(
     match error {
         FacadeError::InvalidInput | FacadeError::NotFound => Outcome::Invalid,
         FacadeError::StaleFence
+        | FacadeError::GenerationConflict { .. }
         | FacadeError::Conflict
         | FacadeError::LaneCoordinationRefused
         | FacadeError::UpgradeRefused
