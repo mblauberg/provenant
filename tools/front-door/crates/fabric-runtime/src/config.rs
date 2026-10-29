@@ -125,8 +125,12 @@ pub struct Lanes {
     pub cargo_incremental: Option<bool>,
     /// `CARGO_PROFILE_DEV_DEBUG` for lanes; `line-tables-only` unless set.
     pub cargo_debug: Option<String>,
-    /// Cap on idle lane Cargo profile directories, in apparent bytes.
+    /// Cap on the allocated bytes of all lane Cargo profile directories, idle
+    /// and busy; see `provenant_config::LaneBuildSettings`.
     pub build_dir_max_bytes: Option<u64>,
+    /// Seconds after its newest write during which a profile directory is
+    /// never removed; 15 minutes unless set.
+    pub build_dir_grace_seconds: Option<u64>,
 }
 
 impl Lanes {
@@ -137,6 +141,7 @@ impl Lanes {
             cargo_incremental: self.cargo_incremental,
             cargo_debug: self.cargo_debug.clone(),
             build_dir_max_bytes: self.build_dir_max_bytes,
+            build_dir_grace_seconds: self.build_dir_grace_seconds,
         }
     }
 }

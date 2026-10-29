@@ -445,7 +445,7 @@ fn gc_data_summary(data: &GcData) -> String {
         }
     ));
     human.push_str(&format!(
-        "{} lane build director(ies), {} bytes {}; {} bytes of lane build output remain, {} busy\n",
+        "{} lane build director(ies), {} bytes {}; {} bytes of lane build output remain, {} busy, {} recent\n",
         data.build_dirs.removed.len(),
         data.build_dirs.bytes,
         if data.report.dry_run {
@@ -455,6 +455,7 @@ fn gc_data_summary(data: &GcData) -> String {
         },
         data.build_dirs.cache_bytes,
         data.build_dirs.busy.len(),
+        data.build_dirs.recent.len(),
     ));
     for error in &data.build_dirs.errors {
         human.push_str(&format!("lane build output: {error}\n"));
@@ -1246,12 +1247,14 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     );
     // Lane build output goes last among collections: it is the largest, and
     // the sweep holds host admission while it removes.
+    let build_settings = config.domains.fabric.lanes.build_settings();
     let build_collection = provenant_run::build_dir_gc::collect(
         roots.state.as_path(),
         &home,
         provenant_run::build_dir_gc::Limits {
-            max_bytes: config.domains.fabric.lanes.build_settings().build_dir_cap(),
+            max_bytes: build_settings.build_dir_cap(),
             free_floor,
+            grace_seconds: build_settings.build_dir_grace_seconds(),
         },
         command.dry_run,
     );

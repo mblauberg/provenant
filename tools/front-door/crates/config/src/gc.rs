@@ -17,8 +17,16 @@ pub struct LaneBuildSettings {
     pub cargo_incremental: Option<bool>,
     /// `CARGO_PROFILE_DEV_DEBUG` for lanes; `line-tables-only` unless set.
     pub cargo_debug: Option<String>,
-    /// Cap on idle lane Cargo profile directories, in apparent bytes.
+    /// Cap on the allocated bytes of all lane Cargo profile directories, idle
+    /// and busy. Collection removes idle ones, least recently used first; when
+    /// busy directories alone exceed the cap it removes every eligible idle
+    /// directory and stays over.
     pub build_dir_max_bytes: Option<u64>,
+    /// Seconds after its newest write during which a profile directory is
+    /// never removed, even with its Cargo locks free: test and run binaries
+    /// execute after Cargo drops its locks, and Cargo may be opening its lock
+    /// files. 15 minutes unless set.
+    pub build_dir_grace_seconds: Option<u64>,
 }
 /// Cargo's accepted `debug` levels, including the legacy numeric and boolean forms.
 const CARGO_DEBUG_LEVELS: [&str; 10] = [
@@ -35,6 +43,8 @@ const CARGO_DEBUG_LEVELS: [&str; 10] = [
 ];
 /// Lane build output cap when `build_dir_max_bytes` is unset.
 pub const DEFAULT_BUILD_DIR_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+/// Recency grace for lane build output when `build_dir_grace_seconds` is unset.
+pub const DEFAULT_BUILD_DIR_GRACE_SECONDS: u64 = 15 * 60;
 /// The asset's -1 sentinel selects the host-dependent default.
 pub fn deserialize_auto<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -129,6 +139,10 @@ impl LaneBuildSettings {
     pub fn build_dir_cap(&self) -> u64 {
         self.build_dir_max_bytes
             .unwrap_or(DEFAULT_BUILD_DIR_MAX_BYTES)
+    }
+    pub fn build_dir_grace_seconds(&self) -> u64 {
+        self.build_dir_grace_seconds
+            .unwrap_or(DEFAULT_BUILD_DIR_GRACE_SECONDS)
     }
     pub fn build_limit(&self, total_bytes: u64) -> u64 {
         self.max_concurrent_builds
@@ -404,13 +418,15 @@ mod build_tests {
         assert!(!settings.incremental());
         assert_eq!(settings.debug_level(), "line-tables-only");
         assert_eq!(settings.build_dir_cap(), 20 * 1024 * 1024 * 1024);
+        assert_eq!(settings.build_dir_grace_seconds(), 900);
         let settings: LaneBuildSettings = toml_edit::de::from_str(
-            "cargo_incremental = true\ncargo_debug = \"full\"\nbuild_dir_max_bytes = 5",
+            "cargo_incremental = true\ncargo_debug = \"full\"\nbuild_dir_max_bytes = 5\nbuild_dir_grace_seconds = 0",
         )
         .unwrap();
         assert!(settings.incremental());
         assert_eq!(settings.debug_level(), "full");
         assert_eq!(settings.build_dir_cap(), 5);
+        assert_eq!(settings.build_dir_grace_seconds(), 0);
         assert!(settings.invalid_keys().is_empty());
         let invalid: LaneBuildSettings = toml_edit::de::from_str("cargo_debug = \"loud\"").unwrap();
         assert_eq!(invalid.invalid_keys(), ["cargo_debug"]);

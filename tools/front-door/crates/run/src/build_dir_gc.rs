@@ -4,10 +4,13 @@
 //! `Library/Caches/provenant-lane-cargo/<digest>/`, in `target/` and
 //! `target-lint/`. A profile directory (`target/debug`, `target/<triple>/debug`)
 //! is idle when a non-blocking exclusive flock succeeds on all of Cargo's
-//! `.cargo-lock`, `.cargo-build-lock` and `.cargo-artifact-lock`. Idle
-//! directories are removed least recently used first until the cap on their
-//! total size and the free-space floor both hold. A directory whose locks are
-//! held, or cannot be probed, is never removed.
+//! `.cargo-lock`, `.cargo-build-lock` and `.cargo-artifact-lock`. The cap counts
+//! every profile directory, idle and busy. Idle directories are removed least
+//! recently used first until the cap and the free-space floor both hold; when
+//! busy directories alone exceed the cap, every eligible idle directory goes and
+//! the total stays over. A directory whose locks are held, or cannot be probed,
+//! is never removed, and neither is one written within the recency grace: a
+//! test or run binary executes after Cargo drops its locks.
 use provenant_confinement::cache::is_cache_digest;
 use provenant_os::fs::{
     Directory, FileKind, ForeignLock, LockGuard, LockMode, Metadata, PayloadTree, effective_uid,
@@ -26,11 +29,13 @@ const TARGETS: [&str; 2] = ["target", "target-lint"];
 const MAX_DEPTH: usize = 64;
 const MAX_ENTRIES: usize = 1_000_000;
 
-/// Size cap on idle profile directories and the free-space floor to restore.
+/// Size cap on all profile directories, the free-space floor to restore, and
+/// the seconds after its newest write that a directory is spared.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub max_bytes: u64,
     pub free_floor: u64,
+    pub grace_seconds: u64,
 }
 
 #[derive(Debug, Default, serde::Serialize)]
@@ -38,10 +43,12 @@ pub struct Report {
     pub removed: Vec<PathBuf>,
     /// Bytes reclaimed, or reclaimable on a dry run.
     pub bytes: u64,
-    /// Apparent bytes in all profile directories after the sweep.
+    /// Allocated bytes in all profile directories after the sweep.
     pub cache_bytes: u64,
     /// Profile directories kept because their locks are held or unprobeable.
     pub busy: Vec<PathBuf>,
+    /// Profile directories kept because they were written within the grace.
+    pub recent: Vec<PathBuf>,
     pub errors: Vec<String>,
 }
 
@@ -57,15 +64,39 @@ struct Candidate {
 enum Outcome {
     Removed,
     Busy,
+    Recent,
+}
+
+/// What a walk of the lane caches found, before anything is removed.
+struct Survey {
+    report: Report,
+    root: Option<Directory>,
+    /// Least recently used first.
+    candidates: Vec<Candidate>,
+    total: u64,
+    free: u64,
+}
+
+impl Survey {
+    fn satisfied(&self, limits: Limits) -> bool {
+        self.total <= limits.max_bytes && self.free >= limits.free_floor
+    }
+    /// The report when nothing is removed.
+    fn finish(mut self) -> Report {
+        self.report.cache_bytes = self.total;
+        self.report
+    }
 }
 
 pub fn cache_root(home: &Path) -> PathBuf {
     home.join("Library/Caches/provenant-lane-cargo")
 }
 
-/// Collect under the host admission lock, so no lane starts mid-sweep. A dry
-/// run changes nothing and takes no lock. `host` is the state root holding the
-/// admission ledger.
+/// Collect. The walk that measures every profile directory runs without any
+/// lock, and nothing more happens when the cap and the floor already hold. Only
+/// removal takes the host admission lock, so no lane starts mid-removal, and it
+/// probes each candidate afresh. A dry run changes nothing and takes no lock.
+/// `host` is the state root holding the admission ledger.
 pub fn collect(
     host: &Path,
     home: &Path,
@@ -73,8 +104,12 @@ pub fn collect(
     dry_run: bool,
 ) -> Result<Report, Box<dyn std::error::Error>> {
     let mut free = || free_bytes(home);
+    let mut survey = survey(home, &mut free);
     if dry_run {
-        return Ok(sweep(home, limits, true, &mut free));
+        return Ok(prune(survey, limits, true, wall_ns()?, &mut free));
+    }
+    if survey.satisfied(limits) {
+        return Ok(survey.finish());
     }
     let clock = provenant_os::clock::SystemClock::new();
     let cancel = provenant_core::CancelToken::new();
@@ -83,14 +118,20 @@ pub fn collect(
         budget: provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&clock), 5)?,
         cancel: &cancel,
     };
-    Ok(crate::ledger::while_admission_held(host, &request, || {
-        sweep(home, limits, false, &mut free)
-    })?)
+    crate::ledger::while_admission_held(
+        host,
+        &request,
+        || -> Result<Report, Box<dyn std::error::Error>> {
+            // The walk may have been long, and a lane may have settled meanwhile.
+            survey.free = free().unwrap_or(survey.free);
+            Ok(prune(survey, limits, false, wall_ns()?, &mut free))
+        },
+    )?
 }
 
 /// Collect for an event (admission below the floor, a settled lane) using the
-/// host's configured cap and floor. Best effort: a busy ledger, unreadable
-/// settings or a failed sweep leave the caches as they were.
+/// host's configured cap, floor and grace. Best effort: a busy ledger,
+/// unreadable settings or a failed sweep leave the caches as they were.
 pub fn reclaim(host: &Path, home: &Path) -> Option<Report> {
     let settings = provenant_config::LaneBuildSettings::read(host).ok()?;
     let floor = provenant_config::GcSettings::read(host)
@@ -99,6 +140,7 @@ pub fn reclaim(host: &Path, home: &Path) -> Option<Report> {
     let limits = Limits {
         max_bytes: settings.build_dir_cap(),
         free_floor: floor,
+        grace_seconds: settings.build_dir_grace_seconds(),
     };
     collect(host, home, limits, false).ok()
 }
@@ -107,38 +149,92 @@ fn free_bytes(home: &Path) -> io::Result<u64> {
     provenant_confinement::disk::available_bytes_at_existing(&cache_root(home))
 }
 
-/// The collection itself, with free space injected. The caller holds whatever
-/// excludes new admissions.
+/// Wall time as nanoseconds since the Unix epoch, the unit of file times.
+fn wall_ns() -> Result<i128, Box<dyn std::error::Error>> {
+    let now = provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())?;
+    Ok(i128::from(now.as_micros()) * 1_000)
+}
+
+/// The collection itself, with free space and the time injected. The caller
+/// holds whatever excludes new admissions.
 pub fn sweep(
     home: &Path,
     limits: Limits,
     dry_run: bool,
+    now_ns: i128,
     free_space: &mut dyn FnMut() -> io::Result<u64>,
 ) -> Report {
+    let survey = survey(home, free_space);
+    prune(survey, limits, dry_run, now_ns, free_space)
+}
+
+/// Measure every profile directory and sample free space. No lock is needed:
+/// removal probes each candidate again.
+fn survey(home: &Path, free_space: &mut dyn FnMut() -> io::Result<u64>) -> Survey {
     let mut report = Report::default();
     let root = match Directory::open_anchor(&cache_root(home)) {
         Ok(root) => root,
-        Err(error) if error.is_not_found() => return report,
         Err(error) => {
-            report.errors.push(error.to_string());
-            return report;
+            if !error.is_not_found() {
+                report.errors.push(error.to_string());
+            }
+            return Survey {
+                report,
+                root: None,
+                candidates: Vec::new(),
+                total: 0,
+                free: u64::MAX,
+            };
         }
     };
     let mut candidates = discover(&root, &cache_root(home), &mut report);
-    let mut total = candidates
+    let total = candidates
         .iter()
         .fold(0_u64, |sum, item| sum.saturating_add(item.bytes));
-    let mut free = free_space().unwrap_or_else(|error| {
+    let free = free_space().unwrap_or_else(|error| {
         report.errors.push(format!("free space: {error}"));
         u64::MAX
     });
     // Least recently used first; the path breaks ties deterministically.
     candidates.sort_by(|a, b| (a.newest, &a.display).cmp(&(b.newest, &b.display)));
+    Survey {
+        report,
+        root: Some(root),
+        candidates,
+        total,
+        free,
+    }
+}
+
+/// Remove candidates until the cap and the floor hold. Each is probed, and its
+/// recency checked, at the moment of removal.
+fn prune(
+    survey: Survey,
+    limits: Limits,
+    dry_run: bool,
+    now_ns: i128,
+    free_space: &mut dyn FnMut() -> io::Result<u64>,
+) -> Report {
+    let Survey {
+        mut report,
+        root,
+        candidates,
+        mut total,
+        mut free,
+    } = survey;
+    let Some(root) = root else {
+        return report;
+    };
+    let grace = grace_ns(limits);
     for candidate in candidates {
         if total <= limits.max_bytes && free >= limits.free_floor {
             break;
         }
-        match remove(&root, &candidate, dry_run) {
+        if within_grace(candidate.newest, now_ns, grace) {
+            report.recent.push(candidate.display);
+            continue;
+        }
+        match remove(&root, &candidate, dry_run, now_ns, grace) {
             Ok(Outcome::Removed) => {
                 total = total.saturating_sub(candidate.bytes);
                 report.bytes = report.bytes.saturating_add(candidate.bytes);
@@ -150,6 +246,7 @@ pub fn sweep(
                 };
             }
             Ok(Outcome::Busy) => report.busy.push(candidate.display),
+            Ok(Outcome::Recent) => report.recent.push(candidate.display),
             Err(error) => {
                 report.busy.push(candidate.display.clone());
                 report
@@ -160,6 +257,15 @@ pub fn sweep(
     }
     report.cache_bytes = total;
     report
+}
+
+fn grace_ns(limits: Limits) -> i128 {
+    i128::from(limits.grace_seconds).saturating_mul(1_000_000_000)
+}
+
+/// A write at or after `now - grace` is recent, and so is one dated in the future.
+fn within_grace(newest: i128, now_ns: i128, grace: i128) -> bool {
+    now_ns.saturating_sub(newest) < grace
 }
 
 /// Every profile directory in this user's lane caches, measured. Anything that
@@ -297,10 +403,20 @@ fn measure(directory: &PayloadTree, depth: usize) -> io::Result<(u64, i128)> {
     Ok((bytes, newest))
 }
 
-/// Probe every lock, and remove only if all are free. The locks stay held
-/// through the removal, so a Cargo that starts meanwhile waits on them and the
-/// lock files go last.
-fn remove(root: &Directory, candidate: &Candidate, dry_run: bool) -> io::Result<Outcome> {
+/// Probe every lock, re-check recency, and remove only if all locks are free
+/// and nothing was written lately. While the locks are held, Cargo waits on
+/// them and the lock files go last. That protects only against a Cargo that
+/// holds a lock at probe time. It does not cover a test or run binary that keeps
+/// executing after Cargo drops its locks, nor a Cargo between opening a lock
+/// file and locking it. Those leave recent writes, which the grace spares, and
+/// a directory written since the survey is spared too.
+fn remove(
+    root: &Directory,
+    candidate: &Candidate,
+    dry_run: bool,
+    now_ns: i128,
+    grace: i128,
+) -> io::Result<Outcome> {
     let metadata: Metadata = root
         .metadata_at(&candidate.cache, false)
         .map_err(io::Error::other)?;
@@ -328,6 +444,10 @@ fn remove(root: &Directory, candidate: &Candidate, dry_run: bool) -> io::Result<
     }
     if dry_run {
         return Ok(Outcome::Removed);
+    }
+    let (_, newest) = measure(&profile, 0)?;
+    if newest != candidate.newest || within_grace(newest, now_ns, grace) {
+        return Ok(Outcome::Recent);
     }
     remove_contents(&profile, 0)?;
     for lock in LOCKS {
@@ -417,11 +537,25 @@ mod tests {
     fn plenty() -> io::Result<u64> {
         Ok(u64::MAX)
     }
+    /// No grace: the fixtures' ages are minutes, and the grace has its own tests.
     fn limits(max_bytes: u64, free_floor: u64) -> Limits {
         Limits {
             max_bytes,
             free_floor,
+            grace_seconds: 0,
         }
+    }
+    fn graced(max_bytes: u64, grace_seconds: u64) -> Limits {
+        Limits {
+            grace_seconds,
+            ..limits(max_bytes, 0)
+        }
+    }
+    fn now() -> i128 {
+        let since = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        i128::try_from(since.as_nanos()).unwrap()
     }
     fn hold(dir: &Path, name: &str) -> LockGuard {
         let directory = Directory::open_anchor(dir).unwrap();
@@ -438,7 +572,13 @@ mod tests {
     fn nothing_is_removed_while_under_the_cap_and_above_the_floor() {
         let fixture = Fixture::new();
         let debug = fixture.profile('a', "debug", 4096, 100);
-        let report = sweep(fixture.home.path(), limits(u64::MAX, 0), false, &mut plenty);
+        let report = sweep(
+            fixture.home.path(),
+            limits(u64::MAX, 0),
+            false,
+            now(),
+            &mut plenty,
+        );
         assert!(report.removed.is_empty() && debug.exists());
         assert!(report.cache_bytes >= 4096);
     }
@@ -449,12 +589,12 @@ mod tests {
             let fixture = Fixture::new();
             let debug = fixture.profile('a', "debug", 4096, 100);
             let guard = hold(&debug, lock);
-            let report = sweep(fixture.home.path(), limits(0, 0), false, &mut plenty);
+            let report = sweep(fixture.home.path(), limits(0, 0), false, now(), &mut plenty);
             assert!(report.removed.is_empty(), "{lock}");
             assert_eq!(report.busy, vec![debug.clone()], "{lock}");
             assert!(debug.join("deps/payload").exists(), "{lock}");
             drop(guard);
-            let report = sweep(fixture.home.path(), limits(0, 0), false, &mut plenty);
+            let report = sweep(fixture.home.path(), limits(0, 0), false, now(), &mut plenty);
             assert_eq!(report.removed, vec![debug.clone()], "{lock}");
             assert!(!debug.exists(), "{lock}");
         }
@@ -466,13 +606,20 @@ mod tests {
         let oldest = fixture.profile('a', "debug", 8192, 3000);
         let middle = fixture.profile('b', "debug", 8192, 2000);
         let newest = fixture.profile('c', "debug", 8192, 1000);
-        let before = sweep(fixture.home.path(), limits(u64::MAX, 0), true, &mut plenty);
+        let before = sweep(
+            fixture.home.path(),
+            limits(u64::MAX, 0),
+            true,
+            now(),
+            &mut plenty,
+        );
         let one = before.cache_bytes / 3;
         // Room for two of the three: only the oldest goes.
         let report = sweep(
             fixture.home.path(),
             limits(before.cache_bytes - one, 0),
             false,
+            now(),
             &mut plenty,
         );
         assert_eq!(report.removed, vec![oldest.clone()]);
@@ -480,7 +627,13 @@ mod tests {
         assert_eq!(report.bytes, one);
         assert!(report.cache_bytes <= before.cache_bytes - one);
         // A tighter cap takes the next oldest, never the newest first.
-        let report = sweep(fixture.home.path(), limits(one, 0), false, &mut plenty);
+        let report = sweep(
+            fixture.home.path(),
+            limits(one, 0),
+            false,
+            now(),
+            &mut plenty,
+        );
         assert_eq!(report.removed, vec![middle.clone()]);
         assert!(newest.exists());
     }
@@ -506,13 +659,21 @@ mod tests {
                 fixture.profile('b', "debug", 8192, 2000),
                 fixture.profile('c', "debug", 8192, 1000),
             ];
-            let size =
-                sweep(fixture.home.path(), limits(u64::MAX, 0), true, &mut plenty).cache_bytes / 3;
+            let size = sweep(
+                fixture.home.path(),
+                limits(u64::MAX, 0),
+                true,
+                now(),
+                &mut plenty,
+            )
+            .cache_bytes
+                / 3;
             let mut free = rising(floor - shortfall, size.min(5_000));
             let report = sweep(
                 fixture.home.path(),
                 limits(u64::MAX, floor),
                 false,
+                now(),
                 &mut free,
             );
             assert_eq!(report.removed.len(), removed, "shortfall {shortfall}");
@@ -528,19 +689,33 @@ mod tests {
         let oldest = fixture.profile('a', "debug", 8192, 3000);
         let middle = fixture.profile('b', "debug", 8192, 2000);
         let newest = fixture.profile('c', "debug", 8192, 1000);
-        let total = sweep(fixture.home.path(), limits(u64::MAX, 0), true, &mut plenty).cache_bytes;
+        let total = sweep(
+            fixture.home.path(),
+            limits(u64::MAX, 0),
+            true,
+            now(),
+            &mut plenty,
+        )
+        .cache_bytes;
         // The cap needs one removal and the floor a second.
         let mut free = rising(100, u64::MAX / 4);
         let report = sweep(
             fixture.home.path(),
             limits(total - 1, 200),
             false,
+            now(),
             &mut free,
         );
         assert_eq!(report.removed, vec![oldest.clone()]);
         assert!(middle.exists() && newest.exists());
         let mut free = rising(100, 50);
-        let report = sweep(fixture.home.path(), limits(u64::MAX, 175), false, &mut free);
+        let report = sweep(
+            fixture.home.path(),
+            limits(u64::MAX, 175),
+            false,
+            now(),
+            &mut free,
+        );
         assert_eq!(report.removed, vec![middle.clone(), newest.clone()]);
     }
 
@@ -548,7 +723,7 @@ mod tests {
     fn a_dry_run_reports_without_deleting_or_holding_locks() {
         let fixture = Fixture::new();
         let debug = fixture.profile('a', "debug", 4096, 100);
-        let report = sweep(fixture.home.path(), limits(0, 0), true, &mut plenty);
+        let report = sweep(fixture.home.path(), limits(0, 0), true, now(), &mut plenty);
         assert_eq!(report.removed, vec![debug.clone()]);
         assert!(report.bytes >= 4096);
         assert!(debug.join("deps/payload").exists());
@@ -570,7 +745,7 @@ mod tests {
         let stray = fixture.cache('a').join("cargo-home");
         fs::create_dir_all(&stray).unwrap();
         fs::write(stray.join(CARGO_LOCK), b"").unwrap();
-        let report = sweep(fixture.home.path(), limits(0, 0), false, &mut plenty);
+        let report = sweep(fixture.home.path(), limits(0, 0), false, now(), &mut plenty);
         assert!(
             !debug.exists() && !triple.exists() && !lint.exists(),
             "{report:?}"
@@ -593,7 +768,7 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), target.join("linked")).unwrap();
         let loose = fixture.profile('b', "debug", 4096, 100);
         fs::set_permissions(fixture.cache('b'), fs::Permissions::from_mode(0o755)).unwrap();
-        let report = sweep(fixture.home.path(), limits(0, 0), false, &mut plenty);
+        let report = sweep(fixture.home.path(), limits(0, 0), false, now(), &mut plenty);
         assert_eq!(report.removed, vec![debug.clone()]);
         assert!(outside.path().join("keep").exists());
         assert!(loose.exists());
@@ -604,7 +779,7 @@ mod tests {
         let fixture = Fixture::new();
         let debug = fixture.profile('a', "debug", 4096, 100);
         fs::set_permissions(debug.join("deps"), fs::Permissions::from_mode(0o500)).unwrap();
-        let report = sweep(fixture.home.path(), limits(0, 0), false, &mut plenty);
+        let report = sweep(fixture.home.path(), limits(0, 0), false, now(), &mut plenty);
         assert_eq!(report.removed, vec![debug.clone()]);
         assert!(!debug.exists());
     }
@@ -616,8 +791,15 @@ mod tests {
         let fixture = Fixture::new();
         let old = fixture.profile('a', "debug", 8192, 2000);
         let new = fixture.profile('b', "debug", 8192, 1000);
-        let size =
-            sweep(fixture.home.path(), limits(u64::MAX, 0), true, &mut plenty).cache_bytes / 2;
+        let size = sweep(
+            fixture.home.path(),
+            limits(u64::MAX, 0),
+            true,
+            now(),
+            &mut plenty,
+        )
+        .cache_bytes
+            / 2;
         let config = state.path().join("config.toml");
         // Under the cap and with a floor any disk meets: nothing to do.
         fs::write(
@@ -643,10 +825,21 @@ mod tests {
         let report = reclaim(state.path(), fixture.home.path()).unwrap();
         assert_eq!(report.removed, vec![old.clone()]);
         assert!(!old.exists() && new.exists());
-        // A floor no volume can meet empties every idle directory.
+        // A floor no volume can meet empties every idle directory, but the
+        // default 15 minute grace spares one written a minute ago.
+        let recent = fixture.profile('c', "debug", 8192, 60);
         fs::write(&config, "[gc]\nfree_floor='900000000000000B'\n").unwrap();
         let report = reclaim(state.path(), fixture.home.path()).unwrap();
         assert_eq!(report.removed, vec![new.clone()]);
+        assert_eq!(report.recent, vec![recent.clone()]);
+        // The configured grace applies.
+        fs::write(
+            &config,
+            "[gc]\nfree_floor='900000000000000B'\n[domains.fabric.lanes]\nbuild_dir_grace_seconds=0\n",
+        )
+        .unwrap();
+        let report = reclaim(state.path(), fixture.home.path()).unwrap();
+        assert_eq!(report.removed, vec![recent.clone()]);
     }
 
     #[test]
@@ -672,5 +865,146 @@ mod tests {
         assert!(debug.exists());
         let report = collect(state.path(), fixture.home.path(), limits(0, 0), false).unwrap();
         assert_eq!(report.removed, vec![debug.clone()]);
+    }
+
+    #[test]
+    fn a_directory_written_within_the_grace_is_kept_though_its_locks_are_free() {
+        let fixture = Fixture::new();
+        let running = fixture.profile('a', "debug", 4096, 60);
+        let settled = fixture.profile('b', "debug", 4096, 1000);
+        // A test binary still runs after Cargo dropped its locks.
+        let report = sweep(
+            fixture.home.path(),
+            graced(0, 900),
+            false,
+            now(),
+            &mut plenty,
+        );
+        assert_eq!(report.removed, vec![settled.clone()]);
+        assert_eq!(report.recent, vec![running.clone()]);
+        assert!(report.busy.is_empty());
+        assert!(running.join("deps/payload").exists() && !settled.exists());
+        assert!(report.cache_bytes >= 4096, "kept bytes still count");
+        // A dry run predicts the same, and a shorter grace releases it.
+        let preview = sweep(
+            fixture.home.path(),
+            graced(0, 900),
+            true,
+            now(),
+            &mut plenty,
+        );
+        assert!(preview.removed.is_empty() && preview.recent == vec![running.clone()]);
+        let report = sweep(
+            fixture.home.path(),
+            graced(0, 30),
+            false,
+            now(),
+            &mut plenty,
+        );
+        assert_eq!(report.removed, vec![running.clone()]);
+    }
+
+    #[test]
+    fn a_write_after_the_walk_keeps_the_directory() {
+        // Cargo opens `.cargo-lock` or creates a directory after the walk
+        // measured the profile and before the sweep takes the flocks.
+        for touch in ["lock", "directory", "payload"] {
+            let fixture = Fixture::new();
+            let debug = fixture.profile('a', "debug", 4096, 1000);
+            let mut free = plenty;
+            let survey = survey(fixture.home.path(), &mut free);
+            let when = std::time::SystemTime::now();
+            match touch {
+                "lock" => fs::File::open(debug.join(CARGO_LOCK))
+                    .unwrap()
+                    .set_modified(when)
+                    .unwrap(),
+                "directory" => fs::create_dir_all(debug.join("deps/incremental")).unwrap(),
+                _ => fs::write(debug.join("deps/payload"), b"more").unwrap(),
+            }
+            let report = prune(survey, graced(0, 900), false, now(), &mut free);
+            assert!(report.removed.is_empty(), "{touch}");
+            assert_eq!(report.recent, vec![debug.clone()], "{touch}");
+            assert!(debug.join("deps/payload").exists(), "{touch}");
+        }
+    }
+
+    #[test]
+    fn a_change_since_the_walk_is_noticed_even_without_a_grace() {
+        let fixture = Fixture::new();
+        let debug = fixture.profile('a', "debug", 4096, 1000);
+        let mut free = plenty;
+        let survey = survey(fixture.home.path(), &mut free);
+        // Newer than the walk saw, yet far older than any grace.
+        let later = std::time::SystemTime::now() - std::time::Duration::from_secs(500);
+        fs::File::open(debug.join("deps/payload"))
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        let report = prune(survey, limits(0, 0), false, now(), &mut free);
+        assert!(report.removed.is_empty() && debug.exists());
+        assert_eq!(report.recent, vec![debug.clone()]);
+    }
+
+    #[test]
+    fn busy_directories_count_toward_the_cap_and_idle_ones_all_go_when_it_is_exceeded() {
+        let fixture = Fixture::new();
+        let busy_a = fixture.profile('a', "debug", 8192, 3000);
+        let busy_b = fixture.profile('b', "debug", 8192, 2000);
+        let idle_a = fixture.profile('c', "debug", 8192, 1000);
+        let idle_b = fixture.profile('d', "debug", 8192, 900);
+        let _a = hold(&busy_a, CARGO_LOCK);
+        let _b = hold(&busy_b, LOCKS[1]);
+        let one = sweep(
+            fixture.home.path(),
+            limits(u64::MAX, 0),
+            true,
+            now(),
+            &mut plenty,
+        )
+        .cache_bytes
+            / 4;
+        // The cap would fit the busy pair's neighbours but not the busy pair.
+        let report = sweep(
+            fixture.home.path(),
+            limits(one, 0),
+            false,
+            now(),
+            &mut plenty,
+        );
+        assert_eq!(report.removed, vec![idle_a.clone(), idle_b.clone()]);
+        assert_eq!(report.busy, vec![busy_a.clone(), busy_b.clone()]);
+        assert!(busy_a.exists() && busy_b.exists());
+        assert!(report.cache_bytes > one, "stays over the cap");
+    }
+
+    #[test]
+    fn a_sweep_with_nothing_to_do_does_not_take_the_admission_lock() {
+        let state = tempfile::tempdir().unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let fixture = Fixture::new();
+        let debug = fixture.profile('a', "debug", 4096, 1000);
+        let clock = provenant_os::clock::SystemClock::new();
+        let cancel = provenant_core::CancelToken::new();
+        let request = crate::Request {
+            clock: &clock,
+            budget: provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&clock), 1)
+                .unwrap(),
+            cancel: &cancel,
+        };
+        // A claim in flight holds the ledger; a sweep that has nothing to remove
+        // neither waits on it nor fails, and still measures the caches.
+        let report = crate::ledger::while_admission_held(state.path(), &request, || {
+            collect(
+                state.path(),
+                fixture.home.path(),
+                graced(u64::MAX, 0),
+                false,
+            )
+        })
+        .unwrap()
+        .unwrap();
+        assert!(report.removed.is_empty() && debug.exists());
+        assert!(report.cache_bytes >= 4096);
     }
 }

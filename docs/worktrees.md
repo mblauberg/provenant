@@ -192,8 +192,11 @@ as incomplete; build a fresh generation after upgrading.
 Lane targets are collected separately. `provenant gc` also removes idle Cargo
 profile directories (those whose `.cargo-lock`, `.cargo-build-lock` and
 `.cargo-artifact-lock` can all be locked) from lane caches, least recently used
-first, until their total is within `build_dir_max_bytes` and free space meets the
-floor. It reports the bytes reclaimed and the lane build output that remains.
+first, until the total of all profile directories, idle and busy, is within
+`build_dir_max_bytes` and free space meets the floor. A directory written within
+`build_dir_grace_seconds` (15 minutes by default) is kept, and so is every busy
+one, so the total can stay over the cap. It reports the bytes reclaimed and the
+lane build output that remains.
 A lane settling and an admission below the floor trigger the same collection.
 Lanes also build with `CARGO_INCREMENTAL=0` and `CARGO_PROFILE_DEV_DEBUG=line-tables-only`.
 See the [configuration runbook](runbooks/configuration.md#lane-build-output).

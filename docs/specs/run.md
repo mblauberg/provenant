@@ -53,15 +53,21 @@ store lock until cloning finishes, so GC cannot remove the source mid-clone.
 A lane builds with `CARGO_INCREMENTAL=0` and `CARGO_PROFILE_DEV_DEBUG=line-tables-only`
 unless `domains.fabric.lanes` or the lane environment says otherwise. Idle Cargo
 profile directories in lane caches are collected least recently used first until
-their total is within `build_dir_max_bytes` and free space meets `gc.free_floor`.
+the allocated bytes of all profile directories, idle and busy, are within
+`build_dir_max_bytes` and free space meets `gc.free_floor`; when busy directories
+alone exceed the cap every eligible idle directory goes and the total stays over.
 A directory is idle only when a non-blocking exclusive `flock` succeeds on all of
 `.cargo-lock`, `.cargo-build-lock` and `.cargo-artifact-lock`; a held lock, or a
-lock that cannot be probed, keeps the directory. Collection holds the host
-admission lock while it removes, so no lane is admitted mid-sweep, and runs when a
-lane settles, when admission finds the disk below the floor, and in `provenant gc`.
+lock that cannot be probed, keeps the directory. Free locks are not enough: test
+and run binaries execute after Cargo drops its locks, so a directory written
+within `build_dir_grace_seconds` (15 minutes by default), or since the sweep
+measured it, is kept. The walk takes no lock and a sweep with nothing to remove
+stops there; removal holds the host admission lock, so no lane is admitted
+mid-removal, and probes each candidate again. Collection runs when a lane
+settles, when admission finds the disk below the floor, and in `provenant gc`.
 - Why: a lane's shared target filled the workshop disk with incremental sessions
   and debug objects that no existing collector owned.
-- Test: `crates/run/src/build_dir_gc.rs::tests::a_held_lock_prevents_deletion_whichever_of_the_three_is_held`; `crates/run/src/build_dir_gc.rs::tests::least_recently_used_goes_first_and_the_cap_stops_collection`; `crates/run/src/build_dir_gc.rs::tests::the_free_space_floor_is_honoured_and_no_more_is_removed`; `crates/run/src/build_dir_gc.rs::tests::collection_waits_for_the_admission_lock_and_blocks_claims`; `crates/run/src/dispatch_tests.rs::admission_below_the_floor_reclaims_build_output_and_then_admits`; `crates/cli/src/run/provider.rs::cargo_profile_tests`
+- Test: `crates/run/src/build_dir_gc.rs::tests::a_held_lock_prevents_deletion_whichever_of_the_three_is_held`; `crates/run/src/build_dir_gc.rs::tests::least_recently_used_goes_first_and_the_cap_stops_collection`; `crates/run/src/build_dir_gc.rs::tests::the_free_space_floor_is_honoured_and_no_more_is_removed`; `crates/run/src/build_dir_gc.rs::tests::collection_waits_for_the_admission_lock_and_blocks_claims`; `crates/run/src/build_dir_gc.rs::tests::a_directory_written_within_the_grace_is_kept_though_its_locks_are_free`; `crates/run/src/build_dir_gc.rs::tests::a_write_after_the_walk_keeps_the_directory`; `crates/run/src/build_dir_gc.rs::tests::a_sweep_with_nothing_to_do_does_not_take_the_admission_lock`; `crates/run/src/build_dir_gc.rs::tests::busy_directories_count_toward_the_cap_and_idle_ones_all_go_when_it_is_exceeded`; `crates/run/src/dispatch_tests.rs::admission_below_the_floor_reclaims_build_output_and_then_admits`; `crates/cli/src/run/provider.rs::cargo_profile_tests`
 - Owner: `crates/run/src/build_dir_gc.rs`, `crates/cli/src/run/provider.rs`
 
 ## Operation IDs

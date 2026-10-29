@@ -92,6 +92,7 @@ incremental compilation on, and the size did not grow on rebuild. The repository
 cargo_incremental = true       # CARGO_INCREMENTAL=1
 cargo_debug = "full"           # CARGO_PROFILE_DEV_DEBUG
 build_dir_max_bytes = 21474836480
+build_dir_grace_seconds = 900
 ```
 
 `cargo_debug` takes any Cargo `debug` level: `none`, `line-directives-only`,
@@ -104,14 +105,23 @@ cache (`target/debug`, `target/<triple>/release`, or the same under
 its `.cargo-lock`, `.cargo-build-lock` and `.cargo-artifact-lock`. Cargo holds
 all three while it builds, so a directory with any of them held is never
 removed. Idle directories go least recently used first, judged by the newest
-modification time below each, until the total of all profile directories is
-within `build_dir_max_bytes` (20 GiB by default) and free space on the cache
-volume is at least `gc.free_floor`. The lock files are removed last. Space
+modification time below each, until the allocated bytes of all profile
+directories, idle and busy alike, are within `build_dir_max_bytes` (20 GiB by
+default) and free space on the cache volume is at least `gc.free_floor`. When
+busy directories alone exceed the cap, the sweep removes every eligible idle
+directory and the total stays over. The lock files are removed last. Space
 outside profile directories (`target/doc`, Cargo homes, other lane files) is
 not counted or collected here.
 
-Collection runs on three events, and holds the host admission lock while it
-removes, so no lane is admitted mid-sweep:
+Free locks do not prove a directory is unused: test and run binaries keep
+executing after Cargo drops its locks, and Cargo can open a lock file just
+before it takes the lock. A directory whose newest modification is within
+`build_dir_grace_seconds` (15 minutes by default) is therefore never removed,
+and neither is one written after the sweep measured it. These directories still
+count toward the cap and are reported as `recent`. Set the grace to 0 to turn
+the protection off.
+
+Collection runs on three events:
 
 - when a lane settles;
 - when lane admission finds free space below `gc.free_floor`, at most about
@@ -119,10 +129,15 @@ removes, so no lane is admitted mid-sweep:
 - in `provenant gc`, including the scheduled sweep, `--pressure` and
   `--dry-run`, which previews without taking the lock.
 
+The walk that measures the caches takes no lock, and a sweep that finds the cap
+and the floor already met stops there. Only removal holds the host admission
+lock, so no lane is admitted mid-removal; it probes each candidate again under
+that lock. A settling lane waits at most 5 seconds for it.
+
 `provenant gc` reports the directories removed or reclaimable, the bytes
 reclaimed, how many bytes of lane build output remain and how many directories
-were busy. The JSON form has the same fields under `build_dirs`
-(`removed`, `bytes`, `cache_bytes`, `busy`, `errors`); the summary form has
+were busy or recent. The JSON form has the same fields under `build_dirs`
+(`removed`, `bytes`, `cache_bytes`, `busy`, `recent`, `errors`); the summary form has
 `build_dirs_removed`, `build_dir_bytes_reclaimed` and `build_dir_bytes`.
 A directory that Cargo is building in is skipped and counted as busy; a later
 event collects it once Cargo has finished. A collection skipped because another

@@ -330,7 +330,8 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
         }
         release_and_reclaim(attempt, exit.scope, recovery)?;
         // The lane's builds have ended: trim lane build output to its cap and
-        // the free-space floor. Best effort; settlement never waits on it.
+        // the free-space floor. Best effort: it waits at most the 5 s ledger
+        // budget for admission, and only when there is something to remove.
         let (state, _) = context.disk_roots();
         crate::build_dir_gc::reclaim(state, &context.roots.home);
         Ok(())
