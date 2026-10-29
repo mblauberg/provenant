@@ -264,6 +264,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn probe_ceilings_raise_within_bounds_and_defaults_stay_small() {
         let defaults = Settings::default();
         assert_eq!(defaults.max_parallel, 3);
