@@ -130,6 +130,13 @@ pub struct GraphExecution {
 
 /// `route` remains the one-route form. A node may instead provide ordered
 /// `routes`; supplying both is invalid.
+/// A family constraint resolved at launch from the node's source writer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DistinctFrom {
+    Writer,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphNode {
@@ -139,6 +146,9 @@ pub struct GraphNode {
     pub composite: Option<CompositeSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// Route this node away from the model families that served its source node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distinct_from: Option<DistinctFrom>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_roots: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -739,6 +749,8 @@ pub struct Replay<'a> {
 /// User-facing content for a graph node's submitted task.
 pub struct NodeInput<'a> {
     pub read_roots: &'a [String],
+    /// Attempts of the source writer whose model families must be avoided.
+    pub distinct_from_attempts: &'a [String],
     pub source_commit: Option<&'a str>,
     pub title: &'a str,
     pub prompt: &'a str,
@@ -1284,6 +1296,8 @@ struct PlannedNode {
     composite: Option<CompositeSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    distinct_from: Option<DistinctFrom>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     read_roots: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2032,11 +2046,30 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .and_then(|attempt| attempt.input_cap)
                     .unwrap_or(effective_limits.node_prompt_bytes);
                 let prompt = render_input(node, &checkpoint, &positions, input_cap).0;
+                // The writer is the nearest writing node along the source chain,
+                // so a framing node between a lens and the writer is skipped.
+                let mut distinct_attempts: Vec<String> = Vec::new();
+                if node.distinct_from == Some(DistinctFrom::Writer) {
+                    let mut current = node;
+                    while let Some(SourceBinding::Node { node: source }) = &current.source {
+                        let Some(index) = positions.get(source) else { break };
+                        current = &plan.nodes[*index];
+                        if plans::writer(current) {
+                            distinct_attempts = checkpoint.nodes[*index]
+                                .attempts
+                                .iter()
+                                .filter_map(|attempt| attempt.attempt_ref.clone())
+                                .collect();
+                            break;
+                        }
+                    }
+                }
                 let observation = owner
                     .observe_or_start(
                         &key,
                         NodeInput {
                             read_roots: &node.read_roots,
+                            distinct_from_attempts: &distinct_attempts,
                             source_commit: checkpoint.nodes[node_index].source_commit.as_deref(),
                             title: node.title.as_deref().unwrap_or(&node.id),
                             prompt: &prompt,
@@ -3050,6 +3083,7 @@ fn validate_flat_plan(
             composite_members: node.composite_members.clone(),
             composite: node.composite.clone(),
             role: node.role.clone(),
+            distinct_from: node.distinct_from,
             read_roots: node.read_roots.clone(),
             source: node.source.clone(),
             after_expansion: node.after_expansion.clone(),
@@ -3608,6 +3642,7 @@ mod tests {
         integration_heads: VecDeque<String>,
         source_commits: Vec<Option<String>>,
         read_roots: Vec<Vec<String>>,
+        distinct_from: Vec<Vec<String>>,
     }
 
     impl AttemptOwner for FakeOwner {
@@ -3665,6 +3700,7 @@ mod tests {
             self.source_commits
                 .push(node.source_commit.map(str::to_owned));
             self.read_roots.push(node.read_roots.to_vec());
+            self.distinct_from.push(node.distinct_from_attempts.to_vec());
             self.titles.push(node.title.to_owned());
             self.prompts.push(node.prompt.to_owned());
             self.delivery_modes.push(replay.delivery.cloned());
@@ -3689,6 +3725,7 @@ mod tests {
     fn node(id: &str, route: GraphRoute) -> GraphNode {
         GraphNode {
             composite_members: Vec::new(),
+            distinct_from: None,
             composite: None,
             role: None,
             read_roots: Vec::new(),
@@ -3725,6 +3762,44 @@ mod tests {
             graph_id: "g-test".to_owned(),
             nodes,
         }
+    }
+
+    #[test]
+    fn distinct_from_writer_passes_the_writer_attempts_to_the_owner() {
+        let mut review = node("review", route("first"));
+        review.source = Some(SourceBinding::Node { node: "write".into() });
+        review.distinct_from = Some(DistinctFrom::Writer);
+        review.depends_on = vec!["write".into()];
+        let mut write = node("write", route("first"));
+        write.access = AccessMode::WorktreeWrite;
+        write.worktree = Some(".worktrees/write".into());
+        let writer_done = AttemptObservation::Terminal {
+            attempt_ref: Some("host/7".into()),
+            outcome: AttemptOutcome::Succeeded,
+            launched: true,
+            result: None,
+            result_warning: None,
+            result_path: None,
+            branch: Some("writer".into()),
+            commit: Some("3".repeat(40)),
+        };
+        let mut owner = FakeOwner {
+            observations: [writer_done, terminal(AttemptOutcome::Succeeded)].into(),
+            ..Default::default()
+        };
+        let run = advance(&graph(vec![write, review]), &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert!(run.checkpoint.successful());
+        assert_eq!(owner.distinct_from[0], Vec::<String>::new());
+        assert_eq!(owner.distinct_from[1], vec!["host/7".to_owned()]);
+        // Without a writing source the constraint has nothing to exclude.
+        let mut unsourced = node("lone", route("first"));
+        unsourced.distinct_from = Some(DistinctFrom::Writer);
+        let mut lone = FakeOwner {
+            observations: [terminal(AttemptOutcome::Succeeded)].into(),
+            ..Default::default()
+        };
+        advance(&graph(vec![unsourced]), &mut lone, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(lone.distinct_from[0], Vec::<String>::new());
     }
 
     #[test]
@@ -3870,6 +3945,38 @@ mod tests {
         assert!(result.excerpt.contains("parallel--a:\nevidence A"));
         assert!(result.excerpt.contains("parallel--b:\nevidence B"));
         assert!(!result.truncated);
+    }
+
+    #[test]
+    fn crash_mid_composite_resumes_without_rerunning_settled_children() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"composite-crash","nodes":[{
+                "id":"group","kind":"composite","access":"read_only",
+                "composite":{"nodes":[
+                    {"id":"a","access":"read_only","prompt":"a","route":{"alias":"junior"}},
+                    {"id":"b","access":"read_only","prompt":"b","depends_on":["a"],"route":{"alias":"junior"}}
+                ],"exports":[{"node":"a","outputs":["result"]},{"node":"b","outputs":["result"]}]}
+            }]
+        }))
+        .unwrap();
+        let mut journal = MemoryJournal::default();
+        let mut crashing = FakeOwner {
+            observations: [terminal_with_result(AttemptOutcome::Succeeded, "evidence A")].into(),
+            ..Default::default()
+        };
+        assert!(advance(&document, &mut crashing, &mut journal).is_err());
+        assert_eq!(crashing.calls.len(), 2);
+        let mut resumed = FakeOwner {
+            observations: [terminal_with_result(AttemptOutcome::Succeeded, "evidence B")].into(),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut resumed, &mut journal).unwrap();
+        assert_eq!(run.status, GraphStatus::Complete);
+        assert!(run.checkpoint.successful());
+        assert_eq!(resumed.calls.len(), 1);
+        assert!(resumed.prompts[0].contains("evidence A") || resumed.prompts[0].contains('b'));
+        let result = run.checkpoint.nodes.last().unwrap().outputs.as_ref().unwrap().result.as_ref().unwrap();
+        assert!(result.excerpt.contains("evidence A") && result.excerpt.contains("evidence B"));
     }
 
     #[test]
@@ -5565,6 +5672,7 @@ mod tests {
         ];
         let document = graph(vec![GraphNode {
             composite_members: Vec::new(),
+            distinct_from: None,
             composite: None,
             role: None,
             read_roots: Vec::new(),
@@ -5728,6 +5836,7 @@ mod tests {
             let routes = vec![route("first"), route("second")];
             let document = graph(vec![GraphNode {
                 composite_members: Vec::new(),
+                distinct_from: None,
                 composite: None,
                 role: None,
                 read_roots: Vec::new(),
@@ -5984,6 +6093,7 @@ mod tests {
     fn terminal_task_failure_does_not_try_a_fallback_route() {
         let document = graph(vec![GraphNode {
             composite_members: Vec::new(),
+            distinct_from: None,
             composite: None,
             role: None,
             read_roots: Vec::new(),

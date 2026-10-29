@@ -37,6 +37,13 @@ pub(crate) use provider::find_executable as provider_executable;
 pub use provider::{prepare_fixture, writer_fixture_plan};
 pub use review::review;
 
+/// Catalogue family of a provider-qualified model, for family-distinct routing.
+pub fn model_family(model: &str) -> Option<String> {
+    let catalogue = provenant_routing::Catalogue::bundled().ok()?;
+    let id = ModelId::parse(model).ok()?;
+    catalogue.model(&id).and_then(|m| m.family.clone())
+}
+
 const PROMPT_LIMIT: u64 = 1024 * 1024;
 
 /// Paths the binary resolved for this invocation.

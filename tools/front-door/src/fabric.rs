@@ -3839,6 +3839,40 @@ fn settle_attempt(
     Ok(store.worktree_settlement(id, &call)?)
 }
 
+impl BoundGraphOwner<'_> {
+    /// Model families that served the writer attempts a reviewer must differ from.
+    fn writer_families(&self, attempts: &[String]) -> Result<Vec<String>, FacadeError> {
+        if attempts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let mut families = Vec::new();
+        for reference in attempts {
+            let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+            let target = AttemptTarget {
+                host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+                attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+            };
+            let record = owner.snapshot(target, self.budget, self.cancel)?;
+            let family = record
+                .applied_route
+                .and_then(|route| route.model)
+                .and_then(|model| provenant_cli::run::model_family(&model));
+            if let Some(family) = family
+                && !families.contains(&family)
+            {
+                families.push(family);
+            }
+        }
+        Ok(families)
+    }
+}
+
 impl provenant_fabric_runtime::graph::CiStatus for BoundGraphOwner<'_> {
     fn host_stamp(&self) -> Option<provenant_fabric_runtime::graph::CiHostStamp> {
         Some(provenant_fabric_runtime::graph::CiHostStamp {
@@ -4086,6 +4120,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             } else {
                 None
             };
+            let excluded_families = self.writer_families(node.distinct_from_attempts)?;
             let input = SubmitInput::Submit {
                 operation_id,
                 tasks: vec![SubmittedTask {
@@ -4112,6 +4147,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                                     format!("{adapter}/{model}")
                                 },
                                 effort: route.effort.clone(),
+                            }
+                        }
+                        None if !excluded_families.is_empty() => {
+                            provenant_records::run::RequestedRoute::Review {
+                                name: route.alias.clone().ok_or(FacadeError::InvalidInput)?,
+                                effort: route.effort.clone(),
+                                excluded_families,
+                                distinct_families: true,
                             }
                         }
                         None => provenant_records::run::RequestedRoute::Named {
