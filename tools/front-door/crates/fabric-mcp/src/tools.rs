@@ -516,12 +516,26 @@ impl ToolCall {
             });
         }
         let mut arguments = arguments;
-        if let Some(operation) = schema::sole_operation(name)
+        // `fabric_context` defaults to inspect; a single-operation tool has one operation.
+        let default_operation = match schema::tool_kind(name) {
+            Some(schema::ToolKind::Identity) => Some("inspect"),
+            _ => schema::sole_operation(name),
+        };
+        if let Some(operation) = default_operation
             && let Some(object) = arguments.as_object_mut()
         {
             object
                 .entry("op")
                 .or_insert_with(|| Value::String(operation.to_owned()));
+        }
+        // Optional on the wire; the runtime input always carries the list.
+        if schema::tool_kind(name) == Some(schema::ToolKind::Mail)
+            && arguments["op"] == "send"
+            && let Some(object) = arguments.as_object_mut()
+        {
+            object
+                .entry("artifacts")
+                .or_insert_with(|| Value::Array(Vec::new()));
         }
         let operation = arguments["op"].as_str().unwrap_or("").to_owned();
         if let Some(path) = schema::invalid_path(name, &arguments) {
@@ -1323,6 +1337,9 @@ impl ServiceError {
                 .unwrap_or_else(|_| serde_json::json!({"code":self.code()})),
             Self::Coordination(CoordinationError::Input(error)) => {
                 serde_json::json!({"code":self.code(),"path":error.path})
+            }
+            Self::Inbox(InboxError::Invalid(field)) => {
+                serde_json::json!({"code":self.code(),"field":field})
             }
             Self::Facade(FacadeError::LaunchUnknown { operation_id })
             | Self::Coordination(CoordinationError::Peer(

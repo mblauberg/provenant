@@ -198,7 +198,7 @@ fn build_strict() -> Vec<Value> {
         (
             "Send and read mail with explicit cursors.",
             json!({
-                "send":{"recipients":recipients,"kind":choices(&["note","request","response"]),"body":text(MAX_TEXT_BYTES),"artifacts":artifacts,"reply_to?":nullable(reference("MessageRef")),"task?":nullable(reference("MessageRef"))},
+                "send":{"recipients":recipients,"kind":choices(&["note","request","response"]),"body":text(MAX_TEXT_BYTES),"artifacts?":artifacts,"reply_to?":nullable(reference("MessageRef")),"task?":nullable(reference("MessageRef"))},
                 "read":{"after?":nullable(seq.clone()),"limit":page.clone(),"session?":nullable(inbox_session.clone())},"mark_read":{"through":seq.clone(),"session?":nullable(inbox_session.clone())}
             }),
         ),
@@ -320,6 +320,18 @@ fn build_strict() -> Vec<Value> {
                     );
                     if is_mutation {
                         variant["properties"]["operation_id"] = reference("OperationId");
+                    }
+                }
+            }
+            // `fabric_context` defaults to inspect, so that variant may omit `op`.
+            if *kind == ToolKind::Identity
+                && let Some(variants) = input["oneOf"].as_array_mut()
+            {
+                for variant in variants {
+                    if variant.pointer("/properties/op/const") == Some(&json!("inspect"))
+                        && let Some(required) = variant["required"].as_array_mut()
+                    {
+                        required.retain(|field| field != "op");
                     }
                 }
             }

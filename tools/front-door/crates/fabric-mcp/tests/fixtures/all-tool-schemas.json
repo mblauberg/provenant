@@ -42,9 +42,7 @@
               "const": "inspect"
             }
           },
-          "required": [
-            "op"
-          ],
+          "required": [],
           "type": "object"
         }
       ],
@@ -420,7 +418,6 @@
             }
           },
           "required": [
-            "artifacts",
             "body",
             "kind",
             "op",
