@@ -525,10 +525,7 @@ mod tests {
         let hours = numbers(window.split("UTC").next().unwrap_or_default());
         assert_eq!(hours.len(), 4, "{comment}");
         assert!(window.contains("Monday to Friday"), "{comment}");
-        let multiplier = numbers(rest)
-            .first()
-            .copied()
-            .ok_or("multiplier missing")? as f64;
+        let multiplier = numbers(rest).first().copied().ok_or("multiplier missing")? as f64;
         let model = ModelId::parse(model)?;
         // 1970-01-05 is a Monday; sample every hour of a full week.
         let monday = 4 * 86_400;
