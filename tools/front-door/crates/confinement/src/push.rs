@@ -17,15 +17,21 @@ pub struct PushUpdate {
 pub enum PushRefusal {
     #[error("Git evidence unavailable or incomplete")]
     Evidence,
-    #[error("deleting the default branch")]
+    #[error(
+        "deleting the default branch is refused; delete a topic branch instead, for example `git push origin --delete my-topic`"
+    )]
     DefaultDeletion,
     #[error(
         "pushing the default branch from a linked worktree; push a topic branch and merge by pull request"
     )]
     LinkedWorktree,
-    #[error("non-fast-forward update")]
+    #[error(
+        "non-fast-forward update is refused; integrate the remote first with `git fetch origin && git merge origin/my-topic`, then push again"
+    )]
     NonFastForward,
-    #[error("conflict markers in pushed commits")]
+    #[error(
+        "conflict markers in pushed commits; remove the marker lines, then `git commit --amend --no-edit` and push again"
+    )]
     ConflictMarkers,
 }
 pub fn is_zero(oid: GitOid) -> bool {

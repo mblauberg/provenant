@@ -526,12 +526,19 @@ A host failure to read the stored prompt, or to stage or read back a context
 file, ends the attempt `rejected` before launch with its cause. `--base`
 context is captured on the host with fsmonitor, external diff, textconv,
 mailmap and fetching disabled, limited to 10 s per read and 1 MiB per file; a timeout keeps
-partial output and is recorded. Reviewers must report inputs they could not
-read and truncated captures.
+partial output and is recorded. The capture holds the log, the whole patch,
+a `--stat` summary and one patch slice per changed file (at most 400, in
+`git-diff-slices/` with an `index.txt`), and the prompt points a reviewer at the
+stat and the slices before the whole patch. Reviewers must report inputs they
+could not read, truncated captures and `slices_complete: false`.
 - Why: repository config is hostile input, and a lane must not run on input
-  the host could not verify.
+  the host could not verify; scoped slices spare a reviewer re-reading a
+  whole patch.
 - Test: `crates/run/src/dispatch_tests.rs::missing_stored_prompt_ends_the_attempt_rejected_with_the_cause`;
-  `crates/run/src/git_context.rs::git_context_pins_hardening_flags_and_writes_prompt_paths`
+  `crates/run/src/git_context.rs::git_context_pins_hardening_flags_and_writes_prompt_paths`;
+  `::slices_cover_every_file_and_the_index_names_them`;
+  `::slices_stop_at_their_limit_and_say_so`;
+  `::real_git_stat_and_slices_match_the_whole_patch`
 - Owner: `crates/run/src/git_context.rs`
 
 ## Launch prompts
