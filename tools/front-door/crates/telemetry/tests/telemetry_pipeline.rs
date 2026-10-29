@@ -459,3 +459,167 @@ fn oversized_merge_is_unmeasured() -> Result {
     assert!(report.rows[0].signals.unmeasured);
     Ok(())
 }
+
+#[test]
+fn ordinary_text_matching_submodule_patch_is_still_measured() -> Result {
+    let root = tempfile::tempdir()?;
+    let repo = root.path();
+    git(repo, &["init", "-q", "-b", "main"], 1)?;
+    commit(repo, "before\n", "Initial", 1)?;
+    git(repo, &["checkout", "-qb", "topic"], 2)?;
+    commit(repo, "Subproject commit ordinary text\n", "Change", 2)?;
+    git(repo, &["checkout", "-q", "main"], 2)?;
+    git(
+        repo,
+        &["merge", "--no-ff", "-qm", "Merge pull request #42", "topic"],
+        2,
+    )?;
+    commit(repo, "corrected\n", "fix: correct ordinary text", 3)?;
+    let now: jiff::Timestamp = "2026-02-01T00:00:00Z".parse()?;
+    let report = outcome::attribute(
+        repo,
+        "main",
+        vec![evidence("graph")],
+        None,
+        14,
+        now.as_second(),
+    )?;
+    assert_eq!(report.rows[0].stratum, "attributed");
+    assert_eq!(report.rows[0].signals.follow_up_fixes, 1);
+    Ok(())
+}
+
+#[test]
+fn follow_up_on_a_branch_that_predates_merge_is_not_attributed() -> Result {
+    let root = tempfile::tempdir()?;
+    let repo = root.path();
+    git(repo, &["init", "-q", "-b", "main"], 1)?;
+    commit(repo, "initial\n", "Initial", 1)?;
+    git(repo, &["checkout", "-qb", "topic"], 2)?;
+    commit(repo, "changed\n", "Change", 2)?;
+    git(repo, &["checkout", "-qb", "side"], 2)?;
+    commit(repo, "fixed\n", "fix: independent branch", 3)?;
+    git(repo, &["checkout", "-q", "main"], 2)?;
+    git(
+        repo,
+        &["merge", "--no-ff", "-qm", "Merge pull request #42", "topic"],
+        2,
+    )?;
+    git(
+        repo,
+        &["merge", "--no-ff", "-qm", "Merge side branch", "side"],
+        4,
+    )?;
+    let now: jiff::Timestamp = "2026-02-01T00:00:00Z".parse()?;
+    let report = outcome::attribute(
+        repo,
+        "main",
+        vec![evidence("graph")],
+        None,
+        14,
+        now.as_second(),
+    )?;
+    assert_eq!(report.rows[0].stratum, "attributed");
+    assert_eq!(report.rows[0].signals.follow_up_fixes, 0);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn truncated_history_and_merge_body_degrade_without_aborting() -> Result {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(mode) = std::env::var("TELEMETRY_TRUNCATION_CASE") {
+        let repo = std::env::var("TELEMETRY_TRUNCATION_REPO")?;
+        let now: jiff::Timestamp = "2026-02-01T00:00:00Z".parse()?;
+        let mut issue = evidence("issue");
+        issue.pr = None;
+        issue.issue = Some(7);
+        let report = outcome::attribute(
+            Path::new(&repo),
+            "main",
+            vec![evidence("pr"), issue],
+            None,
+            14,
+            now.as_second(),
+        )?;
+        assert_eq!(report.rows[1].stratum, "unmeasured");
+        assert!(report.rows[1].signals.unmeasured);
+        if mode == "history" {
+            assert_eq!(report.rows[0].stratum, "unmeasured");
+        } else {
+            assert_eq!(report.rows[0].stratum, "attributed");
+        }
+        return Ok(());
+    }
+    let root = tempfile::tempdir()?;
+    let repo = root.path();
+    git(repo, &["init", "-q", "-b", "main"], 1)?;
+    commit(repo, "initial\n", "Initial", 1)?;
+    git(repo, &["checkout", "-qb", "topic"], 2)?;
+    commit(repo, "change\n", "Change", 2)?;
+    git(repo, &["checkout", "-q", "main"], 2)?;
+    git(
+        repo,
+        &[
+            "merge",
+            "--no-ff",
+            "-qm",
+            "Merge pull request #42\n\nCloses #7",
+            "topic",
+        ],
+        2,
+    )?;
+    let real_git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let quoted_git = real_git.to_string_lossy().replace('\'', "'\\''");
+    let wrapper = repo.join("git-wrapper");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\ncase \"$TELEMETRY_TRUNCATION_CASE:$*\" in\n  history:*' log --first-parent '*) python3 -c 'import sys; sys.stdout.write(\"x\" * 67108865)'; exit 0;;\n  body:*' show -s --format=%b '*) python3 -c 'import sys; sys.stdout.write(\"x\" * 67108865)'; exit 0;;\nesac\nexec '{quoted_git}' \"$@\"\n"
+        ),
+    )?;
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))?;
+    for mode in ["history", "body"] {
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        let argv: Vec<OsString> = vec![
+            std::env::current_exe()?.into_os_string(),
+            "--exact".into(),
+            "truncated_history_and_merge_body_degrade_without_aborting".into(),
+            "--nocapture".into(),
+        ];
+        let mut env: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| {
+                !key.to_string_lossy().starts_with("GIT_")
+                    && key != "PROVENANT_GIT"
+                    && !key.to_string_lossy().starts_with("TELEMETRY_TRUNCATION_")
+            })
+            .collect();
+        env.extend([
+            (
+                OsString::from("TELEMETRY_TRUNCATION_CASE"),
+                OsString::from(mode),
+            ),
+            (
+                OsString::from("TELEMETRY_TRUNCATION_REPO"),
+                repo.as_os_str().to_owned(),
+            ),
+            (
+                OsString::from("PROVENANT_GIT"),
+                wrapper.as_os_str().to_owned(),
+            ),
+        ]);
+        let mut options = ExecOptions::new(&argv, repo, Duration::from_secs(30));
+        options.env = Some(&env);
+        let output = SystemExecutor::new(1)?.execute(options)?;
+        assert!(
+            output.termination == Termination::Exit(0)
+                && !output.timed_out
+                && !output.stdout.truncated
+                && !output.drain_truncated,
+            "{mode}: {} {}",
+            String::from_utf8_lossy(&output.stdout.bytes),
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+    }
+    Ok(())
+}

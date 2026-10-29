@@ -36,7 +36,7 @@ summary. Both results are local reads, and PR rows include only merged PRs.
 To inspect native Claude Code sub-agents for a session, run
 `provenant telemetry stats --claude-subagents PATH`, where `PATH` is that
 session's `subagents` directory under `~/.claude*/projects/<project>/<session>`.
-The directory must contain only regular, non-symlink `agent-*.jsonl` files. This is an
+The importer reads regular, non-symlink `agent-*.jsonl` files and skips unrelated files. This is an
 explicit import and produces a separate usage and API-equivalent cost report
 grouped by model; it does not add those calls to supervised attempt totals.
 The import uses usage metadata, not message bodies. It cannot be combined with

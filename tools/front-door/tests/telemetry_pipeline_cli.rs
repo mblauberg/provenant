@@ -131,6 +131,10 @@ fn unreadable_graph_checkpoint_does_not_abort_pipeline() -> Result {
     assert_eq!(code(&output), 0, "{output:?}");
     let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert!(report["data"]["pipeline"]["outcomes"]["rows"][0]["evidence"]["confirmed"].is_null());
+    assert_eq!(
+        report["data"]["pipeline"]["outcomes"]["rows"][0]["stratum"],
+        "unmeasured"
+    );
     Ok(())
 }
 

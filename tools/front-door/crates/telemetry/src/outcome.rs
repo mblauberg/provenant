@@ -197,7 +197,8 @@ pub fn attribute(
         repo,
         &["rev-parse", "--verify", &format!("{main}^{{commit}}")],
     )?;
-    let mut commits = parse_commits(&git(
+    let ci_coverage_from = ci.and_then(|runs| runs.iter().map(|r| r.created_at).min());
+    let history = git(
         repo,
         &[
             "log",
@@ -206,17 +207,54 @@ pub fn attribute(
             "--format=%H%x00%ct%x00%P%x00%s%x00%x00%x1e",
             head.trim(),
         ],
-    )?)?;
+    )
+    .and_then(|log| parse_commits(&log));
+    let mut commits = match history {
+        Ok(commits) => commits,
+        Err(_) => {
+            let rows: Vec<_> = evidence
+                .into_iter()
+                .map(|evidence| Attributed {
+                    evidence,
+                    stratum: "unmeasured",
+                    merge: None,
+                    mature: false,
+                    signals: Signals {
+                        unmeasured: true,
+                        ..Signals::default()
+                    },
+                })
+                .collect();
+            return Ok(Outcomes {
+                ci_coverage_from: ci_coverage_from.map(|t| t.to_string()),
+                skipped_ci_runs: ci.map_or(0, <[CiRun]>::len),
+                window_days,
+                ci: if ci.is_some() {
+                    "measured"
+                } else {
+                    "not_measured"
+                },
+                unattributed_rows: rows.len(),
+                rows,
+            });
+        }
+    };
+    let mut incomplete_issue_history = false;
     if evidence
         .iter()
         .any(|row| row.pr.is_none() && row.issue.is_some())
     {
-        for commit in commits.iter_mut().filter(|c| c.parents.len() > 1) {
-            commit.body = git(repo, &["show", "-s", "--format=%b", &commit.sha])?;
+        for commit in commits
+            .iter_mut()
+            .filter(|c| c.parents.len() > 1 && c.time <= now)
+        {
+            match git(repo, &["show", "-s", "--format=%b", &commit.sha]) {
+                Ok(body) => commit.body = body,
+                Err(_) => incomplete_issue_history = true,
+            }
         }
     }
     let window = i64::from(window_days) * 86400;
-    let ci_coverage_from = ci.and_then(|runs| runs.iter().map(|r| r.created_at).min());
     let merge_indices: HashMap<_, _> = commits
         .iter()
         .enumerate()
@@ -260,47 +298,68 @@ pub fn attribute(
             }
         }
     }
-    let descendants = if let Some(first) = commits.first() {
+    let mut pr_matches: HashMap<u64, Vec<usize>> = HashMap::new();
+    let mut issue_matches: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (index, commit) in commits
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.parents.len() > 1 && c.time <= now)
+    {
+        if let Some(pr) = commit
+            .subject
+            .strip_prefix("Merge pull request #")
+            .and_then(number)
+        {
+            pr_matches.entry(pr).or_default().push(index);
+        }
+        let issues: BTreeSet<_> = commit
+            .body
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("Closes #").and_then(number))
+            .collect();
+        for issue in issues {
+            issue_matches.entry(issue).or_default().push(index);
+        }
+    }
+    let matches_for = |row: &Evidence| -> &[usize] {
+        if let Some(pr) = row.pr {
+            pr_matches.get(&pr)
+        } else {
+            row.issue.and_then(|issue| issue_matches.get(&issue))
+        }
+        .map_or(&[], Vec::as_slice)
+    };
+    // All later main-line merges descend from the earliest relevant merge.
+    let first_relevant = evidence
+        .iter()
+        .filter(|row| row.graph.is_some())
+        .flat_map(&matches_for)
+        .min()
+        .map(|index| &commits[*index]);
+    let descendants = if let Some(first) = first_relevant {
         git(
             repo,
             &[
                 "log",
                 "--ancestry-path",
-                "--no-merges",
+                "--topo-order",
                 "--reverse",
                 "--format=%H%x00%ct%x00%P%x00%s%x00%x00%x1e",
                 &format!("{}..{}", first.sha, head.trim()),
             ],
         )
         .and_then(|log| parse_commits(&log))
+        .map(|history| index_descendants(history, first, &merge_indices))
     } else {
         Ok(Vec::new())
     };
     let mut cache = CandidateCache::default();
     for row in evidence {
-        let matches: Vec<_> = commits
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| {
-                if c.parents.len() < 2 || c.time > now {
-                    return false;
-                }
-                let pr = c
-                    .subject
-                    .strip_prefix("Merge pull request #")
-                    .and_then(number);
-                row.pr.is_some() && row.pr == pr
-                    || row.pr.is_none()
-                        && row.issue.is_some_and(|issue| {
-                            c.body.lines().any(|line| {
-                                line.trim().strip_prefix("Closes #").and_then(number) == Some(issue)
-                            })
-                        })
-            })
-            .map(|(i, _)| i)
-            .collect();
+        let matches = matches_for(&row);
         // Ambiguity is evidence missing, not permission to guess.
-        let origin = (row.graph.is_some() && matches.len() == 1).then(|| matches[0]);
+        let issue_unmeasured = row.pr.is_none() && row.issue.is_some() && incomplete_issue_history;
+        let origin =
+            (row.graph.is_some() && matches.len() == 1 && !issue_unmeasured).then(|| matches[0]);
         let (merge, mature, signals) = if let Some(index) = origin {
             let commit = &commits[index];
             let signals = if let Some(signals) = signal_cache.get(&index) {
@@ -316,8 +375,8 @@ pub fn attribute(
                     repo,
                     commit,
                     &descendants,
-                    window,
-                    now,
+                    index,
+                    (commit.time + window).min(now),
                     &mut signals,
                     &mut cache,
                 )
@@ -339,6 +398,7 @@ pub fn attribute(
                 false,
                 Signals {
                     ci_failures: None,
+                    unmeasured: issue_unmeasured,
                     ..Signals::default()
                 },
             )
@@ -373,6 +433,7 @@ pub fn attribute(
 
 const MAX_FILES_PER_MERGE: usize = 200;
 const MAX_HUNKS_PER_MERGE: usize = 2_000;
+const MAX_CANDIDATES_PER_MERGE: usize = 2_000;
 
 fn fix_subject(subject: &str) -> bool {
     let lower = subject.to_ascii_lowercase();
@@ -387,24 +448,66 @@ fn fix_subject(subject: &str) -> bool {
 
 #[derive(Default)]
 struct CandidateCache {
-    fixes: HashMap<String, Option<(BTreeSet<String>, usize, usize)>>,
+    fixes: HashMap<String, (BTreeSet<String>, usize, usize)>,
     bodies: HashMap<String, Option<String>>,
+}
+
+struct Candidate {
+    commit: Commit,
+    latest_merge: Option<usize>,
+}
+
+// Main-line merges form a chain. The newest main-line merge reachable from a
+// commit therefore identifies every earlier main-line merge it descends from.
+fn index_descendants(
+    history: Vec<Commit>,
+    first: &Commit,
+    merges: &HashMap<&str, usize>,
+) -> Vec<Candidate> {
+    let mut latest = HashMap::<String, Option<usize>>::new();
+    latest.insert(first.sha.clone(), merges.get(first.sha.as_str()).copied());
+    let mut candidates = Vec::new();
+    for commit in history {
+        let inherited = commit
+            .parents
+            .iter()
+            .filter_map(|p| latest.get(p).copied().flatten())
+            .max();
+        let index = inherited.max(merges.get(commit.sha.as_str()).copied());
+        latest.insert(commit.sha.clone(), index);
+        if commit.parents.len() == 1
+            && (fix_subject(&commit.subject) || commit.subject.starts_with("Revert "))
+        {
+            candidates.push(Candidate {
+                commit,
+                latest_merge: index,
+            });
+        }
+    }
+    candidates.sort_by_key(|candidate| candidate.commit.time);
+    candidates
 }
 
 fn measure_merge(
     repo: &Path,
     commit: &Commit,
-    descendants: &Result<Vec<Commit>>,
-    window: i64,
-    now: i64,
+    descendants: &Result<Vec<Candidate>>,
+    merge_index: usize,
+    window_end: i64,
     signals: &mut Signals,
     cache: &mut CandidateCache,
 ) -> Result<()> {
     let descendants = descendants
         .as_ref()
         .map_err(|e| OutcomeError::Evidence(e.to_string()))?;
-    let (changed, mut files_used, mut hunks_used) =
-        changed_lines(repo, &commit.parents[0], &commit.sha, false)?;
+    let (changed, mut files_used, mut hunks_used) = changed_lines(
+        repo,
+        &commit.parents[0],
+        &commit.sha,
+        false,
+        MAX_FILES_PER_MERGE,
+        MAX_HUNKS_PER_MERGE,
+    )?;
     let mut lines = BTreeSet::new();
     for (file, ranges) in changed {
         for (start, count) in ranges {
@@ -418,24 +521,21 @@ fn measure_merge(
             &format!("{}..{}", commit.parents[0], commit.parents[1]),
         ],
     )?;
-    for later in descendants.iter().filter(|c| {
-        c.time >= commit.time
-            && c.time <= commit.time + window
-            && c.time <= now
-            && c.parents.len() == 1
-    }) {
-        if !later.subject.starts_with("Revert ") && !fix_subject(&later.subject) {
-            continue;
+    let start = descendants.partition_point(|c| c.commit.time < commit.time);
+    let end = descendants.partition_point(|c| c.commit.time <= window_end);
+    let mut candidate_count = 0;
+    for candidate in &descendants[start..end.max(start)] {
+        candidate_count += 1;
+        if candidate_count > MAX_CANDIDATES_PER_MERGE {
+            return Err(OutcomeError::Evidence("candidate limit exceeded".into()));
         }
-        // A candidate must descend from this merge, not merely share its time window.
-        if git(
-            repo,
-            &["merge-base", "--is-ancestor", &commit.sha, &later.sha],
-        )
-        .is_err()
+        if !candidate
+            .latest_merge
+            .is_some_and(|index| index >= merge_index)
         {
             continue;
         }
+        let later = &candidate.commit;
         let body = cache
             .bodies
             .entry(later.sha.clone())
@@ -452,20 +552,26 @@ fn measure_merge(
         if !fix_subject(&later.subject) {
             continue;
         }
-        let candidate = cache.fixes.entry(later.sha.clone()).or_insert_with(|| {
-            let (changed, files, hunks) =
-                changed_lines(repo, &later.parents[0], &later.sha, true).ok()?;
+        if !cache.fixes.contains_key(&later.sha) {
+            let (changed, files, hunks) = changed_lines(
+                repo,
+                &later.parents[0],
+                &later.sha,
+                true,
+                MAX_FILES_PER_MERGE - files_used,
+                MAX_HUNKS_PER_MERGE - hunks_used,
+            )?;
             let mut blamed = BTreeSet::new();
             for (file, ranges) in changed {
                 for (start, count) in ranges {
-                    blamed.extend(blamed_lines(repo, &later.parents[0], &file, start, count).ok()?);
+                    blamed.extend(blamed_lines(repo, &later.parents[0], &file, start, count)?);
                 }
             }
-            Some((blamed, files, hunks))
-        });
-        let candidate = candidate
-            .as_ref()
-            .ok_or_else(|| OutcomeError::Evidence("fix measurement unavailable".into()))?;
+            cache
+                .fixes
+                .insert(later.sha.clone(), (blamed, files, hunks));
+        }
+        let candidate = &cache.fixes[&later.sha];
         files_used += candidate.1;
         hunks_used += candidate.2;
         if files_used > MAX_FILES_PER_MERGE || hunks_used > MAX_HUNKS_PER_MERGE {
@@ -487,6 +593,8 @@ fn changed_lines(
     before: &str,
     after: &str,
     old: bool,
+    max_files: usize,
+    max_hunks: usize,
 ) -> Result<(Ranges, usize, usize)> {
     let files = git(
         repo,
@@ -494,7 +602,7 @@ fn changed_lines(
             "diff",
             "--no-ext-diff",
             "--no-renames",
-            "--name-only",
+            "--raw",
             "-z",
             before,
             after,
@@ -504,9 +612,19 @@ fn changed_lines(
     let mut result = BTreeMap::new();
     let mut file_count = 0;
     let mut hunk_count = 0;
-    for file in files.split('\0').filter(|s| !s.is_empty()) {
+    let mut records = files.split('\0').filter(|s| !s.is_empty());
+    while let Some(metadata) = records.next() {
+        let file = records
+            .next()
+            .ok_or_else(|| OutcomeError::Evidence("invalid raw diff".into()))?;
+        let mut modes = metadata.split_whitespace();
+        let old_mode = modes.next().unwrap_or("").trim_start_matches(':');
+        let new_mode = modes.next().unwrap_or("");
+        if old_mode == "160000" || new_mode == "160000" {
+            continue;
+        }
         file_count += 1;
-        if file_count > MAX_FILES_PER_MERGE {
+        if file_count > max_files {
             return Err(OutcomeError::Evidence("file limit exceeded".into()));
         }
         let diff = git(
@@ -523,18 +641,10 @@ fn changed_lines(
                 file,
             ],
         )?;
-        if diff.lines().any(|line| {
-            line.trim_start_matches(['+', '-', ' '])
-                .starts_with("Subproject commit ")
-                || line == "new file mode 160000"
-                || line == "deleted file mode 160000"
-        }) {
-            continue;
-        }
         let mut ranges = Vec::new();
         for line in diff.lines().filter(|line| line.starts_with("@@ ")) {
             hunk_count += 1;
-            if hunk_count > MAX_HUNKS_PER_MERGE {
+            if hunk_count > max_hunks {
                 return Err(OutcomeError::Evidence("hunk limit exceeded".into()));
             }
             let range = line

@@ -7009,12 +7009,18 @@ fn pipeline_report(
     use provenant_telemetry::outcome::Evidence;
     let invalid = |message: String| Fail::new(Status::Invalid, ErrorKind::Invalid, message);
     let mut checkpoints = BTreeMap::new();
+    let mut unreadable_graphs = std::collections::BTreeSet::new();
     for fact in facts {
         if let Some(graph) = fact.context.as_ref().and_then(|c| c.graph_id.as_ref())
             && !checkpoints.contains_key(graph)
         {
-            let checkpoint =
-                FileJournal::read_checkpoint(&edge.roots.state, project, graph).unwrap_or(None);
+            let checkpoint = match FileJournal::read_checkpoint(&edge.roots.state, project, graph) {
+                Ok(checkpoint) => checkpoint,
+                Err(_) => {
+                    unreadable_graphs.insert(graph.clone());
+                    None
+                }
+            };
             checkpoints.insert(graph.clone(), checkpoint);
         }
     }
@@ -7094,7 +7100,7 @@ fn pipeline_report(
         })
         .transpose()?;
     let now = jiff::Timestamp::now();
-    let outcomes = provenant_telemetry::outcome::attribute(
+    let mut outcomes = provenant_telemetry::outcome::attribute(
         edge.cwd,
         &options.main_ref,
         evidence,
@@ -7103,6 +7109,17 @@ fn pipeline_report(
         now.as_second(),
     )
     .map_err(|e| invalid(e.to_string()))?;
+    for row in &mut outcomes.rows {
+        if row
+            .evidence
+            .graph
+            .as_ref()
+            .is_some_and(|graph| unreadable_graphs.contains(graph))
+        {
+            row.stratum = "unmeasured";
+            row.signals.unmeasured = true;
+        }
+    }
     let ranking = provenant_telemetry::suggest::rank(
         &outcomes,
         options.min_samples as usize,
