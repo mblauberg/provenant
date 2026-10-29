@@ -1,0 +1,272 @@
+# Graph presets
+
+Owner: Fabric maintainers
+Anchor: [Fabric specification](../specs/fabric.md#pipeline-presets)
+
+Use `scout-swarm` to map a problem and `implement-with-lens` to implement a
+bounded slice with a review lens. Roles choose routing tiers, and the chair
+chooses assignments, scopes, worktrees and acceptance evidence. A junior scout
+swarm remains read-only; it can share read roots without Git writer contention.
+
+Four presets are bundled: `scout-swarm`, `implement-with-lens`,
+`review-council` and `big-batch`, alongside the four stage shapes `single`,
+`chain`, `fan-out` and `fan-out-synthesise`.
+
+Inspect the resolved defaults and explain the exact graph before a run:
+
+```sh
+provenant preset list
+provenant preset show scout-swarm
+provenant run --preset scout-swarm --prompt-file brief.md --explain
+provenant run --preset scout-swarm --prompt-file brief.md \
+  --read-root /absolute/path/to/another-worktree --concurrency 4 --wait 30m
+```
+
+`--explain` creates no graph state. Human output groups children under their
+composite and shows roles, tiers, scopes, worktrees, selected inputs, attempt
+bounds, acceptance and effective limits. `--json --explain` includes the exact
+graph and origins. The same resolved graph has the same ID, so retrying its
+submission observes the existing graph. Change the prompt or parameters when
+you intend a separate run.
+
+Run one implementation slice in an existing registered worktree:
+
+```sh
+provenant run --preset implement-with-lens --prompt-file slice.md \
+  --worktree /absolute/path/to/writer \
+  --set 'parameters.scope=["src"]' --wait 30m
+```
+
+The bundled presets expose these main parameters. Use `preset show NAME` for
+all role briefs and defaults.
+
+| Preset | Main parameters | Default work |
+| --- | --- | --- |
+| `scout-swarm` | `width = 4`, `read_roots = []` | Junior scouts, then senior synthesis |
+| `implement-with-lens` | `worktree`, `scope = ["."]`, `subject.commit = "HEAD"`, `base`, `spec`, `lenses`, `delivery = "none"` | Senior writer, then the lens list over the commit it wrote |
+| `review-council` | `subject.commit = "HEAD"`, `worktree`, `base`, `spec`, `lenses`, `risk`, `review_shape`, `risk_tags` | One lens role fanned out over `lenses`, then senior synthesis |
+| `big-batch` | `lanes`, `batch_worktree`, `base`, `spec`, `integration_branch = "batch/graph"`, `width = 4`, `read_roots = []` | Scout, one writer lane per `lanes` entry, council, principal refactor, two-round repair and review |
+
+Write list parameters in a TOML file and pass `--params-file lanes.toml`. The
+file holds top-level `name = value` pairs, one per preset parameter. `--set`
+overrides it. For example, a three-lane batch:
+
+```toml
+batch_worktree = "/absolute/path/to/batch-writer"
+base = "origin/main"
+spec = "#2187"
+lanes = [
+  { name = "api", worktree = "/absolute/path/to/lane-api", scope = ["src/api"], spec = "#2187" },
+  { name = "cli", worktree = "/absolute/path/to/lane-cli", scope = ["src/cli"], spec = "#2187" },
+  { name = "docs", worktree = "/absolute/path/to/lane-docs", scope = ["docs"], spec = "#2187" },
+]
+```
+
+## Configure roles and stages
+
+Preset layers load from bundled defaults, user files under
+`$XDG_CONFIG_HOME/provenant/presets/` (default `~/.config/provenant/presets/`),
+then `.provenant/presets/` in the project. A repository file used during
+resolution is announced before submission. `preset show NAME` displays the
+effective values and their origins; invalid files appear in `preset list`
+without blocking unrelated presets.
+
+An existing name can override only its changed values. A new name can use
+`extends` or define its own stages. For example,
+`.provenant/presets/scout-and-check.toml`:
+
+```toml
+stages = [
+  { id = "map", preset = "scout-swarm" },
+  { id = "check", role = "checker" },
+]
+exports = [{ node = "check", outputs = ["result", "findings"] }]
+
+[roles.checker]
+tier = "senior"
+title = "Check the proposed implementation boundaries"
+prompt = "Challenge unsupported claims and missing call sites.\n${prompt}"
+acceptance_checks = ["Every proposed change cites a relevant call site"]
+```
+
+Stages run in order and receive the preceding result. An entry can select
+other preceding outputs with `outputs = ["result", "findings", "commit"]`.
+`parallel` contains heterogeneous entries, each with its own role or preset;
+`count` repeats an entry from 1 to 32. Repeated roles can use `${index}` to
+assign distinct work. `${prompt}` inserts the supplied brief. Exact parameter
+placeholders retain their TOML type, so `write_scope = "${scope}"` can insert
+a scope array rather than text.
+
+Role profiles default to read-only access. A writer explicitly declares
+`access = "worktree_write"`, an existing `worktree` and literal relative
+`write_scope` paths. `tier` chooses a named routing pool. Use either `tier` or
+`routes`; `routes` accepts pool names or graph route tables, and `effort`
+configures them. A read-only role's `worktree` becomes an additional read
+root; it acquires no Git writer lock.
+
+Two role fields shape review. `prompt_file` appends a bundled prompt, such as
+`code-review/lenses/tests`, to the role prompt; it takes one name or a list and
+refuses unknown names. `distinct_from = "writer"` requires the node's model
+family to differ from the family that wrote the node's source. Route selection
+excludes the writer's family and refuses a route that cannot satisfy it. When
+the source chain has no writer the constraint has no effect.
+
+An entry can fan out over a list parameter with `for_each = "${lenses}"`. Each
+item needs a `name` of lowercase letters, digits and dashes. The node ID is
+`ENTRY-NAME` and `${item.FIELD}` reads the item's fields in the role. Use
+`for_each` or `count`, not both. An item with a `when` value runs only when
+`risk_tags` contains that value.
+
+Each child preset keeps its own parameters and roles; an entry's `parameters`
+or `roles` tables customise that child. Command-line overrides use TOML values:
+
+```sh
+provenant run --preset fan-out --prompt-file brief.md \
+  --set 'parameters.width=3' --set 'parameters.route="junior"' --explain
+```
+
+Keep TOML string quotes inside shell quotes. Expansion refuses unknown fields,
+cycles, more than eight levels and more than 512 nodes including children.
+The original `single`, `chain`, `fan-out` and `fan-out-synthesise` structures
+remain available; every slot, including synthesis, can contain a preset.
+
+## Review and source subjects
+
+`review-council` runs one `lens` role over the `lenses` list: correctness
+against the spec, design fit and reuse, simplicity, conventions and
+readability, and tests. `security-privacy` and `concurrency-data-errors` join
+when `risk_tags` names `security` or `concurrency`, and `adversarial` joins
+when it names `terminal`. `implement-with-lens` takes the same list, with
+correctness against the spec and simplicity by default. Every lens prompt
+carries the same context. The reviewer has read access to the whole
+repository, treats the diff stat and slices as navigation aids rather than the
+scope, reads callers, existing utilities and architecture, and reviews against
+the `spec` (an issue number or file) and the `base` (the diff reference). The
+subject node states both. Prompts live in
+`skills/code-review/references/lenses/`.
+
+The routing review shapes are canonical for who reviews. A lens whose `tier`
+is empty takes its pool from the shape that `routing.review.select_shape`
+picks for `risk` (or the `review_shape` override): `quick` runs one junior
+reviewer, `standard` two, and `deep` up to six with its named lenses. Conditional
+lenses add to that count. Set a lens `tier` to override the shape for that lens.
+`--explain` prints the selected shape. Synthesis reconciles the evidence and
+does not take a majority vote.
+
+Read roots permit scouting another worktree's uncommitted files. For a
+combined review, bind `source` to an immutable commit, a direct dependency's
+commit output or the graph's combined integration head:
+
+```toml
+source = { type = "commit", commit = "0123456789abcdef0123456789abcdef01234567" }
+# Or, on a node directly following the writer:
+source = { type = "node", node = "implementation" }
+# Or, when integration_branch is configured:
+source = { type = "integration" }
+```
+
+These are alternatives, each declared once on the relevant role or entry.
+Preset commit parameters accept refs such as `HEAD`; the front door resolves
+them to full immutable object IDs before explain or submission. For example,
+`--set 'parameters.subject.commit="refs/heads/batch/graph"'` pins a council's
+subject. Raw graph commit bindings require the full object ID.
+The runtime pins the source before launch and retains it on replay. A review
+uses that exact subject. A later writer starts in an existing registered
+worktree at that head, or a clean ancestor context fast-forwards to it while
+holding writer exclusion. Dirty, diverged, reserved and live contexts are
+refused. Ignored output is retained, including refusal if the source would
+overwrite it. The runtime never resets a worktree. A repair's follow-up review
+selects the repair's commit rather than reusing the earlier review head.
+
+## Prepare a batch
+
+`big-batch` groups a scout swarm, parallel senior implementation lanes, review
+lenses, principal refactoring and repair. Prepare and register distinct writer
+worktrees first. Partition their literal write scopes so writers can run
+concurrently. Integrate lane heads into the explicit batch branch, review its
+pinned combined commit, then use that subject for the serial principal and
+repair contexts. Existing clean ancestor contexts fast-forward safely at
+admission; divergent contexts need chair reconciliation. Automatic worktree
+provisioning is outside this workflow.
+
+Bind each batch context explicitly, one `lanes` entry per writer:
+
+```sh
+provenant run --preset big-batch --prompt-file batch.md \
+  --params-file lanes.toml \
+  --set 'parameters.integration_branch="batch/graph"' --explain
+```
+
+Use read-only junior swarms for scouting and research. Give implementation
+lanes to seniors, and put long-horizon principal refactoring at batch end.
+Choose review depth from the risk and author tier.
+
+A graph that reads `source = { type = "integration" }` pins the integration
+head when that source first resolves, and the head joins the graph ID. The
+graph stops before synthesis, and before a writer that starts from the pinned
+commit, if the branch has since moved. Rerun the graph to pin the new head.
+A fallback or retry writer that finds the pin already behind its own HEAD
+continues; a HEAD that diverged from the pin is still refused.
+
+## Read roots and planner limits
+
+A node's `read_roots`, and a preset `--read-root`, must resolve inside the
+project or its linked worktrees. Paths are canonicalised before the check, so
+a symlink cannot point out of the project. The host allows other directories
+through an absolute-path allow-list:
+
+```toml
+[domains.fabric.graph]
+allowed_read_roots = ["/absolute/path/to/shared-reference"]
+```
+
+A planner fragment cannot widen what its planner node holds. Each child
+`role` and `source` must equal the planner's, and each child `read_roots` entry
+must already be one of the planner's.
+
+Graph limits and host ceilings cover all children and every possible loop
+round. The ordinary dependency-depth limit remains four. The default host
+ceiling is 64, and `big-batch` explicitly requests 64. A host can choose a
+lower ceiling; explain reports that effective cap before submission. The
+[host runbook](fabric-hosts.md#configure-hosts) describes limits and budget
+extensions.
+
+An entry's `loop` can use ordered `stages`, including reusable roles and
+presets, with an `until` gate and a positive `max_rounds`. For example, in a
+preset that defines `repairer` and `reviewer` roles:
+
+```toml
+stages = [
+  { id = "repair", loop = { max_rounds = 2, until = "accept", stages = [
+    { id = "fix", role = "repairer" },
+    { id = "review", role = "reviewer", source = { type = "node", node = "fix" } },
+    { id = "accept", kind = "gate", condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
+  ] } },
+]
+```
+
+Existing raw `loop.body` configuration also remains available. All body
+writers share one worktree; `previous.NODE` selects prior-round evidence or
+commit bindings. Planner output cannot refer to named presets.
+
+## Observe and resume
+
+Preset runs use the normal bounded `run` wait, 240 seconds by default.
+`--wait` accepts seconds or durations such as `30m`, up to four hours.
+`--concurrency` accepts 1 to 16 and remains bounded by the host ceiling.
+Timeout leaves work running. Graph status retains one composite status and
+the children's attempts, findings and selected exports. Follow the printed
+continuation command to inspect progress or resume an exhausted graph with
+explicit limit or loop extensions.
+
+A successful complete graph returns success. Failed or cancelled graphs,
+paused graphs and wait timeouts return a nonzero status. The result names the
+retained document and the continuation command, `provenant fabric graph
+resume --document PATH`. Waiting advances the immutable document, including
+pending CI gates, rather than reading status snapshots alone.
+
+Failures in a child fail its composite and block downstream work. An
+exhausted bounded loop pauses for a chair decision; a synthesis does not
+override failed acceptance evidence. Confinement, writer exclusion, immutable
+sources and acceptance checks remain deterministic while the models choose
+how to carry out each assigned role.

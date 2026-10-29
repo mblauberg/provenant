@@ -39,6 +39,23 @@ pub struct Resume {
     pub prompt: String,
     pub created_at: WallTime,
 }
+/// How long past its runtime deadline a live guardian is left to act on its own
+/// before `reconcile` asks it to stop.
+const DEADLINE_GRACE_SECONDS: u64 = 120;
+
+fn past_runtime_deadline(record: &AttemptRecord, call: &Request<'_>) -> bool {
+    let (AttemptState::Running { .. }, Some(deadline), Ok(now)) = (
+        &record.state,
+        record.runtime_deadline,
+        call.clock.wall_now(),
+    ) else {
+        return false;
+    };
+    provenant_core::DurationMicros::from_seconds(DEADLINE_GRACE_SECONDS)
+        .and_then(|grace| deadline.checked_add(grace))
+        .is_ok_and(|limit| now >= limit)
+}
+
 /// What reconcile found for one attempt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -47,6 +64,9 @@ pub enum Reconciled {
     Queued,
     /// A live guardian still holds custody.
     Held,
+    /// A live guardian outlived its attempt's runtime deadline, so a stop at
+    /// the deadline was requested of it. It settles the attempt as a timeout.
+    DeadlineStop,
     /// The supervisor is resuming durable settlement in the background.
     Settling { phase: String },
     /// A durable exit was committed and released.
@@ -189,6 +209,85 @@ mod reboot_tests {
     fn corrupt_reservation_is_not_reboot_proof()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         unavailable_reboot_evidence(true)
+    }
+
+    #[test]
+    fn claim_records_the_runtime_deadline_and_a_host_cap_tightens_it()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for (cap, seconds) in [(0, 3600), (600, 600)] {
+            let temp = tempfile::tempdir()?;
+            let clock = crate::tests::clock();
+            let cancel = provenant_core::CancelToken::new();
+            let call = crate::tests::call(&clock, &cancel);
+            let context = crate::tests::context(temp.path())?;
+            let store = RunStore::open(&context, &call)?;
+            let run = crate::tests::input();
+            store.create(&run, &call)?;
+            let id = run.attempts[0].attempt_id;
+            assert_eq!(store.record(id, &call)?.runtime_deadline, None);
+            store.mark_starting_with_priority(
+                &store.record(id, &call)?,
+                &crate::tests::route(),
+                &[],
+                &Default::default(),
+                None,
+                None,
+                cap,
+                &call,
+            )?;
+            let claimed = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let started = claimed.started_at.ok_or("no start")?;
+            let expected =
+                started.checked_add(provenant_core::DurationMicros::from_seconds(seconds)?)?;
+            assert_eq!(claimed.runtime_deadline, Some(expected));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn only_a_running_attempt_past_its_deadline_and_grace_is_overdue()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let deadline = provenant_core::Clock::wall_now(&clock)?;
+        let mut record: AttemptRecord = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "attempt_id": provenant_core::AttemptId::from_bytes([1; 16]),
+            "run_id": provenant_core::RunId::from_bytes([2; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": provenant_core::TaskId::from_bytes([4; 16]),
+            "operation_id": "overdue-test",
+            "attempt_number": 1, "revision": 1, "generation": 0,
+            "requested_route": {"kind":"model", "provider":"p", "model":"m"},
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": deadline,
+            "state": {"state":"running"},
+            "usage": {},
+            "prompt": {"path":{"encoding":"utf8", "path":"prompt.txt"},
+                "digest": provenant_records::CanonicalV1::file_digest(b""), "bytes":0, "complete":true, "redacted":false}
+        }))?;
+        record.runtime_deadline = Some(deadline);
+        let overdue = |clock: &provenant_core::TestClock, record: &AttemptRecord| {
+            past_runtime_deadline(record, &crate::tests::call(clock, &cancel))
+        };
+        assert!(
+            !overdue(&clock, &record),
+            "at the deadline the guardian acts"
+        );
+        clock.advance(provenant_core::DurationMicros::from_seconds(
+            DEADLINE_GRACE_SECONDS - 1,
+        )?)?;
+        assert!(!overdue(&clock, &record));
+        clock.advance(provenant_core::DurationMicros::from_seconds(1)?)?;
+        assert!(overdue(&clock, &record));
+        record.runtime_deadline = None;
+        assert!(!overdue(&clock, &record), "no recorded deadline, no stop");
+        record.runtime_deadline = Some(deadline);
+        record.state = AttemptState::Starting {
+            extra: Default::default(),
+        };
+        assert!(!overdue(&clock, &record));
+        Ok(())
     }
 
     fn unavailable_reboot_evidence(
@@ -1979,6 +2078,14 @@ impl RunStore {
                         custody::publish_release(&attempt, scope)
                             .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
                         Ok(Reconciled::Finished)
+                    }
+                    Ok(Observation::Live) if past_runtime_deadline(record, call) => {
+                        // The guardian should have stopped the provider at the
+                        // deadline itself; ask again through its own channel.
+                        Ok(match custody::stop(&handle, StopReason::WallDeadline) {
+                            Ok(_) => Reconciled::DeadlineStop,
+                            Err(error) => Reconciled::custody_unavailable(&error),
+                        })
                     }
                     Ok(Observation::Live | Observation::PublicationPending) => Ok(Reconciled::Held),
                     Ok(Observation::Unknown) => Ok(self

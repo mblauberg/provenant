@@ -1,6 +1,6 @@
 use crate::Profile;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::marker::PhantomData;
+use std::{marker::PhantomData, path::Path};
 use thiserror::Error;
 use toml_edit::{DocumentMut, Table};
 
@@ -22,6 +22,39 @@ pub trait DomainConfig: DeserializeOwned {
     fn validate(&self) -> Vec<SectionError> {
         Vec::new()
     }
+}
+
+/// Read one domain's table straight from `<state>/config.toml`, without
+/// resolving the other domains, for a settlement or status reader that does
+/// not link the binary's closed aggregate. A missing file or table answers the
+/// section's serde defaults; an unreadable or malformed one fails.
+pub fn read_domain<T: DeserializeOwned>(state: &Path, name: &str) -> std::io::Result<T> {
+    let read = provenant_os::fs::Directory::open_anchor(state).and_then(|directory| {
+        directory.read_bounded(
+            "config.toml".as_ref(),
+            provenant_records::Limits::CONFIG.max_bytes,
+        )
+    });
+    let table = match read {
+        Ok(bytes) => {
+            let text = std::str::from_utf8(&bytes).map_err(std::io::Error::other)?;
+            let document = text.parse::<DocumentMut>().map_err(std::io::Error::other)?;
+            document
+                .get("domains")
+                .and_then(|domains| domains.get(name))
+                .and_then(|item| item.as_table_like())
+                .map(|table| {
+                    table.iter().fold(Table::new(), |mut out, (key, item)| {
+                        out.insert(key, item.clone());
+                        out
+                    })
+                })
+        }
+        Err(error) if error.is_not_found() => None,
+        Err(error) => return Err(std::io::Error::other(error)),
+    };
+    let document = DocumentMut::from(table.unwrap_or_default());
+    toml_edit::de::from_document(document).map_err(std::io::Error::other)
 }
 
 /// One domain's immutable entry. Assets contain section-local keys: config

@@ -1,3 +1,4 @@
 ## Fixes
+### Git and safety
 
-- Remove registered detached worktrees with the usual custody and dirty checks, preserving branches. Unmerged detached commits require `--discard`; refusals name the reason and a recovery command.
+- Registered detached worktrees can now be removed with the usual safety checks. Unmerged detached commits need `--discard`, and refusals name the reason and a recovery command (#2133).

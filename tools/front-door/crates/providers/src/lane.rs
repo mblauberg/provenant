@@ -76,6 +76,73 @@ impl crate::LaunchSpec {
             .push(("CLAUDE_CODE_SHELL_PREFIX".into(), path.into_os_string()));
         Ok(())
     }
+    /// Put a `cargo` shim first on the lane's PATH. Cargo commands that compile
+    /// take one host build slot (`slots` across every project on this state
+    /// directory) before the real `cargo` runs, and keep it until it exits.
+    /// Waiting blocks only that command.
+    ///
+    /// The host provisions the slot files (`BuildSlots::provision`) before
+    /// the lane starts. The lane is granted read access to that directory and
+    /// nothing more, so it can neither create, unlink nor replace a slot file;
+    /// the shim opens a slot read-only and locks it. The directory and count
+    /// are written into the shim script as environment for the one command,
+    /// which overrides anything the lane's own environment says.
+    pub fn configure_build_slots(
+        &mut self,
+        scratch: &Path,
+        gate: &BuildSlotGate<'_>,
+    ) -> Result<(), ProviderError> {
+        let text = |path: &Path| -> Result<String, ProviderError> {
+            let value = path.to_str().ok_or(ProviderError::InvalidPath)?;
+            if !path.is_absolute() || value.chars().any(char::is_control) {
+                return Err(ProviderError::InvalidPath);
+            }
+            Ok(shell_quote(value))
+        };
+        if !(1..=64).contains(&gate.slots) || gate.wait_seconds == 0 {
+            return Err(ProviderError::Malformed);
+        }
+        let bin = scratch.join("bin");
+        let script = format!(
+            "#!/bin/sh\nPROVENANT_BUILD_SLOT_STATE={} PROVENANT_BUILD_SLOTS={} PROVENANT_BUILD_WAIT_SECS={}\nexport PROVENANT_BUILD_SLOT_STATE PROVENANT_BUILD_SLOTS PROVENANT_BUILD_WAIT_SECS\nexec {} internal build-slot -- {} \"$@\"\n",
+            text(gate.state)?,
+            gate.slots,
+            gate.wait_seconds,
+            text(gate.provenant)?,
+            text(gate.cargo)?,
+        );
+        let slots = gate
+            .state
+            .join(provenant_os::build_slots::DIRECTORY.join("/"));
+        let create = SetupStep::CreateDir(bin.clone());
+        if !self.setup.contains(&create) {
+            self.setup.push(create);
+        }
+        self.setup.push(SetupStep::WriteExecutable {
+            path: bin.join("cargo"),
+            bytes: script.into_bytes(),
+        });
+        let (_, path) = self
+            .env
+            .iter_mut()
+            .find(|(key, _)| key == "PATH")
+            .ok_or(ProviderError::InvalidPath)?;
+        if std::env::split_paths(path).next().as_deref() != Some(bin.as_path()) {
+            *path = std::env::join_paths(
+                std::iter::once(bin.clone()).chain(std::env::split_paths(path)),
+            )
+            .map_err(|_| ProviderError::InvalidPath)?;
+        }
+        let profile = &mut self.profile.spec;
+        // Read only: no write grant covers the slot directory.
+        profile.runtime_reads.push(subtree(slots));
+        profile
+            .process_executables
+            .extend([exact("/bin/sh"), exact(gate.provenant)]);
+        profile.runtime_reads.push(exact(gate.provenant));
+        profile.tool_exec_roots.push(subtree(bin));
+        Ok(())
+    }
     /// Configure shell Git after adapter preparation, including shells that
     /// scrub Git environment variables. No credential is read during setup.
     pub fn configure_publishing(
@@ -208,6 +275,20 @@ fn gh_wrapper(gh: &str, gh_config: &str, policy: &provenant_config::GithubPolicy
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// What the `cargo` shim needs to take a host build slot.
+pub struct BuildSlotGate<'a> {
+    /// The `provenant` executable that runs `internal build-slot`.
+    pub provenant: &'a Path,
+    /// Host state directory, shared by every project, holding the slot files.
+    pub state: &'a Path,
+    /// How many builds the host runs at once.
+    pub slots: u64,
+    /// Seconds a build waits for a slot or a Cargo lock before giving up.
+    pub wait_seconds: u64,
+    /// The real `cargo` the shim runs once it holds a slot.
+    pub cargo: &'a Path,
 }
 
 /// Canonical runtime paths supplied by the composition edge.
@@ -735,6 +816,164 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    fn bare_spec(path: &str) -> crate::LaunchSpec {
+        crate::LaunchSpec {
+            argv: Vec::new(),
+            env: vec![("PATH".into(), path.into())],
+            stdin: crate::Stdin::Null,
+            secret_input: None,
+            cwd: PathBuf::from("/"),
+            setup: Vec::new(),
+            git_wrapper: Default::default(),
+            profile: provenant_confinement::permissions::ProviderProfile {
+                spec: ProviderProfileSpec::default(),
+                observations: Default::default(),
+            },
+            stream: crate::StreamState::new("claude", |_| Ok(Vec::new())),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn the_cargo_shim_hands_the_command_to_the_build_slot_gate() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (scratch, state) = (root.join("it's scratch"), root.join("state"));
+        let mut spec = bare_spec("/home/.cargo/bin:/usr/bin:/bin");
+        spec.cwd = root.clone();
+        let provenant = root.join("fake provenant");
+        let gate = BuildSlotGate {
+            provenant: &provenant,
+            state: &state,
+            slots: 3,
+            wait_seconds: 1800,
+            cargo: Path::new("/home/.cargo/bin/cargo"),
+        };
+        spec.configure_build_slots(&scratch, &gate).unwrap();
+        let (_, path) = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
+        assert_eq!(
+            std::env::split_paths(path).next().unwrap(),
+            scratch.join("bin")
+        );
+        // The lane gets no write to the slot directory, the state root,
+        // `fabric/locks` or anything near a repository's `.git`: only a read
+        // of the slot directory, which the host provisions beforehand.
+        let slots = state.join("fabric/locks/build-slots");
+        assert!(spec.profile.spec.state_writes.is_empty());
+        assert!(spec.profile.spec.tool_writes.is_empty());
+        assert!(spec.profile.spec.runtime_reads.contains(&subtree(&slots)));
+        assert!(
+            !spec
+                .setup
+                .iter()
+                .any(|step| matches!(step, SetupStep::CreateDir(path) if path.starts_with(&slots))),
+            "the lane never creates the slot directory"
+        );
+        let bytes = spec
+            .setup
+            .iter()
+            .find_map(|step| match step {
+                SetupStep::WriteExecutable { path, bytes } if path.ends_with("bin/cargo") => {
+                    Some(bytes.clone())
+                }
+                _ => None,
+            })
+            .unwrap();
+        // Run the script against a stand-in for `provenant` that prints argv
+        // and the host's slot environment, with hostile values in the lane's.
+        std::fs::write(
+            &provenant,
+            "#!/bin/sh\nprintf '<%s>' \"$@\"\nprintf '[%s|%s|%s]' \"$PROVENANT_BUILD_SLOT_STATE\" \"$PROVENANT_BUILD_SLOTS\" \"$PROVENANT_BUILD_WAIT_SECS\"\n",
+        )
+        .unwrap();
+        let shim = root.join("cargo");
+        std::fs::write(&shim, bytes).unwrap();
+        for file in [&provenant, &shim] {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let output = std::process::Command::new(&shim)
+            .args(["test", "--", "two words"])
+            .env("PROVENANT_BUILD_SLOT_STATE", "/lane/chosen")
+            .env("PROVENANT_BUILD_SLOTS", "64")
+            .env("PROVENANT_BUILD_WAIT_SECS", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!(
+                "<internal><build-slot><--></home/.cargo/bin/cargo><test><--><two words>[{}|3|1800]",
+                state.display()
+            ),
+            "the host's slot directory, count and wait override the lane's environment"
+        );
+    }
+
+    /// The finished writer profile, with the confinement's own list of every
+    /// write allowance, must leave the slot directory out of reach: no grant
+    /// equals it or contains it, so a lane cannot create, unlink or replace a
+    /// slot file.
+    #[test]
+    fn no_write_grant_of_the_finished_lane_profile_reaches_the_slot_directory() {
+        use provenant_confinement::permissions::{PathScope, write_grants};
+        let state = PathBuf::from("/fixture/hoststate");
+        let slots = state.join("fabric/locks/build-slots");
+        let mut spec = bare_spec("/usr/bin");
+        let gate = BuildSlotGate {
+            provenant: Path::new("/fixture/bin/provenant"),
+            state: &state,
+            slots: 2,
+            wait_seconds: 60,
+            cargo: Path::new("/home/.cargo/bin/cargo"),
+        };
+        spec.configure_build_slots(Path::new("/fixture/scratch"), &gate)
+            .unwrap();
+        let plan =
+            crate::tests::fixture_access_plan(crate::Access::WorktreeWrite, Some("fixture"), true);
+        let grants = write_grants(plan.permissions(), &spec.profile);
+        assert!(!grants.is_empty(), "the profile lists its write grants");
+        for grant in &grants {
+            let reaches = match grant.scope {
+                PathScope::Exact => grant.path == slots,
+                PathScope::Subtree => slots.starts_with(&grant.path),
+            };
+            assert!(
+                !reaches,
+                "{:?} grant {} reaches {}",
+                grant.source,
+                grant.path.display(),
+                slots.display()
+            );
+        }
+    }
+
+    #[test]
+    fn the_cargo_shim_refuses_settings_that_cannot_be_trusted() {
+        let mut spec = bare_spec("/usr/bin");
+        for (state, slots, wait) in [
+            ("/s", 0, 60),
+            ("/s", 65, 60),
+            ("/s", 1, 0),
+            ("relative", 1, 60),
+            ("/s\nx", 1, 60),
+        ] {
+            let gate = BuildSlotGate {
+                provenant: Path::new("/p"),
+                state: Path::new(state),
+                slots,
+                wait_seconds: wait,
+                cargo: Path::new("/c"),
+            };
+            assert!(
+                spec.configure_build_slots(Path::new("/scratch"), &gate)
+                    .is_err(),
+                "{state} {slots} {wait}"
+            );
+        }
+        assert!(spec.setup.is_empty());
     }
 
     #[test]

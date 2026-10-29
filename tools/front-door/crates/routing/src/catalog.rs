@@ -184,6 +184,7 @@ impl From<FixedDeadline> for String {
 /// registry-free callers and can match accounts across adapters, including
 /// profile, reset reference and override selectors.
 pub struct RoutingConfig {
+    pub model_policy: crate::ModelPolicies,
     /// Silence the advisory for Opus implementation lanes.
     pub suppress_opus_writer_warning: bool,
     pub capacity_cooldown_seconds: u64,
@@ -199,6 +200,7 @@ pub struct RoutingConfig {
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
+            model_policy: crate::ModelPolicies::default(),
             suppress_opus_writer_warning: false,
             capacity_cooldown_seconds: 600,
             review: crate::ReviewConfig::default(),
@@ -306,6 +308,7 @@ pub struct NamedRoute {
 impl DomainConfig for RoutingConfig {
     fn validate(&self) -> Vec<SectionError> {
         let mut errors = Vec::new();
+        self.model_policy.validate(&mut errors);
         if self.routes.len() > 128 {
             errors.push(SectionError {
                 field: "routes".into(),
@@ -667,6 +670,8 @@ pub const SECTION: DomainSection = DomainSection::new::<RoutingConfig>("routing"
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelEntry {
+    #[serde(default)]
+    pub free: bool,
     pub model: ModelId,
     /// Only exact controls with recording evidence. No guessed effort default.
     pub efforts: Vec<String>,
@@ -904,12 +909,14 @@ impl Catalogue {
             .then(|| bundled.first().map(|s| (*s).to_owned()))
             .flatten()
     }
-    /// Whether the bundled pool evidence marks this exact model as free.
+    /// Billing classification belongs to the model, independently of pools.
     pub fn is_free_model(&self, id: &ModelId) -> bool {
-        self.pools
-            .values()
-            .flatten()
-            .any(|member| member.free && member.model == *id)
+        self.model(id).is_some_and(|model| model.free)
+            || self
+                .pools
+                .values()
+                .flatten()
+                .any(|member| member.free && member.model == *id)
     }
 }
 
@@ -948,6 +955,7 @@ mod tests {
             confinement_ref: "grant",
         }];
         let context = RoutingContext {
+            policy_account_hint: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,
@@ -966,6 +974,7 @@ mod tests {
             assert!(entry.evidence_ref.contains("opencode-go-models.md"));
             let route = resolve(
                 &RouteRequest {
+                    intent: Default::default(),
                     choice: RouteChoice::Model(model.clone()),
                     effort: None,
                     confidential: true,

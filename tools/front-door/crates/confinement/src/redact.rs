@@ -469,6 +469,19 @@ pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
     Ok(safe)
 }
 
+/// A one-line excerpt of lane or server text, redacted with the known
+/// credential shapes before it is bounded, so a cut never leaves part of a
+/// secret that no longer matches a shape. Text that cannot be filtered is
+/// replaced, never passed through.
+pub fn bounded_line(text: &str, max_chars: usize) -> String {
+    match known_shapes(text.as_bytes()) {
+        Ok(safe) => provenant_core::bounded_line(&String::from_utf8_lossy(&safe), max_chars),
+        Err(FilterError) => {
+            provenant_core::bounded_line("excerpt could not be sanitised", max_chars)
+        }
+    }
+}
+
 impl CaptureFilter for Redactor {
     fn filter(&mut self, bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
         self.filter_bounded(bytes)

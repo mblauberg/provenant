@@ -6,6 +6,7 @@ use crate::git_evidence::{
 };
 use crate::plan::read_only::RESERVED;
 use crate::repo::RepoPath;
+use crate::review_exempt::ReviewExempt;
 use crate::status::{
     StatusError, StatusKind, StatusPath, parse_index_entries, parse_porcelain_v2_z,
 };
@@ -15,6 +16,7 @@ use provenant_os::fs::{Directory, FileKind, FsError, Metadata, PublishMode};
 use provenant_records::{CanonicalV1, FileDigest, PathWire};
 use provenant_supervisor::custody::{Recovery, RecoveryState, Scope};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
@@ -63,9 +65,47 @@ impl ProtectedPath {
 }
 
 impl Git<'_> {
+    /// Symlinks no review-exempt listing may cover: index entries, plus any
+    /// path that was a symlink in any of `bases` or in HEAD among the paths changed
+    /// between them, so unstaging a committed link does not hide it.
+    pub(crate) fn symlink_paths(
+        &self,
+        bases: &[GitOid],
+    ) -> Result<BTreeSet<Vec<u8>>, QuarantineError> {
+        let raw = self
+            .read(GitRead::IndexEntries { paths: Vec::new() })?
+            .stdout
+            .bytes;
+        let mut paths = BTreeSet::new();
+        for entry in parse_index_entries(&raw)? {
+            let entry = entry?;
+            if entry.mode == 0o120000 {
+                paths.insert(entry.path.to_vec());
+            }
+        }
+        // Staged changes against HEAD, so a committed link removed from the
+        // index without a new commit is still known.
+        let staged = self.read(GitRead::StagedModes)?.stdout.bytes;
+        paths.extend(raw_symlink_paths(&staged)?);
+        let head = self.head()?;
+        for base in bases {
+            let raw = self
+                .read(GitRead::ChangedModes { base: *base, head })?
+                .stdout
+                .bytes;
+            paths.extend(raw_symlink_paths(&raw)?);
+        }
+        Ok(paths)
+    }
+
     /// Discover the complete tracked instruction/control scope. New protected
     /// paths are also checked by quarantine, including committed additions.
-    pub fn writer_instruction_paths(&self) -> Result<Vec<ProtectedPath>, QuarantineError> {
+    /// Paths the project lists as review-exempt are not part of the scope.
+    pub fn writer_instruction_paths(
+        &self,
+        exempt: &ReviewExempt,
+    ) -> Result<Vec<ProtectedPath>, QuarantineError> {
+        let exempt = &exempt.with_symlinks(self.symlink_paths(&[])?);
         let raw = self
             .read(GitRead::IndexEntries { paths: Vec::new() })?
             .stdout
@@ -73,7 +113,7 @@ impl Git<'_> {
         let mut paths = Vec::new();
         for entry in parse_index_entries(&raw)? {
             let entry = entry?;
-            if !is_protected_evidence_path(entry.path) {
+            if !is_protected_evidence_path(entry.path, exempt) {
                 continue;
             }
             let path = Path::new(OsStr::from_bytes(entry.path));
@@ -174,14 +214,23 @@ impl Git<'_> {
         snapshot: &InstructionSnapshot,
         comparison_base: GitOid,
         quarantine_dir: &Directory,
+        exempt: &ReviewExempt,
     ) -> Result<QuarantineOutcome, QuarantineError> {
-        quarantine_instruction_changes(self, recovery, snapshot, comparison_base, quarantine_dir)
+        quarantine_instruction_changes(
+            self,
+            recovery,
+            snapshot,
+            comparison_base,
+            quarantine_dir,
+            exempt,
+        )
     }
 
     fn protected_changed_paths(
         &self,
         base: GitOid,
         head: GitOid,
+        exempt: &ReviewExempt,
     ) -> Result<Vec<RepoPath>, QuarantineError> {
         let raw = self
             .read(GitRead::ChangedPaths { base, head })?
@@ -189,7 +238,7 @@ impl Git<'_> {
             .bytes;
         let mut paths = Vec::new();
         for path in raw.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
-            if is_protected_evidence_path(path) {
+            if is_protected_evidence_path(path, exempt) {
                 paths.push(
                     RepoPath::new(Path::new(OsStr::from_bytes(path)))
                         .map_err(|_| QuarantineError::InvalidPath)?,
@@ -543,8 +592,10 @@ fn quarantine_instruction_changes(
     snapshot: &InstructionSnapshot,
     comparison_base: GitOid,
     quarantine_dir: &Directory,
+    exempt: &ReviewExempt,
 ) -> Result<QuarantineOutcome, QuarantineError> {
     let repo = git.repo;
+    let exempt = &exempt.with_symlinks(git.symlink_paths(&[snapshot.head, comparison_base])?);
     let archive_identity = quarantine_dir.metadata()?;
     validate_archive(repo.root_identity().device, &archive_identity)?;
     if !snapshot.archive_identity.same_identity(&archive_identity) {
@@ -647,15 +698,15 @@ fn quarantine_instruction_changes(
         .map(|upstream_base| (comparison_base, upstream_base))
         .unwrap_or((snapshot.head, snapshot.head))
     };
-    let mut own_paths = git.protected_changed_paths(snapshot.head, head_before)?;
+    let mut own_paths = git.protected_changed_paths(snapshot.head, head_before, exempt)?;
     if comparison_base != snapshot.head {
-        let delivery_paths = git.protected_changed_paths(comparison_base, head_before)?;
+        let delivery_paths = git.protected_changed_paths(comparison_base, head_before, exempt)?;
         own_paths.retain(|path| delivery_paths.contains(path));
     }
     let mut review_paths = own_paths.clone();
     for record in &status_paths {
         for path in std::iter::once(&record.path).chain(record.original_path.iter()) {
-            if is_protected_evidence_path(path) {
+            if is_protected_evidence_path(path, exempt) {
                 review_paths.push(
                     RepoPath::new(Path::new(OsStr::from_bytes(path)))
                         .map_err(|_| QuarantineError::InvalidPath)?,
@@ -663,7 +714,7 @@ fn quarantine_instruction_changes(
             }
         }
     }
-    let upstream_paths = git.protected_changed_paths(upstream_base, comparison_base)?;
+    let upstream_paths = git.protected_changed_paths(upstream_base, comparison_base, exempt)?;
     // Only clean paths whose tree matches the delivery baseline are exempt.
     // Staged, disk and conflict changes still require ordinary quarantine.
     let mut clean_upstream_paths = Vec::new();
@@ -695,7 +746,7 @@ fn quarantine_instruction_changes(
             .bytes,
     )? {
         let entry = entry?;
-        if is_protected_evidence_path(entry.path)
+        if is_protected_evidence_path(entry.path, exempt)
             && !upstream_paths
                 .iter()
                 .any(|path| path_bytes(path) == entry.path)
@@ -798,7 +849,7 @@ fn quarantine_instruction_changes(
     let mut unaccounted_snapshots = Vec::new();
     for record in &status_paths {
         for raw_path in std::iter::once(&record.path).chain(record.original_path.iter()) {
-            if !is_protected_evidence_path(raw_path) {
+            if !is_protected_evidence_path(raw_path, exempt) {
                 continue;
             }
             let path = RepoPath::new(PathBuf::from(OsString::from_vec(raw_path.clone())))
@@ -838,10 +889,18 @@ fn quarantine_instruction_changes(
                 });
             }
         }
-        if matches!(
-            record.kind,
-            StatusKind::Conflict | StatusKind::RenameOrCopy | StatusKind::Unknown
-        ) {
+        // An unmerged or renamed entry hides nothing when every path it names
+        // is one the project exempts.
+        let exempt_entry = matches!(record.kind, StatusKind::Conflict | StatusKind::RenameOrCopy)
+            && std::iter::once(&record.path)
+                .chain(record.original_path.iter())
+                .all(|path| exempt.covers(path));
+        if !exempt_entry
+            && matches!(
+                record.kind,
+                StatusKind::Conflict | StatusKind::RenameOrCopy | StatusKind::Unknown
+            )
+        {
             review = true;
         }
     }
@@ -1299,6 +1358,25 @@ fn restore_file(
     Ok(())
 }
 
+/// Paths a `diff --raw -z` lists with a symlink mode on either side.
+fn raw_symlink_paths(raw: &[u8]) -> Result<Vec<Vec<u8>>, QuarantineError> {
+    if !raw.is_empty() && !raw.ends_with(&[0]) {
+        return Err(QuarantineError::Incomplete);
+    }
+    let mut fields = raw.split(|byte| *byte == 0);
+    let mut paths = Vec::new();
+    while let Some(meta) = fields.next().filter(|meta| !meta.is_empty()) {
+        let path = fields.next().ok_or(QuarantineError::Incomplete)?;
+        let meta = meta.strip_prefix(b":").ok_or(QuarantineError::Incomplete)?;
+        let mut parts = meta.split(|byte| *byte == b' ');
+        let (old, new) = (parts.next(), parts.next());
+        if old == Some(b"120000") || new == Some(b"120000") {
+            paths.push(path.to_vec());
+        }
+    }
+    Ok(paths)
+}
+
 fn parse_tree_entries(raw: &[u8]) -> Result<Vec<TreeRecord>, QuarantineError> {
     if !raw.is_empty() && !raw.ends_with(&[0]) {
         return Err(QuarantineError::Incomplete);
@@ -1379,13 +1457,18 @@ fn matches_tree(git: &Git<'_>, base: GitOid, path: &RepoPath) -> Result<bool, Qu
 }
 
 fn under_agents(path: &Path) -> bool {
-    path.strip_prefix(".agents")
-        .is_ok_and(|relative| !relative.as_os_str().is_empty())
+    under_agents_bytes(path.as_os_str().as_bytes())
 }
 fn under_agents_bytes(path: &[u8]) -> bool {
-    path.starts_with(b".agents/")
+    path.len() > 8 && path[..8].eq_ignore_ascii_case(b".agents/")
 }
-fn is_protected_evidence_path(path: &[u8]) -> bool {
+fn is_protected_evidence_path(path: &[u8], exempt: &ReviewExempt) -> bool {
+    if exempt.refuses_symlink(path) {
+        return true;
+    }
+    if exempt.covers(path) {
+        return false;
+    }
     if under_agents_bytes(path) {
         return true;
     }
@@ -1396,24 +1479,38 @@ fn wire_path(path: &RepoPath) -> Result<PathWire, QuarantineError> {
     PathWire::from_relative(&relative).map_err(|_| QuarantineError::InvalidPath)
 }
 
+/// Instruction documents are control files at any depth, but a project may
+/// list them in its review-exempt paths; nothing in `is_hard_control` can be.
+const INSTRUCTION_DOCS: [&[u8]; 4] = [b"AGENTS.md", b"HARNESS.md", b"CLAUDE.md", b"GEMINI.md"];
+
+/// Instruction documents at any depth and the `.agents/` tree: a directory or
+/// bare-name exemption never covers them, only an exact path listing does.
+pub(crate) fn is_instruction_path(path: &[u8]) -> bool {
+    under_agents_bytes(path) || is_known_control(Path::new(OsStr::from_bytes(path)))
+}
+
 fn is_known_control(path: &Path) -> bool {
-    // Control filenames apply at any depth, while ordinary source directories
-    // called config, git or hooks carry no policy authority.
+    is_hard_control(path)
+        || path.components().any(|component| {
+            matches!(component, Component::Normal(name)
+            if INSTRUCTION_DOCS
+                .iter()
+                .any(|doc| name.as_bytes().eq_ignore_ascii_case(doc)))
+        })
+}
+
+/// Paths that change what the host or an agent executes: Git metadata and
+/// attributes, hooks and provider control roots. Control filenames apply at
+/// any depth, while ordinary source directories called config, git or hooks
+/// carry no policy authority.
+pub(crate) fn is_hard_control(path: &Path) -> bool {
     path.components().any(|component| {
         let Component::Normal(name) = component else {
             return true;
         };
-        [
-            b"AGENTS.md".as_slice(),
-            b"HARNESS.md",
-            b"CLAUDE.md",
-            b"GEMINI.md",
-            b".git",
-            b".gitattributes",
-            b".gitmodules",
-        ]
-        .iter()
-        .any(|control| name.as_bytes().eq_ignore_ascii_case(control))
+        [b".git".as_slice(), b".gitattributes", b".gitmodules"]
+            .iter()
+            .any(|control| name.as_bytes().eq_ignore_ascii_case(control))
     }) || path.components().next().is_some_and(|first| {
         // The first component is the control root; APFS folds its case. Shares
         // the read-only plan's reserved list so the two cannot drift, while
@@ -1623,6 +1720,7 @@ mod custody_integration_tests {
     use crate::git_evidence::{Git, GitEvidenceError};
     use crate::quarantine::{ProtectedPath, QuarantineOutcome};
     use crate::repo::RepoPath;
+    use crate::review_exempt::ReviewExempt;
     use crate::test_support::{
         Fixture, PoisonedNestedRepo, add_poisoned_gitlink, assert_raw_git_runs_poison_filter,
     };
@@ -1722,6 +1820,264 @@ mod custody_integration_tests {
     }
 
     #[test]
+    fn ordinary_project_paths_never_need_review() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        seed_protected(&fixture)?;
+        fixture.run(&["checkout", "-b", "evidence-fixture"])?;
+        let base = fixture.head()?;
+        let token = CancelToken::new();
+        let git = evidence_git(&fixture, &token)?;
+        let archive = archive_dir(&fixture, "ordinary-archive")?;
+        let snapshot = git.snapshot_instructions(scope(), &protected()?, &archive)?;
+        let recovery = acquire_absent_recovery(&fixture, scope(), base)?;
+        for (path, text) in [
+            ("Cargo.lock", "lock\n"),
+            ("docs/specs/run.md", "spec\n"),
+            ("docs/release-notes/next.d/1-x.md", "## Fixes\n"),
+            (".tracker-input", "input\n"),
+            ("tools/front-door/Cargo.lock", "nested lock\n"),
+        ] {
+            let target = fixture.root.join(path);
+            fs::create_dir_all(target.parent().ok_or("parent")?)?;
+            fs::write(target, text)?;
+        }
+        fixture.run(&["add", "-A"])?;
+        fixture.run(&["commit", "-m", "ordinary project files"])?;
+        let outcome = git.quarantine_instructions(
+            &recovery,
+            &snapshot,
+            base,
+            &archive,
+            &ReviewExempt::none(),
+        )?;
+        assert!(
+            matches!(outcome, QuarantineOutcome::Restored { .. }),
+            "{outcome:?}"
+        );
+        Ok(())
+    }
+
+    fn settle_writer_commit(
+        setup: impl FnOnce(&Fixture) -> Result<(), Box<dyn Error>>,
+        exempt: &ReviewExempt,
+    ) -> Result<QuarantineOutcome, Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        seed_protected(&fixture)?;
+        fs::create_dir_all(fixture.root.join("docs/specs"))?;
+        fs::write(
+            fixture.root.join("docs/specs/a.md"),
+            b"spec text for rename\nmore\n",
+        )?;
+        fixture.run(&["add", "docs/specs/a.md"])?;
+        fixture.run(&["commit", "-m", "spec"])?;
+        fixture.run(&["checkout", "-b", "evidence-fixture"])?;
+        let base = fixture.head()?;
+        let token = CancelToken::new();
+        let git = evidence_git(&fixture, &token)?;
+        let archive = archive_dir(&fixture, "exempt-archive")?;
+        let snapshot =
+            git.snapshot_instructions(scope(), &git.writer_instruction_paths(exempt)?, &archive)?;
+        let recovery = acquire_absent_recovery(&fixture, scope(), base)?;
+        setup(&fixture)?;
+        Ok(git.quarantine_instructions(&recovery, &snapshot, base, &archive, exempt)?)
+    }
+
+    #[test]
+    fn exempt_instruction_tree_paths_settle_without_review() -> Result<(), Box<dyn Error>> {
+        let commit_spec = |fixture: &Fixture| -> Result<(), Box<dyn Error>> {
+            fs::create_dir_all(fixture.root.join(".agents/specs"))?;
+            fs::write(fixture.root.join(".agents/specs/new.md"), b"a spec\n")?;
+            fixture.run(&["add", ".agents/specs/new.md"])?;
+            fixture.run(&["commit", "-m", "spec under the instruction tree"])?;
+            Ok(())
+        };
+        let outcome = settle_writer_commit(commit_spec, &ReviewExempt::none())?;
+        let QuarantineOutcome::ReviewRequired { paths, .. } = outcome else {
+            return Err("an unlisted instruction-tree commit was not reviewed".into());
+        };
+        assert_eq!(
+            paths
+                .iter()
+                .filter_map(|p| p.as_path_text())
+                .collect::<Vec<_>>(),
+            [".agents/specs/new.md"]
+        );
+        // A directory listing never exempts the instruction tree.
+        let outcome = settle_writer_commit(commit_spec, &ReviewExempt::new(&[".agents/specs/"]))?;
+        assert!(matches!(outcome, QuarantineOutcome::ReviewRequired { .. }));
+        let listed = ReviewExempt::new(&[".agents/specs/new.md"]);
+        let outcome = settle_writer_commit(commit_spec, &listed)?;
+        assert!(
+            matches!(outcome, QuarantineOutcome::Restored { .. }),
+            "{outcome:?}"
+        );
+        // Listing one path leaves the rest of the tree under review.
+        let other = |fixture: &Fixture| -> Result<(), Box<dyn Error>> {
+            fs::write(fixture.root.join(".agents/other.md"), b"other\n")?;
+            fixture.run(&["add", ".agents/other.md"])?;
+            fixture.run(&["commit", "-m", "other"])?;
+            Ok(())
+        };
+        assert!(matches!(
+            settle_writer_commit(other, &listed)?,
+            QuarantineOutcome::ReviewRequired { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn hard_controls_stay_under_review_even_when_listed() -> Result<(), Box<dyn Error>> {
+        let listed = ReviewExempt::new(&[".github/", "hooks/", ".gitattributes", "ci.yml"]);
+        for path in [
+            ".github/workflows/ci.yml",
+            "hooks/pre-push",
+            ".gitattributes",
+        ] {
+            let outcome = settle_writer_commit(
+                |fixture| {
+                    let target = fixture.root.join(path);
+                    fs::create_dir_all(target.parent().ok_or("parent")?)?;
+                    fs::write(target, b"x\n")?;
+                    fixture.run(&["add", "-f", path])?;
+                    fixture.run(&["commit", "-m", "control"])?;
+                    Ok(())
+                },
+                &listed,
+            )?;
+            assert!(
+                matches!(outcome, QuarantineOutcome::ReviewRequired { .. }),
+                "{path}: {outcome:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_staged_rename_of_exempt_paths_does_not_force_review() -> Result<(), Box<dyn Error>> {
+        let rename = |fixture: &Fixture| -> Result<(), Box<dyn Error>> {
+            fixture.run(&["mv", "docs/specs/a.md", "docs/specs/b.md"])?;
+            Ok(())
+        };
+        assert!(matches!(
+            settle_writer_commit(rename, &ReviewExempt::none())?,
+            QuarantineOutcome::ReviewRequired { .. }
+        ));
+        let listed = ReviewExempt::new(&["docs/specs/"]);
+        let outcome = settle_writer_commit(rename, &listed)?;
+        assert!(
+            matches!(outcome, QuarantineOutcome::Restored { .. }),
+            "{outcome:?}"
+        );
+        // A rename out of the listed tree still hides a path the host cannot see.
+        let out = |fixture: &Fixture| -> Result<(), Box<dyn Error>> {
+            fixture.run(&["mv", "docs/specs/a.md", "moved.md"])?;
+            Ok(())
+        };
+        assert!(matches!(
+            settle_writer_commit(out, &listed)?,
+            QuarantineOutcome::ReviewRequired { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn instruction_documents_and_symlinks_in_exempt_directories_need_review()
+    -> Result<(), Box<dyn Error>> {
+        let defaults =
+            ReviewExempt::new(&["docs/release-notes/next.d/", "docs/specs/", "Cargo.lock"]);
+        for path in [
+            "docs/specs/AGENTS.md",
+            "docs/release-notes/next.d/CLAUDE.md",
+            ".agents/x/Cargo.lock",
+            "docs/specs/link",
+        ] {
+            let outcome = settle_writer_commit(
+                |fixture| {
+                    let target = fixture.root.join(path);
+                    fs::create_dir_all(target.parent().ok_or("parent")?)?;
+                    if path.ends_with("/link") {
+                        std::os::unix::fs::symlink("../../AGENTS.md", &target)?;
+                    } else {
+                        fs::write(&target, b"x\n")?;
+                    }
+                    fixture.run(&["add", "-f", path])?;
+                    fixture.run(&["commit", "-m", "alias"])?;
+                    Ok(())
+                },
+                &defaults,
+            )?;
+            assert!(
+                matches!(outcome, QuarantineOutcome::ReviewRequired { .. }),
+                "{path}: {outcome:?}"
+            );
+        }
+        let exact = ReviewExempt::new(&["docs/AGENTS.md"]);
+        let outcome = settle_writer_commit(
+            |fixture| {
+                fs::write(fixture.root.join("docs/AGENTS.md"), b"x\n")?;
+                fixture.run(&["add", "-f", "docs/AGENTS.md"])?;
+                fixture.run(&["commit", "-m", "doc"])?;
+                Ok(())
+            },
+            &exact,
+        );
+        assert!(
+            matches!(outcome, Ok(QuarantineOutcome::Restored { .. })),
+            "{outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_unstaged_committed_symlink_in_an_exempt_directory_still_needs_review()
+    -> Result<(), Box<dyn Error>> {
+        let listed = ReviewExempt::new(&["docs/specs/"]);
+        for unstage in [
+            &["rm", "--cached", "docs/specs/link"][..],
+            &["update-index", "--force-remove", "docs/specs/link"][..],
+        ] {
+            let outcome = settle_writer_commit(
+                |fixture| {
+                    let target = fixture.root.join("docs/specs/link");
+                    std::os::unix::fs::symlink("../../AGENTS.md", &target)?;
+                    fixture.run(&["add", "-f", "docs/specs/link"])?;
+                    fixture.run(&["commit", "-m", "alias"])?;
+                    fixture.run(unstage)?;
+                    Ok(())
+                },
+                &listed,
+            )?;
+            assert!(
+                matches!(outcome, QuarantineOutcome::ReviewRequired { .. }),
+                "{unstage:?}: {outcome:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_agents_prefix_matches_without_ascii_case() {
+        for path in [".agents/a", ".Agents/a", ".AGENTS/x/y"] {
+            assert!(super::under_agents_bytes(path.as_bytes()), "{path}");
+        }
+        for path in [".agents", ".agentsx/a", "x/.agents/a"] {
+            assert!(!super::under_agents_bytes(path.as_bytes()), "{path}");
+        }
+        assert!(super::under_agents(std::path::Path::new(".AGENTS/x")));
+        assert!(!super::under_agents(std::path::Path::new(".AGENTS")));
+        assert_eq!(
+            ProtectedPath::ordinary(".AGENTS/x/rules.md")
+                .map(|p| p.class())
+                .ok(),
+            Some(super::InstructionClass::OrdinaryInstruction)
+        );
+        assert!(super::is_protected_evidence_path(
+            b".AGENTS/x/Cargo.lock",
+            &ReviewExempt::new(&["Cargo.lock", ".agents/"])
+        ));
+    }
+
+    #[test]
     fn quarantine_attributes_protected_changes_against_delivery_merge_base()
     -> Result<(), Box<dyn Error>> {
         for change in [
@@ -1779,7 +2135,13 @@ mod custody_integration_tests {
                 )?;
             }
             let outcome = git
-                .quarantine_instructions(&recovery, &snapshot, target, &archive)
+                .quarantine_instructions(
+                    &recovery,
+                    &snapshot,
+                    target,
+                    &archive,
+                    &ReviewExempt::none(),
+                )
                 .map_err(|error| format!("{change} quarantine: {error}"))?;
             assert_eq!(
                 matches!(outcome, QuarantineOutcome::ReviewRequired { .. }),
@@ -1800,8 +2162,14 @@ mod custody_integration_tests {
                 );
             }
             assert_eq!(
-                git.quarantine_instructions(&recovery, &snapshot, target, &archive)
-                    .map_err(|error| format!("{change} quarantine: {error}"))?,
+                git.quarantine_instructions(
+                    &recovery,
+                    &snapshot,
+                    target,
+                    &archive,
+                    &ReviewExempt::none()
+                )
+                .map_err(|error| format!("{change} quarantine: {error}"))?,
                 outcome
             );
             if change == "delete" {
@@ -1843,8 +2211,11 @@ mod custody_integration_tests {
         let git = evidence_git(&fixture, &token)?;
         let scope = scope();
         let archive = archive_dir(&fixture, "ordinary-archive")?;
-        let snapshot =
-            git.snapshot_instructions(scope, &git.writer_instruction_paths()?, &archive)?;
+        let snapshot = git.snapshot_instructions(
+            scope,
+            &git.writer_instruction_paths(&ReviewExempt::none())?,
+            &archive,
+        )?;
         snapshot.persist(&archive)?;
         let recovery = acquire_absent_recovery(&fixture, scope, base)?;
         let snapshot = git.recover_instruction_snapshot(&recovery, base, &archive)?;
@@ -1857,11 +2228,22 @@ mod custody_integration_tests {
             fixture.root.join("unrelated.txt"),
             b"unrelated edit retained\n",
         )?;
-        let outcome =
-            git.quarantine_instructions(&recovery, &snapshot, snapshot.head(), &archive)?;
+        let outcome = git.quarantine_instructions(
+            &recovery,
+            &snapshot,
+            snapshot.head(),
+            &archive,
+            &ReviewExempt::none(),
+        )?;
 
         assert_eq!(
-            git.quarantine_instructions(&recovery, &snapshot, snapshot.head(), &archive)?,
+            git.quarantine_instructions(
+                &recovery,
+                &snapshot,
+                snapshot.head(),
+                &archive,
+                &ReviewExempt::none(),
+            )?,
             outcome
         );
         match outcome {
@@ -1882,7 +2264,13 @@ mod custody_integration_tests {
         // partial restore. Recovery retains that archive and requires review.
         archive.unlink(std::ffi::OsStr::new("quarantine-result.json"))?;
         assert!(matches!(
-            git.quarantine_instructions(&recovery, &snapshot, snapshot.head(), &archive)?,
+            git.quarantine_instructions(
+                &recovery,
+                &snapshot,
+                snapshot.head(),
+                &archive,
+                &ReviewExempt::none(),
+            )?,
             QuarantineOutcome::ReviewRequired { .. }
         ));
         let archive_path = fixture._temp.path().join("ordinary-archive");
@@ -1914,8 +2302,13 @@ mod custody_integration_tests {
         fs::write(fixture.root.join(".agents/a.md"), b"staged ordinary edit\n")?;
         fixture.run(&["add", "--", ".agents/a.md"])?;
 
-        let outcome =
-            git.quarantine_instructions(&recovery, &snapshot, snapshot.head(), &archive)?;
+        let outcome = git.quarantine_instructions(
+            &recovery,
+            &snapshot,
+            snapshot.head(),
+            &archive,
+            &ReviewExempt::none(),
+        )?;
 
         assert!(matches!(outcome, QuarantineOutcome::ReviewRequired { .. }));
         assert_eq!(
@@ -1987,7 +2380,13 @@ mod custody_integration_tests {
         )?;
         fs::write(fixture.root.join(".agents/a.md"), b"ordinary edit\n")?;
         assert!(matches!(
-            git.quarantine_instructions(&recovery, &snapshot, snapshot.head(), &archive)?,
+            git.quarantine_instructions(
+                &recovery,
+                &snapshot,
+                snapshot.head(),
+                &archive,
+                &ReviewExempt::none(),
+            )?,
             QuarantineOutcome::Restored { .. }
         ));
         assert_eq!(
@@ -2014,8 +2413,13 @@ mod custody_integration_tests {
         let recovery = acquire_absent_recovery(&fixture, scope, base)?;
         fs::write(fixture.root.join("AGENTS.md"), b"changed policy\n")?;
 
-        let outcome =
-            git.quarantine_instructions(&recovery, &snapshot, snapshot.head(), &archive)?;
+        let outcome = git.quarantine_instructions(
+            &recovery,
+            &snapshot,
+            snapshot.head(),
+            &archive,
+            &ReviewExempt::none(),
+        )?;
 
         assert!(matches!(outcome, QuarantineOutcome::ReviewRequired { .. }));
         assert_eq!(
@@ -2081,8 +2485,13 @@ mod custody_integration_tests {
         fs::remove_file(&link)?;
         std::os::unix::fs::symlink("unrelated.txt", &link)?;
 
-        let outcome =
-            git.quarantine_instructions(&recovery, &snapshot, snapshot.head(), &archive)?;
+        let outcome = git.quarantine_instructions(
+            &recovery,
+            &snapshot,
+            snapshot.head(),
+            &archive,
+            &ReviewExempt::none(),
+        )?;
 
         assert!(matches!(outcome, QuarantineOutcome::ReviewRequired { .. }));
         assert_eq!(fs::read_link(&link)?, std::path::Path::new("unrelated.txt"));
@@ -2097,8 +2506,13 @@ mod custody_integration_tests {
         let snapshot = git.snapshot_instructions(scope, &protected, &archive)?;
         fs::remove_file(&link)?;
         fs::write(&link, b"AGENTS.md")?;
-        let outcome =
-            git.quarantine_instructions(&recovery, &snapshot, snapshot.head(), &archive)?;
+        let outcome = git.quarantine_instructions(
+            &recovery,
+            &snapshot,
+            snapshot.head(),
+            &archive,
+            &ReviewExempt::none(),
+        )?;
         assert!(matches!(outcome, QuarantineOutcome::ReviewRequired { .. }));
         Ok(())
     }
@@ -2124,7 +2538,13 @@ mod custody_integration_tests {
         )?;
 
         assert!(matches!(
-            git.quarantine_instructions(&recovery, &snapshot, snapshot.head(), &archive)?,
+            git.quarantine_instructions(
+                &recovery,
+                &snapshot,
+                snapshot.head(),
+                &archive,
+                &ReviewExempt::none(),
+            )?,
             QuarantineOutcome::ReviewRequired { .. }
         ));
         let manifest: serde_json::Value = serde_json::from_slice(&fs::read(
@@ -2216,8 +2636,13 @@ mod custody_integration_tests {
         fs::write(fixture.root.join(".agents/.gitignore"), "/hidden.md\n")?;
         fs::write(fixture.root.join(".agents/hidden.md"), "protected hidden\n")?;
         nested.arm()?;
-        let outcome =
-            git.quarantine_instructions(&recovery, &snapshot, snapshot.head(), &archive)?;
+        let outcome = git.quarantine_instructions(
+            &recovery,
+            &snapshot,
+            snapshot.head(),
+            &archive,
+            &ReviewExempt::none(),
+        )?;
         assert!(matches!(outcome, QuarantineOutcome::ReviewRequired { .. }));
         let QuarantineOutcome::ReviewRequired { paths, .. } = &outcome else {
             return Err("ignored protected changes were not retained for review".into());

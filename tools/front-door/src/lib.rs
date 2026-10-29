@@ -3,6 +3,7 @@
 // file and dispatches with its fixture seams. Plain comments only: `include!`
 // refuses inner attributes.
 mod bench;
+mod build_slot;
 mod chair;
 mod checks;
 #[cfg(test)]
@@ -113,13 +114,24 @@ fn emit<T: Serialize>(
     human: &str,
     read_only: bool,
 ) -> u8 {
-    let mode = if globals.json {
-        RenderMode::Json
-    } else {
+    emit_summarised(result, globals, human, read_only, None)
+}
+/// `emit` for an owner that supplies its own compact view.
+fn emit_summarised<T: Serialize>(
+    result: &CommandResult<T>,
+    globals: &provenant_cli::Globals,
+    human: &str,
+    read_only: bool,
+    summary: Option<&provenant_cli::Summary>,
+) -> u8 {
+    let mode = if !globals.json && matches!(result.command.as_str(), "help" | "version") {
         RenderMode::Human {
             text: human,
             read_only,
+            summary: None,
         }
+    } else {
+        globals.render_mode(human, read_only, summary)
     };
     let rendered = provenant_cli::render_or_publish(
         result,
@@ -142,6 +154,37 @@ fn emit<T: Serialize>(
             3
         }
     }
+}
+/// Accounts by adapter, then the registered rows; none needs action.
+fn accounts_summary(settings: &provenant_providers::accounts::Settings) -> provenant_cli::Summary {
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for entry in settings.entries.values() {
+        *counts.entry(entry.adapter.as_str()).or_default() += 1;
+    }
+    let total = settings.entries.len();
+    let headline = if total == 0 {
+        "no accounts registered".to_owned()
+    } else {
+        format!(
+            "{total} account{}: {}",
+            if total == 1 { "" } else { "s" },
+            provenant_cli::Summary::tally(&counts.into_iter().collect::<Vec<_>>())
+        )
+    };
+    let rows = settings
+        .entries
+        .values()
+        .map(|entry| {
+            format!(
+                "{} {} {}{}",
+                entry.adapter,
+                entry.label,
+                entry.key,
+                if entry.hidden { " hidden" } else { "" }
+            )
+        })
+        .collect();
+    provenant_cli::Summary::new(headline, rows, None)
 }
 fn fail(
     command: &str,
@@ -218,7 +261,13 @@ fn run_edge_workspace(
             if let Some(error) = &mut reply.result.error {
                 apply_repair(leaf, error, globals.json);
             }
-            emit(&reply.result, globals, &reply.human, false)
+            emit_summarised(
+                &reply.result,
+                globals,
+                &reply.human,
+                reply.read_only,
+                reply.summary.as_ref(),
+            )
         }
         Err(error) => {
             let status = match error {
@@ -495,12 +544,15 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 globals,
                 |edge| match provenant_cli::accounts::execute(&command, edge.roots, edge.home) {
                     Ok(data) => {
+                        let listing = matches!(command, provenant_cli::accounts::Accounts::List);
                         let mut reply = provenant_cli::run::Reply {
                             human: data
                                 .entries
                                 .values()
                                 .map(|e| format!("{} {} {}\n", e.adapter, e.label, e.key))
                                 .collect(),
+                            summary: listing.then(|| accounts_summary(&data)),
+                            read_only: listing,
                             result: CommandResult::new(
                                 &inv.leaf,
                                 Outcome::Ok,
@@ -533,6 +585,8 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                         provenant_cli::run::Reply {
                             result,
                             human: String::new(),
+                            summary: None,
+                            read_only: false,
                         }
                     }
                 },
@@ -584,6 +638,14 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Internal(provenant_cli::Internal::Supervise { descriptors }) => {
             supervise(&descriptors, globals, process)
         }
+        // Handled in `dispatch` before roots and telemetry; it never gets here.
+        Command::Internal(provenant_cli::Internal::BuildSlot { .. }) => fail(
+            &inv.leaf,
+            Outcome::Error,
+            "INTERNAL",
+            "build-slot is dispatched before the command table",
+            globals,
+        ),
         Command::Internal(provenant_cli::Internal::Settle { request }) => {
             match provenant_run::settlement::resume(
                 &request,
@@ -742,7 +804,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Status(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::status(cmd, globals.json, edge)
         }),
-        Command::Land { number, head } => pr::land::run(number, head, globals, process.workers()),
+        Command::Land { number, head, wait } => {
+            pr::land::run(number, head, wait, globals, process.workers())
+        }
         Command::Dispatch(cmd) => run_edge(&inv.leaf, globals, |edge| {
             let mut reply = provenant_cli::run::dispatch(*cmd, edge);
             if let Err(error) =
@@ -946,6 +1010,18 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
         ParseOutcome::Version { globals } => ("version", globals),
     };
     let verb = verb.to_owned();
+    // The lane's cargo shim runs on every build: it needs no roots, telemetry
+    // or result envelope, and ends with cargo's exit code.
+    if let ParseOutcome::Invocation(inv) = &parsed
+        && let Command::Internal(provenant_cli::Internal::BuildSlot { command }) = &inv.command
+    {
+        let env: Vec<_> = std::env::vars_os().collect();
+        return u8::try_from(build_slot::run(build_slot::Gate {
+            settings: build_slot::Settings::from_env(&env),
+            command,
+        }))
+        .unwrap_or(1);
+    }
     // No product installation, Git probe or provider access is needed to count.
     // Read-only catalogue and checkpoint observation must not record demand
     // telemetry, including on an otherwise empty state root.

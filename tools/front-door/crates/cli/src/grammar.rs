@@ -2,7 +2,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::TypedValueParser};
 use provenant_core::{DeliveryId, GitOid, OperationId, RunId, TaskId};
 pub use provenant_records::Harness;
-use std::{path::PathBuf, str::FromStr};
+use std::{ffi::OsString, path::PathBuf, str::FromStr};
 
 #[derive(Debug, Parser)]
 #[command(name = "provenant", disable_help_subcommand = true)]
@@ -22,6 +22,7 @@ pub struct Invocation {
 #[derive(Debug, Default)]
 pub struct Globals {
     pub json: bool,
+    pub full: bool,
     pub state_dir: Option<PathBuf>,
     pub project: Option<PathBuf>,
 }
@@ -30,6 +31,9 @@ pub(crate) struct RawGlobals {
     /// Print machine-readable JSON output
     #[arg(long, global = true, action = clap::ArgAction::Append, num_args = 0, default_missing_value = "true")]
     pub json: Vec<bool>,
+    /// Show all human-readable detail instead of a compact summary
+    #[arg(long, global = true, action = clap::ArgAction::Append, num_args = 0, default_missing_value = "true")]
+    pub full: Vec<bool>,
     /// Use this absolute directory for state
     #[arg(long, global = true, value_parser = clap::builder::PathBufValueParser::new().try_map(absolute))]
     pub state_dir: Vec<PathBuf>,
@@ -94,6 +98,9 @@ pub enum Command {
         /// Pin a reviewed head instead of using the current PR head
         #[arg(long, hide = true)]
         head: Option<GitOid>,
+        /// Wait for this head's CI (default 1 hour; maximum 4 hours)
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", value_parser = duration_seconds)]
+        wait: Option<u64>,
     },
     /// Start a provider lane or manifest of lanes
     Dispatch(Box<Dispatch>),
@@ -202,6 +209,9 @@ pub enum Pr {
         /// Pull requests to report; this account's open ones when omitted
         #[arg(value_parser = clap::value_parser!(u64).range(1..))]
         numbers: Vec<u64>,
+        /// Block until the snapshot changes (default 5 minutes; maximum 4 hours)
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "5m", value_parser = duration_seconds)]
+        wait: Option<u64>,
     },
 }
 #[derive(Debug, Args)]
@@ -494,12 +504,15 @@ pub struct DispatchInput {
 #[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
 pub struct Dispatch {
     /// Expand and run a named pipeline preset
-    #[arg(long, requires = "prompt_file", conflicts_with_all = ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "worktree", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "read_root", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "confidential", "allow_free", "provider_timeout", "operation_id", "wait"])]
+    #[arg(long, requires = "prompt_file", conflicts_with_all = ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"])]
     pub preset: Option<String>,
     /// Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable
     #[arg(long = "set", requires = "preset")]
     pub preset_set: Vec<String>,
-    /// Print the expanded graph and origins without running it
+    /// Read preset parameters from a TOML table file; --set overrides it
+    #[arg(long = "params-file", requires = "preset")]
+    pub preset_params_file: Option<PathBuf>,
+    /// Explain roles, limits and the expanded graph without running it
     #[arg(long, requires = "preset")]
     pub explain: bool,
     /// Use the build-heavy scheduling priority
@@ -539,10 +552,10 @@ pub struct Dispatch {
     #[command(flatten)]
     pub access: Access,
     /// Provider timeout in seconds
-    #[arg(long, default_value = "3600", default_value_if("mode", "worktree-write", "10800"), value_parser = clap::value_parser!(u64).range(1..=14400))]
+    #[arg(long, default_value = "3600", default_value_if("mode", "worktree-write", "10800"), value_parser = clap::value_parser!(u64).range(1..=provenant_core::MAX_LANE_RUNTIME_SECONDS))]
     pub provider_timeout: u64,
-    /// Manifest lanes to run at once (1 to 16)
-    #[arg(long, requires = "manifest", conflicts_with_all = ["prompt_file", "prompt_stdin"], value_parser = clap::value_parser!(u64).range(1..=16))]
+    /// Manifest lanes or preset graph attempts to run at once (1 to 16)
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=16))]
     pub concurrency: Option<u64>,
     /// Override an effective harness knob for this dispatch (NAME=VALUE).
     #[arg(long = "knob")]
@@ -562,7 +575,7 @@ pub struct Dispatch {
     /// Git base for attempt history and a new writer branch
     #[arg(long)]
     pub base: Option<String>,
-    /// Wait for settlement (seconds, or a duration such as 30m)
+    /// Wait for task or preset graph settlement (seconds, or a duration such as 30m)
     #[arg(long, value_parser = duration_seconds)]
     pub wait: Option<u64>,
 }
@@ -766,7 +779,7 @@ pub struct Lanes {
         default_missing_value = "14400",
         value_name = "SECONDS",
         conflicts_with_all = ["all", "states", "cursor"],
-        value_parser = clap::value_parser!(u64).range(1..=14400)
+        value_parser = clap::value_parser!(u64).range(1..=provenant_core::MAX_LANE_RUNTIME_SECONDS)
     )]
     pub watch: Option<u64>,
     /// Keep lanes in any of these states.
@@ -1065,6 +1078,12 @@ pub enum Internal {
         request: String,
     },
     ProviderUpdates,
+    /// Take a host build slot, then run the given cargo command (the lane's cargo shim). The slot directory, count and wait come from the host's environment (`PROVENANT_BUILD_SLOT_STATE`, `PROVENANT_BUILD_SLOTS`, `PROVENANT_BUILD_WAIT_SECS`), never from arguments.
+    BuildSlot {
+        /// The real cargo, then its arguments.
+        #[arg(last = true, required = true, allow_hyphen_values = true)]
+        command: Vec<OsString>,
+    },
     Supervise {
         /// Private S2 handoff values, validated and adopted only by supervisor.
         #[arg(hide = true, num_args = 5..=6, value_parser = clap::value_parser!(u64).range(3..=2147483647))]
@@ -1202,7 +1221,7 @@ fn duration_seconds(value: &str) -> Result<u64, &'static str> {
         .parse::<u64>()
         .ok()
         .and_then(|n| n.checked_mul(multiplier))
-        .filter(|n| (1..=14400).contains(n))
+        .filter(|n| (1..=provenant_core::MAX_LANE_RUNTIME_SECONDS).contains(n))
         .ok_or("wait must be 1s to 4h; run `provenant help run` for examples")
 }
 #[derive(Debug, Args)]

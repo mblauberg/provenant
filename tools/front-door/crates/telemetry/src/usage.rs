@@ -43,6 +43,10 @@ struct Event {
     account: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session: Option<String>,
+    /// A chair session's Claude config directory, relative to the home
+    /// directory, so its transcript can be found without a registered account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    config: Option<String>,
 }
 
 fn project_trace(project_id: Option<ProjectId>) -> Option<Trace> {
@@ -120,6 +124,7 @@ pub fn record_cli(
             trace: project_trace(project_id),
             account: None,
             session: None,
+            config: None,
         },
         true,
     );
@@ -145,18 +150,26 @@ pub fn record_tool(
             trace: project_trace(project_id),
             account: None,
             session: None,
+            config: None,
         },
         false,
     );
 }
 
-/// Record the serving account resolved by the chair's SessionStart hook.
+/// The account recorded for a chair session whose config directory is not a
+/// registered account, so such sessions stay visible instead of being dropped.
+pub const UNATTRIBUTED: &str = "unattributed";
+
+/// Record the serving account resolved by the chair's SessionStart hook, or
+/// [`UNATTRIBUTED`] when none resolved. `config` is the session's Claude config
+/// directory relative to the home directory, when it lies under it.
 pub fn record_chair(
     roots: &Roots,
     clock: &dyn Clock,
     account: &str,
     session: &str,
     project: Option<ProjectId>,
+    config: Option<&str>,
 ) {
     let Ok(now) = clock.wall_now() else { return };
     let _ = append(
@@ -171,6 +184,7 @@ pub fn record_chair(
             trace: project_trace(project),
             account: Some(account.into()),
             session: Some(session.into()),
+            config: config.map(str::to_owned),
         },
         true,
     );
@@ -182,6 +196,13 @@ pub struct ChairSession {
     pub account: String,
     pub session: String,
     pub project: Option<ProjectId>,
+    /// Claude config directory relative to home, as recorded by the hook.
+    pub config: Option<String>,
+    /// Token counts per model once [`crate::attach_chair_usage`] has read the
+    /// session's transcript.
+    pub usage: Vec<crate::ChairModelUsage>,
+    /// Why `usage` is empty although the session ran, if it could not be read.
+    pub unread: Option<crate::Unread>,
 }
 
 /// Recent chair observations. The caller deduplicates repeated SessionStart
@@ -210,6 +231,9 @@ pub fn chair_sessions(
                 account: event.account?,
                 session: event.session?,
                 project: event.trace.and_then(|trace| trace.project),
+                config: event.config,
+                usage: Vec::new(),
+                unread: None,
             })
         })
         .collect())

@@ -79,7 +79,13 @@ fn allowance(node: &GraphNode, extensions: &[String]) -> usize {
         )
 }
 
-pub(super) fn validate_extension(document: &GraphDocument, extension: &str) -> Result<(), String> {
+pub(super) fn validate_extension(
+    document: &GraphDocument,
+    extension: &str,
+    limits: &crate::config::GraphLimits,
+) -> Result<(), String> {
+    let flattened = composites::expand(document, limits)?;
+    let document = &flattened;
     let (key, value) = extension.split_once('=').ok_or("expected KEY=VALUE")?;
     let key = key.strip_prefix("loop.").ok_or("invalid loop extension")?;
     let (name, field) = key.rsplit_once('.').ok_or("invalid loop extension")?;
@@ -99,8 +105,11 @@ pub(super) fn validate_resume_extension(
     document: &GraphDocument,
     checkpoint: &GraphCheckpoint,
     extension: &str,
+    limits: &crate::config::GraphLimits,
 ) -> Result<(), String> {
-    validate_extension(document, extension)?;
+    validate_extension(document, extension, limits)?;
+    let flattened = composites::expand(document, limits)?;
+    let document = &flattened;
     if checkpoint.extensions.iter().any(|saved| saved == extension) {
         return Ok(());
     }
@@ -164,6 +173,15 @@ pub(super) fn validate_resume_extension(
 pub(super) fn expand(
     document: &GraphDocument,
     extensions: &[String],
+    limits: &crate::config::GraphLimits,
+) -> Result<GraphDocument, String> {
+    let flattened = composites::expand(document, limits)?;
+    Ok(expand_loops(&flattened, extensions)?)
+}
+
+fn expand_loops(
+    document: &GraphDocument,
+    extensions: &[String],
 ) -> Result<GraphDocument, &'static str> {
     let declared: std::collections::BTreeSet<_> = document.nodes.iter().map(|n| &n.id).collect();
     if document
@@ -208,7 +226,6 @@ pub(super) fn expand(
             || node.route.is_some()
             || node.routes.is_some()
             || !node.prompt.is_empty()
-            || !node.inputs.is_empty()
             || node.required_verdict.is_some()
             || spec.body.is_empty()
             || spec.max_rounds == 0
@@ -301,7 +318,7 @@ pub(super) fn expand(
         let mut pending = vec![spec.until.clone()];
         while let Some(name) = pending.pop() {
             if ancestors.insert(name.clone()) {
-                pending.extend(plan.nodes[positions[&name]].depends_on.clone());
+                pending.extend(plan.nodes[positions[&name]].dependencies().cloned());
             }
         }
         if ancestors.len() != spec.body.len() {
@@ -328,6 +345,34 @@ pub(super) fn expand(
                     .iter()
                     .map(|name| id(&node.id, round, name))
                     .collect();
+                child.after_expansion = child
+                    .after_expansion
+                    .iter()
+                    .map(|name| id(&node.id, round, name))
+                    .collect();
+                child.composite_members = child
+                    .composite_members
+                    .iter()
+                    .map(|name| id(&node.id, round, name))
+                    .collect();
+                if let Some(composite) = &mut child.composite {
+                    for export in &mut composite.exports {
+                        export.node = id(&node.id, round, &export.node);
+                    }
+                }
+                if let Some(SourceBinding::Node { node: source }) = &mut child.source {
+                    *source = if let Some(previous) = source.strip_prefix("previous.") {
+                        if round == 1 {
+                            return Err("previous source requires an initial commit binding");
+                        }
+                        id(&node.id, round - 1, previous)
+                    } else {
+                        id(&node.id, round, source)
+                    };
+                    if !child.depends_on.contains(source) {
+                        child.depends_on.push(source.clone());
+                    }
+                }
                 if child.depends_on.is_empty() {
                     if round == 1 {
                         child.depends_on.extend(node.depends_on.clone());
@@ -347,6 +392,15 @@ pub(super) fn expand(
                     if !child.depends_on.contains(&input.node) {
                         child.depends_on.push(input.node.clone());
                     }
+                }
+                if round == 1
+                    && spec
+                        .body
+                        .iter()
+                        .find(|n| n.id == local)
+                        .is_some_and(|n| n.depends_on.is_empty())
+                {
+                    child.inputs.extend(node.inputs.clone());
                 }
                 expanded.nodes.push(child);
             }
@@ -407,6 +461,8 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
         .map(|n| {
             prior.remove(&n.id).unwrap_or_else(|| NodeProgress {
                 extra: Default::default(),
+                children: n.composite_members.clone(),
+                source_commit: None,
                 fragment: None,
                 handoff: None,
                 expansion_pause: None,
@@ -692,7 +748,7 @@ pub(super) fn prepare_decision_extension(
     extension: &str,
     limits: &crate::config::GraphLimits,
 ) -> Result<(), String> {
-    validate_resume_extension(document, checkpoint, extension)?;
+    validate_resume_extension(document, checkpoint, extension, limits)?;
     if extension
         .split_once('=')
         .is_some_and(|(key, _)| key.ends_with(".decision"))
@@ -701,8 +757,7 @@ pub(super) fn prepare_decision_extension(
     }
     let mut extensions = checkpoint.extensions.clone();
     extensions.push(extension.to_owned());
-    let expanded =
-        plans::expand(document, &extensions, &checkpoint.expansions).map_err(str::to_owned)?;
+    let expanded = plans::expand(document, &extensions, &checkpoint.expansions, limits)?;
     let (plan, _) = validate_flat_plan(&expanded, limits).map_err(str::to_owned)?;
     if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
         return Err(reason);

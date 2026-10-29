@@ -59,6 +59,14 @@ fn integer(min: u64, max: u64) -> Value {
 fn text(max: usize) -> Value {
     json!({"type":"string","minLength":1,"maxLength":max,"pattern":r"^[^\u0000]*$","x-provenant-maxUtf8Bytes":max})
 }
+/// Text that may be empty, as the CLI's summary patch accepts it.
+fn text_allowing_empty(max: usize) -> Value {
+    let mut schema = text(max);
+    if let Some(fields) = schema.as_object_mut() {
+        fields.remove("minLength");
+    }
+    schema
+}
 fn pattern(value: &str) -> Value {
     json!({"type":"string","pattern":value})
 }
@@ -222,7 +230,7 @@ fn build_strict() -> Vec<Value> {
         (
             "Submit and wait for results, list, inspect, wait for, cancel or resume runs. List returns compact attempts newest first; pass next_after as after to continue. Set detail for full records.",
             json!({
-                "submit":{"operation_id?":reference("OperationId"),"wait_seconds?":wait.clone(),"detail?":{"type":"boolean"},"tasks":array(object(json!({"build_heavy?":{"type":"boolean"},"prompt":text(MAX_TEXT_BYTES),"title?":nullable(text(256)),"base?":nullable(text(1024)),"head?":nullable(text(64)),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_seconds":integer(1,14_400),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,64),"concurrency?":nullable(integer(1,16)),"knobs?":array(text(256),0,64),"host?":nullable(reference("Id"))},
+                "submit":{"operation_id?":reference("OperationId"),"wait_seconds?":wait.clone(),"detail?":{"type":"boolean"},"tasks":array(object(json!({"build_heavy?":{"type":"boolean"},"prompt":text(MAX_TEXT_BYTES),"title?":nullable(text(256)),"base?":nullable(text(1024)),"head?":nullable(text(64)),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_seconds":integer(1,provenant_core::MAX_LANE_RUNTIME_SECONDS),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,64),"concurrency?":nullable(integer(1,16)),"knobs?":array(text(256),0,64),"host?":nullable(reference("Id"))},
                 "list":{"after?":nullable(reference("AttemptTarget")),"limit?":page},"status":{"target":reference("AttemptTarget"),"detail?":{"type":"boolean"}},
                 "wait":{"targets":array(reference("AttemptTarget"),1,100),"condition":choices(&["any","all"]),"wait_seconds":wait,"detail?":{"type":"boolean"}},
                 "cancel":{"target":reference("AttemptTarget"),"operation_id?":reference("OperationId"),"detail?":{"type":"boolean"}},
@@ -271,7 +279,7 @@ fn build_strict() -> Vec<Value> {
             json!({
                 "summary_show":{"session":inbox_session.clone()},
                 "summary_diff":{"session":inbox_session.clone(),"from":integer(1,u64::MAX),"to?":nullable(integer(1,u64::MAX))},
-                "summary_update":{"session":inbox_session.clone(),"patch":object(json!({"now?":nullable(text(256 * 1024)),"next?":nullable(text(256 * 1024)),"needs_you?":nullable(json!({"type":"array","items":text(256 * 1024)})),"risk?":nullable(text(256 * 1024))})),"expect_revision":integer(0,u64::MAX)},
+                "summary_update":{"session":inbox_session.clone(),"patch":object(json!({"now?":nullable(text_allowing_empty(256 * 1024)),"next?":nullable(text_allowing_empty(256 * 1024)),"needs_you?":nullable(json!({"type":"array","items":text_allowing_empty(256 * 1024)})),"risk?":nullable(text_allowing_empty(256 * 1024))})),"expect_revision":integer(0,u64::MAX)},
                 "log_list":{"session":inbox_session.clone(),"after?":nullable(integer(0,u64::MAX)),"limit?":integer(1,100)},
                 "log_append":{"session":inbox_session,"entry":object(json!({"kind":text(16 * 1024),"markdown":text(256 * 1024),"channel":text(16 * 1024),"request_ids?":json!({"type":"array","items":text(256 * 1024)}),"attempt_ids?":json!({"type":"array","items":text(256 * 1024)}),"issue_ids?":json!({"type":"array","items":text(256 * 1024)}),"pr_ids?":json!({"type":"array","items":text(256 * 1024)}),"correction_of?":nullable(integer(0,u64::MAX))})),"operation_id?":nullable(reference("OperationId")),"issued_at?":nullable(json!({"type":"integer"}))}
             }),
@@ -519,6 +527,131 @@ pub fn legacy_catalogue() -> &'static [Value] {
             })
             .collect()
     })
+}
+
+/// Name the one valid argument an unknown key or action most likely meant. The
+/// path comes from `invalid_path`; the call is still refused by the caller.
+pub fn near_argument(name: &str, value: &Value, path: &str) -> Option<String> {
+    let root = strict_catalogue()
+        .iter()
+        .find(|tool| tool["name"] == name)
+        .map(|tool| &tool["inputSchema"])?;
+    let normalised = path.replace('[', ".").replace(']', "");
+    let segments: Vec<&str> = normalised.split('.').skip(1).collect();
+    let (given, parents) = segments.split_last()?;
+    let (holder, owner) = locate(root, value, parents)?;
+    let object = settle(root, holder, owner);
+    if let Some(variants) = object["oneOf"].as_array() {
+        if !matches!(*given, "op" | "kind" | "scope") {
+            return None;
+        }
+        let typed = owner.get(*given)?.as_str()?;
+        let choices = variants
+            .iter()
+            .filter_map(|variant| variant["properties"][*given]["const"].as_str());
+        return nearest(typed, choices).map(str::to_owned);
+    }
+    let fields = object["properties"].as_object()?;
+    if fields.contains_key(*given) {
+        return None;
+    }
+    nearest(given, fields.keys().map(String::as_str)).map(str::to_owned)
+}
+
+/// The schema and value at a dotted argument path, before the final segment's
+/// variant is settled.
+fn locate<'a>(
+    root: &'a Value,
+    value: &'a Value,
+    segments: &[&str],
+) -> Option<(&'a Value, &'a Value)> {
+    let mut schema = root;
+    let mut current = value;
+    for segment in segments {
+        schema = settle(root, schema, current);
+        if let Ok(index) = segment.parse::<usize>() {
+            schema = &schema["items"];
+            current = current.get(index)?;
+        } else {
+            schema = &schema["properties"][*segment];
+            current = current.get(*segment)?;
+        }
+    }
+    Some((schema, current))
+}
+
+/// Follow references and anyOf, then the variant a discriminator selects. An
+/// unmatched oneOf is returned as it is, so its tag values can be listed.
+fn settle<'a>(root: &'a Value, mut schema: &'a Value, current: &Value) -> &'a Value {
+    loop {
+        if let Some(next) = schema["$ref"]
+            .as_str()
+            .and_then(|pointer| root.pointer(pointer.strip_prefix('#')?))
+        {
+            schema = next;
+        } else if let Some(first) = schema["anyOf"]
+            .as_array()
+            .and_then(|options| options.first())
+        {
+            schema = first;
+        } else if let Some(variant) = schema["oneOf"].as_array().and_then(|options| {
+            options.iter().find(|option| {
+                ["op", "kind", "scope"].iter().any(|tag| {
+                    current
+                        .get(*tag)
+                        .is_some_and(|v| option["properties"][*tag]["const"] == *v)
+                })
+            })
+        }) {
+            schema = variant;
+        } else {
+            return schema;
+        }
+    }
+}
+
+/// The lone closest candidate, when it is within a small edit distance after
+/// case and separator folding. A tie refuses to guess.
+fn nearest<'a>(given: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let given = fold(given);
+    let mut best: Option<(usize, &'a str)> = None;
+    let mut tied = false;
+    for candidate in candidates {
+        let distance = edit_distance(&given, &fold(candidate));
+        match best {
+            Some((best_distance, _)) if distance > best_distance => {}
+            Some((best_distance, _)) if distance == best_distance => tied = true,
+            _ => {
+                best = Some((distance, candidate));
+                tied = false;
+            }
+        }
+    }
+    let (distance, candidate) = best?;
+    let limit = (given.len().max(fold(candidate).len()) / 3).clamp(1, 2);
+    (!tied && distance <= limit).then_some(candidate)
+}
+
+fn fold(name: &str) -> String {
+    name.chars()
+        .filter(|c| !matches!(c, '_' | '-'))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let substitution = diagonal + usize::from(ca != *cb);
+            diagonal = row[j + 1];
+            row[j + 1] = substitution.min(row[j + 1] + 1).min(row[j] + 1);
+        }
+    }
+    row[b.len()]
 }
 
 /// Diagnose only a rejected serde value. Runtime is the validation owner;

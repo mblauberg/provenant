@@ -262,8 +262,11 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             let mut events = vec![E::Usage {
                 input: result.usage.input_tokens,
                 output: result.usage.output_tokens,
+                // Agy's `cache_read_tokens` is not recorded: nothing shows whether
+                // `input_tokens` already contains it, so splitting would guess.
                 cache_read: None,
                 cache_write: None,
+                cache_write_1h: None,
             }];
             if !result.conversation_id.is_empty() {
                 events.push(E::Session(result.conversation_id));

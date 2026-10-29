@@ -15,8 +15,15 @@ mod git;
 pub(crate) mod land;
 mod open;
 pub(crate) mod status;
+mod wait;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// An external command exceeded its time limit. Reads may retry this; a
+/// mutation must first re-read the state it meant to change.
+#[derive(Debug, thiserror::Error)]
+#[error("external command timed out")]
+pub(crate) struct TimedOut;
 
 fn execute(project: &Path, argv: &[&str], watch: bool) -> Result<ExecOutcome> {
     execute_for(
@@ -61,8 +68,10 @@ fn execute_with(
             }
             error => error.to_string(),
         })?;
-    if output.timed_out
-        || output.cancelled
+    if output.timed_out {
+        return Err(Box::new(TimedOut));
+    }
+    if output.cancelled
         || output.drain_truncated
         || output.stdout.truncated
         || output.stdout.read_failed
@@ -159,7 +168,7 @@ pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 
     let (leaf, number) = match command {
         Pr::Watch { number } => ("pr watch", number),
         Pr::Open(command) => return open::run(*command, globals),
-        Pr::Status { numbers } => return status::run(numbers, globals),
+        Pr::Status { numbers, wait } => return status::run(numbers, wait, globals),
         Pr::Contributions { number, bind } => return contributions::run(number, bind, globals),
     };
     let mut captured = None;

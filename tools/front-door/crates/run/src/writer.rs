@@ -134,6 +134,21 @@ pub struct WriterLaunch {
     pub branch: GitRefName,
     pub(crate) base: GitOid,
     pub(crate) custody: Option<(Directory, WriterBinding)>,
+    /// Paths the project lets this writer change without review, read from the
+    /// host config when the launch was prepared.
+    pub(crate) review_exempt: provenant_confinement::review_exempt::ReviewExempt,
+}
+impl WriterLaunch {
+    /// Bind a graph writer to its immutable source. The instruction snapshot
+    /// rechecks this prepared base while holding writer custody before launch.
+    pub fn require_source(&self, expected: GitOid) -> Result<()> {
+        if self.base != expected {
+            return Err(RunError::Validation(
+                "writer differs from pinned source commit",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -291,6 +306,10 @@ pub fn prepare_writer(
         branch,
         base,
         custody: Some((directory, binding)),
+        review_exempt: provenant_confinement::run_config::RunConfig::review_exempt_at(
+            state,
+            &project.to_string(),
+        ),
     })
 }
 
@@ -892,6 +911,7 @@ mod cargo_setup_tests {
             branch: GitRefName::new(reference)?,
             base: GitOid::parse(&expected)?,
             custody: None,
+            review_exempt: Default::default(),
         };
         let second_tree = provenant_confinement::verify_worktree(&repo, &second_lane)?;
         let mut second = WriterLaunch {
@@ -899,6 +919,7 @@ mod cargo_setup_tests {
             branch: GitRefName::new("refs/heads/feature/second")?,
             base: GitOid::parse(&expected)?,
             custody: None,
+            review_exempt: Default::default(),
         };
         std::thread::scope(|scope| {
             let first = scope.spawn(|| {
@@ -1209,10 +1230,12 @@ impl WriterLaunch {
             budget()?,
             &cancel,
         );
-        let paths = git.writer_instruction_paths().map_err(error(
-            "list writer instruction paths",
-            Some(self.worktree.path()),
-        ))?;
+        let paths = git
+            .writer_instruction_paths(&self.review_exempt)
+            .map_err(error(
+                "list writer instruction paths",
+                Some(self.worktree.path()),
+            ))?;
         let snapshot = git
             .snapshot_instructions(scope, &paths, &archive)
             .map_err(error(
@@ -1455,7 +1478,13 @@ impl WriterLaunch {
         })()
         .unwrap_or(snapshot.head());
         let outcome = git
-            .quarantine_instructions(custody, &snapshot, comparison_base, &archive)
+            .quarantine_instructions(
+                custody,
+                &snapshot,
+                comparison_base,
+                &archive,
+                &self.review_exempt,
+            )
             .map_err(error(
                 "quarantine writer instructions",
                 Some(self.worktree.path()),
@@ -1539,10 +1568,12 @@ impl WriterLaunch {
             budget()?,
             cancel,
         );
-        let paths = git.uncommitted_since(base).map_err(error(
-            "read writer uncommitted changes",
-            Some(self.worktree.path()),
-        ))?;
+        let paths = git
+            .uncommitted_since(base, &self.review_exempt)
+            .map_err(error(
+                "read writer uncommitted changes",
+                Some(self.worktree.path()),
+            ))?;
         Ok(uncommitted_reason(&paths))
     }
 }

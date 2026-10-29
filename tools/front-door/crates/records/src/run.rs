@@ -389,6 +389,9 @@ pub struct UsageRecord {
     pub uncached_input: Option<u64>,
     pub cache_read: Option<u64>,
     pub cache_write: Option<u64>,
+    /// The long-TTL part of `cache_write`, where the provider splits writes.
+    #[serde(default)]
+    pub cache_write_1h: Option<u64>,
     pub output_excluding_reasoning: Option<u64>,
     pub reasoning: Option<u64>,
     pub source: Option<String>,
@@ -400,6 +403,7 @@ impl From<UsageRecord> for crate::Usage {
             uncached_input: u.uncached_input,
             cache_read: u.cache_read,
             cache_write: u.cache_write,
+            cache_write_1h: u.cache_write_1h,
             output_excluding_reasoning: u.output_excluding_reasoning,
             reasoning: u.reasoning,
         }
@@ -662,6 +666,10 @@ pub struct AttemptRecord {
     pub provider_ms: Option<u64>,
     pub admission_deadline: Option<WallTime>,
     pub runtime_deadline: Option<WallTime>,
+    /// Signals that the lane finished only part of its brief. Empty for a lane
+    /// with none, which is not proof that it finished everything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub partial_signals: Vec<PartialSignal>,
     pub state: AttemptState,
     pub usage: UsageRecord,
     pub prompt: ArtifactRecord,
@@ -676,6 +684,29 @@ pub struct AttemptRecord {
     #[serde(default)]
     pub trace: crate::Trace,
 }
+/// Why a settled attempt is flagged as a partial finish. A flag is advice for
+/// the chair, who decides whether to resume; it never changes the outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PartialSignal {
+    /// The final answer ends with a valid `handoff` block whose status is
+    /// `stopped_early`: the lane's own statement that work remains.
+    DeclaredStop,
+    /// The provider reported a stop reason other than a finished turn.
+    ProviderStop,
+    /// A writer left edits it did not commit.
+    UncommittedWork,
+}
+impl PartialSignal {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DeclaredStop => "declared_stop",
+            Self::ProviderStop => "provider_stop",
+            Self::UncommittedWork => "uncommitted_work",
+        }
+    }
+}
+
 /// The admission class of a lane: it picks the startup spacing a lane waits
 /// out and which earlier starts it is measured against.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -737,6 +768,10 @@ pub struct AdmissionTicket {
     pub run_concurrency: u64,
     pub quota_permit: Option<String>,
     pub admission_deadline: WallTime,
+    /// The provider's wall-clock allowance once it starts, in seconds. Absent
+    /// (zero) on tickets from before runtime deadlines were recorded.
+    #[serde(default)]
+    pub runtime_seconds: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunEvent {

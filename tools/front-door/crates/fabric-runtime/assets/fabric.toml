@@ -4,7 +4,12 @@ ssh_executable = "" # empty selects shared system SSH discovery
 home_hosts = {}
 peers = {}
 [lanes]
-max_concurrent_builds = -1 # automatic: 1 at or below 16 GiB, otherwise 2
+# A build throttle for cooperative fair sharing of CPU and memory among lanes, not a hard cap:
+# lanes' `cargo` commands that compile wait for a slot; direct `~/.cargo/bin/cargo`, rustc and non-cargo builds are not gated.
+max_concurrent_builds = -1 # host-wide builds at once, 1-64; automatic: max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))
+build_wait_minutes = -1 # minutes a build waits for a slot or Cargo lock before giving up, 1-1440; automatic: 30
+max_writer_lanes = -1 # writer lanes live at once across the host, 1-64; automatic: 40
+max_project_writer_lanes = -1 # writer lanes live at once per project, 1-32 and at most max_writer_lanes; automatic: 30
 cargo_build_jobs = -1 # automatic: half the available cores, at least 1
 [lanes.cargo_seed]
 enabled = false
@@ -34,7 +39,7 @@ edges = 4096
 routes_per_node = 16
 node_prompt_bytes = 262144
 graph_prompt_bytes = 4194304
-expansion_depth = 4
+expansion_depth = 32
 fan_out_width = 32
 concurrency = 0 # 0 uses host lane caps
 

@@ -24,6 +24,7 @@ snapshot = []
 [dev-dependencies]
 provenant-supervisor = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }
+toml_edit = { workspace = true }
 
 [lints]
 workspace = true

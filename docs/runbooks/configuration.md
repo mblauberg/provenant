@@ -50,33 +50,108 @@ wall clock changes; a reboot resets spacing, except that the one-time upgrade
 of a version 1 ledger that recorded a start holds each class for one spacing.
 Spacing is enforced at admission, not at provider spawn, so a guardian
 suspended between the two can spawn alongside a later lane. The host
-allows 64 active lanes and 32 per project. On macOS it defers starts at warning
+caps writer lanes at `max_writer_lanes` (default 40) and at
+`max_project_writer_lanes` per project (default 30), inside fixed ceilings of
+64 active lanes per host and 32 per project. A writer at a cap waits until the
+admission deadline and is then refused with a reason that names the cap, its
+scope and the key to raise. On macOS it defers starts at warning
 or critical kernel memory pressure; on other platforms the 5 % memory floor
 applies. The disk floor applies to both classes. `lanes` shows a queued or starting lane's
 class and what it is waiting for, such as `read-only startup spacing: 1.2 s
 left of 2.0 s`.
 
-Every worktree-write lane occupies a host build slot until it settles, since
-build activity cannot be identified cheaply. The default is one slot on hosts
-with 16 GiB or less, and two on larger hosts. Cargo defaults to half the available
-cores per lane, at least one. Set host overrides in `config.toml`:
+Build slots gate builds, not lanes. A writer is admitted on the writer caps
+and the memory and disk floors alone, however many writers are live, so one
+project's idle writers never block another's. The slots are a build throttle,
+not a hard cap and not a security boundary: they share CPU and memory fairly
+among our own lanes. `max_concurrent_builds` is the number of cargo builds
+that run at once on the host. The default is
+`max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))`, so a 10-core 16 GiB
+host with the default 5 jobs gets 2. A writer lane gets a `cargo` shim first on
+its PATH only when its environment sets `CARGO_TARGET_DIR` and
+`~/.cargo/bin/cargo` exists; other lanes run cargo ungated. A cargo command that compiles (`build`,
+`check`, `clippy`, `test`, `run`, `bench`, `doc`, `rustc`, `rustdoc`, `fix`,
+`install`, `package`, `publish`, `nextest`, `llvm-cov` and `miri`, and their
+short aliases) takes one slot before the real cargo starts. The shim process
+holds the slot itself, runs cargo as its child and releases the slot when that
+child exits, so `cargo run` and `cargo test` hold the slot for the whole of the
+program or test run, not only the compile. Other commands, such as `fmt` and
+`metadata`, take none. A cargo started inside a gated build skips the gate only
+when the `PROVENANT_BUILD_SLOT` marker, `pid:start` (the holder shim's pid and
+native process start time), names a live ancestor of the nested shim that began
+at that time and is a provenant process. A marker that names another process,
+even a live ancestor such as the shell above the shim, a reused pid or a value a
+lane invents, is ignored and the command acquires normally. A nested cargo that
+a build starts with a scrubbed environment loses the marker, so it queues behind
+the slot its own parent holds and waits until it times out; keep
+`PROVENANT_BUILD_SLOT` in a build's environment when it runs cargo itself.
+
+A command that finds every slot taken waits, prints
+`provenant: waiting for a build slot (n of m in use)` on its own stderr, and
+repeats the message about every 60 seconds. It gives up after
+`build_wait_minutes` (default 30) with an error that names the slot count and
+suggests `provenant lanes` to find the holders. The same bounded wait and
+progress message apply while the command waits for another build's
+`.cargo-lock` on its target directory, which it does before it takes a slot so
+a slot is never held by a build that Cargo would queue anyway. Both waits share
+one deadline: together they take at most `build_wait_minutes`. A shim that
+receives SIGTERM, SIGINT or SIGHUP passes the signal to its cargo child, and on
+Linux the child is also signalled if the shim is killed outright, so a build
+does not keep compiling after the shim and its slot are gone. Provenant repairs
+the slot directory when it launches a lane: it restores the 0700 and 0600 modes
+and recreates a missing, non-regular or hard-linked slot file. Waiting blocks
+that command only, not the lane or its admission. `lanes` does not report
+build waits; the message is in the lane's output.
+
+The slots are files `slot-0.lock` to `slot-N-1.lock` under
+`<state>/fabric/locks/build-slots/`, shared by every project on the same state
+directory. Provenant creates them outside the sandbox when it launches a lane.
+A lane has read access to that directory and its files and no write access, so
+it cannot create, unlink or replace a slot file; the shim opens a slot file
+read-only and takes `flock` on it. The descriptor is close-on-exec, so a
+daemon or an orphaned grandchild (sccache, a backgrounded test process) never
+keeps a slot after the build exits. The kernel releases the slot when the shim
+exits, even after a crash or `kill -9`. The slot directory, count and wait
+come from the environment written into the shim script by the host, not from
+arguments the lane chooses.
+
+What this does not do, by design: a build that runs `~/.cargo/bin/cargo`,
+`rustc` or a non-cargo build tool directly is not gated, and a lane can hold a
+slot by locking a slot file on purpose. Gating non-cargo builds is out of
+scope. If the slot directory cannot be opened or locked for an unexpected
+reason, the build runs without a slot and prints a single warning: fair
+sharing fails open. A slot that stays busy for the whole wait is an error, not
+an ungated build.
+
+`cargo_build_jobs` is the separate per-build parallelism: Cargo defaults to
+half the available cores, at least one. Set host overrides in `config.toml`:
 
 ```toml
 [domains.fabric.lanes]
 max_concurrent_builds = 2
 cargo_build_jobs = 5
+build_wait_minutes = 30
+max_writer_lanes = 40
+max_project_writer_lanes = 30
 ```
 
-Omit either build setting from `config.toml` to select its host-dependent default.
-The host settings are not workflow knobs managed by `provenant config set`;
-edit the `[domains.fabric.lanes]` table directly. The value `-1` also selects
-automatic behaviour.
-
+Omit a key from `config.toml` to select its default. The host settings are
+not workflow knobs managed by `provenant config set`; edit the
+`[domains.fabric.lanes]` table directly. The value `-1` also selects automatic
+behaviour. `max_concurrent_builds` is 1 to 64, `cargo_build_jobs` 1 to 1024,
+`build_wait_minutes` 1 to 1440, `max_writer_lanes` 1 to 64 and
+`max_project_writer_lanes` 1 to 32 and, when set, at most `max_writer_lanes`
+(left unset it follows the host cap down, as the smaller of 30 and the host
+cap). An
+out-of-range value is rejected when configuration loads, so it never blocks
+lane admission. A lane keeps the slot count and wait it was launched with; a
+change applies to lanes launched afterwards.
 
 Higher values can reduce waiting but increase peak memory and CPU demand.
 An existing `CARGO_BUILD_JOBS` in the submitting environment takes precedence;
-a brief can also set it inside the lane. Pressure and slots are checked before
-lane admission, not continuously during a build.
+a brief can also set it inside the lane. Memory pressure and the disk floor are
+checked before lane admission, not continuously during a build; the memory
+floor remains the guard against running out of memory.
 
 ### Lane build output
 
@@ -232,10 +307,30 @@ other failed attempts. Interruption can leave a partially replaced installation;
 the next attempt uses the same native updater to repair it. Update failures
 are recorded once per interval, with updater output discarded. An independent
 attempt record preserves backoff if publishing the result record fails.
-Worker failures surface through the activity note and update records only;
-the quota tick does not report them. Activity records the old and new versions.
+The worker starts in the quota event's working directory, which need not be a
+Git checkout, and quota events launch it at most once every 15 minutes whatever
+its outcome. `<state>/provider-updates/worker.json` holds the last launch time
+and, if that run failed, its one cause. Worker failures surface through the
+activity note, that record and the update records only; the quota tick does not
+report them. Activity records the old and new versions.
 Each lane's `availability.json`
 also includes its observed version and the latest update result.
+
+## Lane runtime deadline
+
+A lane's wall-clock allowance is its dispatch `--provider-timeout` (3600
+seconds, or 10800 for `worktree-write`; at most 14400). Cap it per provider with
+`runtime_deadline_seconds`; the shorter of the two applies:
+
+```toml
+[providers.codex]
+runtime_deadline_seconds = 7200
+```
+
+The deadline runs on the wall clock, so a host that sleeps through it stops the
+provider on waking. The attempt settles as `timed_out`, releases its worktree
+and lock, and `lanes` shows the deadline of each running lane and a
+`provenant resume` hint for a timed-out one.
 
 ## OpenCode Go monthly allowance floor
 
@@ -472,6 +567,42 @@ Read-only lanes are unchanged. The config is refused if an entry is too broad
 or names a credential directory such as `~/.ssh`; a launch is refused if an
 entry overlaps the state directory's protected parts or Git metadata.
 `/usr/bin` is already executable in lanes, so `/usr/bin/lockf` works.
+
+## Writer review-exempt paths
+
+A writer whose commits change a protected path ends `review_required` until
+the chair accepts it. Paths every implementation legitimately changes should
+not cost that stop, so the host lists them:
+
+```toml
+[domains.run]
+review_exempt = ["docs/release-notes/next.d/", "docs/specs/", "Cargo.lock", ".tracker-input"]
+
+[domains.run.projects."PROJECT_ID"]
+review_exempt = ["docs/release-notes/next.d/", "CHANGELOG.md"]
+```
+
+The values above are the defaults (the first list). An entry is a
+repository-relative path with no wildcards: `dir/` names a directory at the
+repository root, a bare name such as `Cargo.lock` matches a file of that name
+at any depth, and anything else is one exact path. Names compare without ASCII
+case. A project's own list replaces the host-wide one for that project, and
+`review_exempt = []` turns the exemption off. At most 64 entries of 256 bytes.
+
+A listed path never makes a writer `review_required`: a committed change to it
+is not protected evidence, and an unmerged or renamed entry that names only
+listed paths does not force review. A listed path left uncommitted does not
+make a lane that committed nothing end `uncommitted`. Git metadata and
+attributes, hook directories, provider control roots (`.claude`, `.codex`,
+`.mcp.json` and the rest) and CI workflows under `.github/` can never be
+listed, whatever the config says. Instruction documents (`AGENTS.md`,
+`CLAUDE.md`, `GEMINI.md`, `HARNESS.md`) and the `.agents/` tree can be listed
+and are not on by default. A writer reads the list when it launches and again
+when it settles. If `config.toml` cannot be read at settlement, nothing is
+exempt.
+
+`provenant status` ends with the list that applies to the current project, and
+`status --json` carries it as `review_exempt`.
 
 Fabric supplies private Cargo paths to each lane; see
 [writer lanes](providers.md#writer-lanes). Native unconfined agents may share a

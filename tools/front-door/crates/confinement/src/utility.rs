@@ -20,10 +20,11 @@ const DEFAULT_STREAM_LIMIT: usize = 8 * 1024 * 1024;
 const MAX_STREAM_LIMIT: usize = 64 * 1024 * 1024;
 const DEFAULT_TERMINATE_GRACE: Duration = Duration::from_millis(250);
 const DEFAULT_REAP_TIMEOUT: Duration = Duration::from_secs(2);
-const MAX_UTILITY_TIMEOUT: Duration = Duration::from_secs(14_400);
+const MAX_UTILITY_TIMEOUT: Duration = Duration::from_secs(provenant_core::MAX_LANE_RUNTIME_SECONDS);
 const MAX_CLEANUP_BUDGET: Duration = Duration::from_secs(2);
 const MAX_GIT_LOG: u64 = 1000;
 const MAX_LANE_CONFIG_FILES: usize = 32;
+/// The longest fetch stderr excerpt, in characters.
 const MAX_FETCH_STDERR: usize = 1024;
 const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
@@ -190,6 +191,13 @@ pub enum GitRead {
         base: GitOid,
         head: GitOid,
     },
+    /// Staged changes against HEAD with their modes.
+    StagedModes,
+    /// Changed paths with their old and new modes (`diff --raw`).
+    ChangedModes {
+        base: GitOid,
+        head: GitOid,
+    },
     DiffIndex {
         paths: Vec<RepoPath>,
     },
@@ -254,6 +262,9 @@ pub enum GitRead {
 /// narrower policy services that own each operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GitMutation {
+    FastForward {
+        head: GitOid,
+    },
     WorktreeAdd {
         branch: GitRefName,
         base: Option<GitOid>,
@@ -896,54 +907,7 @@ pub(crate) fn fetch_missing_remote_branch(
 }
 
 fn fetch_stderr_excerpt(bytes: &[u8]) -> String {
-    let safe = crate::redact::known_shapes(bytes)
-        .unwrap_or_else(|_| b"fetch stderr could not be sanitised".to_vec());
-    let mut stderr: String = String::from_utf8_lossy(&safe)
-        .chars()
-        .map(|character| {
-            if character.is_control() || is_format_character(character) {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect();
-    if stderr.len() > MAX_FETCH_STDERR {
-        let mut end = MAX_FETCH_STDERR - '…'.len_utf8();
-        while !stderr.is_char_boundary(end) {
-            end -= 1;
-        }
-        stderr.truncate(end);
-        stderr.push('…');
-    }
-    stderr
-}
-
-fn is_format_character(character: char) -> bool {
-    matches!(
-        character as u32,
-        0x00AD
-            | 0x0600..=0x0605
-            | 0x061C
-            | 0x06DD
-            | 0x070F
-            | 0x0890..=0x0891
-            | 0x08E2
-            | 0x180E
-            | 0x200B..=0x200F
-            | 0x202A..=0x202E
-            | 0x2060..=0x2064
-            | 0x2066..=0x206F
-            | 0xFEFF
-            | 0xFFF9..=0xFFFB
-            | 0x110BD
-            | 0x110CD
-            | 0x13430..=0x1343F
-            | 0x1BCA0..=0x1BCA3
-            | 0x1D173..=0x1D17A
-            | 0xE0001
-            | 0xE0020..=0xE007F
-    )
+    crate::redact::bounded_line(&String::from_utf8_lossy(bytes), MAX_FETCH_STDERR)
 }
 
 /// Run a read for the release scan, where shallow boundaries must not hide
@@ -1180,6 +1144,28 @@ fn git_args(
             "--no-textconv".into(),
             "--no-renames".into(),
             "--name-only".into(),
+            "-z".into(),
+            base.to_string().into(),
+            head.to_string().into(),
+            "--".into(),
+        ],
+        GitRead::StagedModes => vec![
+            "diff-index".into(),
+            "--cached".into(),
+            "--no-renames".into(),
+            "--raw".into(),
+            "--no-abbrev".into(),
+            "-z".into(),
+            "HEAD".into(),
+            "--".into(),
+        ],
+        GitRead::ChangedModes { base, head } => vec![
+            "diff".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            "--no-renames".into(),
+            "--raw".into(),
+            "--no-abbrev".into(),
             "-z".into(),
             base.to_string().into(),
             head.to_string().into(),
@@ -1919,6 +1905,17 @@ fn run_git_probe(
 fn mutation_args(mutation: GitMutation) -> Result<(Vec<OsString>, Option<Vec<u8>>), UtilityError> {
     let mut args = GIT_COMMON.iter().map(OsString::from).collect::<Vec<_>>();
     let input = match mutation {
+        GitMutation::FastForward { head } => {
+            args.extend([
+                "merge".into(),
+                "--ff-only".into(),
+                "--no-edit".into(),
+                "--no-stat".into(),
+                "--no-overwrite-ignore".into(),
+                head.to_string().into(),
+            ]);
+            None
+        }
         GitMutation::WorktreeAdd {
             branch,
             base,
@@ -2491,7 +2488,7 @@ pub(crate) mod tests {
             return Err(format!("unexpected error: {error}").into());
         };
         assert_ne!(status, 0);
-        assert!(stderr.len() <= MAX_FETCH_STDERR);
+        assert!(stderr.chars().count() <= MAX_FETCH_STDERR);
 
         fixture.run(&[
             "remote",
@@ -2527,7 +2524,7 @@ pub(crate) mod tests {
         let excerpt = fetch_stderr_excerpt(long_secret.as_bytes());
         assert!(!excerpt.contains("secret"));
         assert!(excerpt.contains("[REDACTED]"));
-        assert!(excerpt.len() <= MAX_FETCH_STDERR);
+        assert!(excerpt.chars().count() <= MAX_FETCH_STDERR);
         Ok(())
     }
 

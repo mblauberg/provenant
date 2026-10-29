@@ -22,7 +22,7 @@ pub const REGISTRATION: crate::Registration = crate::Registration {
     },
 };
 
-crate::adapter!(OpenCode, "opencode", prepare);
+crate::adapter!(OpenCode, "opencode", prepare, failure_diagnostic);
 /// The JSON run stream carries no answering-model position.
 const MODEL_ON_WIRE: bool = false;
 
@@ -89,8 +89,12 @@ fn prepare(
         "--standalone".as_ref(),
         "--format".as_ref(),
         "json".as_ref(),
+        // The server reports its own HTTP failures only in its log, and the
+        // JSON stream carries just "UnexpectedStatus: 500". Keep that log in
+        // the attempt's stderr so `failure_diagnostic` can recover the cause.
+        "--print-logs".as_ref(),
         "--log-level".as_ref(),
-        "error".as_ref(),
+        "info".as_ref(),
     ]
     .map(OsString::from)
     .to_vec();
@@ -182,7 +186,10 @@ fn prepare(
             target: input.provenant.git.to_owned(),
         },
     ];
-    for name in ["log", "storage", "snapshot"] {
+    // `shell` holds per-project shell state; the server creates its entry
+    // while resolving the location, and refuses every request (HTTP 500)
+    // when that mkdir is denied.
+    for name in ["log", "storage", "snapshot", "shell"] {
         let directory = data.join(name);
         state_writes.push(subtree(&directory));
         setup.push(SetupStep::CreateDir(directory));
@@ -260,6 +267,40 @@ fn prepare(
             observations: Default::default(),
         },
         stream,
+    })
+}
+
+/// The server's own cause for a failed HTTP request, from its log lines
+/// (`... cause="..." ... http.status=500`). Only a bounded, printable cause on
+/// a 5xx line is kept; no other stderr prose is copied.
+fn failure_diagnostic(stderr: &[u8]) -> Option<String> {
+    const LIMIT: usize = 240;
+    let stderr = std::str::from_utf8(stderr).ok()?;
+    stderr.lines().find_map(|line| {
+        let status = line.split(" http.status=").nth(1)?;
+        let digits = status.split(' ').next()?;
+        if digits.len() != 3
+            || !digits.starts_with('5')
+            || !digits.bytes().all(|b| b.is_ascii_digit())
+        {
+            return None;
+        }
+        let cause = line.split(" cause=\"").nth(1)?;
+        let end = cause.find("\" ").or_else(|| cause.rfind('"'))?;
+        // The log escapes newlines, so the first stack frame ends the cause.
+        let first = cause[..end].split("\\n").next()?.trim();
+        let printable: String = first
+            .chars()
+            .map(|c| {
+                if c.is_ascii_graphic() || c == ' ' {
+                    c
+                } else {
+                    '?'
+                }
+            })
+            .collect();
+        let first = provenant_confinement::redact::bounded_line(&printable, LIMIT);
+        (!first.is_empty()).then(|| format!("opencode server failed with HTTP {digits}: {first}"))
     })
 }
 
@@ -758,6 +799,76 @@ mod tests {
             )
             .unwrap();
         assert_eq!(outcome.status(), crate::OutcomeStatus::Partial);
+    }
+
+    #[test]
+    fn server_shell_state_is_created_and_writable() {
+        let plan = crate::tests::read_only_plan("/fixture", None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let input = crate::tests::fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            None,
+        );
+        let spec = prepare(
+            &input,
+            Access::ReadOnly,
+            Session::Fresh,
+            OpenCode.stream(None).unwrap(),
+        )
+        .unwrap();
+        let shell = input.home.join(".local/share/opencode/shell");
+        assert!(spec.setup.iter().any(|step| matches!(
+            step, SetupStep::CreateDir(path) if *path == shell)));
+        assert!(spec.profile.spec.state_writes.contains(&subtree(&shell)));
+        let argv: Vec<_> = spec.argv.iter().map(|a| a.to_string_lossy()).collect();
+        assert!(argv.iter().any(|a| a == "--print-logs"));
+    }
+
+    #[test]
+    fn server_http_failure_cause_is_a_bounded_diagnostic() {
+        let log = concat!(
+            "timestamp=t level=INFO run=a message=\"watcher stopped\" path=/x http.span=1\n",
+            "timestamp=t level=INFO run=a cause=\"Error: EPERM: operation not permitted, ",
+            "mkdir '/h/.local/share/opencode/shell/abc'\\n    at ServerProcess.start\" ",
+            "http.span=68 role=server http.method=GET http.url=/api/location http.status=500\n",
+        );
+        assert_eq!(
+            failure_diagnostic(log.as_bytes()).as_deref(),
+            Some(
+                "opencode server failed with HTTP 500: Error: EPERM: operation not permitted, \
+                 mkdir '/h/.local/share/opencode/shell/abc'"
+            )
+        );
+        let long = format!(
+            "level=INFO cause=\"{}\" http.status=503\n",
+            "x".repeat(1000)
+        );
+        let diagnostic = failure_diagnostic(long.as_bytes()).unwrap();
+        assert_eq!(
+            diagnostic.chars().count(),
+            240 + "opencode server failed with HTTP 503: ".len()
+        );
+        assert!(diagnostic.ends_with('…'));
+        let secret =
+            "level=INFO cause=\"fetch https://user:secret@example.invalid/x\" http.status=500\n";
+        let redacted = failure_diagnostic(secret.as_bytes()).unwrap();
+        assert!(!redacted.contains("secret"), "{redacted}");
+        for unrelated in [
+            "level=INFO cause=\"boom\" http.status=404\n",
+            "level=INFO message=\"ok\" http.status=500\n",
+            "level=INFO cause=\"\" http.status=500\n",
+            "garbage",
+        ] {
+            assert_eq!(
+                failure_diagnostic(unrelated.as_bytes()),
+                None,
+                "{unrelated}"
+            );
+        }
     }
 
     #[test]

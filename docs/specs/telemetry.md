@@ -2,7 +2,8 @@
 
 Owner: `crates/telemetry` (reducer, prices, trace, usage log)
 Anchor: `crates/telemetry/src/tests.rs`, `crates/telemetry/src/usage/tests.rs`,
-`crates/telemetry/src/native.rs`, `tests/usage.rs`, `tests/telemetry_native.rs`
+`crates/telemetry/src/native.rs`, `crates/telemetry/src/chair/tests.rs`, `tests/usage.rs`,
+`tests/telemetry_native.rs`, `tests/chair.rs`
 
 Telemetry summarises run's terminal attempt records into per-route outcomes,
 usage and API-equivalent cost (the cost of the same tokens at published API
@@ -77,6 +78,55 @@ unknown or incomplete prices remain unknown.
 - Test: `crates/telemetry/src/native.rs::tests::imports_metadata_once_per_message_and_prices_exact_model`;
   `tests/telemetry_native.rs::native_stats_runs_without_a_project_or_store_and_sanitises_output`
 - Owner: `crates/telemetry/src/`
+
+## Cache-read share is a first-class figure
+
+Every `totals` object carries `cache`: the records that reported cache reads
+and those that did not, their input tokens (uncached input, cache reads and
+cache writes), `read_tokens`, `write_tokens`, `write_1h_tokens` and
+`read_share_basis_points`, cache reads as a share of all input. Only records
+whose provider reported cache reads enter the share; a record that reports no
+cache split is counted as `missing`, never as a miss. The report's `cache`
+section rolls the same figures up `by_model`, `by_account`, `by_provider` and
+`by_source` (`lane` or `chair`). The share is the figure to raise: cache reads
+are the cheapest input. Provider decoders keep the categories disjoint. Codex
+counts cached and newly cached tokens inside `input_tokens`, so the decoder
+subtracts both; Claude and Cursor report them beside the uncached count. Agy's
+`cache_read_tokens` is not recorded, because nothing shows whether its
+`input_tokens` already contains it. `cache_write_1h` is the long-TTL part of
+`cache_write` where the provider splits writes (Claude); prices stay at the
+table's single write rate.
+An absent `reasoning` count never makes a cost a lower bound: reasoning is
+priced at the output rate and providers count it inside output.
+- Why: a share that counts providers which never report a split reads as a
+  cache miss, and a token total that includes cached input is not input.
+- Test: `crates/telemetry/src/tests.rs::cache_read_share_is_reported_per_model_account_provider_and_source`;
+  `crates/providers/src/tests.rs::codex_cached_input_is_cache_read_and_leaves_uncached_input`
+- Owner: `crates/telemetry/src/reducer.rs`, `crates/providers/src/`
+
+## Chair usage is read from the session transcript
+
+The chair's SessionStart hook records `chair.session` with the serving account
+key resolved from `CLAUDE_CONFIG_DIR` (or `~/.claude`), the session ID, the
+optional project and the config directory relative to home. A config directory
+that is not a registered account, the default `~/.claude` included, is recorded
+under the reserved account `unattributed` and reported as such; it is never
+dropped and never guessed. Launch the chair with `CLAUDE_CONFIG_DIR` set to a
+registered account's directory to attribute it. Tokens do not exist at session
+start, so `quota usage` and `telemetry stats` read them when they run, from the
+session's own `projects/*/<session>.jsonl` and its `subagents/agent-*.jsonl`:
+only assistant message IDs, models and usage counts, each message once at its
+largest counts. Reads are bounded (1 GiB a transcript, 2 GiB a report, 8 MiB a
+line) and never follow links. A session whose transcript cannot be read is
+counted as unread with its reason, not as zero. `telemetry stats` shows the
+host's chair sessions in a `chair` section priced like lanes; `quota usage`
+shows them per account and project beside lane tokens.
+- Why: chair sessions are most of the spend, and an unattributed or zero row
+  hides who spent it.
+- Test: `crates/telemetry/src/chair/tests.rs`;
+  `tests/chair.rs::chair_start_records_serving_account_without_a_pending_handoff`;
+  `::chair_on_an_unregistered_config_directory_is_recorded_as_unattributed`
+- Owner: `crates/telemetry/src/chair.rs`, `src/chair.rs`, `crates/cli/src/quota.rs`
 
 ## Trace export
 

@@ -57,9 +57,14 @@ pub enum CustodyError {
     #[error("memory pressure is {level}; wait for host memory pressure to fall")]
     AdmissionMemoryPressure { level: String },
     #[error(
-        "writer build slots full: {active} of {limit} active; wait for a writer to finish or adjust lanes.max_concurrent_builds"
+        "writer lane cap reached: {active} of {limit} {scope} writer lanes are active; wait for a writer to finish or raise domains.fabric.lanes.{key}",
+        key = if *scope == "project" { "max_project_writer_lanes" } else { "max_writer_lanes" }
     )]
-    AdmissionBuildSlots { active: u64, limit: u64 },
+    AdmissionLaneCap {
+        active: u64,
+        limit: u64,
+        scope: &'static str,
+    },
     #[error("custody I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]

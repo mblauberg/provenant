@@ -5,7 +5,10 @@
 #   collate-release-notes vX.Y.Z    write docs/release-notes/vX.Y.Z.md and
 #                                   delete the fragments, keeping _intro.md
 # Each fragment is <topic>.md whose first line is one of the section headings
-# below, followed by its bullets, with no later ## heading.
+# below, followed by its bullets, with no later ## heading. An optional second
+# line, "### <Area>", names one of the areas below. The collated notes render
+# "### Area" sub-headings only in a section with more than 12 entries; smaller
+# sections list their entries flat, in area order. Untagged entries come last.
 # Links in fragments are relative to next.d/;
 # the collated file sits one directory up, so ../../ becomes ../.
 set -eu
@@ -16,6 +19,21 @@ sections='## Breaking changes
 ## Behaviour changes
 ## Additions
 ## Fixes'
+areas='CLI and install
+Lanes and settlement
+Git and safety
+Accounts, quota and routing
+Pipelines and graphs
+Chair, inbox and console
+Fabric and MCP
+Telemetry and providers'
+
+area_of() {
+  second=$(sed -n 2p "$1")
+  case "$second" in
+    '### '*) printf '%s\n' "${second#\#\#\# }" ;;
+  esac
+}
 
 check() {
   status=0
@@ -35,6 +53,11 @@ check() {
       echo "collate-release-notes: $f: first line must be one of: $(printf '%s' "$sections" | paste -sd, -)" >&2
       status=1
     fi
+    area=$(area_of "$f")
+    if [ -n "$area" ] && ! printf '%s\n' "$areas" | grep -qxF -- "$area"; then
+      echo "collate-release-notes: $f: unknown area \"$area\"; use one of: $(printf '%s' "$areas" | paste -sd, -)" >&2
+      status=1
+    fi
     if awk 'NR > 1 && /^## / { found = 1 } END { exit !found }' "$f"; then
       echo "collate-release-notes: $f: section headings are only allowed on line 1" >&2
       status=1
@@ -43,22 +66,75 @@ check() {
   return $status
 }
 
+# Count the bullets in section $1.
+section_count() {
+  for f in "$dir"/*.md; do
+    [ -e "$f" ] || continue
+    [ "$f" = "$dir/_intro.md" ] && continue
+    [ "$(sed -n 1p "$f")" = "$1" ] || continue
+    grep -c '^- ' "$f" || true
+  done | awk '{ n += $1 } END { print n + 0 }'
+}
+
+# Print the bodies of the fragments in section $1 tagged with area $2
+# (untagged when $2 is empty).
+section_part() {
+  for f in "$dir"/*.md; do
+    [ -e "$f" ] || continue
+    [ "$f" = "$dir/_intro.md" ] && continue
+    [ "$(sed -n 1p "$f")" = "$1" ] || continue
+    [ "$(area_of "$f")" = "$2" ] || continue
+    skip=0
+    [ -z "$2" ] || skip=2
+    # Drop the heading, the area line and any blank lines around the bullets.
+    awk -v skip="$skip" 'NR > 1 && NR != skip { if ($0 == "") { held = held "\n"; next } if (started) printf "%s", held; held = ""; started = 1; print }' "$f"
+  done
+}
+
 collate() {
   if [ -n "${1:-}" ]; then
-    echo "# $1"
+    echo "# Provenant $1"
+    echo
+    echo "Released $(date '+%-d %B %Y')."
   else
     echo "# Next release"
   fi
   echo
-  cat "$dir/_intro.md"
+  sed 's|](\.\./\.\./|](../|g' "$dir/_intro.md"
   printf '%s\n' "$sections" | while IFS= read -r heading; do
-    body=$(for f in "$dir"/*.md; do
-      [ -e "$f" ] || continue
-      [ "$f" = "$dir/_intro.md" ] && continue
-      [ "$(sed -n 1p "$f")" = "$heading" ] || continue
-      # Drop the heading and any blank lines around the bullets.
-      awk 'NR > 1 { if ($0 == "") { held = held "\n"; next } if (started) printf "%s", held; held = ""; started = 1; print }' "$f"
-    done)
+    if [ "$(section_count "$heading")" -gt 12 ]; then
+      grouped=1
+    else
+      grouped=0
+    fi
+    body=$(printf '%s\n' "$areas" | {
+      first=1
+      while IFS= read -r area; do
+        part=$(section_part "$heading" "$area")
+        [ -n "$part" ] || continue
+        if [ "$grouped" = 1 ]; then
+          [ "$first" = 1 ] || printf '\n'
+          printf '### %s\n\n%s\n' "$area" "$part"
+        else
+          printf '%s\n' "$part"
+        fi
+        first=0
+      done
+    })
+    rest=$(section_part "$heading" "")
+    if [ -n "$rest" ]; then
+      if [ -z "$body" ]; then
+        :
+      elif [ "$grouped" = 1 ]; then
+        body="$body
+
+$rest"
+      else
+        body="$body
+$rest"
+      fi
+      [ -n "$body" ] || body=$rest
+    fi
     [ -n "$body" ] || continue
     printf '\n%s\n\n%s\n' "$heading" "$body"
   done | sed 's|](\.\./\.\./|](../|g'

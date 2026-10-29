@@ -1261,9 +1261,6 @@ fn read_output(
         Part::Transcript => return Err(unsupported("--part transcript")),
         Part::Receipt => return Err(unsupported("--part receipt")),
     };
-    if command.tail.is_some() {
-        return Err(unsupported("--tail"));
-    }
     if command.trace {
         return Err(unsupported("--trace"));
     }
@@ -1278,20 +1275,141 @@ fn read_output(
         offset: command.offset,
         max_bytes: command.max_bytes,
     };
+    let window = Window::new(Duration::from_secs(30));
     let PeerResult::Output {
         data: chunk,
         extra: _,
-    } = peer.call(
+    } = peer.call_within(
         host,
         PeerAction::Output {
             extra: Default::default(),
             input,
         },
+        window.next()?,
     )?
     else {
         return Err(corrupt());
     };
+    let chunk = if let Some(lines) = command.tail {
+        collect_tail(chunk, lines, command.max_bytes, |offset| {
+            let input = OutputInput::Read {
+                extra: Default::default(),
+                target: AttemptTarget {
+                    extra: Default::default(),
+                    attempt,
+                    host: Some(host),
+                },
+                part,
+                offset,
+                max_bytes: command.max_bytes,
+            };
+            match peer.call_within(
+                host,
+                PeerAction::Output {
+                    extra: Default::default(),
+                    input,
+                },
+                window.next()?,
+            )? {
+                PeerResult::Output {
+                    data: chunk,
+                    extra: _,
+                } => Ok(chunk),
+                _ => Err(corrupt()),
+            }
+        })?
+    } else {
+        chunk
+    };
     chunk_response(attempt, host, &command.part, chunk)
+}
+
+/// Older peers expose paged reads. Retain only the bounded tail while paging,
+/// and refuse a changing artifact rather than combining different digests.
+fn collect_tail(
+    mut chunk: OutputResult,
+    lines: u64,
+    max_bytes: u64,
+    mut read: impl FnMut(u64) -> Result<OutputResult, Fail>,
+) -> Result<OutputResult, Fail> {
+    let mut retained = Vec::new();
+    let mut retained_events = Vec::new();
+    let mut expected_digest = None;
+    for _ in 0..1024 {
+        let OutputResult::Chunk {
+            bytes,
+            next_offset,
+            eof,
+            digest,
+            offset,
+            part,
+            ..
+        } = &chunk
+        else {
+            return Err(corrupt());
+        };
+        // Event offsets are sequence cursors; their content digest changes per page.
+        if !matches!(part, OutputPart::Events) {
+            if expected_digest.is_some_and(|previous| previous != *digest) {
+                return Err(corrupt());
+            }
+            expected_digest = Some(*digest);
+        }
+        let raw = match bytes {
+            OutputBytes::Utf8(text) => text.as_bytes().to_vec(),
+            OutputBytes::Base64(text) => {
+                provenant_fabric_runtime::handoff::decode_base64(text).ok_or_else(corrupt)?
+            }
+        };
+        if matches!(part, OutputPart::Events) {
+            let page: Vec<Value> = serde_json::from_slice(&raw).map_err(|_| corrupt())?;
+            retained_events.extend(page);
+            let excess = retained_events
+                .len()
+                .saturating_sub(lines.min(super::TAIL_MAX) as usize);
+            retained_events.drain(..excess);
+            retained = serde_json::to_vec(&retained_events).map_err(io_fail)?;
+            while retained.len() as u64 > max_bytes && !retained_events.is_empty() {
+                retained_events.remove(0);
+                retained = serde_json::to_vec(&retained_events).map_err(io_fail)?;
+            }
+        } else {
+            retained.extend_from_slice(&raw);
+            let excess = retained.len().saturating_sub(max_bytes as usize);
+            retained.drain(..excess);
+        }
+        if *eof {
+            let start = super::tail_start(&retained, lines.min(super::TAIL_MAX));
+            retained.drain(..start);
+            while !retained.is_empty() && retained[0] & 0xc0 == 0x80 {
+                retained.remove(0);
+            }
+            let mut result = chunk;
+            if let OutputResult::Chunk {
+                bytes,
+                offset,
+                next_offset,
+                part,
+                ..
+            } = &mut result
+            {
+                if !matches!(part, OutputPart::Events) {
+                    *offset = next_offset.saturating_sub(retained.len() as u64);
+                }
+                *bytes = OutputBytes::from_bytes(retained);
+            }
+            return Ok(result);
+        }
+        if next_offset <= offset {
+            return Err(corrupt());
+        }
+        chunk = read(*next_offset)?;
+    }
+    Err(Fail::new(
+        Status::Error,
+        ErrorKind::Limit,
+        "peer output exceeds the bounded tail scan",
+    ))
 }
 
 fn chunk_response(
@@ -1562,6 +1680,87 @@ mod tests {
     use provenant_core::RootInputs;
 
     type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+    #[test]
+    fn peer_tail_pages_to_eof_and_rejects_a_changed_artifact() -> Result {
+        let target = AttemptTarget {
+            extra: Default::default(),
+            attempt: AttemptId::from_bytes([1; 16]),
+            host: None,
+        };
+        let chunk = |text: &str, offset, eof, byte| OutputResult::Chunk {
+            extra: Default::default(),
+            target: target.clone(),
+            part: OutputPart::Result,
+            state: "succeeded".into(),
+            reason: None,
+            offset,
+            next_offset: offset + text.len() as u64,
+            eof,
+            digest: provenant_core::Digest::from_bytes([byte; 32]),
+            bytes: OutputBytes::Utf8(text.into()),
+        };
+        let first = chunk("before\n", 0, false, 1);
+        let last = collect_tail(first.clone(), 1, 64, |offset| {
+            assert_eq!(offset, 7);
+            Ok(chunk("verdict\n", offset, true, 1))
+        })
+        .map_err(|fail| fail.message)?;
+        let (_, text) = chunk_response(
+            target.attempt,
+            HostId::from_bytes([2; 16]),
+            &Part::Result,
+            last,
+        )
+        .map_err(|fail| fail.message)?;
+        assert_eq!(text, "verdict\n");
+        assert!(
+            collect_tail(first, 1, 64, |offset| Ok(chunk(
+                "changed\n",
+                offset,
+                true,
+                2
+            )))
+            .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn peer_event_tail_preserves_whole_records_across_pages() -> Result {
+        let target = AttemptTarget {
+            extra: Default::default(),
+            attempt: AttemptId::from_bytes([1; 16]),
+            host: None,
+        };
+        let chunk = |sequence, eof| OutputResult::Chunk {
+            extra: Default::default(),
+            target: target.clone(),
+            part: OutputPart::Events,
+            state: "succeeded".into(),
+            reason: None,
+            offset: sequence - 1,
+            next_offset: sequence,
+            eof,
+            digest: provenant_core::Digest::from_bytes([sequence as u8; 32]),
+            bytes: OutputBytes::Utf8(json!([{"sequence":sequence}]).to_string()),
+        };
+        let last = collect_tail(chunk(1, false), 1, 1024, |offset| {
+            assert_eq!(offset, 1);
+            Ok(chunk(2, true))
+        })
+        .map_err(|fail| fail.message)?;
+        let (_, text) = chunk_response(
+            target.attempt,
+            HostId::from_bytes([2; 16]),
+            &Part::Events,
+            last,
+        )
+        .map_err(|fail| fail.message)?;
+        assert_eq!(
+            serde_json::from_str::<Value>(&text)?,
+            json!([{"sequence":2}])
+        );
+        Ok(())
+    }
 
     fn lane(seed: u8, state: &str) -> Result<run::AttemptRecord> {
         Ok(serde_json::from_value(json!({

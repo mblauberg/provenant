@@ -105,6 +105,7 @@ fn bash_guard_rules_deny_with_a_remedy_and_follow_config() -> Result {
     };
     let remedy = decide("git push --force origin main")?.ok_or("force push allowed")?;
     assert!(remedy.contains("open a PR"), "{remedy}");
+    assert!(remedy.contains("`git push origin my-topic`"), "{remedy}");
     assert!(decide("git push --force origin topic")?.is_none());
     assert!(decide("git stash")?.is_none());
     assert!(decide("rm -rf ~")?.is_some());
@@ -241,12 +242,12 @@ fn check_push_policy(rig: &TestRig) -> Result {
         (
             format!("(delete) {zero} refs/heads/main {second}\n"),
             1,
-            "deleting the default branch",
+            "deleting the default branch is refused; delete a topic branch instead, for example `git push origin --delete my-topic`",
         ),
         (
             format!("refs/heads/main {first} refs/heads/main {second}\n"),
             1,
-            "non-fast-forward",
+            "non-fast-forward update is refused; integrate the remote first with `git fetch origin && git merge origin/my-topic`",
         ),
         (
             format!("refs/heads/main {second} refs/heads/main {first}\n"),
@@ -281,7 +282,14 @@ fn check_push_policy(rig: &TestRig) -> Result {
         Some(input.as_bytes()),
     )?;
     assert_eq!(code(&output), 1);
-    assert!(String::from_utf8_lossy(&output.stderr.bytes).contains("conflict markers"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr.bytes)
+            .contains("remove the marker lines, then `git commit --amend --no-edit`")
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr.bytes)
+            .contains("already pushed to the topic branch")
+    );
     git(rig, &["update-ref", "refs/remotes/origin/main", &conflict])?;
     let fixed = commit(rig, "resolved", "resolved\n")?;
     let input = format!("refs/heads/main {fixed} refs/heads/topic {zero}\n");

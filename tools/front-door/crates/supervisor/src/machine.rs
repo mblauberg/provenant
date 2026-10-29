@@ -220,6 +220,11 @@ pub struct DeliveryReceipt {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tick {
     pub now_ms: u64,
+    /// Wall-clock milliseconds since launch. `now_ms` is monotonic and stops
+    /// while the host sleeps, so a sleeping host would otherwise extend the
+    /// deadline by the whole sleep. The wall deadline fires on whichever of
+    /// the two clocks reaches it first.
+    pub wall_ms: u64,
     /// This is the WNOWAIT observation, supplied before stop requests are
     /// considered in the same turn.
     pub observed_exit: Option<Termination>,
@@ -231,6 +236,7 @@ impl Tick {
     pub const fn at(now_ms: u64) -> Self {
         Self {
             now_ms,
+            wall_ms: 0,
             observed_exit: None,
             delivery: None,
             cleanup: None,
@@ -298,7 +304,7 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
     }
 
     if matches!(state.phase, Phase::Running | Phase::TerminalGrace)
-        && tick.now_ms >= state.budgets.wall_deadline_ms
+        && tick.now_ms.max(tick.wall_ms) >= state.budgets.wall_deadline_ms
     {
         request_stop(&mut state, StopReason::WallDeadline, &mut effects);
         return (state, effects);
@@ -503,6 +509,23 @@ mod tests {
         );
         assert!(expired.stop_attempts().is_empty());
         assert_eq!(effects, vec![Effect::PublishExit]);
+    }
+
+    #[test]
+    fn a_host_sleep_cannot_extend_the_wall_deadline() {
+        // The monotonic clock stood still while the host slept; the wall clock
+        // moved on past the deadline.
+        let mut tick = Tick::at(40);
+        tick.wall_ms = 100;
+        let (state, effects) = step(running(), Event::Silence, tick);
+        assert_eq!(state.phase(), Phase::Stopping);
+        assert_eq!(effects, vec![Effect::DeliverStop(StopReason::WallDeadline)]);
+        // Neither clock at the deadline leaves the lane running.
+        let mut tick = Tick::at(40);
+        tick.wall_ms = 99;
+        let (state, effects) = step(running(), Event::Silence, tick);
+        assert_eq!(state.phase(), Phase::Running);
+        assert!(effects.is_empty());
     }
 
     #[test]

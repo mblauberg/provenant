@@ -12,6 +12,7 @@ pub mod hosts;
 pub mod identity;
 pub mod inbox;
 pub mod peer_agent;
+pub mod read_roots;
 pub use provenant_records::result_capture;
 #[cfg(test)]
 mod forward_compatibility;

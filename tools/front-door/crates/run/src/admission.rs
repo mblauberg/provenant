@@ -23,7 +23,10 @@ pub(crate) struct AppliedWriteGrants {
     pub git_grants_digest: Option<provenant_core::Digest>,
 }
 
-/// Hard host limits, independent of batch concurrency.
+/// Fixed ceilings on live lanes of any class, independent of batch
+/// concurrency. The writer caps are configurable below these
+/// (`domains.fabric.lanes.max_writer_lanes`, default 40, and
+/// `max_project_writer_lanes`, default 30).
 pub const HOST_ACTIVE: u64 = 64;
 pub const PROJECT_ACTIVE: u64 = 32;
 pub const HOST_QUEUED: u64 = 256;
@@ -122,6 +125,13 @@ impl Resources for SystemResources {
     }
 }
 
+/// How long a lane may wait to start, and then run.
+#[derive(Clone, Copy)]
+pub(crate) struct Allowance {
+    pub queue_seconds: u64,
+    pub runtime_seconds: u64,
+}
+
 impl RunStore {
     pub fn set_admission_policy(&mut self, policy: AdmissionPolicy) {
         self.policy = policy;
@@ -132,7 +142,7 @@ impl RunStore {
         attempt: &AttemptRecord,
         class: LaneClass,
         concurrency: u64,
-        queue_seconds: u64,
+        allowance: Allowance,
         disk_floor_bytes: u64,
     ) -> Result<()> {
         let sequence: i64 = tx.query_row(
@@ -158,8 +168,11 @@ impl RunStore {
             quota_permit: None,
             admission_deadline: deadline(
                 attempt.queued_at,
-                self.policy.admission_seconds.saturating_add(queue_seconds),
+                self.policy
+                    .admission_seconds
+                    .saturating_add(allowance.queue_seconds),
             )?,
+            runtime_seconds: allowance.runtime_seconds,
         };
         tx.execute(
             "INSERT INTO admission(attempt,project,run,active,record) VALUES (?1,?2,?3,0,?4)",
@@ -234,18 +247,6 @@ impl RunStore {
                     )) = resources.pressure()
                     {
                         format!("host capacity: memory pressure {pressure:?}")
-                    } else if class == LaneClass::Writer
-                        && let (Ok(memory), Ok(settings), Some(count)) = (
-                            resources.memory(),
-                            provenant_config::LaneBuildSettings::read(&self.writer_registry),
-                            crate::ledger::writer_count(&self.writer_registry, call),
-                        )
-                        && count >= settings.build_limit(memory.total_bytes)
-                    {
-                        format!(
-                            "host capacity: {count} of {} writer build slots active",
-                            settings.build_limit(memory.total_bytes)
-                        )
                     } else {
                         "host capacity: active lane caps and memory or disk floors".to_owned()
                     }
@@ -331,7 +332,16 @@ impl RunStore {
         head: Option<GitOid>,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
-        self.mark_starting_with_priority(expected, route, writable, write_grants, head, None, call)
+        self.mark_starting_with_priority(
+            expected,
+            route,
+            writable,
+            write_grants,
+            head,
+            None,
+            0,
+            call,
+        )
     }
 
     #[expect(clippy::too_many_arguments, reason = "priority is launch evidence")]
@@ -343,6 +353,7 @@ impl RunStore {
         write_grants: &AppliedWriteGrants,
         head: Option<GitOid>,
         priority: Option<u8>,
+        runtime_seconds: u64,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         let id = expected.attempt_id;
@@ -393,6 +404,10 @@ impl RunStore {
                 }
             }
             ticket.generation = next.generation;
+            // The provider's host cap may tighten the allowance fixed at submission.
+            if runtime_seconds > 0 {
+                ticket.runtime_seconds = runtime_seconds;
+            }
             update_attempt(tx, &old, &next)?;
             tx.execute(
                 "UPDATE admission SET record=?1 WHERE attempt=?2",
@@ -444,6 +459,9 @@ impl RunStore {
                 eprintln!("admission: memory pressure probe failed: {error}");
                 None
             });
+            // Build slots gate builds inside lanes, not admission, and range
+            // errors are reported when configuration loads. Only a file that
+            // cannot be read as settings refuses here.
             let settings = provenant_config::LaneBuildSettings::read(&self.writer_registry);
             if settings
                 .as_ref()
@@ -458,7 +476,7 @@ impl RunStore {
                 disk_floor_bytes,
                 settings,
             ) {
-                (Ok(memory), pressure, Ok(disk), Ok(floor), Ok(settings)) => {
+                (Ok(memory), pressure, Ok(disk), Ok(floor), Ok(_)) => {
                     let mut disk = disk;
                     if disk < floor {
                         if below_floor.is_multiple_of(RECLAIM_EVERY)
@@ -481,7 +499,7 @@ impl RunStore {
                     } else {
                         None
                     };
-                    let fits = !matches!(
+                    !matches!(
                         pressure,
                         Some(
                             resources::MemoryPressure::Warning
@@ -491,27 +509,27 @@ impl RunStore {
                         && u128::from(memory.available_bytes) * 10_000
                             >= u128::from(memory.total_bytes)
                                 * u128::from(ticket.memory_floor_basis_points)
-                        && disk >= floor;
-                    fits.then_some(settings.build_limit(memory.total_bytes))
+                        && disk >= floor
                 }
                 _ => {
                     refusal = None;
-                    None
+                    false
                 }
             };
-            if let Some(limit) = fits {
-                match self.claim_with_build_limit_observed(id, limit, clock, &call, &|| {
-                    resources.guardian_identity()
-                }) {
+            if fits {
+                match self.claim_observed(id, clock, &call, &|| resources.guardian_identity()) {
                     Ok(Some(record)) => return Ok(record),
                     // A busy store is transient; keep waiting to the deadline.
                     Ok(None) => {
+                        // Name the writer cap when it is what holds this lane.
                         if ticket.lane_class == LaneClass::Writer
-                            && let Some(active) =
-                                crate::ledger::writer_count(&self.writer_registry, &call)
-                            && active >= limit
+                            && let Some(hit) = self.writer_cap_hit(&ticket, &call)
                         {
-                            refusal = Some(RunError::BuildSlots { active, limit });
+                            refusal = Some(RunError::LaneCap {
+                                active: hit.active,
+                                limit: hit.limit,
+                                scope: hit.scope,
+                            });
                         }
                     }
                     Err(RunError::GuardianIdentityUnavailable) => {
@@ -551,24 +569,30 @@ impl RunStore {
         clock: &dyn Clock,
         call: &Request<'_>,
     ) -> Result<Option<AttemptRecord>> {
-        self.claim_with_build_limit(id, HOST_ACTIVE, clock, call)
+        self.claim_observed(id, clock, call, &|| SystemResources.guardian_identity())
     }
-    #[cfg(test)]
-    pub(crate) fn claim_with_build_limit(
+    fn lane_caps(&self) -> crate::ledger::LaneCaps {
+        crate::ledger::LaneCaps::of(
+            &provenant_config::LaneBuildSettings::read(&self.writer_registry).unwrap_or_default(),
+        )
+    }
+    fn writer_cap_hit(
         &self,
-        id: AttemptId,
-        max_builds: u64,
-        clock: &dyn Clock,
+        ticket: &AdmissionTicket,
         call: &Request<'_>,
-    ) -> Result<Option<AttemptRecord>> {
-        self.claim_with_build_limit_observed(id, max_builds, clock, call, &|| {
-            SystemResources.guardian_identity()
-        })
+    ) -> Option<crate::ledger::CapHit> {
+        let ledger = crate::ledger::open(&self.writer_registry, call).ok()?;
+        crate::ledger::cap_hit(
+            &ledger,
+            ticket.project_id,
+            ticket.lane_class,
+            self.lane_caps(),
+        )
+        .ok()?
     }
-    fn claim_with_build_limit_observed(
+    fn claim_observed(
         &self,
         id: AttemptId,
-        max_builds: u64,
         clock: &dyn Clock,
         call: &Request<'_>,
         observe: &dyn Fn() -> Option<provenant_supervisor::census::ProcessIdentity>,
@@ -587,6 +611,7 @@ impl RunStore {
             return Ok(None);
         }
         let ledger = crate::ledger::open(&self.writer_registry, call)?;
+        let caps = self.lane_caps();
         self.write(call, |tx| {
             let old = self.record(id, call)?;
             if !matches!(old.state, AttemptState::Starting { .. }) {
@@ -609,7 +634,7 @@ impl RunStore {
                 &ledger,
                 self.context.state_root.as_path(),
                 &ticket,
-                max_builds,
+                caps,
                 clock,
                 call,
                 observe,
@@ -628,6 +653,11 @@ impl RunStore {
                 extra: Default::default(),
             };
             next.started_at = Some(now);
+            // The guardian enforces the same allowance on the wall clock; the
+            // record lets `lanes` and `reconcile` see it without the guardian.
+            next.runtime_deadline = (ticket.runtime_seconds > 0)
+                .then(|| deadline(now, ticket.runtime_seconds))
+                .transpose()?;
             update_attempt(tx, &old, &next)?;
             Ok(Some(next))
         })

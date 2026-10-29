@@ -1,5 +1,5 @@
 //! Routing's frozen clap leaves and read-only composition/rendering edge.
-use crate::{Globals, RenderMode};
+use crate::Globals;
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{Roots, WallTime};
 use provenant_os::fs::FsError;
@@ -29,6 +29,9 @@ pub enum Route {
 }
 #[derive(Debug, Args)]
 pub struct RouteListRequest {
+    /// List catalogued model/effort pairs accepted by the resolver (no live probe).
+    #[arg(long)]
+    pub valid: bool,
     /// Limit models, named routes and pool members to this adapter.
     #[arg(long)]
     pub adapter: Option<String>,
@@ -105,6 +108,12 @@ pub struct RoutePacing {
 }
 #[derive(Debug, Args)]
 pub struct RouteResolve {
+    /// Preview a route that needs write access.
+    #[arg(long)]
+    pub writes: bool,
+    /// Account key for policy preview.
+    #[arg(long)]
+    pub account: Option<String>,
     /// Route name, ADAPTER/ID model, or a model ID given without its adapter
     #[arg(conflicts_with_all = ["model", "route"])]
     pub name: Option<String>,
@@ -113,6 +122,9 @@ pub struct RouteResolve {
 }
 #[derive(Debug, Clone, Args)]
 pub struct RouteRequest {
+    /// Optimise selection for read-heavy work.
+    #[arg(long)]
+    pub read_heavy: bool,
     /// Exact model in ADAPTER/ID form
     #[arg(long, conflicts_with = "route")]
     pub model: Option<Model>,
@@ -160,6 +172,14 @@ impl RouteRequest {
             )?)
         };
         Ok(provenant_routing::RouteRequest {
+            intent: provenant_routing::RouteIntent {
+                workload: if self.read_heavy {
+                    provenant_routing::Workload::ReadHeavy
+                } else {
+                    provenant_routing::Workload::General
+                },
+                writes: false,
+            },
             choice,
             effort: self.effort.clone(),
             confidential: self.confidential,
@@ -309,7 +329,9 @@ fn resolve_request(
             close_matches(&route.to_ascii_lowercase(), &routes, &models),
         ));
     }
-    Ok(request.to_domain()?)
+    let mut request = request.to_domain()?;
+    request.intent.writes = query.writes;
+    Ok(request)
 }
 #[derive(Debug, thiserror::Error)]
 enum EdgeError {
@@ -373,6 +395,8 @@ pub enum Data {
 }
 #[derive(Serialize)]
 pub struct RoutePreview {
+    pub model_policy: provenant_routing::EffectiveModelPolicy,
+    pub compaction_break_even_turns: Option<f64>,
     #[serde(flatten)]
     pub route: provenant_records::ResolvedRoute,
     pub supported_efforts: Option<Vec<String>>,
@@ -589,6 +613,7 @@ fn with_context<T>(
     let now = WallTime::from_micros(timestamp.as_microsecond())?;
     action(
         &RoutingContext {
+            policy_account_hint: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,
@@ -879,6 +904,7 @@ fn list_data(
             &provenant_routing::RouteListQuery {
                 adapter: query.adapter.clone(),
                 pool: query.pool.clone(),
+                valid: query.valid,
             },
             context,
         )?))
@@ -887,6 +913,7 @@ fn list_data(
 
 fn effective_members(roots: &Roots, pool: &str) -> Result<Vec<RoutePoolMember>, EdgeError> {
     let query = RouteListRequest {
+        valid: false,
         adapter: None,
         pool: Some(pool.to_owned()),
     };
@@ -1211,8 +1238,24 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
         Route::List(query) => Ok(Data::List(list_data(roots, query)?)),
         Route::Resolve(query) => {
             with_context(roots, &[], &[], "local-preview", &[], |context, records| {
-                let route = provenant_routing::resolve(&resolve_request(query, context)?, context)?;
+                let context = &RoutingContext {
+                    policy_account_hint: query.account.as_deref(),
+                    ..*context
+                };
+                let request = resolve_request(query, context)?;
+                let route = provenant_routing::resolve(&request, context)?;
                 let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
+                let model_policy = context.config.model_policy.effective(
+                    &model,
+                    query.account.as_deref().or(route.account_key.as_deref()),
+                    context.now.as_timestamp().as_second(),
+                );
+                provenant_routing::validate_intent(&model_policy.policy, request.intent)?;
+                let compaction_break_even_turns = model_policy
+                    .policy
+                    .compaction
+                    .window
+                    .and_then(|window| model_policy.policy.break_even_turns(window, 15_000, 0));
                 provenant_routing::check_go_allowance(&model, context.config, context.catalogue)
                     .map_err(EdgeError::GoAllowance)?;
                 let quota = records
@@ -1233,6 +1276,8 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
                 let pacing = provenant_routing::pacing_preview(&model, context);
                 let entry = context.catalogue.model(&model);
                 Ok(Data::Resolved(Box::new(RoutePreview {
+                    model_policy,
+                    compaction_break_even_turns,
                     route,
                     supported_efforts: entry.map(|entry| entry.efforts.clone()),
                     nearest_models: if entry.is_none() {
@@ -1250,6 +1295,7 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
             Ok(Data::List(list_data(
                 roots,
                 &RouteListRequest {
+                    valid: false,
                     adapter: None,
                     pool: Some(request.pool.clone()),
                 },
@@ -1260,6 +1306,7 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
             Ok(Data::List(list_data(
                 roots,
                 &RouteListRequest {
+                    valid: false,
                     adapter: None,
                     pool: Some(request.pool.clone()),
                 },
@@ -1270,6 +1317,7 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
             Ok(Data::List(list_data(
                 roots,
                 &RouteListRequest {
+                    valid: false,
                     adapter: None,
                     pool: Some(request.pool.clone()),
                 },
@@ -1280,6 +1328,7 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
             Ok(Data::List(list_data(
                 roots,
                 &RouteListRequest {
+                    valid: false,
                     adapter: None,
                     pool: None,
                 },
@@ -1335,6 +1384,13 @@ pub fn run(
         match &result.data {
             Some(Data::List(list)) => {
                 let mut lines = vec![format!("catalogue {}", list.catalogue_revision)];
+                lines.extend(list.valid_pairs.iter().map(|pair| {
+                    format!(
+                        "{} effort={}",
+                        pair.model.as_str(),
+                        pair.effort.as_deref().unwrap_or("unspecified")
+                    )
+                }));
                 lines.extend(
                     list.models
                         .iter()
@@ -1430,6 +1486,7 @@ pub fn run(
                         }),
                     diagnostics
                 );
+                text.push_str(&format!("model policy sources={}\n{}\ncompaction break-even turns (15k summary, zero rework): {:?}\n", preview.model_policy.sources.join(", "), preview.model_policy.policy.guidance(), preview.compaction_break_even_turns));
                 match &preview.supported_efforts {
                     Some(efforts) if efforts.is_empty() => {
                         text.push_str("supported efforts: none\n")
@@ -1459,14 +1516,38 @@ pub fn run(
             None => String::new(),
         }
     };
-    let mode = if globals.json {
-        RenderMode::Json
-    } else {
-        RenderMode::Human {
-            text: &human,
-            read_only: matches!(command, Route::List(_) | Route::Resolve(_)),
+    let summary = match &result.data {
+        Some(Data::List(list)) => {
+            let counts = [
+                ("models", list.models.len()),
+                ("routes", list.named_routes.len()),
+                ("pools", list.pools.len()),
+                ("pacing entries", list.account_pacing.len()),
+                ("overrides", list.active_overrides.len()),
+            ];
+            let rows = list
+                .named_routes
+                .iter()
+                .map(|(name, r)| format!("route {name} = {}", r.model.as_str()))
+                .chain(list.pools.keys().map(|name| format!("pool {name}")))
+                .collect();
+            Some(crate::Summary::new(
+                format!(
+                    "catalogue {}: {}",
+                    list.catalogue_revision,
+                    crate::Summary::tally(&counts)
+                ),
+                rows,
+                Some("provenant route resolve MODEL".to_owned()),
+            ))
         }
+        _ => None,
     };
+    let mode = globals.render_mode(
+        &human,
+        matches!(command, Route::List(_) | Route::Resolve(_)),
+        summary.as_ref(),
+    );
     let outcome = crate::render_or_publish(
         &result,
         mode,
@@ -1663,6 +1744,7 @@ mod route_tests {
         }];
         let request = |model: Option<&str>, route: Option<&str>| {
             super::RouteRequest {
+                read_heavy: false,
                 model: model.map(|m| super::Model(m.into())),
                 route: route.map(str::to_owned),
                 effort: None,
@@ -1685,8 +1767,11 @@ mod route_tests {
             )
         };
         let preview = super::Route::Resolve(super::RouteResolve {
+            writes: false,
+            account: None,
             name: None,
             request: super::RouteRequest {
+                read_heavy: false,
                 model: Some(super::Model("opencode/opencode-go/claude-haiku-5-5".into())),
                 route: None,
                 effort: None,
@@ -1709,6 +1794,7 @@ mod route_tests {
         assert!(error.contains("opencode-go/unlisted") && error.contains("unknown"));
         let fallback = |model: Option<&str>, route: Option<&str>| -> Result<(), Box<dyn Error>> {
             let request = super::RouteRequest {
+                read_heavy: false,
                 model: model.map(|m| super::Model(m.into())),
                 route: route.map(str::to_owned),
                 effort: None,
@@ -1834,6 +1920,7 @@ mod route_tests {
             });
         }
         let request = super::RouteRequest {
+            read_heavy: false,
             model: Some(super::Model("codex/unlisted-exact".into())),
             route: None,
             effort: None,
@@ -2091,6 +2178,7 @@ mod route_tests {
             },
         ];
         let request = super::RouteRequest {
+            read_heavy: false,
             model: None,
             route: Some("test".into()),
             effort: None,

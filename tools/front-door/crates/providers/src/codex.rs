@@ -195,7 +195,12 @@ enum Item {
 }
 #[derive(Deserialize)]
 struct Usage {
+    /// Everything the model read, including cached and newly cached tokens.
     input_tokens: u64,
+    #[serde(default)]
+    cached_input_tokens: Option<u64>,
+    #[serde(default)]
+    cache_write_input_tokens: Option<u64>,
     output_tokens: u64,
 }
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
@@ -206,10 +211,18 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         } => vec![E::Text(text)],
         Event::Completed { usage } => vec![
             E::Usage {
-                input: usage.input_tokens,
+                // Codex counts cache reads and writes inside `input_tokens`;
+                // the recorded categories are disjoint.
+                input: usage.input_tokens.saturating_sub(
+                    usage
+                        .cached_input_tokens
+                        .unwrap_or(0)
+                        .saturating_add(usage.cache_write_input_tokens.unwrap_or(0)),
+                ),
                 output: usage.output_tokens,
-                cache_read: None,
-                cache_write: None,
+                cache_read: usage.cached_input_tokens,
+                cache_write: usage.cache_write_input_tokens,
+                cache_write_1h: None,
             },
             E::Terminal,
         ],

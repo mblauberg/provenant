@@ -1,3 +1,4 @@
 ## Fixes
+### CLI and install
 
-- Announce all repository preset files used by a run, including inheritance-only and overridden layers.
+- `run` announces every repository preset file it uses, including inheritance-only and overridden layers (#2109).

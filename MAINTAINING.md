@@ -44,12 +44,18 @@ cross-tracker routes, not a second current-work owner.
 - Owns: `git log` for what changed and when; [`docs/adr/`](docs/adr/) for why
 - Living docs are edited in place, not appended to; see
   [engineering-docs](skills/engineering-docs/SKILL.md#binding-rules)
-- Release notes: each change adds a fragment under
-  [`docs/release-notes/next.d/`](docs/release-notes/next.d/). To release, run
-  `scripts/collate-release-notes vX.Y.Z`, which writes
+- Release notes: each user-visible change adds a fragment under
+  [`docs/release-notes/next.d/`](docs/release-notes/next.d/). Fragment authors
+  and the release collator follow the
+  [release-notes reference](skills/engineering-writing/references/release-notes.md)
+  and the fragment rules in the [release-notes index](docs/release-notes/README.md#writing-a-fragment).
+  Each fragment's second line tags an area from the index; the collator decides whether to render it. The no-stability-promise policy lives only in that index. Before releasing,
+  read the collated preview (`scripts/collate-release-notes`) end to end, merge
+  entries on one topic, align tense and terms, and write `_intro.md` last.
+  To release, run `scripts/collate-release-notes vX.Y.Z`, which writes
   `docs/release-notes/vX.Y.Z.md` and deletes the fragments but `_intro.md`;
-  add the released version to the [release-notes index](docs/release-notes/README.md)
-  and edit `_intro.md` for the next release.
+  add the released version to the index and reset `_intro.md` for the next
+  release.
 
 ### Specifications
 

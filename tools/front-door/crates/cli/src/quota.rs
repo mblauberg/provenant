@@ -1033,6 +1033,50 @@ fn execute(
     decorate(&mut shown, &entries, &settings.display);
     Ok(shown)
 }
+/// Chair sessions the SessionStart hook recorded in `[since, until)`, with the
+/// tokens read from their transcripts. The hook stores the resolved account
+/// key; lane facts carry labels, so a registered account's key becomes its
+/// label here. A session on an unregistered config directory keeps the
+/// reserved `unattributed` account.
+pub(crate) fn chair_sessions_with_usage(
+    roots: &Roots,
+    home: Option<&Path>,
+    since: jiff::Timestamp,
+    until: jiff::Timestamp,
+) -> Result<Vec<provenant_telemetry::usage::ChairSession>, EdgeError> {
+    use std::path::Component;
+    let accounts = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+        .domains
+        .accounts;
+    let mut chairs = provenant_telemetry::usage::chair_sessions(roots, since, until)?;
+    provenant_telemetry::attach_chair_usage(&mut chairs, |chair| {
+        accounts
+            .entries
+            .values()
+            .find(|entry| entry.adapter == chair.adapter && entry.key == chair.account)
+            .map(|entry| entry.directory.clone())
+            .or_else(|| {
+                // The hook records only a plain relative path under home.
+                let relative = Path::new(chair.config.as_deref()?);
+                relative
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_)))
+                    .then(|| home.map(|home| home.join(relative)))
+                    .flatten()
+            })
+    });
+    for chair in &mut chairs {
+        if let Some(entry) = accounts
+            .entries
+            .values()
+            .find(|entry| entry.adapter == chair.adapter && entry.key == chair.account)
+        {
+            chair.account = entry.label.clone();
+        }
+    }
+    Ok(chairs)
+}
+
 fn usage_report(
     roots: &Roots,
     filter: &Filter,
@@ -1083,29 +1127,18 @@ fn usage_report(
             }
         }
     }
-    let accounts = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
-        .domains
-        .accounts;
-    let mut chairs = provenant_telemetry::usage::chair_sessions(
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let chairs = chair_sessions_with_usage(
         roots,
+        home.as_deref(),
         since.as_timestamp(),
         until.as_timestamp(),
     )?;
-    // Lane facts retain labels; chair observations retain the resolved key.
-    for chair in &mut chairs {
-        if let Some(entry) = accounts
-            .entries
-            .values()
-            .find(|entry| entry.adapter == chair.adapter && entry.key == chair.account)
-        {
-            chair.account = entry.label.clone();
-        }
-    }
     let mut rows = provenant_telemetry::quota_usage(facts, chairs, &window)?;
     if let Some(adapter) = &filter.adapter {
         rows.retain(|row| row.adapter.as_ref() == Some(adapter));
     }
-    let note = "Chair token usage is not recorded; chair rows count distinct sessions observed in this window only. Historical chair tokens are not recovered. Chair project attribution requires usage.project_attribution=true; otherwise the project is unknown. Usage logs are bounded and rotated. Lane tokens cover terminal attempts in registered projects only, not transient workspaces, and are not provider quota percentages.";
+    let note = "Chair tokens are read from each recorded chair session's own transcript when this report runs, so they cover sessions the SessionStart hook recorded in this window, sub-agents included. A session on a config directory that is not a registered account is reported under the account `unattributed`; launch the chair with CLAUDE_CONFIG_DIR set to a registered account's directory to attribute it. Sessions whose transcript cannot be read are counted as unread, not as zero. Chair project attribution requires usage.project_attribution=true; otherwise the project is unknown. Usage logs are bounded and rotated. Lane tokens cover terminal attempts in registered projects only, not transient workspaces, and are not provider quota percentages.";
     let mut human = format!("Recorded use: {since} to {until}\n{note}\n");
     for row in &rows {
         let project = projects
@@ -1119,7 +1152,7 @@ fn usage_report(
                 |p| p.common_dir().display().to_string(),
             );
         human.push_str(&format!(
-            "{} [{}] project={} ({})\n  chair: {} sessions\n  lanes: {} attempts\n",
+            "{} [{}] project={} ({})\n  chair: {} sessions ({} unread)\n  lanes: {} attempts\n",
             row.account
                 .as_deref()
                 .unwrap_or("unknown account")
@@ -1132,24 +1165,40 @@ fn usage_report(
             row.project
                 .map_or_else(|| "unattributed".into(), |p| p.to_string()),
             row.chair_sessions,
+            row.chair_sessions_unread,
             row.lane_attempts
         ));
-        for (label, total) in [
-            ("uncached input", &row.lane_usage.uncached_input),
-            ("cache read", &row.lane_usage.cache_read),
-            ("cache write", &row.lane_usage.cache_write),
+        for (source, attempts, usage, cache) in [
+            ("lanes", row.lane_attempts, &row.lane_usage, &row.lane_cache),
             (
-                "output excluding reasoning",
-                &row.lane_usage.output_excluding_reasoning,
+                "chair",
+                row.chair_sessions.saturating_sub(row.chair_sessions_unread),
+                &row.chair_usage,
+                &row.chair_cache,
             ),
-            ("reasoning", &row.lane_usage.reasoning),
         ] {
-            if row.lane_attempts > 0 {
+            if attempts == 0 {
+                continue;
+            }
+            for (label, total) in [
+                ("uncached input", &usage.uncached_input),
+                ("cache read", &usage.cache_read),
+                ("cache write", &usage.cache_write),
+                (
+                    "output excluding reasoning",
+                    &usage.output_excluding_reasoning,
+                ),
+                ("reasoning", &usage.reasoning),
+            ] {
                 human.push_str(&format!(
-                    "    {label}: {} tokens; {} attempts missing this category\n",
+                    "    {source} {label}: {} tokens; {} records missing this category\n",
                     total.known, total.missing
                 ));
             }
+            human.push_str(&format!(
+                "    {source} cache-read share: {}\n",
+                cache_share(cache)
+            ));
         }
     }
     if rows.is_empty() {
@@ -1163,6 +1212,24 @@ fn usage_report(
         return Err(EdgeError::TooLarge);
     }
     Ok((data, human))
+}
+
+/// `93.4% of 1200 input tokens`, or why there is no share.
+pub(crate) fn cache_share(cache: &provenant_telemetry::CacheSummary) -> String {
+    match cache.read_share_basis_points {
+        Some(share) => format!(
+            "{}.{}% of {} input tokens ({} records reported, {} did not)",
+            share / 100,
+            share % 100 / 10,
+            cache.input_tokens,
+            cache.reporting,
+            cache.missing
+        ),
+        None => format!(
+            "not reported ({} records reported, {} did not)",
+            cache.reporting, cache.missing
+        ),
+    }
 }
 
 fn quota_human(report: &QuotaReport) -> String {
@@ -1235,6 +1302,61 @@ fn quota_human(report: &QuotaReport) -> String {
     human.push_str(&format!("Report: {}\n", report.report_path));
     human
 }
+/// Counts by state, then the accounts that need attention, then the command
+/// that shows the rest.
+fn quota_summary(report: &QuotaReport) -> crate::Summary {
+    let state = |row: &provenant_quota::AccountRow| {
+        serde_json::to_value(row.status)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "unknown".into())
+    };
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for row in &report.accounts {
+        let name = state(row);
+        match counts.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((name, 1)),
+        }
+    }
+    let tally = crate::Summary::tally(
+        &counts
+            .iter()
+            .map(|(n, c)| (n.as_str(), *c))
+            .collect::<Vec<_>>(),
+    );
+    let mut rows: Vec<String> = report
+        .display_icon_warning
+        .iter()
+        .map(|warning| format!("Warning: {warning}"))
+        .collect();
+    rows.extend(
+        report
+            .accounts
+            .iter()
+            .filter(|row| state(row) != "current")
+            .map(|row| {
+                format!(
+                    "{} [{}]: {}",
+                    row.account.label,
+                    row.account.adapter,
+                    state(row)
+                )
+            }),
+    );
+    let next = (!rows.is_empty()).then(|| "provenant quota tick".to_owned());
+    crate::Summary::new(
+        format!(
+            "quota {}/{} current{}{}",
+            report.coverage.known,
+            report.coverage.total,
+            if tally.is_empty() { "" } else { ": " },
+            tally
+        ),
+        rows,
+        next,
+    )
+}
 pub fn run(
     command: Quota,
     globals: &crate::Globals,
@@ -1251,10 +1373,14 @@ pub fn run(
         Quota::Display { .. } => "quota display",
         Quota::Tick { .. } => "quota tick",
     };
+    let mut summary = None;
     let result = match &command {
         Quota::Usage { adapter, days } => usage_report(roots, adapter, *days),
         _ => execute(&command, roots, registry, effects).and_then(|report| {
             let human = quota_human(&report);
+            if matches!(command, Quota::Show(_)) {
+                summary = Some(quota_summary(&report));
+            }
             Ok((serde_json::to_value(report)?, human))
         }),
     };
@@ -1283,14 +1409,11 @@ pub fn run(
             (result, String::new())
         }
     };
-    let mode = if globals.json {
-        crate::RenderMode::Json
-    } else {
-        crate::RenderMode::Human {
-            text: &human,
-            read_only: matches!(command, Quota::Show(_) | Quota::Usage { .. }),
-        }
-    };
+    let mode = globals.render_mode(
+        &human,
+        matches!(command, Quota::Show(_) | Quota::Usage { .. }),
+        summary.as_ref(),
+    );
     let outcome = crate::render_or_publish(
         &envelope,
         mode,

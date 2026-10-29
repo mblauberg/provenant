@@ -142,7 +142,7 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
     };
     render(
         &result,
-        globals.json,
+        globals,
         &human,
         &mut io::stdout().lock(),
         &mut io::stderr().lock(),
@@ -261,20 +261,21 @@ where
 // Never publish an overflow artefact, including when rendering errors.
 fn render(
     result: &CommandResult<Option<serde_json::Value>>,
-    json: bool,
+    globals: &provenant_cli::Globals,
     human: &str,
     stdout: &mut impl io::Write,
     stderr: &mut impl io::Write,
 ) -> u8 {
-    let mode = if json {
-        RenderMode::Json
-    } else {
-        RenderMode::Human {
-            text: human,
-            read_only: true,
-        }
-    };
-    let rendered = if !json && result.error.is_some() {
+    let json = globals.json;
+    let mode = globals.render_mode(human, true, None);
+    // The result's size is a bound on the result, not on how it is presented:
+    // a compact view of an oversized result is still an oversized result.
+    let oversized = !json
+        && serde_json::to_vec(result)
+            .is_ok_and(|bytes| bytes.len() > provenant_cli::MAX_RESULT_BYTES);
+    let rendered = if oversized {
+        Err(RenderError::TooLarge)
+    } else if !json && result.error.is_some() {
         provenant_cli::render(result, mode, stderr)
     } else {
         provenant_cli::render(result, mode, stdout)
@@ -310,6 +311,7 @@ fn render(
                     RenderMode::Human {
                         text: "",
                         read_only: true,
+                        summary: None,
                     },
                     stderr,
                 );
@@ -376,7 +378,17 @@ mod tests {
         );
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         assert_eq!(
-            super::render(&result, true, "", &mut stdout, &mut stderr),
+            super::render(
+                &result,
+                &provenant_cli::Globals {
+                    json: true,
+                    full: true,
+                    ..Default::default()
+                },
+                "",
+                &mut stdout,
+                &mut stderr
+            ),
             3
         );
         let failure: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
@@ -400,7 +412,17 @@ mod tests {
         );
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         assert_eq!(
-            super::render(&result, false, &human, &mut stdout, &mut stderr),
+            super::render(
+                &result,
+                &provenant_cli::Globals {
+                    json: false,
+                    full: true,
+                    ..Default::default()
+                },
+                &human,
+                &mut stdout,
+                &mut stderr
+            ),
             3
         );
         assert!(stdout.is_empty());

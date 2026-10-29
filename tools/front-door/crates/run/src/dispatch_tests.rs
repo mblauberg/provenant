@@ -729,7 +729,17 @@ fn host_remembers_child_task_after_attempt_row_deletion() -> TestResult {
     // Make the replacement fully launchable, including its prompt and ticket.
     let directory = store.attempt_dir(nested.run_id, replacement.attempt_id, true)?;
     artifacts::seal(&directory, "prompt.txt", b"exact prompt", RECORD_LIMIT)?;
-    store.queue_ticket(&store.db, &replacement, LaneClass::ReadOnly, 1, 0, 1)?;
+    store.queue_ticket(
+        &store.db,
+        &replacement,
+        LaneClass::ReadOnly,
+        1,
+        crate::admission::Allowance {
+            queue_seconds: 0,
+            runtime_seconds: 0,
+        },
+        1,
+    )?;
     let revalidated = store.validate_child(
         nested.run_id,
         parent,
@@ -2488,36 +2498,6 @@ fn pressure_errors_fall_back_and_normal_still_obeys_floor() -> TestResult {
 }
 
 #[test]
-fn writer_build_limit_is_shared_across_runs() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (Stepped::up(0), CancelToken::new());
-    let call = stepped_call(&clock, &cancel);
-    let mut store = RunStore::open(&context(temp.path())?, &call)?;
-    store.set_admission_policy(AdmissionPolicy {
-        startup_spacing_ms: 0,
-        ..AdmissionPolicy::default()
-    });
-    let first = starting(&store, &lane(55, true), &call)?;
-    let second = starting(&store, &lane(56, true), &call)?;
-    let third = starting(&store, &lane(57, true), &call)?;
-    assert!(
-        store
-            .claim_with_build_limit(first, 2, &clock, &call)?
-            .is_some()
-    );
-    assert!(
-        store
-            .claim_with_build_limit(second, 2, &clock, &call)?
-            .is_some()
-    );
-    assert!(
-        store
-            .claim_with_build_limit(third, 2, &clock, &call)?
-            .is_none()
-    );
-    Ok(())
-}
-#[test]
 fn invalid_build_settings_refuse_without_waiting() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -2526,11 +2506,7 @@ fn invalid_build_settings_refuse_without_waiting() -> TestResult {
     let run = lane(69, true);
     let id = starting(&store, &run, &call)?;
     let attempt = store.attempt_dir(run.run_id, id, false)?;
-    for assignment in [
-        "max_concurrent_builds = 0",
-        "cargo_build_jobs = -2",
-        "cargo_build_jobs = 'invalid'",
-    ] {
+    for assignment in ["cargo_build_jobs = -2", "cargo_build_jobs = 'invalid'"] {
         std::fs::write(
             store.writer_registry.join("config.toml"),
             format!("[domains.fabric.lanes]\n{assignment}\n"),
@@ -2607,7 +2583,45 @@ fn guardian_identity_unknown_retries_and_names_expiry() -> TestResult {
 }
 
 #[test]
-fn configured_build_limit_controls_host_leases() -> TestResult {
+fn idle_writers_are_admitted_beyond_the_build_limit() -> TestResult {
+    // `max_concurrent_builds` gates builds inside lanes, never writer lanes.
+    for limit in [None, Some(1)] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            startup_spacing_ms: 0,
+            admission_seconds: 1,
+            ..AdmissionPolicy::default()
+        });
+        if let Some(limit) = limit {
+            std::fs::write(
+                store.writer_registry.join("config.toml"),
+                format!("[domains.fabric.lanes]\nmax_concurrent_builds = {limit}\n"),
+            )?;
+        }
+        for seed in 60..65 {
+            let run = lane(seed, true);
+            let id = starting(&store, &run, &call)?;
+            let dir = store.attempt_dir(run.run_id, id, false)?;
+            assert_eq!(
+                store
+                    .admit(id, &dir, &Host { available: 100 }, &clock, &cancel)?
+                    .state,
+                AttemptState::Running {
+                    extra: Default::default()
+                },
+                "writer {seed} with limit {limit:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn out_of_range_build_settings_do_not_block_admission() -> TestResult {
+    // Range errors are reported when configuration loads, not at admission.
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -2619,96 +2633,73 @@ fn configured_build_limit_controls_host_leases() -> TestResult {
     });
     std::fs::write(
         store.writer_registry.join("config.toml"),
-        "[domains.fabric.lanes]\nmax_concurrent_builds = 2\n",
+        "[domains.fabric.lanes]\nmax_concurrent_builds = 0\n",
     )?;
-    let first_run = lane(63, true);
-    let second_run = lane(64, true);
-    let third_run = lane(65, true);
-    for run in [&first_run, &second_run] {
-        let id = starting(&store, run, &call)?;
-        let dir = store.attempt_dir(run.run_id, id, false)?;
-        assert_eq!(
-            store
-                .admit(id, &dir, &Host { available: 100 }, &clock, &cancel)?
-                .state,
-            AttemptState::Running {
-                extra: Default::default()
-            }
-        );
-    }
-    let id = starting(&store, &third_run, &call)?;
-    let dir = store.attempt_dir(third_run.run_id, id, false)?;
-    assert!(matches!(
-        store.admit(id, &dir, &Host { available: 100 }, &clock, &cancel),
-        Err(RunError::BuildSlots {
-            active: 2,
-            limit: 2
-        })
-    ));
+    let run = lane(71, true);
+    let id = starting(&store, &run, &call)?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    assert_eq!(
+        store
+            .admit(id, &dir, &Host { available: 100 }, &clock, &cancel)?
+            .state,
+        AttemptState::Running {
+            extra: Default::default()
+        }
+    );
     Ok(())
 }
 
 #[test]
-fn writer_slot_refusal_and_release() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let mut store = RunStore::open(&context(temp.path())?, &call)?;
-    store.set_admission_policy(AdmissionPolicy {
-        startup_spacing_ms: 0,
-        admission_seconds: 1,
-        ..AdmissionPolicy::default()
-    });
-    let first_run = lane(60, true);
-    let first = starting(&store, &first_run, &call)?;
-    assert!(
-        store
-            .claim_with_build_limit(first, 1, &clock, &call)?
-            .is_some()
-    );
-    let blocked_run = lane(61, true);
-    let blocked = starting(&store, &blocked_run, &call)?;
-    let waits = store.lane_waits_with_resources(
-        &[store.record(blocked, &call)?],
-        &call,
-        &Host { available: 100 },
-    );
-    assert_eq!(
-        waits[0].waiting_for,
-        "host capacity: 1 of 1 writer build slots active"
-    );
-    let attempt = store.attempt_dir(blocked_run.run_id, blocked, false)?;
-    assert!(matches!(
-        store.admit(blocked, &attempt, &Host { available: 100 }, &clock, &cancel),
-        Err(RunError::BuildSlots {
-            active: 1,
-            limit: 1
-        })
-    ));
-    let next = starting(&store, &lane(62, true), &call)?;
-    assert!(
-        store
-            .claim_with_build_limit(next, 1, &clock, &call)?
-            .is_none()
-    );
-    let mut observed = exit();
-    observed.scope = RunStore::scope(&store.record(first, &call)?);
-    seal_exit(&store, &observed)?;
-    let revision = store.record(first, &call)?.revision;
-    store.publish_terminal(
-        first,
-        revision,
-        &super::tests::publication(),
-        &observed,
-        &call,
-    )?;
-    assert!(
-        store
-            .claim_with_build_limit(next, 1, &clock, &call)?
-            .is_some()
-    );
+fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
+    for (config, scope) in [
+        ("max_writer_lanes = 3\nmax_project_writer_lanes = 3", "host"),
+        (
+            "max_writer_lanes = 8\nmax_project_writer_lanes = 3",
+            "project",
+        ),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            startup_spacing_ms: 0,
+            admission_seconds: 1,
+            ..AdmissionPolicy::default()
+        });
+        std::fs::write(
+            store.writer_registry.join("config.toml"),
+            format!("[domains.fabric.lanes]\n{config}\n"),
+        )?;
+        let mut last = None;
+        for seed in 80..84 {
+            let run = lane(seed, true);
+            let id = starting(&store, &run, &call)?;
+            let dir = store.attempt_dir(run.run_id, id, false)?;
+            last = Some(store.admit(id, &dir, &Host { available: 100 }, &clock, &cancel));
+            if seed < 83 {
+                assert_eq!(
+                    last.take().ok_or("admitted")??.state,
+                    AttemptState::Running {
+                        extra: Default::default()
+                    },
+                    "writer {seed} is inside the cap"
+                );
+            }
+        }
+        match last.ok_or("a fourth writer")? {
+            Err(error @ RunError::LaneCap { limit: 3, .. }) => {
+                let text = error.to_string();
+                assert!(text.contains("writer lane cap reached"), "{text}");
+                assert!(text.contains(scope), "{text}");
+                assert!(text.contains("max_"), "{text}");
+            }
+            other => return Err(format!("the fourth writer is refused: {other:?}").into()),
+        }
+    }
     Ok(())
 }
+
 impl Resources for Host {
     fn memory(&self) -> std::io::Result<MemorySample> {
         Ok(MemorySample {
@@ -2730,6 +2721,12 @@ pub(super) struct Fake {
     prepared: Cell<usize>,
     resumed: Cell<Option<AttemptId>>,
     prompt: RefCell<String>,
+    /// The outcome a decode reports; success when unset.
+    outcome: Option<Outcome>,
+    /// The answer a decode reports, instead of the captured stdout.
+    answer: Option<String>,
+    /// Partial-finish signals a decode reports.
+    partial: Vec<PartialSignal>,
 }
 
 #[test]
@@ -2798,16 +2795,173 @@ impl Providers for Fake {
         assert_eq!(applied, &route());
         self.decoded.set(self.decoded.get() + 1);
         Ok(Decoded {
-            outcome: Outcome::Succeeded,
-            result: String::from_utf8_lossy(stdout).into_owned(),
-            complete: true,
+            outcome: self.outcome.unwrap_or(Outcome::Succeeded),
+            result: self
+                .answer
+                .clone()
+                .unwrap_or_else(|| String::from_utf8_lossy(stdout).into_owned()),
+            complete: self
+                .outcome
+                .is_none_or(|outcome| outcome == Outcome::Succeeded),
             observed_route: self.observed.clone(),
             usage: UsageRecord::default(),
             session: None,
             reason: None,
+            partial_signals: self.partial.clone(),
         })
     }
 }
+#[test]
+fn a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    // A hung provider's partial output, then the guardian's stop and kill.
+    artifacts::seal(&dir, "stdout.log", b"half an answer", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    observed.termination = Some(Termination::Signal(9));
+    observed.stop_reason = Some(provenant_supervisor::machine::StopReason::WallDeadline);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        outcome: Some(Outcome::Failed),
+        ..Fake::default()
+    };
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    let AttemptState::Terminal {
+        outcome, reason, ..
+    } = record.state
+    else {
+        return Err("not terminal".into());
+    };
+    assert_eq!(outcome, Outcome::TimedOut);
+    assert_eq!(
+        reason.as_deref(),
+        Some("runtime deadline exceeded: provider stopped after 3600s")
+    );
+    Ok(())
+}
+
+/// Settle one attempt whose provider reported `outcome` and `signals`, with
+/// `answer` as its final answer, and return the committed record.
+fn settle_with(
+    answer: &str,
+    outcome: Option<Outcome>,
+    signals: Vec<PartialSignal>,
+) -> std::result::Result<AttemptRecord, Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        outcome,
+        answer: Some(answer.into()),
+        partial: signals,
+        ..Fake::default()
+    };
+    Ok(store.finish(id, &dir, &observed, &fake, &call)?)
+}
+
+const STOPPED_EARLY: &str = "```handoff\n{\"schema_version\":1,\"status\":\"stopped_early\",\"note\":\"Parser done; renderer and tests remain.\"}\n```";
+
+#[test]
+fn a_terra_style_early_stop_settles_succeeded_but_flagged_partial() -> TestResult {
+    let record = settle_with(
+        &format!("Done: parser.\n\n{STOPPED_EARLY}\n"),
+        Some(Outcome::Succeeded),
+        Vec::new(),
+    )?;
+    let AttemptState::Terminal {
+        outcome, reason, ..
+    } = &record.state
+    else {
+        return Err("not terminal".into());
+    };
+    // Advisory: the outcome is not downgraded.
+    assert_eq!(*outcome, Outcome::Succeeded);
+    assert_eq!(record.partial_signals, [PartialSignal::DeclaredStop]);
+    let reason = reason.as_deref().ok_or("no reason")?;
+    assert!(
+        reason.contains("partial finish (declared_stop)"),
+        "{reason}"
+    );
+    assert!(reason.contains("renderer and tests remain"), "{reason}");
+    Ok(())
+}
+
+#[test]
+fn a_complete_finish_and_prose_about_remaining_work_are_not_flagged() -> TestResult {
+    for answer in [
+        "All of the brief is done.".to_owned(),
+        "Work remains in the renderer, which I did not finish.".to_owned(),
+        // A block quoted mid-answer is not the lane's closing statement.
+        format!("The contract says:\n{STOPPED_EARLY}\nI followed it and finished."),
+    ] {
+        let record = settle_with(&answer, Some(Outcome::Succeeded), Vec::new())?;
+        assert_eq!(record.partial_signals, [], "{answer}");
+        assert!(matches!(
+            record.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Succeeded,
+                reason: None,
+                ..
+            }
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn provider_stops_are_kept_and_failures_carry_no_flag() -> TestResult {
+    let record = settle_with(
+        "answer",
+        Some(Outcome::Succeeded),
+        vec![PartialSignal::ProviderStop],
+    )?;
+    assert_eq!(record.partial_signals, [PartialSignal::ProviderStop]);
+    // A failed lane is already a failure; a partial flag would only repeat it.
+    let record = settle_with(
+        &format!("{STOPPED_EARLY}\n"),
+        Some(Outcome::Failed),
+        vec![PartialSignal::ProviderStop],
+    )?;
+    assert_eq!(record.partial_signals, []);
+    Ok(())
+}
+
 fn two_tasks(concurrency: u64) -> PreparedRun {
     let mut run = input();
     let mut task = run.request.tasks[0].clone();
@@ -4414,6 +4568,7 @@ fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> 
         observed_route: Some(route()),
         usage: UsageRecord::default(),
         session: None,
+        partial_signals: Vec::new(),
     };
     store.publish_terminal(terminal, 1, &publication, &observed, &call)?;
     assert!(!terminal_tmp.exists());
@@ -7123,7 +7278,12 @@ fn admission_below_the_floor_reclaims_build_output_and_then_admits() -> TestResu
         let result = store.admit(id, &attempt, &disk, &clock, &cancel);
         assert_eq!(disk.reclaims.get(), 1, "one attempt per refusal window");
         if helps {
-            assert!(matches!(result?.state, AttemptState::Running { .. }));
+            assert_eq!(
+                result?.state,
+                AttemptState::Running {
+                    extra: Default::default()
+                }
+            );
         } else {
             assert!(matches!(
                 result,

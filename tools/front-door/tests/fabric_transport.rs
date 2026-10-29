@@ -2535,7 +2535,10 @@ fn silence_knob_controls_capture_plan_observations() -> Result {
             &knobs,
             json!({"kind":"model","provider":"codex","model":"fixture"}),
         )?;
-        let plan = provenant_run::capture_plan(&request.tasks[0]);
+        let plan = provenant_run::capture_plan(
+            &request.tasks[0],
+            request.tasks[0].provider_timeout_seconds,
+        );
         assert_eq!(plan.silence_ms, threshold);
         assert!(!plan.silent(threshold - 1, Some(0)));
         assert!(plan.silent(threshold, Some(0)));
@@ -3433,8 +3436,10 @@ fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
     }
     let status_of_stderr = status;
     let (status, tail) = json_command(&rig, &["output", &target, "--tail", "5", "--json"])?;
-    assert_ne!(status, 0);
-    assert_eq!(tail["error"]["code"], "UNSUPPORTED", "{tail}");
+    // Peer artifacts support `--tail`; it reads the default part, which exists
+    // even when the sandbox rejected the launch.
+    assert_eq!(status, 0, "{tail}");
+    assert_eq!(tail["data"]["host"], peer_text, "{tail}");
     // The peer's own attempt is reachable without a placement: `--host`, and
     // the `HOST/ATTEMPT` form of a graph `attempt_ref` (#1837).
     let by_host = format!("{peer}/{attempt}");

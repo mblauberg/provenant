@@ -788,6 +788,12 @@ enum Event {
         // streaming placeholders.
         #[serde(default)]
         usage: Option<Usage>,
+        /// Why the final turn ended; `end_turn` is a finished one.
+        #[serde(default)]
+        stop_reason: Option<String>,
+        /// Why the session ended; `completed` is a finished one.
+        #[serde(default)]
+        terminal_reason: Option<String>,
     },
     #[serde(other)]
     Other,
@@ -818,6 +824,14 @@ struct Usage {
     cache_read_input_tokens: Option<u64>,
     #[serde(default)]
     cache_creation_input_tokens: Option<u64>,
+    /// Cache writes split by time-to-live bucket.
+    #[serde(default)]
+    cache_creation: Option<CacheCreation>,
+}
+#[derive(Deserialize)]
+struct CacheCreation {
+    #[serde(default)]
+    ephemeral_1h_input_tokens: Option<u64>,
 }
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     Ok(match wire::<Event>(bytes)? {
@@ -883,6 +897,8 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             result,
             api_error_status,
             usage,
+            stop_reason,
+            terminal_reason,
         } => {
             let mut events = vec![E::Session(session_id)];
             if let Some(usage) = usage {
@@ -891,6 +907,9 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                     output: usage.output_tokens,
                     cache_read: usage.cache_read_input_tokens,
                     cache_write: usage.cache_creation_input_tokens,
+                    cache_write_1h: usage
+                        .cache_creation
+                        .and_then(|split| split.ephemeral_1h_input_tokens),
                 });
             }
             if is_error || subtype != "success" {
@@ -908,6 +927,19 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             } else {
                 if let Some(result) = result {
                     events.push(E::Text(result));
+                }
+                // A success that stopped for another reason than finishing its
+                // turn is still a partial piece of work.
+                let early = stop_reason
+                    .filter(|reason| !matches!(reason.as_str(), "end_turn" | "stop_sequence"))
+                    .map(|reason| format!("stop_reason {reason}"))
+                    .or_else(|| {
+                        terminal_reason
+                            .filter(|reason| reason != "completed")
+                            .map(|reason| format!("terminal_reason {reason}"))
+                    });
+                if let Some(reason) = early {
+                    events.push(E::EarlyStop { reason });
                 }
                 events.push(E::Terminal);
             }

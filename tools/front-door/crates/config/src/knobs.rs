@@ -415,3 +415,17 @@ mod chair_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod ceiling_tests {
+    use super::*;
+    #[test]
+    fn registry_runtime_deadline_maximum_is_the_lane_ceiling() {
+        let registry: Value = serde_json::from_str(REGISTRY).unwrap();
+        assert_eq!(
+            registry["provider_updates"]["runtime_deadline_seconds"]["max"],
+            provenant_core::MAX_LANE_RUNTIME_SECONDS
+        );
+    }
+}

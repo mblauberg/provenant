@@ -1,5 +1,4 @@
-## Fixes
+## Behaviour changes
+### Fabric and MCP
 
-- Fabric run listings now return compact attempt summaries, newest queued first.
-  Follow `next_after` to page towards older attempts and use `op: status` for
-  the full attempt record, including usage and execution evidence.
+- Fabric run listings now return compact attempt summaries, newest first. Use `next_after` to page back and `op: status` for the full record (#1937).

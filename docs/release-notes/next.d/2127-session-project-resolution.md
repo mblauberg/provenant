@@ -1,3 +1,4 @@
 ## Fixes
+### Chair, inbox and console
 
-- Session saves require a Git checkout from the working directory or `--project`, refuse conflicting selections and existing registrations in another project, and name the selected project in successful output.
+- Session saves now require a Git checkout or `--project`, refuse conflicting project selections, and name the selected project in the output (#2127).

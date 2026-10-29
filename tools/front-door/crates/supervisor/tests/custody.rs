@@ -31,6 +31,11 @@ const S2_IGNORE_CHILD_REGISTRY: &str = "s2-ignore-child-registry";
 const S2_SUPPRESSED_REGISTRY_READ: &str = "s2-registry-suppressed-read";
 
 const S2_DISK_PRESSURE: &str = "s2-disk-pressure";
+/// Seconds the guardian's wall clock jumps forward after launch, as a sleeping
+/// host's does while its monotonic clock stands still.
+const S2_WALL_JUMP: &str = "s2-wall-jump-seconds";
+/// Present once the jump has happened.
+const S2_WALL_JUMP_NOW: &str = "s2-wall-jump-now";
 const S2_DISK_SAMPLED: &str = "s2-disk-sampled";
 
 struct MarkerDiskPressure {
@@ -2177,6 +2182,40 @@ fn wall_deadline_is_the_execution_bound(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A host that slept through most of the deadline: the monotonic clock saw a
+/// few seconds, the wall clock hours. The attempt still stops as a timeout.
+fn a_host_sleep_cannot_extend_the_wall_deadline(root: &Path) -> Result<()> {
+    let home = root.join("HOME");
+    std::fs::create_dir_all(&home)?;
+    std::fs::write(home.join(S2_WALL_JUMP), b"7200")?;
+    let socket = root.join("sleep.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (_writer, handle) = start(
+        root,
+        "sleep",
+        "socket-blocked",
+        &[socket.into_os_string()],
+        CapturePlan {
+            // An hour of monotonic time would not pass inside this test.
+            wall_ms: 3_600_000,
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..CapturePlan::default()
+        },
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    // The host sleeps: the wall clock moves two hours, the monotonic one not at all.
+    std::fs::write(home.join(S2_WALL_JUMP_NOW), b"asleep")?;
+    let exit = exited(&handle)?;
+    assert_eq!(exit.stop_reason, Some(StopReason::WallDeadline));
+    assert_eq!(
+        exit.termination,
+        Some(provenant_os::exec::Termination::Signal(9))
+    );
+    Ok(())
+}
+
 type Case = (&'static str, fn(&Path) -> Result<()>);
 const CASES: &[Case] = &[
     (
@@ -2327,6 +2366,10 @@ const CASES: &[Case] = &[
         "checkpoint_enospc_while_provider_lives_never_signals_it",
         checkpoint_enospc_while_provider_lives_never_signals_it,
     ),
+    (
+        "a_host_sleep_cannot_extend_the_wall_deadline",
+        a_host_sleep_cannot_extend_the_wall_deadline,
+    ),
     ("natural_exit_races_cancel", natural_exit_races_cancel),
     (
         "immediate_exit_identity_survives_absent_observation",
@@ -2388,6 +2431,22 @@ fn main() -> Result<()> {
         let production_shape = home.join(S2_PRODUCTION_SHAPE).is_file();
         let store = FileNestedChildren { home: home.clone() };
         let refusal_marker = home.join(S2_REFUSE_ADMISSION);
+        let jump_marker = home.join(S2_WALL_JUMP);
+        let jump = std::fs::read_to_string(&jump_marker)
+            .ok()
+            .and_then(|text| text.trim().parse::<i64>().ok());
+        // The jump starts once the test has the provider connected: a stop at
+        // once would end it before it could.
+        let sleeping = home.join(S2_WALL_JUMP_NOW);
+        let jumping = move || {
+            let now = provenant_core::Clock::wall_now(&SystemClock::new()).ok()?;
+            let offset = if sleeping.exists() {
+                jump.unwrap_or(0)
+            } else {
+                0
+            };
+            provenant_core::WallTime::from_micros(now.as_micros() + offset * 1_000_000).ok()
+        };
         let registry = FileChildRegistry { home };
         let observer = CensusGateObserver;
         let disk = std::env::var_os("PROVENANT_STATE_DIR")
@@ -2413,6 +2472,7 @@ fn main() -> Result<()> {
                 children: (!production_shape).then_some(&registry as &dyn ChildRegistry),
                 nested_children: production_shape.then_some(&store as &dyn NestedChildStore),
                 observer: Some(&observer),
+                wall_clock: jump.is_some().then_some(&jumping as &dyn Fn() -> Option<_>),
                 disk: disk
                     .as_ref()
                     .map(|disk| disk as &dyn provenant_supervisor::DiskPressure),

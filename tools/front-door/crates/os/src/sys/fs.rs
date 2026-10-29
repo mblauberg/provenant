@@ -572,6 +572,12 @@ pub fn try_flock(file: &File, mode: crate::fs::LockMode) -> io::Result<()> {
     // safe owner can retry within its WaitBudget.
     status(unsafe { libc::flock(file.as_raw_fd(), op) })
 }
+/// Whether the descriptor closes on exec, so no child can inherit it.
+pub fn is_cloexec(file: &File) -> bool {
+    // SAFETY: borrowed live fd; F_GETFD reads its descriptor flags only.
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+    flags >= 0 && flags & libc::FD_CLOEXEC != 0
+}
 pub fn effective_uid() -> u32 {
     // SAFETY: geteuid reads only the calling process's effective UID and has no
     // pointer, ownership, lifetime or concurrency requirements.

@@ -39,6 +39,14 @@ fn reviews(results: &[&str]) -> FakeOwner {
     }
 }
 
+/// A host ceiling of four, so a third round is refused.
+fn tight_limits() -> crate::config::GraphLimits {
+    crate::config::GraphLimits {
+        expansion_depth: 4,
+        ..Default::default()
+    }
+}
+
 fn extension(
     document: &GraphDocument,
     owner: &mut FakeOwner,
@@ -49,11 +57,51 @@ fn extension(
         document,
         owner,
         journal,
-        &Default::default(),
+        &tight_limits(),
         &Default::default(),
         values,
     )
     .unwrap()
+}
+
+#[test]
+fn loop_composite_review_pins_each_repaired_commit() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":"repair-composite","nodes":[{
+            "id":"repair","kind":"loop","access":"read_only",
+            "loop":{"max_rounds":2,"until":"accepted","body":[
+                {"id":"writer","access":"worktree_write","worktree":"/fixture/writer", "prompt":"repair","route":{"alias":"senior"}},
+                {"id":"council","kind":"composite","access":"read_only", "depends_on":["writer"],
+                    "source":{"type":"node","node":"writer"}, "composite":{"nodes":[
+                        {"id":"lens","access":"read_only","prompt":"review pinned repair", "route":{"alias":"senior"},
+                            "depends_on":["writer"],"source":{"type":"node","node":"writer"}}
+                    ],"exports":[{"node":"lens","outputs":["verdict"]}]}},
+                {"id":"accepted","kind":"gate","access":"read_only","depends_on":["council"],
+                    "inputs":[{"node":"council","outputs":["verdict"]}],
+                    "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+            ]}
+        }]
+    })).unwrap();
+    let commit1 = "1".repeat(40);
+    let commit2 = "2".repeat(40);
+    let writer = |commit: &str| AttemptObservation::Terminal {
+        attempt_ref: None, outcome: AttemptOutcome::Succeeded, launched: true,
+        result: None, result_warning: None, result_path: None, branch: None,
+        commit: Some(commit.to_owned()),
+    };
+    let mut owner = FakeOwner {
+        observations: [writer(&commit1), terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: FAIL"),
+            writer(&commit2), terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: PASS")].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.source_commits, vec![None, Some(commit1), None, Some(commit2)]);
+    assert_eq!(owner.calls[1].0.node_id, "repair--r1--council--lens");
+    assert_eq!(owner.calls[3].0.node_id, "repair--r2--council--lens");
+    assert_eq!(advance(&document, &mut FakeOwner::default(), &mut journal).unwrap().checkpoint, run.checkpoint);
 }
 
 #[test]
@@ -926,9 +974,9 @@ fn loop_default_host_allows_one_to_two_round_extension() {
 }
 
 #[test]
-fn loop_default_host_rejects_third_round_before_saving_and_can_accept() {
+fn loop_host_ceiling_rejects_third_round_before_saving_and_can_accept() {
     let document = fixture("exhaust");
-    let limits = crate::config::GraphLimits::default();
+    let limits = tight_limits();
     let mut journal = MemoryJournal::default();
     let paused = advance_with_budget(
         &document,
@@ -968,7 +1016,7 @@ fn loop_default_host_rejects_third_round_before_saving_and_can_accept() {
 }
 
 #[test]
-fn loop_inbox_extension_respects_default_ceiling_and_closes_rejected_ask() {
+fn loop_inbox_extension_respects_host_ceiling_and_closes_rejected_ask() {
     let mut document = fixture("exhaust");
     document.nodes[0]
         .loop_body
@@ -980,7 +1028,7 @@ fn loop_inbox_extension_respects_default_ceiling_and_closes_rejected_ask() {
         response: Ok(Some(LoopDecision::Extend { rounds: 1 })),
         closed: vec![],
     };
-    let limits = crate::config::GraphLimits::default();
+    let limits = tight_limits();
     let mut journal = MemoryJournal::default();
     let paused = advance_with_budget(
         &document,

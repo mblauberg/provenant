@@ -1,3 +1,4 @@
 ## Behaviour changes
+### Accounts, quota and routing
 
-- Refuse OpenCode Go models below the configurable monthly allowance floor, or with an unknown allowance, across pool and exact selection. The default floor is $60; zero disables it. Zen models are unaffected. An exact `--model opencode/opencode-go/claude-haiku-5-5` is refused by default because its allowance is $15.
+- OpenCode Go models are now refused when their monthly allowance is unknown or below a configurable floor (default $60; zero disables it). For example, `--model opencode/opencode-go/claude-haiku-5-5` is refused by default because its allowance is $15 (#1995).

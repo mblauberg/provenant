@@ -6,12 +6,19 @@ use provenant_os::{
     fs::Directory,
 };
 use std::{
+    collections::BTreeSet,
     ffi::OsString,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 const CONTEXT_LIMIT: usize = 1024 * 1024;
+/// Per-file slices written beside the whole patch. A larger change keeps the
+/// whole patch and the stat, and the index counts the files left without a slice.
+const SLICE_LIMIT: usize = 400;
+const SLICE_DIRECTORY: &str = "git-diff-slices";
+const SLICE_INDEX: &str = "index.txt";
+const SLICE_INDEX_LIMIT: u64 = 128 * 1024;
 
 pub fn continuation_history(cwd: &Path, base: &str) -> Result<String> {
     let git = provenant_os::git::git_executable().ok_or(RunError::Validation("Git unavailable"))?;
@@ -434,8 +441,10 @@ pub struct GitContext {
     head: String,
     log: CapturedStream,
     diff: CapturedStream,
+    stat: CapturedStream,
     log_timed_out: bool,
     diff_timed_out: bool,
+    stat_timed_out: bool,
 }
 impl GitContext {
     /// Capture a specified review head on the host.
@@ -484,12 +493,10 @@ impl GitContext {
             CONTEXT_LIMIT,
             &env,
         )?;
-        let (diff, diff_timed_out) = read_git_with_env(
-            executor,
-            git,
-            cwd,
-            &[
+        let diff_args = |format: &'static str| {
+            [
                 "diff",
+                format,
                 "--text",
                 "--no-renames",
                 "--no-ext-diff",
@@ -500,7 +507,22 @@ impl GitContext {
                 "--no-relative",
                 &range,
                 "--",
-            ],
+            ]
+        };
+        let (diff, diff_timed_out) = read_git_with_env(
+            executor,
+            git,
+            cwd,
+            &diff_args("--patch"),
+            CONTEXT_LIMIT,
+            &env,
+        )?;
+        // Wide enough that long paths are not shortened with `...`.
+        let (stat, stat_timed_out) = read_git_with_env(
+            executor,
+            git,
+            cwd,
+            &diff_args("--stat=240,200,1000"),
             CONTEXT_LIMIT,
             &env,
         )?;
@@ -509,8 +531,10 @@ impl GitContext {
             head,
             log,
             diff,
+            stat,
             log_timed_out,
             diff_timed_out,
+            stat_timed_out,
         })
     }
 
@@ -528,29 +552,240 @@ impl GitContext {
             &self.diff.bytes,
             CONTEXT_LIMIT as u64,
         )?;
+        seal(
+            directory,
+            "git-diff.stat",
+            &self.stat.bytes,
+            CONTEXT_LIMIT as u64,
+        )?;
+        let slices = self.write_slices(directory)?;
+        let diff_cut = self.diff.truncated || self.diff_timed_out;
         let metadata = serde_json::to_vec(&serde_json::json!({
             "base": self.base,
             "head": self.head,
             "max_bytes_per_file": CONTEXT_LIMIT,
             "log_truncated": self.log.truncated,
             "diff_truncated": self.diff.truncated,
-            "timed_out": self.log_timed_out || self.diff_timed_out,
+            "stat_truncated": self.stat.truncated,
+            "timed_out": self.log_timed_out || self.diff_timed_out || self.stat_timed_out,
             "log_timed_out": self.log_timed_out,
             "diff_timed_out": self.diff_timed_out,
+            "stat_timed_out": self.stat_timed_out,
+            "slices": slices.written,
+            "slices_omitted": slices.omitted,
+            "slices_complete": !diff_cut && slices.omitted == 0,
         }))
         .map_err(execution_error)?;
         seal(directory, "git-context.json", &metadata, 4096)?;
+        let slice_directory = scratch.join(SLICE_DIRECTORY);
+        let incomplete = if diff_cut || slices.omitted > 0 {
+            self.incomplete_note(&slices.paths)
+        } else {
+            String::new()
+        };
         Ok(format!(
-            "Host-written Git context for {}..{}: log at {}; diff at {}; \
-             bounds, truncation and timeouts at {}. Read these files for the review boundary; \
-             they cover committed changes only.\n",
+            "Host-written Git context for {}..{}: log at {}; per-file diff stat at {}; \
+             one patch slice per changed file in {} (index at {}); whole diff at {}; \
+             bounds, truncation and timeouts at {}. The stat and slices are navigation aids, \
+             not the scope of the review. Start from the stat and read the slice for each file \
+             you examine, then read the surrounding code in the repository: callers and \
+             callees, existing utilities the change should reuse, and whether it fits the \
+             architecture. Open the whole diff only when a question spans files. These files \
+             cover committed changes only.{}\n",
             self.base,
             self.head,
             scratch.join("git-log.txt").display(),
+            scratch.join("git-diff.stat").display(),
+            slice_directory.display(),
+            slice_directory.join(SLICE_INDEX).display(),
             scratch.join("git-diff.patch").display(),
             scratch.join("git-context.json").display(),
+            incomplete,
         ))
     }
+
+    /// Say the slices are incomplete and name the changed files from the stat
+    /// that have no slice, so a reviewer reads those from the whole patch or
+    /// the checkout.
+    fn incomplete_note(&self, sliced: &BTreeSet<Vec<u8>>) -> String {
+        const LISTED: usize = 50;
+        let missing: Vec<String> = stat_paths(&self.stat.bytes)
+            .into_iter()
+            .filter(|path| !sliced.contains(path))
+            .map(|path| String::from_utf8_lossy(&path).into_owned())
+            .collect();
+        let mut note = String::from(
+            " The slices are incomplete: the whole patch was cut by its bounds or the slice \
+             limit.",
+        );
+        if missing.is_empty() {
+            note.push_str(
+                " Read any file you cannot find a slice for from the whole patch or the checkout.",
+            );
+        } else {
+            note.push_str(
+                " These changed files have no slice; read them from the whole patch or the \
+                 checkout: ",
+            );
+            note.push_str(
+                &missing
+                    .iter()
+                    .take(LISTED)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            if missing.len() > LISTED {
+                note.push_str(&format!(
+                    ", and {} more in the stat",
+                    missing.len() - LISTED
+                ));
+            }
+            note.push('.');
+        }
+        if self.stat.truncated || self.stat_timed_out {
+            note.push_str(" The stat is itself incomplete, so other files may be missing from it.");
+        }
+        note
+    }
+
+    /// Split the whole patch into one file per changed path, with an index
+    /// naming each slice, so a reviewer reads the files it needs and not the
+    /// whole patch again.
+    fn write_slices(&self, directory: &Directory) -> Result<SliceCounts> {
+        let name = std::ffi::OsStr::new(SLICE_DIRECTORY);
+        match directory.mkdir(name, 0o700) {
+            Ok(()) => {}
+            Err(error) if error.is_exists() => {}
+            Err(error) => return Err(error.into()),
+        }
+        let slices = directory.open_verified_directory(name)?;
+        let files = split_patch(&self.diff.bytes);
+        let mut index = String::from(
+            "# One slice per changed file, in patch order: slice, bytes, path.\n\
+             # The stat lists every changed file. A file missing here was cut from the whole\n\
+             # patch by its bounds, or left without a slice by the slice limit.\n",
+        );
+        if self.diff.truncated || self.diff_timed_out {
+            index.push_str("# The whole patch is incomplete: the last slice may be partial.\n");
+        }
+        let mut written = 0;
+        let mut paths = BTreeSet::new();
+        for (number, file) in files.iter().take(SLICE_LIMIT).enumerate() {
+            let name = format!("{:04}-{}.patch", number + 1, slice_label(&file.path));
+            seal(&slices, &name, file.bytes, CONTEXT_LIMIT as u64)?;
+            index.push_str(&format!(
+                "{name}\t{}\t{}\n",
+                file.bytes.len(),
+                String::from_utf8_lossy(&file.path)
+            ));
+            paths.insert(file.path.clone());
+            written += 1;
+        }
+        let omitted = files.len() - written;
+        if omitted > 0 {
+            index.push_str(&format!(
+                "# {omitted} more changed files have no slice; read them from the whole patch.\n"
+            ));
+        }
+        seal(&slices, SLICE_INDEX, index.as_bytes(), SLICE_INDEX_LIMIT)?;
+        Ok(SliceCounts {
+            written,
+            omitted,
+            paths,
+        })
+    }
+}
+
+struct SliceCounts {
+    written: usize,
+    omitted: usize,
+    /// The path of each written slice, as the patch header printed it.
+    paths: BTreeSet<Vec<u8>>,
+}
+
+/// The changed paths a `git diff --stat` lists: each line up to its ` | `.
+fn stat_paths(stat: &[u8]) -> Vec<Vec<u8>> {
+    stat.split(|byte| *byte == b'\n')
+        .filter_map(|line| {
+            let at = line.windows(3).rposition(|window| window == b" | ")?;
+            let path = line[..at].trim_ascii();
+            (!path.is_empty()).then(|| path.to_vec())
+        })
+        .collect()
+}
+
+struct FileSlice<'a> {
+    /// The path as Git printed it in the header, quoted when Git quoted it.
+    path: Vec<u8>,
+    bytes: &'a [u8],
+}
+
+/// Cut a patch at its `diff --git` headers. Every body line starts with a
+/// space, `+`, `-`, `@` or a backslash, so a line beginning `diff --git ` is
+/// always a header.
+fn split_patch(patch: &[u8]) -> Vec<FileSlice<'_>> {
+    const HEADER: &[u8] = b"diff --git ";
+    let mut starts = Vec::new();
+    let mut offset = 0;
+    for line in patch.split_inclusive(|byte| *byte == b'\n') {
+        if line.starts_with(HEADER) {
+            starts.push(offset);
+        }
+        offset += line.len();
+    }
+    starts
+        .iter()
+        .enumerate()
+        .map(|(at, start)| {
+            let end = starts.get(at + 1).copied().unwrap_or(patch.len());
+            let bytes = &patch[*start..end];
+            let header = bytes
+                .split(|byte| *byte == b'\n')
+                .next()
+                .unwrap_or_default();
+            FileSlice {
+                path: header_path(&header[HEADER.len()..]),
+                bytes,
+            }
+        })
+        .collect()
+}
+
+/// The path of a `diff --git a/P b/P` header. Renames are off, so both sides
+/// name the same path.
+fn header_path(rest: &[u8]) -> Vec<u8> {
+    if let Some(quoted) = rest.strip_prefix(b"\"a/") {
+        let mut at = 0;
+        while let Some(byte) = quoted.get(at) {
+            at += if *byte == b'\\' { 2 } else { 1 };
+            if *byte == b'"' {
+                break;
+            }
+        }
+        return [b"\"", &quoted[..at.min(quoted.len())]].concat();
+    }
+    // `a/P b/P`: the two sides are equally long.
+    let side = rest.len() / 2;
+    if rest.len() % 2 == 1 && rest.get(side) == Some(&b' ') && rest[..side].starts_with(b"a/") {
+        return rest[2..side].to_vec();
+    }
+    rest.to_vec()
+}
+
+/// A short, filesystem-safe tail of the path for the slice name.
+fn slice_label(path: &[u8]) -> String {
+    let text: Vec<char> = String::from_utf8_lossy(path)
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    text[text.len().saturating_sub(80)..].iter().collect()
 }
 
 #[cfg(test)]
@@ -754,7 +989,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(scratch.path().join("git-context.json"))?)?;
         assert_eq!(metadata["log_truncated"], false);
         assert_eq!(metadata["diff_truncated"], false);
-        assert_eq!(executor.0.lock().map_err(|_| "calls poisoned")?.len(), 8);
+        assert_eq!(executor.0.lock().map_err(|_| "calls poisoned")?.len(), 9);
         Ok(())
     }
 
@@ -1230,6 +1465,216 @@ mod tests {
             Err(RunError::InvalidBase(_))
         ));
         assert!(GitContext::capture(&binary, &root, "absent-base").is_err());
+        Ok(())
+    }
+
+    fn context_with_diff(diff: &[u8], truncated: bool) -> GitContext {
+        let captured = |bytes: &[u8], truncated| CapturedStream {
+            bytes: bytes.to_vec(),
+            truncated,
+            ..Default::default()
+        };
+        GitContext {
+            base: OID.into(),
+            head: OID.into(),
+            log: captured(b"log", false),
+            diff: captured(diff, truncated),
+            stat: captured(b" stat\n", false),
+            log_timed_out: false,
+            diff_timed_out: false,
+            stat_timed_out: false,
+        }
+    }
+
+    fn patch_for(path: &str, body: &str) -> String {
+        format!(
+            "diff --git a/{path} b/{path}\nindex 111..222 100644\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-{body}\n+{body}!\n"
+        )
+    }
+
+    #[test]
+    fn patch_headers_name_plain_quoted_and_odd_paths() {
+        let plain = patch_for("src/a b.rs", "x");
+        let quoted = "diff --git \"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"\nindex 1..2\n";
+        let tricky =
+            "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-diff --git a/fake b/fake\n+kept\n";
+        let patch = format!("{plain}{quoted}{tricky}");
+        let files = split_patch(patch.as_bytes());
+        let paths: Vec<_> = files
+            .iter()
+            .map(|file| String::from_utf8_lossy(&file.path).into_owned())
+            .collect();
+        assert_eq!(paths, ["src/a b.rs", "\"caf\\303\\251.txt\"", "x"]);
+        let joined: Vec<u8> = files.iter().flat_map(|file| file.bytes.to_vec()).collect();
+        assert_eq!(joined, patch.as_bytes());
+        assert!(split_patch(b"").is_empty());
+        assert_eq!(slice_label(b"src/a b.rs"), "src_a_b.rs");
+        assert_eq!(slice_label("é".repeat(100).as_bytes()).chars().count(), 80);
+    }
+
+    #[test]
+    fn slices_cover_every_file_and_the_index_names_them() -> TestResult {
+        let patch = ["a.rs", "dir/b.rs", "c.md"]
+            .map(|path| patch_for(path, path))
+            .concat();
+        let context = context_with_diff(patch.as_bytes(), false);
+        let scratch = tempfile::tempdir()?;
+        let prompt = context.write_to(&Directory::open_anchor(scratch.path())?, scratch.path())?;
+        assert_eq!(
+            std::fs::read(scratch.path().join("git-diff.stat"))?,
+            b" stat\n"
+        );
+        let slices = scratch.path().join(SLICE_DIRECTORY);
+        let index = std::fs::read_to_string(slices.join(SLICE_INDEX))?;
+        let rows: Vec<_> = index
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        assert_eq!(rows.len(), 3, "{index}");
+        let mut joined = Vec::new();
+        for (row, path) in rows.iter().zip(["a.rs", "dir/b.rs", "c.md"]) {
+            let fields: Vec<_> = row.split('\t').collect();
+            assert_eq!(fields[2], path);
+            let bytes = std::fs::read(slices.join(fields[0]))?;
+            assert_eq!(bytes.len().to_string(), fields[1]);
+            assert!(
+                String::from_utf8(bytes.clone())?.starts_with(&format!("diff --git a/{path} "))
+            );
+            joined.extend(bytes);
+        }
+        assert_eq!(joined, patch.as_bytes());
+        assert!(rows[1].starts_with("0002-dir_b.rs.patch\t"), "{index}");
+        for needle in [
+            scratch.path().join("git-diff.stat"),
+            slices.clone(),
+            slices.join(SLICE_INDEX),
+            scratch.path().join("git-diff.patch"),
+        ] {
+            assert!(prompt.contains(&needle.display().to_string()), "{prompt}");
+        }
+        assert!(prompt.contains("navigation aids"), "{prompt}");
+        assert!(prompt.contains("surrounding code"), "{prompt}");
+        assert!(!prompt.contains("incomplete"), "{prompt}");
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(scratch.path().join("git-context.json"))?)?;
+        assert_eq!(metadata["slices"], 3);
+        assert_eq!(metadata["slices_omitted"], 0);
+        assert_eq!(metadata["slices_complete"], true);
+        assert_eq!(metadata["stat_truncated"], false);
+        Ok(())
+    }
+
+    #[test]
+    fn slices_stop_at_their_limit_and_say_so() -> TestResult {
+        let patch: String = (0..SLICE_LIMIT + 5)
+            .map(|n| patch_for(&format!("f{n}.txt"), "x"))
+            .collect();
+        let context = context_with_diff(patch.as_bytes(), false);
+        let scratch = tempfile::tempdir()?;
+        context.write_to(&Directory::open_anchor(scratch.path())?, scratch.path())?;
+        let slices = scratch.path().join(SLICE_DIRECTORY);
+        let index = std::fs::read_to_string(slices.join(SLICE_INDEX))?;
+        assert!(
+            index.contains("# 5 more changed files have no slice"),
+            "{index}"
+        );
+        // The limit plus the index.
+        assert_eq!(std::fs::read_dir(&slices)?.count(), SLICE_LIMIT + 1);
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(scratch.path().join("git-context.json"))?)?;
+        assert_eq!(metadata["slices"], SLICE_LIMIT);
+        assert_eq!(metadata["slices_omitted"], 5);
+        assert_eq!(metadata["slices_complete"], false);
+        Ok(())
+    }
+
+    #[test]
+    fn an_incomplete_prompt_names_the_changed_files_without_a_slice() -> TestResult {
+        let patch: String = (0..SLICE_LIMIT + 2)
+            .map(|n| patch_for(&format!("f{n}.txt"), "x"))
+            .collect();
+        let mut context = context_with_diff(patch.as_bytes(), false);
+        let stat: String = (0..SLICE_LIMIT + 2)
+            .map(|n| format!(" f{n}.txt | 2 +-\n"))
+            .chain([" 402 files changed, 402 insertions(+)\n".to_owned()])
+            .collect();
+        context.stat.bytes = stat.into_bytes();
+        let scratch = tempfile::tempdir()?;
+        let prompt = context.write_to(&Directory::open_anchor(scratch.path())?, scratch.path())?;
+        assert!(prompt.contains("The slices are incomplete"), "{prompt}");
+        let last = SLICE_LIMIT + 1;
+        assert!(
+            prompt.contains(&format!("f{}.txt, f{last}.txt.", SLICE_LIMIT)),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("f0.txt,"), "{prompt}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_truncated_patch_marks_its_last_slice_partial() -> TestResult {
+        let patch = patch_for("a.rs", "x");
+        let context = context_with_diff(&patch.as_bytes()[..patch.len() - 6], true);
+        let scratch = tempfile::tempdir()?;
+        context.write_to(&Directory::open_anchor(scratch.path())?, scratch.path())?;
+        let index =
+            std::fs::read_to_string(scratch.path().join(SLICE_DIRECTORY).join(SLICE_INDEX))?;
+        assert!(index.contains("the last slice may be partial"), "{index}");
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(scratch.path().join("git-context.json"))?)?;
+        assert_eq!(metadata["slices_complete"], false);
+        Ok(())
+    }
+
+    #[test]
+    fn real_git_stat_and_slices_match_the_whole_patch() -> TestResult {
+        let fixture = small_history()?;
+        std::fs::create_dir_all(fixture.root.join("deep/dir"))?;
+        std::fs::write(fixture.root.join("deep/dir/new file.txt"), "new\n")?;
+        std::fs::write(fixture.root.join("second.txt"), "second\n")?;
+        git(
+            &fixture.executor,
+            &fixture.binary,
+            &fixture.root,
+            &["add", "."],
+        )?;
+        git(
+            &fixture.executor,
+            &fixture.binary,
+            &fixture.root,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                "more files",
+            ],
+        )?;
+        let context = GitContext::capture(&fixture.binary, &fixture.root, &fixture.base)?;
+        let scratch = tempfile::tempdir()?;
+        context.write_to(&Directory::open_anchor(scratch.path())?, scratch.path())?;
+        let stat = std::fs::read_to_string(scratch.path().join("git-diff.stat"))?;
+        for path in ["deep/dir/new file.txt", "second.txt"] {
+            assert!(stat.contains(path), "{stat}");
+        }
+        assert!(stat.contains("3 files changed"), "{stat}");
+        let slices = scratch.path().join(SLICE_DIRECTORY);
+        let index = std::fs::read_to_string(slices.join(SLICE_INDEX))?;
+        let mut joined = Vec::new();
+        for row in index.lines().filter(|line| !line.starts_with('#')) {
+            joined.extend(std::fs::read(
+                slices.join(row.split('\t').next().unwrap_or("")),
+            )?);
+        }
+        assert_eq!(
+            joined,
+            std::fs::read(scratch.path().join("git-diff.patch"))?
+        );
         Ok(())
     }
 }

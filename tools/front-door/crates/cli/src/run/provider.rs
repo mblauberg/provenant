@@ -92,6 +92,29 @@ fn prepare_with(
     locate: impl Fn(&str) -> Result<PathBuf, String>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
 ) -> Result<run::PreparedLaunch, String> {
+    prepare_candidates(
+        registry,
+        task,
+        prompt_text,
+        paths,
+        resume,
+        &locate,
+        fixture_token,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_candidates(
+    registry: &Registry<'_>,
+    task: &run::TaskRequest,
+    prompt_text: &str,
+    paths: &run::LaunchPaths,
+    resume: Option<&run::AttemptRecord>,
+    locate: &dyn Fn(&str) -> Result<PathBuf, String>,
+    fixture_token: Option<&provenant_providers::claude::OauthToken>,
+    redirected: bool,
+) -> Result<run::PreparedLaunch, String> {
     check_launch_prompt(prompt_text, paths, None)?;
     if task.fallback.is_empty()
         && let run::RequestedRoute::Model { model, .. } = &task.route
@@ -129,6 +152,11 @@ fn prepare_with(
         Some(writer) => writer.worktree.path().to_owned(),
         None => canonical(registry.cwd.ok_or("working directory is unavailable")?)?,
     };
+    if let (Some(writer), Some(head)) = (&writer, task.head.as_deref()) {
+        writer
+            .require_source(head.parse().map_err(|_| "invalid pinned writer source")?)
+            .map_err(|error| error.to_string())?;
+    }
     // Publishing is optional. Missing gh tools or configuration leave the
     // writer able to do local work without publishing credential access.
     let publishing_gh = (writer.is_some()
@@ -166,10 +194,11 @@ fn prepare_with(
         .map_err(|e| e.to_string())?;
     // Continue the applied decision rather than redrawing the named pool
     // using the new operation seed.
-    let request = match resume {
+    let mut request = match resume {
         Some(prior) => continuation_request(prior)?,
         None => route_request(task)?,
     };
+    request.intent = route_request(task)?.intent;
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
     let eligible = provenant_routing::probe_adapters(&request, &catalogue, &config.domains.routing)
         .map_err(|e| e.to_string())?;
@@ -404,6 +433,56 @@ fn prepare_with(
     }
     for (candidate, route) in candidates(resolved).into_iter().enumerate() {
         let label = format!("{}/{}", route.adapter, route.model);
+        let model_policy = config
+            .domains
+            .routing
+            .model_policy
+            .effective(
+                &provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?,
+                route.account_key.as_deref(),
+                jiff::Timestamp::now().as_second(),
+            )
+            .policy;
+        if !model_policy.permits(request.intent) {
+            reasons.push(skip(&label, SkipKind::Refused, "read-only model policy"));
+            continue;
+        }
+        // A child store is writable by its parent lane. Pick the reliable
+        // fallback before launch there, rather than trust a later retry record.
+        if paths.lane_depth > 1
+            && model_policy.result.check == Some(true)
+            && !request.intent.writes
+            && resume.is_none()
+        {
+            if redirected {
+                reasons.push(skip(
+                    &label,
+                    SkipKind::Refused,
+                    "restricted nested route needs a reliable read-only fallback",
+                ));
+                continue;
+            }
+            let fallback = nested_policy_fallback(task, &route, &model_policy)?;
+            let mut prepared = prepare_candidates(
+                registry,
+                &fallback,
+                prompt_text,
+                paths,
+                None,
+                locate,
+                fixture_token,
+                true,
+            )?;
+            prepared.skipped_routes.insert(
+                0,
+                skip(
+                    &label,
+                    SkipKind::Refused,
+                    "nested route selected its result-policy fallback before launch",
+                ),
+            );
+            return Ok(prepared);
+        }
         let Some(registration) = REGISTRY
             .iter()
             .find(|registration| registration.adapter.id() == route.adapter)
@@ -524,6 +603,7 @@ fn prepare_with(
             }
             None => prompt_text.to_owned(),
         };
+        let text = format!("{}\n\n{text}", model_policy.guidance());
         let prompt = match launch_prompt(&text, paths, state_root, adapter.id()) {
             Ok(prompt) => prompt,
             Err(error) => {
@@ -651,6 +731,37 @@ fn prepare_with(
                 continue;
             }
         };
+        let build_settings = config.domains.fabric.lanes.build_settings();
+        // Builds, not lanes, share the host's build slots: a `cargo` shim takes
+        // one around each compiling command. The host (this process, outside
+        // the sandbox) creates the slot files; the lane may only read and lock
+        // them. Memory is unreadable only on a host that cannot run lanes.
+        let cargo = home.join(".cargo/bin/cargo");
+        if spec.env.iter().any(|(name, _)| name == "CARGO_TARGET_DIR") && cargo.is_file() {
+            let total =
+                provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
+            let slots = build_settings.build_limit(total);
+            match provenant_os::build_slots::BuildSlots::provision(roots.state.as_path(), slots) {
+                Ok(()) => spec
+                    .configure_build_slots(
+                        scratch,
+                        &provenant_providers::BuildSlotGate {
+                            provenant: &provenant_executable,
+                            state: roots.state.as_path(),
+                            slots,
+                            wait_seconds: build_settings.build_wait().as_secs(),
+                            cargo: &cargo,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?,
+                // Build slots are fair sharing, not a boundary: without them
+                // the lane still runs, ungated.
+                #[allow(clippy::print_stderr)]
+                Err(error) => eprintln!(
+                    "provenant: build slots unavailable for this lane, building without them: {error}"
+                ),
+            }
+        }
         if !host_indexes_protected(
             roots.state.as_path(),
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
@@ -669,15 +780,19 @@ fn prepare_with(
                 spec.env.push(("PROVENANT_LANE_BASE".into(), base.into()));
             }
         }
-        let build_settings = config.domains.fabric.lanes.build_settings();
-        let jobs = build_settings.jobs();
         set_cargo_profile(&mut spec.env, &build_settings);
+        spec.env.extend(
+            model_policy
+                .launch_env(adapter.id())
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into())),
+        );
         set_cargo_jobs(
             &mut spec.env,
             registry
                 .host
                 .and_then(|host| host.cargo_build_jobs.as_deref()),
-            jobs,
+            build_settings.jobs(),
         );
         if adapter.id() == "claude" {
             spec.configure_claude_shell(scratch)
@@ -780,6 +895,48 @@ fn prepare_with(
         .map(|skipped| format!("{}: {}", skipped.route, skipped.detail))
         .collect::<Vec<_>>()
         .join("; "))
+}
+
+fn nested_policy_fallback(
+    task: &run::TaskRequest,
+    route: &ResolvedRoute,
+    policy: &provenant_routing::ModelPolicy,
+) -> Result<run::TaskRequest, String> {
+    if task.writer.is_some() || !task.access.write_roots.is_empty() {
+        return Err("model policy fallback requires read-only authority".into());
+    }
+    let fallback = task
+        .fallback
+        .first()
+        .cloned()
+        .or_else(|| {
+            policy.result.fallback.as_ref().map(|model| RouteRecord {
+                provider: Some(model.adapter().into()),
+                model: Some(model.as_str().into()),
+                effort: policy.result.fallback_effort.clone(),
+                ..Default::default()
+            })
+        })
+        .ok_or("restricted nested route has no result-policy fallback")?;
+    let model = provenant_routing::ModelId::parse(
+        fallback
+            .model
+            .as_deref()
+            .ok_or("policy fallback model missing")?,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut task = task.clone();
+    task.route = run::RequestedRoute::Model {
+        extra: Default::default(),
+        provider: model.adapter().into(),
+        model: model.as_str().into(),
+        effort: fallback.effort,
+    };
+    if model.adapter() != route.adapter {
+        task.account = None;
+    }
+    task.fallback.clear();
+    Ok(task)
 }
 
 fn set_cargo_jobs(
@@ -911,6 +1068,7 @@ fn continuation_request(
         );
     }
     Ok(provenant_routing::RouteRequest {
+        intent: Default::default(),
         choice: RouteChoice::Model(model),
         effort: applied.effort.clone(),
         fallback: Fallback::None,
@@ -2257,6 +2415,61 @@ pub fn prepare_fixture(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nested_result_policy_uses_a_reliable_route_without_broadening_authority()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_routing::{
+            Catalogue, Fallback, ModelId, RouteChoice, RouteIntent, RoutingConfig, RoutingContext,
+        };
+        let catalogue = Catalogue::bundled()?;
+        let config = RoutingConfig::default();
+        let model = ModelId::parse("agy/gemini-3.8-flash")?;
+        let route = provenant_routing::resolve(
+            &provenant_routing::RouteRequest {
+                intent: RouteIntent::default(),
+                choice: RouteChoice::Model(model.clone()),
+                effort: None,
+                confidential: false,
+                allow_free: false,
+                fallback: Fallback::None,
+            },
+            &RoutingContext {
+                policy_account_hint: None,
+                catalogue: &catalogue,
+                config: &config,
+                registry: REGISTRY,
+                availability: &[],
+                quota: &[],
+                capacity_cooldowns: &[],
+                access: &[],
+                now: provenant_core::WallTime::from_micros(0)?,
+                host: "fixture",
+            },
+        )?;
+        let mut input = super::super::tests::trace_run(
+            30,
+            provenant_core::AttemptId::from_bytes([31; 16]),
+            provenant_core::WallTime::from_micros(0)?,
+        )?;
+        let mut task = input.request.tasks.remove(0);
+        task.account = Some("agy-work".into());
+        let policy = config.model_policy.effective(&model, None, 0).policy;
+        let fallback = super::nested_policy_fallback(&task, &route, &policy)?;
+        assert!(
+            matches!(fallback.route, run::RequestedRoute::Model { ref model, ref effort, .. } if model == "codex/gpt-6-luna" && effort.as_deref() == Some("high"))
+        );
+        assert_eq!(fallback.authority_digest, task.authority_digest);
+        assert_eq!(fallback.access, task.access);
+        assert!(fallback.account.is_none());
+        task.access.write_roots.push("/fixture/work".into());
+        assert_eq!(
+            super::nested_policy_fallback(&task, &route, &policy)
+                .err()
+                .as_deref(),
+            Some("model policy fallback requires read-only authority")
+        );
+        Ok(())
+    }
     use super::*;
 
     #[test]
@@ -2991,6 +3204,25 @@ mod tests {
             host: None,
             cancel: Some(&cancel),
         };
+        // A clean writer that moved after graph source preparation must be
+        // refused before provider probing or any launch artefact is written.
+        let mut stale_source = task.clone();
+        stale_source.head = Some("a".repeat(40));
+        let error = prepare_with(
+            &registry,
+            &stale_source,
+            &prompt,
+            &paths,
+            None,
+            |_| Err("provider lookup must follow source validation".into()),
+            None,
+        )
+        .err()
+        .ok_or("stale writer source was accepted")?;
+        assert_eq!(
+            error,
+            "invalid run record: writer differs from pinned source commit"
+        );
         let call = run::Request {
             clock: &clock,
             budget: WaitBudget::cli(clock.mono_now(), 5)?,
@@ -4465,6 +4697,7 @@ mod tests {
     fn host_write_paths_reach_writers_only() {
         let host = provenant_confinement::run_config::RunConfig {
             writer_writes: vec!["/p/.agent-run/locks".into()],
+            ..Default::default()
         };
         let access = run::LaneAccess {
             write_roots: vec!["/p/extra".into()],

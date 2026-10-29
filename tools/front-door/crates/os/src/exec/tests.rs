@@ -286,3 +286,52 @@ fn secret_input_arrives_by_descriptor_with_eof_and_no_token_environment() {
     assert_eq!(outcome.stdout.bytes, secret.bytes);
     assert!(outcome.stderr.bytes.is_empty());
 }
+
+// Supervision deadlines use the operating system's monotonic clock, as in exec.rs.
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn timeout_and_cancel_kill_the_whole_process_group() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::sys::raw_exec::pid_is_absent_for_test;
+    let executor = SystemExecutor::new(1)?;
+    let temp = tempfile::tempdir()?;
+    for cancel in [false, true] {
+        let pid_file = temp.path().join(format!("grandchild-{cancel}.pid"));
+        let script = format!("/bin/sleep 60 & echo $! > '{}'; wait", pid_file.display());
+        let argv = [
+            OsString::from("/bin/sh"),
+            OsString::from("-c"),
+            OsString::from(script),
+        ];
+        let token = CancelToken::new();
+        let canceller = token.clone();
+        let timeout = Duration::from_secs(if cancel { 60 } else { 1 });
+        let mut options = ExecOptions::new(&argv, temp.path(), timeout);
+        options.process_group = true;
+        options.cancel = Some(&token);
+        let outcome = std::thread::scope(|scope| {
+            if cancel {
+                scope.spawn(|| {
+                    let stop = Instant::now() + Duration::from_secs(10);
+                    while !pid_file.exists() && Instant::now() < stop {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    canceller.cancel();
+                });
+            }
+            executor.execute(options)
+        })?;
+        if cancel {
+            assert!(outcome.cancelled, "cancel must reach the child");
+        } else {
+            assert!(outcome.timed_out, "timeout must reach the child");
+        }
+        let pid: u32 = std::fs::read_to_string(&pid_file)?.trim().parse()?;
+        // The grandchild is reparented and reaped asynchronously after the group dies.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !pid_is_absent_for_test(pid)? {
+            assert!(Instant::now() < deadline, "grandchild {pid} survived");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    Ok(())
+}

@@ -11,6 +11,9 @@ pub enum Outcome {
     Unavailable,
     Timeout,
     Cancelled,
+    /// The request was accepted but its effect has not happened yet, such as
+    /// a merge queued by the repository.
+    Pending,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct CommandError {

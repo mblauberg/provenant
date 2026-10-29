@@ -267,28 +267,98 @@ their `operation_id`.
 
 ### Pipeline presets
 
-`provenant run --preset NAME --prompt-file FILE` expands a structural preset
-into an ordinary graph and submits it through the graph owner. `--explain`
-prints the graph and effective value origins without writing a graph, opening
-graph state or publishing an overflow artifact. Its output is bounded by the
-8 MiB graph document limit rather than the ordinary 1 MiB result limit.
-Identical expanded graphs use the same graph ID and a
-private, content-addressed document in project scratch, so retrying the same
-submission observes the existing graph. Use a changed prompt or parameters for
-a separate graph.
+`provenant run --preset NAME --prompt-file FILE` expands a preset into an
+ordinary graph and submits it through the graph owner. `--wait DURATION`
+waits for graph progress, `--concurrency N` bounds admission, `--worktree PATH`
+supplies a writer binding, and repeatable `--read-root PATH` grants additional
+read access. Writer worktrees must already exist and be registered; presets
+do not provision branches or checkouts. The [preset runbook](../runbooks/presets.md)
+contains starting points and batch preparation guidance.
 
-The bundled structures are `single`, `chain`, `fan-out` and
+`--explain` prints a compact tree of roles, tiers, scopes, worktrees, inputs,
+concurrency, attempt bounds, acceptance and effective limits without writing a
+graph or opening graph state. JSON output includes the exact submitted graph
+and effective value origins, bounded by the 8 MiB graph document limit rather
+than the ordinary 1 MiB result limit. Identical expanded graphs use the same
+graph ID and a private, content-addressed document in project scratch, so
+retrying the same submission observes the existing graph. Change the prompt or
+parameters for a separate graph.
+
+The original structures remain `single`, `chain`, `fan-out` and
 `fan-out-synthesise`. Each uses read-only tasks, a `parameters.route` pool
 (default `senior`), and the supplied prompt; fan-out structures also accept
 `parameters.width` (1 to 32, default 2). A chain passes the first result to
-the second; synthesis receives each branch result. Graph limits still apply.
+the second; synthesis receives each branch result. Slots can contain another
+preset, including the synthesis slot.
+
+New presets can declare ordered `stages`. A stage selects a role, another
+preset or heterogeneous `parallel` entries. `count` repeats an entry, from 1
+to 32. Role profiles supply node defaults, and an entry may override them:
+
+```toml
+stages = [
+  { id = "scouts", parallel = [{ role = "scout", count = 3 }] },
+  { id = "summary", role = "synthesiser" },
+]
+exports = [{ node = "summary", outputs = ["result", "findings"] }]
+
+[roles.scout]
+tier = "junior"
+title = "Scout ${index}"
+prompt = "Map assignment ${index}; cite call sites and uncertainty.\n${prompt}"
+
+[roles.synthesiser]
+tier = "senior"
+kind = "synthesise"
+prompt = "Reconcile evidence and identify the next slice.\n${prompt}"
+```
+
+Roles can configure `prompt`, `title`, `tier` or `route`, `effort`, `access`,
+`worktree`, `write_scope`, `read_roots`, `acceptance_checks`, selected `inputs`,
+`required_verdict`, `source` and existing node-kind configuration. Access
+remains read-only unless explicitly changed. Tier names resolve through named
+routing pools; profiles do not hard-code a model. A curated `high-junior`
+pool is a chair-supplied configuration, not a bundled alias for high effort.
+`tier` and `route` are alternatives; `route` accepts a pool name or graph route
+table, and `effort` configures the chosen route.
+
+`${prompt}` inserts the run brief and `${index}` is the one-based repeated
+entry number. `[parameters]` defines editable values: an exact `${name}`
+placeholder retains the parameter's TOML type, including arrays; placeholders
+inside text insert scalar values. Unknown parameters and unresolved bindings
+are rejected. Stage IDs form local dependency and export names; expansion
+namespaces nested children. Child presets have their own parameters and roles;
+an entry's `parameters` and `roles` tables override that child's defaults.
+
+Composite nodes retain their children, expose declared outputs and report
+one grouped status. Their internal attempts and evidence remain available in
+the graph checkpoint. `exports` uses ordinary graph input selectors; by
+default a preset exports result and findings from its final stage. Parallel
+groups combine labelled, bounded results and findings. Scalar outputs such as
+a commit or verdict require an unambiguous named export. Stage inputs select
+the preceding result by default; an entry's `outputs` chooses other preceding
+output kinds. Composites use no provider attempt of their own. An entry can
+declare `loop = { stages = [...], until = "accept", max_rounds = 2 }` to reuse
+roles and presets inside bounded repair. Existing `loop.body` configuration
+also remains available. Planner fragments do not resolve named presets.
+
+Bundled `scout-swarm`, `implement-with-lens`, `review-council` and `big-batch`
+express scouting, implementation with a simplicity lens, combined review and
+a full batch respectively. Scouts use junior tiers and remain read-only;
+implementation uses senior tiers; the end-of-batch refactor uses principal.
+The implementation lens challenges redundancy, test quality, cleanup and
+rigid over-engineering. Junior reviews on senior or principal work are
+advisory. Counted acceptance reviews must meet the author's tier under
+`HARNESS.md`; add principal coverage for high-risk areas and principal-authored
+refactors. Synthesis reconciles evidence rather than taking a majority vote.
 
 Preset TOML files are named `NAME.toml` under
 `$XDG_CONFIG_HOME/provenant/presets/` (or `~/.config/provenant/presets/`)
 and `.provenant/presets/` in the selected project. Values merge in bundled,
 user, repository and `--set PATH=TOML_VALUE` order. `preset list` lists names;
-`preset show NAME` displays merged values and their origins. New names inherit
-a structure using `extends = "single"` (or another preset name). For example:
+`preset show NAME` displays merged values and their origins. `extends` selects
+another preset's defaults. A same-name override omits `extends` and supplies
+only its changes. For example:
 
 ```toml
 extends = "chain"
@@ -304,34 +374,87 @@ A preset run announces every repository preset file used in resolution order,
 including inherited files and files whose values are overridden. Each file is
 listed once; bundled and user layers are excluded.
 
-Slots may name another preset and override its parameters. A named preset uses
-its own route; it does not inherit the parent's `parameters.route`. A file
-overriding an existing preset by the same name should omit `extends` and supply
-only its changes. Expansion is static,
-limited to eight levels and 512 nodes, and refuses cycles, unknown slots and
-unknown parameters. Parameter values passed on the command line use TOML
+Named child presets use their own route defaults. Expansion is static,
+limited to eight levels and 512 nodes including children, and refuses cycles
+and invalid fields. Parameter values passed on the command line use TOML
 syntax, for example `--set 'parameters.route="utility"'`; unquoted bare words
 are rejected with a quoting hint. Invalid files appear in `preset list` and do
-not prevent use of unrelated presets. Planner fragments
-are not preset expansion points. Review shape parameters and the remaining
-structural presets are future work.
+not prevent use of unrelated presets. Runtime limits and host ceilings still
+apply.
 
-- Why: structural configuration composes into the existing graph runtime
-  without changing its admission, settlement or delivery rules.
+- Why: editable roles and nested compositions reuse graph admission,
+  settlement, writer exclusion and delivery.
 - Test: `src/preset_tests.rs::bundled_expansions_match_golden_graphs`,
   `::layering_composition_and_refusals`, `::named_presets_inherit_and_cycles_are_refused`,
-  `crates/cli/src/lib.rs::tests::preset_arguments_require_run_and_prompt_and_reject_dispatch_options`.
+  `crates/cli/src/lib.rs::tests::preset_runs_accept_graph_controls_without_dispatch_writer_mode`.
 - Owner: `src/preset.rs`, `src/fabric.rs`
 
 A graph must obey the configured structural limits and budgets. Each attempt
 is also bounded by `limits.graph_timeout_seconds`. The [host runbook](../runbooks/fabric-hosts.md#configure-hosts)
 describes defaults, ceilings, budget telemetry and resuming a paused graph.
+The ordinary dependency-depth limit remains four; the default host ceiling is
+64 so a preset can request an explicit compatible depth. `big-batch` requests
+64. A lower configured ceiling still caps that request and appears in explain.
 
 Each node has an optional task `title`, defaulting to its ID; titles use the
 shared task title validation and appear in lanes and graph status. A node may
 specify a single `route` or an ordered `routes` list for agent work. A route can name a pool
 with just `alias`, resolved as for `dispatch --route`, or supply an explicit
 adapter. Routes require an adapter or alias and may mix these forms in a list.
+
+### Sources and read roots
+
+Agent nodes may declare `read_roots`, a list of additional directories passed
+through ordinary run confinement. A read-only scout can inspect another
+worktree's uncommitted files without acquiring a writer lease. Read roots grant
+no write authority and remain subject to protected-path checks. Presets
+canonicalise each root and accept only the project, its linked worktrees and
+the host's `[domains.fabric.graph] allowed_read_roots` list. A planner
+fragment may not add `read_roots`, change `source` or change `role` relative
+to its planner node.
+
+An optional `source` pins a node's subject before its first attempt:
+
+```json
+{"type":"commit","commit":"0123456789abcdef0123456789abcdef01234567"}
+{"type":"node","node":"implementation"}
+{"type":"integration"}
+```
+
+The explicit commit must be a full object ID. A node binding selects the
+successful direct dependency's typed `commit` output. An integration binding
+requires the graph's `integration_branch` and resolves its combined head when
+the node becomes ready. The checkpoint retains the pinned source for replay
+and route fallback. A read-only review receives this exact subject as its
+attempt head; its own lane launch head is not a combined integration commit.
+Missing subjects fail closed rather than falling back to the current checkout.
+The checkpoint also pins the first resolved integration head. A synthesise
+node, or a writer whose source is that pinned commit, that has not yet
+attempted fails if the integration branch has moved, and a rerun starts a new
+graph. A retry writer whose pin is an ancestor of its HEAD continues; a
+diverged HEAD is refused.
+
+A node may set `distinct_from = "writer"`. The runtime walks the source chain
+to the nearest writer node and gives the owner that node's attempt refs. The
+owner excludes those attempts' model families from route selection and
+refuses a route that cannot satisfy the constraint. Without a writing source
+the constraint is a no-op.
+
+A writer source requires an existing registered worktree. Under writer
+exclusion, a clean ancestor worktree advances to the pinned commit with a
+fast-forward only merge. Ignored output is preserved; ignored files that would
+become tracked refuse the advance. Dirty, diverged, reserved and live writer
+contexts are refused. The runtime never resets or creates a worktree to
+satisfy a binding. The chair prepares writer contexts and integration
+explicitly. A review after repair must depend on the repair
+node and select its new commit, so it reviews the changed head. In a loop,
+`previous.NODE` names the prior round's commit using the ordinary cross-round
+namespace rules.
+
+- Why: scouting can share read access while combined review and repair retain
+  one immutable Git subject.
+- Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`,
+  `crates/confinement/src/worktrees.rs`
 
 ### Synthesise agents
 
@@ -438,8 +561,9 @@ plus the wrapper, with cross-round edges included. Budget and concurrency
 checks use the ordinary scheduler and attempt telemetry. Extensions must also
 fit effective limits and their host ceilings before any additional rounds are
 saved. A refusal retains the exhausted checkpoint and its stop/accept path.
-The default depth and ceiling are four; larger bodies require explicit host
-configuration, as shown in the host runbook. Independent safety bounds reject more than 1024 rounds,
+The default depth is four and the default ceiling is 64; larger bodies request
+an explicit graph limit or host configuration, as shown in the host runbook.
+Independent safety bounds reject more than 1024 rounds,
 more than 16384 expanded nodes or an expanded node ID longer than 64 bytes.
 
 Within a body, ordinary dependencies and inputs refer to nodes in the current

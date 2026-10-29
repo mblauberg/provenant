@@ -35,13 +35,19 @@ fn fixture() -> Result {
     if args.get(1).is_some_and(|v| v == "run") {
         let mut prompt = String::new();
         io::stdin().read_to_string(&mut prompt)?;
-        io::stdout().write_all(if prompt.contains("free limit") {
-            include_bytes!("fixtures/providers/opencode/v2.2.0-free-limit.jsonl")
+        let frames = if prompt.contains("free limit") {
+            include_str!("fixtures/providers/opencode/v2.2.0-free-limit.jsonl")
         } else if prompt.contains("model unavailable") {
-            include_bytes!("fixtures/providers/opencode/model-unavailable.jsonl")
+            include_str!("fixtures/providers/opencode/model-unavailable.jsonl")
         } else {
-            include_bytes!("fixtures/providers/opencode/v2.2.0-success.jsonl")
-        })?;
+            include_str!("fixtures/providers/opencode/v2.2.0-success.jsonl")
+        };
+        // Restricted routes must supply the sections requested at launch.
+        let frames = frames.replace(
+            r#""text":"OK""#,
+            r###""text":"## Findings\nOK\n## Evidence\nFixture checked.""###,
+        );
+        io::stdout().write_all(frames.as_bytes())?;
         return Ok(());
     }
     if args.get(1).is_some_and(|v| v == "-p") {
@@ -67,6 +73,10 @@ fn fixture() -> Result {
         let fd: i32 = std::env::var("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR")?.parse()?;
         let token = provenant_os::sys::fixture_read_secret_pipe(fd)?;
         assert_eq!(token, b"fixture-refreshed-token");
+        assert_eq!(
+            std::env::var("CLAUDE_CODE_AUTO_COMPACT_WINDOW")?.as_str(),
+            "275000"
+        );
         for frame in [
             json!({"type":"system","subtype":"init","session_id":"fixture-session"}),
             json!({"type":"assistant","session_id":"fixture-session","parent_tool_use_id":null,"message":{"model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":1,"output_tokens":1}}}),
@@ -92,13 +102,17 @@ fn fixture() -> Result {
     } else {
         session
     };
+    let policy_model = args
+        .windows(2)
+        .find(|pair| pair[0] == "-m")
+        .map(|pair| pair[1].as_str());
     if !prompt.contains("missing") {
         fs::write(
             sessions.join(format!("rollout-2026-10-24T00-00-00-{session}.jsonl")),
             format!(
                 "{}\n{}\n{}\n",
                 json!({"type":"session_meta","payload":{"id":recorded_session}}),
-                json!({"type":"turn_context","payload":{"model": if prompt.contains("fixture pool result") { "gpt-6.1-sol" } else { "gpt-6-luna" },"effort":"low"}}),
+                json!({"type":"turn_context","payload":{"model": if prompt.contains("fixture policy result") || prompt.contains("fixture policy continuation") { policy_model.unwrap_or("gpt-6-luna") } else if prompt.contains("fixture pool result") { "gpt-6.1-sol" } else { "gpt-6-luna" },"effort":"low"}}),
                 json!({"type":"response_item","payload":{"content":"must not be retained"}})
             ),
         )?;
@@ -116,7 +130,15 @@ fn fixture() -> Result {
         )?;
         return Ok(());
     }
-    let answer = if prompt.contains("Review commit ") {
+    let answer = if prompt.contains("fixture policy continuation") {
+        if args.iter().any(|arg| arg == "resume") {
+            "Completed.\nStatus: complete".into()
+        } else {
+            "More work remains.\nStatus: incomplete".into()
+        }
+    } else if prompt.contains("fixture policy result") && policy_model == Some("gpt-6-luna") {
+        String::new()
+    } else if prompt.contains("Review commit ") {
         let lens = prompt
             .lines()
             .find(|line| line.starts_with("Lens: "))
@@ -137,6 +159,135 @@ fn fixture() -> Result {
     ] {
         writeln!(io::stdout(), "{frame}")?;
     }
+    Ok(())
+}
+fn policy_codex_fixture() -> Result<TestRig> {
+    let mut rig = TestRig::new()?;
+    for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
+        fs::create_dir_all(rig.home.join(path))?;
+    }
+    fs::write(rig.home.join(".rustup/settings.toml"), "")?;
+    let bin = rig.root.join("provider/bin");
+    fs::create_dir_all(&bin)?;
+    rig.copy_executable(&std::env::current_exe()?, &bin.join("codex"))?;
+    fs::write(
+        rig.root.join("codex/auth.json"),
+        br#"{"tokens":{"account_id":"fixture-one"}}"#,
+    )?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    Ok(rig)
+}
+fn settled_policy_lanes(rig: &TestRig, output: provenant_os::exec::ExecOutcome) -> Result<Value> {
+    assert!(matches!(code(&output), 0 | 124), "{output:?}");
+    let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let run_id = output["data"]["run_id"].as_str().ok_or("run ID")?;
+    // Keep each command below the rig's ten-second watchdog while allowing
+    // sequential guardians to settle and launch their successor.
+    for _ in 0..6 {
+        let lanes = rig.command(&["lanes", "--id", run_id, "--all", "--wait", "5s", "--json"])?;
+        if code(&lanes) != 124 {
+            assert_eq!(code(&lanes), 0, "{lanes:?}");
+            return Ok(serde_json::from_slice(&lanes.stdout.bytes)?);
+        }
+    }
+    Err("policy successors did not settle within the fixture budget".into())
+}
+fn policy_empty_result_falls_back_without_a_chair_turn() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    fs::create_dir_all(&rig.state)?;
+    fs::set_permissions(&rig.state, fs::Permissions::from_mode(0o700))?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6-luna'\n[domains.routing.model_policy.rules.policy.result]\ncheck=true\nfallback='codex/gpt-6.1-terra'\nfallback_effort='low'\n",
+    )?;
+    let prompt = rig.root.join("prompt.txt");
+    fs::write(&prompt, "fixture policy result")?;
+    let output = rig.command(&[
+        "run",
+        "--model",
+        "codex/gpt-6-luna",
+        "--effort",
+        "low",
+        "--operation-id",
+        "policy-fallback",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt path")?,
+        "--wait",
+        "3s",
+        "--json",
+    ])?;
+    let lanes = settled_policy_lanes(&rig, output)?;
+    let rows = lanes["data"]["lanes"].as_array().ok_or("lane rows")?;
+    assert_eq!(rows.len(), 2, "{lanes}");
+    let first = rows
+        .iter()
+        .find(|row| row["attempt_number"] == 1)
+        .ok_or("first attempt")?;
+    let second = rows
+        .iter()
+        .find(|row| row["attempt_number"] == 2)
+        .ok_or("fallback attempt")?;
+    assert_eq!(first["state"], "failed", "{lanes}");
+    assert_eq!(second["state"], "succeeded", "{lanes}");
+    assert_eq!(second["applied_route"]["model"], "codex/gpt-6.1-terra");
+    assert_eq!(second["continuation"], "policy_fallback");
+    cleanup.disarm();
+    Ok(())
+}
+fn policy_incomplete_result_continues_the_retained_session() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let prompt = rig.root.join("prompt.txt");
+    fs::write(&prompt, "fixture policy continuation")?;
+    let output = rig.command(&[
+        "run",
+        "--model",
+        "codex/gpt-6.1-terra",
+        "--effort",
+        "low",
+        "--operation-id",
+        "policy-continuation",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt path")?,
+        "--wait",
+        "3s",
+        "--json",
+    ])?;
+    let lanes = settled_policy_lanes(&rig, output)?;
+    let rows = lanes["data"]["lanes"].as_array().ok_or("lane rows")?;
+    assert_eq!(rows.len(), 2, "{lanes}");
+    let first = rows
+        .iter()
+        .find(|row| row["attempt_number"] == 1)
+        .ok_or("first attempt")?;
+    let second = rows
+        .iter()
+        .find(|row| row["attempt_number"] == 2)
+        .ok_or("continuation attempt")?;
+    assert_eq!(first["state"], "failed", "{lanes}");
+    assert_eq!(second["state"], "succeeded", "{lanes}");
+    assert_eq!(second["continuation"], "policy_continuation");
+    assert_eq!(second["applied_route"]["model"], "codex/gpt-6.1-terra");
+    assert_eq!(
+        first["transcript"]["session"]
+            .as_str()
+            .ok_or("first session")?,
+        second["transcript"]["session"]
+            .as_str()
+            .ok_or("continued session")?
+    );
+    cleanup.disarm();
     Ok(())
 }
 fn review_fans_out_and_collects_fake_provider() -> Result {
@@ -585,7 +736,10 @@ fn codex_dispatch_observes_rollout() -> Result {
             let text = String::from_utf8(slow.stdout.bytes)?;
             let id = text
                 .lines()
-                .find_map(|line| line.strip_prefix("attempt "))
+                .find_map(|line| {
+                    line.strip_prefix("next: provenant lanes --id ")
+                        .and_then(|rest| rest.split_whitespace().next())
+                })
                 .ok_or("timeout attempt")?;
             assert!(
                 text.contains(&format!("provenant lanes --id {id} --wait 4m")),
@@ -1667,21 +1821,24 @@ fn persisted_attempt_with(
                 observed_route: Some(applied),
                 usage: Default::default(),
                 session: None,
+                partial_signals: Vec::new(),
             },
             &exit,
             &call,
         )?
     } else {
-        store.finish(
-            attempt_id,
-            &attempt,
-            &exit,
-            &provenant_cli::run::Registry {
-                roots: options.host_registry.then_some(&roots),
-                ..Default::default()
-            },
-            &call,
-        )?
+        store
+            .finish(
+                attempt_id,
+                &attempt,
+                &exit,
+                &provenant_cli::run::Registry {
+                    roots: options.host_registry.then_some(&roots),
+                    ..Default::default()
+                },
+                &call,
+            )
+            .map_err(|error| format!("finish persisted provider fixture: {error:?}"))?
     };
     Ok((rig, terminal))
 }
@@ -1714,7 +1871,7 @@ fn receipt_output_resolves_run_task_and_attempt() -> Result {
         format!("Reviewer provenance: unknown, actor {actor}, model unknown, family unknown");
     let expected = format!("{receipt}\n{attribution}\n");
     for target in &targets {
-        let human = rig.command(&["output", target, "--part", "receipt"])?;
+        let human = rig.command(&["output", target, "--part", "receipt", "--full"])?;
         assert_eq!(
             code(&human),
             0,
@@ -1722,6 +1879,10 @@ fn receipt_output_resolves_run_task_and_attempt() -> Result {
             String::from_utf8_lossy(&human.stderr.bytes)
         );
         assert_eq!(String::from_utf8(human.stdout.bytes)?, expected);
+        let compact = rig.command(&["output", target, "--part", "receipt"])?;
+        assert_eq!(code(&compact), 0);
+        assert!(compact.stdout.bytes.len() <= 2048);
+        assert_eq!(String::from_utf8(compact.stdout.bytes)?, expected);
         let output = rig.command(&["output", target, "--part", "receipt", "--json"])?;
         assert_eq!(
             code(&output),
@@ -1782,7 +1943,7 @@ fn receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts()
             assert_eq!(data["data"]["role"], "writer");
             let line = data["data"]["receipt"].as_str().ok_or("receipt line")?;
             assert!(line.starts_with("Writer: codex/gpt-6.1-sol@unknown (openai;"));
-            let human = rig.command(&["output", &exact, "--part", "receipt"])?;
+            let human = rig.command(&["output", &exact, "--part", "receipt", "--full"])?;
             assert_eq!(code(&human), 0);
             assert_eq!(data["data"]["reviewer"]["provenance"], "observed");
             assert_eq!(data["data"]["reviewer"]["family"], "openai");
@@ -1802,7 +1963,7 @@ fn receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts()
                     .ok_or("message")?
                     .contains("exactly one attempt")
             );
-            let exact_output = rig.command(&["output", &exact, "--part", "receipt"])?;
+            let exact_output = rig.command(&["output", &exact, "--part", "receipt", "--full"])?;
             assert_eq!(code(&exact_output), 0);
         } else {
             assert_ne!(code(&output), 0, "{data}");
@@ -1842,7 +2003,7 @@ fn receipt_output_reports_unknown_route_for_settled_lost_attempt() -> Result {
         .ok_or("reviewer fact")?
         .actor_id;
     assert_eq!(data["data"]["reviewer"]["actor_id"], actor.to_string());
-    let human = rig.command(&["output", &target, "--part", "receipt"])?;
+    let human = rig.command(&["output", &target, "--part", "receipt", "--full"])?;
     assert_eq!(code(&human), 0);
     assert_eq!(
         String::from_utf8(human.stdout.bytes)?,
@@ -1869,7 +2030,13 @@ fn agy_denial_result_reaches_terminal_reason() -> Result {
             ..
         }
     ));
-    let lanes = rig.command(&["lanes", "--all", "--json"])?;
+    let lanes = rig.command(&[
+        "lanes",
+        "--id",
+        &terminal.attempt_id.to_string(),
+        "--all",
+        "--json",
+    ])?;
     assert_eq!(code(&lanes), 0, "{:?}", lanes.stderr.bytes);
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
     assert_eq!(
@@ -1904,7 +2071,13 @@ fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
                 ..
             }
         ));
-        let lanes = rig.command(&["lanes", "--all", "--json"])?;
+        let lanes = rig.command(&[
+            "lanes",
+            "--id",
+            &terminal.attempt_id.to_string(),
+            "--all",
+            "--json",
+        ])?;
         assert_eq!(code(&lanes), 0, "{:?}", lanes.stderr.bytes);
         let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
         let reason = lanes["data"]["lanes"][0]["reason"]
@@ -1925,9 +2098,9 @@ fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
             );
         }
     }
-    // A successful answer wins even when stderr contains a denial notice.
-    let success = br#"{"event":"init","conversation_id":"fixture-session","init":{"model":"gemini-3.8-flash"}}
-{"event":"result","result":{"conversation_id":"fixture-session","status":"SUCCESS","response":"Verified.","error":null,"usage":{"input_tokens":0,"output_tokens":0}}}"#;
+    // A valid successful answer wins even when stderr contains a denial notice.
+    let success = br###"{"event":"init","conversation_id":"fixture-session","init":{"model":"gemini-3.8-flash"}}
+{"event":"result","result":{"conversation_id":"fixture-session","status":"SUCCESS","response":"## Findings\nVerified.\n## Evidence\nChecked the claim.","error":null,"usage":{"input_tokens":0,"output_tokens":0}}}"###;
     let (rig, terminal) = persisted_attempt(
         "agy",
         "agy/gemini-3.8-flash",
@@ -1946,7 +2119,10 @@ fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
     let output = rig.command(&["output", &terminal.attempt_id.to_string(), "--json"])?;
     assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
     let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(output["data"]["bytes"]["data"], "Verified.");
+    assert_eq!(
+        output["data"]["bytes"]["data"],
+        "## Findings\nVerified.\n## Evidence\nChecked the claim."
+    );
     Ok(())
 }
 
@@ -2454,6 +2630,8 @@ fn main() -> ExitCode {
                 "owned_dispatch_retains_failed_attempt_and_replays",
                 "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation",
                 "codex_dispatch_observes_rollout",
+                "policy_empty_result_falls_back_without_a_chair_turn",
+                "policy_incomplete_result_continues_the_retained_session",
                 "review_fans_out_and_collects_fake_provider",
                 "opencode_dispatch_observes_v2_wal_session",
                 "opus_writer_dispatch_advises_a_cheaper_route",
@@ -2486,6 +2664,8 @@ fn main() -> ExitCode {
                         owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation()
                     }
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
+                    "policy_empty_result_falls_back_without_a_chair_turn" => policy_empty_result_falls_back_without_a_chair_turn(),
+                    "policy_incomplete_result_continues_the_retained_session" => policy_incomplete_result_continues_the_retained_session(),
                     "review_fans_out_and_collects_fake_provider" => review_fans_out_and_collects_fake_provider(),
                     "opencode_dispatch_observes_v2_wal_session" => {
                         opencode_dispatch_observes_v2_wal_session()

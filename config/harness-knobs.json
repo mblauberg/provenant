@@ -19,12 +19,57 @@
       "min": 1,
       "default": 86400,
       "effect": "Minimum time between update attempts, checked on existing housekeeping events. Failed and interrupted attempts and result-write errors wait the same interval."
+    },
+    "runtime_deadline_seconds": {
+      "type": "int",
+      "min": 1,
+      "max": 14400,
+      "default": "unset",
+      "effect": "Cap on the wall-clock runtime of any lane on this provider. A dispatch's own --provider-timeout applies when it is shorter. At the deadline the provider is stopped and the attempt settles as timed_out, whatever the host did meanwhile, including sleeping."
+    }
+  },
+  "host_graph_settings": {
+    "path": "domains.fabric.graph",
+    "settings": {
+      "allowed_read_roots": {"type": "string_list", "allowed": "absolute directory paths", "default": "empty (read roots stay inside the project and its registered worktrees)", "effect": "Absolute host directories that graph and preset `read_roots` may name besides the project's own registered worktrees."},
+      "limits.expansion_depth": {"type": "int", "allowed": "1 or more", "default": "32", "effect": "Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 29. Graph documents cannot raise it."}
+    }
+  },
+  "host_model_policy_settings": {
+    "path": "domains.routing.model_policy",
+    "settings": {
+      "bundled": {"type": "bool", "allowed": "true or false", "default": "true", "effect": "Start from the bundled per-model policy (cache prices, compaction windows, lane guidance, result checks). false starts empty."},
+      "defaults.cache.read_share_target": {"type": "number", "allowed": "0 to 1", "default": "unset (bundled 0.9)", "effect": "Advisory cache-read share a lane should reach; reported in stats, never enforced."},
+      "defaults.cache.price_multiplier": {"type": "number", "allowed": "number above 0", "default": "1.0 (bundled: 2.0 in DeepSeek weekday peak)", "effect": "Current price multiplier; divides the read-heavy preference weight."},
+      "defaults.cache.read_ratio": {"type": "number", "allowed": "0 or more", "default": "per model", "effect": "Cache-read price divided by uncached input price."},
+      "defaults.cache.write_ratio": {"type": "number", "allowed": "0 or more", "default": "per model", "effect": "Cache-write price divided by uncached input price."},
+      "defaults.cache.output_ratio": {"type": "number", "allowed": "0 or more", "default": "per model", "effect": "Output price divided by uncached input price, for compaction break-even guidance."},
+      "defaults.cache.ttl_seconds": {"type": "number", "allowed": "seconds, 1 or more", "default": "unset", "effect": "Provider cache time to live."},
+      "defaults.cache.min_prefix": {"type": "number", "allowed": "tokens, 1 or more", "default": "unset", "effect": "Smallest prefix the provider caches."},
+      "defaults.cache.context_window": {"type": "number", "allowed": "tokens, 1 or more", "default": "per model", "effect": "Context window size; read-heavy preference needs at least 1000000."},
+      "defaults.cache.read_heavy_weight": {"type": "number", "allowed": "1 to 255", "default": "3", "effect": "Weight multiplier for read-heavy and review work on cheap-cache models."},
+      "defaults.compaction.window": {"type": "int", "allowed": "tokens, 1 or more", "default": "per model", "effect": "Context size at which compaction is advised."},
+      "defaults.compaction.mode": {"type": "enum", "allowed": "auto, task_boundary or never", "default": "per model", "effect": "When compaction is advised."},
+      "defaults.compaction.min_turns": {"type": "int", "allowed": "turns, 1 or more", "default": "per model", "effect": "Fewest turns before compaction is advised."},
+      "defaults.lane.max_context": {"type": "int", "allowed": "tokens, 1 or more", "default": "unset", "effect": "Enforced largest context for a lane on this model."},
+      "defaults.lane.max_turns": {"type": "int", "allowed": "turns, 1 or more", "default": "unset", "effect": "Enforced most turns for a lane on this model."},
+      "defaults.lane.stop_early_ok": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "false marks a model prone to stopping early; an unfinished result then gets a bounded continuation."},
+      "defaults.lane.max_continuations": {"type": "int", "allowed": "0 to 255", "default": "2 where stop_early_ok is false", "effect": "Most continuations after an unfinished result."},
+      "defaults.lane.read_only": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "true refuses write lanes on this model."},
+      "defaults.result.check": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "Check the result for the required sections before accepting it."},
+      "defaults.result.sections": {"type": "string_list", "allowed": "exact section heading lines; empty clears", "default": "per model", "effect": "Heading lines a result must contain."},
+      "defaults.result.fallback": {"type": "string", "allowed": "model id", "default": "per model", "effect": "Model for the one fallback attempt when the result check fails."},
+      "defaults.result.fallback_effort": {"type": "string", "allowed": "effort name", "default": "per model", "effect": "Effort for the fallback attempt."},
+      "rules": {"type": "array of tables", "allowed": "tables with adapter, model, account, starts_unix_seconds, expires_unix_seconds, windows (list of {start_hour, end_hour}, UTC) and policy (the same fields as defaults, under rules.policy)", "default": "empty", "effect": "Layered overrides ordered by scope: global, adapter, model, account, model plus account; later rules win at equal scope. Inclusive start, exclusive expiry; an overnight window wraps midnight; inactive rules have no effect."}
     }
   },
   "host_lane_build_settings": {
     "path": "domains.fabric.lanes",
     "settings": {
-      "max_concurrent_builds": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "1 at 16 GiB or less, otherwise 2", "effect": "Maximum active worktree-write lanes across the host."},
+      "max_concurrent_builds": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))", "effect": "A build throttle, not a hard cap: cargo builds, tests, checks and lints that a lane's cargo shim runs at once across the host and every project that shares the state directory. Lanes are not capped by it; a command that compiles waits for a free slot. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated."},
+      "build_wait_minutes": {"type": "int", "min": 1, "max": 1440, "auto_value": -1, "default": 30, "effect": "Minutes a build waits for a build slot or another build's Cargo lock before it gives up with an error."},
+      "max_writer_lanes": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": 40, "effect": "Most writer lanes live at once across the host; a writer beyond it queues and is then refused with a reason naming the cap."},
+      "max_project_writer_lanes": {"type": "int", "min": 1, "max": 32, "auto_value": -1, "default": 30, "effect": "Most writer lanes live at once for one project; at most max_writer_lanes."},
       "cargo_build_jobs": {"type": "int", "min": 1, "max": 1024, "auto_value": -1, "default": "Half the available cores, at least 1", "effect": "Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence."},
       "cargo_incremental": {"type": "bool", "allowed": "true or false", "default": "false", "effect": "CARGO_INCREMENTAL for lanes. Incremental sessions grow a lane's target without bound and are rarely reused; a value already in the lane environment takes precedence."},
       "cargo_debug": {"type": "string", "allowed": "none, line-directives-only, line-tables-only, limited, full, 0, 1, 2, true or false", "default": "line-tables-only", "effect": "CARGO_PROFILE_DEV_DEBUG for lanes. Line tables keep backtraces at a fraction of the size of full debug information; a value already in the lane environment takes precedence."},
@@ -34,6 +79,12 @@
     }
   },
   "knobs": {
+    "routing.workload": {
+      "type": "enum", "values": ["general", "read_heavy", "edit_heavy", "review"], "default": "general", "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/run.rs",
+      "effect": "Describe the task for model policy. Read-heavy and review work give cheap-cache, million-token models a configurable preference in pools.",
+      "trade_off": "A preference preserves model choice and readiness gates; it does not force every read-heavy task onto one model."
+    },
     "domains.routing.capacity_cooldown_seconds": {
       "type": "int", "min": 0, "default": 600, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run.rs",

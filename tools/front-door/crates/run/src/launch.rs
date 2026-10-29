@@ -61,9 +61,17 @@ pub fn concurrency(
     })
 }
 
-pub fn capture_plan(task: &TaskRequest) -> CapturePlan {
+/// The wall-clock allowance of one lane: the task's timeout, tightened by the
+/// provider's host cap.
+pub fn runtime_seconds(task: &TaskRequest, cap: Option<u64>) -> u64 {
+    cap.map_or(task.provider_timeout_seconds, |cap| {
+        cap.min(task.provider_timeout_seconds)
+    })
+}
+
+pub fn capture_plan(task: &TaskRequest, runtime_seconds: u64) -> CapturePlan {
     CapturePlan {
-        wall_ms: task.provider_timeout_seconds.saturating_mul(1000),
+        wall_ms: runtime_seconds.saturating_mul(1000),
         silence_ms: task
             .profile
             .knob_u64("lanes.silence_seconds")
@@ -138,6 +146,8 @@ pub struct Decoded {
     /// Provider session handle decoded from the stream, if any.
     pub session: Option<String>,
     pub reason: Option<String>,
+    /// Partial-finish signals the provider decode found; run adds its own.
+    pub partial_signals: Vec<PartialSignal>,
 }
 /// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
 pub struct LaunchPaths {
@@ -177,7 +187,7 @@ impl Drop for PreparedStart {
 
 fn output_prompt(directory: &std::path::Path, prompt: &str) -> String {
     format!(
-        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Files in $TMPDIR are discarded when the attempt ends. Provider history is kept. Files left in $TMPDIR are not deliverables.\n\n{prompt}",
+        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Files in $TMPDIR are discarded when the attempt ends. Provider history is kept. Files left in $TMPDIR are not deliverables. If you stop with any part of the brief undone, end your final answer with this block, and nothing after it, so the harness records a partial finish (put what remains in the note):\n```handoff\n{{\"schema_version\":1,\"status\":\"stopped_early\",\"note\":\"what remains\"}}\n```\n\n{prompt}",
         result = directory.join("result.md").display(),
         exit = directory.join("process-exit.json").display(),
         stdout = directory.join("stdout.log").display(),
@@ -283,6 +293,23 @@ impl RunStore {
     }
 }
 pub trait Providers {
+    /// A host cap, in seconds, on the runtime deadline of lanes on `provider`.
+    /// The task's own timeout applies when it is shorter or there is no cap.
+    fn runtime_cap(&self, _provider: &str) -> Option<u64> {
+        None
+    }
+    /// Host policy can reject a result and request a bounded successor. The
+    /// store preserves authority and refuses writer route fallback.
+    fn assess_result(
+        &self,
+        _task: &TaskRequest,
+        _record: &AttemptRecord,
+        _decoded: &Decoded,
+        _context: Option<&crate::HolderContext>,
+        _policy_attempt: u64,
+    ) -> std::result::Result<crate::ResultAssessment, String> {
+        Ok(crate::ResultAssessment::default())
+    }
     /// Host-selected minimum nice value for this lane.
     fn priority(&self, task: &TaskRequest) -> std::result::Result<u8, String> {
         Ok(if task.writer.is_some() { 10 } else { 5 })
@@ -919,8 +946,48 @@ impl RunStore {
                 .enumerate()
                 .find(|(_, task)| task.task_id == record.task_id)
                 .ok_or(RunError::Validation("attempt task missing from request"))?;
-            let effective_task =
+            let mut effective_task =
                 self.effective_launch_task(&request, task, child.map(|(validated, _)| validated));
+            let policy_retry = matches!(
+                record.continuation.as_deref(),
+                Some("policy_continuation" | "policy_fallback")
+            );
+            if policy_retry {
+                if self.sealed_requester.is_some()
+                    || request.parent_attempt.is_some()
+                    || self.context.state_root.as_path() != self.writer_registry()
+                {
+                    return Err(RunError::Validation(
+                        "policy retry requires a host-owned store",
+                    ));
+                }
+                effective_task.route = record.requested_route.clone();
+                effective_task.fallback.clear();
+                // An account pin belongs to its original provider. A fallback
+                // resolves a fresh account for the replacement provider.
+                if record.continuation.as_deref() == Some("policy_fallback") {
+                    let original_provider = record
+                        .retry_of
+                        .map(|prior| self.record(prior, call))
+                        .transpose()?
+                        .and_then(|prior| prior.applied_route.and_then(|route| route.provider));
+                    let replacement_provider = match &record.requested_route {
+                        RequestedRoute::Model { provider, .. } => Some(provider.as_str()),
+                        _ => None,
+                    };
+                    if original_provider.as_deref() != replacement_provider {
+                        effective_task.account = None;
+                    }
+                }
+            }
+            let policy_resume = if record.continuation.as_deref() == Some("policy_continuation") {
+                record
+                    .retry_of
+                    .map(|prior| self.record(prior, call))
+                    .transpose()?
+            } else {
+                None
+            };
             let task = &effective_task;
             let task_index = u64::try_from(task_index)
                 .map_err(|_| RunError::Validation("attempt task index"))?;
@@ -1000,7 +1067,16 @@ impl RunStore {
                 })
                 .and_then(|priority| {
                     providers
-                        .prepare(task, &prompt, &paths, resume.as_ref())
+                        .prepare(
+                            task,
+                            &prompt,
+                            &paths,
+                            policy_resume.as_ref().or(if policy_retry {
+                                None
+                            } else {
+                                resume.as_ref()
+                            }),
+                        )
                         .map(|plan| (plan, priority))
                         .map_err(|reason| (RefusalKind::Preparation, reason))
                 });
@@ -1032,6 +1108,10 @@ impl RunStore {
                     continue;
                 }
             };
+            let runtime = runtime_seconds(
+                task,
+                providers.runtime_cap(plan.route.provider.as_deref().unwrap_or_default()),
+            );
             set_lane_environment(&mut plan.environment, request.lane_depth.unwrap_or(1), id);
             // Record the exact project-relative exceptions of the plan that launches.
             let writable = plan
@@ -1081,6 +1161,7 @@ impl RunStore {
                 &write_grants,
                 plan.observed_head,
                 Some(priority),
+                runtime,
                 call,
             ) {
                 Ok(record) => record,
@@ -1102,6 +1183,7 @@ impl RunStore {
                     context,
                     acquire_writer,
                     &record,
+                    runtime,
                     call,
                 ) {
                     Ok(()) => Started::Launched(id),
@@ -1156,6 +1238,7 @@ impl RunStore {
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,
         record: &AttemptRecord,
+        runtime_seconds: u64,
         call: &Request<'_>,
     ) -> std::result::Result<(), HandOff> {
         let local = |error: &dyn std::fmt::Display| HandOff::Local(error.to_string());
@@ -1347,7 +1430,7 @@ impl RunStore {
                 .requested_priority
                 .ok_or_else(|| local(&"lane priority missing"))?,
         };
-        let capture = capture_plan(task);
+        let capture = capture_plan(task, runtime_seconds);
         // Held before launch: an unconfirmed handoff may still have a guardian.
         if let Some((held, custody)) = held {
             self.hold_child(held, custody);

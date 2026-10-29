@@ -363,20 +363,26 @@ workflow. Lane-writable missing child records alone cannot authorise deletion.
 Admission and operation insertion are one transaction, and the immutable
 request is published before acknowledgement. No launch, probe, wait or
 supervisor call happens inside a transaction. Admission bounds active lanes
-at 64 per host and 32 per project and queued lanes at 256 per host, with
+at the fixed ceilings of 64 per host and 32 per project (writers also by the configured caps below) and queued lanes at 256 per host, with
 memory and disk floors, startup spacing and a deadline.
 
 On macOS, Warning or Critical kernel memory pressure defers both classes.
 Normal pressure still requires the memory floor. An unavailable or unknown
 pressure sample is logged and falls back to the floor; Linux uses the floor.
-Disk and memory floors apply to both classes. Writers also require a host-wide
-build slot, defaulting to one at or below 16 GiB of RAM and two above that;
-read-only lanes do not consume one. The provider-exit callback releases this
-slot before Git import or terminal bookkeeping, including on cancellation. At expiry, disk floor, known pressure and
-full build slots have distinct refusal reasons. Disk-floor refusal takes precedence
-when disk and pressure are both insufficient; otherwise Warning or Critical
-pressure is named before build-slot contention. A failed memory sample or a
-floor-only memory shortage retains the generic admission refusal. The ledger associates new leases
+Disk and memory floors apply to both classes. Build slots do not gate
+admission: a host-wide build throttle (not a hard cap), by default
+max(1, min(cores / cargo_build_jobs, GiB of RAM / 6)) slots, gates each
+compiling cargo command a lane runs (`provenant_os::build_slots`, reached
+through the lane's `cargo` shim), so idle writers are admitted beyond the slot
+count. Writer lanes are capped separately by `max_writer_lanes` (host, default
+40) and `max_project_writer_lanes` (per project, default 30); a writer at the
+cap queues to the admission deadline and is then refused with a reason naming
+the cap, its scope and the key to raise. All lanes also count against fixed
+ceilings of 64 per host and 32 per project. At expiry, disk floor, known
+pressure and the writer cap have distinct refusal reasons. Disk-floor refusal
+takes precedence when disk and pressure are both insufficient. A failed memory
+sample or a floor-only memory shortage retains the generic admission refusal.
+The ledger associates new leases
 with the boot and guardian identity; a different boot, a definitely absent
 guardian or an admission row proven absent from the same readable owner store
 releases a lease. A busy, missing, replaced or unreadable store retains the
@@ -439,10 +445,13 @@ action simply shows none.
   must not queue behind writer spacing that exists to pace worktree and
   provider startup.
 - Test: `crates/run/src/ledger.rs::tests::{live_guardian_fences_busy_replaced_and_corrupt_store, cross_boot_malformed_and_readable_row_removal_release}`;
-  `crates/run/src/dispatch_tests.rs::{memory_pressure_defers_even_when_available_memory_is_high, pressure_errors_fall_back_and_normal_still_obeys_floor, writer_slot_refusal_and_release}`;
+  `crates/run/src/dispatch_tests.rs::{memory_pressure_defers_even_when_available_memory_is_high, pressure_errors_fall_back_and_normal_still_obeys_floor, idle_writers_are_admitted_beyond_the_build_limit, the_writer_cap_refuses_at_its_limit_and_names_it, out_of_range_build_settings_do_not_block_admission}`;
   `crates/providers/src/lane.rs::tests::claude_shell_restores_jobs_after_scrub`;
-  `crates/config/src/gc.rs::build_tests::{defaults_and_overrides, automatic_and_invalid_build_values}`;
-  `crates/run/src/dispatch_tests.rs::{configured_build_limit_controls_host_leases, invalid_build_settings_refuse_without_waiting, guardian_identity_unknown_retries_and_names_expiry}`;
+  `crates/os/src/build_slots.rs::tests::{slots_are_bounded_and_reusable, contention_never_exceeds_the_limit, read_only_slot_files_cannot_be_created_unlinked_or_replaced_yet_still_lock, the_slot_descriptor_is_close_on_exec, a_process_that_outlives_the_holder_does_not_keep_the_slot, a_wait_reports_progress_then_times_out_naming_the_slots, waiting_for_a_cargo_lock_reports_progress_and_times_out}`;
+  `crates/providers/src/lane.rs::tests::{the_cargo_shim_hands_the_command_to_the_build_slot_gate, the_cargo_shim_refuses_settings_that_cannot_be_trusted, no_write_grant_of_the_finished_lane_profile_reaches_the_slot_directory}`;
+  `tests/build_slot.rs::{more_builds_than_slots_compile_serially, a_killed_build_releases_its_slot_and_the_wait_is_reported, a_backgrounded_grandchild_that_outlives_the_build_does_not_keep_the_slot, a_wait_gives_up_after_the_configured_time_naming_the_slots, a_spoofed_marker_does_not_skip_the_gate_unless_it_names_a_live_ancestor, read_only_slot_files_cannot_be_unlinked_or_created_by_the_build, commands_that_do_not_compile_and_nested_cargo_never_queue, a_marker_naming_a_live_ancestor_that_is_not_a_shim_does_not_skip_the_gate, the_cargo_lock_wait_and_the_slot_wait_share_one_deadline, a_terminated_shim_passes_the_signal_to_its_build}`;
+  `crates/config/src/gc.rs::build_tests::{defaults_and_overrides, automatic_and_invalid_build_values, writer_caps_and_wait_validate_and_default, automatic_build_slots_follow_cores_jobs_and_memory}`;
+  `crates/run/src/dispatch_tests.rs::{invalid_build_settings_refuse_without_waiting, guardian_identity_unknown_retries_and_names_expiry}`;
   `crates/fabric-runtime/src/config.rs::tests::lane_build_settings_validate_shared_bounds_and_auto`;
   `crates/run/src/dispatch_tests.rs::admission_holds_run_concurrency_spacing_floors_and_deadline`;
   `::read_only_lane_is_admitted_inside_a_writers_spacing_window`;
@@ -573,12 +582,42 @@ Success needs a supervisor-observed exit 0, a matching provider identity and
 a complete, validated, non-empty result; capture bytes are never completion
 evidence. A dead owner is not a failed provider. A completed writer whose
 protected changes need review ends `review_required`, and one with only
-uncommitted edits ends `uncommitted`; neither delivers. Run reads no provider
+uncommitted edits ends `uncommitted`; neither delivers. Paths in the project's
+`[domains.run] review_exempt` list (release-note fragments, specs, lock files
+and `.tracker-input` by default) never count toward either, and Git metadata,
+hooks and provider control roots can never be listed. Run reads no provider
 transcript except Codex's post-exit identity projection.
 - Why: a crash, truncation or impostor must never read as success.
 - Test: `crates/run/src/dispatch_tests.rs::holder_commits_decoded_success_only_with_exit_zero_and_observed_identity`;
-  `crates/run/src/tests.rs::protected_review_retains_candidate_and_paths_without_delivery`
-- Owner: `crates/run/src/holder.rs`, `crates/run/src/writer.rs`
+  `crates/run/src/tests.rs::protected_review_retains_candidate_and_paths_without_delivery`;
+  `crates/confinement/src/quarantine.rs::exempt_instruction_tree_paths_settle_without_review`;
+  `::hard_controls_stay_under_review_even_when_listed`;
+  `::a_staged_rename_of_exempt_paths_does_not_force_review`;
+  `::ordinary_project_paths_never_need_review`;
+  `crates/confinement/src/git_evidence.rs::exempt_paths_left_uncommitted_do_not_count`
+- Owner: `crates/run/src/holder.rs`, `crates/run/src/writer.rs`, `crates/confinement/src/review_exempt.rs`
+
+## A partial finish is flagged, not failed
+
+An attempt that settles `succeeded`, `review_required` or `uncommitted` carries
+`partial_signals` when there is structured evidence that part of the brief is
+undone: `declared_stop` (its final answer ends with a single, valid `handoff`
+block with status `stopped_early`, the contract graph writers already use, and
+nothing after it), `provider_stop` (the provider reported a stop reason other
+than a finished turn, such as Claude's `stop_reason` `max_tokens` or a
+`terminal_reason` other than `completed`) and `uncommitted_work`. Prose is never
+read, and a quoted, repeated or trailing-text block is no flag. The outcome is
+not changed, so delivery and fallback behave as before; the reason carries a
+`partial finish (...)` note, and `lanes` shows `(partial)` beside the state,
+the signals, and a `provenant resume` hint. A failed lane carries no flag. Every
+launch prompt asks the lane to end with the `handoff` block when it stops with
+work left. The chair decides whether to resume.
+- Why: a lane that did part of its brief must not read as one that did all of it.
+- Test: `crates/run/src/dispatch_tests.rs::a_terra_style_early_stop_settles_succeeded_but_flagged_partial`;
+  `::a_complete_finish_and_prose_about_remaining_work_are_not_flagged`;
+  `crates/run/src/completion.rs::tests`;
+  `crates/providers/src/tests.rs::claude_success_that_stopped_for_another_reason_is_an_early_stop`
+- Owner: `crates/run/src/completion.rs`, `crates/run/src/holder.rs`
 
 ## Host inputs fail before launch
 
@@ -586,12 +625,21 @@ A host failure to read the stored prompt, or to stage or read back a context
 file, ends the attempt `rejected` before launch with its cause. `--base`
 context is captured on the host with fsmonitor, external diff, textconv,
 mailmap and fetching disabled, limited to 10 s per read and 1 MiB per file; a timeout keeps
-partial output and is recorded. Reviewers must report inputs they could not
-read and truncated captures.
+partial output and is recorded. The capture holds the log, the whole patch,
+a `--stat` summary and one patch slice per changed file (at most 400, in
+`git-diff-slices/` with an `index.txt`), and the prompt points a reviewer at the
+stat and the slices before the whole patch. When `slices_complete` is false the
+prompt says so and lists the changed files with no slice. Reviewers must report inputs they
+could not read, truncated captures and `slices_complete: false`.
 - Why: repository config is hostile input, and a lane must not run on input
-  the host could not verify.
+  the host could not verify; slices are navigation aids into the patch, and a
+  reviewer still reads the surrounding code in the checkout.
 - Test: `crates/run/src/dispatch_tests.rs::missing_stored_prompt_ends_the_attempt_rejected_with_the_cause`;
-  `crates/run/src/git_context.rs::git_context_pins_hardening_flags_and_writes_prompt_paths`
+  `crates/run/src/git_context.rs::git_context_pins_hardening_flags_and_writes_prompt_paths`;
+  `::slices_cover_every_file_and_the_index_names_them`;
+  `::slices_stop_at_their_limit_and_say_so`;
+  `::an_incomplete_prompt_names_the_changed_files_without_a_slice`;
+  `::real_git_stat_and_slices_match_the_whole_patch`
 - Owner: `crates/run/src/git_context.rs`
 
 ## Launch prompts
@@ -738,18 +786,39 @@ guard, not a security boundary: a lane can invoke the real `gh` directly.
   `crates/providers/src/lane.rs::github_policy_guards_labels_and_verb_prefixes`
 - Owner: `crates/config/src/github_policy.rs`; `crates/providers/src/lane.rs`
 
-## Writer hard-link refusal
+## Writer hard-link boundary
 
-On macOS, launch refuses a writable worktree containing an existing hard-linked
-regular file and names the offending path. Directories Git ignores wholesale,
-such as an in-tree Cargo `target/` or `node_modules/`, are skipped by the
-census and its entry bound. An operator can inspect a refused file and remove or
-rebuild it if it is disposable output before retrying.
-- Why: a writable hard link could modify data outside the granted tree.
-- Test: `crates/confinement/src/permissions.rs::writable_tree_hard_link_refusal_names_nested_file`;
-  `::the_census_neither_walks_nor_counts_skipped_directories`;
-  `crates/confinement/src/ignored.rs::wholly_ignored_directories_are_listed_and_others_are_not`
-- Owner: `crates/confinement/src/permissions.rs`, `crates/confinement/src/ignored.rs`
+The sandbox profile carries `(deny file-link)`, so a lane cannot create a hard
+link. Launch no longer walks the writable worktree, scratch, provider state or
+lane build cache for existing hard links, and no hard-linked build or
+dependency file refuses a launch or adds a per-path deny. Launch inspects only
+what a second name would let the lane write: the exact write grants (provider
+credential files), the selected `HEAD`, and the host Git control files the lane
+may not write, `config`, `packed-refs`, `config.worktree`, the linked `index`,
+`hooks/*` and `info/*`. Any of those with another hard link refuses the launch
+and names the file. A held directory that fails revalidation, a provider executable that is
+missing and a scratch directory that is not private each name their path and
+check. A grant on a file in a directory that does not exist grants nothing and
+needs no anchor. The compiled profile may be up to 512 KiB and the error names
+its size.
+
+Accepted risk: a hard link the host itself created inside a lane-writable tree
+is writable through its alias, so a write through the alias modifies the file
+outside the tree, and launch does not look for it. Host code that seeds a lane tree must therefore copy or clone (`clonefile`), never hard-link,
+from a shared store. The Cargo target and registry seeds clone, retained
+provider state is copied with hard-link refusal, and the pnpm store is
+read-only to the lane, so no host path creates such a link today.
+- Why: a writable hard link could modify data outside the granted tree, but
+  only a link made by something other than the lane can exist, and only the
+  Git control files make such a link dangerous; refusing whole build trees cost
+  launches without protecting anything.
+- Test: `crates/confinement/src/permissions.rs::only_git_control_files_are_checked_for_other_names`;
+  `::a_hard_linked_exact_grant_names_its_path`;
+  `::held_path_failures_name_the_path_and_the_check`;
+  `::a_grant_in_a_directory_that_does_not_exist_needs_no_anchor`;
+  `::profiles_between_the_old_and_new_limits_compile_and_larger_ones_name_their_size`;
+  `::native_sandbox_blocks_path_escape_probes`
+- Owner: `crates/confinement/src/permissions.rs`
 
 ## Reconcile and temporary cleanup
 
