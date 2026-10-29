@@ -104,29 +104,32 @@ fn repository_environment(
 ) -> Result<Vec<(OsString, OsString)>> {
     use std::os::unix::ffi::OsStringExt;
     let mut env = environment();
-    // Bootstrap only the metadata paths with the hardened environment. Pin
-    // both thereafter, including for ref resolution in linked worktrees.
-    for (key, flag) in [
-        ("GIT_DIR", "--absolute-git-dir"),
-        ("GIT_COMMON_DIR", "--git-common-dir"),
-    ] {
-        let (out, timed_out) = read_git_with_env(
-            executor,
-            git,
-            cwd,
-            &["rev-parse", "--path-format=absolute", flag],
-            4096,
-            &env,
-        )?;
-        if timed_out || out.truncated || out.bytes.last() != Some(&b'\n') {
-            return Err(execution_error("Git metadata path read was incomplete"));
-        }
-        let path = OsString::from_vec(out.bytes[..out.bytes.len() - 1].to_vec());
-        if !Path::new(&path).is_absolute() {
-            return Err(execution_error("Git metadata path was not absolute"));
-        }
-        env.push((key.into(), path));
+    // Resolve the common directory without trusting inherited redirects, then
+    // pin the private directory for subsequent Git operations.
+    let common = provenant_os::git::repository_path_with(
+        executor,
+        git,
+        cwd,
+        provenant_os::git::RepositoryPath::CommonDir,
+    )
+    .map_err(execution_error)?;
+    let (out, timed_out) = read_git_with_env(
+        executor,
+        git,
+        cwd,
+        &["rev-parse", "--path-format=absolute", "--absolute-git-dir"],
+        4096,
+        &env,
+    )?;
+    if timed_out || out.truncated || out.bytes.last() != Some(&b'\n') {
+        return Err(execution_error("Git metadata path read was incomplete"));
     }
+    let path = OsString::from_vec(out.bytes[..out.bytes.len() - 1].to_vec());
+    if !Path::new(&path).is_absolute() {
+        return Err(execution_error("Git metadata path was not absolute"));
+    }
+    env.push(("GIT_DIR".into(), path));
+    env.push(("GIT_COMMON_DIR".into(), common.into_os_string()));
     env.push(("GIT_WORK_TREE".into(), cwd.as_os_str().to_owned()));
     Ok(env)
 }
@@ -805,28 +808,37 @@ mod tests {
     struct InspectGit(Mutex<Vec<Vec<OsString>>>);
     impl Executor for InspectGit {
         fn execute(&self, options: ExecOptions<'_>) -> std::result::Result<ExecOutcome, ExecError> {
-            assert_eq!(
-                &options.argv[1..4],
-                ["--no-pager", "-c", "core.fsmonitor=false"]
-            );
+            let common_query = options.argv.contains(&"--git-common-dir".into());
+            if !common_query {
+                assert_eq!(
+                    &options.argv[1..4],
+                    ["--no-pager", "-c", "core.fsmonitor=false"]
+                );
+            }
             assert!(options.stop_on_output_limit);
             let env = options.env.ok_or(ExecError::Busy)?;
-            for (key, value) in environment() {
-                assert!(env.contains(&(key, value)));
+            if !common_query {
+                for (key, value) in environment() {
+                    assert!(env.contains(&(key, value)));
+                }
             }
             if !options.argv.contains(&"--absolute-git-dir".into())
                 && !options.argv.contains(&"--git-common-dir".into())
             {
-                for key in ["GIT_DIR", "GIT_COMMON_DIR"] {
-                    assert!(env.contains(&(key.into(), "/fixture/repo/.git".into())));
-                }
+                assert!(env.contains(&("GIT_DIR".into(), "/fixture/repo/.git".into())));
+                let common =
+                    std::fs::canonicalize(std::env::temp_dir()).map_err(|_| ExecError::Busy)?;
+                assert!(env.contains(&("GIT_COMMON_DIR".into(), common.into_os_string())));
             }
             assert!(options.timeout <= Duration::from_secs(10));
             let mut calls = self.0.lock().map_err(|_| ExecError::Busy)?;
             calls.push(options.argv.to_vec());
-            let bytes = if options.argv.contains(&"--absolute-git-dir".into())
-                || options.argv.contains(&"--git-common-dir".into())
-            {
+            let bytes = if common_query {
+                use std::os::unix::ffi::OsStrExt;
+                let mut bytes = std::env::temp_dir().as_os_str().as_bytes().to_vec();
+                bytes.push(b'\n');
+                bytes
+            } else if options.argv.contains(&"--absolute-git-dir".into()) {
                 b"/fixture/repo/.git\n".to_vec()
             } else if options.argv[4] == "rev-parse" {
                 format!("{OID}\n").into_bytes()
