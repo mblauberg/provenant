@@ -2405,7 +2405,7 @@ Accepted by every command, before or after the subcommand.
 | `--since` | `{"name": "since"}` |
 | `--until` | `{"name": "until"}` |
 | `--run-id` | `{"name": "run_id"}` |
-| `--by` | `{"conflicts": ["usage"], "name": "by", "values": ["pr", "issue", "graph", "preset", "role"]}` |
+| `--by` | `{"conflicts": ["usage"], "name": "by", "values": ["pr", "issue", "graph", "node", "pattern", "preset", "role"]}` |
 | `--detail` | `{"conflicts": ["usage"], "defaults": ["false"], "name": "detail", "values": ["true", "false"]}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
