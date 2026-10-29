@@ -1791,6 +1791,13 @@ pub fn submit_with_host(
 
 /// The main CLI path reuses admission, managed worktrees and bounded waits.
 pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
+    if command.access.worktree.is_none()
+        && command.branch.is_none()
+        && command.worktree_branch.is_none()
+        && let Err(fail) = require_worktree_target(edge.cwd)
+    {
+        return reply("run", Err(fail));
+    }
     if command.host.is_none()
         && let Some(path) = &command.access.worktree
     {
@@ -1841,6 +1848,37 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
         }
     }
     render_run(dispatch(command, edge), edge)
+}
+
+// A linked checkout has a gitfile at its root. Refuse before dispatch so an
+// omitted writer target cannot silently turn a task into a read-only lane.
+fn require_worktree_target(cwd: &Path) -> Result<(), Fail> {
+    let cwd = provenant_os::fs::canonicalize(cwd)
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Invalid, error.to_string()))?;
+    for path in cwd.ancestors() {
+        match std::fs::symlink_metadata(path.join(".git")) {
+            Ok(marker) if marker.is_file() => {
+                return Err(Fail::new(
+                    Status::Refused,
+                    ErrorKind::Refused,
+                    format!(
+                        "run from a linked worktree needs an explicit target; use --worktree {}",
+                        path.display()
+                    ),
+                ));
+            }
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Fail::new(
+                    Status::Error,
+                    ErrorKind::Invalid,
+                    error.to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
@@ -7579,6 +7617,82 @@ mod lane_depth_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_in_linked_worktree_requires_explicit_target() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::RootInputs;
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let project = root.join("project");
+        let tree = root.join("writer");
+        let home = root.join("home");
+        std::fs::create_dir_all(&project)?;
+        std::fs::create_dir_all(&home)?;
+        let executor = SystemExecutor::new(1)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let mut env: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
+            .collect();
+        env.push(("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()));
+        env.push(("GIT_CONFIG_NOSYSTEM".into(), "1".into()));
+        for args in [
+            vec!["init", "-q", "-b", "fixture-base"],
+            vec![
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "base",
+            ],
+            vec![
+                "worktree",
+                "add",
+                "-qb",
+                "writer",
+                tree.to_str().ok_or("path")?,
+            ],
+        ] {
+            let argv: Vec<_> = std::iter::once(git.as_os_str().to_owned())
+                .chain(args.into_iter().map(std::ffi::OsString::from))
+                .collect();
+            let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(10));
+            options.env = Some(&env);
+            let output = executor.execute(options)?;
+            assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
+        }
+        let nested = tree.join("nested");
+        std::fs::create_dir(&nested)?;
+        let mut inputs = RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let edge = Edge {
+            roots: &roots,
+            home: &home,
+            assets: &project,
+            cwd: &nested,
+        };
+        let parsed = crate::parse(["run", "--prompt-stdin"].map(std::ffi::OsString::from));
+        let crate::ParseOutcome::Invocation(invocation) = parsed else {
+            return Err("parse failed".into());
+        };
+        let crate::Command::Run(command) = invocation.command else {
+            return Err("not run".into());
+        };
+        let result = super::run(*command, &edge);
+        let error = result.result.error.ok_or("expected refusal")?;
+        assert_eq!(error.code, "REFUSED");
+        assert!(
+            error
+                .message
+                .contains(&format!("--worktree {}", tree.display()))
+        );
+        assert!(super::require_worktree_target(&project).is_ok());
+        Ok(())
+    }
 
     #[test]
     fn graph_quality_counts_only_executed_repair_rounds_and_leaf_findings() {

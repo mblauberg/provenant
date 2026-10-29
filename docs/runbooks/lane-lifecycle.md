@@ -17,6 +17,10 @@ again. `provenant status` shows active lanes and the twenty newest settled
 lanes, newest first. `--json` returns full records for the same selection.
 Use `--all` with `--limit N` and the returned `--cursor N` to page all history.
 
+A valid final handoff declaring `stopped_early` or `blocked` makes an otherwise
+successful lane settle as `review_required`. `run --wait` and `lanes` show the
+state, so the unfinished work is visible without inspecting partial signals.
+
 On macOS, the host selects a nice value for the lane, and the guardian applies
 it to the provider process before confinement. Its descendants inherit that
 value.
@@ -38,6 +42,10 @@ value is null before it is known and for older records without this evidence.
 If the guardian already has a higher nice value, the provider inherits that
 lower scheduling priority. If changing priority fails, the provider still
 launches at its inherited priority and the reason is recorded as a warning.
+
+When run from a registered linked worktree without `--worktree` or `--branch`,
+`run` refuses with `REFUSED` and names `--worktree <path>` as the repair. Pass
+that option to bind the checkout as a writer.
 
 The receipt names the worktree. `--worktree PATH` uses an existing checkout
 without taking over its lifecycle. A missing branch name creates an owned

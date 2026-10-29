@@ -1053,8 +1053,7 @@ impl RunStore {
                 });
             }
         }
-        // A finish that settled well can still be a partial one. Flag it for
-        // the chair, who decides whether to resume; the outcome stays as is.
+        // A declared stop requires review even when the provider succeeded.
         let mut partial = std::mem::take(&mut decoded.partial_signals);
         if matches!(
             decoded.outcome,
@@ -1063,6 +1062,9 @@ impl RunStore {
             let mut notes = Vec::new();
             if let Some(handoff) = handoff.as_ref().filter(|handoff| handoff.unfinished()) {
                 partial.push(PartialSignal::DeclaredStop);
+                if decoded.outcome == Outcome::Succeeded {
+                    decoded.outcome = Outcome::ReviewRequired;
+                }
                 notes.push(format!(
                     "lane stopped early: {}",
                     bounded_note(&handoff.note)

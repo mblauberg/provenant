@@ -601,7 +601,7 @@ transcript except Codex's post-exit identity projection.
   `crates/confinement/src/git_evidence.rs::exempt_paths_left_uncommitted_do_not_count`
 - Owner: `crates/run/src/holder.rs`, `crates/run/src/writer.rs`, `crates/confinement/src/review_exempt.rs`
 
-## A partial finish is flagged, not failed
+## A partial finish is visible
 
 An attempt that settles `succeeded`, `review_required` or `uncommitted` carries
 `partial_signals` when there is structured evidence that part of the brief is
@@ -610,9 +610,10 @@ schema v2 block with status `stopped_early` or `blocked`, and nothing after it),
 `provider_stop` (the provider reported a stop reason other
 than a finished turn, such as Claude's `stop_reason` `max_tokens` or a
 `terminal_reason` other than `completed`) and `uncommitted_work`. Prose is never
-read, and a quoted, repeated or trailing-text block is no flag. The outcome is
-not changed, so delivery and fallback behave as before; the reason carries a
-`partial finish (...)` note, and `lanes` shows `(partial)` beside the state,
+read, and a quoted, repeated or trailing-text block is no flag. A declared stop
+changes an otherwise `succeeded` outcome to `review_required`; other outcomes
+remain unchanged. The reason carries a `partial finish (...)` note, and `lanes`
+shows `(partial)` beside the state,
 the signals, and a `provenant resume` hint. A failed lane carries no flag. Every
 launch prompt asks for the same final `handoff` block on every finish. Its JSON
 has `schema_version: 2`, `status` (`done`, `stopped_early`, `blocked`), `note`,
@@ -636,7 +637,7 @@ original brief and worktree state, rather than a result transcript. Policy
 continuations use `stopped_early`; `blocked` needs a decision or external change.
 The `Status:` line protocol is removed.
 - Why: a lane that did part of its brief must not read as one that did all of it.
-- Test: `crates/run/src/dispatch_tests.rs::a_terra_style_early_stop_settles_succeeded_but_flagged_partial`;
+- Test: `crates/run/src/dispatch_tests.rs::a_declared_stop_settles_review_required`;
   `::a_complete_finish_and_prose_about_remaining_work_are_not_flagged`;
   `crates/run/src/completion.rs::tests`;
   `crates/providers/src/tests.rs::claude_success_that_stopped_for_another_reason_is_an_early_stop`
@@ -910,6 +911,11 @@ in [nested lanes, MCP and hooks](routing.md#nested-lanes-mcp-and-hooks).
 
 ## Lane-owned worktrees and adoption
 
+A `run` submitted from a registered linked worktree without `--worktree` or
+`--branch` is refused with code `REFUSED` and a repair naming `--worktree
+<path>`. This prevents an intended writer from silently starting read-only; an
+explicit worktree binds the writer normally.
+
 Dispatch may opt into local lifecycle ownership with `--worktree-branch BRANCH
 [--base REF]`, exclusive with `--worktree` and peer `--branch`. Creation uses
 confinement's existing registered-worktree path. Reuse requires the same branch,
@@ -956,7 +962,8 @@ is silently skipped. Other failures may add a fixed, redacted
 or change an adopted worktree's receipt. Concurrent refreshes of the same
 branch may race and produce a warning.
 - Why: a lane may reclaim only work it owns and commits proven retained elsewhere.
-- Test: `crates/confinement/src/worktrees.rs::adopted_owner_proves_membership_and_enables_custody`;
+- Test: `crates/cli/src/run.rs::tests::run_in_linked_worktree_requires_explicit_target`;
+  `crates/confinement/src/worktrees.rs::adopted_owner_proves_membership_and_enables_custody`;
   `::owned_cleanup_refuses_dirty_unmerged_and_adopted_trees`;
   `tests/dispatch_provider.rs::owned_dispatch_creates_and_replays_after_pruning`;
   `tools/front-door/src/gc_support.rs::writer_tracking_refresh_handles_remote_branch_absence_and_failure`;
