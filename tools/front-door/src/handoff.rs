@@ -144,12 +144,31 @@ fn inspect(src: &Source, workers: &dyn WorkerObserver) -> Result<Vec<Tree>, Refu
         workers,
         |context, cancel| Ok(worktrees::list(context, cancel)?),
     )?;
-    let (_, common) = git(
-        project,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        GIT_TIMEOUT,
-    )?;
-    let common = PathBuf::from(common.trim());
+    let common =
+        provenant_os::git::repository_path(project, provenant_os::git::RepositoryPath::CommonDir)
+            .map_err(|error| {
+            if matches!(
+                error
+                    .get_ref()
+                    .and_then(|cause| cause.downcast_ref::<provenant_os::git::DiscoveryError>()),
+                Some(provenant_os::git::DiscoveryError::TimedOut)
+            ) {
+                Refusal::new(
+                    Outcome::Timeout,
+                    "GIT",
+                    "git rev-parse --path-format=absolute --git-common-dir timed out",
+                )
+            } else if matches!(
+                error
+                    .get_ref()
+                    .and_then(|cause| cause.downcast_ref::<provenant_os::git::DiscoveryError>()),
+                Some(provenant_os::git::DiscoveryError::Unavailable)
+            ) {
+                Refusal::new(Outcome::Error, "GIT", error.to_string())
+            } else {
+                Refusal::from(error)
+            }
+        })?;
     let primary = common
         .file_name()
         .is_some_and(|name| name == ".git")
