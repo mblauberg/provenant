@@ -21,5 +21,6 @@ stable.
 | [0033](0033-weighted-route-pools-are-the-routing-unit.md) | Weighted route pools are the routing unit |
 | [0034](0034-refusals-carry-stable-typed-codes.md) | Refusals carry stable typed codes |
 | [0035](0035-four-hard-boundaries-and-flexible-everything-else.md) | Four hard boundaries, flexible everything else |
+| [0036](0036-one-owner-per-mechanism.md) | One owner per mechanism: backoff, transient failure, time, expiry, durations and Git discovery |
 
 Run `scripts/check-adr-index` to check file coverage and index targets.

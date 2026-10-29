@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 
-Changed: 2026-10-30, #2272.
+Changed: 2026-10-30, #2272 and #2349.
 
 ## Context
 
@@ -21,9 +21,11 @@ members are ordered fallbacks. Pool membership and weights are data, editable
 under `[domains.routing]`, not code.
 
 Routing owns eligibility, weights and pacing; accounts only filter eligibility.
-Families are established from verified provider evidence, not from names. A
-confidential request admits only models that do not train on prompts; free-tier
-models need explicit opt-in and are never admitted to confidential work.
+Families are established from verified provider evidence, not from names. Free
+models are ordinary pool members with no opt-in. Confidential routing depends
+only on whether a model trains on or retains prompts: a confidential request
+admits only models whose catalogue row says neither, and an unknown row is
+ineligible. Price and free status do not enter that check.
 
 Review independence uses the resolved pool tier and model family, recorded per
 attempt, so a review leg is judged by what actually ran
@@ -34,4 +36,5 @@ attempt, so a review leg is judged by what actually ran
 Retuning capacity or adding a model is a data change. Tests assert resolver
 outcomes, not catalogue contents. The [routing spec](../specs/routing.md) owns
 the rules and the [routing runbook](../runbooks/model-routing.md) owns use.
-Changing how free models are treated in confidential work amends this ADR.
+Changing the confidentiality rule, or treating free models differently from
+paid ones in eligibility, amends this ADR.
