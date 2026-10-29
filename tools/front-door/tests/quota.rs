@@ -54,7 +54,7 @@ fn usage_reads_terminal_lanes_across_projects_and_keeps_unknown_accounts() -> Re
         assert_eq!(row["lane_usage"]["uncached_input"]["missing"], 1);
     }
     assert!(!String::from_utf8_lossy(&output.stdout.bytes).contains("private fixture prompt"));
-    let human = rig.command(&["quota", "usage"])?;
+    let human = rig.command(&["quota", "usage", "--full"])?;
     let human = String::from_utf8(human.stdout.bytes)?;
     assert!(human.contains("Chair tokens are read from each recorded chair session"));
     assert!(human.contains("unknown account"));
