@@ -2,7 +2,8 @@
 use crate::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use std::{
     ffi::{OsStr, OsString},
-    fs, io,
+    fs,
+    io::{self, Read},
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
     time::Duration,
@@ -18,6 +19,30 @@ pub enum RepositoryPath {
 /// Resolve and validate a repository path without inheriting Git redirects.
 pub fn repository_path(cwd: &Path, field: RepositoryPath) -> io::Result<PathBuf> {
     let git = git_executable().ok_or_else(|| io::Error::other("Git executable unavailable"))?;
+    let executor = SystemExecutor::new(1).map_err(io::Error::other)?;
+    repository_path_with(&executor, &git, cwd, field)
+}
+
+/// Resolve a repository path with a caller-selected executable and executor.
+/// The environment is rebuilt here so inherited Git redirects cannot affect
+/// discovery, even when the caller later pins its own trusted metadata paths.
+pub fn repository_path_with(
+    executor: &dyn Executor,
+    git: &Path,
+    cwd: &Path,
+    field: RepositoryPath,
+) -> io::Result<PathBuf> {
+    repository_path_with_cancel(executor, git, cwd, field, None)
+}
+
+/// As [`repository_path_with`], with cancellation for long-running workflows.
+pub fn repository_path_with_cancel(
+    executor: &dyn Executor,
+    git: &Path,
+    cwd: &Path,
+    field: RepositoryPath,
+    cancel: Option<&provenant_core::CancelToken>,
+) -> io::Result<PathBuf> {
     let flag = match field {
         RepositoryPath::Toplevel => "--show-toplevel",
         RepositoryPath::CommonDir => "--git-common-dir",
@@ -54,15 +79,21 @@ pub fn repository_path(cwd: &Path, field: RepositoryPath) -> io::Result<PathBuf>
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
     options.stderr = StreamPolicy::Discard;
+    options.cancel = cancel;
     options.stop_on_output_limit = true;
-    let result = SystemExecutor::new(1)
-        .and_then(|executor| executor.execute(options))
-        .map_err(io::Error::other)?;
+    let result = executor.execute(options).map_err(io::Error::other)?;
     if result.termination != Termination::Exit(0)
         || result.timed_out
+        || result.cancelled
+        || result.overflow_stopped
         || result.drain_truncated
         || result.stdout.truncated
         || result.stdout.read_failed
+        || result.stdout.sink_failed
+        || result.stdout.sink_lost_bytes != 0
+        || result.stdout.oversized_frames != 0
+        || result.stdout.decoder_lost_frames != 0
+        || result.stdout.filter_failed
     {
         return Err(io::Error::other("Git path discovery failed"));
     }
@@ -118,7 +149,77 @@ pub fn git_executable() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exec::{CapturedStream, ExecError, ExecOutcome};
     use std::{fs, os::unix::fs::PermissionsExt};
+
+    struct DiscoveryExecutor {
+        output: Vec<u8>,
+        truncated: bool,
+    }
+
+    impl Executor for DiscoveryExecutor {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            let env = options.env.expect("isolated environment");
+            for key in [
+                "GIT_DIR",
+                "GIT_WORK_TREE",
+                "GIT_INDEX_FILE",
+                "GIT_COMMON_DIR",
+                "GIT_OBJECT_DIRECTORY",
+            ] {
+                assert!(!env.iter().any(|(name, _)| name == key));
+            }
+            assert!(
+                options
+                    .argv
+                    .contains(&OsString::from("--path-format=absolute"))
+            );
+            assert!(options.stop_on_output_limit);
+            Ok(ExecOutcome {
+                termination: Termination::Exit(0),
+                stdout: CapturedStream {
+                    bytes: self.output.clone(),
+                    truncated: self.truncated,
+                    ..Default::default()
+                },
+                stderr: CapturedStream::default(),
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        }
+    }
+
+    #[test]
+    fn repository_path_uses_isolated_environment_and_refuses_truncation() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let output = format!("{}\n", dir.path().display()).into_bytes();
+        let executor = DiscoveryExecutor {
+            output: output.clone(),
+            truncated: false,
+        };
+        for field in [RepositoryPath::Toplevel, RepositoryPath::CommonDir] {
+            assert_eq!(
+                repository_path_with(&executor, Path::new("/git"), dir.path(), field).unwrap(),
+                fs::canonicalize(dir.path()).unwrap()
+            );
+        }
+        let executor = DiscoveryExecutor {
+            output,
+            truncated: true,
+        };
+        assert!(
+            repository_path_with(
+                &executor,
+                Path::new("/git"),
+                dir.path(),
+                RepositoryPath::CommonDir
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn repository_path_rejects_ambiguous_output() {
