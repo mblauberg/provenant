@@ -9,11 +9,41 @@ pub struct CompositeSpec {
     pub exports: Vec<GraphInput>,
 }
 
+/// Structural guards used when the document states no limit of its own. The
+/// host ceiling is enforced afterwards against the resolved limits.
+pub(super) const DEFAULT_COMPOSITE_DEPTH: usize = 8;
+pub(super) const DEFAULT_COMPOSITE_NODES: usize = 512;
+
+fn bounds(document: &GraphDocument) -> (usize, usize) {
+    let stated = document.limits.as_ref();
+    (
+        stated
+            .and_then(|l| l.expansion_depth)
+            .map_or(DEFAULT_COMPOSITE_DEPTH, |v| v.max(DEFAULT_COMPOSITE_DEPTH)),
+        stated
+            .and_then(|l| l.nodes)
+            .map_or(DEFAULT_COMPOSITE_NODES, |v| v.max(DEFAULT_COMPOSITE_NODES)),
+    )
+}
+
 /// Expand only at the execution boundary. The submitted document remains nested.
 pub(super) fn expand(document: &GraphDocument) -> Result<GraphDocument, &'static str> {
     let mut expanded = document.clone();
-    expanded.nodes = children(&document.nodes, "", &[], &[], None, &[], 0)?;
-    if expanded.nodes.iter().any(|node| node.composite.is_some()) && expanded.nodes.len() > 512 {
+    let (max_depth, max_nodes) = bounds(document);
+    expanded.nodes = children(
+        &document.nodes,
+        "",
+        &[],
+        &[],
+        None,
+        &[],
+        0,
+        max_depth,
+        max_nodes,
+    )?;
+    if expanded.nodes.iter().any(|node| node.composite.is_some())
+        && expanded.nodes.len() > max_nodes
+    {
         return Err("composite expansion exceeds 512 nodes");
     }
     Ok(expanded)
@@ -57,9 +87,11 @@ fn children(
     source: Option<&SourceBinding>,
     read_roots: &[String],
     depth: usize,
+    max_depth: usize,
+    max_nodes: usize,
 ) -> Result<Vec<GraphNode>, &'static str> {
-    if depth > 8 {
-        return Err("composite expansion depth exceeds 8");
+    if depth > max_depth {
+        return Err("composite expansion depth exceeds the limit");
     }
     let locals: BTreeSet<_> = nodes.iter().map(|node| node.id.as_str()).collect();
     if locals.len() != nodes.len() {
@@ -139,7 +171,17 @@ fn children(
                     return Err("loop body cannot nest loops or deliver or route on_fail");
                 }
             }
-            spec.body = children(&spec.body, "", &[], &[], None, &[], depth)?;
+            spec.body = children(
+                &spec.body,
+                "",
+                &[],
+                &[],
+                None,
+                &[],
+                depth,
+                max_depth,
+                max_nodes,
+            )?;
         }
         if (node.kind == Some(NodeKind::Composite)) != node.composite.is_some() {
             return Err("composite requires nodes and exports");
@@ -198,6 +240,8 @@ fn children(
                 node.source.as_ref(),
                 &node.read_roots,
                 depth + 1,
+                max_depth,
+                max_nodes,
             )?;
             node.composite_members = spec
                 .nodes
@@ -222,7 +266,7 @@ fn children(
             expanded.extend(body);
         }
         expanded.push(node);
-        if composite_bound && expanded.len() > 512 {
+        if composite_bound && expanded.len() > max_nodes {
             return Err("composite expansion exceeds 512 nodes");
         }
     }

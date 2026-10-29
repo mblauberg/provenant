@@ -1376,7 +1376,8 @@ fn validate_binding(context: &WorktreeContext<'_>) -> Result<(), WorktreeError> 
 
 /// Advance a free, registered linked worktree to a pinned descendant commit.
 /// Writer exclusion covers verification and mutation. Local edits, divergence
-/// and ignored files that would be overwritten always refuse the handoff.
+/// and ignored files that would be overwritten always refuse the handoff. A
+/// checkout already ahead of the pin is left as it is.
 pub fn fast_forward(
     context: &WorktreeContext<'_>,
     path: &Path,
@@ -1415,6 +1416,11 @@ pub fn fast_forward(
             return Err(WorktreeError::GitOperationInProgress);
         }
         WorktreeCondition::Unknown => return Err(WorktreeError::UnknownWriter),
+    }
+    // A retry or fallback writer resumes in a checkout that already holds work
+    // committed past the pin; that descendant of the pin is not a divergence.
+    if current.head != head && is_ancestor(context, head, current.head, cancel)? {
+        return Ok(());
     }
     if !is_ancestor(context, current.head, head, cancel)? {
         return Err(WorktreeError::SourceDiverged {
@@ -2715,6 +2721,43 @@ mod lifecycle_tests {
         );
         assert!(!info.path.join("hook-ran").exists());
         fast_forward(&context, &info.path, target, &cancel())?;
+        Ok(())
+    }
+
+    #[test]
+    fn fallback_writer_after_a_partial_commit_continues_past_the_pin() -> Result<(), Box<dyn Error>>
+    {
+        let fixture = Fixture::new()?;
+        let test = TestContext::new(&fixture)?;
+        let context = test.context();
+        let info = create(
+            &context,
+            WorktreeCreate {
+                branch: "source-writer".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        let pin = fixture.head()?;
+        fast_forward(&context, &info.path, pin, &cancel())?;
+        run_in_worktree(
+            &fixture,
+            &info.path,
+            &["commit", "--allow-empty", "-m", "partial work"],
+        )?;
+        let ahead = read_worktrees(&context, &cancel())?
+            .into_iter()
+            .find(|entry| entry.path == info.path)
+            .ok_or("missing writer")?
+            .head;
+        assert_ne!(ahead, pin);
+        fast_forward(&context, &info.path, pin, &cancel())?;
+        let after = read_worktrees(&context, &cancel())?
+            .into_iter()
+            .find(|entry| entry.path == info.path)
+            .ok_or("missing writer")?
+            .head;
+        assert_eq!(after, ahead);
         Ok(())
     }
 

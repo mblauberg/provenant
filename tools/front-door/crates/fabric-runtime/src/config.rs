@@ -20,6 +20,9 @@ pub struct FabricConfig {
     pub lanes: Lanes,
 }
 
+/// Document-level expansion depth allowed when the host configures no depth.
+pub const DEFAULT_DEPTH_CEILING: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GraphConfig {
     pub limits: GraphLimits,
@@ -32,7 +35,7 @@ impl Default for GraphConfig {
         Self {
             limits: GraphLimits::default(),
             limit_ceiling: GraphLimits {
-                expansion_depth: 64,
+                expansion_depth: DEFAULT_DEPTH_CEILING,
                 ..Default::default()
             },
             budget: GraphBudget::default(),
@@ -53,7 +56,13 @@ impl<'de> Deserialize<'de> for GraphConfig {
         }
         let raw = RawGraphConfig::deserialize(deserializer)?;
         let mut ceiling = raw.limits.clone();
-        ceiling.expansion_depth = ceiling.expansion_depth.max(64);
+        // Composed batches may raise depth to 64 only on an unconfigured host.
+        // Any explicit depth limit or ceiling is the host's decision and stands.
+        if raw.limit_ceiling.expansion_depth.is_none()
+            && raw.limits.expansion_depth == GraphLimits::default().expansion_depth
+        {
+            ceiling.expansion_depth = DEFAULT_DEPTH_CEILING;
+        }
         macro_rules! inherit {
             ($($field:ident),+ $(,)?) => {$(
                 if let Some(value) = raw.limit_ceiling.$field {
@@ -659,6 +668,11 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(bounded.limit_ceiling.expansion_depth, 8);
+        let tightened: GraphConfig = serde_json::from_value(serde_json::json!({
+            "limits": {"expansion_depth": 2}
+        }))
+        .unwrap();
+        assert_eq!(tightened.limit_ceiling.expansion_depth, 2);
         assert_eq!(graph.budget.unknown_usage, UnknownUsage::Warn);
 
         let unlimited: GraphConfig = serde_json::from_value(serde_json::json!({

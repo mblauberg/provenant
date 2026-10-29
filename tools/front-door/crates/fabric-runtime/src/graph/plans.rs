@@ -245,6 +245,33 @@ fn fragment(
         ));
     }
     for child in &mut fragment.nodes {
+        // A planner may narrow but never widen the access its own node holds.
+        if let Some(role) = &child.role
+            && node.role.as_ref() != Some(role)
+        {
+            return Err(format!(
+                "fragment node {} sets role {role}; planner-emitted nodes cannot choose a role",
+                child.id
+            ));
+        }
+        if let Some(source) = &child.source
+            && node.source.as_ref() != Some(source)
+        {
+            return Err(format!(
+                "fragment node {} sets source; planner-emitted nodes may only repeat the planner's own source",
+                child.id
+            ));
+        }
+        if let Some(root) = child
+            .read_roots
+            .iter()
+            .find(|r| !node.read_roots.contains(r))
+        {
+            return Err(format!(
+                "fragment node {} read root {root} is outside the planner's read roots",
+                child.id
+            ));
+        }
         if !spec.kinds.contains(&child.kind.unwrap_or(NodeKind::Task)) {
             return Err(format!(
                 "fragment kind {:?} was not declared",
