@@ -113,6 +113,8 @@ fn console_chair_schema_parity() -> Result {
             patch_path,
             "--expect-revision",
             "0",
+            "--operation-id",
+            "parity-summary",
         ],
     )?;
     std::fs::remove_dir_all(&rig.state)?;
@@ -120,13 +122,40 @@ fn console_chair_schema_parity() -> Result {
     let mut actual = invoke(
         &rig,
         "fabric_chair",
-        json!({"op":"summary_update","session":"chair","patch":patch,"expect_revision":0}),
+        json!({"op":"summary_update","session":"chair","patch":patch,"expect_revision":0,"operation_id":"parity-summary"}),
     )?;
     assert!(expected["summary"]["updated_at"].is_string());
     assert!(actual["summary"]["updated_at"].is_string());
     expected["summary"]["updated_at"] = Value::Null;
     actual["summary"]["updated_at"] = Value::Null;
     assert_eq!(actual, expected);
+    assert_eq!(actual["replayed"], false);
+
+    // A retry through either surface replays the receipt; a different request
+    // under the same id is refused.
+    let mut replay = invoke(
+        &rig,
+        "fabric_chair",
+        json!({"op":"summary_update","session":"chair","patch":patch,"expect_revision":0,"operation_id":"parity-summary"}),
+    )?;
+    assert_eq!(replay["replayed"], true);
+    replay["replayed"] = Value::Bool(false);
+    replay["summary"]["updated_at"] = Value::Null;
+    assert_eq!(replay, actual);
+    let conflict = rig.command(&[
+        "chair",
+        "summary",
+        "update",
+        "chair",
+        "--file",
+        patch_path,
+        "--expect-revision",
+        "1",
+        "--operation-id",
+        "parity-summary",
+        "--json",
+    ])?;
+    assert_ne!(code(&conflict), 0);
 
     let stale = rig.command(&[
         "chair",

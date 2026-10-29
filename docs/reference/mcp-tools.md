@@ -2502,6 +2502,12 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
   },
   "description": "Read and update chair summaries and append or list chair logs.",
   "inputSchema": {
+    "$defs": {
+      "OperationId": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+        "type": "string"
+      }
+    },
     "oneOf": [
       {
         "additionalProperties": false,
@@ -2585,8 +2591,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
           "operation_id": {
             "anyOf": [
               {
-                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
-                "type": "string"
+                "$ref": "#/$defs/OperationId"
               },
               {
                 "type": "null"
@@ -2705,6 +2710,16 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
           },
           "op": {
             "const": "summary_update"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OperationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "patch": {
             "additionalProperties": false,

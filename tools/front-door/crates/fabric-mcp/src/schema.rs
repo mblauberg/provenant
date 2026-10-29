@@ -279,7 +279,7 @@ fn build_strict() -> Vec<Value> {
             json!({
                 "summary_show":{"session":inbox_session.clone()},
                 "summary_diff":{"session":inbox_session.clone(),"from":integer(1,u64::MAX),"to?":nullable(integer(1,u64::MAX))},
-                "summary_update":{"session":inbox_session.clone(),"patch":object(json!({"now?":nullable(text_allowing_empty(256 * 1024)),"next?":nullable(text_allowing_empty(256 * 1024)),"needs_you?":nullable(json!({"type":"array","items":text_allowing_empty(256 * 1024)})),"risk?":nullable(text_allowing_empty(256 * 1024))})),"expect_revision":integer(0,u64::MAX)},
+                "summary_update":{"session":inbox_session.clone(),"patch":object(json!({"now?":nullable(text_allowing_empty(256 * 1024)),"next?":nullable(text_allowing_empty(256 * 1024)),"needs_you?":nullable(json!({"type":"array","items":text_allowing_empty(256 * 1024)})),"risk?":nullable(text_allowing_empty(256 * 1024))})),"expect_revision":integer(0,u64::MAX),"operation_id?":nullable(reference("OperationId"))},
                 "log_list":{"session":inbox_session.clone(),"after?":nullable(integer(0,u64::MAX)),"limit?":integer(1,100)},
                 "log_append":{"session":inbox_session,"entry":object(json!({"kind":text(16 * 1024),"markdown":text(256 * 1024),"channel":text(16 * 1024),"request_ids?":json!({"type":"array","items":text(256 * 1024)}),"attempt_ids?":json!({"type":"array","items":text(256 * 1024)}),"issue_ids?":json!({"type":"array","items":text(256 * 1024)}),"pr_ids?":json!({"type":"array","items":text(256 * 1024)}),"correction_of?":nullable(integer(0,u64::MAX))})),"operation_id?":nullable(reference("OperationId")),"issued_at?":nullable(json!({"type":"integer"}))}
             }),
