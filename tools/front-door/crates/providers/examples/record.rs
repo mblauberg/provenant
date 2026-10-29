@@ -1077,6 +1077,7 @@ fn main() -> Result<()> {
                 hidden: false,
                 order: None,
                 headline: None,
+                settings: Default::default(),
             }
             .registered()
         })

@@ -34,11 +34,9 @@ const DENIED: [&str; 6] = [
     "forceLoginOrgUUID",
     "otelHeadersHelper",
 ];
-const DENIED_WORDS: [&str; 11] = [
+const DENIED_WORDS: [&str; 9] = [
     "auth",
     "authentication",
-    "authorization",
-    "authorisation",
     "credential",
     "credentials",
     "token",
@@ -85,7 +83,7 @@ pub fn denied_key(name: &str) -> bool {
     let words = words(name);
     words
         .iter()
-        .any(|word| DENIED_WORDS.contains(&word.as_str()))
+        .any(|word| DENIED_WORDS.contains(&word.as_str()) || word.starts_with("authori"))
         || words.iter().any(|word| word == "apikey")
         || words.windows(2).any(|pair| {
             matches!(
