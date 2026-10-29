@@ -416,7 +416,7 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
     let run = |directory: &Path,
                args: &[&str]|
      -> std::result::Result<String, Box<dyn std::error::Error>> {
-        let output = std::process::Command::new(&git)
+        let output = provenant_os::fixture::git_command_at(&git)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &home)
@@ -559,7 +559,7 @@ impl OriginFixture {
         directory: &Path,
         args: &[&str],
     ) -> std::result::Result<String, Box<dyn std::error::Error>> {
-        let output = std::process::Command::new(&self.git)
+        let output = provenant_os::fixture::git_command_at(&self.git)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &self.home)

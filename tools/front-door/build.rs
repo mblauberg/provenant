@@ -10,6 +10,20 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use toml_edit::{DocumentMut, Item};
 
+#[cfg(test)]
+use provenant_os::fixture as fixture_git;
+
+#[cfg(test)]
+fn inventory_git() -> Command {
+    fixture_git::git_command()
+}
+
+#[cfg(not(test))]
+#[allow(clippy::disallowed_methods)]
+fn inventory_git() -> Command {
+    Command::new("git")
+}
+
 type BuildResult<T> = Result<T, Box<dyn Error>>;
 
 const MAX_SOURCE_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -92,7 +106,7 @@ impl TrackedFiles {
         repository: &Path,
         watched: &mut BTreeSet<PathBuf>,
     ) -> BuildResult<Self> {
-        let top_level = Command::new("git")
+        let top_level = inventory_git()
             .args(["rev-parse", "--show-toplevel"])
             .current_dir(workspace)
             .output()?;
@@ -108,7 +122,7 @@ impl TrackedFiles {
             return Err(invalid("source workspace is outside its expected git checkout").into());
         }
 
-        let index = Command::new("git")
+        let index = inventory_git()
             .args(["rev-parse", "--path-format=absolute", "--git-path", "index"])
             .current_dir(workspace)
             .output()?;
@@ -118,7 +132,7 @@ impl TrackedFiles {
         let index = index_path_from_output(&index.stdout)?;
         watch(watched, index)?;
 
-        let output = Command::new("git")
+        let output = inventory_git()
             .args(["ls-files", "--full-name", "-z", "--", ":/"])
             .current_dir(workspace)
             .output()?;
@@ -871,7 +885,6 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
-    use std::process::Command;
 
     #[test]
     fn dangling_untracked_symlink_is_not_watched() -> BuildResult<()> {
@@ -1114,7 +1127,7 @@ mod tests {
 
     #[allow(clippy::disallowed_methods)]
     fn run_git(repository: &Path, arguments: &[&str]) -> BuildResult<()> {
-        let status = Command::new("git")
+        let status = super::fixture_git::git_command()
             .args(arguments)
             .current_dir(repository)
             .status()?;

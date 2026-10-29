@@ -101,6 +101,8 @@ provenant-records = { workspace = true }
 toml_edit = { workspace = true }
 
 [dev-dependencies]
+provenant-os = { workspace = true, features = ["fixture"] }
+regex = { workspace = true }
 rusqlite = { workspace = true }
 provenant-cli = { workspace = true, features = ["fixture"] }
 provenant-run = { workspace = true, features = ["fixture"] }

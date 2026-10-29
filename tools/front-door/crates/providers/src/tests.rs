@@ -473,7 +473,7 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
         let other = root.join("other");
         let linked = root.join("linked");
         let host_git = |cwd: &Path, args: &[&std::ffi::OsStr]| {
-            let output = Command::new("/usr/bin/git")
+            let output = provenant_os::fixture::git_command_at("/usr/bin/git")
                 .current_dir(cwd)
                 .env_clear()
                 .env(
@@ -700,7 +700,7 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
         let other_head = host_git(&other, &["rev-parse".as_ref(), "HEAD".as_ref()]);
         // Native Git can inspect a second repository by explicitly removing
         // the lane's repository selectors; no command-routing parser is needed.
-        let other_read = Command::new(git)
+        let other_read = provenant_os::fixture::git_command_at(git)
             .current_dir(&other)
             .env_clear()
             .envs(spec.env.iter().cloned())

@@ -741,8 +741,11 @@ The original worktree gitfile stays unchanged so the host retains its verified
 repository identity. Seatbelt denies writes throughout both the shared Git
 directory and the linked admin directory, including refs, config, hooks, info
 and the original index. These environment selectors intentionally select the lane
-repository. To inspect a second repository, run the pinned native Git executable
-with GIT_DIR, GIT_COMMON_DIR, GIT_WORK_TREE and GIT_OBJECT_DIRECTORY unset.
+repository. To inspect or create a second repository, run the pinned native Git
+executable with inherited `GIT_*` variables unset. Clearing those variables
+alone is insufficient when `git` resolves to the lane wrapper on `PATH`, since
+the wrapper restores the lane binding. Test fixtures use native Git directly
+and clear those variables before supplying any fixture-specific settings.
 The small Git wrapper has one source and restores
 scrubbed environment or supplies publishing credentials; it does not inspect
 Git commands or route their objects.

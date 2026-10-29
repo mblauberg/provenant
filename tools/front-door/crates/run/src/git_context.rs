@@ -869,11 +869,10 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods)]
     fn capture_uses_requested_head_instead_of_checkout() -> TestResult {
-        use std::process::Command;
         let temp = tempfile::tempdir()?;
         let git = |args: &[&str]| -> TestResult {
             assert!(
-                Command::new("git")
+                provenant_os::fixture::git_command()
                     .current_dir(temp.path())
                     .args(args)
                     .status()?
@@ -894,7 +893,7 @@ mod tests {
         ])?;
         let oid = || -> std::result::Result<String, Box<dyn std::error::Error>> {
             Ok(String::from_utf8(
-                Command::new("git")
+                provenant_os::fixture::git_command()
                     .current_dir(temp.path())
                     .args(["rev-parse", "HEAD"])
                     .output()?

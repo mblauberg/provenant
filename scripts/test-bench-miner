@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/test-git-env.sh"
 
 script=$(cd "$(dirname "$0")" && pwd -P)/bench
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-bench-miner.XXXXXX")
