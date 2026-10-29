@@ -13,7 +13,7 @@
         "primary_skill": "ui-ux-design",
         "companion_skills": []
       },
-      "note": "Screenshot and untested-state discipline from references/review.md. A screenshot alone must not be reported as certifying more than it shows."
+      "note": "Screenshot and untested-state discipline from references/craft.md. A screenshot alone must not be reported as certifying more than it shows."
     },
     {
       "id": "r002",
@@ -28,7 +28,7 @@
           "engineering-docs"
         ]
       },
-      "note": "Original frontend-review boundary case (WCAG-companion). The companion places the recorded findings; this skill still owns the review workflow and the finding contract, per references/review.md."
+      "note": "Original frontend-review boundary case (WCAG-companion). The companion places the recorded findings; this skill still owns the review workflow and the finding contract, per references/craft.md."
     },
     {
       "id": "r003",
@@ -43,7 +43,7 @@
           "engineering-docs"
         ]
       },
-      "note": "Lighthouse-evidence companion to r002: a Lighthouse run is one evidence lane, not a substitute for manual inspection or a standards certification; see the claim-boundary section in references/review.md."
+      "note": "Lighthouse-evidence companion to r002: a Lighthouse run is one evidence lane, not a substitute for manual inspection or a standards certification; see the claim-boundary section in references/craft.md."
     },
     {
       "id": "r004",

@@ -1,5 +1,7 @@
 # TanStack Pacer (beta)
 
+Version-sensitive guidance last checked 22 October 2026; verify against the installed package.
+
 The docs mark the API as beta and subject to change. Checked against
 `@tanstack/react-pacer` 0.24.1 declarations.
 

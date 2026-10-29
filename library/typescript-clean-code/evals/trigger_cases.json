@@ -41,9 +41,10 @@
     {
       "id": "q274",
       "relation": "negative",
-      "prompt": "Rename and extract this stable JavaScript helper without any type-boundary change.",
+      "prompt": "Rename and extract this stable TypeScript helper without changing its types or behaviour.",
       "tags": [
-        "adjacent"
+        "adjacent",
+        "near-miss"
       ],
       "expected": {
         "primary_skill": "refactor",
@@ -55,9 +56,10 @@
     {
       "id": "q275",
       "relation": "negative",
-      "prompt": "Profile and fix the React page's rendering bottleneck.",
+      "prompt": "Profile and fix the rendering bottleneck in this TypeScript React page; its types already check.",
       "tags": [
-        "adjacent"
+        "adjacent",
+        "near-miss"
       ],
       "expected": {
         "primary_skill": "react-performance",
@@ -100,7 +102,7 @@
       "expected": {
         "primary_skill": "implement",
         "companion_skills": [
-          "tdd",
+          "test-design",
           "typescript-clean-code"
         ]
       }

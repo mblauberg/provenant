@@ -1,5 +1,7 @@
 # TanStack Store selectors
 
+Version-sensitive guidance last checked 22 October 2026; verify against the installed package.
+
 Checked against `@tanstack/react-store` and `@tanstack/store` 0.11.2 source and
 declarations.
 
