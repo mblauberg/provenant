@@ -2347,7 +2347,7 @@ mod route_tests {
         let path = roots.state.as_path().join("config.toml");
         std::fs::write(
             &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/minimax-m3.1-flash',weight=1},{model='opencode/opencode-go/glm-5.3-flash',weight=0}]\n",
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/glm-5.3-flash',weight=1},{model='opencode/opencode-go/deepseek-v4.1-flash',weight=0}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=61\n",
         )?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let catalogue = super::Catalogue::bundled()?;
@@ -2361,8 +2361,8 @@ mod route_tests {
             catalogue_revision: catalogue.revision().into(),
             account_key: Some("go".into()),
             observed_models: vec![
-                "opencode-go/minimax-m3.1-flash".into(),
                 "opencode-go/glm-5.3-flash".into(),
+                "opencode-go/deepseek-v4.1-flash".into(),
             ],
             observed_unix_seconds: now,
             expires_unix_seconds: now + 300,
@@ -2402,9 +2402,7 @@ mod route_tests {
             name: None,
             request: super::RouteRequest {
                 read_heavy: false,
-                model: Some(super::Model(
-                    "opencode/opencode-go/minimax-m3.1-flash".into(),
-                )),
+                model: Some(super::Model("opencode/opencode-go/glm-5.3-flash".into())),
                 route: None,
                 effort: None,
                 confidential: false,
@@ -2412,19 +2410,23 @@ mod route_tests {
             },
         });
         match super::execute(&preview, &roots, 0) {
-            Err(error) => assert!(error.to_string().contains("$20")),
+            Err(error) => assert!(error.to_string().contains("$60")),
             Ok(_) => panic!("preview must refuse the model"),
         }
-        let error = resolve(&request(
-            Some("opencode/opencode-go/minimax-m3.1-flash"),
-            None,
-        )?)
-        .unwrap_err();
+        let error =
+            resolve(&request(Some("opencode/opencode-go/glm-5.3-flash"), None)?).unwrap_err();
         let error = error.to_string();
-        assert!(error.contains("minimax-m3.1-flash") && error.contains("$20"));
+        assert!(error.contains("glm-5.3-flash") && error.contains("$60"));
         let error = resolve(&request(Some("opencode/opencode-go/unlisted"), None)?).unwrap_err();
         let error = error.to_string();
-        assert!(error.contains("opencode-go/unlisted") && error.contains("unknown"));
+        assert!(
+            error.contains("opencode-go/unlisted")
+                && error.contains("not an admitted OpenCode route")
+                && error.contains("opencode/opencode-go/glm-5.3-flash")
+        );
+        let error = resolve(&request(Some("opencode/opencode-go/glm-5.2"), None)?).unwrap_err();
+        let error = error.to_string();
+        assert!(error.contains("glm-5.2") && error.contains("opencode/opencode-go/glm-5.3-flash"));
         let fallback = |model: Option<&str>, route: Option<&str>| -> Result<(), Box<dyn Error>> {
             let request = super::RouteRequest {
                 read_heavy: false,
@@ -2432,43 +2434,45 @@ mod route_tests {
                 route: route.map(str::to_owned),
                 effort: None,
                 confidential: false,
-                fallback: vec![super::Model("opencode/opencode-go/glm-5.3-flash".into())],
+                fallback: vec![super::Model(
+                    "opencode/opencode-go/deepseek-v4.1-flash".into(),
+                )],
             };
             let resolved = resolve(&request.to_domain()?)?;
             assert!(super::check_dispatch_candidate(&roots, &resolved).is_err());
             assert_eq!(
                 resolved.alternatives.as_slice()[0].model,
-                "opencode-go/glm-5.3-flash"
+                "opencode-go/deepseek-v4.1-flash"
             );
             Ok(())
         };
-        fallback(Some("opencode/opencode-go/minimax-m3.1-flash"), None)?;
+        fallback(Some("opencode/opencode-go/glm-5.3-flash"), None)?;
         std::fs::write(
             &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/minimax-m3.1-flash',weight=1}]\n",
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/glm-5.3-flash',weight=1}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=61\n",
         )?;
         fallback(None, Some("test"))?;
         std::fs::write(
             &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/minimax-m3.1-flash',weight=1},{model='opencode/opencode-go/glm-5.3-flash',weight=1}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=100\n",
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/glm-5.3-flash',weight=1},{model='opencode/opencode-go/deepseek-v4.1-flash',weight=1}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=100\n",
         )?;
         let error = resolve(&request(None, Some("test"))?)
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("minimax-m3.1-flash") && error.contains("glm-5.3-flash"),
+            error.contains("glm-5.3-flash") && error.contains("deepseek-v4.1-flash"),
             "{error}"
         );
         std::fs::write(
             &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/minimax-m3.1-flash',weight=1},{model='opencode/opencode-go/glm-5.3-flash',weight=0}]\n",
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/glm-5.3-flash',weight=1},{model='opencode/opencode-go/deepseek-v4.1-flash',weight=0}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=61\n",
         )?;
         let selected = resolve(&request(None, Some("test"))?)?;
-        assert_eq!(selected.model, "opencode-go/glm-5.3-flash");
+        assert_eq!(selected.model, "opencode-go/deepseek-v4.1-flash");
         assert!(
             selected.pool_selection.as_ref().unwrap().redraws[0]
                 .reason
-                .contains("$20")
+                .contains("$60")
         );
         let mut candidate = selected.clone();
         candidate.model = "opencode-go/unlisted".into();
@@ -2477,11 +2481,11 @@ mod route_tests {
                 .unwrap_err()
                 .contains("unknown")
         );
-        candidate.model = "opencode-go/minimax-m3.1-flash".into();
+        candidate.model = "opencode-go/glm-5.3-flash".into();
         assert!(
             super::check_dispatch_candidate(&roots, &candidate)
                 .unwrap_err()
-                .contains("$20")
+                .contains("$60")
         );
         Ok(())
     }

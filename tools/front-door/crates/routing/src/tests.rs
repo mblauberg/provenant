@@ -525,7 +525,7 @@ fn exact_unknown_is_retained_but_requires_availability() -> Result<(), Box<dyn s
     Ok(())
 }
 #[test]
-fn explicit_unlisted_model_is_ready_without_provider_listing()
+fn explicit_catalogued_model_is_ready_without_provider_listing()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
@@ -544,8 +544,8 @@ fn explicit_unlisted_model_is_ready_without_provider_listing()
     context.access = &access;
     let query = request("opencode/opencode/glm-5.3-flash-free")?;
     let route = resolve(&query, &context)?;
-    assert_eq!(route.model, "opencode/beam-free");
-    assert_eq!(route.eligibility, RouteEligibility::UnverifiedModel);
+    assert_eq!(route.model, "opencode/glm-5.3-flash-free");
+    assert_eq!(route.eligibility, RouteEligibility::Eligible);
     assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
     assert!(route.exclusions.is_empty());
     let mut with_effort = query.clone();
@@ -556,10 +556,41 @@ fn explicit_unlisted_model_is_ready_without_provider_listing()
     ));
     let mut confidential = query;
     confidential.confidential = true;
-    assert!(matches!(
-        resolve(&confidential, &context),
-        Err(RoutingError::ConfidentialModel)
-    ));
+    assert!(resolve(&confidential, &context).is_ok());
+    Ok(())
+}
+
+#[test]
+fn explicit_unlisted_opencode_model_names_the_admitted_routes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let context = context(&catalogue, &config, now()?);
+    let admitted = [
+        "opencode/opencode/deepseek-v4.1-flash-free",
+        "opencode/opencode/glm-5.3-flash-free",
+        "opencode/opencode-go/deepseek-v4.1-flash",
+        "opencode/opencode-go/glm-5.3-flash",
+    ];
+    for id in [
+        "opencode/opencode/beam-free",
+        "opencode/opencode-go/glm-5.2",
+    ] {
+        let error = resolve(&request(id)?, &context).expect_err("model must be refused");
+        assert_eq!(error.code(), "unlisted_opencode_model");
+        let message = error.to_string();
+        assert!(message.contains(id), "{message}");
+        for route in admitted {
+            assert!(message.contains(route), "{message}");
+        }
+    }
+    let mut fallback = request("codex/gpt-6-luna")?;
+    fallback.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse(
+        "opencode/opencode/beam-free",
+    )?])?);
+    let error = resolve(&fallback, &context).expect_err("fallback must be refused");
+    assert_eq!(error.code(), "unlisted_opencode_model");
+    assert!(resolve(&request("codex/unlisted-exact-id")?, &context).is_ok());
     Ok(())
 }
 

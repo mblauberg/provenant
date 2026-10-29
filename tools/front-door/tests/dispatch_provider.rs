@@ -987,20 +987,27 @@ fn opencode_dispatch_observes_v2_wal_session() -> Result {
             ("opencode-limit", "free limit", "quota_limited"),
         ] {
             fs::write(&prompt, text)?;
-            let model = if expected == "model_unavailable" {
-                "opencode/opencode/misspelt-free"
+            let (model, provider, session_model) = if expected == "model_unavailable" {
+                (
+                    "opencode/opencode/deepseek-v4.1-flash-free",
+                    "opencode",
+                    "misspelt-free",
+                )
             } else if operation == "opencode-zen" {
-                "opencode/opencode/beam-free"
+                (
+                    "opencode/opencode/glm-5.3-flash-free",
+                    "opencode",
+                    "glm-5.3-flash-free",
+                )
             } else {
-                "opencode/opencode-go/beam-free"
-            };
-            let provider = if model.starts_with("opencode/opencode-go/") {
-                "opencode-go"
-            } else {
-                "opencode"
+                (
+                    "opencode/opencode-go/glm-5.3-flash",
+                    "opencode-go",
+                    "glm-5.3-flash",
+                )
             };
             db.execute("UPDATE session_message SET data = ?1", [
-                serde_json::to_string(&json!({"model": {"providerID": provider, "id": "beam-free"}, "finish": "stop"}))?
+                serde_json::to_string(&json!({"model": {"providerID": provider, "id": session_model}, "finish": "stop"}))?
             ])?;
             let out = rig.command(&[
                 "dispatch",

@@ -731,9 +731,9 @@ mod go_allowance_tests {
         let mut config: RoutingConfig = toml_edit::de::from_str("[opencode_go]\n")?;
         assert_eq!(config.opencode_go.min_monthly_allowance_usd, 60);
         for id in [
-            "opencode/opencode-go/beam-free",
-            "opencode/opencode-go/glm-5.3-flash",
             "opencode/opencode-go/deepseek-v4.1-flash",
+            "opencode/opencode-go/glm-5.3-flash",
+            "opencode/opencode/deepseek-v4.1-flash-free",
             "opencode/opencode/glm-5.3-flash-free",
         ] {
             assert!(
@@ -741,31 +741,25 @@ mod go_allowance_tests {
                 "{id}"
             );
         }
-        for (id, expected) in [
-            ("opencode/opencode-go/minimax-m3.1-flash", "$20"),
-            ("opencode/opencode-go/unlisted", "unknown"),
-        ] {
-            let model = ModelId::parse(id)?;
-            let error = check_go_allowance(&model, &config, &catalogue).unwrap_err();
-            assert!(
-                error.contains(id)
-                    && error.contains(expected)
-                    && error.contains("domains.routing.opencode_go.min_monthly_allowance_usd"),
-                "{error}"
-            );
-            config.opencode_go.min_monthly_allowance_usd = 0;
-            assert!(check_go_allowance(&model, &config, &catalogue).is_ok());
-            config.opencode_go.min_monthly_allowance_usd = 60;
-        }
-        config.opencode_go.min_monthly_allowance_usd = 61;
+        let model = ModelId::parse("opencode/opencode-go/unlisted")?;
+        let error = check_go_allowance(&model, &config, &catalogue).unwrap_err();
         assert!(
-            check_go_allowance(
-                &ModelId::parse("opencode/opencode-go/glm-5.3-flash")?,
-                &config,
-                &catalogue
-            )
-            .is_err()
+            error.contains("opencode-go/unlisted")
+                && error.contains("unknown")
+                && error.contains("domains.routing.opencode_go.min_monthly_allowance_usd"),
+            "{error}"
         );
+        config.opencode_go.min_monthly_allowance_usd = 0;
+        assert!(check_go_allowance(&model, &config, &catalogue).is_ok());
+        config.opencode_go.min_monthly_allowance_usd = 61;
+        let error = check_go_allowance(
+            &ModelId::parse("opencode/opencode-go/glm-5.3-flash")?,
+            &config,
+            &catalogue,
+        )
+        .unwrap_err();
+        assert!(error.contains("$60"), "{error}");
+        config.opencode_go.min_monthly_allowance_usd = 60;
         Ok(())
     }
 }
@@ -1622,7 +1616,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let catalogue = Catalogue::bundled()?;
         let config = RoutingConfig::default();
-        let model_names = ["deepseek-v4.1-flash", "glm-5.3-flash", "mimo-v2.6-flash"];
+        let model_names = ["deepseek-v4.1-flash", "glm-5.3-flash"];
         let availability = [AvailabilityRecord {
             schema_version: 1,
             adapter: "opencode".into(),
