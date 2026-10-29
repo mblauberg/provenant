@@ -431,3 +431,37 @@ fn request_correlation_mcp_replacement_and_deadline_are_explicit_and_typed() {
     input["request"]["deadline"] = json!("tomorrow");
     assert!(ToolCall::parse("fabric_inbox", input).is_err());
 }
+
+#[test]
+fn summary_patch_accepts_empty_text_as_the_cli_does() {
+    let value = json!({"op":"summary_update","session":"s","expect_revision":0,
+        "patch":{"now":"","next":"","risk":"","needs_you":[""]}});
+    assert!(ToolCall::parse("fabric_chair", value).is_ok());
+    let value = json!({"op":"log_append","session":"s",
+        "entry":{"kind":"update","markdown":"","channel":"chat"}});
+    assert!(matches!(
+        ToolCall::parse("fabric_chair", value),
+        Err(InvalidInput::Arguments { path }) if path == "arguments.entry.markdown"
+    ));
+}
+
+#[test]
+fn cli_error_detail_carries_data_once() {
+    let error = ServiceError::Cli {
+        code: "conflict".into(),
+        message: "stale".into(),
+        data: json!({"revision": 4, "data": "kept"}),
+    };
+    let detail = error.structured_error();
+    assert_eq!(detail["code"], "conflict");
+    assert_eq!(detail["revision"], 4);
+    assert_eq!(detail["data"], "kept");
+    let error = ServiceError::Cli {
+        code: "cli_failed".into(),
+        message: "failed".into(),
+        data: json!("text"),
+    };
+    let detail = error.structured_error();
+    assert_eq!(detail["code"], "cli_failed");
+    assert_eq!(detail["data"], "text");
+}

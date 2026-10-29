@@ -300,6 +300,35 @@ fn invalid_first_tool_calls_do_not_commit_the_protocol_era() {
 }
 
 #[test]
+fn unknown_argument_names_the_lone_near_match() {
+    let call = |arguments: Value| {
+        let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "_meta":{VERSION:MODERN,CAPABILITIES:{}},"name":"fabric_chair",
+            "arguments":arguments
+        }});
+        let Action::Reply(reply) =
+            Protocol::default().receive(&serde_json::to_vec(&request).unwrap())
+        else {
+            panic!()
+        };
+        reply["result"]["structuredContent"].clone()
+    };
+    let error = call(json!({"op":"summary_show","sessionId":"s"}));
+    assert_eq!(error["path"], "arguments.sessionId");
+    assert_eq!(
+        error["message"],
+        "Invalid argument at arguments.sessionId; did you mean 'session'?"
+    );
+    let error = call(json!({"op":"summary_show","zzz":"s"}));
+    assert!(error["message"].as_str().unwrap().contains("expected"));
+    let error = call(json!({"op":"summary_shwo","session":"s"}));
+    assert_eq!(
+        error["message"],
+        "Invalid argument at arguments.op; did you mean 'summary_show'?"
+    );
+}
+
+#[test]
 fn invalid_arguments_explain_the_expected_value_and_recovery() {
     let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
         "_meta":{VERSION:MODERN,CAPABILITIES:{}},"name":"fabric_output",

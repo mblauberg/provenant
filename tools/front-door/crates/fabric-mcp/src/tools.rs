@@ -1081,12 +1081,15 @@ impl ServiceError {
             return detail;
         }
         let mut detail = match self {
-            Self::Cli { data, .. } => {
-                let mut detail = data.as_object().cloned().unwrap_or_default();
-                detail.insert("data".into(), data.clone());
-                detail.insert("code".into(), Value::String(self.code().into()));
-                Value::Object(detail)
-            }
+            // Object data is flattened beside the code; any other shape stays under `data`.
+            Self::Cli { data, .. } => match data.as_object() {
+                Some(fields) => {
+                    let mut detail = fields.clone();
+                    detail.insert("code".into(), Value::String(self.code().into()));
+                    Value::Object(detail)
+                }
+                None => serde_json::json!({"code":self.code(),"data":data}),
+            },
             Self::Invalid(error) => serde_json::json!({"code":self.code(),"path":error.path}),
             Self::Coordination(CoordinationError::LaneMutation) => {
                 serde_json::json!({"code":self.code(),"message":self.to_string()})
