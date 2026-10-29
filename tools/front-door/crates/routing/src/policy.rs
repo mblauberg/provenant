@@ -374,8 +374,8 @@ impl<'de> Deserialize<'de> for ModelPolicies {
                 || rule.expires_unix_seconds.is_some()
                 || rule.windows.is_some()
         });
-        let mut defaults = input.defaults;
-        let mut rules: Vec<ModelPolicyRule> = input
+        let defaults = input.defaults;
+        let rules: Vec<ModelPolicyRule> = input
             .rules
             .into_iter()
             .filter_map(|rule| {
@@ -407,10 +407,10 @@ impl<'de> Deserialize<'de> for ModelPolicies {
             );
         }
         if let Ok(catalogue) = crate::Catalogue::bundled() {
-            reconcile_fallback(&mut defaults, "model_policy.defaults", &catalogue);
-            for (index, rule) in rules.iter_mut().enumerate() {
-                reconcile_fallback(
-                    &mut rule.policy,
+            warn_invalid_fallback(&defaults, "model_policy.defaults", &catalogue);
+            for (index, rule) in rules.iter().enumerate() {
+                warn_invalid_fallback(
+                    &rule.policy,
                     &format!("model_policy.rules.{index}"),
                     &catalogue,
                 );
@@ -423,7 +423,7 @@ impl<'de> Deserialize<'de> for ModelPolicies {
         })
     }
 }
-fn reconcile_fallback(policy: &mut ModelPolicy, field: &str, catalogue: &crate::Catalogue) {
+fn warn_invalid_fallback(policy: &ModelPolicy, field: &str, catalogue: &crate::Catalogue) {
     let Some(model) = policy.result.fallback.as_ref() else {
         return;
     };
@@ -443,11 +443,9 @@ fn reconcile_fallback(policy: &mut ModelPolicy, field: &str, catalogue: &crate::
     if let Some(reason) = reason {
         let _ = writeln!(
             std::io::stderr().lock(),
-            "warning: domains.routing.{field}.result.fallback: {} ({reason}); dropped",
+            "warning: domains.routing.{field}.result.fallback: {} ({reason}); effective fallback checked after overlays",
             model.as_str()
         );
-        policy.result.fallback = None;
-        policy.result.fallback_effort = None;
     }
 }
 fn default_bundled() -> bool {
@@ -871,18 +869,48 @@ mod tests {
     }
 
     #[test]
+    fn fallback_effort_is_validated_after_policy_layers_are_overlaid()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let policies: ModelPolicies = toml_edit::de::from_str(
+            "[defaults.result]\nfallback='codex/gpt-6-luna'\nfallback_effort='max'\n[[rules]]\naccount='work'\n[rules.policy.result]\nfallback_effort='high'\n",
+        )?;
+        assert_eq!(
+            policies.defaults.result.fallback_effort.as_deref(),
+            Some("max")
+        );
+        let effective = policies.effective(
+            &ModelId::parse("codex/gpt-6-luna")?,
+            Some("work"),
+            jiff::Timestamp::now().as_second(),
+        );
+        assert_eq!(
+            effective
+                .policy
+                .result
+                .fallback
+                .as_ref()
+                .map(ModelId::as_str),
+            Some("codex/gpt-6-luna")
+        );
+        assert_eq!(
+            effective.policy.result.fallback_effort.as_deref(),
+            Some("high")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn legacy_schedule_migrates_and_shared_evaluator_handles_local_windows()
     -> Result<(), Box<dyn std::error::Error>> {
         let model = ModelId::parse("codex/gpt-6.1-terra")?;
         let starts = "2026-10-29T23:00:00Z"
             .parse::<jiff::Timestamp>()?
             .as_second();
-        let expires = starts + 86_400;
         let legacy: ModelPolicies = toml_edit::de::from_str(&format!(
-            "[[rules]]\nmodel='codex/gpt-6.1-terra'\nstarts_unix_seconds={starts}\nexpires_unix_seconds={expires}\nwindows=[{{weekdays=[3],start_hour=23,end_hour=2}}]\n[rules.policy.lane]\nmax_turns=17\n"
+            "[[rules]]\nmodel='codex/gpt-6.1-terra'\nstarts_unix_seconds={starts}\nwindows=[{{weekdays=[3],start_hour=23,end_hour=2}}]\n[rules.policy.lane]\nmax_turns=17\n"
         ))?;
         let canonical: ModelPolicies = toml_edit::de::from_str(&format!(
-            "[[rules]]\nmodel='codex/gpt-6.1-terra'\n[rules.schedule]\nstarts={starts}\nexpires={expires}\nwindows=[{{weekdays=[3],start_hour=23,end_hour=2}}]\n[rules.policy.lane]\nmax_turns=17\n"
+            "[[rules]]\nmodel='codex/gpt-6.1-terra'\n[rules.schedule]\nstarts={starts}\nwindows=[{{weekdays=[3],start_hour=23,end_hour=2}}]\n[rules.policy.lane]\nmax_turns=17\n"
         ))?;
         assert_eq!(
             legacy.effective(&model, None, starts).policy.lane.max_turns,
@@ -1070,9 +1098,25 @@ mod tests {
         }
         assert!(toml_edit::de::from_str::<ModelPolicies>("[defaults.cache]\nunknown=1").is_err());
         let drifted: ModelPolicies = toml_edit::de::from_str(
-            "[[rules]]\n[rules.schedule]\nexpires=1\n[rules.policy.result]\nfallback='codex/not-catalogued'\n",
+            "[[rules]]\n[rules.policy.result]\nfallback='codex/not-catalogued'\n",
         )?;
-        assert!(drifted.rules[0].policy.result.fallback.is_none());
+        assert_eq!(
+            drifted.rules[0]
+                .policy
+                .result
+                .fallback
+                .as_ref()
+                .map(ModelId::as_str),
+            Some("codex/not-catalogued")
+        );
+        assert!(
+            drifted
+                .effective(&ModelId::parse("codex/gpt-6-luna")?, None, 0)
+                .policy
+                .result
+                .fallback
+                .is_none()
+        );
         Ok(())
     }
 }

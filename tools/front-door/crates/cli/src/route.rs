@@ -472,10 +472,13 @@ fn schedule_windows(schedule: &provenant_routing::Schedule) -> String {
         .collect::<Vec<_>>()
         .join("; ")
 }
-fn migrate_pacing_override_value(value: toml_edit::Value) -> toml_edit::Value {
+fn migrate_pacing_override_value(value: toml_edit::Value, now: i64) -> Option<toml_edit::Value> {
     let toml_edit::Value::InlineTable(mut row) = value else {
-        return value;
+        return Some(value);
     };
+    let legacy = ["starts_unix_seconds", "expires_unix_seconds", "windows"]
+        .iter()
+        .any(|key| row.contains_key(key));
     let mut schedule = row
         .get("schedule")
         .and_then(toml_edit::Value::as_inline_table)
@@ -490,10 +493,18 @@ fn migrate_pacing_override_value(value: toml_edit::Value) -> toml_edit::Value {
             schedule.insert(new, value);
         }
     }
+    if legacy
+        && schedule
+            .get("expires")
+            .and_then(toml_edit::Value::as_integer)
+            .is_some_and(|expiry| expiry <= now)
+    {
+        return None;
+    }
     if !schedule.is_empty() {
         row.insert("schedule", toml_edit::Value::InlineTable(schedule));
     }
-    toml_edit::Value::InlineTable(row)
+    Some(toml_edit::Value::InlineTable(row))
 }
 fn override_line(row: &provenant_routing::PacingOverride) -> String {
     let scope = match (&row.account, &row.provider) {
@@ -1363,6 +1374,7 @@ fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<Option<St
         .as_deref()
         .map(|name| resolve_account_reference(name, "--account", &settings))
         .transpose()?;
+    let now = jiff::Timestamp::now().as_second();
     edit_config(roots, |document| {
         let routing = routing_table(document)?;
         let mut values = match routing.remove("pacing_overrides") {
@@ -1381,7 +1393,9 @@ fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<Option<St
         };
         let mut migrated_values = toml_edit::Array::new();
         for value in values.iter() {
-            migrated_values.push(migrate_pacing_override_value(value.clone()));
+            if let Some(value) = migrate_pacing_override_value(value.clone(), now) {
+                migrated_values.push(value);
+            }
         }
         values = migrated_values;
         values.retain(|value| {
@@ -1906,6 +1920,52 @@ mod route_tests {
         RouteSelectionCandidate, RouteSelectionReceipt,
     };
     use std::error::Error;
+
+    #[test]
+    fn pacing_override_write_drops_expired_legacy_removed_account_rows()
+    -> Result<(), Box<dyn Error>> {
+        use super::{PacingChoice, RoutePacing};
+        use std::path::Path;
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(
+                &self,
+                path: &Path,
+            ) -> std::io::Result<std::path::PathBuf> {
+                Ok(path.into())
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&Resolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        let path = roots.state.as_path().join("config.toml");
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing]\npacing_overrides=[{account='codex/removed',policy='pace',expires_unix_seconds=1}]\n",
+        )?;
+
+        super::set_pacing_override(
+            &roots,
+            &RoutePacing {
+                target: "override".into(),
+                value: None,
+                account: None,
+                provider: Some("codex".into()),
+                all: false,
+                policy: Some(PacingChoice::Max),
+                until: Some("1h".into()),
+            },
+        )?;
+
+        let saved = std::fs::read_to_string(path)?;
+        assert!(!saved.contains("codex/removed"), "{saved}");
+        assert!(!saved.contains("expires_unix_seconds"), "{saved}");
+        assert!(saved.contains("provider = \"codex\""), "{saved}");
+        Ok(())
+    }
 
     #[test]
     fn pacing_account_references_reject_collisions_and_keep_adapter() {
