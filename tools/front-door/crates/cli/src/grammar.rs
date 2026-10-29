@@ -1073,6 +1073,10 @@ pub enum GitHook {
 }
 #[derive(Debug, Subcommand)]
 pub enum Internal {
+    Settle {
+        /// Private durable-settlement resume request from the host.
+        request: String,
+    },
     ProviderUpdates,
     Supervise {
         /// Private S2 handoff values, validated and adopted only by supervisor.
