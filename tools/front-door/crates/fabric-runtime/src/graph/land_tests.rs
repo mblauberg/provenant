@@ -260,12 +260,9 @@ fn a_repair_without_a_delivered_branch_fails_before_launch() {
     let repair = node(&checkpoint, "repair");
     assert_eq!(repair.state, NodeState::Failed);
     assert!(repair.attempts.is_empty());
-    assert!(
-        repair
-            .advance_error
-            .as_deref()
-            .unwrap()
-            .contains("recorded no delivery branch")
+    assert_eq!(
+        repair.advance_error_code.as_deref(),
+        Some("continuation_delivery_missing")
     );
     assert_eq!(owner.launches.len(), 1);
 }
@@ -367,8 +364,10 @@ fn an_inbox_answer_of_land_never_approves_a_land() {
     let land = node(&checkpoint, "land");
     assert_eq!(land.state, NodeState::Failed);
     assert!(owner.lands.is_empty(), "{:?}", owner.lands);
-    let error = land.advance_error.as_deref().unwrap();
-    assert!(error.contains("cannot approve a land"), "{error}");
+    assert_eq!(
+        land.advance_error_code.as_deref(),
+        Some("land_answer_cannot_approve")
+    );
     assert!(land.land.as_ref().unwrap().authorised_by.is_none());
 }
 
@@ -404,12 +403,7 @@ fn a_hold_answer_fails_the_land_without_merging() {
     );
     let land = node(&checkpoint, "land");
     assert_eq!(land.state, NodeState::Failed);
-    assert!(
-        land.advance_error
-            .as_deref()
-            .unwrap()
-            .contains("held by chair")
-    );
+    assert_eq!(land.advance_error_code.as_deref(), Some("land_held"));
     assert!(owner.lands.is_empty());
 }
 
@@ -448,8 +442,10 @@ fn an_ask_tier_without_a_session_fails_with_guidance() {
     );
     let land = node(&checkpoint, "land");
     assert_eq!(land.state, NodeState::Failed);
-    let error = land.advance_error.as_deref().unwrap();
-    assert!(error.contains("decision session") && error.contains("provenant land"));
+    assert_eq!(
+        land.advance_error_code.as_deref(),
+        Some("land_session_missing")
+    );
     assert!(owner.lands.is_empty() && checkpoint.asks.is_empty());
 }
 
@@ -486,12 +482,7 @@ fn a_pending_land_is_observed_again_and_a_refusal_fails_the_node() {
     }
     let land = node(&checkpoint, "land");
     assert_eq!(land.state, NodeState::Failed);
-    assert!(
-        land.advance_error
-            .as_deref()
-            .unwrap()
-            .contains("land refused: HEAD_MOVED")
-    );
+    assert_eq!(land.advance_error_code.as_deref(), Some("land_refused"));
     assert_eq!(owner.lands.len(), 2);
     assert!(owner.lands.iter().all(|(_, head, _)| head == REPAIR_HEAD));
 }
@@ -566,10 +557,9 @@ fn a_failed_review_routed_to_land_never_calls_the_host() {
     assert!(owner.lands.is_empty());
     assert_eq!(land.state, NodeState::Failed);
     assert!(land.land.is_none());
-    let error = land.advance_error.unwrap();
-    assert!(
-        error.contains("no passing verdict gate") && error.contains(WRITE_HEAD),
-        "{error}"
+    assert_eq!(
+        land.advance_error_code.as_deref(),
+        Some("land_review_required")
     );
 }
 
@@ -592,8 +582,10 @@ fn ci_output_never_substitutes_for_review() {
     );
     assert!(owner.lands.is_empty(), "{:?}", owner.lands);
     assert_eq!(land.state, NodeState::Failed);
-    let error = land.advance_error.unwrap();
-    assert!(error.contains("accepted passed no head"), "{error}");
+    assert_eq!(
+        land.advance_error_code.as_deref(),
+        Some("land_review_required")
+    );
 }
 
 #[test]
@@ -619,10 +611,9 @@ fn a_review_of_an_earlier_head_never_lands_a_continuation() {
     );
     assert!(owner.lands.is_empty());
     assert_eq!(land.state, NodeState::Failed);
-    let error = land.advance_error.unwrap();
-    assert!(
-        error.contains(REPAIR_HEAD) && error.contains(&format!("accepted passed {WRITE_HEAD}")),
-        "{error}"
+    assert_eq!(
+        land.advance_error_code.as_deref(),
+        Some("land_review_required")
     );
 
     // A reviewer pinned to the writer's commit judged H1 even when it ran
@@ -632,17 +623,16 @@ fn a_review_of_an_earlier_head_never_lands_a_continuation() {
     nodes[3]["depends_on"] = json!(["repair", "write"]);
     let (owner, land) = land_outcome(nodes, "VERDICT: PASS");
     assert!(owner.lands.is_empty());
-    assert!(
-        land.advance_error
-            .unwrap()
-            .contains(&format!("accepted passed {WRITE_HEAD}"))
+    assert_eq!(
+        land.advance_error_code.as_deref(),
+        Some("land_review_required")
     );
 }
 
-fn refusal(value: serde_json::Value) -> String {
+fn refusal(value: serde_json::Value) -> &'static str {
     let document: GraphDocument = serde_json::from_value(value).unwrap();
     match advance(&document, &mut owner(), &mut Journal::default()) {
-        Err(GraphError::Invalid(reason)) => reason,
+        Err(error @ GraphError::Invalid(_)) => error.code(),
         other => panic!("expected refusal, got {:?}", other.map(|run| run.status)),
     }
 }
@@ -695,7 +685,7 @@ fn continuation_and_land_wiring_is_checked_before_launch() {
             continue;
         }
         let refused = refusal(value);
-        assert!(refused.contains(reason), "{refused} lacks {reason}");
+        assert_eq!(refused, "invalid_graph");
     }
 }
 
@@ -714,7 +704,7 @@ fn a_loop_body_cannot_land() {
     }))
     .unwrap();
     let reason = refusal(serde_json::to_value(document).unwrap());
-    assert!(reason.contains("cannot land"), "{reason}");
+    assert_eq!(reason, "invalid_graph");
 }
 
 #[test]
@@ -786,7 +776,7 @@ fn a_head_source_must_name_an_upstream_writer() {
             "prompt":"look", "depends_on":depends_on, "route":{"alias":"senior"},
             "source":{"type":"head", "node":target}}));
         let refused = refusal(json!({"schema_version":1, "graph_id":"g-land", "nodes":nodes}));
-        assert!(refused.contains("head source"), "{target}: {refused}");
+        assert_eq!(refused, "invalid_graph", "{target}");
     }
 }
 
@@ -804,9 +794,8 @@ fn a_composite_verdict_binds_to_the_head_its_producer_reviewed() {
     let (owner, land) = land_outcome(nodes, "VERDICT: PASS");
     assert!(owner.lands.is_empty(), "{:?}", owner.lands);
     assert_eq!(land.state, NodeState::Failed);
-    let error = land.advance_error.unwrap();
-    assert!(
-        error.contains(REPAIR_HEAD) && error.contains(&format!("accepted passed {WRITE_HEAD}")),
-        "{error}"
+    assert_eq!(
+        land.advance_error_code.as_deref(),
+        Some("land_review_required")
     );
 }
