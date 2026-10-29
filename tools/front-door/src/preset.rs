@@ -1094,6 +1094,12 @@ fn lower_leaf(
         }
     }
     map.insert("id".into(), json!(id));
+    // An empty land session, such as an unset decision session, means unset.
+    if let Some(land) = map.get_mut("land").and_then(Value::as_object_mut)
+        && land.get("session").is_some_and(|session| session == "")
+    {
+        land.remove("session");
+    }
     // The brief: card, then the task, then reference text. References are
     // resolved against the release root and their digests recorded.
     let mut references = Vec::new();

@@ -302,7 +302,11 @@ fn expand_loops(
                     return Err("unknown previous round input");
                 }
             }
-            child.inputs.retain(|i| !i.node.starts_with("previous."));
+            // Prior-round and outer inputs are checked against the expanded
+            // graph; the isolated body check has only the local namespace.
+            child
+                .inputs
+                .retain(|i| spec.body.iter().any(|node| node.id == i.node));
             // A head source naming a writer outside the body is checked
             // against the expanded graph, as an external CI subject is.
             if let Some(SourceBinding::Head { node: writer }) = &child.source
@@ -434,8 +438,12 @@ fn expand_loops(
                 for input in &mut child.inputs {
                     input.node = if let Some(previous) = input.node.strip_prefix("previous.") {
                         id(&node.id, round - 1, previous)
-                    } else {
+                    } else if spec.body.iter().any(|body| body.id == input.node) {
                         id(&node.id, round, &input.node)
+                    } else {
+                        // An outer node, such as the writer a repair continues,
+                        // is selected afresh in every round.
+                        input.node.clone()
                     };
                     if !child.depends_on.contains(&input.node) {
                         child.depends_on.push(input.node.clone());
@@ -448,7 +456,21 @@ fn expand_loops(
                         .find(|n| n.id == local)
                         .is_some_and(|n| n.depends_on.is_empty())
                 {
-                    child.inputs.extend(node.inputs.clone());
+                    // The loop's own inputs merge with a body selection of
+                    // the same outer node.
+                    for input in &node.inputs {
+                        if let Some(own) =
+                            child.inputs.iter_mut().find(|own| own.node == input.node)
+                        {
+                            for kind in &input.outputs {
+                                if !own.outputs.contains(kind) {
+                                    own.outputs.push(*kind);
+                                }
+                            }
+                        } else {
+                            child.inputs.push(input.clone());
+                        }
+                    }
                 }
                 expanded.nodes.push(child);
             }

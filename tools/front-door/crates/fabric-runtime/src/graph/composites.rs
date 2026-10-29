@@ -104,7 +104,15 @@ fn children(
         }
         for input in &mut node.inputs {
             if !input.node.starts_with("previous.") {
+                // A loop body may select an outer node's outputs in every
+                // round, which resolves through the enclosing scopes.
                 input.node = reference(prefix, &input.node, &locals, incoming)
+                    .or_else(|| {
+                        prefix
+                            .is_empty()
+                            .then(|| visible_names.get(&input.node).cloned())
+                            .flatten()
+                    })
                     .unwrap_or_else(|| scoped(prefix, &input.node));
             }
         }
@@ -248,7 +256,10 @@ fn children(
                     kinds.push(*kind);
                     if matches!(
                         kind,
-                        OutputKind::Verdict | OutputKind::Branch | OutputKind::Commit
+                        OutputKind::Verdict
+                            | OutputKind::Branch
+                            | OutputKind::Commit
+                            | OutputKind::Remaining
                     ) {
                         if scalar.contains(kind) {
                             return Err("composite scalar output has multiple sources".into());
@@ -314,6 +325,7 @@ fn outputs(
         branch: None,
         commit: None,
         warnings: Vec::new(),
+        remaining: None,
     };
     let mut results = Vec::new();
     for export in &spec.exports {
@@ -334,6 +346,7 @@ fn outputs(
                 OutputKind::Findings => selected.findings.extend(source.findings.clone()),
                 OutputKind::Branch => selected.branch = source.branch.clone(),
                 OutputKind::Commit => selected.commit = source.commit.clone(),
+                OutputKind::Remaining => selected.remaining = source.remaining.clone(),
             }
         }
     }

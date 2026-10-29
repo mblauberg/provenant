@@ -387,16 +387,20 @@ refactors. Synthesis reconciles evidence rather than taking a majority vote.
 composite `ci` holding a CI gate bound to the writer's pushed head and a
 repair loop the gate routes to on failure. Each loop round runs a fresh
 `repairer` that `continues` the writer's branch, whose inputs are the failed
-gate's findings (check names with log excerpts) and the previous agent's
-result, never a transcript, followed by the CI gate again. The composite
+gate's findings (check names with log excerpts), the writer's `result` and
+`remaining` in every round and the previous repair's, never a transcript,
+followed by the CI gate again. The composite
 succeeds on either path. A `review-council` then reviews a `head` source
 binding to the writer, so it judges the newest repaired head; a verdict gate
 and a `land` node merge that head under the host's tier policy. No model runs
 while a gate is pending. `max_iterations` bounds the rounds; exhaustion raises
 the loop ask when `decision_session` is set and otherwise pauses the graph.
-Preset leaves may set `continues`, `land` and `kind = "land"`. A preset's
-top-level `decision_session` sets the graph's decision session; an empty
-value, here and on a loop, leaves it unset.
+The same session is bound to the land node's `session`, so a nested `deliver`
+still asks it; with none, a tier that asks fails the land node with guidance
+to land by hand. Preset leaves may set `continues`, `land` and
+`kind = "land"`. A preset's top-level `decision_session` sets the graph's
+decision session; an empty value, here, on a loop or as a land session, leaves
+it unset.
 
 Preset TOML files are named `NAME.toml` under
 `$XDG_CONFIG_HOME/provenant/presets/` (or `~/.config/provenant/presets/`)
@@ -455,6 +459,10 @@ apply.
   `src/preset_deliver_tests.rs::a_red_gate_repairs_from_the_failure_excerpt_and_the_repaired_head_is_reviewed_and_landed`,
   `::an_exhausted_repair_loop_asks_the_decision_session_or_pauses`,
   `::pending_ci_runs_no_model_and_status_shows_the_waiting_gate`,
+  `::remaining_work_at_the_end_of_a_long_report_reaches_every_repair_round`,
+  `::reviewers_route_away_from_the_writer_and_every_repair_author`,
+  `::a_council_pinned_to_the_writer_commit_never_lands_the_repaired_head`,
+  `::deliver_nests_inside_another_preset`,
   `crates/cli/src/lib.rs::tests::preset_runs_accept_graph_controls_without_dispatch_writer_mode`.
 - Owner: `src/preset.rs`, `src/fabric.rs`
 
@@ -522,7 +530,9 @@ checks. Inside a composite or loop body the writer name resolves through the
 enclosing scopes. Validation refuses a head binding to any other node.
 
 A node may set `distinct_from = "writer"` or `"dependencies"`. For `writer` the
-runtime walks the source chain to the nearest writer node; for `dependencies`
+runtime walks the source chain to the nearest writer node. When that writer is
+reached through a head binding, the attempts of every upstream writer that
+continues it count too, since each authored the pinned head; for `dependencies`
 it takes every transitive dependency's attempt, composite members included. It gives the owner those
 attempt refs, and the owner excludes their model families from route
 selection. `distinct_strength` is `prefer` (default) or `require`. Under
@@ -759,6 +769,9 @@ Within a body, ordinary dependencies and inputs refer to nodes in the current
 round. An input named `previous.NODE` selects the preceding round's output
 using the existing output selectors and bounded untrusted-data handoff. It
 adds the corresponding cross-round dependency and is omitted in round one.
+An input naming a node outside the body, resolved through the enclosing
+scopes, selects that node's output in every round and adds the dependency;
+in round one it merges with the loop's own selection of the same node.
 Every later round waits for the preceding `until` gate. A failed `until`
 starts the next round; a passing gate succeeds the wrapper and skips unused
 rounds. A failed task, synthesise node or other gate fails the loop rather
@@ -917,7 +930,10 @@ When ready, the node pins the branch and newest commit delivered by the
 writer and the writers that continue it. A passing verdict gate after the
 writer must have reviewed that head: each of its inputs judged the head
 through its pinned `source` commit or, without one, as the newest head of the
-writer's chain upstream of it. Otherwise the node fails without calling the
+writer's chain upstream of it. A composite input has no subject of its own, so
+it resolves to the member that exported its verdict, recursively: a council
+pinned to an earlier head never vouches for a later one that merely precedes
+its boundary. Otherwise the node fails without calling the
 host and names the heads that were reviewed, so a failed gate whose `on_fail`
 reaches the land, or a review that predates a continuation, never lands. It
 then resolves the host's tier policy
@@ -950,6 +966,7 @@ land.
   `::a_pending_land_persists_a_retry_deadline_that_survives_restart`;
   `::a_failed_review_routed_to_land_never_calls_the_host`;
   `::a_review_of_an_earlier_head_never_lands_a_continuation`;
+  `::a_composite_verdict_binds_to_the_head_its_producer_reviewed`;
   `::a_loop_body_cannot_land`;
   `crates/fabric-runtime/src/config.rs::land_policy_layers_project_then_host_then_default`;
   `src/pr/land.rs::graph_land_tests::a_land_report_maps_to_a_graph_observation`.
@@ -1066,8 +1083,12 @@ invalid final block yields an empty list and warning.
 The separate `required_verdict` contract checks for its exact line across the
 complete redacted stream. Writers can also provide a branch or commit.
 
-A node's `inputs` list selects `result`, `verdict`, `findings`, `branch` or
-`commit` from named direct dependencies. Each dependency and output selector
+A node's `inputs` list selects `result`, `verdict`, `findings`, `branch`,
+`commit` or `remaining` from named direct dependencies. `remaining` is the
+closing window, at most 2048 canonical bytes starting on a line boundary, of a
+report whose `result` excerpt was cut short, so remaining work a final report
+states last survives; it is null when the excerpt holds the whole report, so
+select it with `result`. Each dependency and output selector
 may occur only once. The selected data is rendered into its brief, which is
 bounded by the effective per-node prompt byte limit. If the node prompt leaves
 no room for the block, or the selected outputs do not fit, the node fails

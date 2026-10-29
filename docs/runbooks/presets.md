@@ -309,9 +309,11 @@ The graph is `write`, then `ci` (a CI gate and its repair loop), `review`
    runs. A green gate skips the repair loop.
 3. A red gate routes to the repair loop. Each round starts a fresh
    `repairer` agent on the same worktree and branch (`continues = "write"`).
-   Its brief holds the failed checks with their log excerpts and the previous
-   agent's final report, including any remaining work it handed off, never
-   an earlier transcript. The host pushes the repair to the same pull request
+   Its brief holds the failed checks with their log excerpts, the writer's
+   final report and the previous repair's, never an earlier transcript. Each
+   report the 4 KiB excerpt cuts short also carries its closing `remaining`
+   window, so work handed off at the end of a long report reaches every
+   round. The host pushes the repair to the same pull request
    and the CI gate runs again on the new head.
 4. After `max_iterations` red rounds the loop stops. With
    `decision_session` set, the session receives a loop ask offering stop,
@@ -319,12 +321,18 @@ The graph is `write`, then `ci` (a CI gate and its repair loop), `review`
    `--extend loop.ci--repair.rounds=N` or
    `--extend loop.ci--repair.decision=stop|accept` resumes it.
 5. `review-council` reviews a `head` source on the writer, the newest head the
-   chain delivered, so a repaired head is the one reviewed. A failed review
-   stops the graph before land.
+   chain delivered, so a repaired head is the one reviewed. Its lenses that
+   route away from the writer also route away from every repair author. A
+   failed review stops the graph before land.
 6. `land` merges that exact head under the host's land policy for
    `land_tier`. By default `routine` and `substantial` land automatically, and
-   `crucial` and `terminal` ask the decision session first. The land node
-   refuses a head other than the reviewed one and needs the CI gate green.
+   `crucial` and `terminal` ask the decision session first. The session is
+   bound to the land node itself, so it still applies when `deliver` runs
+   inside another preset. Without a `decision_session`, a tier that asks fails
+   the land node, which names the branch and head to land by hand with
+   `provenant land`; it does not pause. The land node refuses a head other
+   than the one the passing verdict reviewed, including a council pinned to an
+   earlier head, and needs the CI gate green.
 
 Knobs: `checks` names the required checks (empty uses the branch's required
 checks), `ci_timeout_seconds` bounds each gate, `repair_tier` routes the
