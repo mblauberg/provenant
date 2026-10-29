@@ -370,14 +370,103 @@ pub fn run_wait(
     env: &[(OsString, OsString)],
 ) -> io::Result<i32> {
     use std::os::unix::process::ExitStatusExt;
-    let status = std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    command
         .args(args)
         .env_clear()
-        .envs(env.iter().map(|(key, value)| (key, value)))
-        .status()?;
+        .envs(env.iter().map(|(key, value)| (key, value)));
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: the closure runs between fork and exec and only calls
+        // prctl, which is async-signal-safe and touches no shared state.
+        unsafe {
+            command.pre_exec(|| {
+                // A child must not outlive a shim that was killed outright
+                // (SIGKILL cannot be forwarded), or it would keep building
+                // without the slot the shim held.
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let forward = forward::Forward::install();
+    let mut child = command.spawn()?;
+    forward.child(i32::try_from(child.id()).unwrap_or(0));
+    let status = child.wait();
+    drop(forward);
+    let status = status?;
     Ok(status
         .code()
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)))
+}
+
+/// Forwards SIGTERM, SIGINT and SIGHUP received by the waiting caller to the
+/// child it runs, so a terminated shim does not leave the child running on.
+mod forward {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    const SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP];
+    static CHILD: AtomicI32 = AtomicI32::new(0);
+    /// A signal that arrived before the child existed, 0 for none.
+    static EARLY: AtomicI32 = AtomicI32::new(0);
+
+    extern "C" fn handle(signal: libc::c_int) {
+        let child = CHILD.load(Ordering::SeqCst);
+        if child > 0 {
+            // SAFETY: kill is async-signal-safe; child is a positive pid.
+            unsafe { libc::kill(child, signal) };
+        } else {
+            EARLY.store(signal, Ordering::SeqCst);
+        }
+    }
+
+    pub(super) struct Forward {
+        previous: Vec<(libc::c_int, libc::sigaction)>,
+    }
+    impl Forward {
+        pub(super) fn install() -> Self {
+            CHILD.store(0, Ordering::SeqCst);
+            EARLY.store(0, Ordering::SeqCst);
+            let mut previous = Vec::new();
+            for signal in SIGNALS {
+                // SAFETY: sigaction is plain data; all-zero is a valid value.
+                let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+                action.sa_sigaction = handle as extern "C" fn(libc::c_int) as usize;
+                // SAFETY: the mask is a live field of the struct above.
+                unsafe { libc::sigemptyset(&mut action.sa_mask) };
+                // SAFETY: as above, a valid all-zero value for sigaction to fill.
+                let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+                // SAFETY: the handler is an async-signal-safe extern "C" fn and
+                // both pointers refer to live structs.
+                if unsafe { libc::sigaction(signal, &action, &mut old) } == 0 {
+                    previous.push((signal, old));
+                }
+            }
+            Self { previous }
+        }
+
+        /// Record the child's pid and pass on a signal that beat it.
+        pub(super) fn child(&self, pid: i32) {
+            CHILD.store(pid, Ordering::SeqCst);
+            let early = EARLY.swap(0, Ordering::SeqCst);
+            if early != 0 && pid > 0 {
+                // SAFETY: kill with a pid this process just spawned.
+                unsafe { libc::kill(pid, early) };
+            }
+        }
+    }
+    impl Drop for Forward {
+        fn drop(&mut self) {
+            CHILD.store(0, Ordering::SeqCst);
+            for (signal, old) in &self.previous {
+                // SAFETY: restores the action sigaction returned earlier.
+                unsafe { libc::sigaction(*signal, old, std::ptr::null_mut()) };
+            }
+        }
+    }
 }
 
 /// Read a fixture's inherited secret directly, without opening `/dev/fd/N`

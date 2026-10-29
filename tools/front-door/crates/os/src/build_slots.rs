@@ -101,22 +101,49 @@ pub struct BuildSlots {
 
 impl BuildSlots {
     /// Host side: create the slot directory (mode 0700) and `slot-0..limit`
-    /// lock files (mode 0600) when missing. Never called from a lane.
+    /// lock files (mode 0600), and repair what is there: a directory with
+    /// the wrong mode gets 0700, and a slot file that is missing, not a
+    /// regular file, shared by a hard link or with the wrong mode is
+    /// recreated or corrected. Never called from a lane.
     pub fn provision(state: &Path, limit: u64) -> std::io::Result<()> {
-        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
         let path = directory(state);
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&path)?;
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if !meta.is_dir() => {
+                return Err(std::io::Error::other(format!(
+                    "{} is not a directory",
+                    path.display()
+                )));
+            }
+            Ok(meta) => {
+                if meta.permissions().mode() & 0o7777 != 0o700 {
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+                }
+            }
+            Err(_) => std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&path)?,
+        }
         for index in 0..limit {
+            let file = path.join(slot_name(index));
+            match std::fs::symlink_metadata(&file) {
+                Ok(meta) if meta.is_file() && meta.nlink() == 1 => {
+                    if meta.permissions().mode() & 0o7777 != 0o600 {
+                        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
+                    }
+                    continue;
+                }
+                Ok(meta) if meta.is_dir() => std::fs::remove_dir(&file)?,
+                Ok(_) => std::fs::remove_file(&file)?,
+                Err(_) => {}
+            }
             std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
+                .create_new(true)
                 .write(true)
                 .mode(0o600)
                 .custom_flags(libc::O_NOFOLLOW)
-                .open(path.join(slot_name(index)))?;
+                .open(&file)?;
         }
         Ok(())
     }
@@ -475,6 +502,46 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(error, SlotError::Cancelled));
+    }
+
+    #[test]
+    fn provisioning_again_repairs_the_directory_and_its_slot_files() {
+        use std::os::unix::fs::MetadataExt;
+        let _serial = serial();
+        let state = state();
+        BuildSlots::provision(state.path(), 4).unwrap();
+        let dir = directory(state.path());
+        let mode = |name: &str| std::fs::metadata(dir.join(name)).unwrap().mode() & 0o7777;
+        // A loose directory, a loose file, a missing file, a file that is
+        // really a symlink, and one shared by a hard link.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o770)).unwrap();
+        std::fs::set_permissions(
+            dir.join("slot-0.lock"),
+            std::fs::Permissions::from_mode(0o666),
+        )
+        .unwrap();
+        std::fs::remove_file(dir.join("slot-1.lock")).unwrap();
+        std::fs::remove_file(dir.join("slot-2.lock")).unwrap();
+        std::os::unix::fs::symlink(state.path(), dir.join("slot-2.lock")).unwrap();
+        std::fs::remove_file(dir.join("slot-3.lock")).unwrap();
+        std::fs::write(state.path().join("elsewhere"), b"").unwrap();
+        std::fs::hard_link(state.path().join("elsewhere"), dir.join("slot-3.lock")).unwrap();
+        BuildSlots::provision(state.path(), 4).unwrap();
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().mode() & 0o7777,
+            0o700,
+            "directory mode"
+        );
+        for name in ["slot-0.lock", "slot-1.lock", "slot-2.lock", "slot-3.lock"] {
+            let meta = std::fs::symlink_metadata(dir.join(name)).unwrap();
+            assert!(meta.is_file() && meta.nlink() == 1, "{name} is private");
+            assert_eq!(mode(name), 0o600, "{name}");
+        }
+        let slots = BuildSlots::open(state.path()).unwrap();
+        let held: Vec<_> = (0..4)
+            .map(|_| slots.try_acquire(4).unwrap().unwrap())
+            .collect();
+        assert_eq!(held.len(), 4);
     }
 
     #[test]

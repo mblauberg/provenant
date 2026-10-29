@@ -906,6 +906,44 @@ mod tests {
         );
     }
 
+    /// The finished writer profile, with the confinement's own list of every
+    /// write allowance, must leave the slot directory out of reach: no grant
+    /// equals it or contains it, so a lane cannot create, unlink or replace a
+    /// slot file.
+    #[test]
+    fn no_write_grant_of_the_finished_lane_profile_reaches_the_slot_directory() {
+        use provenant_confinement::permissions::{PathScope, write_grants};
+        let state = PathBuf::from("/fixture/hoststate");
+        let slots = state.join("fabric/locks/build-slots");
+        let mut spec = bare_spec("/usr/bin");
+        let gate = BuildSlotGate {
+            provenant: Path::new("/fixture/bin/provenant"),
+            state: &state,
+            slots: 2,
+            wait_seconds: 60,
+            cargo: Path::new("/home/.cargo/bin/cargo"),
+        };
+        spec.configure_build_slots(Path::new("/fixture/scratch"), &gate)
+            .unwrap();
+        let plan =
+            crate::tests::fixture_access_plan(crate::Access::WorktreeWrite, Some("fixture"), true);
+        let grants = write_grants(plan.permissions(), &spec.profile);
+        assert!(!grants.is_empty(), "the profile lists its write grants");
+        for grant in &grants {
+            let reaches = match grant.scope {
+                PathScope::Exact => grant.path == slots,
+                PathScope::Subtree => slots.starts_with(&grant.path),
+            };
+            assert!(
+                !reaches,
+                "{:?} grant {} reaches {}",
+                grant.source,
+                grant.path.display(),
+                slots.display()
+            );
+        }
+    }
+
     #[test]
     fn the_cargo_shim_refuses_settings_that_cannot_be_trusted() {
         let mut spec = bare_spec("/usr/bin");

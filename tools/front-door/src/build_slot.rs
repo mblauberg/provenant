@@ -22,14 +22,15 @@ use std::{
     ffi::{OsStr, OsString},
     io::Write,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-/// Set in the environment of a gated build to the holder shim's pid. A cargo
-/// run nested inside it (a build script, a test that spawns cargo) skips the
-/// gate only while that pid is a live ancestor of the nested shim, so it does
-/// not queue behind the slot its own parent holds. A value naming anything
-/// else is ignored.
+/// Set in the environment of a gated build to `pid:start`, the holder shim's
+/// pid and native process start time. A cargo run nested inside it (a build
+/// script, a test that spawns cargo) skips the gate only while that exact
+/// process is a live ancestor of the nested shim and is a provenant process,
+/// so it does not queue behind the slot its own parent holds. Naming any
+/// other process, even a live ancestor, is ignored.
 pub(crate) const HELD: &str = "PROVENANT_BUILD_SLOT";
 /// Host state root that holds the slot directory.
 pub(crate) const STATE_ENV: &str = "PROVENANT_BUILD_SLOT_STATE";
@@ -100,12 +101,46 @@ pub(crate) fn gated(args: &[OsString]) -> bool {
     false
 }
 
-/// Whether `pid` is a live ancestor of this process.
-pub(crate) fn live_ancestor(pid: i64) -> bool {
-    ancestor_of(std::process::id().into(), pid, &SystemProcessObserver)
+/// The process a nested build's marker must name.
+#[derive(Debug, PartialEq, Eq)]
+struct Holder {
+    pid: i64,
+    start: u64,
+}
+impl Holder {
+    fn marker(&self) -> String {
+        format!("{}:{}", self.pid, self.start)
+    }
+    fn parse(value: &str) -> Option<Self> {
+        let (pid, start) = value.split_once(':')?;
+        Some(Self {
+            pid: pid.parse().ok().filter(|pid| *pid > 1)?,
+            start: start.parse().ok()?,
+        })
+    }
 }
 
-fn ancestor_of(start: i64, wanted: i64, observer: &dyn ProcessObserver) -> bool {
+/// This process's identity as a holder, and its observed command name. The
+/// holder shim and a nested shim are the same binary, so the command name of
+/// one is the command a holder must have.
+fn own(observer: &dyn ProcessObserver) -> Option<(Holder, String)> {
+    let pid = i64::from(std::process::id());
+    match observer.observe(pid) {
+        ProcessObservation::Present(fact) => Some((
+            Holder {
+                pid,
+                start: fact.identity.native_start,
+            },
+            fact.command?,
+        )),
+        _ => None,
+    }
+}
+
+/// Whether `holder` is a live ancestor of `start` that began when the marker
+/// says and runs `command`: a pid reused by another process, a live ancestor
+/// that is not a shim, and a zombie all fail.
+fn ancestor_of(start: i64, holder: &Holder, command: &str, observer: &dyn ProcessObserver) -> bool {
     let mut current = start;
     // A process tree is shallow; the bound only stops a cycle.
     for _ in 0..256 {
@@ -116,9 +151,13 @@ fn ancestor_of(start: i64, wanted: i64, observer: &dyn ProcessObserver) -> bool 
         if parent <= 1 {
             return false;
         }
-        if parent == wanted {
+        if parent == holder.pid {
             return match observer.observe(parent) {
-                ProcessObservation::Present(parent) => !parent.zombie,
+                ProcessObservation::Present(found) => {
+                    !found.zombie
+                        && found.identity.native_start == holder.start
+                        && found.command.as_deref() == Some(command)
+                }
                 _ => false,
             };
         }
@@ -129,10 +168,21 @@ fn ancestor_of(start: i64, wanted: i64, observer: &dyn ProcessObserver) -> bool 
 
 /// Whether the marker in `env` names a live ancestor shim.
 fn nested(env: &[(OsString, OsString)]) -> bool {
-    env.iter()
+    nested_with(env, &SystemProcessObserver)
+}
+
+fn nested_with(env: &[(OsString, OsString)], observer: &dyn ProcessObserver) -> bool {
+    let Some(holder) = env
+        .iter()
         .find(|(name, _)| name == HELD)
-        .and_then(|(_, value)| value.to_str()?.parse::<i64>().ok())
-        .is_some_and(|pid| pid > 1 && live_ancestor(pid))
+        .and_then(|(_, value)| Holder::parse(value.to_str()?))
+    else {
+        return false;
+    };
+    let Some((me, command)) = own(observer) else {
+        return false;
+    };
+    ancestor_of(me.pid, &holder, &command, observer)
 }
 
 /// Take a slot when `gate.command` compiles, run it and return its exit
@@ -149,21 +199,24 @@ pub(crate) fn run(gate: Gate<'_>) -> i32 {
         warn(&"the host's build slot settings are missing or invalid");
     }
     if gate_this && let Some(settings) = &gate.settings {
+        // One deadline covers the Cargo-lock wait and the slot wait.
+        #[allow(clippy::disallowed_methods)]
+        let began = Instant::now();
         if let Err(message) = wait_for_lock(&env, settings) {
             return report(&message);
         }
         match BuildSlots::open(&settings.state) {
             Ok(slots) => match slots.acquire(
                 settings.slots,
-                Wait::new(settings.wait),
+                Wait::new(settings.wait.saturating_sub(began.elapsed())),
                 &CancelToken::new(),
                 &mut |busy, waited| waiting(busy, settings.slots, waited),
             ) {
                 Ok(slot) => held = Some(slot),
-                Err(SlotError::Timeout { held, waited, .. }) => {
+                Err(SlotError::Timeout { held, .. }) => {
                     return report(&format!(
                         "gave up waiting for a build slot after {} min: all {} are held ({held} in use). Run `provenant lanes` to find the lanes holding them, or raise domains.fabric.lanes.max_concurrent_builds or build_wait_minutes",
-                        waited.as_secs().div_ceil(60),
+                        began.elapsed().as_secs().div_ceil(60),
                         settings.slots
                     ));
                 }
@@ -172,8 +225,11 @@ pub(crate) fn run(gate: Gate<'_>) -> i32 {
             Err(error) => warn(&error),
         }
     }
-    if held.is_some() {
-        env.push((HELD.into(), std::process::id().to_string().into()));
+    if held.is_some()
+        && let Some((me, _)) = own(&SystemProcessObserver)
+    {
+        env.retain(|(name, _)| name != HELD);
+        env.push((HELD.into(), me.marker().into()));
     }
     // `held` stays open while the child runs; the descriptor is the slot.
     let code = match provenant_os::sys::run_wait(Path::new(program), args, &env) {
@@ -315,7 +371,30 @@ mod tests {
         dead_code,
         reason = "the custom worktree test driver includes this library without the test harness"
     )]
-    struct Tree(HashMap<i64, (i64, bool)>);
+    struct Tree(HashMap<i64, Node>);
+    #[allow(
+        dead_code,
+        reason = "the custom worktree test driver includes this library without the test harness"
+    )]
+    #[derive(Clone, Copy)]
+    struct Node {
+        parent: i64,
+        zombie: bool,
+        start: u64,
+        command: &'static str,
+    }
+    #[allow(
+        dead_code,
+        reason = "the custom worktree test driver includes this library without the test harness"
+    )]
+    fn node(parent: i64, start: u64, command: &'static str) -> Node {
+        Node {
+            parent,
+            zombie: false,
+            start,
+            command,
+        }
+    }
     impl ProcessObserver for Tree {
         fn boot_identity(&self) -> Result<String, provenant_supervisor::census::CensusError> {
             Ok("boot".into())
@@ -329,40 +408,80 @@ mod tests {
         }
         fn observe(&self, pid: i64) -> ProcessObservation {
             match self.0.get(&pid) {
-                Some((parent, zombie)) => ProcessObservation::Present(ProcessFact {
+                Some(node) => ProcessObservation::Present(ProcessFact {
                     identity: ProcessIdentity {
                         boot: "boot".into(),
                         pid,
-                        native_start: 1,
+                        native_start: node.start,
                         group_id: pid,
                         session_id: pid,
                     },
-                    parent_pid: *parent,
-                    zombie: *zombie,
+                    parent_pid: node.parent,
+                    zombie: node.zombie,
                     cpu_micros: None,
-                    command: None,
+                    command: Some(node.command.into()),
                 }),
                 None => ProcessObservation::Absent,
             }
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "the custom worktree test driver includes this library without the test harness"
+    )]
+    fn holder(pid: i64, start: u64) -> Holder {
+        Holder { pid, start }
+    }
+
     #[test]
-    fn only_a_live_ancestor_counts_as_the_holder() {
-        // 500 (a lane process) -> 400 (cargo) -> 300 (holder shim) -> 200 -> 1
+    fn only_the_exact_live_shim_ancestor_counts_as_the_holder() {
+        // 500 (nested shim) -> 400 (cargo) -> 300 (holder shim) -> 200 (sh) -> 1
         let tree = Tree(HashMap::from([
-            (500, (400, false)),
-            (400, (300, false)),
-            (300, (200, false)),
-            (200, (1, false)),
-            (900, (1, false)),
+            (500, node(400, 50, "provenant")),
+            (400, node(300, 40, "cargo")),
+            (300, node(200, 30, "provenant")),
+            (200, node(1, 20, "sh")),
+            (900, node(1, 90, "provenant")),
         ]));
-        assert!(ancestor_of(500, 300, &tree));
-        assert!(ancestor_of(500, 400, &tree));
-        assert!(!ancestor_of(500, 900, &tree), "an unrelated live pid");
-        assert!(!ancestor_of(500, 1, &tree), "init is never the holder");
-        assert!(!ancestor_of(500, 777, &tree), "a pid that does not exist");
-        let dead = Tree(HashMap::from([(500, (300, false)), (300, (200, true))]));
-        assert!(!ancestor_of(500, 300, &dead), "a zombie holder is gone");
+        assert!(ancestor_of(500, &holder(300, 30), "provenant", &tree));
+        assert!(
+            !ancestor_of(500, &holder(300, 31), "provenant", &tree),
+            "a pid reused after the holder: another start time"
+        );
+        assert!(
+            !ancestor_of(500, &holder(400, 40), "provenant", &tree),
+            "a live ancestor that is not a shim"
+        );
+        assert!(
+            !ancestor_of(500, &holder(200, 20), "provenant", &tree),
+            "the shell above the shim"
+        );
+        assert!(!ancestor_of(500, &holder(900, 90), "provenant", &tree));
+        assert!(!ancestor_of(500, &holder(777, 1), "provenant", &tree));
+        let mut dead = tree.0.clone();
+        dead.insert(
+            300,
+            Node {
+                zombie: true,
+                ..node(200, 30, "provenant")
+            },
+        );
+        assert!(
+            !ancestor_of(500, &holder(300, 30), "provenant", &Tree(dead)),
+            "a zombie holder is gone"
+        );
+    }
+
+    #[test]
+    fn markers_round_trip_and_reject_anything_malformed() {
+        let marker = holder(300, 30).marker();
+        assert_eq!(marker, "300:30");
+        assert_eq!(Holder::parse(&marker), Some(holder(300, 30)));
+        for bad in [
+            "300", "300:", ":30", "1:30", "0:30", "-5:30", "x:30", "300:y", "",
+        ] {
+            assert_eq!(Holder::parse(bad), None, "{bad:?}");
+        }
     }
 }

@@ -128,6 +128,19 @@ fn finish(child: &mut Child, timeout: Duration) -> Result<bool> {
     Err("shim did not finish in time".into())
 }
 
+fn until_exit(child: &mut Child, timeout: Duration) -> Result<std::process::ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    child.kill()?;
+    child.wait()?;
+    Err("shim did not exit in time".into())
+}
+
 fn alive(pid: &str) -> bool {
     Command::new("/bin/kill")
         .args(["-0", pid])
@@ -310,6 +323,108 @@ fn a_spoofed_marker_does_not_skip_the_gate_unless_it_names_a_live_ancestor() -> 
     assert!(!rig.started("start"));
     holder.kill()?;
     holder.wait()?;
+    Ok(())
+}
+
+/// The marker names a live ancestor with its true pid and start time, but that
+/// ancestor is a shell, not a provenant shim, so the gate still applies.
+#[test]
+fn a_marker_naming_a_live_ancestor_that_is_not_a_shim_does_not_skip_the_gate() -> Result {
+    use provenant_supervisor::census::{ProcessObservation, SystemProcessObserver};
+    let rig = Rig::new()?;
+    rig.provision(1)?;
+    let mut holder = rig.shim(1, &["check"])?;
+    assert!(until(Duration::from_secs(20), || rig.started("hung")));
+    let marker = rig.log.with_extension("marker");
+    let result = rig.log.with_extension("result");
+    // The shell stays the shim's parent: the shim is not its last command.
+    let script = format!(
+        "while [ ! -s '{m}' ]; do /bin/sleep 0.05; done; PROVENANT_BUILD_SLOT=$(cat '{m}') '{bin}' internal build-slot -- '{cargo}' build; echo \"exit $?\" > '{r}'; exit 0",
+        m = marker.display(),
+        bin = env!("CARGO_BIN_EXE_provenant"),
+        cargo = rig.cargo.display(),
+        r = result.display(),
+    );
+    let mut shell = Command::new("/bin/sh")
+        .args(["-c", &script])
+        .env("PROVENANT_BUILD_SLOT_STATE", &rig.state)
+        .env("PROVENANT_BUILD_SLOTS", "1")
+        .env("PROVENANT_BUILD_WAIT_SECS", "1")
+        .stderr(Stdio::null())
+        .spawn()?;
+    let pid = i64::from(shell.id());
+    let ProcessObservation::Present(fact) = SystemProcessObserver.observe(pid) else {
+        return Err("shell not observable".into());
+    };
+    let staged = marker.with_extension("tmp");
+    fs::write(&staged, format!("{pid}:{}", fact.identity.native_start))?;
+    fs::rename(&staged, &marker)?;
+    assert!(until(Duration::from_secs(30), || result.exists()));
+    assert!(
+        fs::read_to_string(&result)?.contains("exit 1"),
+        "the build waited for the held slot and gave up"
+    );
+    assert!(!rig.started("start"), "the build never ran");
+    shell.wait()?;
+    holder.kill()?;
+    holder.wait()?;
+    Ok(())
+}
+
+#[test]
+fn the_cargo_lock_wait_and_the_slot_wait_share_one_deadline() -> Result {
+    let rig = Rig::new()?;
+    rig.provision(1)?;
+    let mut holder = rig.shim(1, &["check"])?;
+    assert!(until(Duration::from_secs(20), || rig.started("hung")));
+    let profile = rig.state.join("target/debug");
+    fs::create_dir_all(&profile)?;
+    let lock = fs::File::create(profile.join(".cargo-lock"))?;
+    lock.try_lock()?;
+    let began = Instant::now();
+    let mut waiter = rig
+        .command(1, 5, &["build"])
+        .env("CARGO_TARGET_DIR", rig.state.join("target"))
+        .spawn()?;
+    // The Cargo lock goes after 2 s; the slot never frees. Waiting a full
+    // budget for each would take about 7 s.
+    std::thread::sleep(Duration::from_secs(2));
+    drop(lock);
+    assert!(!finish(&mut waiter, Duration::from_secs(30))?);
+    let total = began.elapsed();
+    assert!(
+        total < Duration::from_millis(6500),
+        "the two waits shared one budget, took {total:?}"
+    );
+    assert!(stderr_of(&mut waiter)?.contains("gave up waiting for a build slot"));
+    holder.kill()?;
+    holder.wait()?;
+    Ok(())
+}
+
+#[test]
+fn a_terminated_shim_passes_the_signal_to_its_build() -> Result {
+    for signal in ["TERM", "HUP", "INT"] {
+        let rig = Rig::new()?;
+        rig.provision(1)?;
+        let mut shim = rig.shim(1, &["check"])?;
+        assert!(until(Duration::from_secs(20), || rig.started("hung")));
+        let pid = rig
+            .log()?
+            .iter()
+            .find_map(|line| line.strip_prefix("hung ").map(str::to_owned))
+            .ok_or("no pid")?;
+        assert!(alive(&pid));
+        Command::new("/bin/kill")
+            .args([format!("-{signal}"), shim.id().to_string()])
+            .status()?;
+        let status = until_exit(&mut shim, Duration::from_secs(20))?;
+        assert!(!status.success(), "{signal}: the build was interrupted");
+        assert!(
+            until(Duration::from_secs(10), || !alive(&pid)),
+            "{signal}: the build kept running after the shim was signalled"
+        );
+    }
     Ok(())
 }
 

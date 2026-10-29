@@ -96,7 +96,9 @@ impl LaneBuildSettings {
             invalid.push("max_writer_lanes");
         }
         if !in_range(self.max_project_writer_lanes, PROJECT_WRITER_LANES_CEILING)
-            || self.project_writer_lanes() > self.writer_lanes()
+            || self
+                .max_project_writer_lanes
+                .is_some_and(|project| project > self.writer_lanes())
         {
             invalid.push("max_project_writer_lanes");
         }
@@ -126,10 +128,14 @@ impl LaneBuildSettings {
             .unwrap_or(DEFAULT_MAX_WRITER_LANES)
             .clamp(1, WRITER_LANES_CEILING)
     }
+    /// The per-project writer cap. An unset key defaults to
+    /// `min(default, writer_lanes)`, so lowering only the host cap never makes
+    /// the default project cap exceed it.
     pub fn project_writer_lanes(&self) -> u64 {
         self.max_project_writer_lanes
             .unwrap_or(DEFAULT_MAX_PROJECT_WRITER_LANES)
             .clamp(1, PROJECT_WRITER_LANES_CEILING)
+            .min(self.writer_lanes())
     }
     pub fn build_wait(&self) -> std::time::Duration {
         std::time::Duration::from_secs(
@@ -408,6 +414,15 @@ mod build_tests {
         let fine: LaneBuildSettings =
             toml_edit::de::from_str("max_writer_lanes = 8\nmax_project_writer_lanes = 8").unwrap();
         assert!(fine.invalid_keys().is_empty());
+        // Only the host cap set: the unset project key is not blamed, and its
+        // effective cap follows the host cap down.
+        let only_host: LaneBuildSettings =
+            toml_edit::de::from_str("max_writer_lanes = 20").unwrap();
+        assert!(only_host.invalid_keys().is_empty());
+        assert_eq!(only_host.writer_lanes(), 20);
+        assert_eq!(only_host.project_writer_lanes(), 20);
+        let roomy: LaneBuildSettings = toml_edit::de::from_str("max_writer_lanes = 50").unwrap();
+        assert_eq!(roomy.project_writer_lanes(), 30);
     }
     #[test]
     fn automatic_build_slots_follow_cores_jobs_and_memory() {

@@ -67,17 +67,24 @@ not a hard cap and not a security boundary: they share CPU and memory fairly
 among our own lanes. `max_concurrent_builds` is the number of cargo builds
 that run at once on the host. The default is
 `max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))`, so a 10-core 16 GiB
-host with the default 5 jobs gets 2. Every lane that has the Rust toolchain
-gets a `cargo` shim first on its PATH. A cargo command that compiles (`build`,
+host with the default 5 jobs gets 2. A writer lane gets a `cargo` shim first on
+its PATH only when its environment sets `CARGO_TARGET_DIR` and
+`~/.cargo/bin/cargo` exists; other lanes run cargo ungated. A cargo command that compiles (`build`,
 `check`, `clippy`, `test`, `run`, `bench`, `doc`, `rustc`, `rustdoc`, `fix`,
 `install`, `package`, `publish`, `nextest`, `llvm-cov` and `miri`, and their
 short aliases) takes one slot before the real cargo starts. The shim process
 holds the slot itself, runs cargo as its child and releases the slot when that
-child exits. Other commands, such as `fmt` and `metadata`, take none. A cargo
-started inside a gated build skips the gate only when the
-`PROVENANT_BUILD_SLOT` marker names a live ancestor of the nested shim (the
-marker holds the holder shim's pid); any other value, such as one a lane
-invents, is ignored and the command acquires normally.
+child exits, so `cargo run` and `cargo test` hold the slot for the whole of the
+program or test run, not only the compile. Other commands, such as `fmt` and
+`metadata`, take none. A cargo started inside a gated build skips the gate only
+when the `PROVENANT_BUILD_SLOT` marker, `pid:start` (the holder shim's pid and
+native process start time), names a live ancestor of the nested shim that began
+at that time and is a provenant process. A marker that names another process,
+even a live ancestor such as the shell above the shim, a reused pid or a value a
+lane invents, is ignored and the command acquires normally. A nested cargo that
+a build starts with a scrubbed environment loses the marker, so it queues behind
+the slot its own parent holds and waits until it times out; keep
+`PROVENANT_BUILD_SLOT` in a build's environment when it runs cargo itself.
 
 A command that finds every slot taken waits, prints
 `provenant: waiting for a build slot (n of m in use)` on its own stderr, and
@@ -86,7 +93,13 @@ repeats the message about every 60 seconds. It gives up after
 suggests `provenant lanes` to find the holders. The same bounded wait and
 progress message apply while the command waits for another build's
 `.cargo-lock` on its target directory, which it does before it takes a slot so
-a slot is never held by a build that Cargo would queue anyway. Waiting blocks
+a slot is never held by a build that Cargo would queue anyway. Both waits share
+one deadline: together they take at most `build_wait_minutes`. A shim that
+receives SIGTERM, SIGINT or SIGHUP passes the signal to its cargo child, and on
+Linux the child is also signalled if the shim is killed outright, so a build
+does not keep compiling after the shim and its slot are gone. Provenant repairs
+the slot directory when it launches a lane: it restores the 0700 and 0600 modes
+and recreates a missing, non-regular or hard-linked slot file. Waiting blocks
 that command only, not the lane or its admission. `lanes` does not report
 build waits; the message is in the lane's output.
 
@@ -127,7 +140,9 @@ not workflow knobs managed by `provenant config set`; edit the
 `[domains.fabric.lanes]` table directly. The value `-1` also selects automatic
 behaviour. `max_concurrent_builds` is 1 to 64, `cargo_build_jobs` 1 to 1024,
 `build_wait_minutes` 1 to 1440, `max_writer_lanes` 1 to 64 and
-`max_project_writer_lanes` 1 to 32 and at most `max_writer_lanes`. An
+`max_project_writer_lanes` 1 to 32 and, when set, at most `max_writer_lanes`
+(left unset it follows the host cap down, as the smaller of 30 and the host
+cap). An
 out-of-range value is rejected when configuration loads, so it never blocks
 lane admission. A lane keeps the slot count and wait it was launched with; a
 change applies to lanes launched afterwards.
