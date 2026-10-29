@@ -62,6 +62,8 @@ pub enum AgentError {
     Path(PathBuf),
     #[error("launchctl {0} failed: {1}")]
     Launchctl(&'static str, String),
+    #[error("systemctl {0} failed: {1}")]
+    Systemctl(&'static str, String),
     #[error(transparent)]
     Exec(#[from] provenant_os::exec::ExecError),
     #[error(transparent)]
@@ -441,14 +443,51 @@ fn launchctl_with(
     home: &Path,
     executor: &impl Executor,
 ) -> Result<(bool, String), AgentError> {
-    let mut argv: Vec<OsString> = vec!["/bin/launchctl".into()];
-    argv.extend(args.iter().map(|arg| arg.to_os_string()));
-    let env: [(OsString, OsString); 2] = [
+    let env = [
         ("HOME".into(), home.into()),
         ("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into()),
     ];
+    service_tool("/bin/launchctl", args, home, &env, executor)
+}
+
+/// Return stdout on success, or the termination cause and captured output on failure.
+pub fn systemctl(args: &[&OsStr], home: &Path) -> Result<(bool, String), AgentError> {
+    // The user manager is found through the login session's runtime directory.
+    let env: Vec<(OsString, OsString)> = [
+        ("HOME", Some(home.as_os_str().to_owned())),
+        ("PATH", Some("/usr/bin:/bin:/usr/sbin:/sbin".into())),
+        ("XDG_RUNTIME_DIR", std::env::var_os("XDG_RUNTIME_DIR")),
+        ("XDG_CONFIG_HOME", std::env::var_os("XDG_CONFIG_HOME")),
+        (
+            "DBUS_SESSION_BUS_ADDRESS",
+            std::env::var_os("DBUS_SESSION_BUS_ADDRESS"),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| Some((key.into(), value?)))
+    .collect();
+    let mut argv: Vec<&OsStr> = vec!["--user".as_ref()];
+    argv.extend(args);
+    service_tool(
+        "/usr/bin/systemctl",
+        &argv,
+        home,
+        &env,
+        &SystemExecutor::new(1)?,
+    )
+}
+
+fn service_tool(
+    program: &str,
+    args: &[&OsStr],
+    home: &Path,
+    env: &[(OsString, OsString)],
+    executor: &impl Executor,
+) -> Result<(bool, String), AgentError> {
+    let mut argv: Vec<OsString> = vec![program.into()];
+    argv.extend(args.iter().map(|arg| arg.to_os_string()));
     let mut options = ExecOptions::new(&argv, home, Duration::from_secs(10));
-    options.env = Some(&env);
+    options.env = Some(env);
     options.stdout = StreamPolicy::Capture { limit: 65_536 };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
     let outcome = executor.execute(options)?;
@@ -574,6 +613,11 @@ impl Installed {
 /// state root owns the single per-user agent, so test and worktree installs
 /// with their own roots leave it alone.
 pub fn eligible(state: &Path, home: &Path) -> bool {
+    cfg!(target_os = "macos") && owns_default_state(state, home)
+}
+
+/// Whether `state` is this account's default state root under `home`, on any platform.
+pub fn owns_default_state(state: &Path, home: &Path) -> bool {
     let Ok(home) = fs::canonicalize(home) else {
         return false;
     };
@@ -582,13 +626,7 @@ pub fn eligible(state: &Path, home: &Path) -> bool {
         .ok()
         .flatten()
         .and_then(|account| fs::canonicalize(PathBuf::from(account.home)).ok());
-    if !cfg!(target_os = "macos")
-        || account_home.as_deref() != Some(home)
-        || state != home.join(".local/share/provenant/v1")
-    {
-        return false;
-    }
-    true
+    account_home.as_deref() == Some(home) && state == home.join(".local/share/provenant/v1")
 }
 
 pub fn install(state: &Path, home: &Path, changed: bool) -> Installed {

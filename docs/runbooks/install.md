@@ -349,8 +349,19 @@ The same macOS default-state install also manages
 wake deadlines and collect registered projects daily, protecting live writers
 and reservations. Its stdout and stderr go to `<state>/tick/`. The tick uses a
 fixed PATH plus the install bin directory and resolved provider, Git and GitHub
-CLI locations outside project worktrees. Linux scheduler installation is deferred;
-`provenant tick` can also run directly.
+CLI locations outside project worktrees. `provenant tick` can also run directly.
+
+On Linux, a default-state install writes
+`~/.config/systemd/user/provenant-tick.service` (a one-shot running
+`provenant tick` with the same PATH, state directory and `<state>/tick/` logs)
+and `provenant-tick.timer` (first tick on activation, then every 60 seconds
+after the previous one), then runs `systemctl --user enable --now` on the
+timer. Reinstall is idempotent: unchanged units are left running, changed units
+trigger a `daemon-reload` and timer restart. Uninstall disables and stops the
+timer and removes both unchanged units; modified units are kept and reported.
+The user manager needs a login session (`XDG_RUNTIME_DIR` set). To keep the
+timer running while logged out, run `loginctl enable-linger $USER`. The peer
+agent stays macOS-only.
 
 Daily collection runs in a detached one-shot worker, so a slow collection does
 not delay graph deadlines. Its completion or failure is recorded in
@@ -381,7 +392,8 @@ recursively deletes a checkout, state root or release. With `CLAUDE_CONFIG_DIR`
 or `CODEX_HOME` set, uninstall removes only that directory's target; without
 it, every recorded target of the harness.
 Removing the last recorded target also boots out the peer and tick
-LaunchAgents and removes their unchanged plists.
+LaunchAgents (or disables the Linux tick timer) and removes their unchanged
+plists and units.
 A modified plist is kept and reported; its
 service is left running. A failed bootout keeps the plist for a retry.
 A missing recorded plist is stopped by its service label.
