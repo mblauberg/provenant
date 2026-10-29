@@ -50,12 +50,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     )?;
     assert_ne!(code(&retry_unbound), 0);
     let failure = json(&retry_unbound)?;
-    assert!(
-        failure["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("project is unbound")),
-        "{failure}"
-    );
+    assert_eq!(failure["error"]["code"], "PR_PROJECT_UNBOUND", "{failure}");
     fs::write(
         landing.rig.state.join("config.toml"),
         format!(
@@ -2017,6 +2012,7 @@ fn unregister(landing: &Landing) -> Result {
 }
 
 /// The message of a refused `pr open`, which is a usage error.
+/// The refusal code of a `pr open` that exits 2.
 fn open_refusal(rig: &TestRig, args: &[&str]) -> Result<String> {
     let mut argv = vec!["pr", "open"];
     argv.extend_from_slice(args);
@@ -2029,9 +2025,9 @@ fn open_refusal(rig: &TestRig, args: &[&str]) -> Result<String> {
         String::from_utf8_lossy(&output.stdout.bytes)
     );
     let value = json(&output)?;
-    Ok(value["error"]["message"]
+    Ok(value["error"]["code"]
         .as_str()
-        .ok_or("error message")?
+        .ok_or("error code")?
         .to_owned())
 }
 
@@ -2052,14 +2048,14 @@ pub(crate) fn pr_open_refuses_what_the_receipts_cannot_support() -> Result {
         "--dry-run",
     ];
     // No template, then an empty summary, then an attempt nobody ran.
-    assert!(open_refusal(&rig, &args)?.contains("pull request template"));
+    assert_eq!(open_refusal(&rig, &args)?, "PR_FILE_UNREADABLE");
     fs::create_dir_all(rig.project.join(".github"))?;
     fs::write(
         rig.project.join(".github/pull_request_template.md"),
         include_str!("../../../.github/pull_request_template.md"),
     )?;
     fs::write(&summary, "\n")?;
-    assert!(open_refusal(&rig, &args)?.contains("summary file is empty"));
+    assert_eq!(open_refusal(&rig, &args)?, "PR_SUMMARY_EMPTY");
     fs::write(
         &summary,
         "# feat(cli): add the thing\n\nIt adds the thing.\n",
@@ -2086,7 +2082,7 @@ pub(crate) fn pr_open_refuses_what_the_receipts_cannot_support() -> Result {
         .as_str()
         .ok_or("attempt")?
         .to_owned();
-    let message = open_refusal(
+    let refusal = open_refusal(
         &rig,
         &[
             "--from-attempt",
@@ -2096,10 +2092,7 @@ pub(crate) fn pr_open_refuses_what_the_receipts_cannot_support() -> Result {
             "--dry-run",
         ],
     )?;
-    assert!(
-        message.contains("only a succeeded or review_required attempt"),
-        "{message}"
-    );
+    assert_eq!(refusal, "PR_ATTEMPT_STATE");
     // A malformed attempt ID is a usage error before anything is read.
     let invalid = command(
         &rig,

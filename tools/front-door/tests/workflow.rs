@@ -418,12 +418,7 @@ fn chair_log_cli_retention_replay_and_lane_refusal() -> Result {
     assert_eq!(append(&rig, &first, "first", 0)?["data"], original["data"]);
     rig.env.push(("PROVENANT_LANE_DEPTH".into(), "1".into()));
     let refused = append(&rig, &first, "lane", 1)?;
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("lane cannot append")
-    );
+    assert_eq!(refused["error"]["code"], "IN_LANE", "{refused}");
     Ok(())
 }
 
@@ -611,7 +606,7 @@ fn session_save_outside_checkout_requires_project() -> Result {
     let before = state_snapshot(&rig.state.join("workflow"))?;
     rig.project = rig.root.clone();
     let refused = call(&rig, &args, 1)?;
-    assert_eq!(refused["error"]["code"], "ROOT");
+    assert_eq!(refused["error"]["code"], "SESSION_PROJECT_MISSING");
     assert!(
         refused["error"]["message"]
             .as_str()
@@ -631,7 +626,7 @@ fn session_save_outside_checkout_requires_project() -> Result {
         ],
         1,
     )?;
-    assert_eq!(unknown["error"]["code"], "ROOT");
+    assert_eq!(unknown["error"]["code"], "SESSION_PROJECT_MISSING");
     assert_eq!(state_snapshot(&rig.state.join("workflow"))?, before);
     let mut explicit = args.to_vec();
     explicit.extend(["--project", project.to_str().ok_or("project")?]);
@@ -723,7 +718,7 @@ fn session_save_refuses_conflicting_explicit_project() -> Result {
         ],
         1,
     )?;
-    assert_eq!(refused["error"]["code"], "ROOT");
+    assert_eq!(refused["error"]["code"], "SESSION_PROJECT_MISMATCH");
     let message = refused["error"]["message"].as_str().ok_or("message")?;
     assert!(message.contains("--project"));
     assert!(message.contains(rig.project.to_str().ok_or("project")?));

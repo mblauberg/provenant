@@ -74,9 +74,7 @@ impl Tracker {
     }
 
     pub(super) fn bind(&self, branch: &str, number: u64, head: GitOid) -> Result<()> {
-        let project = self
-            .project
-            .ok_or("project is unbound; register the project before binding contributions")?;
+        let project = self.project.ok_or_else(unbound)?;
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let call = Request {
@@ -127,9 +125,7 @@ impl Tracker {
     }
 
     pub(super) fn close(&self, number: u64) -> Result<()> {
-        let project = self
-            .project
-            .ok_or("project is unbound; register the project before binding contributions")?;
+        let project = self.project.ok_or_else(unbound)?;
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let call = Request {
@@ -277,9 +273,7 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
         let project_bound = tracker.project.is_some();
         if bind_requested {
             if !project_bound {
-                return Err(
-                    "project is unbound; register the project before binding contributions".into(),
-                );
+                return Err(unbound().into());
             }
             let view = super::land::pull(&resolved.project, &number.to_string())?;
             if view.cross_repository {
@@ -415,11 +409,18 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
         Err(error) => fail(
             LEAF,
             Outcome::Error,
-            "PR_CONTRIBUTIONS",
+            super::code_of(error.as_ref(), "PR_CONTRIBUTIONS"),
             &error.to_string(),
             globals,
         ),
     }
+}
+
+fn unbound() -> super::Refused {
+    super::Refused::new(
+        "PR_PROJECT_UNBOUND",
+        "project is unbound; register the project before binding contributions",
+    )
 }
 
 #[cfg(test)]

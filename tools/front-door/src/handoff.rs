@@ -69,6 +69,9 @@ impl Refusal {
         self.data = Some((data, human));
         self
     }
+    fn code(&self) -> &str {
+        &self.code
+    }
     fn invalid(message: impl Into<String>) -> Self {
         Self::new(Outcome::Invalid, "INVALID", message)
     }
@@ -912,7 +915,7 @@ pub fn run(args: Handoff, globals: &Globals, workers: &dyn WorkerObserver) -> u8
         Err(refusal) => crate::fail(
             COMMAND,
             refusal.status,
-            &refusal.code,
+            refusal.code(),
             &refusal.message,
             globals,
         ),
@@ -1302,7 +1305,7 @@ mod tests {
             provenant_core::ActorId::from_bytes([6; 16]),
         );
         let refusal = checkpoint_identity(&other, &repair).err().unwrap();
-        assert_eq!(refusal.code, "IDENTITY");
+        assert_eq!(refusal.code(), "IDENTITY");
         assert!(refusal.message.contains("provenant --state-dir '/custom state' --project '/selected project' workflow session save handoff-session --client codex --rebind --file <checkpoint.md>"));
     }
 

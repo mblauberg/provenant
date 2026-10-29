@@ -654,12 +654,15 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
     };
     if let Err(error) = roots::validate_globals(globals) {
         // A bad selected root is a usage fault; the environment is not.
-        let (status, code) = match error {
-            roots::RootError::Home if inv.leaf == "install" => (Outcome::Invalid, "HOME"),
-            roots::RootError::Checkout | roots::RootError::State(_) => {
-                (Outcome::Invalid, "INVALID")
-            }
-            _ => (Outcome::Error, "ROOT"),
+        let status = match error {
+            roots::RootError::Home if inv.leaf == "install" => Outcome::Invalid,
+            roots::RootError::Checkout | roots::RootError::State(_) => Outcome::Invalid,
+            _ => Outcome::Error,
+        };
+        let code = if matches!(error, roots::RootError::Home) && inv.leaf == "install" {
+            "HOME"
+        } else {
+            error.code()
         };
         return fail(&inv.leaf, status, code, &error.to_string(), globals);
     }
@@ -1241,7 +1244,13 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                         | roots::RootError::SessionProjectMismatch { .. } => Outcome::Refused,
                         _ => Outcome::Error,
                     };
-                    fail(&inv.leaf, outcome, "ROOT", &error.to_string(), globals)
+                    fail(
+                        &inv.leaf,
+                        outcome,
+                        error.code(),
+                        &error.to_string(),
+                        globals,
+                    )
                 }
             }
         }

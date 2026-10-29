@@ -2045,12 +2045,6 @@ fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache() -> Resul
             let value = json(&refused)?;
             assert_eq!(value["status"], "refused", "{value}");
             assert_eq!(value["error"]["code"], "WORKTREE_LOCK_BUSY", "{value}");
-            assert!(
-                value["error"]["message"]
-                    .as_str()
-                    .ok_or("message")?
-                    .contains("lock busy")
-            );
         }
         make_idle(&cache)?;
         let listed = ok(&rig, &["worktree", "list", "--json"])?;
@@ -2231,11 +2225,7 @@ fn recreated_worktree_accepts_writer_after_settlement() -> Result {
     };
     let old_tree = Directory::open_anchor(&path)?;
     drop(acquire(scope)?);
-    assert!(acquire(scope).is_err_and(|error| {
-        error
-            .to_string()
-            .contains("writer reservation requires recovery")
-    }));
+    assert!(acquire(scope).is_err_and(|error| is_fenced(error.as_ref())));
     provenant_supervisor::custody::acquire_recovery(
         Directory::open_anchor(&state)?,
         scope,
@@ -2252,9 +2242,7 @@ fn recreated_worktree_accepts_writer_after_settlement() -> Result {
             generation: 2,
             ..scope
         })
-        .is_err_and(|error| error
-            .to_string()
-            .contains("writer reservation requires recovery"))
+        .is_err_and(|error| is_fenced(error.as_ref()))
     );
     let lease = acquire(Scope {
         run: provenant_core::RunId::from_bytes([33; 16]),
@@ -2269,12 +2257,17 @@ fn recreated_worktree_accepts_writer_after_settlement() -> Result {
             generation: 2,
             ..scope
         })
-        .is_err_and(|error| error
-            .to_string()
-            .contains("writer reservation requires recovery"))
+        .is_err_and(|error| is_fenced(error.as_ref()))
     );
     drop(old_tree);
     Ok(())
+}
+
+fn is_fenced(error: &(dyn std::error::Error + 'static)) -> bool {
+    matches!(
+        error.downcast_ref::<provenant_supervisor::custody::CustodyError>(),
+        Some(provenant_supervisor::custody::CustodyError::Fenced)
+    )
 }
 
 fn branch_commit(rig: &TestRig, branch: &str) -> Result<std::path::PathBuf> {
