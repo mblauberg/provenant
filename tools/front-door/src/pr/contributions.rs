@@ -2,7 +2,7 @@
 use super::{Result, execute, successful};
 use crate::{emit, fail, roots};
 use provenant_cli::Globals;
-use provenant_core::{CancelToken, Clock, GitOid, ProjectId, WaitBudget};
+use provenant_core::{CancelToken, Clock, GitOid, ProjectId, WaitBudget, WallTime};
 use provenant_os::clock::SystemClock;
 use provenant_records::{CommandResult, Outcome};
 use provenant_run::{Contributions, PullRequest, Request};
@@ -94,6 +94,10 @@ impl Tracker {
                 #[derive(serde::Deserialize)]
                 struct State {
                     state: String,
+                    #[serde(rename = "mergedAt")]
+                    merged_at: Option<String>,
+                    #[serde(rename = "closedAt")]
+                    closed_at: Option<String>,
                 }
                 let bytes = successful(execute(
                     &self.resolved.project,
@@ -105,13 +109,21 @@ impl Tracker {
                         "--repo",
                         &candidate.repository,
                         "--json",
-                        "state",
+                        "state,mergedAt,closedAt",
                     ],
                     false,
                 )?)?;
-                let state = serde_json::from_slice::<State>(&bytes)?.state;
-                if matches!(state.as_str(), "CLOSED" | "MERGED") {
-                    db.close(project, &candidate, &call)?;
+                let view = serde_json::from_slice::<State>(&bytes)?;
+                if matches!(view.state.as_str(), "CLOSED" | "MERGED") {
+                    // Attempts queued after this instant belong to the next generation.
+                    let ended_at = match view.merged_at.or(view.closed_at) {
+                        Some(text) => {
+                            let stamp: jiff::Timestamp = text.parse()?;
+                            Some(WallTime::from_micros(stamp.as_microsecond())?)
+                        }
+                        None => None,
+                    };
+                    db.close_at(project, &candidate, ended_at, &call)?;
                 }
                 Ok(())
             })();
@@ -226,6 +238,11 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
             .map(|db| db.skipped_sealed_for_pr(&pr, &call))
             .transpose()?
             .unwrap_or(0);
+        let reassigned = db
+            .as_ref()
+            .map(|db| db.reassigned_from_pr(&pr, &call))
+            .transpose()?
+            .unwrap_or(0);
         let ambiguous = attempts.iter().any(|row| row.ambiguous);
         let bound = project_bound
             && db
@@ -292,7 +309,7 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
             ));
         }
         text.push_str(&format!(
-            "local_attempts: {coverage}\nskipped_sealed: {skipped_sealed}\n"
+            "local_attempts: {coverage}\nskipped_sealed: {skipped_sealed}\nreassigned: {reassigned}\n"
         ));
         text.push_str(&format!(
             "peer_attempts: unknown (known hosts: {})\n",
@@ -304,7 +321,7 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
         ));
         Ok((
             json!({"pull_request":pr,"attempts":attempts,
-            "coverage":{"local_attempts":coverage, "ambiguous":ambiguous,"truncated":truncated,"skipped_sealed":skipped_sealed, "peer_attempts":"unknown","known_peer_hosts":peers}}),
+            "coverage":{"local_attempts":coverage, "ambiguous":ambiguous,"truncated":truncated,"skipped_sealed":skipped_sealed,"reassigned":reassigned, "peer_attempts":"unknown","known_peer_hosts":peers}}),
             text,
         ))
     })();
