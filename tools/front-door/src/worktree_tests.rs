@@ -1738,6 +1738,10 @@ fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks() -> Result 
         }
         fs::write(dir.join("deps/payload"), vec![1; 65_536])?;
         let when = std::time::SystemTime::now() - Duration::from_secs(age);
+        // Recency is the newest write anywhere below the directory, locks included.
+        for lock in [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"] {
+            fs::File::open(dir.join(lock))?.set_modified(when)?;
+        }
         for path in [dir.join("deps/payload"), dir.join("deps"), dir.clone()] {
             fs::File::open(path)?.set_modified(when)?;
         }

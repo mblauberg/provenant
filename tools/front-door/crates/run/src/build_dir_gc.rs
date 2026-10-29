@@ -652,6 +652,7 @@ mod tests {
     #[test]
     fn collection_waits_for_the_admission_lock_and_blocks_claims() {
         let state = tempfile::tempdir().unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let fixture = Fixture::new();
         let debug = fixture.profile('a', "debug", 4096, 100);
         let clock = provenant_os::clock::SystemClock::new();
