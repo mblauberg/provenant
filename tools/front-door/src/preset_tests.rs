@@ -253,6 +253,8 @@ struct PresetOwner {
     /// Nodes whose result carries `VERDICT: FAIL`.
     failing: Vec<String>,
     launched: Vec<String>,
+    /// The brief each launched node received, inputs included.
+    prompts: Vec<(String, String)>,
     integration_pins: usize,
 }
 
@@ -279,12 +281,16 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
     ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, Self::Error> {
         use provenant_fabric_runtime::graph::{AccessMode, AttemptObservation, AttemptOutcome};
         self.launched.push(key.node_id.clone());
+        self.prompts
+            .push((key.node_id.clone(), node.prompt.to_owned()));
         let mut result =
             provenant_records::result_capture::ResultCapture::new(node.required_verdict);
         result.push(if self.failing.contains(&key.node_id) {
             b"Blocked on the user.\nVERDICT: FAIL\n".as_slice()
         } else {
-            b"Evidence checked.\nVERDICT: PASS\n".as_slice()
+            format!("Evidence checked for {}.\nVERDICT: PASS\n", key.node_id)
+                .leak()
+                .as_bytes()
         });
         Ok(AttemptObservation::Terminal {
             attempt_ref: Some(format!("fixture/{}", key.node_id)),
@@ -824,9 +830,28 @@ fn read_roots_are_confined_to_the_project_or_the_host_allow_list()
     Ok(())
 }
 
-fn council(overrides: &[&str], shapes: bool) -> Result<serde_json::Value, String> {
+/// Stand-in for the routing review configuration: low risk is one junior,
+/// high risk is six, otherwise two.
+fn shapes() -> super::preset::ShapeSelector {
+    Box::new(|named, risk| {
+        let (name, source, count) = match (named, risk) {
+            (Some("standard"), _) => ("standard", "override", 2),
+            (_, Some("high")) => ("deep", "by_risk", 6),
+            (_, Some("low")) => ("quick", "by_risk", 1),
+            _ => ("standard", "default", 2),
+        };
+        Ok(super::preset::ShapeHint {
+            name: name.into(),
+            source: source.into(),
+            slots: vec!["junior".into(); count],
+            named: Vec::new(),
+        })
+    })
+}
+
+fn council(overrides: &[&str], shaped: bool) -> Result<serde_json::Value, String> {
     let mut layers = Layers::empty();
-    layers.review = shapes.then(provenant_routing::ReviewConfig::default);
+    layers.review = shaped.then(shapes);
     let overrides: Vec<String> = overrides.iter().map(|s| (*s).to_owned()).collect();
     expand(&layers, "review-council", "the change", &overrides).map(|e| e.document)
 }
@@ -927,7 +952,7 @@ fn lens_count(document: &serde_json::Value, council: &str) -> usize {
 #[test]
 fn each_review_stage_selects_its_shape_from_its_own_parameters() {
     let mut layers = Layers::empty();
-    layers.review = Some(provenant_routing::ReviewConfig::default());
+    layers.review = Some(shapes());
     let batch = [
         "parameters.batch_worktree='/repo/batch'".to_owned(),
         "parameters.lanes=[{name='one',worktree='/repo/one',scope=['.'],spec=''}]".to_owned(),
@@ -942,7 +967,7 @@ fn each_review_stage_selects_its_shape_from_its_own_parameters() {
     assert!(high.review_shape.unwrap().contains("deep (by_risk)"));
     // A parent's ambient risk tier reaches a child that declares it.
     let mut layers = Layers::empty();
-    layers.review = Some(provenant_routing::ReviewConfig::default());
+    layers.review = Some(shapes());
     layers
         .insert(
             "repo",
@@ -955,7 +980,7 @@ fn each_review_stage_selects_its_shape_from_its_own_parameters() {
 }
 
 #[test]
-fn nested_set_paths_keep_the_rest_of_a_childs_table_default() {
+fn nested_set_paths_keep_the_rest_of_a_children_table_default() {
     let mut layers = Layers::empty();
     layers
         .insert(
@@ -1001,7 +1026,7 @@ fn malformed_parameter_schemas_are_refused() {
             "{ type = 'string', default = 'a', enum = [] }",
             "enum must be a nonempty list",
         ),
-        ("{ type = 'strng', default = 'a' }", "type must be one of"),
+        ("{ type = 'integr', default = 'a' }", "type must be one of"),
         ("{ type = 3, default = 'a' }", "type must be one of"),
         (
             "{ type = 'boolean', default = true, max = 1 }",
@@ -1343,5 +1368,93 @@ fn a_blocked_scope_launches_no_writer() {
         owner.launched.iter().all(|id| !id.starts_with("run")),
         "{:?}",
         owner.launched
+    );
+}
+
+#[test]
+fn the_writer_receives_the_scoped_criteria_once_the_scope_is_ready() {
+    use provenant_fabric_runtime::graph::advance_with_budget;
+    let document = bundled_fixture("scope-then-run");
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner::default();
+    let mut journal = PresetJournal::default();
+    advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &config.limits,
+        &config.budget,
+    )
+    .unwrap();
+    let writer = owner
+        .prompts
+        .iter()
+        .find(|(id, _)| id.starts_with("run--implement"))
+        .unwrap_or_else(|| panic!("{:?}", owner.launched));
+    assert!(
+        writer.1.contains("Evidence checked for scope."),
+        "{}",
+        writer.1
+    );
+}
+
+#[test]
+fn set_paths_on_a_preset_stage_apply_in_command_line_order() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "repo",
+            "wrap",
+            "stages = [{ id = 'child', preset = 'fan-out' }]\n",
+        )
+        .unwrap();
+    let count = |sets: &[&str]| {
+        let sets: Vec<String> = sets.iter().map(|s| (*s).to_owned()).collect();
+        expand(&layers, "wrap", "brief", &sets).unwrap().document["nodes"][0]["composite"]["nodes"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    assert_eq!(count(&["child.width.default=1", "child.width=3"]), 3);
+    assert_eq!(count(&["child.width=3", "child.width.default=1"]), 1);
+}
+
+#[test]
+fn nested_diagnostics_qualify_only_the_path_and_keep_real_origins() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::write(
+        repo.join("inner.toml"),
+        "extends = 'single'\n[pattern]\nlevel = 'famous'\n[parameters.route]\nenum = ['a']\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("middle.toml"),
+        "stages = [{ id = 'leaf', preset = 'inner' }]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("outer.toml"),
+        "stages = [{ id = 'child', preset = 'middle' }]\n",
+    )
+    .unwrap();
+    let layers = Layers::load(&temp.path().join("user"), &repo).unwrap();
+    let error = expand(&layers, "outer", "brief", &[]).unwrap_err();
+    let file = repo.join("inner.toml").display().to_string();
+    assert!(
+        error.contains("child.leaf.pattern.level") && error.contains(&format!("({file})")),
+        "{error}"
+    );
+    std::fs::write(
+        repo.join("inner.toml"),
+        "extends = 'single'\n[parameters.route]\nenum = ['a']\ndefault = 'b'\n",
+    )
+    .unwrap();
+    let layers = Layers::load(&temp.path().join("user"), &repo).unwrap();
+    let error = expand(&layers, "outer", "brief", &[]).unwrap_err();
+    assert!(
+        error.contains("child.leaf.route") && error.contains(&format!("({file})")),
+        "{error}"
     );
 }

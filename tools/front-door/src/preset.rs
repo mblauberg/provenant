@@ -62,8 +62,12 @@ const DEPTH: usize = 8;
 
 /// The review shape selected for one review stage. Review shapes are canonical
 /// for who reviews; presets compose them, so lens counts and tiers default from here.
+/// Picks a review shape from a stage's `review_shape` and `risk_tier`. The host
+/// owns routing, so it supplies this from its review configuration.
+pub type ShapeSelector = Box<dyn Fn(Option<&str>, Option<&str>) -> Result<ShapeHint, String>>;
+
 #[derive(Clone, Debug, Default)]
-struct ShapeHint {
+pub struct ShapeHint {
     pub name: String,
     pub source: String,
     /// Reviewer pools in shape order, one entry per reviewer.
@@ -76,7 +80,7 @@ struct ShapeHint {
 pub struct Layers {
     /// Routing review shapes. Each review stage selects its own shape from its
     /// final `review_shape` and `risk_tier` parameters.
-    pub review: Option<provenant_routing::ReviewConfig>,
+    pub review: Option<ShapeSelector>,
     used_shapes: std::cell::RefCell<BTreeSet<String>>,
     entries: BTreeMap<String, Vec<(String, Value)>>,
     errors: BTreeMap<String, Vec<String>>,
@@ -519,19 +523,14 @@ fn override_stage(
         let entry = entry
             .as_object_mut()
             .ok_or("stage entries must be tables")?;
-        if field.len() == 1 {
-            let target = entry.entry("parameters").or_insert_with(|| json!({}));
-            set_nested(target, field, replacement.clone())?;
-        } else {
-            // A nested path applies to the child's resolved defaults, not the
-            // entry, so the rest of a table value survives.
-            entry
-                .entry("set")
-                .or_insert_with(|| json!({}))
-                .as_object_mut()
-                .ok_or("stage set must be a table")?
-                .insert(field.join("."), replacement.clone());
-        }
+        // Applied to the child's resolved defaults, not the entry, so the rest
+        // of a table value survives, and in command-line order.
+        entry
+            .entry("set")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or("stage set must be a list")?
+            .push(json!({"path": field.join("."), "value": replacement}));
     } else {
         set_nested(entry, field, replacement.clone())?;
     }
@@ -622,12 +621,12 @@ fn scalar_text(value: &Value) -> String {
 fn flatten_parameters(
     name: &str,
     parameters: &Value,
-    prefix: &str,
+    scope: &str,
     origins: &BTreeMap<String, String>,
 ) -> Result<Value, String> {
     let map = parameters
         .as_object()
-        .ok_or_else(|| invalid_config(name, "parameters", "must be a table", prefix, origins))?;
+        .ok_or_else(|| invalid_config(name, "parameters", "must be a table", scope, origins))?;
     let mut plain = serde_json::Map::new();
     for (key, value) in map {
         if !is_fragment(value) {
@@ -635,13 +634,7 @@ fn flatten_parameters(
             continue;
         }
         let fail = |message: String| {
-            invalid_config(
-                name,
-                &format!("parameters.{key}"),
-                &message,
-                prefix,
-                origins,
-            )
+            invalid_config(name, &format!("parameters.{key}"), &message, scope, origins)
         };
         let default = value
             .get("default")
@@ -740,15 +733,10 @@ fn invalid_config(
     name: &str,
     key: &str,
     message: &str,
-    prefix: &str,
+    scope: &str,
     origins: &BTreeMap<String, String>,
 ) -> String {
-    let context = if prefix.is_empty() {
-        String::new()
-    } else {
-        format!("expanded.{}.", prefix.trim_end_matches('-'))
-    };
-    let path = format!("{context}{key}");
+    let path = key.to_owned();
     let origin = origins
         .get(&path)
         .or_else(|| {
@@ -759,7 +747,14 @@ fn invalid_config(
         })
         .map(String::as_str)
         .unwrap_or("unknown origin");
-    format!("preset {name}: {key} ({origin}): {message}")
+    // Origins are local to the preset being built; the scope names the stage
+    // path that reached it, so only the path is qualified.
+    let shown = match (scope.is_empty(), key.strip_prefix("parameters.")) {
+        (true, _) => key.to_owned(),
+        (false, Some(parameter)) => format!("{scope}.{parameter}"),
+        (false, None) => format!("{scope}.{key}"),
+    };
+    format!("preset {name}: {shown} ({origin}): {message}")
 }
 
 pub fn expand(
@@ -877,7 +872,7 @@ fn build(
     name: &str,
     config: &Value,
     prompt: &str,
-    prefix: &str,
+    scope: &str,
     deps: &[String],
     stack: &mut Vec<String>,
     nodes: &mut Vec<Value>,
@@ -893,14 +888,14 @@ fn build(
     stack.push(name.into());
     let result = if config.get("stages").is_some() {
         build_stages(
-            layers, name, config, prompt, prefix, deps, stack, nodes, origins, repo_files,
+            layers, name, config, prompt, scope, deps, stack, nodes, origins, repo_files,
         )
     } else {
         Err(invalid_config(
             name,
             "stages",
             "missing stages; use extends",
-            prefix,
+            scope,
             origins,
         ))
     };
@@ -1207,7 +1202,7 @@ fn build_stages(
     name: &str,
     config: &Value,
     prompt: &str,
-    prefix: &str,
+    scope: &str,
     deps: &[String],
     stack: &mut Vec<String>,
     nodes: &mut Vec<Value>,
@@ -1229,13 +1224,13 @@ fn build_stages(
             .contains(&key.as_str())
         })
     }) {
-        return Err(invalid_config(name, key, "unknown field", prefix, origins));
+        return Err(invalid_config(name, key, "unknown field", scope, origins));
     }
-    check_pattern(name, config.get("pattern"), prefix, origins)?;
+    check_pattern(name, config.get("pattern"), scope, origins)?;
     let parameters = flatten_parameters(
         name,
         config.get("parameters").unwrap_or(&json!({})),
-        prefix,
+        scope,
         origins,
     )?;
     let mut builder = StageBuilder {
@@ -1247,10 +1242,11 @@ fn build_stages(
         stack,
         origins,
         repo_files,
+        scope,
     };
     builder.sequence(
         config.get("stages").ok_or("missing stages")?,
-        prefix,
+        "",
         deps,
         nodes,
         0,
@@ -1266,6 +1262,8 @@ struct StageBuilder<'a> {
     stack: &'a mut Vec<String>,
     origins: &'a mut BTreeMap<String, String>,
     repo_files: &'a mut Vec<String>,
+    /// Stage path of this preset's caller, for diagnostics.
+    scope: &'a str,
 }
 
 impl StageBuilder<'_> {
@@ -1296,7 +1294,7 @@ impl StageBuilder<'_> {
 
     /// The shape this stage's final parameters select, if shapes are configured.
     fn shape_hint(&self) -> Result<Option<ShapeHint>, String> {
-        let Some(review) = &self.layers.review else {
+        let Some(select) = &self.layers.review else {
             return Ok(None);
         };
         let text = |key: &str| {
@@ -1305,19 +1303,7 @@ impl StageBuilder<'_> {
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
         };
-        let selected = review.select_shape(text("review_shape"), text("risk_tier"), None, &[])?;
-        let mut hint = ShapeHint {
-            name: selected.name.to_owned(),
-            source: selected.source.to_owned(),
-            ..Default::default()
-        };
-        for group in &selected.shape.reviewers {
-            hint.slots
-                .extend(std::iter::repeat_n(group.pool.clone(), group.count));
-            for lens in &group.lenses {
-                hint.named.push((lens.clone(), group.pool.clone()));
-            }
-        }
+        let hint = select(text("review_shape"), text("risk_tier"))?;
         self.layers
             .used_shapes
             .borrow_mut()
@@ -1509,9 +1495,14 @@ impl StageBuilder<'_> {
                     }
                 }
                 if let Some(sets) = object.remove("set") {
-                    for (path, value) in sets.as_object().ok_or("stage set must be a table")? {
-                        let value =
-                            interpolate(value, &self.parameters, self.prompt, index as usize)?;
+                    for item in sets.as_array().ok_or("stage set must be a list")? {
+                        let path = item["path"].as_str().unwrap_or_default();
+                        let value = interpolate(
+                            &item["value"],
+                            &self.parameters,
+                            self.prompt,
+                            index as usize,
+                        )?;
                         passed.push(path.split('.').next().unwrap_or(path).to_owned());
                         override_value(
                             &mut config,
@@ -1547,12 +1538,17 @@ impl StageBuilder<'_> {
                     merge(target, &roles, "roles", "entry", &mut local)?;
                 }
                 let mut children = Vec::new();
+                let child_scope = if self.scope.is_empty() {
+                    id.clone()
+                } else {
+                    format!("{}.{id}", self.scope)
+                };
                 let built = build(
                     self.layers,
                     child,
                     &config,
                     self.prompt,
-                    "",
+                    &child_scope,
                     &[],
                     self.stack,
                     &mut children,
@@ -1560,16 +1556,13 @@ impl StageBuilder<'_> {
                     self.repo_files,
                 );
                 for (key, origin) in local {
-                    let key = if key.starts_with("expanded.") {
-                        key
-                    } else {
-                        format!("expanded.{id}.{key}")
+                    let key = match key.strip_prefix("expanded.") {
+                        Some(rest) => format!("expanded.{id}.{rest}"),
+                        None => format!("expanded.{id}.{key}"),
                     };
                     self.origins.insert(key, origin);
                 }
-                // Name the failing value by the stage that received it.
-                let ends =
-                    built.map_err(|error| error.replacen("parameters.", &format!("{id}."), 1))?;
+                let ends = built?;
                 let exports = object
                     .remove("exports")
                     .or_else(|| config.get("exports").cloned())
@@ -1619,7 +1612,16 @@ impl StageBuilder<'_> {
             if decorate_wrapper {
                 object.remove("outputs");
                 for key in object.keys() {
-                    if !["title", "prompt", "source", "read_roots"].contains(&key.as_str()) {
+                    if ![
+                        "title",
+                        "prompt",
+                        "source",
+                        "read_roots",
+                        "inputs",
+                        "depends_on",
+                    ]
+                    .contains(&key.as_str())
+                    {
                         return Err(format!(
                             "preset {}: composite {id}: unknown entry field {key}",
                             self.name
@@ -1630,10 +1632,21 @@ impl StageBuilder<'_> {
                     node["title"] =
                         interpolate(title, &self.parameters, self.prompt, index as usize)?;
                 }
-                for key in ["source", "read_roots"] {
+                for key in ["source", "read_roots", "inputs"] {
                     if let Some(value) = object.get(key) {
                         node[key] =
                             interpolate(value, &self.parameters, self.prompt, index as usize)?;
+                    }
+                }
+                if let Some(extra) = object.get("depends_on") {
+                    let extra = extra.as_array().ok_or("depends_on must be an array")?;
+                    let existing = node["depends_on"]
+                        .as_array_mut()
+                        .ok_or("depends_on must be an array")?;
+                    for dependency in extra {
+                        if !existing.contains(dependency) {
+                            existing.push(dependency.clone());
+                        }
                     }
                 }
                 if let Some(brief) = object.get("prompt") {
@@ -1660,18 +1673,18 @@ const LEVELS: [&str; 3] = ["default", "recommended", "experimental"];
 fn check_pattern(
     name: &str,
     pattern: Option<&Value>,
-    prefix: &str,
+    scope: &str,
     origins: &BTreeMap<String, String>,
 ) -> Result<(), String> {
     let Some(pattern) = pattern else {
         return Ok(());
     };
     let fail = |key: &str, message: &str| {
-        invalid_config(name, &format!("pattern.{key}"), message, prefix, origins)
+        invalid_config(name, &format!("pattern.{key}"), message, scope, origins)
     };
     let map = pattern
         .as_object()
-        .ok_or_else(|| invalid_config(name, "pattern", "must be a table", prefix, origins))?;
+        .ok_or_else(|| invalid_config(name, "pattern", "must be a table", scope, origins))?;
     for (key, value) in map {
         match key.as_str() {
             "level" if value.as_str().is_some_and(|level| LEVELS.contains(&level)) => {}
@@ -2129,7 +2142,23 @@ pub fn run(
             provenant_config::read_with_domains(&roots.roots, &provenant_cli::domains::SECTIONS)
                 .map_err(|e| e.to_string())?;
         let mut layers = configured(globals)?;
-        layers.review = Some(config.domains.routing.review.clone());
+        let review = config.domains.routing.review.clone();
+        layers.review = Some(Box::new(move |named, risk| {
+            let selected = review.select_shape(named, risk, None, &[])?;
+            let mut hint = ShapeHint {
+                name: selected.name.to_owned(),
+                source: selected.source.to_owned(),
+                ..Default::default()
+            };
+            for group in &selected.shape.reviewers {
+                hint.slots
+                    .extend(std::iter::repeat_n(group.pool.clone(), group.count));
+                for lens in &group.lenses {
+                    hint.named.push((lens.clone(), group.pool.clone()));
+                }
+            }
+            Ok(hint)
+        }));
         let mut expansion = expand_with(&layers, name, prompt, &params, &request.preset_set)?;
         let policy =
             discover_read_roots(&directory, &config.domains.fabric.graph.allowed_read_roots);

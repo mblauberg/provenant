@@ -2,7 +2,7 @@ stages = [
   { id = "scout", preset = "scout-swarm", parameters = { width = "${width}", read_roots = "${read_roots}" } },
   { id = "scope", role = "scoper" },
   { id = "ready", kind = "gate", condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "scope", outputs = ["verdict"] }] },
-  { id = "run", preset = "generator-evaluator", parameters = { worktree = "${worktree}", scope = "${write_scope}", base = "${base}", spec = "${spec}", delivery = "${delivery}", review_shape = "${review_shape}", risk_tags = "${risk_tags}" } },
+  { id = "run", preset = "generator-evaluator", depends_on = ["scope"], inputs = [{ node = "scope", outputs = ["result"] }], parameters = { worktree = "${worktree}", scope = "${write_scope}", base = "${base}", spec = "${spec}", delivery = "${delivery}", review_shape = "${review_shape}", risk_tags = "${risk_tags}" } },
 ]
 exports = [{ node = "run", outputs = ["result", "findings"] }]
 
