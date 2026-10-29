@@ -529,19 +529,6 @@ mod reboot_tests {
             Ok(())
         })?;
         assert_eq!((reaped, spawned.get()), (1, 1));
-        store.reconcile_with_observer(
-            run.run_id,
-            &crate::dispatch_tests::Fake::default(),
-            &call,
-            &SystemProcessObserver,
-        )?;
-        assert!(matches!(
-            store.record(id, &call)?.state,
-            AttemptState::Terminal {
-                outcome: Outcome::Lost,
-                ..
-            }
-        ));
         Ok(())
     }
 

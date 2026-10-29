@@ -7008,6 +7008,7 @@ fn recover_rebooted_writer_inner(
             return Ok(());
         }
         // Free exclusion and an absent guardian and provider leave no holder.
+        assert_eq!(store.reap_with(&call, |_, _| Ok(()))?, 1);
         if cancel_run {
             assert_eq!(
                 store.cancel_with_observer(id, "stop", &call, &observer)?,
