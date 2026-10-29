@@ -1276,7 +1276,12 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     let status =
         &replies.iter().find(|r| r["id"] == 1).ok_or("status")?["result"]["structuredContent"];
     assert_eq!(status["attempt"]["attempt_id"], attempt.to_string());
-    let wait = &replies.iter().find(|r| r["id"] == 2).ok_or("wait")?["result"]["structuredContent"];
+    let wait_reply = replies.iter().find(|r| r["id"] == 2).ok_or("wait")?;
+    assert!(
+        !wait_reply["result"]["isError"].as_bool().unwrap_or(false),
+        "{wait_reply}"
+    );
+    let wait = &wait_reply["result"]["structuredContent"];
     assert_eq!(wait["timed_out"], true);
     assert_eq!(wait["satisfied"], false);
     let first = rig.command(&["fabric", "events", "read", "--after", "0", "--json"])?;
