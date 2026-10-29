@@ -21,6 +21,9 @@ final class InboxModel {
         enum Kind: Equatable { case saved, stale, failed }
         let kind: Kind
         let message: String
+        /// The request as this window last knew it. It outlives the open list, so the result stays reachable.
+        let request: HumanRequest
+        /// The item as the CLI returned it after the answer, when that read succeeded.
         let item: InboxItem?
     }
 
@@ -33,7 +36,7 @@ final class InboxModel {
     }
 
     var selected: HumanRequest? {
-        selection.flatMap { id in requests.first { $0.id == id } ?? results[id]?.item?.request }
+        selection.flatMap { id in requests.first { $0.id == id } ?? results[id]?.request }
     }
 
     /// Reads the open inbox. One read at a time; a refresh asked for during one is dropped, not queued.
@@ -61,16 +64,18 @@ final class InboxModel {
         do {
             switch try await client.answer(request.id, action: action, option: option, text: text, expectRevision: request.revision) {
             case .saved(let receipt):
+                // A failed read leaves the item out, but the receipt still says what was saved and delivered.
                 let item = try? await client.item(request.id)
-                results[request.id] = Result(kind: .saved, message: Self.saved(receipt), item: item)
+                results[request.id] = Result(kind: .saved, message: Self.saved(receipt), request: request, item: item)
             case .stale(let current):
                 results[request.id] = Result(
                     kind: .stale,
                     message: "This request changed since you opened it (now revision \(current.request.revision), \(current.request.state)). Nothing was sent.",
+                    request: current.request,
                     item: current)
             }
         } catch {
-            results[request.id] = Result(kind: .failed, message: Self.describe(error), item: nil)
+            results[request.id] = Result(kind: .failed, message: Self.describe(error), request: request, item: nil)
         }
         await refresh()
     }

@@ -101,7 +101,8 @@ private struct DetailView: View {
                 }
                 if let result { ResultBanner(result: result) }
                 if let answer = item?.answer { AnswerSummary(answer: answer, delivery: item?.delivery) }
-                if request.isOpen { form }
+                // A saved answer closes the request even when the window could not read the item back.
+                if request.isOpen, result?.kind != .saved { form }
             }
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)

@@ -69,6 +69,27 @@ final class InboxModelTests: XCTestCase {
         XCTAssertEqual(InboxModel.deliveryLine(try XCTUnwrap(result.item?.delivery)),
                        "Delivery acknowledged by fabric mail, 1 attempt, acknowledged 2026-10-30T01:06:09Z.")
     }
+
+    func testConfirmationAndDeliverySurviveAFailedItemReadAndARefresh() async throws {
+        let replay = FixtureReplay([(["inbox", "--state", "open", "--limit", "50", "--cursor", "CUR1"], "inbox-page2", 0),
+                                    (["inbox", "--state"], "inbox-page1", 0)])
+        let model = InboxModel(client: replay.client)
+        await model.refresh()
+        let request = try XCTUnwrap(model.requests.first)
+        XCTAssertEqual(model.selection, request.id)
+        // The answer is saved, the read-back fails, and the list no longer holds the request.
+        replay.set([(["answer"], "answer-saved", 0), (["inbox", request.id], "answer-conflict", 1),
+                    (["inbox", "--state"], "inbox-page2", 0)])
+        await model.answer(request, action: .choose, option: "sqlite")
+        let result = try XCTUnwrap(model.results[request.id])
+        XCTAssertEqual(result.kind, .saved)
+        XCTAssertNil(result.item)
+        XCTAssertTrue(result.message.contains("Delivery queued"), result.message)
+        XCTAssertFalse(model.requests.contains { $0.id == request.id })
+        XCTAssertEqual(model.selection, request.id)
+        XCTAssertEqual(model.selected?.id, request.id)
+        XCTAssertEqual(model.selected?.request.title, "Pick the storage layer")
+    }
 }
 
 private extension FixtureReplay {

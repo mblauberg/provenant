@@ -96,6 +96,59 @@ final class InboxClientTests: XCTestCase {
         }
     }
 
+    /// A runner that signals once it has the arguments, then holds the call open until `gate` is signalled.
+    final class Slow: @unchecked Sendable {
+        let started = DispatchSemaphore(value: 0), gate = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var arguments: [String] = []
+        func run(_ arguments: [String]) throws -> CLI.Output {
+            lock.withLock { self.arguments = arguments }
+            started.signal()
+            gate.wait()
+            return CLI.Output(status: 0, signalled: false, timedOut: false, truncated: false,
+                              out: try Replay.fixture("answer-saved"), err: "")
+        }
+        var replyPath: String? {
+            lock.withLock { arguments.firstIndex(of: "--text-file").map { arguments[$0 + 1] } }
+        }
+        /// Waits on a dispatch queue, since a blocking semaphore wait is unavailable in async code.
+        func waitUntilStarted() async -> DispatchTimeoutResult {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global().async { continuation.resume(returning: self.started.wait(timeout: .now() + 5)) }
+            }
+        }
+    }
+
+    func testQuittingDuringASlowAnswerRemovesTheReplyFileWithinTheGrace() async throws {
+        let slow = Slow(), replies = ReplyFiles()
+        defer { slow.gate.signal() }
+        let client = InboxClient(cli: CLIClient { arguments, _ in try slow.run(arguments) }, replies: replies)
+        let answer = Task { try await client.answer("1", action: .reply, text: "a private reply", expectRevision: 3) }
+        let started = await slow.waitUntilStarted()
+        XCTAssertEqual(started, .success)
+        let path = try XCTUnwrap(slow.replyPath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+        let begin = Date()
+        replies.finish(within: .milliseconds(200))
+        XCTAssertLessThan(Date().timeIntervalSince(begin), 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        slow.gate.signal()
+        guard case .saved = try await answer.value else { return XCTFail("expected a saved answer") }
+    }
+
+    func testFinishWaitsForAnAnswerThatReturnsWithinTheGrace() async throws {
+        let slow = Slow(), replies = ReplyFiles()
+        defer { slow.gate.signal() }
+        let client = InboxClient(cli: CLIClient { arguments, _ in try slow.run(arguments) }, replies: replies)
+        let answer = Task { try await client.answer("1", action: .reply, text: "a private reply", expectRevision: 3) }
+        _ = await slow.waitUntilStarted()
+        let path = try XCTUnwrap(slow.replyPath)
+        slow.gate.signal()
+        replies.finish(within: .seconds(5))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        guard case .saved = try await answer.value else { return XCTFail("expected a saved answer") }
+    }
+
     func testExecCapsOutput() throws {
         let run = try CLI.exec(URL(fileURLWithPath: "/usr/bin/yes"), [], path: nil, limit: 0.3, maxOutput: 1024)
         XCTAssertTrue(run.truncated)

@@ -77,10 +77,56 @@ public enum AnswerOutcome: Equatable, Sendable {
     case stale(InboxItem)
 }
 
+/// Reply-text files for answers whose CLI call has not returned. Each is 0600 and is removed when its call returns.
+/// `finish` gives outstanding calls a bounded grace at quit, then removes what is left, so quitting during a slow
+/// answer leaves no copy of the reply text behind.
+public final class ReplyFiles: @unchecked Sendable {
+    public static let shared = ReplyFiles()
+    private let lock = NSLock()
+    private let outstanding = DispatchGroup()
+    private var pending: Set<URL> = []
+
+    public init() {}
+
+    /// Writes `text` to a new file and tracks it until `release`.
+    func write(_ text: String) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appending(path: "provenant-answer-\(UUID().uuidString).txt")
+        guard FileManager.default.createFile(atPath: url.path, contents: Data(text.utf8), attributes: [.posixPermissions: 0o600]) else {
+            throw ClientError.launch("could not write the reply text")
+        }
+        lock.withLock { _ = pending.insert(url) }
+        outstanding.enter()
+        return url
+    }
+
+    /// Removes a reply file once the call that read it has returned.
+    func release(_ url: URL) {
+        let tracked = lock.withLock { pending.remove(url) != nil }
+        try? FileManager.default.removeItem(at: url)
+        if tracked { outstanding.leave() }
+    }
+
+    /// Waits up to `grace` for outstanding calls to return, then removes the reply files of any still running.
+    public func finish(within grace: DispatchTimeInterval) {
+        _ = outstanding.wait(timeout: .now() + grace)
+        let urls = lock.withLock { () -> Set<URL> in
+            let all = pending
+            pending = []
+            return all
+        }
+        // Each removed file leaves the group, so a late `release` finds nothing tracked and leaves it alone.
+        for url in urls {
+            try? FileManager.default.removeItem(at: url)
+            outstanding.leave()
+        }
+    }
+}
+
 /// The inbox through the CLI. Answers always say `--channel console` and the revision the person saw.
 public struct InboxClient: Sendable {
     public let cli: CLIClient
-    public init(cli: CLIClient = CLIClient()) { self.cli = cli }
+    public let replies: ReplyFiles
+    public init(cli: CLIClient = CLIClient(), replies: ReplyFiles = .shared) { self.cli = cli; self.replies = replies }
 
     private struct Listed: Decodable, Sendable {
         let items: [HumanRequest]
@@ -110,13 +156,10 @@ public struct InboxClient: Sendable {
         var arguments = ["answer", id, "--action", action.rawValue, "--expect-revision", String(expectRevision), "--channel", "console"]
         if let option { arguments += ["--option", option] }
         var file: URL?
-        defer { file.map { try? FileManager.default.removeItem(at: $0) } }
+        defer { if let file { replies.release(file) } }
         if let text {
             // The CLI reads reply text from a file, so the text never appears in an argument list.
-            let url = FileManager.default.temporaryDirectory.appending(path: "provenant-answer-\(UUID().uuidString).txt")
-            guard FileManager.default.createFile(atPath: url.path, contents: Data(text.utf8), attributes: [.posixPermissions: 0o600]) else {
-                throw ClientError.launch("could not write the reply text")
-            }
+            let url = try replies.write(text)
             file = url
             arguments += ["--text-file", url.path]
         }

@@ -43,6 +43,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool { true }
 
+    /// Gives answers still in flight a second to return, then removes their reply files. Nothing waits longer.
+    func applicationWillTerminate(_: Notification) { ReplyFiles.shared.finish(within: .seconds(1)) }
+
     @objc func refresh() { Task { await model.refresh() } }
 
     private static func menu() -> NSMenu {
