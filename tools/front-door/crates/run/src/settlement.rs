@@ -618,7 +618,10 @@ impl crate::RunStore {
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
         self.run(run, call)?;
         let attempts = self.pending_attempts(run, call)?;
-        let wall = call.clock.wall_now().map_err(|_| RunError::Admission(AdmissionError::Clock))?;
+        let wall = call
+            .clock
+            .wall_now()
+            .map_err(|_| RunError::Admission(AdmissionError::Clock))?;
         let now = now_ms(call.clock)?;
         // Owed reactions need a worker even when no attempt is live.
         let mut needs_worker = !self.pending_reactions(run, call)?.is_empty();

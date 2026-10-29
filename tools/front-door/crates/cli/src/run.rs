@@ -6896,9 +6896,9 @@ fn stats_inner(
     let cache_kpis = cache_kpi_rows(
         &selected,
         &config.domains,
-        call.clock
-            .wall_now()
-            .map_err(|_| provenant_run::RunError::Admission(provenant_run::AdmissionError::Clock))?,
+        call.clock.wall_now().map_err(|_| {
+            provenant_run::RunError::Admission(provenant_run::AdmissionError::Clock)
+        })?,
     );
     let pipeline = if command.outcomes || command.suggest {
         Some(pipeline_report(

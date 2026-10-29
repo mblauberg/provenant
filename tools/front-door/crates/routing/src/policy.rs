@@ -1146,11 +1146,7 @@ mod tests {
             Some("high")
         );
         assert!(effective.dropped_fallback.is_none());
-        let other = policies.effective(
-            &ModelId::parse("codex/gpt-6-luna")?,
-            Some("other"),
-            at(0),
-        );
+        let other = policies.effective(&ModelId::parse("codex/gpt-6-luna")?, Some("other"), at(0));
         assert!(other.policy.result.fallback.is_none());
         assert_eq!(
             other.dropped_fallback,

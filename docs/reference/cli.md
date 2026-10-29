@@ -1862,7 +1862,6 @@ Accepted by every command, before or after the subcommand.
 | `--route` | `{"description": "Named route, or ADAPTER/NAME for a model-less adapter such as command/fmt-check", "name": "route"}` |
 | `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
 | `--confidential` | `{"defaults": ["false"], "description": "Require a confidential-safe route", "name": "confidential", "values": ["true", "false"]}` |
-| `--allow-free` | `{"defaults": ["false"], "description": "Allow free-tier models", "name": "allow_free", "values": ["true", "false"]}` |
 | `--fallback` | `{"bounds": [0, 2], "description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -1888,7 +1887,6 @@ Accepted by every command, before or after the subcommand.
         "route",
         "effort",
         "confidential",
-        "allow_free",
         "fallback"
       ],
       "multiple": true,
@@ -2217,7 +2215,7 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
+| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
 | `--set` | `{"description": "Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable", "name": "preset_set", "repeatable": true, "requires": ["preset"]}` |
 | `--params-file` | `{"description": "Read preset parameters from a TOML table file; --set overrides it", "name": "preset_params_file", "requires": ["preset"]}` |
 | `--explain` | `{"defaults": ["false"], "description": "Explain roles, limits and the expanded graph without running it", "name": "explain", "values": ["true", "false"]}` |
@@ -2239,7 +2237,6 @@ Accepted by every command, before or after the subcommand.
 | `--route` | `{"description": "Named route, or ADAPTER/NAME for a model-less adapter such as command/fmt-check", "name": "route"}` |
 | `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
 | `--confidential` | `{"defaults": ["false"], "description": "Require a confidential-safe route", "name": "confidential", "values": ["true", "false"]}` |
-| `--allow-free` | `{"defaults": ["false"], "description": "Allow free-tier models", "name": "allow_free", "values": ["true", "false"]}` |
 | `--fallback` | `{"bounds": [0, 2], "description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
 | `--account` | `{"description": "Pin a registered account (key or label) instead of resolving one", "name": "account"}` |
 | `--mode` | `{"description": "Access mode: read-only or worktree-write [default: read-only]", "name": "mode", "values": ["read-only", "worktree-write"]}` |
@@ -2299,7 +2296,6 @@ Accepted by every command, before or after the subcommand.
         "route",
         "effort",
         "confidential",
-        "allow_free",
         "fallback"
       ],
       "multiple": true,
@@ -2436,7 +2432,7 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
+| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
 | `--set` | `{"description": "Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable", "name": "preset_set", "repeatable": true, "requires": ["preset"]}` |
 | `--params-file` | `{"description": "Read preset parameters from a TOML table file; --set overrides it", "name": "preset_params_file", "requires": ["preset"]}` |
 | `--explain` | `{"defaults": ["false"], "description": "Explain roles, limits and the expanded graph without running it", "name": "explain", "values": ["true", "false"]}` |
@@ -2458,7 +2454,6 @@ Accepted by every command, before or after the subcommand.
 | `--route` | `{"description": "Named route, or ADAPTER/NAME for a model-less adapter such as command/fmt-check", "name": "route"}` |
 | `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
 | `--confidential` | `{"defaults": ["false"], "description": "Require a confidential-safe route", "name": "confidential", "values": ["true", "false"]}` |
-| `--allow-free` | `{"defaults": ["false"], "description": "Allow free-tier models", "name": "allow_free", "values": ["true", "false"]}` |
 | `--fallback` | `{"bounds": [0, 2], "description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
 | `--account` | `{"description": "Pin a registered account (key or label) instead of resolving one", "name": "account"}` |
 | `--mode` | `{"description": "Access mode: read-only or worktree-write [default: read-only]", "name": "mode", "values": ["read-only", "worktree-write"]}` |
@@ -2517,7 +2512,6 @@ Accepted by every command, before or after the subcommand.
         "route",
         "effort",
         "confidential",
-        "allow_free",
         "fallback"
       ],
       "multiple": true,

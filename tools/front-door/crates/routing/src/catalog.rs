@@ -1491,10 +1491,11 @@ mod tests {
         config.model_policy.defaults.result.fallback =
             Some(ModelId::parse("codex/not-catalogued")?);
         assert!(config.validate().is_empty());
-        let effective =
-            config
-                .model_policy
-                .effective(&ModelId::parse("codex/gpt-6-luna")?, None, provenant_core::WallTime::from_unix_seconds(1)?);
+        let effective = config.model_policy.effective(
+            &ModelId::parse("codex/gpt-6-luna")?,
+            None,
+            provenant_core::WallTime::from_unix_seconds(1)?,
+        );
         assert!(effective.policy.result.fallback.is_none());
         assert_eq!(
             effective.dropped_fallback,
@@ -1504,10 +1505,11 @@ mod tests {
         config.model_policy.defaults.result.fallback = Some(ModelId::parse("codex/gpt-6-luna")?);
         config.model_policy.defaults.result.fallback_effort = Some("unsupported".into());
         assert!(config.validate().is_empty());
-        let effective =
-            config
-                .model_policy
-                .effective(&ModelId::parse("codex/gpt-6-luna")?, None, provenant_core::WallTime::from_unix_seconds(1)?);
+        let effective = config.model_policy.effective(
+            &ModelId::parse("codex/gpt-6-luna")?,
+            None,
+            provenant_core::WallTime::from_unix_seconds(1)?,
+        );
         assert_eq!(
             effective.dropped_fallback,
             Some((ModelId::parse("codex/gpt-6-luna")?, "unsupported effort"))
