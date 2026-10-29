@@ -1580,7 +1580,7 @@ mod tests {
                     .trains_on_prompts,
                 Some(false)
             );
-            assert_eq!(free_member.weight, 20);
+            assert_eq!(free_member.weight, 50);
             assert!(free_member.weight > paid_member.weight);
             assert!(free_member.efforts.is_empty());
         }

@@ -183,14 +183,14 @@ trains_on_prompts = false
 model = "opencode/opencode/deepseek-v4.1-flash-free"
 free = true
 efforts = []
-evidence_ref = "legacy config/model-routing.json@114e3331"
+evidence_ref = "https://opencode.ai/docs/zen (privacy: zero retention, no training; not an exception); accessed 2026-10-30"
 trains_on_prompts = false
 
 [[models]]
 model = "opencode/opencode/glm-5.3-flash-free"
 free = true
 efforts = []
-evidence_ref = "legacy config/model-routing.json@114e3331"
+evidence_ref = "https://opencode.ai/docs/zen (privacy: zero retention, no training; not an exception); accessed 2026-10-30"
 trains_on_prompts = false
 
 [pacing]
@@ -208,8 +208,8 @@ utility = [
 ]
 junior = [
     # Prefer free capacity while it is eligible and available.
-    { model = "opencode/opencode/deepseek-v4.1-flash-free", weight = 20, efforts = [] },
-    { model = "opencode/opencode/glm-5.3-flash-free", weight = 20, efforts = [] },
+    { model = "opencode/opencode/deepseek-v4.1-flash-free", weight = 50, efforts = [] },
+    { model = "opencode/opencode/glm-5.3-flash-free", weight = 50, efforts = [] },
     # Provisional pending local trial evidence.
     { model = "opencode/opencode-go/deepseek-v4.1-flash", weight = 2, efforts = [] },
     { model = "opencode/opencode-go/glm-5.3-flash", weight = 1, efforts = [] },

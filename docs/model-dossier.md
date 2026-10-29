@@ -206,11 +206,13 @@ the reader, not the decider.
 
 Use `utility` for mechanical work: Claude Haiku has no explicit effort, Codex
 Luna uses its recorded `low` control. The junior pool favours the free
-OpenCode DeepSeek V4.1 Flash and GLM-5.3 Flash routes with weight 20 each;
-their Go variants have weights 2 and 1. Weights favour free capacity rather
-than guaranteeing it is exhausted first, and free routes require free-tier
-permission and available capacity. Use the named junior, senior or principal
-pools for increasing judgement, or the writing and design pools for those crafts. Check `route list` for pool
+OpenCode DeepSeek V4.1 Flash and GLM-5.3 Flash routes with weight 50 each,
+about 86% of junior draws when every member is ready; their Go variants have weights 2 and 1. Weights
+favour free capacity rather than guaranteeing it is exhausted first, and free
+routes require free-tier permission and available capacity. OpenCode Zen lists
+both free variants as zero retention with no training on prompts. Use the
+named junior, senior or principal pools for increasing judgement, or the
+writing and design pools for those crafts. Check `route list` for pool
 membership and weights.
 
 ### Human-facing final polish
