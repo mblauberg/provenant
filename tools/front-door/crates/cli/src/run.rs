@@ -2084,7 +2084,7 @@ fn refused(error: provenant_records::UnsupportedLaunch) -> Fail {
     Fail::new(Status::Refused, ErrorKind::Unsupported, error.to_string())
 }
 /// A pool is refused an effort only when no member's adapter can take it.
-fn pool_effort_refusal(
+pub(crate) fn pool_effort_refusal(
     adapters: &[&str],
     effort: &str,
 ) -> Option<provenant_records::UnsupportedLaunch> {
