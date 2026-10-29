@@ -2,6 +2,7 @@
 # Behaviour tests for scripts/assertion-diff: seeded loosened and removed
 # assertions are flagged, unrelated test diffs and non-test files stay quiet.
 set -eu
+# shellcheck source=scripts/test-git-env.sh disable=SC1091
 . "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)/test-git-env.sh"
 
 dir=$(cd "$(dirname "$0")" && pwd -P)

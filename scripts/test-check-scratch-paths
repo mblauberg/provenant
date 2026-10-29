@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+# shellcheck source=scripts/test-git-env.sh disable=SC1091
 . "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)/test-git-env.sh"
 
 script=$(cd "$(dirname "$0")" && pwd -P)/check-scratch-paths
