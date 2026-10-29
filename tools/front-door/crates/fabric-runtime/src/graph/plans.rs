@@ -311,6 +311,17 @@ fn fragment(
                 });
             }
         }
+        // The destination is chair authority: a planner never names one.
+        if matches!(
+            child.delivery,
+            Some(provenant_records::run::DeliveryMode::Integrate(_))
+        ) && document.integration_branch.is_none()
+        {
+            return Err(format!(
+                "fragment node {} sets integrate delivery, but the graph names no integration_branch",
+                child.id
+            ));
+        }
         if child.access == AccessMode::WorktreeWrite {
             if child.delivery.as_ref().is_some_and(|mode| {
                 !matches!(

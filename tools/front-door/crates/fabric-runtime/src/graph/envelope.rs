@@ -161,9 +161,8 @@ fn land_skeleton(tier: provenant_records::workflow::RiskTier) -> LandRecord {
         policy_source: crate::config::LandSource::Project,
         branch: String::new(),
         head: String::new(),
-        authorised_by: Some(LandAuthority::Ask {
+        authorised_by: Some(LandAuthority::Chair {
             ask_id: String::new(),
-            actor: String::new(),
         }),
         pull_request: Some(u64::MAX),
         note: Some(String::new()),
@@ -287,19 +286,13 @@ fn node_bound(
         bytes += ask_bound(ask, MAX_ADVANCE_ERROR_BYTES);
     }
     if let Some(spec) = &node.land {
-        // branch, head, ask ID, actor and note; one ask, replaced on rejection.
+        // branch, head, ask ID, actor and note; one ask, whose body names the
+        // branch and head twice.
         bytes +=
             2 * OUTPUT_FIELD_BYTES + node.id.len() + 32 + HOST_ID_BYTES + MAX_ADVANCE_ERROR_BYTES;
         let session = land::session(spec, plan).unwrap_or("");
-        let ask = land::land_ask(
-            &plan.graph_id,
-            node,
-            &land_skeleton(spec.tier),
-            session,
-            u64::MAX,
-            Some(""),
-        );
-        bytes += ask_bound(ask, 2 * OUTPUT_FIELD_BYTES + MAX_ADVANCE_ERROR_BYTES);
+        let ask = land::land_ask(&plan.graph_id, node, &land_skeleton(spec.tier), session);
+        bytes += ask_bound(ask, 4 * OUTPUT_FIELD_BYTES + MAX_ADVANCE_ERROR_BYTES);
     }
     if gate {
         bytes += OUTPUT_FIELD_BYTES; // gate reason

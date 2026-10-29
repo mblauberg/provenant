@@ -121,6 +121,12 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
         Ok(None)
     }
     fn land(&mut self, request: LandRequest<'_>) -> Result<LandObservation, Self::Error> {
+        // A tier that asks only observes; the chair has not merged by hand.
+        if request.authority.is_none() {
+            return Ok(LandObservation::Pending {
+                reason: "awaiting the chair".into(),
+            });
+        }
         self.lands
             .push((request.branch.into(), request.head.into()));
         Ok(LandObservation::Merged {
@@ -514,7 +520,8 @@ fn deliver_nests_inside_another_preset() {
     assert_eq!(host.lands.len(), 1);
 
     // The child's decision session reaches its land node, so a crucial tier
-    // asks the wrapper's chair instead of failing for want of a session.
+    // asks the wrapper's chair instead of failing for want of a session, and
+    // waits for the chair to land by hand.
     let mut layers = Layers::empty();
     layers
         .insert(
@@ -537,6 +544,7 @@ fn deliver_nests_inside_another_preset() {
     let land = progress(&run.checkpoint, "ship--land");
     assert_eq!(land.state, NodeState::Running, "{:?}", land.advance_error);
     assert!(host.lands.is_empty());
+    assert!(land.land.as_ref().unwrap().authorised_by.is_none());
     assert!(
         host.asks
             .iter()
@@ -655,4 +663,87 @@ fn remaining_work_at_the_end_of_a_long_report_reaches_every_repair_round() {
         second.contains("Repaired in ci--repair--r1--fix."),
         "{second}"
     );
+}
+
+#[test]
+fn repository_layers_never_lower_the_land_tier_or_add_a_land() {
+    let temp = tempfile::tempdir().unwrap();
+    let (user, repo) = (temp.path().join("user"), temp.path().join("repo"));
+    std::fs::create_dir(&user).unwrap();
+    std::fs::create_dir(&repo).unwrap();
+    let tier = |overrides: &[&str]| {
+        let mut all = vec!["parameters.worktree='/repo/lane'".to_owned()];
+        all.extend(overrides.iter().map(|item| (*item).to_owned()));
+        let layers = Layers::load(&user, &repo).unwrap();
+        let expanded = expand(&layers, "deliver", "approved brief", &all).unwrap();
+        let nodes = expanded.document["nodes"].as_array().unwrap().clone();
+        nodes
+            .iter()
+            .find(|node| node["id"] == "land")
+            .map(|node| node["land"]["tier"].as_str().unwrap().to_owned())
+    };
+    std::fs::write(
+        user.join("deliver.toml"),
+        "[parameters]\nland_tier = 'crucial'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("deliver.toml"),
+        "[parameters]\nland_tier = 'routine'\n",
+    )
+    .unwrap();
+    assert_eq!(tier(&[]).as_deref(), Some("crucial"));
+    // An explicit command-line value still applies.
+    assert_eq!(
+        tier(&["parameters.land_tier='routine'"]).as_deref(),
+        Some("routine")
+    );
+    // A land the user configuration turned off takes the strictest tier.
+    std::fs::write(user.join("deliver.toml"), "[parameters]\nland = 0\n").unwrap();
+    std::fs::write(repo.join("deliver.toml"), "[parameters]\nland = 1\n").unwrap();
+    assert_eq!(tier(&[]).as_deref(), Some("terminal"));
+    // A stricter repository tier stands.
+    std::fs::remove_file(user.join("deliver.toml")).unwrap();
+    std::fs::write(
+        repo.join("deliver.toml"),
+        "[parameters]\nland_tier = 'crucial'\n",
+    )
+    .unwrap();
+    assert_eq!(tier(&[]).as_deref(), Some("crucial"));
+}
+
+#[test]
+fn repository_roles_never_lower_a_custom_land_role() {
+    let temp = tempfile::tempdir().unwrap();
+    let (user, repo) = (temp.path().join("user"), temp.path().join("repo"));
+    std::fs::create_dir_all(user.join("presets")).unwrap();
+    std::fs::create_dir_all(repo.join("presets")).unwrap();
+    std::fs::write(
+        user.join("presets/ship-flow.toml"),
+        "stages = [\n  { id = \"write\", tier = \"senior\", access = \"worktree_write\", worktree = \"/repo/lane\", delivery = \"pr\", prompt = \"${prompt}\" },\n  { id = \"ship\", role = \"ship\", depends_on = [\"write\"] },\n]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        user.join("roles.toml"),
+        "[roles.ship]\nkind = \"land\"\nland = { node = \"write\", tier = \"crucial\" }\n",
+    )
+    .unwrap();
+    let tier = || {
+        let layers = Layers::load(&user.join("presets"), &repo.join("presets")).unwrap();
+        let expanded = expand(&layers, "ship-flow", "approved brief", &[]).unwrap();
+        expanded.document["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == "ship")
+            .map(|node| node["land"]["tier"].as_str().unwrap().to_owned())
+    };
+    assert_eq!(tier().as_deref(), Some("crucial"));
+    // A repository role override, with no repository preset, cannot lower it.
+    std::fs::write(
+        repo.join("roles.toml"),
+        "[roles.ship]\nland = { node = \"write\", tier = \"routine\" }\n",
+    )
+    .unwrap();
+    assert_eq!(tier().as_deref(), Some("crucial"));
 }
