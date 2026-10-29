@@ -2,8 +2,7 @@
 use crate::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use std::{
     ffi::{OsStr, OsString},
-    fs,
-    io::{self, Read},
+    fs, io,
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
     time::Duration,
@@ -237,6 +236,41 @@ mod tests {
             parse_repository_path(b"/tmp\n").unwrap(),
             fs::canonicalize("/tmp").unwrap()
         );
+    }
+
+    #[test]
+    fn repository_path_identifies_linked_worktree() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let main = temp.path().join("main");
+        let linked = temp.path().join("linked");
+        let common = main.join(".git");
+        let private = common.join("worktrees/linked");
+        for dir in [
+            &linked,
+            &private,
+            &common.join("objects"),
+            &common.join("refs"),
+        ] {
+            fs::create_dir_all(dir).expect("fixture directory");
+        }
+        fs::write(common.join("HEAD"), "ref: refs/heads/main\n").expect("main HEAD");
+        fs::write(private.join("HEAD"), "ref: refs/heads/linked\n").expect("linked HEAD");
+        fs::write(private.join("commondir"), "../..\n").expect("common directory");
+        fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}\n", private.display()),
+        )
+        .expect("gitfile");
+        for root in [&main, &linked] {
+            assert_eq!(
+                repository_path(root, RepositoryPath::Toplevel).unwrap(),
+                fs::canonicalize(root).unwrap()
+            );
+            assert_eq!(
+                repository_path(root, RepositoryPath::CommonDir).unwrap(),
+                fs::canonicalize(&common).unwrap()
+            );
+        }
     }
 
     #[test]
