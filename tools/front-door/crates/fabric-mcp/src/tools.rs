@@ -251,6 +251,10 @@ impl ToolCall {
                 _,
             ) => body(text, "text"),
             Self::Inbox(InboxInput::Close { reason, .. }, _) => body(reason, "reason"),
+            Self::Inbox(
+                InboxInput::Steer { text, .. } | InboxInput::ChairMessage { text, .. },
+                _,
+            ) => body(text, "text"),
             Self::Mail(MailInput::Send { body: value, .. }, _) => body(value, "body"),
             Self::Mail(MailInput::Read { limit, .. }, _) => page(*limit),
             Self::Task(
@@ -550,7 +554,7 @@ impl ToolCall {
         }
         let host = if schema::tool_kind(name) == Some(schema::ToolKind::Inbox) {
             let host = arguments.as_object_mut().and_then(|o| o.remove("host"));
-            if host.is_some() && operation == "ask" {
+            if host.is_some() && matches!(operation.as_str(), "ask" | "steer" | "chair_message") {
                 return Err(InvalidInput::Arguments {
                     path: "arguments.host".into(),
                 });
@@ -708,7 +712,9 @@ impl ToolCall {
             InboxInput::Ask { operation_id, .. }
             | InboxInput::Answer { operation_id, .. }
             | InboxInput::Close { operation_id, .. }
-            | InboxInput::Acknowledge { operation_id, .. },
+            | InboxInput::Acknowledge { operation_id, .. }
+            | InboxInput::Steer { operation_id, .. }
+            | InboxInput::ChairMessage { operation_id, .. },
             _,
         ) = &mut self
             && operation_id.is_none()
@@ -735,7 +741,9 @@ impl ToolCall {
                 InboxInput::Ask { operation_id, .. }
                 | InboxInput::Answer { operation_id, .. }
                 | InboxInput::Close { operation_id, .. }
-                | InboxInput::Acknowledge { operation_id, .. },
+                | InboxInput::Acknowledge { operation_id, .. }
+                | InboxInput::Steer { operation_id, .. }
+                | InboxInput::ChairMessage { operation_id, .. },
                 _,
             ) => operation_id.clone(),
             Self::Chair(

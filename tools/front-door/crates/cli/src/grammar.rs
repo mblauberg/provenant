@@ -112,6 +112,8 @@ pub enum Command {
     Cancel(Cancel),
     /// Resume an attempt with a new prompt
     Resume(Resume),
+    /// Queue a steering message for a lane when its provider supports control
+    Steer(crate::inbox::Steer),
     /// Deliver a settled writer attempt
     #[command(subcommand)]
     Lane(Lane),
@@ -284,6 +286,8 @@ pub enum Chair {
     /// Append and read a chair session's authored updates.
     #[command(subcommand)]
     Log(ChairLog),
+    /// Queue a message for an exact registered chair session.
+    Message(crate::inbox::ChairMessage),
     /// Checkpoint and continue under an allowed registered Claude account.
     Switch {
         /// Registered Claude account to switch to

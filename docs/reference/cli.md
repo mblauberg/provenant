@@ -2466,6 +2466,33 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant steer`
+
+| Argument | Contract |
+|---|---|
+| `attempt` | `{"name": "attempt", "positional": true, "required": true}` |
+| `--text-stdin` | `{"defaults": ["false"], "name": "text_stdin", "required": true, "values": ["true", "false"]}` |
+| `--operation-id` | `{"name": "operation_id"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "attempt",
+        "text_stdin",
+        "operation_id"
+      ],
+      "multiple": true,
+      "name": "Steer",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant lane`
 
 | Argument | Contract |
@@ -3206,6 +3233,35 @@ Accepted by every command, before or after the subcommand.
       ],
       "multiple": true,
       "name": "List",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant chair message`
+
+| Argument | Contract |
+|---|---|
+| `session` | `{"name": "session", "positional": true, "required": true}` |
+| `--text-stdin` | `{"defaults": ["false"], "name": "text_stdin", "required": true, "values": ["true", "false"]}` |
+| `--channel` | `{"name": "channel", "required": true, "values": ["chat", "console", "phone_remote", "cli", "unknown"]}` |
+| `--operation-id` | `{"name": "operation_id"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "session",
+        "text_stdin",
+        "channel",
+        "operation_id"
+      ],
+      "multiple": true,
+      "name": "ChairMessage",
       "required": false
     }
   ]

@@ -57,6 +57,58 @@ pub fn resolve_delivery_target(
     })
 }
 
+/// Resolve where a control request goes. A lane's adapter comes from its run
+/// record alone; a chair is the exactly registered session of this host and
+/// project. Callers cannot name the recipient.
+pub fn resolve_control(
+    edge: &crate::run::Edge<'_>,
+    identity: &provenant_fabric_runtime::identity::Identity,
+    input: &InboxInput,
+) -> Result<provenant_fabric_runtime::inbox::ControlRoute, InboxError> {
+    use provenant_fabric_runtime::inbox::ControlRoute;
+    use provenant_records::control::LaunchKind;
+    use provenant_workflow::session::{HostSessionId, SessionStore};
+    match input {
+        InboxInput::Steer { attempt, .. } => {
+            let provider = crate::run::attempt_provider(edge, *attempt).map_err(|fail| {
+                if fail.kind == provenant_run::ErrorKind::NotFound {
+                    InboxError::Store(provenant_fabric_runtime::StoreError::NotFound)
+                } else {
+                    InboxError::WorkLookup(fail.message)
+                }
+            })?;
+            Ok(ControlRoute {
+                provider: provider
+                    .and_then(|name| provenant_records::AdapterSpec::get(&name))
+                    .map(|spec| spec.id),
+                launch: LaunchKind::Lane,
+                recipient: None,
+                target: attempt.to_string(),
+            })
+        }
+        InboxInput::ChairMessage { session, .. } => {
+            let id = HostSessionId::parse(session).map_err(|_| InboxError::Invalid("session"))?;
+            let found = SessionStore::new(edge.roots.state.clone(), identity.project, id)
+                .discovery()
+                .map_err(|_| InboxError::OwnerUnavailable)?
+                .ok_or(InboxError::Store(
+                    provenant_fabric_runtime::StoreError::NotFound,
+                ))?;
+            let record = found.record;
+            if record.host != identity.host || record.project_id != identity.project {
+                return Err(InboxError::Conflict);
+            }
+            Ok(ControlRoute {
+                provider: None,
+                launch: LaunchKind::Chair,
+                recipient: Some(record.chair_actor),
+                target: format!("{}/{}/{}", record.host, record.project_id, session),
+            })
+        }
+        _ => Err(InboxError::Invalid("control target")),
+    }
+}
+
 /// Compose Run's host lookup with the inbox owner without a runtime dependency.
 pub fn resolve_work(
     root: &provenant_core::StateRoot,
@@ -117,6 +169,28 @@ pub struct Answer {
     pub text_file: Option<PathBuf>,
     #[arg(long, value_parser=clap::value_parser!(u64).range(1..))]
     pub expect_revision: u64,
+    #[arg(long, value_enum)]
+    pub channel: Channel,
+    #[arg(long)]
+    pub operation_id: Option<OperationId>,
+}
+#[derive(Debug, Args)]
+pub struct Steer {
+    /// Attempt ID
+    pub attempt: provenant_core::AttemptId,
+    /// Read the message from standard input (at most 4 KiB; input must finish within 5 seconds)
+    #[arg(long, required = true)]
+    pub text_stdin: bool,
+    #[arg(long)]
+    pub operation_id: Option<OperationId>,
+}
+#[derive(Debug, Args)]
+pub struct ChairMessage {
+    /// Registered chair session ID
+    pub session: String,
+    /// Read the message from standard input (at most 4 KiB; input must finish within 5 seconds)
+    #[arg(long, required = true)]
+    pub text_stdin: bool,
     #[arg(long, value_enum)]
     pub channel: Channel,
     #[arg(long)]
@@ -199,10 +273,22 @@ pub enum Closure {
     Expired,
 }
 
+fn interaction_channel(channel: Channel) -> InteractionChannel {
+    match channel {
+        Channel::Chat => InteractionChannel::Chat,
+        Channel::Console => InteractionChannel::Console,
+        Channel::PhoneRemote => InteractionChannel::PhoneRemote,
+        Channel::Cli => InteractionChannel::Cli,
+        Channel::Unknown => InteractionChannel::Unknown,
+    }
+}
+
 pub enum HumanCommand {
     Ask(Ask),
     Answer(Answer),
     Inbox(Inbox),
+    Steer(Steer),
+    ChairMessage(ChairMessage),
 }
 impl HumanCommand {
     fn input(self) -> Result<InboxInput, Error> {
@@ -232,13 +318,20 @@ impl HumanCommand {
                     }
                 },
                 expect_revision: args.expect_revision,
-                channel: match args.channel {
-                    Channel::Chat => InteractionChannel::Chat,
-                    Channel::Console => InteractionChannel::Console,
-                    Channel::PhoneRemote => InteractionChannel::PhoneRemote,
-                    Channel::Cli => InteractionChannel::Cli,
-                    Channel::Unknown => InteractionChannel::Unknown,
-                },
+                channel: interaction_channel(args.channel),
+                operation_id: args.operation_id,
+            },
+            Self::Steer(args) => InboxInput::Steer {
+                extra: Default::default(),
+                attempt: args.attempt,
+                text: read_text()?,
+                operation_id: args.operation_id,
+            },
+            Self::ChairMessage(args) => InboxInput::ChairMessage {
+                extra: Default::default(),
+                session: args.session,
+                text: read_text()?,
+                channel: interaction_channel(args.channel),
                 operation_id: args.operation_id,
             },
             Self::Inbox(Inbox {
@@ -597,6 +690,19 @@ fn execute(
                 call.cancel,
             )
         },
+        // Assets only redirect lane state, which a mutation never reaches.
+        &|input, _| {
+            resolve_control(
+                &crate::run::Edge {
+                    roots: &context.roots,
+                    home,
+                    assets: home,
+                    cwd,
+                },
+                &context.identity,
+                input,
+            )
+        },
     )?)
 }
 pub fn run(
@@ -608,6 +714,27 @@ pub fn run(
     cwd: &Path,
 ) -> u8 {
     let result = match execute(command, roots.clone(), home, cwd) {
+        Ok(InboxResult::Control { receipt })
+            if receipt.state == provenant_records::control::ControlState::Unsupported =>
+        {
+            // Refused before any side effect; the receipt still names the reason.
+            let reason = format!("control unsupported: {}", receipt.reason);
+            let mut result = CommandResult::new(
+                path,
+                Outcome::Refused,
+                Some(InboxResult::Control { receipt }),
+            );
+            result.error = Some(CommandError {
+                code: "control_unsupported".into(),
+                message: reason,
+                cause: None,
+                repair: Some(
+                    "Read `provenant help --all --json` provider_controls for what each provider supports; use resume to continue a lane."
+                        .into(),
+                ),
+            });
+            result
+        }
         Ok(data) => CommandResult::new(path, Outcome::Ok, Some(data)),
         Err(error) => {
             let (status, code) = error.outcome_code();

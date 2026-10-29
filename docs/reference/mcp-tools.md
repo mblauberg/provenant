@@ -1901,7 +1901,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
   "_meta": {
     "io.provenant/schemaVersion": 2
   },
-  "description": "Post human requests, list, answer, close or acknowledge; route to an owner host when needed.",
+  "description": "Post human requests, list, answer, close or acknowledge; route to an owner host when needed. Steer a lane or message a chair session, both local-only and refused when unsupported.",
   "inputSchema": {
     "$defs": {
       "Id": {
@@ -2279,6 +2279,50 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
       {
         "additionalProperties": false,
         "properties": {
+          "channel": {
+            "enum": [
+              "chat",
+              "console",
+              "phone_remote",
+              "cli",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "op": {
+            "const": "chair_message"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OperationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session": {
+            "maxLength": 128,
+            "pattern": "^[a-z0-9]([a-z0-9_-]|\\.[a-z0-9_-])*\\.?$",
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 4096,
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel",
+          "op",
+          "session",
+          "text"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
           "expect_revision": {
             "maximum": 18446744073709551615,
             "minimum": 1,
@@ -2398,6 +2442,37 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
         },
         "required": [
           "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "$ref": "#/$defs/Id"
+          },
+          "op": {
+            "const": "steer"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OperationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "text": {
+            "maxLength": 4096,
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempt",
+          "op",
+          "text"
         ],
         "type": "object"
       }

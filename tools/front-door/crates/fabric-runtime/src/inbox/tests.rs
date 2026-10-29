@@ -823,6 +823,7 @@ fn inbox_worker_mutations_are_refused_without_opening_store() {
         ask(RequestKind::Decision, "create"),
         &f.cancel,
         &|_, _| panic!("lookup must not run"),
+        &|_, _| panic!("control lookup must not run"),
     );
     assert_eq!(result.unwrap_err().code(), "lane_coordination_refused");
     assert!(!f.root.as_path().join("fabric").exists());
@@ -835,6 +836,7 @@ fn inbox_worker_mutations_are_refused_without_opening_store() {
         ask(RequestKind::Decision, "create"),
         &f.cancel,
         &|_, _| panic!("lookup must not run"),
+        &|_, _| panic!("control lookup must not run"),
     );
     assert!(result.is_ok());
 }
@@ -1427,4 +1429,150 @@ fn hook_offers_retry_idempotently_without_hiding_later_queued_answers() {
     let retried = claim(retries.clone(), deadline()).unwrap();
     assert_eq!(retried, retries);
     assert!(retried.items.iter().all(|item| item.delivery.attempts == 1));
+}
+
+fn chair_message(session: &str, text: &str, id: &str) -> InboxInput {
+    InboxInput::ChairMessage {
+        extra: Default::default(),
+        session: session.into(),
+        text: text.into(),
+        channel: InteractionChannel::Console,
+        operation_id: op(id),
+    }
+}
+fn steer(text: &str, id: &str) -> InboxInput {
+    InboxInput::Steer {
+        extra: Default::default(),
+        attempt: provenant_core::AttemptId::from_bytes([7; 16]),
+        text: text.into(),
+        operation_id: op(id),
+    }
+}
+fn control_route(f: &Fixture, provider: Option<Harness>, launch: LaunchKind) -> ControlRoute {
+    ControlRoute {
+        provider,
+        launch,
+        recipient: (launch == LaunchKind::Chair).then_some(f.identity.inbox.actor),
+        target: "target".into(),
+    }
+}
+fn control(
+    f: &Fixture,
+    route: ControlRoute,
+    input: InboxInput,
+) -> Result<ControlReceipt, InboxError> {
+    let lookup = move |_: &InboxInput, _: &Request<'_>| Ok(route.clone());
+    match f
+        .service()
+        .with_control_lookup(&lookup)
+        .execute(input, &f.cancel)?
+    {
+        InboxResult::Control { receipt } => Ok(receipt),
+        other => panic!("{other:?}"),
+    }
+}
+fn mailbox(f: &Fixture) -> Vec<provenant_fabric_store::Delivery> {
+    let request = Request {
+        clock: &f.clock,
+        cancel: &f.cancel,
+    };
+    Store::open(&f.root, &request)
+        .unwrap()
+        .read_mail(
+            f.identity.project,
+            f.identity.inbox.actor,
+            Some(0),
+            50,
+            &request,
+        )
+        .unwrap()
+        .items
+}
+
+#[test]
+fn chair_message_queues_mail_replays_and_refuses_a_conflicting_reuse() {
+    let f = Fixture::new();
+    let route = || control_route(&f, None, LaunchKind::Chair);
+    let first = control(
+        &f,
+        route(),
+        chair_message("session-a", "look at CI", "msg-1"),
+    )
+    .unwrap();
+    assert_eq!(first.state, ControlState::Queued);
+    assert_eq!(first.transport, Some(AnswerTransport::FabricMail));
+    assert_eq!(first.control, ControlKind::ChairMessage);
+    let replay = control(
+        &f,
+        route(),
+        chair_message("session-a", "look at CI", "msg-1"),
+    )
+    .unwrap();
+    assert_eq!(replay, first);
+    let conflict = control(
+        &f,
+        route(),
+        chair_message("session-a", "different", "msg-1"),
+    );
+    assert!(matches!(
+        conflict,
+        Err(InboxError::Mutation { ref source, .. }) if source.code() == "operation_conflict"
+    ));
+    let mail = mailbox(&f);
+    assert_eq!(mail.len(), 1);
+    assert!(mail[0].message.body.contains("look at CI"));
+    assert!(mail[0].message.body.contains("not an approval"));
+}
+
+#[test]
+fn unsupported_steer_refuses_before_any_side_effect() {
+    let f = Fixture::new();
+    for provider in provenant_records::ADAPTER_SPECS.iter().map(|spec| spec.id) {
+        let route = control_route(&f, Some(provider), LaunchKind::Lane);
+        let receipt = control(&f, route, steer("slow down", "steer-1")).unwrap();
+        assert_eq!(receipt.state, ControlState::Unsupported, "{provider:?}");
+        assert_eq!(receipt.transport, None);
+        assert_eq!(receipt.message_id, None);
+    }
+    // Nothing was recorded, so the ID is still free for a different request.
+    let route = control_route(&f, None, LaunchKind::Lane);
+    let receipt = control(&f, route, steer("other text", "steer-1")).unwrap();
+    assert_eq!(receipt.state, ControlState::Unsupported);
+    assert!(mailbox(&f).is_empty());
+}
+
+#[test]
+fn control_text_is_bounded_and_nonblank() {
+    let f = Fixture::new();
+    let route = || control_route(&f, None, LaunchKind::Chair);
+    for text in [
+        "".to_owned(),
+        "  \n".to_owned(),
+        "x".repeat(CONTROL_TEXT_BYTES + 1),
+    ] {
+        assert!(matches!(
+            control(&f, route(), chair_message("session-a", &text, "msg-bad")),
+            Err(InboxError::Invalid(_))
+        ));
+        assert!(matches!(
+            control(&f, route(), steer(&text, "steer-bad")),
+            Err(InboxError::Invalid(_))
+        ));
+    }
+    let longest = "x".repeat(CONTROL_TEXT_BYTES);
+    assert!(control(&f, route(), chair_message("session-a", &longest, "msg-max")).is_ok());
+}
+
+#[test]
+fn control_is_refused_inside_a_lane_and_without_a_lookup() {
+    let f = Fixture::new();
+    let input = chair_message("session-a", "hello", "msg-lane");
+    assert!(matches!(
+        validate_request(&f.identity, &config(), true, &input),
+        Err(InboxError::LaneMutation)
+    ));
+    assert!(matches!(
+        f.call(input),
+        Err(InboxError::Mutation { ref source, .. }) if source.code() == "inbox_unavailable"
+    ));
 }

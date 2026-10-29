@@ -258,13 +258,15 @@ fn build_strict() -> Vec<Value> {
             json!({"discover":{}}),
         ),
         (
-            "Post human requests, list, answer, close or acknowledge; route to an owner host when needed.",
+            "Post human requests, list, answer, close or acknowledge; route to an owner host when needed. Steer a lane or message a chair session, both local-only and refused when unsupported.",
             json!({
                 "ask":{"session":inbox_session.clone(),"request":inbox_request,"operation_id?":nullable(reference("OperationId"))},
                 "list":{"host?":nullable(text(128)),"id?":nullable(reference("Id")),"session?":nullable(inbox_session.clone()),"state?":choices(&["open","all"]),"limit?":integer(1,100),"cursor?":nullable(pattern(r"^[0-9a-f]{32}\.sha256:[0-9a-f]{64}\.[0-9]{1,20}$"))},
                 "answer":{"host?":nullable(text(128)),"id":reference("Id"),"action":choices(&["choose","reply","confirm","override"]),"option_id?":nullable(reference("OperationId")),"text?":nullable(text(provenant_records::inbox::ANSWER_TEXT_BYTES)),"expect_revision":integer(1,u64::MAX),"channel":choices(&["chat","console","phone_remote","cli","unknown"]),"operation_id?":nullable(reference("OperationId"))},
                 "close":{"host?":nullable(text(128)),"id":reference("Id"),"state":choices(&["withdrawn","superseded","expired"]),"reason":text(1024),"expect_revision":integer(1,u64::MAX),"operation_id?":nullable(reference("OperationId"))},
-                "acknowledge":{"host?":nullable(text(128)),"id":reference("Id"),"answer_id":reference("Id"),"session":inbox_session.clone(),"operation_id?":nullable(reference("OperationId"))}
+                "acknowledge":{"host?":nullable(text(128)),"id":reference("Id"),"answer_id":reference("Id"),"session":inbox_session.clone(),"operation_id?":nullable(reference("OperationId"))},
+                "steer":{"attempt":reference("Id"),"text":text(provenant_records::control::CONTROL_TEXT_BYTES),"operation_id?":nullable(reference("OperationId"))},
+                "chair_message":{"session":inbox_session.clone(),"text":text(provenant_records::control::CONTROL_TEXT_BYTES),"channel":choices(&["chat","console","phone_remote","cli","unknown"]),"operation_id?":nullable(reference("OperationId"))}
             }),
         ),
         (

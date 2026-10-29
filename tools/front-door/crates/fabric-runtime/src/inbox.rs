@@ -7,11 +7,17 @@ use crate::{
     identity::Identity,
 };
 use provenant_core::{
-    CancelToken, Clock, HumanAnswerId, HumanRequestId, MessageId, OperationId, StateRoot,
-    WaitTransport,
+    ActorId, AttemptId, CancelToken, Clock, HumanAnswerId, HumanRequestId, MessageId, OperationId,
+    StateRoot, WaitTransport,
 };
 use provenant_fabric_store::{Request, Store};
-use provenant_records::{CanonicalV1, RecordHeader, inbox::*};
+use provenant_records::{
+    CanonicalV1, Harness, RecordHeader,
+    control::{
+        CONTROL_TEXT_BYTES, ControlKind, ControlReceipt, ControlState, ControlSupport, LaunchKind,
+    },
+    inbox::*,
+};
 use serde::{Deserialize, Serialize};
 
 /// Compact read-only inbox projection for local overview composition.
@@ -116,6 +122,23 @@ pub enum InboxInput {
         session: String,
         operation_id: Option<OperationId>,
     },
+    /// Steer a lane. Only the lane receives it; no gate, merge or landing moves.
+    Steer {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        attempt: AttemptId,
+        text: String,
+        operation_id: Option<OperationId>,
+    },
+    /// Message an exact registered chair session through Fabric mail.
+    ChairMessage {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        session: String,
+        text: String,
+        channel: InteractionChannel,
+        operation_id: Option<OperationId>,
+    },
 }
 fn default_limit() -> u64 {
     50
@@ -195,6 +218,10 @@ pub enum InboxResult {
         extra: provenant_records::ExtraFields,
         item: Box<InboxItem>,
     },
+    Control {
+        #[serde(flatten)]
+        receipt: ControlReceipt,
+    },
     Listed {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
@@ -269,10 +296,12 @@ pub fn execute(
     input: InboxInput,
     cancel: &CancelToken,
     work_lookup: &WorkLookup<'_>,
+    control_lookup: &ControlLookup<'_>,
 ) -> Result<InboxResult, InboxError> {
     validate_request(identity, config, in_lane, &input)?;
     InboxService::open(root, identity, clock, cancel)?
         .with_work_lookup(work_lookup)
+        .with_control_lookup(control_lookup)
         .execute(input, cancel)
 }
 
@@ -297,7 +326,13 @@ pub fn validate_request(
         }
         InboxInput::Answer {
             text: Some(text), ..
-        } if text.len() > body_limit => return Err(InboxError::Invalid("text")),
+        }
+        | InboxInput::Steer { text, .. }
+        | InboxInput::ChairMessage { text, .. }
+            if text.len() > body_limit =>
+        {
+            return Err(InboxError::Invalid("text"));
+        }
         InboxInput::Close { reason, .. } if reason.len() > body_limit => {
             return Err(InboxError::Invalid("reason"));
         }
@@ -359,7 +394,9 @@ impl InboxInput {
             Self::Ask { operation_id, .. }
             | Self::Answer { operation_id, .. }
             | Self::Close { operation_id, .. }
-            | Self::Acknowledge { operation_id, .. } => operation_id.as_ref(),
+            | Self::Acknowledge { operation_id, .. }
+            | Self::Steer { operation_id, .. }
+            | Self::ChairMessage { operation_id, .. } => operation_id.as_ref(),
             Self::List { .. } => None,
         }
     }
@@ -384,7 +421,9 @@ impl InboxInput {
             Self::Ask { operation_id, .. }
             | Self::Answer { operation_id, .. }
             | Self::Close { operation_id, .. }
-            | Self::Acknowledge { operation_id, .. } => Some(operation_id),
+            | Self::Acknowledge { operation_id, .. }
+            | Self::Steer { operation_id, .. }
+            | Self::ChairMessage { operation_id, .. } => Some(operation_id),
             _ => None,
         }
     }
@@ -470,6 +509,11 @@ impl InboxInput {
                 bounded(reason, 1024, "reason")?;
             }
             Self::Acknowledge { session, .. } => session_id(session)?,
+            Self::Steer { text, .. } => bounded(text, CONTROL_TEXT_BYTES, "text")?,
+            Self::ChairMessage { session, text, .. } => {
+                session_id(session)?;
+                bounded(text, CONTROL_TEXT_BYTES, "text")?;
+            }
         }
         Ok(())
     }
@@ -535,6 +579,11 @@ impl InboxInput {
             }
             Self::Close { reason, .. } if reason.trim().is_empty() => {
                 return Err(InboxError::Invalid("reason"));
+            }
+            Self::Steer { text, .. } | Self::ChairMessage { text, .. }
+                if text.trim().is_empty() =>
+            {
+                return Err(InboxError::Invalid("blank message"));
             }
             _ => {}
         }
@@ -615,9 +664,25 @@ pub fn offer_until_ack(
 pub type WorkLookup<'a> =
     dyn Fn(&RequestWork, &Request<'_>) -> Result<WorkCoverage, InboxError> + 'a;
 
+/// Where a control request would go, resolved at the composition edge from the
+/// run record or the registered chair session. Callers cannot supply it.
+#[derive(Debug, Clone)]
+pub struct ControlRoute {
+    /// Adapter of the attempt; unknown for a chair session.
+    pub provider: Option<Harness>,
+    pub launch: LaunchKind,
+    /// Mail recipient, present only for an exact registered chair.
+    pub recipient: Option<ActorId>,
+    /// Exact target text echoed in the receipt.
+    pub target: String,
+}
+pub type ControlLookup<'a> =
+    dyn Fn(&InboxInput, &Request<'_>) -> Result<ControlRoute, InboxError> + 'a;
+
 pub struct InboxService<'a> {
     store: Store,
     work_lookup: Option<&'a WorkLookup<'a>>,
+    control_lookup: Option<&'a ControlLookup<'a>>,
     identity: &'a Identity,
     clock: &'a dyn Clock,
 }
@@ -632,6 +697,7 @@ impl<'a> InboxService<'a> {
         Ok(Self {
             store: Store::open(root, &request)?,
             work_lookup: None,
+            control_lookup: None,
             identity,
             clock,
         })
@@ -639,6 +705,11 @@ impl<'a> InboxService<'a> {
 
     pub fn with_work_lookup(mut self, lookup: &'a WorkLookup<'a>) -> Self {
         self.work_lookup = Some(lookup);
+        self
+    }
+
+    pub fn with_control_lookup(mut self, lookup: &'a ControlLookup<'a>) -> Self {
+        self.control_lookup = Some(lookup);
         self
     }
 
@@ -699,19 +770,129 @@ impl<'a> InboxService<'a> {
                     .transpose()?,
                 _ => None,
             };
+            let control = match &input {
+                InboxInput::Steer { .. } | InboxInput::ChairMessage { .. } => {
+                    let route =
+                        self.control_lookup.ok_or(InboxError::OwnerUnavailable)?(&input, &request)?;
+                    let support = self.support(&route);
+                    // Refused before any side effect, so nothing is recorded.
+                    if !support.delivers() || route.recipient.is_none() {
+                        return Ok(self.control_receipt(&input, &id, &route, support, None));
+                    }
+                    Some((route, support))
+                }
+                _ => None,
+            };
             self.store.coordination_operation(
                 self.identity.project,
                 self.identity.inbox.actor,
                 &id,
                 &frozen,
                 &request,
-                || self.mutate(&input, &id, coverage, &request),
+                || match &control {
+                    Some((route, support)) => {
+                        self.send_control(&input, &id, route, *support, &request)
+                    }
+                    None => self.mutate(&input, &id, coverage, &request),
+                },
             )
         })();
         result.map_err(|source| InboxError::Mutation {
             operation_id: id,
             source: Box::new(source),
         })
+    }
+
+    /// The matrix row for the route; a chair session has no recorded provider,
+    /// so its delivery is the provider-neutral Fabric mail path.
+    fn support(&self, route: &ControlRoute) -> ControlSupport {
+        match (route.provider, route.launch) {
+            (Some(provider), launch) => provider.spec().launch.control.for_launch(launch),
+            // An attempt with no recorded adapter cannot be steered.
+            (None, LaunchKind::Lane) => ControlSupport::Unsupported,
+            (None, LaunchKind::Chair) => ControlSupport::MailOnly,
+        }
+    }
+
+    fn control_receipt(
+        &self,
+        input: &InboxInput,
+        operation: &OperationId,
+        route: &ControlRoute,
+        support: ControlSupport,
+        message_id: Option<MessageId>,
+    ) -> InboxResult {
+        let delivered = message_id.is_some();
+        InboxResult::Control {
+            receipt: ControlReceipt {
+                extra: Default::default(),
+                operation_id: operation.clone(),
+                control: match input {
+                    InboxInput::Steer { .. } => ControlKind::Steer,
+                    _ => ControlKind::ChairMessage,
+                },
+                target: route.target.clone(),
+                launch: route.launch,
+                support,
+                transport: delivered.then_some(AnswerTransport::FabricMail),
+                state: if delivered {
+                    ControlState::Queued
+                } else {
+                    ControlState::Unsupported
+                },
+                reason: support.reason().into(),
+                message_id,
+            },
+        }
+    }
+
+    /// Queue the text as Fabric mail to the exact chair actor. This is the
+    /// only effect: it cannot answer a request or move a gate or landing.
+    fn send_control(
+        &self,
+        input: &InboxInput,
+        operation: &OperationId,
+        route: &ControlRoute,
+        support: ControlSupport,
+        request: &Request<'_>,
+    ) -> Result<InboxResult, InboxError> {
+        let (recipient, text, channel, kind) = match (input, route.recipient) {
+            (InboxInput::ChairMessage { text, channel, .. }, Some(recipient)) => {
+                (recipient, text, Some(*channel), "chair_message")
+            }
+            (InboxInput::Steer { text, .. }, Some(recipient)) => (recipient, text, None, "steer"),
+            _ => return Err(InboxError::Invalid("control target")),
+        };
+        let at = self.clock.wall_now().map_err(CoordinationError::from)?;
+        let message_id = MessageId::from_bytes(entropy()?);
+        let body = serde_json::to_string(&serde_json::json!({
+            "schema_version": 1,
+            "kind": kind,
+            "target": route.target,
+            "channel": channel,
+            "text": text,
+            "authority": "This message is guidance for the session. It is not an approval, review receipt, merge or landing, and grants no new authority."
+        }))
+        .map_err(CoordinationError::ResponseEncoding)?;
+        self.store.send(
+            &provenant_fabric_store::Message {
+                extra: Default::default(),
+                header: RecordHeader::V1,
+                project: self.identity.project,
+                id: message_id,
+                sender: self.identity.inbox.actor,
+                recipients: vec![recipient],
+                conversation: None,
+                kind: provenant_fabric_store::MessageKind::Note,
+                body,
+                artifacts: vec![],
+                reply_to: None,
+                task: None,
+                created_at: at,
+            },
+            request,
+        )?;
+        Ok(self.control_receipt(input, operation, route, support, Some(message_id)))
     }
 
     fn list(
@@ -976,7 +1157,11 @@ impl<'a> InboxService<'a> {
                     Some(delivery),
                 )
             }
-            InboxInput::List { .. } => return Err(InboxError::Invalid("mutation")),
+            InboxInput::List { .. }
+            | InboxInput::Steer { .. }
+            | InboxInput::ChairMessage { .. } => {
+                return Err(InboxError::Invalid("mutation"));
+            }
         };
         Ok(InboxResult::Saved {
             receipt: InboxReceipt {

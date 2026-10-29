@@ -10,6 +10,7 @@ mod artifact_ref;
 mod attempt_fact;
 mod attempt_file;
 mod canonical;
+pub mod control;
 mod finding;
 pub mod handoff;
 mod input;

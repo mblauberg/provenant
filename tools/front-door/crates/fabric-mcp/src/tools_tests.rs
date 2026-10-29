@@ -482,3 +482,33 @@ fn summary_update_carries_a_validated_operation_id() {
     let call = ToolCall::parse("fabric_chair", value);
     assert!(call.is_err() || call.unwrap().operation_id().is_none());
 }
+
+#[test]
+fn control_ops_are_strict_local_mutations_with_bounded_text() {
+    let steer = json!({"op":"steer","attempt":"00000000000000000000000000000001",
+        "text":"slow down","operation_id":"steer-retry-1"});
+    let call = ToolCall::parse("fabric_inbox", steer.clone()).unwrap();
+    assert!(call.is_mutation());
+    assert_eq!(call.operation_id().unwrap().as_str(), "steer-retry-1");
+    let message = json!({"op":"chair_message","session":"chair-a","text":"look at CI",
+        "channel":"console"});
+    assert!(
+        ToolCall::parse("fabric_inbox", message.clone())
+            .unwrap()
+            .is_mutation()
+    );
+    for base in [steer, message] {
+        let mut host = base.clone();
+        host["host"] = json!("peer");
+        assert!(ToolCall::parse("fabric_inbox", host).is_err());
+        let mut forged = base.clone();
+        forged["actor"] = json!("00000000000000000000000000000002");
+        assert!(ToolCall::parse("fabric_inbox", forged).is_err());
+        let mut long = base.clone();
+        long["text"] = json!("x".repeat(provenant_records::control::CONTROL_TEXT_BYTES + 1));
+        assert!(ToolCall::parse("fabric_inbox", long).is_err());
+        let mut blank = base;
+        blank["text"] = json!("");
+        assert!(ToolCall::parse("fabric_inbox", blank).is_err());
+    }
+}
