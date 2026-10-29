@@ -135,11 +135,15 @@ impl LaneRoots {
         if !path.is_absolute() {
             return false;
         }
+        // `..` after a symlink climbs out of the link's target, not out of
+        // the link's own directory, so the raw path is resolved as well as the
+        // lexical one.
         let lexical = normalise(path);
         let resolved = resolve(&lexical);
-        self.0
-            .iter()
-            .any(|root| lexical.starts_with(root) || resolved.starts_with(root))
+        let raw = resolve(path);
+        self.0.iter().any(|root| {
+            lexical.starts_with(root) || resolved.starts_with(root) || raw.starts_with(root)
+        })
     }
 }
 
@@ -224,6 +228,99 @@ pub fn parse_listing(bytes: &[u8]) -> Result<Vec<ConfigEntry>, TransportError> {
         });
     }
     Ok(entries)
+}
+
+/// The argv tail that lists the configuration without following includes, so
+/// every `include.path` and `includeIf.*.path` directive is visible whether or
+/// not Git would read its target for this repository.
+pub const DIRECTIVE_ARGS: [&str; 5] = ["config", "--no-includes", "--show-origin", "-z", "--list"];
+
+/// The argv tail that lists one config file without following its includes.
+pub fn file_listing_args(file: &Path) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec!["config".into(), "--file".into()];
+    args.push(file.as_os_str().to_owned());
+    args.extend(["--no-includes", "--show-origin", "-z", "--list"].map(OsString::from));
+    args
+}
+
+pub fn is_include_directive(key: &str) -> bool {
+    key == "include.path" || (key.starts_with("includeif.") && key.ends_with(".path"))
+}
+
+/// Where an include directive in `from` points. Git resolves a relative path
+/// against the including file's directory and expands a leading `~/`.
+pub fn include_target(from: &Path, value: &str, home: &Path) -> PathBuf {
+    if let Some(rest) = value.strip_prefix("~/") {
+        return home.join(rest);
+    }
+    let path = Path::new(value);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        from.parent().unwrap_or(Path::new("/")).join(path)
+    }
+}
+
+/// Most files followed while looking for a lane-writable include. Git itself
+/// stops at depth ten.
+const MAX_INCLUDE_FILES: usize = 64;
+
+/// Lists one config file taken with [`file_listing_args`], or `None` when it
+/// does not exist.
+pub type ReadConfigFile<'a> =
+    dyn FnMut(&Path) -> Result<Option<Vec<ConfigEntry>>, TransportError> + 'a;
+
+/// Refuse an include directive whose target lies where a lane can write,
+/// whether or not the target exists or Git would read it today.
+///
+/// The effective listing only shows files Git read, so a missing target or an
+/// `includeIf` condition that is false for now (`gitdir:`, `onbranch:`,
+/// `hasconfig:`) would escape [`check_listing`], and a lane could create the
+/// file in the window before Git rereads the configuration. `top` is the
+/// listing taken with [`DIRECTIVE_ARGS`]; `read` lists one file taken with
+/// [`file_listing_args`], or `None` when it does not exist. Targets outside
+/// the lane areas are followed, since they may include onward.
+pub fn check_includes(
+    top: &[ConfigEntry],
+    base: &Path,
+    home: &Path,
+    roots: &LaneRoots,
+    read: &mut ReadConfigFile<'_>,
+) -> Result<(), TransportError> {
+    let mut pending = Vec::new();
+    let collect = |entries: &[ConfigEntry], origin: Option<&Path>, pending: &mut Vec<PathBuf>| {
+        for entry in entries {
+            let Some(value) = entry.value.as_deref().filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            if is_include_directive(&entry.key) {
+                let from = origin
+                    .map(Path::to_path_buf)
+                    .or_else(|| entry.file(base))
+                    .unwrap_or_else(|| base.join("config"));
+                pending.push(include_target(&from, value, home));
+            }
+        }
+    };
+    collect(top, None, &mut pending);
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some(target) = pending.pop() {
+        if roots.contains(&target) {
+            return Err(TransportError::LaneConfig {
+                file: target.display().to_string(),
+            });
+        }
+        if !visited.insert(target.clone()) {
+            continue;
+        }
+        if visited.len() > MAX_INCLUDE_FILES {
+            return Err(TransportError::Unreadable);
+        }
+        if let Some(entries) = read(&target)? {
+            collect(&entries, Some(&target), &mut pending);
+        }
+    }
+    Ok(())
 }
 
 /// Keys whose value names a program Git runs for a transport.
@@ -379,6 +476,110 @@ mod tests {
         assert!(!roots.contains(&root.join("laneish")));
         assert!(!roots.contains(Path::new("relative/lane")));
         Ok(())
+    }
+
+    #[test]
+    fn lane_roots_follow_parent_components_after_a_link() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        std::fs::create_dir_all(root.join("lane/deep"))?;
+        std::fs::create_dir_all(root.join("safe"))?;
+        // `safe/link/../x` is `lane/x` for the kernel, not `safe/x`.
+        std::os::unix::fs::symlink(root.join("lane/deep"), root.join("safe/link"))?;
+        let roots = LaneRoots::new([root.join("lane")]);
+        assert!(roots.contains(&root.join("safe/link/../not-yet")));
+        assert!(!roots.contains(&root.join("safe/not-yet")));
+        Ok(())
+    }
+
+    fn directive(file: &str, key: &str, value: &str) -> ConfigEntry {
+        ConfigEntry {
+            origin: format!("file:{file}"),
+            key: key.to_owned(),
+            value: Some(value.to_owned()),
+        }
+    }
+
+    #[test]
+    fn include_targets_in_lane_areas_are_refused_even_when_unread() {
+        let roots = LaneRoots::new([PathBuf::from("/project/.worktrees")]);
+        let base = Path::new("/project");
+        let home = Path::new("/home/user");
+        // The files a followed include would list, by path.
+        let check = |top: &[ConfigEntry], files: &[(&str, Vec<ConfigEntry>)]| {
+            let mut read = |file: &Path| {
+                Ok(files
+                    .iter()
+                    .find(|(name, _)| Path::new(name) == file)
+                    .map(|(_, entries)| entries.clone()))
+            };
+            check_includes(top, base, home, &roots, &mut read)
+        };
+        let config = "/project/.git/config";
+        // Absolute, relative to the including file and `..`-laden paths,
+        // through `include` and each `includeIf` condition, none of them read.
+        for (key, value) in [
+            ("include.path", "/project/.worktrees/x/cfg"),
+            ("include.path", "../.worktrees/x/cfg"),
+            ("include.path", "../.worktrees/../.worktrees/x/cfg"),
+            (
+                "includeif.onbranch:nothing.path",
+                "/project/.worktrees/x/cfg",
+            ),
+            ("includeif.gitdir:/elsewhere/.path", "../.worktrees/x/cfg"),
+            (
+                "includeif.hasconfig:remote.*.url:never.path",
+                "../.worktrees/x/cfg",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    check(&[directive(config, key, value)], &[]),
+                    Err(TransportError::LaneConfig { .. })
+                ),
+                "{key}={value}"
+            );
+        }
+        // Home-relative, and other locations, are fine.
+        assert!(check(&[directive(config, "include.path", "~/x/cfg")], &[]).is_ok());
+        assert!(
+            check(
+                &[directive(config, "user.name", "/project/.worktrees/x")],
+                &[]
+            )
+            .is_ok()
+        );
+
+        // An include outside the lane areas is followed, and its own includes
+        // are held to the same rule.
+        let outside = [directive(config, "include.path", "/etc/shared.cfg")];
+        let nested = [(
+            "/etc/shared.cfg",
+            vec![directive(
+                "/etc/shared.cfg",
+                "include.path",
+                "/project/.worktrees/x/cfg",
+            )],
+        )];
+        assert!(matches!(
+            check(&outside, &nested),
+            Err(TransportError::LaneConfig { .. })
+        ));
+        let inert = [(
+            "/etc/shared.cfg",
+            vec![directive("/etc/shared.cfg", "user.name", "x")],
+        )];
+        assert!(check(&outside, &inert).is_ok());
+        // A cycle terminates.
+        let cycle = [(
+            "/etc/shared.cfg",
+            vec![directive(
+                "/etc/shared.cfg",
+                "include.path",
+                "/etc/shared.cfg",
+            )],
+        )];
+        assert!(check(&outside, &cycle).is_ok());
     }
 
     #[test]

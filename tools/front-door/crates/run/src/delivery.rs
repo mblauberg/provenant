@@ -711,13 +711,38 @@ impl HostDeliveryContext {
         // a fetch writes through a symref to the ref it points at. Leave such
         // names out. Only a colliding default is fatal.
         let mut reserved = vec!["HEAD".to_owned()];
+        let mut existing = Vec::new();
         for line in run(&["for-each-ref", "--format=%(refname)%09%(symref)", &tracking])?.lines() {
             if let Some((name, symref)) = line.split_once('\t')
-                && !symref.is_empty()
                 && let Some(short) = name.strip_prefix(&tracking)
             {
-                reserved.push(short.to_owned());
+                if !symref.is_empty() {
+                    reserved.push(short.to_owned());
+                }
+                existing.push(short.to_owned());
             }
+        }
+        // Spellings that differ only in Unicode normalisation share one
+        // tracking ref where Git precomposes names or the filesystem folds
+        // them, so a sibling's commit would land behind the default (or
+        // behind `<remote>/HEAD`). Which spelling survives is not ours to
+        // choose, so refuse outright instead of leaving a name out.
+        let advertised: Vec<&str> = default
+            .iter()
+            .map(String::as_str)
+            .chain(heads.iter().copied())
+            .collect();
+        let on_disk: Vec<&str> = existing.iter().map(String::as_str).collect();
+        if let Some((name, other)) = provenant_core::find_normalisation_alias(&advertised, &on_disk)
+        {
+            return Err(prepare_error(
+                "origin refresh",
+                format!(
+                    "branch names {} and {} are equivalent under Unicode NFC normalisation; refusing to refresh {remote} until one spelling is gone",
+                    spelled(name),
+                    spelled(other),
+                ),
+            ));
         }
         let mut refspecs = Vec::new();
         for name in &heads {
@@ -1227,7 +1252,35 @@ impl HostDeliveryContext {
         transport::check_environment(environment, base, &roots).map_err(refuse)?;
         let listing = self.command_with_input(cwd, "git", &transport::LISTING_ARGS, stage, b"")?;
         let entries = transport::parse_listing(listing.as_bytes()).map_err(refuse)?;
-        transport::check_listing(&entries, base, &roots).map_err(refuse)
+        transport::check_listing(&entries, base, &roots).map_err(refuse)?;
+        // Git rereads configuration for the command itself, so refuse any
+        // include directive that names a lane area, read or not: a lane could
+        // otherwise create the target between this check and the command.
+        let directives =
+            self.command_with_input(cwd, "git", &transport::DIRECTIVE_ARGS, stage, b"")?;
+        let top = transport::parse_listing(directives.as_bytes()).map_err(refuse)?;
+        let home = environment
+            .iter()
+            .find(|(name, _)| name == "HOME")
+            .map_or(base, |(_, home)| Path::new(home));
+        let mut read = |file: &Path| -> std::result::Result<
+            Option<Vec<transport::ConfigEntry>>,
+            transport::TransportError,
+        > {
+            if !file.is_file() {
+                return Ok(None);
+            }
+            let file = file.to_str().ok_or(transport::TransportError::Unreadable)?;
+            let args = ["config", "--file", file]
+                .into_iter()
+                .chain(["--no-includes", "--show-origin", "-z", "--list"])
+                .collect::<Vec<_>>();
+            let listing = self
+                .command_with_input(cwd, "git", &args, stage, b"")
+                .map_err(|_| transport::TransportError::Unreadable)?;
+            transport::parse_listing(listing.as_bytes()).map(Some)
+        };
+        transport::check_includes(&top, base, home, &roots, &mut read).map_err(refuse)
     }
     pub(super) fn head(&self, writer: &WriterRequest) -> Result<GitOid> {
         let head = self.command(
@@ -1813,6 +1866,20 @@ pub(super) fn redact_url_userinfo(detail: &str) -> String {
         }
     }
     safe
+}
+
+/// A name with its non-ASCII characters escaped, so two spellings of one
+/// name read differently.
+fn spelled(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else {
+            out.push_str(&c.escape_unicode().to_string());
+        }
+    }
+    format!("\"{name}\" ({out})")
 }
 
 pub(super) fn prepare_error(step: &'static str, detail: impl std::fmt::Display) -> RunError {

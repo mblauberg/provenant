@@ -682,7 +682,44 @@ impl<'a> HostGit<'a> {
         }
         let entries = transport::parse_listing(&listing.stdout.bytes)?;
         transport::check_listing(&entries, repo.root_path(), &roots)?;
+        host.check_include_targets(&roots)?;
         Ok(host)
+    }
+
+    /// Git rereads configuration for the command itself, so a lane must not be
+    /// able to create an include target after the listing above: refuse any
+    /// directive that names a lane area, read or not.
+    fn check_include_targets(&self, roots: &LaneRoots) -> Result<(), UtilityError> {
+        let directives = self.run(
+            &transport::DIRECTIVE_ARGS
+                .iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>(),
+        )?;
+        if directives.termination != Termination::Exit(0) {
+            return Err(UtilityError::UnreadableGitConfiguration);
+        }
+        let top = transport::parse_listing(&directives.stdout.bytes)?;
+        let base = self.repo.root_path();
+        let home = self
+            .env
+            .iter()
+            .find(|(name, _)| name == "HOME")
+            .map_or(base, |(_, home)| Path::new(home));
+        let mut read = |file: &Path| -> Result<Option<Vec<ConfigEntry>>, TransportError> {
+            if !file.is_file() {
+                return Ok(None);
+            }
+            let outcome = self
+                .run(&transport::file_listing_args(file))
+                .map_err(|_| TransportError::Unreadable)?;
+            if outcome.termination != Termination::Exit(0) {
+                return Err(TransportError::Unreadable);
+            }
+            transport::parse_listing(&outcome.stdout.bytes).map(Some)
+        };
+        transport::check_includes(&top, base, home, roots, &mut read)?;
+        Ok(())
     }
 
     fn run(&self, args: &[OsString]) -> Result<ExecOutcome, UtilityError> {
@@ -1546,24 +1583,6 @@ fn is_inert_for_utility(key: &str) -> bool {
             .any(|prefix| lower.starts_with(prefix))
 }
 
-fn is_include_directive(key: &str) -> bool {
-    key == "include.path" || (key.starts_with("includeif.") && key.ends_with(".path"))
-}
-
-/// Where an include directive in `from` points. Git resolves a relative path
-/// against the including file's directory and expands a leading `~/`.
-fn include_target(from: &Path, value: &str, home: &Path) -> PathBuf {
-    if let Some(rest) = value.strip_prefix("~/") {
-        return home.join(rest);
-    }
-    let path = Path::new(value);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        from.parent().unwrap_or(Path::new("/")).join(path)
-    }
-}
-
 /// Enumerate the configuration Git would read (includes followed, `onbranch:`
 /// and `gitdir:` conditions evaluated for this repository's HEAD), find every
 /// file lanes can write, and neutralise what such a file sets:
@@ -1613,9 +1632,9 @@ fn scan_configuration(
             read.insert(file.clone());
         }
         if let (Some(file), Some(value)) = (&file, &entry.value)
-            && is_include_directive(&entry.key)
+            && transport::is_include_directive(&entry.key)
         {
-            let target = include_target(file, value, home);
+            let target = transport::include_target(file, value, home);
             files.insert(target.clone());
             declared.push((file.clone(), target));
         }
@@ -1667,8 +1686,9 @@ fn scan_configuration(
             continue;
         };
         for entry in &entries {
-            if let (Some(value), true) = (&entry.value, is_include_directive(&entry.key)) {
-                let nested = include_target(&target, value, home);
+            if let (Some(value), true) = (&entry.value, transport::is_include_directive(&entry.key))
+            {
+                let nested = transport::include_target(&target, value, home);
                 files.insert(nested.clone());
                 pending.push(nested);
             }
@@ -1686,7 +1706,7 @@ fn scan_configuration(
         })
         .chain(unread.iter().map(|entry| (entry.key.as_str(), None)));
     for (key, file) in lane_entries {
-        if !seen.insert(key.to_owned()) || is_include_directive(key) {
+        if !seen.insert(key.to_owned()) || transport::is_include_directive(key) {
             continue;
         }
         if key.starts_with("filter.")
@@ -1761,15 +1781,7 @@ fn read_config_file(
     if !path.is_file() {
         return Ok(None);
     }
-    let args: Vec<OsString> = vec![
-        "config".into(),
-        "--file".into(),
-        path.as_os_str().to_owned(),
-        "--no-includes".into(),
-        "--show-origin".into(),
-        "-z".into(),
-        "--list".into(),
-    ];
+    let args = transport::file_listing_args(path);
     let outcome = run_git_probe(executor, repo, runtime, budget, cancel, &[], &args)?;
     if outcome.termination != Termination::Exit(0) {
         return Err(UtilityError::UnreadableGitConfiguration);
@@ -2389,6 +2401,52 @@ pub(crate) mod tests {
             assert_eq!(advertise(&fixture)?.termination, Termination::Exit(0));
             fixture.run(&["config", "--unset", key])?;
         }
+
+        // An include directive that names a lane area is refused whether or
+        // not Git reads its target today: a lane could create the file, or
+        // make an `includeIf` condition true, before Git rereads the
+        // configuration for the command itself. Relative targets resolve
+        // against the including file.
+        let not_yet = script_path(&fixture.root.join(".worktrees/lane-1/not-yet.cfg"))?;
+        let shared = fixture._temp.path().join("shared.cfg");
+        for (key, value) in [
+            ("include.path", not_yet.as_str()),
+            ("include.path", "../.worktrees/lane-1/not-yet.cfg"),
+            (
+                "includeIf.onbranch:never-checked-out.path",
+                not_yet.as_str(),
+            ),
+            (
+                "includeIf.gitdir:/nowhere/.path",
+                "../.worktrees/lane-1/not-yet.cfg",
+            ),
+            (
+                "includeIf.hasconfig:remote.*.url:never://*.path",
+                not_yet.as_str(),
+            ),
+        ] {
+            fixture.run(&["config", key, value])?;
+            for result in [advertise(&fixture).map(|_| ()), fetch(&fixture).map(|_| ())] {
+                assert!(
+                    matches!(
+                        &result,
+                        Err(UtilityError::Transport(TransportError::LaneConfig { .. }))
+                    ),
+                    "{key}={value}: {result:?}"
+                );
+            }
+            fixture.run(&["config", "--unset", key])?;
+        }
+        // The same through a file the user keeps elsewhere, which Git does read.
+        fs::write(&shared, format!("[include]\n\tpath = {not_yet}\n"))?;
+        fixture.run(&["config", "include.path", &script_path(&shared)?])?;
+        assert!(matches!(
+            advertise(&fixture),
+            Err(UtilityError::Transport(TransportError::LaneConfig { .. }))
+        ));
+        fs::write(&shared, "[user]\n\tname = Someone\n")?;
+        assert_eq!(advertise(&fixture)?.termination, Termination::Exit(0));
+        fixture.run(&["config", "--unset", "include.path"])?;
 
         // Configuration read from a lane-writable file is refused outright.
         let included = fixture.root.join(".worktrees/lane-1/extra.cfg");

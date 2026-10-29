@@ -32,7 +32,8 @@ a writer at the branch's tip with
 
 New branch names must not differ from an existing local or remote-tracking
 branch name only by case (including non-ASCII case) or by a branch-path
-prefix. Names are not Unicode-normalised. Branch names follow Git's own ref
+prefix, and spellings that differ only in Unicode normalisation (NFC against
+NFD) count as the same name. Branch names follow Git's own ref
 format, so `feat/a+b` is accepted.
 
 A remote base such as `origin/main` is pinned to the commit the remote
@@ -49,7 +50,12 @@ another advertised name, with a warning; their tracking refs may remain
 stale. `HEAD` counts as an existing name, so a branch called `head` collides
 with `origin/HEAD`, and a branch that would be written into an existing
 tracking symref is left out too. It fails only if the remote's default branch
-is among them. Refresh fetches pass `core.precomposeunicode=true`. The
+is among them. Refresh fetches pass `core.precomposeunicode=true`, so names
+that differ only in Unicode normalisation (an NFD default with an NFC sibling)
+would share one tracking ref. Refresh compares every advertised name, and every
+tracking ref already on disk, under NFC normalisation and case folding before
+it fetches, and refuses outright, naming both spellings, when two distinct
+spellings are equivalent. The
 pre-push policy reads the remote's advertised default branch instead of the
 local tracking HEAD, and refuses the push if none is advertised.
 

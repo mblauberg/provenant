@@ -326,10 +326,23 @@ worktree base pinning and delivery) share one transport environment with
 hooks, fsmonitor and protocol limits, and refuse configuration read from a
 lane-writable file or a `core.sshCommand`, `credential.helper` or
 `remote.*.uploadpack`/`receivepack` that runs a program there. A helper the
-user keeps elsewhere stays allowed.
+user keeps elsewhere stays allowed. Git rereads configuration for the command
+itself, so the check also lists the raw directives (`--no-includes`) and
+refuses any `include.path` or `includeIf.*.path` whose target, resolved against
+the including file, `~/` and symlinks, lies in a lane area, whether or not the
+target exists or the `gitdir:`, `onbranch:` or `hasconfig:` condition holds
+today. Targets outside lane areas are followed for onward includes.
+Residual risk: Git still rereads the validated files, so a location a lane can
+write that is not one of the enumerated lane areas (a world-writable directory
+the user's own configuration includes from, say) can change what Git reads
+between the check and the command; the host does not snapshot the values into
+`-c` parameters because credential helpers and SSH settings the user needs are
+scoped by URL and multi-valued.
 - Why: repository content is attacker-controlled input to the host.
 - Test: `crates/confinement/src/utility.rs::onbranch_include_of_a_lane_writable_file_is_neutralised_for_its_worktree`;
   `crates/confinement/src/utility.rs::host_transport_is_hardened_and_refuses_lane_writable_programs`;
+  `crates/confinement/src/transport.rs::include_targets_in_lane_areas_are_refused_even_when_unread`;
+  `crates/run/src/delivery_tests.rs::origin_refresh_refuses_includes_that_name_a_lane_area_before_they_exist`;
   `crates/confinement/src/utility.rs::filters_are_disabled_not_refused_and_empty_tree_source_suppresses_worktree_attributes`;
   `crates/confinement/src/repo.rs::git_revision_accepts_frozen_base_refs_and_refuses_option_injection`
 - Owner: `crates/confinement/src/utility.rs`, `crates/confinement/src/transport.rs`

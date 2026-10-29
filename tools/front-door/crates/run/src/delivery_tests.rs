@@ -825,6 +825,90 @@ fn origin_refresh_never_writes_through_head_or_a_tracking_symref()
 }
 
 #[test]
+fn origin_refresh_refuses_names_that_differ_only_in_unicode_normalisation()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = OriginFixture::new()?;
+    let kept = fixture.local(&["rev-parse", "refs/remotes/origin/main"])?;
+    let newer = fixture.commit("newer")?;
+    let (nfc, nfd) = ("caf\u{e9}", "cafe\u{301}");
+    let assert_untouched = |tracking: &str| -> std::result::Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(fixture.local(&["rev-parse", tracking])?, kept, "{tracking}");
+        // Behind the symref: Git may have stored either spelling of the name.
+        assert_eq!(
+            fixture.local(&["rev-parse", "refs/remotes/origin/HEAD"])?,
+            kept
+        );
+        Ok(())
+    };
+
+    // An NFD default, with `origin/HEAD` pointing at its tracking ref, and an
+    // NFC sibling at another commit. With precomposed Unicode both would land
+    // on one tracking ref, writing the sibling's commit behind `origin/HEAD`.
+    let default_ref = format!("refs/remotes/origin/{nfd}");
+    fixture.local(&["update-ref", &default_ref, &kept])?;
+    fixture.local(&["symbolic-ref", "refs/remotes/origin/HEAD", &default_ref])?;
+    fixture.advertise(&[(nfd, &kept), (nfc, &newer), ("other", &newer)], nfd)?;
+    let error = fixture
+        .refresh(None)
+        .err()
+        .ok_or("NFD default with an NFC sibling must be refused")?
+        .to_string();
+    assert!(error.contains("Unicode NFC"), "{error}");
+    for spelling in ["caf\\u{e9}", "cafe\\u{301}"] {
+        assert!(error.contains(spelling), "{spelling} missing: {error}");
+    }
+    assert_untouched(&default_ref)?;
+    // The refusal comes before any fetch, so unrelated branches stay put too.
+    assert!(
+        fixture
+            .local(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/other"
+            ])
+            .is_err()
+    );
+
+    // The same pair, with the NFC spelling as the default and a case change.
+    fixture.advertise(&[(nfd, &kept), ("Caf\u{c9}", &newer)], nfd)?;
+    assert!(fixture.refresh(None).is_err());
+    assert_untouched(&default_ref)?;
+
+    // Two siblings that alias each other are refused as well, even where the
+    // default is unaffected.
+    fixture.advertise(&[("main", &kept), (nfd, &newer), (nfc, &newer)], "main")?;
+    assert!(fixture.refresh(None).is_err());
+
+    // A tracking ref already on disk under the other spelling is a destination
+    // the advertised name would write through. Packed refs keep the stored
+    // spelling on any filesystem.
+    let local_packed = fixture.project.join(".git/packed-refs");
+    std::fs::write(
+        &local_packed,
+        format!("# pack-refs with: sorted\n{kept} refs/remotes/origin/{nfd}\n"),
+    )?;
+    fixture.local(&["update-ref", "-d", &default_ref]).ok();
+    fixture.advertise(&[("main", &kept), (nfc, &newer)], "main")?;
+    let error = fixture
+        .refresh(None)
+        .err()
+        .ok_or("an existing NFD tracking ref must refuse an NFC branch")?
+        .to_string();
+    assert!(error.contains("cafe\\u{301}"), "{error}");
+    std::fs::remove_file(&local_packed)?;
+
+    // Plain spellings, and names that differ only by case, still refresh.
+    fixture.advertise(&[("main", &kept), (nfc, &newer), ("other", &newer)], "main")?;
+    fixture.refresh(None)?;
+    assert_eq!(
+        fixture.local(&["rev-parse", &format!("refs/remotes/origin/{nfc}")])?,
+        newer
+    );
+    Ok(())
+}
+
+#[test]
 #[allow(clippy::disallowed_methods)]
 fn origin_refresh_routes_advertisement_and_fetch_through_one_hardened_transport()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -912,6 +996,48 @@ fn origin_refresh_routes_advertisement_and_fetch_through_one_hardened_transport(
             .any(|line| line.contains(" ls-remote ") || line.contains(" fetch ")),
         "no network command may run: {calls}"
     );
+    Ok(())
+}
+
+#[test]
+fn origin_refresh_refuses_includes_that_name_a_lane_area_before_they_exist()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = OriginFixture::new()?;
+    let newer = fixture.commit("newer")?;
+    fixture.advertise(&[("main", &newer), ("other", &newer)], "main")?;
+    let lane_file = fixture.project.join(".worktrees/lane-1/not-yet.cfg");
+    let lane_file = lane_file.to_str().ok_or("path")?;
+    let shared = fixture.root.join("shared.cfg");
+    // Git reads none of these targets today: the file is missing, or the
+    // `includeIf` condition is false. A lane could create the file, or make
+    // the condition true, before Git rereads the configuration for the fetch.
+    for (key, value) in [
+        ("include.path", lane_file),
+        ("include.path", "../.worktrees/lane-1/not-yet.cfg"),
+        ("includeIf.onbranch:never-checked-out.path", lane_file),
+        (
+            "includeIf.gitdir:/nowhere/.path",
+            "../.worktrees/lane-1/not-yet.cfg",
+        ),
+        ("includeIf.hasconfig:remote.*.url:never://*.path", lane_file),
+    ] {
+        fixture.local(&["config", key, value])?;
+        let error = fixture
+            .refresh(None)
+            .err()
+            .ok_or_else(|| format!("{key}={value} must be refused"))?;
+        assert!(
+            error.to_string().contains("where lanes can write"),
+            "{key}={value}: {error}"
+        );
+        fixture.local(&["config", "--unset", key])?;
+    }
+    // The same through a file outside the lane areas, which Git does read.
+    std::fs::write(&shared, format!("[include]\n\tpath = {lane_file}\n"))?;
+    fixture.local(&["config", "include.path", shared.to_str().ok_or("path")?])?;
+    assert!(fixture.refresh(None).is_err());
+    std::fs::write(&shared, "[user]\n\tname = Someone\n")?;
+    fixture.refresh(None)?;
     Ok(())
 }
 
