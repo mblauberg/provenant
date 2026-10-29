@@ -300,9 +300,6 @@ Accepted by every command, before or after the subcommand.
 | `--adopt` | `{"name": "adopt"}` |
 | `--force-settings` | `{"defaults": ["false"], "name": "force_settings", "values": ["true", "false"]}` |
 | `--prune-orphans` | `{"defaults": ["false"], "name": "prune_orphans", "values": ["true", "false"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
