@@ -1864,35 +1864,31 @@ fn recovery_drains_what_a_crashed_guardian_left_and_a_failed_step_retries() -> T
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)]
 fn two_concurrent_drains_react_once() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
-    let clock = clock();
-    let cancel = CancelToken::new();
+    let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
-    let runs = std::sync::atomic::AtomicUsize::new(0);
-    std::thread::scope(|scope| {
-        for _ in 0..2 {
-            scope.spawn(|| {
-                let (clock, cancel) = (super::tests::clock(), CancelToken::new());
-                let call = super::tests::call(&clock, &cancel);
-                let store = RunStore::open(&context, &call).unwrap();
-                store
-                    .drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, _| {
-                        runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        std::thread::sleep(Duration::from_millis(200));
-                        reaction.notice_done = true;
-                        reaction.log_done = true;
-                        Ok(())
-                    })
-                    .unwrap();
-            });
-        }
-    });
-    assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let runs = std::cell::Cell::new(0);
+    let mut finish = |reaction: &mut Reaction, _: &mut crate::reactions::Saver<'_>| {
+        runs.set(runs.get() + 1);
+        reaction.graph_done = true;
+        reaction.notice_done = true;
+        reaction.log_done = true;
+        Ok(())
+    };
+    // One drain is mid-flight and holds the run's lock; a second, from another
+    // process's store, defers to it instead of repeating its work.
+    let held = store.reaction_lock(input.run_id)?.ok_or("lock")?;
+    let other = RunStore::open(&context, &call)?;
+    other.drain_reactions(input.run_id, &clock, &cancel, &mut finish)?;
+    assert_eq!(runs.get(), 0);
+    drop(held);
+    other.drain_reactions(input.run_id, &clock, &cancel, &mut finish)?;
+    store.drain_reactions(input.run_id, &clock, &cancel, &mut finish)?;
+    assert_eq!(runs.get(), 1);
     assert!(store.pending_reactions(input.run_id, &call)?.is_empty());
     Ok(())
 }
@@ -1910,6 +1906,7 @@ fn done_rows_are_pruned_and_pending_rows_are_kept() -> TestResult {
     store.prune_reactions(i64::MAX, &call)?;
     assert!(store.reaction(id, &call)?.is_some());
     store.drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, _| {
+        reaction.graph_done = true;
         reaction.notice_done = true;
         reaction.log_done = true;
         Ok(())
