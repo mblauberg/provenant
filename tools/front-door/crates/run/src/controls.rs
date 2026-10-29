@@ -77,7 +77,7 @@ pub enum Reconciled {
     /// The attempt is terminal, but temporary data could not be removed.
     TemporaryRetained {
         path: std::path::PathBuf,
-        reason: String,
+        reason: TemporaryReason,
     },
     /// Launch never reached a guardian; ended as rejected.
     Withdrawn,
@@ -87,6 +87,53 @@ pub enum Reconciled {
     /// Custody cannot be proven either way; it stays fenced.
     Uncertain { reason: UncertainReason },
 }
+/// Stable reason for retaining terminal temporary data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TemporaryReasonKind {
+    Error,
+    ReservationUnreadable,
+    ReservationRetained,
+    NotPrivate,
+}
+
+/// A typed reason that remains a string in reconcile output.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct TemporaryReason {
+    text: String,
+    #[serde(skip)]
+    pub kind: TemporaryReasonKind,
+}
+impl TemporaryReason {
+    fn new(kind: TemporaryReasonKind, text: impl Into<String>) -> Self {
+        Self {
+            kind,
+            text: text.into(),
+        }
+    }
+}
+impl From<String> for TemporaryReason {
+    fn from(text: String) -> Self {
+        Self::new(TemporaryReasonKind::Error, text)
+    }
+}
+impl From<&str> for TemporaryReason {
+    fn from(text: &str) -> Self {
+        Self::from(text.to_owned())
+    }
+}
+impl std::ops::Deref for TemporaryReason {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+impl std::fmt::Display for TemporaryReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
 /// Why custody could not be proven. The text of an underlying error rides
 /// along as `error`; the kind is what a caller matches on.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -94,6 +141,13 @@ pub enum Reconciled {
 pub enum UncertainReason {
     /// Reconciling the attempt failed before it could be settled.
     ReconcileFailed { error: String },
+    /// Reboot evidence could not be established; the wire kind is unchanged.
+    #[serde(rename = "reconcile_failed")]
+    RebootProofUnavailable {
+        error: String,
+        #[serde(skip)]
+        cause: RebootProofCause,
+    },
     /// Custody could not be reattached, acquired or observed.
     CustodyUnavailable { error: String },
     /// A running attempt has no launch summary.
@@ -109,12 +163,50 @@ pub enum UncertainReason {
     /// A writer reservation outlived the attempt's terminal commit.
     WriterReservationRetained { reservation: std::path::PathBuf },
 }
+/// The source of an unavailable reboot proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RebootProofCause {
+    Filesystem,
+    Other,
+}
+
+/// Causes of an attempt lost during custody recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LostReason {
+    Holderless,
+    RemovedWorktree,
+    StaleReservation,
+}
+impl LostReason {
+    pub(crate) const fn message(self) -> &'static str {
+        match self {
+            Self::Holderless => {
+                "no live holder: the guardian and provider ended before the attempt settled"
+            }
+            Self::RemovedWorktree => {
+                "machine rebooted before settlement and the writer worktree was removed"
+            }
+            Self::StaleReservation => {
+                "writer reservation was gone or stale and the recorded process tree predates this boot"
+            }
+        }
+    }
+}
+impl RebootProofCause {
+    fn from_error(error: &RunError) -> Self {
+        if matches!(error, RunError::Filesystem(_)) {
+            Self::Filesystem
+        } else {
+            Self::Other
+        }
+    }
+}
 impl std::fmt::Display for UncertainReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ReconcileFailed { error } | Self::CustodyUnavailable { error } => {
-                f.write_str(error)
-            }
+            Self::ReconcileFailed { error }
+            | Self::RebootProofUnavailable { error, .. }
+            | Self::CustodyUnavailable { error } => f.write_str(error),
             Self::NoLaunchSummary => f.write_str("running attempt has no launch summary"),
             Self::CustodyNotProvablyAbsent => f.write_str("launch custody is not provably absent"),
             Self::ExitWithoutLaunchSummary => f.write_str("exit exists without a launch summary"),
@@ -404,18 +496,18 @@ mod reboot_tests {
         let reservation = evidence.join("reservation.json");
         let cause = if corrupt_reservation {
             std::fs::write(&reservation, b"corrupt reservation")?;
-            "record is invalid"
+            RebootProofCause::Other
         } else {
             std::fs::create_dir(path.join("process-exit.json"))?;
-            "process-exit.json"
+            RebootProofCause::Filesystem
         };
         let before = std::fs::read(&reservation).ok();
         assert!(matches!(store.settle_rebooted(
             &store.record(id, &call)?,
             &call,
             &SystemProcessObserver
-        )?, Some(Reconciled::Uncertain { reason: UncertainReason::ReconcileFailed { error } })
-            if error.contains("reboot proof unavailable") && error.contains(cause)));
+        )?, Some(Reconciled::Uncertain { reason: UncertainReason::RebootProofUnavailable { cause: found, .. } })
+            if found == cause));
         assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
         let request: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path.join("cancel.json"))?)?;
@@ -427,8 +519,8 @@ mod reboot_tests {
             &store.record(id, &call)?,
             &call,
             &SystemProcessObserver
-        )?, Some(Reconciled::Uncertain { reason: UncertainReason::ReconcileFailed { error } })
-            if error.contains("reboot proof unavailable") && error.contains(cause)));
+        )?, Some(Reconciled::Uncertain { reason: UncertainReason::RebootProofUnavailable { cause: found, .. } })
+            if found == cause));
         assert_eq!(std::fs::read(&reservation).ok(), before);
         assert_eq!(
             store.record(id, &call)?.state,
@@ -1032,7 +1124,8 @@ impl RunStore {
             Ok(None) => return Ok(None),
             Err(error) => {
                 return Ok(Some(Reconciled::uncertain(
-                    UncertainReason::ReconcileFailed {
+                    UncertainReason::RebootProofUnavailable {
+                        cause: RebootProofCause::from_error(&error),
                         error: format!("reboot proof unavailable: {error}"),
                     },
                 )));
@@ -1057,7 +1150,7 @@ impl RunStore {
                 .and_then(|task| task.writer.as_ref())
                 .is_some_and(crate::writer::worktree_removed);
             if missing_worktree {
-                self.commit_lost(proof.scope(), Self::removed_worktree_lost_reason(), call)?;
+                self.commit_lost(proof.scope(), LostReason::RemovedWorktree.message(), call)?;
             } else {
                 self.commit_reboot_lost(&proof, call)?;
             }
@@ -1088,10 +1181,6 @@ impl RunStore {
                     ..
                 }
             ) && record.exit_evidence.is_none())
-    }
-
-    fn removed_worktree_lost_reason() -> &'static str {
-        "machine rebooted before settlement and the writer worktree was removed"
     }
 
     /// Writer exclusion for an attempt, taken without waiting: failure means a
@@ -1189,11 +1278,7 @@ impl RunStore {
         {
             return Ok(None);
         }
-        self.commit_lost(
-            scope,
-            "no live holder: the guardian and provider ended before the attempt settled",
-            call,
-        )?;
+        self.commit_lost(scope, LostReason::Holderless.message(), call)?;
         recovery
             .release_lost()
             .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
@@ -1280,7 +1365,8 @@ impl RunStore {
             Ok(None) => return Ok(None),
             Err(error) if proof_errors_uncertain => {
                 return Ok(Some(Reconciled::uncertain(
-                    UncertainReason::ReconcileFailed {
+                    UncertainReason::RebootProofUnavailable {
+                        cause: RebootProofCause::from_error(&error),
                         error: format!("reboot proof unavailable: {error}"),
                     },
                 )));
@@ -1290,9 +1376,9 @@ impl RunStore {
         self.commit_lost(
             Self::scope(record),
             if missing_worktree {
-                Self::removed_worktree_lost_reason()
+                LostReason::RemovedWorktree.message()
             } else {
-                "writer reservation was gone or stale and the recorded process tree predates this boot"
+                LostReason::StaleReservation.message()
             },
             call,
         )?;
@@ -2083,7 +2169,7 @@ impl RunStore {
             Err(error) => {
                 return Ok(Some(Reconciled::TemporaryRetained {
                     path,
-                    reason: error.to_string(),
+                    reason: error.to_string().into(),
                 }));
             }
         };
@@ -2138,7 +2224,7 @@ impl RunStore {
                 Err(error) => {
                     return Ok(Some(Reconciled::TemporaryRetained {
                         path,
-                        reason: error.to_string(),
+                        reason: error.to_string().into(),
                     }));
                 }
             }
@@ -2159,7 +2245,7 @@ impl RunStore {
             Err(error) => {
                 return Ok(Some(Reconciled::TemporaryRetained {
                     path,
-                    reason: error.to_string(),
+                    reason: error.to_string().into(),
                 }));
             }
         };
@@ -2168,10 +2254,13 @@ impl RunStore {
         if let Some(issue) = listing.issues.first() {
             return Ok(Some(Reconciled::TemporaryRetained {
                 path,
-                reason: format!(
-                    "writer reservation unreadable at {}: {}",
-                    issue.reservation.display(),
-                    issue.reason
+                reason: TemporaryReason::new(
+                    TemporaryReasonKind::ReservationUnreadable,
+                    format!(
+                        "writer reservation unreadable at {}: {}",
+                        issue.reservation.display(),
+                        issue.reason
+                    ),
                 ),
             }));
         }
@@ -2188,7 +2277,7 @@ impl RunStore {
                 provenant_os::fs::LockMode::Exclusive,
             )?;
             match custody::reservation_present(&attempt, scope) {
-                Ok(true) => return Err(RunError::Validation("attempt reservation retained")),
+                Ok(true) => return Err(RunError::AttemptReservationRetained),
                 Ok(false) => {}
                 Err(error) => return Err(error.into()),
             }
@@ -2202,7 +2291,18 @@ impl RunStore {
             }
             Err(error) => Reconciled::TemporaryRetained {
                 path,
-                reason: error.to_string(),
+                reason: TemporaryReason::new(
+                    match error {
+                        RunError::AttemptReservationRetained => {
+                            TemporaryReasonKind::ReservationRetained
+                        }
+                        RunError::Filesystem(provenant_os::fs::FsError::NotPrivate { .. }) => {
+                            TemporaryReasonKind::NotPrivate
+                        }
+                        _ => TemporaryReasonKind::Error,
+                    },
+                    error.to_string(),
+                ),
             },
         }))
     }
@@ -2327,6 +2427,19 @@ mod tests {
 
     #[test]
     fn uncertain_reasons_serialise_by_kind_and_keep_their_text() {
+        let retained = Reconciled::TemporaryRetained {
+            path: "/tmp".into(),
+            reason: TemporaryReason::new(TemporaryReasonKind::ReservationUnreadable, "detail"),
+        };
+        assert_eq!(serde_json::to_value(retained).unwrap()["reason"], "detail");
+        assert_eq!(
+            serde_json::to_value(UncertainReason::RebootProofUnavailable {
+                error: "proof failed".into(),
+                cause: RebootProofCause::Filesystem,
+            })
+            .unwrap(),
+            serde_json::json!({ "kind": "reconcile_failed", "error": "proof failed" })
+        );
         let reservation = std::path::PathBuf::from("/state/custody/reservation.json");
         let found = Reconciled::uncertain(UncertainReason::WriterCustodyUnconfirmed {
             reservation: reservation.clone(),
@@ -2341,6 +2454,7 @@ mod tests {
         let Reconciled::Uncertain { reason } = found else {
             unreachable!()
         };
+        // The display text is the operator's recovery guidance.
         assert!(reason.to_string().contains("chair recovery required"));
         let unit = serde_json::to_value(UncertainReason::GuardianNotObservable).unwrap();
         assert_eq!(

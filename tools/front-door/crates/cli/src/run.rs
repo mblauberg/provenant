@@ -1423,15 +1423,34 @@ fn network_access(switch: Option<Switch>, postgres: bool) -> Option<run::Network
 /// existing directories, stored canonically, and clear of the state root;
 /// the confinement compiler refuses credential, broad and Git roots.
 pub fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAccess, Fail> {
-    let invalid = |message: String| Fail::new(Status::Invalid, ErrorKind::Invalid, message);
+    lane_access_checked(access, state_root)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))
+}
+
+#[derive(Debug, thiserror::Error)]
+enum AccessError {
+    #[error(
+        "unknown capability {0}; known: postgres (Rust and Node toolchains are granted to every lane)"
+    )]
+    UnknownCapability(String),
+    #[error("{flag} {} is not an existing directory", path.display())]
+    MissingDirectory { flag: &'static str, path: PathBuf },
+    #[error("{flag} {} overlaps the Provenant state root", path.display())]
+    StateOverlap { flag: &'static str, path: PathBuf },
+    #[error("--write-root {} overlaps the --worktree; worktree-write already grants the worktree", .0.display())]
+    WorktreeOverlap(PathBuf),
+}
+
+fn lane_access_checked(
+    access: &crate::Access,
+    state_root: &Path,
+) -> Result<run::LaneAccess, AccessError> {
     let mut postgres = false;
     for name in &access.capability {
         match name.as_str() {
             "postgres" => postgres = true,
             other => {
-                return Err(invalid(format!(
-                    "unknown capability {other}; known: postgres (Rust and Node toolchains are granted to every lane)"
-                )));
+                return Err(AccessError::UnknownCapability(other.into()));
             }
         }
     }
@@ -1439,28 +1458,26 @@ pub fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::Lan
     // A first dispatch can precede the state root's creation; compare lexically then.
     let state =
         provenant_os::fs::canonicalize(state_root).unwrap_or_else(|_| state_root.to_path_buf());
-    let resolve = |paths: &[PathBuf], flag: &str| {
+    let resolve = |paths: &[PathBuf], flag: &'static str| {
         paths
             .iter()
             .map(|path| {
                 let canonical = provenant_os::fs::canonicalize(path)
                     .ok()
                     .filter(|canonical| canonical.is_dir())
-                    .ok_or_else(|| {
-                        invalid(format!(
-                            "{flag} {} is not an existing directory",
-                            path.display()
-                        ))
+                    .ok_or_else(|| AccessError::MissingDirectory {
+                        flag,
+                        path: path.clone(),
                     })?;
                 if canonical.starts_with(&state) || state.starts_with(&canonical) {
-                    return Err(invalid(format!(
-                        "{flag} {} overlaps the Provenant state root",
-                        path.display()
-                    )));
+                    return Err(AccessError::StateOverlap {
+                        flag,
+                        path: path.clone(),
+                    });
                 }
                 Ok(canonical)
             })
-            .collect::<Result<Vec<_>, Fail>>()
+            .collect::<Result<Vec<_>, AccessError>>()
     };
     let write_roots = resolve(&access.write_root, "--write-root")?;
     // Worktree-write protects `.git` inside the worktree, so a write root that
@@ -1470,10 +1487,7 @@ pub fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::Lan
         let worktree =
             provenant_os::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
         if let Some(root) = write_roots.iter().find(|root| worktree.starts_with(root)) {
-            return Err(invalid(format!(
-                "--write-root {} overlaps the --worktree; worktree-write already grants the worktree",
-                root.display()
-            )));
+            return Err(AccessError::WorktreeOverlap(root.clone()));
         }
     }
     Ok(run::LaneAccess {
@@ -1526,13 +1540,27 @@ pub fn submit(
 #[derive(Debug)]
 enum DiskCheck {
     Unobserved(String),
-    Low(String),
+    Low {
+        path: PathBuf,
+        available: u64,
+        floor: u64,
+        reclaimed: u64,
+    },
 }
 
 impl From<DiskCheck> for String {
     fn from(check: DiskCheck) -> Self {
         match check {
-            DiskCheck::Unobserved(message) | DiskCheck::Low(message) => message,
+            DiskCheck::Unobserved(message) => message,
+            DiskCheck::Low {
+                path,
+                available,
+                floor,
+                reclaimed,
+            } => format!(
+                "insufficient disk space on {}: {available} bytes available, floor {floor} bytes; bounded GC reported {reclaimed} bytes reclaimed; run `provenant gc --free-floor {floor}B` before dispatching a writer",
+                path.display()
+            ),
         }
     }
 }
@@ -1650,10 +1678,12 @@ fn check_writer_disk_with_collection(
             }
         }
         if minimum < floor {
-            return Err(DiskCheck::Low(format!(
-                "insufficient disk space on {}: {minimum} bytes available, floor {floor} bytes; bounded GC reported {reclaimed} bytes reclaimed; run `provenant gc --free-floor {floor}B` before dispatching a writer",
-                limiting.display()
-            )));
+            return Err(DiskCheck::Low {
+                path: limiting.to_path_buf(),
+                available: minimum,
+                floor,
+                reclaimed,
+            });
         }
     }
     Ok(())
@@ -1685,7 +1715,7 @@ pub fn submit_with_host(
                 )
                 .map_err(|check| {
                     let (kind, status) = match &check {
-                        DiskCheck::Low(_) => (ErrorKind::DiskFloor, Status::Refused),
+                        DiskCheck::Low { .. } => (ErrorKind::DiskFloor, Status::Refused),
                         DiskCheck::Unobserved(_) => (ErrorKind::Io, Status::Error),
                     };
                     let message = String::from(check);
@@ -3022,6 +3052,26 @@ struct OwnedWorktree {
     created_at: WallTime,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum OwnWorktreeError {
+    #[error(
+        "--worktree-branch cannot reuse an adopted or foreign owner; its ownership, label and base are unchanged"
+    )]
+    ForeignOwner,
+    #[error(transparent)]
+    Other(run::RunError),
+}
+impl From<OwnWorktreeError> for Fail {
+    fn from(error: OwnWorktreeError) -> Self {
+        match error {
+            OwnWorktreeError::ForeignOwner => {
+                Fail::new(Status::Refused, ErrorKind::Refused, error.to_string())
+            }
+            OwnWorktreeError::Other(error) => error.into(),
+        }
+    }
+}
+
 /// Create or claim the owned tree and publish its lane ownership. A new
 /// tree's owner records the commit creation pinned, so nothing is resolved
 /// again after the side effect and a replay finds the same base.
@@ -3040,7 +3090,7 @@ fn own_worktree(
         provenant_confinement::worktrees::WorktreeInfo,
         provenant_core::GitOid,
     ),
-    Fail,
+    OwnWorktreeError,
 > {
     let OwnedWorktree {
         branch,
@@ -3056,8 +3106,7 @@ fn own_worktree(
         cancel,
         |context| {
             use provenant_confinement::worktrees::{
-                self, WorktreeCondition, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
-                WriterState,
+                self, WorktreeCondition, WorktreeCreate, WorktreeOrigin, WorktreeOwner, WriterState,
             };
             let context = &worktrees::WorktreeContext {
                 workers,
@@ -3145,13 +3194,9 @@ fn own_worktree(
     )
     .map_err(|error| {
         if owner_refused {
-            Fail::new(
-                Status::Refused,
-                ErrorKind::Refused,
-                "--worktree-branch cannot reuse an adopted or foreign owner; its ownership, label and base are unchanged",
-            )
+            OwnWorktreeError::ForeignOwner
         } else {
-            run::RunError::from(error).into()
+            OwnWorktreeError::Other(run::RunError::from(error))
         }
     })
 }
@@ -3525,29 +3570,80 @@ fn with_chair_index<T>(
 
 /// New lane-local associations need the same namespace proof as WorkIndex.
 /// A legacy row can be replayed, but a lane cannot create or repair one.
+#[derive(Debug)]
+enum ChairRunError {
+    Unauthorised(Fail),
+    Other(Fail),
+}
+impl From<ChairRunError> for Fail {
+    fn from(error: ChairRunError) -> Self {
+        match error {
+            ChairRunError::Unauthorised(error) | ChairRunError::Other(error) => error,
+        }
+    }
+}
 fn check_chair_run_id(
     session: &Session,
     roots: &Roots,
     run: RunId,
     request: &run::CanonicalRequest,
     call: &run::Request<'_>,
-) -> Result<(), Fail> {
+) -> Result<(), ChairRunError> {
     session
         .store
-        .check_child_run_id(run, request, &session.store.run(run, call)?.operation_id)?;
+        .check_child_run_id(
+            run,
+            request,
+            &session
+                .store
+                .run(run, call)
+                .map_err(Fail::from)
+                .map_err(ChairRunError::Other)?
+                .operation_id,
+        )
+        .map_err(Fail::from)
+        .map_err(ChairRunError::Other)?;
     if request.child_attempt_id_version.is_none() {
-        let digest = request.digest().map_err(run::RunError::from)?;
+        let digest = request
+            .digest()
+            .map_err(run::RunError::from)
+            .map_err(Fail::from)
+            .map_err(ChairRunError::Other)?;
+        let mut identity_refused = false;
         with_chair_index(roots, call, |index, c| {
             match index.read(session.context.project_id, run, c)? {
                 Some(value) if value.request_digest == digest => Ok(()),
                 Some(_) => Err(provenant_fabric_runtime::chairs::Error::Conflict),
-                None => Err(provenant_fabric_runtime::chairs::Error::Invalid(
-                    "new chair associations require host-derived child run IDs",
-                )),
+                None => {
+                    identity_refused = true;
+                    Err(provenant_fabric_runtime::chairs::Error::Invalid(
+                        "new chair associations require host-derived child run IDs",
+                    ))
+                }
+            }
+        })
+        .map_err(|failure| {
+            if identity_refused {
+                ChairRunError::Unauthorised(failure)
+            } else {
+                ChairRunError::Other(failure)
             }
         })?;
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct ChairSourceError;
+
+fn check_chair_source(
+    store: &run::RunStore,
+    request: &run::CanonicalRequest,
+    parent: &run::AttemptRecord,
+) -> Result<(), ChairSourceError> {
+    store
+        .check_child_attempt_id(request, parent)
+        .map_err(|_| ChairSourceError)
 }
 
 fn seal_launch_task(
@@ -3739,14 +3835,11 @@ fn launch_on_host(
                     provenant_fabric_runtime::chairs::Error::Invalid("continuation request")
                 })?;
                 if lane_local {
-                    session
-                        .store
-                        .check_child_attempt_id(&original, &parent)
-                        .map_err(|_| {
-                            provenant_fabric_runtime::chairs::Error::Invalid(
-                                "continuation source identity does not match host-derived IDs",
-                            )
-                        })?;
+                    check_chair_source(&session.store, &original, &parent).map_err(|_| {
+                        provenant_fabric_runtime::chairs::Error::Invalid(
+                            "continuation source identity does not match host-derived IDs",
+                        )
+                    })?;
                     if index
                         .read(session.context.project_id, parent.run_id, index_call)?
                         .is_none()
@@ -4472,6 +4565,7 @@ fn select_since(
         },
         since,
     )
+    .map_err(Fail::from)
 }
 /// The candidate lanes for a wait or watch, read afresh on each call. With
 /// `seen`, an unnamed selection holds the unsettled lanes and those settled
@@ -5620,20 +5714,31 @@ fn tail_start(bytes: &[u8], lines: u64) -> usize {
 /// run's submitter lives in its parent's store), which appears as a hop that
 /// knows only its attempt ID. A parent that repeats is a corrupt store and
 /// fails.
+#[derive(Debug, thiserror::Error)]
+enum TraceError {
+    #[error("trace parents loop back to attempt {0}")]
+    Loop(AttemptId),
+    #[error(transparent)]
+    Run(#[from] run::RunError),
+}
+impl From<TraceError> for Fail {
+    fn from(error: TraceError) -> Self {
+        match error {
+            TraceError::Loop(_) => Fail::new(Status::Error, ErrorKind::Io, error.to_string()),
+            TraceError::Run(error) => error.into(),
+        }
+    }
+}
 fn trace_chain(
     store: &run::RunStore,
     record: run::AttemptRecord,
     call: &run::Request<'_>,
-) -> Result<Vec<provenant_records::Trace>, Fail> {
+) -> Result<Vec<provenant_records::Trace>, TraceError> {
     let mut seen = std::collections::HashSet::from([record.attempt_id]);
     let mut chain = vec![record.trace];
     while let Some(parent) = chain.last().and_then(|t| t.parent) {
         if !seen.insert(parent) {
-            return Err(Fail::new(
-                Status::Error,
-                ErrorKind::Io,
-                format!("trace parents loop back to attempt {parent}"),
-            ));
+            return Err(TraceError::Loop(parent));
         }
         match run::Service::new(store).status(parent, call) {
             Ok(record) => chain.push(record.trace),
@@ -8053,8 +8158,9 @@ mod writer_disk_tests {
             let error = result
                 .err()
                 .ok_or_else(|| format!("writer accepted low volume {}", low.display()))?;
-            let error = String::from(error);
-            assert!(error.contains("insufficient disk space"), "{error}");
+            assert!(
+                matches!(error, DiskCheck::Low { ref path, available: 99, floor: 100, .. } if path == low)
+            );
             assert!(observed.contains(&low.to_path_buf()));
         }
         check_writer_disk_with(&settings, state, worktree, home, |_| Ok(100))?;
@@ -8112,8 +8218,15 @@ mod writer_disk_tests {
                 result?;
             } else {
                 let error = result.err().ok_or("writer accepted low disk")?;
-                let error = String::from(error);
-                assert!(error.contains("reported 49 bytes reclaimed"), "{error}");
+                assert!(matches!(
+                    error,
+                    DiskCheck::Low {
+                        available: 99,
+                        floor: 100,
+                        reclaimed: 49,
+                        ..
+                    }
+                ));
             }
         }
         let calls = Cell::new(0);
@@ -9406,14 +9519,10 @@ mod tests {
                 "protected delivery was admitted"
             );
             assert_eq!(reply.result.status, Status::Refused);
-            assert!(
-                reply
-                    .result
-                    .error
-                    .ok_or("refusal")?
-                    .message
-                    .contains("default and primary checkout branches")
-            );
+            assert!(matches!(
+                run::HostDeliveryContext::check_delivery_branch(&project, target),
+                Err(run::RunError::ProtectedDeliveryBranch)
+            ));
             let branch = if delivery == "push" && placement == "owned" {
                 target
             } else {
@@ -9533,15 +9642,9 @@ mod tests {
                 assert_eq!(owner.origin, WorktreeOrigin::Adopted);
                 assert_eq!(owner.operation_id, Some(previous));
                 assert_eq!(owner.label.as_deref(), Some("preserved-label"));
-                assert!(
-                    claimed
-                        .err()
-                        .ok_or("adopted owner was claimed")?
-                        .message
-                        .contains("adopted or foreign owner")
-                );
+                assert!(matches!(claimed, Err(OwnWorktreeError::ForeignOwner)));
             } else {
-                assert_eq!(claimed.map_err(|fail| fail.message)?.0.path, path);
+                assert_eq!(claimed?.0.path, path);
                 assert_eq!(owner.origin, WorktreeOrigin::Lane);
                 assert_eq!(
                     owner.operation_id,
@@ -9731,7 +9834,7 @@ mod tests {
             &clock,
             &cancel,
         )
-        .map_err(|fail| fail.message)?;
+        .map_err(|fail| fail.to_string())?;
         assert_eq!(info.head, pinned);
         let dispatch = |base: &str| run::DispatchRequest {
             chair: None,
@@ -10229,7 +10332,7 @@ mod tests {
         store.create(&first, &call)?;
         store.create(&second, &call)?;
         let leaf = store.record(second.attempts[0].attempt_id, &call)?;
-        let chain = trace_chain(&store, leaf, &call).map_err(|f| f.message)?;
+        let chain = trace_chain(&store, leaf, &call)?;
         let attempts: Vec<_> = chain.iter().map(|t| t.attempt).collect();
         assert_eq!(
             attempts,
@@ -10381,7 +10484,7 @@ mod tests {
             ids.push(parent);
         }
         let leaf = store.record(parent, &call)?;
-        let chain = trace_chain(&store, leaf, &call).map_err(|f| f.message)?;
+        let chain = trace_chain(&store, leaf, &call)?;
         let attempts: Vec<_> = chain.iter().filter_map(|t| t.attempt).collect();
         ids.reverse();
         ids.push(missing);
@@ -10402,11 +10505,12 @@ mod tests {
         store.create(&first, &call)?;
         store.create(&second, &call)?;
         let leaf = store.record(second.attempts[0].attempt_id, &call)?;
-        let Err(fail) = trace_chain(&store, leaf, &call) else {
+        let Err(error) = trace_chain(&store, leaf, &call) else {
             return Err("a looping chain must fail".into());
         };
-        assert_eq!(fail.kind.code(), "IO");
-        assert!(fail.message.contains("loop back"), "{}", fail.message);
+        assert!(
+            matches!(error, TraceError::Loop(attempt) if attempt == second.attempts[0].attempt_id)
+        );
         Ok(())
     }
 
@@ -11094,10 +11198,10 @@ mod tests {
             network(Mode::ReadOnly, Some(Switch::On), &[]),
             Ok(Some(run::NetworkAccess::Open))
         );
-        assert!(
-            network(Mode::ReadOnly, None, &["rust"])
-                .is_err_and(|message| message.contains("known: postgres"))
-        );
+        assert!(matches!(
+            lane_access_checked(&access(Mode::ReadOnly, None, &["rust"], Vec::new()), &state),
+            Err(AccessError::UnknownCapability(name)) if name == "rust"
+        ));
         let granted = lane_access(
             &access(Mode::WorktreeWrite, None, &[], vec![project.clone()]),
             &state,
@@ -11141,14 +11245,11 @@ mod tests {
             capability: Vec::new(),
         };
         for overlapping in [worktree.clone(), temp.path().join("work")] {
-            let message = lane_access(&access(Vec::new(), vec![overlapping]), &state)
-                .err()
-                .map(|fail| fail.message)
-                .unwrap_or_default();
-            assert!(
-                message.contains("--write-root") && message.contains("already grants"),
-                "{message}"
-            );
+            let expected = provenant_os::fs::canonicalize(&overlapping)?;
+            assert!(matches!(
+                lane_access_checked(&access(Vec::new(), vec![overlapping]), &state),
+                Err(AccessError::WorktreeOverlap(path)) if path == expected
+            ));
         }
         // A read root on the worktree and a write root beneath it stay valid.
         assert!(lane_access(&access(vec![worktree.clone()], vec![inside]), &state).is_ok());

@@ -44,7 +44,9 @@ mod writer;
 pub use admission::{
     AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, LaneWait, PROJECT_ACTIVE, Resources, SystemResources,
 };
-pub use controls::{CancelReceipt, Reconciled, Resume, UncertainReason};
+pub use controls::{
+    CancelReceipt, Reconciled, Resume, TemporaryReason, TemporaryReasonKind, UncertainReason,
+};
 pub use delivery::HostDeliveryContext;
 pub use git_context::{GitContext, continuation_history, resolve_git_base, review_merge_base};
 pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
@@ -173,12 +175,52 @@ impl std::fmt::Display for PathCheck {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportRefusal {
+    LaneConfig,
+    LaneProgram,
+    Unreadable,
+}
+
+impl From<&provenant_confinement::transport::TransportError> for TransportRefusal {
+    fn from(error: &provenant_confinement::transport::TransportError) -> Self {
+        use provenant_confinement::transport::TransportError;
+        match error {
+            TransportError::LaneConfig { .. } => Self::LaneConfig,
+            TransportError::LaneProgram { .. } => Self::LaneProgram,
+            TransportError::Unreadable => Self::Unreadable,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error("{0}")]
+    InvalidTaskTitle(String),
     #[error("{message}")]
     Input { kind: ErrorKind, message: String },
     #[error("host writer delivery failed at {0:?}")]
     Delivery(WriterDeliveryStage),
+    #[error(
+        "host writer delivery failed at Prepare (origin refresh): default branch collides with another branch name"
+    )]
+    OriginDefaultCollision,
+    #[error(
+        "host writer delivery failed at Prepare (integration target): default and primary checkout branches require PR delivery"
+    )]
+    ProtectedDeliveryBranch,
+    #[error("host writer delivery failed at Prepare (origin refresh): {0}")]
+    OriginNormalisationCollision(String),
+    #[error("host writer delivery failed at Prepare (transport): {reason}")]
+    DeliveryTransport {
+        kind: TransportRefusal,
+        reason: String,
+    },
+    #[error("run filesystem I/O failed: {reason}")]
+    GitTransport {
+        kind: TransportRefusal,
+        reason: String,
+    },
     #[error("host writer delivery failed at Prepare ({step}): {reason}")]
     DeliveryPrepare { step: &'static str, reason: String },
     #[error("provider evidence could not be committed: {0}")]
@@ -195,8 +237,14 @@ pub enum RunError {
     WriterRefLocked(std::path::PathBuf),
     #[error(transparent)]
     Plan(#[from] provenant_confinement::PlanError),
+    #[error("invalid run record: attempt reservation retained")]
+    AttemptReservationRetained,
     #[error("invalid run record: {0}")]
     Validation(&'static str),
+    #[error("invalid run record: writer HEAD is not the lane branch")]
+    WriterHeadNotLaneBranch,
+    #[error("invalid run record: review required; use lane deliver --accept-review ATTEMPT")]
+    ReviewAcceptanceRequired,
     #[error("lane object import refused: {0}")]
     ObjectImportLimit(&'static str),
     #[error("invalid Git base {0:?}: expected a resolvable commit reference")]

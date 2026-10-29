@@ -124,16 +124,33 @@ pub(super) type Page = (Vec<run::AttemptRecord>, Option<u64>);
 /// after `since`, whenever it was queued. Queue order says nothing about when a
 /// lane settled, so the scan covers up to 1000 lanes and refuses past that
 /// instead of silently missing one.
+#[derive(Debug)]
+pub(super) enum SinceError {
+    ScanLimit,
+    Page(Fail),
+}
+impl From<SinceError> for Fail {
+    fn from(error: SinceError) -> Self {
+        match error {
+            SinceError::ScanLimit => Fail::new(
+                Status::Invalid,
+                ErrorKind::Invalid,
+                "--since reaches back more than 1000 lanes; narrow it or name lanes with --id",
+            ),
+            SinceError::Page(error) => error,
+        }
+    }
+}
 pub(super) fn settled_since(
     mut ids: Vec<AttemptId>,
     mut pages: impl FnMut(u64) -> Result<Page, Fail>,
     since: WallTime,
-) -> Result<Vec<AttemptId>, Fail> {
+) -> Result<Vec<AttemptId>, SinceError> {
     const SCAN: usize = 1000;
     let mut scanned = 0;
     let mut after = 0;
     loop {
-        let (lanes, next) = pages(after)?;
+        let (lanes, next) = pages(after).map_err(SinceError::Page)?;
         for lane in &lanes {
             let recent = finished(lane).is_none_or(|at| at >= since);
             if recent && !ids.contains(&lane.attempt_id) {
@@ -144,11 +161,7 @@ pub(super) fn settled_since(
         match next {
             Some(next) if scanned < SCAN => after = next,
             Some(_) => {
-                return Err(Fail::new(
-                    Status::Invalid,
-                    ErrorKind::Invalid,
-                    "--since reaches back more than 1000 lanes; narrow it or name lanes with --id",
-                ));
+                return Err(SinceError::ScanLimit);
             }
             None => return Ok(ids),
         }
@@ -854,8 +867,7 @@ mod tests {
             |after| Ok((vec![done(1, 10); 100], Some(after + 1))),
             WallTime::from_micros(40).unwrap(),
         );
-        let message = refused.err().map(|fail| fail.message).unwrap_or_default();
-        assert!(message.contains("more than 1000 lanes"), "{message}");
+        assert!(matches!(refused, Err(SinceError::ScanLimit)));
     }
 
     #[test]

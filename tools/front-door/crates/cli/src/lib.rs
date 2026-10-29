@@ -1632,7 +1632,7 @@ mod tests {
             let result = run::check_flag_capabilities(&request, None);
             assert_eq!(result.is_err(), refused, "{model}");
             if let Err(fail) = result {
-                assert!(fail.message.contains("does not support effort"), "{model}");
+                assert_eq!(fail.kind.code(), "UNSUPPORTED", "{model}");
             }
         }
     }
@@ -1655,7 +1655,7 @@ mod tests {
             panic!("run")
         };
         let fail = run::check_flag_capabilities(&request, None).unwrap_err();
-        assert!(fail.message.contains("cursor does not support effort"));
+        assert_eq!(fail.kind.code(), "UNSUPPORTED");
     }
     #[test]
     fn pool_effort_is_refused_only_when_no_member_takes_it() {

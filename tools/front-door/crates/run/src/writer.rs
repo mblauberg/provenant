@@ -1329,7 +1329,7 @@ impl WriterLaunch {
         if std::str::from_utf8(&head).map(str::trim).ok()
             != Some(format!("ref: {}", self.branch.as_str()).as_str())
         {
-            return Err(RunError::Validation("writer HEAD is not the lane branch"));
+            return Err(RunError::WriterHeadNotLaneBranch);
         }
         let import_cancel = settlement.cancellation();
         if settlement.phase() == crate::settlement::Phase::Import {
@@ -1512,7 +1512,7 @@ impl WriterLaunch {
             },
         )? != tip
         {
-            return Err(RunError::Validation("writer HEAD is not the lane branch"));
+            return Err(RunError::WriterHeadNotLaneBranch);
         }
         worktrees::check_writer_terminal(self.worktree.repo())?;
         crate::artifacts::seal(
