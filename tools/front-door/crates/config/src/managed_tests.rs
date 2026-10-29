@@ -4111,3 +4111,42 @@ fn receipt_with_a_legacy_object_upgrades_and_drops_it() {
     );
     assert!(f.plan_for(release).actions().is_empty());
 }
+
+#[test]
+fn linux_tick_units_are_receipted_reinstalled_idempotently_and_removed() {
+    let mut f = Fixture::new();
+    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+        .resolve(&Resolver)
+        .unwrap();
+    f.targets.tick_agent = Some(b"timer\n".to_vec());
+    f.targets.tick_service = Some(b"service\n".to_vec());
+    let state = f.targets.roots.state.as_path().to_path_buf();
+    let timer = tick_timer_path(&state).unwrap();
+    let service = tick_service_path(&state).unwrap();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let context = InstallContext {
+        clock: &clock,
+        cancel: &cancel,
+        budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
+    };
+    install(&f.plan(), &context, &mut Reporter::default(), &Smoke, false).unwrap();
+    assert_eq!(fs::read(&timer).unwrap(), b"timer\n");
+    assert_eq!(fs::read(&service).unwrap(), b"service\n");
+    assert!(f.plan().actions().is_empty());
+    struct Stops(Vec<String>);
+    impl InstallReporter for Stops {
+        fn preview(&mut self, _: &[Action]) -> io::Result<()> {
+            Ok(())
+        }
+        fn before_remove(&mut self, action: &Action) -> io::Result<()> {
+            self.0.push(action.selector.clone());
+            Ok(())
+        }
+    }
+    let mut reporter = Stops(Vec::new());
+    uninstall(&f.targets, &context, &mut reporter).unwrap();
+    assert!(reporter.0.iter().any(|s| s == "tick-agent"));
+    assert!(reporter.0.iter().any(|s| s == "tick-service"));
+    assert!(!timer.exists() && !service.exists());
+}

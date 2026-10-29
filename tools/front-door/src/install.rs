@@ -44,19 +44,25 @@ fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
         targets.peer_agent_previous =
             provenant_fabric_runtime::peer_agent::previous_plist(&previous, state, &targets.home)
                 .map_err(EdgeError::Peer)?;
-        targets.tick_agent = Some(
-            super::tick_agent::render(
-                &program,
-                state,
-                &provenant_fabric_runtime::peer_agent::scheduler_path(
-                    &program,
-                    &targets.roots,
-                    peer_agent_registry_name,
-                )
-                .map_err(EdgeError::Peer)?,
-            )
-            .map_err(EdgeError::Peer)?,
-        );
+    }
+    if super::tick_agent::eligible(state, &targets.home) {
+        let program = targets.bin_dir.join("provenant");
+        let search = provenant_fabric_runtime::peer_agent::scheduler_path(
+            &program,
+            &targets.roots,
+            peer_agent_registry_name,
+        )
+        .map_err(EdgeError::Peer)?;
+        if cfg!(target_os = "linux") {
+            targets.tick_agent = Some(super::tick_agent::render_timer());
+            targets.tick_service = Some(
+                super::tick_agent::render_service(&program, state, &search)
+                    .map_err(EdgeError::Peer)?,
+            );
+        } else {
+            targets.tick_agent =
+                Some(super::tick_agent::render(&program, state, &search).map_err(EdgeError::Peer)?);
+        }
     }
     Ok(())
 }
@@ -253,7 +259,7 @@ impl PreviewReporter {
     ) -> io::Result<()> {
         if matches!(
             action.selector.as_str(),
-            "peer-agent" | "tick-agent" | "gc-agent"
+            "peer-agent" | "tick-agent" | "tick-service" | "gc-agent"
         ) {
             let home = self
                 .home
@@ -261,7 +267,9 @@ impl PreviewReporter {
                 .ok_or_else(|| io::Error::other("missing agent home"))?;
             let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
             let expected = match action.selector.as_str() {
+                "tick-agent" if cfg!(target_os = "linux") => super::tick_agent::timer(&home),
                 "tick-agent" => super::tick_agent::plist(&home),
+                "tick-service" => super::tick_agent::service(&home),
                 "gc-agent" => home.join("Library/LaunchAgents/dev.provenant.gc.plist"),
                 _ => provenant_fabric_runtime::peer_agent::plist(&home),
             };
@@ -277,7 +285,9 @@ impl PreviewReporter {
 impl InstallReporter for PreviewReporter {
     fn before_remove(&mut self, action: &Action) -> io::Result<()> {
         self.before_remove_with(action, |home| match action.selector.as_str() {
-            "tick-agent" => super::tick_agent::stop(home).map_err(io::Error::other),
+            "tick-agent" | "tick-service" => {
+                super::tick_agent::stop(home).map_err(io::Error::other)
+            }
             "gc-agent" => super::tick_agent::retire_gc(home).map_err(io::Error::other),
             _ => provenant_fabric_runtime::peer_agent::stop(home).map_err(io::Error::other),
         })
@@ -1025,7 +1035,7 @@ fn apply_install(
             outcome
                 .actions
                 .iter()
-                .any(|action| action.selector == "tick-agent"),
+                .any(|action| matches!(action.selector.as_str(), "tick-agent" | "tick-service")),
             tick_enabled,
         )),
         _ => None,
