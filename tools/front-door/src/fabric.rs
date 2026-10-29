@@ -4277,6 +4277,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         ))
     }
 
+    fn attempt_families(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
+        self.writer_families(attempts)
+    }
+
     fn observe_or_start(
         &mut self,
         key: &provenant_fabric_runtime::graph::AttemptKey,
@@ -4406,6 +4410,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                                 effort: route.effort.clone(),
                                 excluded_families,
                                 distinct_families: true,
+                                require_distinct: node.require_distinct,
                             }
                         }
                         None => provenant_records::run::RequestedRoute::Named {

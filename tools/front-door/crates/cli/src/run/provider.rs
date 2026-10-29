@@ -421,8 +421,9 @@ fn prepare_candidates(
             run::RequestedRoute::Review {
                 excluded_families,
                 distinct_families: true,
+                require_distinct,
                 ..
-            } => Some(excluded_families.as_slice()),
+            } => Some((excluded_families.as_slice(), *require_distinct)),
             _ => None,
         },
     )?;

@@ -60,6 +60,8 @@ fn findings() -> Vec<Finding> {
         line: None,
         summary,
         status: "open".into(),
+        disposition: None,
+        reason: None,
     };
     let mut findings = vec![finding(String::new()); MAX_FINDINGS];
     let spare = FINDINGS_BYTES - canonical_len(&findings);
@@ -179,6 +181,13 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                     passed: false,
                     reason: Some(worst(OUTPUT_FIELD_BYTES)),
                     on_fail: node.on_fail.clone(),
+                }),
+                separation: node.distinct_from.map(|_| FamilySeparation {
+                    extra: Default::default(),
+                    strength: FamilyStrength::Require,
+                    excluded: vec![worst(FAMILY_BYTES); SEPARATION_FAMILIES],
+                    applied: Some(worst(FAMILY_BYTES)),
+                    outcome: SeparationOutcome::Unavailable,
                 }),
                 ci: matches!(node.condition, Some(GateCondition::Ci { .. })).then(|| CiEvidence {
                     extra: Default::default(),

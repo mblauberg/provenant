@@ -375,6 +375,9 @@ pub enum RequestedRoute {
         effort: Option<String>,
         excluded_families: Vec<String>,
         distinct_families: bool,
+        /// Refuse a route inside an excluded family instead of substituting one.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        require_distinct: bool,
     },
 }
 impl RequestedRoute {

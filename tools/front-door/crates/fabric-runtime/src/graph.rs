@@ -115,7 +115,45 @@ pub struct GraphExecution {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DistinctFrom {
+    /// The nearest writing node along the source chain.
     Writer,
+    /// Every upstream node this one depends on, transitively.
+    Dependencies,
+}
+
+/// How firmly a node's family separation binds the router.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FamilyStrength {
+    /// Substitute a route in an excluded family when none outside them is ready.
+    #[default]
+    Prefer,
+    /// Fail the attempt rather than route inside an excluded family.
+    Require,
+}
+
+/// How the router honoured a node's family separation, recorded at settlement.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilySeparation {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub strength: FamilyStrength,
+    /// Families that served the upstream attempts.
+    pub excluded: Vec<String>,
+    /// Family of the attempt that settled, when it launched.
+    pub applied: Option<String>,
+    pub outcome: SeparationOutcome,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeparationOutcome {
+    /// The attempt ran outside every excluded family.
+    Separated,
+    /// No route outside the excluded families was available.
+    Unavailable,
+    /// No upstream family was known, so nothing was excluded.
+    Unconstrained,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +169,12 @@ pub struct GraphNode {
     /// Route this node away from the model families that served its source node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distinct_from: Option<DistinctFrom>,
+    /// `prefer` (the default) or `require`; applies when `distinct_from` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distinct_strength: Option<FamilyStrength>,
+    /// Dispositions each finding must carry at settlement, with a reason.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dispositions: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_roots: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -438,6 +482,12 @@ pub struct Finding {
     pub line: Option<u64>,
     pub summary: String,
     pub status: String,
+    /// The settlement decision on this finding, from the node's declared list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<String>,
+    /// One line of why that disposition was chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -547,6 +597,9 @@ pub struct NodeProgress {
     pub round: Option<LoopRound>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<GateResult>,
+    /// Which family separation applied, when the node asked for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separation: Option<FamilySeparation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ci: Option<CiEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -796,6 +849,8 @@ pub struct NodeInput<'a> {
     pub read_roots: &'a [String],
     /// Attempts of the source writer whose model families must be avoided.
     pub distinct_from_attempts: &'a [String],
+    /// Refuse a route inside those families instead of substituting one.
+    pub require_distinct: bool,
     pub source_commit: Option<&'a str>,
     pub title: &'a str,
     pub prompt: &'a str,
@@ -867,6 +922,11 @@ pub trait AttemptOwner {
 
     fn cost_unknown_reason(&mut self) -> Option<String> {
         None
+    }
+
+    /// Model families that served these attempts. Unknown attempts are skipped.
+    fn attempt_families(&mut self, _attempts: &[String]) -> Result<Vec<String>, Self::Error> {
+        Ok(Vec::new())
     }
 
     fn observe_or_start(
@@ -1381,6 +1441,10 @@ struct PlannedNode {
     role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     distinct_from: Option<DistinctFrom>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    distinct_strength: Option<FamilyStrength>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    dispositions: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     read_roots: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1580,6 +1644,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         loop_pause: None,
                         round: node.round.clone(),
                         gate: None,
+                        separation: None,
                         ci: None,
                         id: node.id.clone(),
                         title: Some(node.title.as_deref().unwrap_or(&node.id).to_owned()),
@@ -2182,7 +2247,27 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 // The writer is the nearest writing node along the source chain,
                 // so a framing node between a lens and the writer is skipped.
                 let mut distinct_attempts: Vec<String> = Vec::new();
-                if node.distinct_from == Some(DistinctFrom::Writer) {
+                if node.distinct_from == Some(DistinctFrom::Dependencies) {
+                    let mut pending: Vec<&String> = node.depends_on.iter().collect();
+                    let mut seen = std::collections::BTreeSet::new();
+                    while let Some(id) = pending.pop() {
+                        let Some(index) = positions.get(id) else {
+                            continue;
+                        };
+                        if !seen.insert(*index) {
+                            continue;
+                        }
+                        distinct_attempts.extend(
+                            checkpoint.nodes[*index]
+                                .attempts
+                                .iter()
+                                .filter_map(|attempt| attempt.attempt_ref.clone()),
+                        );
+                        pending.extend(plan.nodes[*index].depends_on.iter());
+                    }
+                    distinct_attempts.sort();
+                    distinct_attempts.dedup();
+                } else if node.distinct_from == Some(DistinctFrom::Writer) {
                     let mut current = node;
                     while let Some(SourceBinding::Node { node: source }) = &current.source {
                         let Some(index) = positions.get(source) else {
@@ -2205,6 +2290,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         NodeInput {
                             read_roots: &node.read_roots,
                             distinct_from_attempts: &distinct_attempts,
+                            require_distinct: node.distinct_strength
+                                == Some(FamilyStrength::Require),
                             source_commit: checkpoint.nodes[node_index].source_commit.as_deref(),
                             title: node.title.as_deref().unwrap_or(&node.id),
                             prompt: &prompt,
@@ -2254,6 +2341,25 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     None
                 };
+                let recorded_separation = match (&observation, node.distinct_from) {
+                    (AttemptObservation::Terminal { attempt_ref, .. }, Some(_)) => {
+                        let excluded = owner
+                            .attempt_families(&distinct_attempts)
+                            .unwrap_or_default();
+                        let applied = attempt_ref.as_ref().and_then(|reference| {
+                            owner
+                                .attempt_families(std::slice::from_ref(reference))
+                                .ok()
+                                .and_then(|families| families.into_iter().next())
+                        });
+                        Some(separation(
+                            node.distinct_strength.unwrap_or_default(),
+                            excluded,
+                            applied,
+                        ))
+                    }
+                    _ => None,
+                };
                 let mut settled_result = None;
                 let should_continue = {
                     let progress = &mut checkpoint.nodes[node_index];
@@ -2290,30 +2396,40 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             attempt.state = AttemptState::Terminal;
                             attempt.attempt_ref = attempt_ref;
                             // Provider success alone does not satisfy an explicit result contract.
-                            let outcome = if result_warning.is_some() {
+                            let warned = result_warning.is_some();
+                            let outputs = make_outputs(
+                                result.as_ref(),
+                                result_warning,
+                                result_path,
+                                branch,
+                                commit,
+                            );
+                            let disposition_error = disposition_error(&node.dispositions, &outputs);
+                            let outcome = if warned {
                                 AttemptOutcome::OtherFailure
                             } else if outcome == AttemptOutcome::Succeeded
-                                && node.required_verdict.is_some()
-                                && !(plans::writer(node)
-                                    && result.as_ref().is_some_and(|capture| {
-                                        plans::handoff(capture).ok().flatten().is_some()
-                                    }))
-                                && !result
-                                    .as_ref()
-                                    .is_some_and(|capture| capture.matched_required)
+                                && (node.required_verdict.is_some()
+                                    && !(plans::writer(node)
+                                        && result.as_ref().is_some_and(|capture| {
+                                            plans::handoff(capture).ok().flatten().is_some()
+                                        }))
+                                    && !result
+                                        .as_ref()
+                                        .is_some_and(|capture| capture.matched_required)
+                                    || disposition_error.is_some())
                             {
                                 AttemptOutcome::TaskFailed
                             } else {
                                 outcome
                             };
                             attempt.outcome = Some(outcome);
-                            progress.outputs = Some(make_outputs(
-                                result.as_ref(),
-                                result_warning,
-                                result_path,
-                                branch,
-                                commit,
-                            ));
+                            if outcome == AttemptOutcome::TaskFailed
+                                && let Some(reason) = disposition_error
+                            {
+                                progress.advance_error =
+                                    Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+                            }
+                            progress.outputs = Some(outputs);
                             match outcome {
                                 AttemptOutcome::Succeeded => {
                                     progress.state = NodeState::Succeeded;
@@ -2339,6 +2455,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         }
                     }
                 };
+                if recorded_separation.is_some() {
+                    checkpoint.nodes[node_index].separation = recorded_separation;
+                }
                 if checkpoint.nodes[node_index]
                     .attempts
                     .last()
@@ -3241,6 +3360,8 @@ fn validate_flat_plan(
             composite: node.composite.clone(),
             role: node.role.clone(),
             distinct_from: node.distinct_from,
+            distinct_strength: node.distinct_strength,
+            dispositions: node.dispositions.clone(),
             read_roots: node.read_roots.clone(),
             source: node.source.clone(),
             after_expansion: node.after_expansion.clone(),
@@ -3392,6 +3513,9 @@ fn route_is_bounded(route: &GraphRoute) -> bool {
 }
 
 const OUTPUT_FIELD_BYTES: usize = 1024;
+/// Families and bytes per family a recorded separation keeps.
+const SEPARATION_FAMILIES: usize = 8;
+const FAMILY_BYTES: usize = 64;
 const MAX_FINDINGS: usize = 32;
 
 /// Canonical JSON bytes of one character inside a string.
@@ -3432,6 +3556,81 @@ fn prefix(text: &str, max: usize) -> &str {
     }
     &text[..end]
 }
+
+/// Why settled outputs lack the dispositions a node declares, if they do.
+/// A findings block must parse, and each finding needs a disposition from the
+/// declared list with a non-empty reason.
+fn disposition_error(dispositions: &[String], outputs: &NodeOutputs) -> Option<String> {
+    if dispositions.is_empty() || outputs.result.is_none() {
+        return None;
+    }
+    let allowed = dispositions.join(", ");
+    if outputs.findings.is_empty()
+        && outputs
+            .warnings
+            .iter()
+            .any(|warning| warning == FINDINGS_INVALID)
+    {
+        return Some(format!(
+            "dispositions required ({allowed}): the findings block is missing or invalid"
+        ));
+    }
+    for finding in &outputs.findings {
+        let valid = finding
+            .disposition
+            .as_ref()
+            .is_some_and(|value| dispositions.contains(value));
+        if !valid {
+            return Some(format!(
+                "finding {} needs a disposition of {allowed}; found {}",
+                finding.id,
+                finding.disposition.as_deref().unwrap_or("none"),
+            ));
+        }
+        if finding
+            .reason
+            .as_ref()
+            .is_none_or(|reason| reason.trim().is_empty())
+        {
+            return Some(format!(
+                "finding {} needs a reason for its disposition",
+                finding.id
+            ));
+        }
+    }
+    None
+}
+
+/// Whether the attempt ran outside the families that served its upstream.
+fn separation(
+    strength: FamilyStrength,
+    excluded: Vec<String>,
+    applied: Option<String>,
+) -> FamilySeparation {
+    let outcome = if excluded.is_empty() {
+        SeparationOutcome::Unconstrained
+    } else if applied
+        .as_ref()
+        .is_some_and(|family| !excluded.contains(family))
+    {
+        SeparationOutcome::Separated
+    } else {
+        SeparationOutcome::Unavailable
+    };
+    FamilySeparation {
+        extra: Default::default(),
+        strength,
+        excluded: excluded
+            .iter()
+            .take(SEPARATION_FAMILIES)
+            .map(|family| bounded(family, FAMILY_BYTES))
+            .collect(),
+        applied: applied.map(|family| bounded(&family, FAMILY_BYTES)),
+        outcome,
+    }
+}
+
+const FINDINGS_INVALID: &str = "findings block missing or invalid";
 
 fn make_outputs(
     result: Option<&crate::result_capture::CapturedResult>,
@@ -3483,13 +3682,16 @@ fn make_outputs(
                     [&f.id, &f.severity, &f.file, &f.summary, &f.status]
                         .iter()
                         .all(|field| field.len() <= OUTPUT_FIELD_BYTES)
+                        && [&f.disposition, &f.reason].iter().all(|field| {
+                            field.as_ref().is_none_or(|v| v.len() <= OUTPUT_FIELD_BYTES)
+                        })
                 }))
             .then_some(block.findings)
         })
         .filter(|findings| canonical_len(findings) <= FINDINGS_BYTES);
     let findings = parsed.unwrap_or_else(|| {
         if result.is_some() {
-            warnings.push("findings block missing or invalid".to_owned());
+            warnings.push(FINDINGS_INVALID.to_owned());
         }
         Vec::new()
     });
@@ -3854,6 +4056,8 @@ mod tests {
         source_commits: Vec<Option<String>>,
         read_roots: Vec<Vec<String>>,
         distinct_from: Vec<Vec<String>>,
+        require_distinct: Vec<bool>,
+        families: std::collections::BTreeMap<String, String>,
         answers: std::collections::BTreeMap<String, AskReply>,
         now: Option<provenant_core::WallTime>,
         asked: Vec<String>,
@@ -3908,6 +4112,18 @@ mod tests {
             }
             Ok(())
         }
+        fn attempt_families(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
+            let mut families = Vec::new();
+            for family in attempts
+                .iter()
+                .filter_map(|attempt| self.families.get(attempt))
+            {
+                if !families.contains(family) {
+                    families.push(family.clone());
+                }
+            }
+            Ok(families)
+        }
         fn usage(&mut self, _attempt_ref: &str) -> Result<AttemptUsage, Self::Error> {
             if self.usage_fails {
                 Err(NoObservation)
@@ -3938,6 +4154,7 @@ mod tests {
             self.read_roots.push(node.read_roots.to_vec());
             self.distinct_from
                 .push(node.distinct_from_attempts.to_vec());
+            self.require_distinct.push(node.require_distinct);
             self.titles.push(node.title.to_owned());
             self.prompts.push(node.prompt.to_owned());
             self.delivery_modes.push(replay.delivery.cloned());
@@ -3965,6 +4182,8 @@ mod tests {
             extra: Default::default(),
             composite_members: Vec::new(),
             distinct_from: None,
+            distinct_strength: None,
+            dispositions: Vec::new(),
             composite: None,
             role: None,
             read_roots: Vec::new(),
@@ -4054,6 +4273,227 @@ mod tests {
         )
         .unwrap();
         assert_eq!(lone.distinct_from[0], Vec::<String>::new());
+    }
+
+    fn lens_then_verify(strength: Option<FamilyStrength>) -> GraphDocument {
+        let mut verify = node("verify", route("first"));
+        verify.distinct_from = Some(DistinctFrom::Dependencies);
+        verify.distinct_strength = strength;
+        verify.depends_on = vec!["mid".into()];
+        let mut mid = node("mid", route("first"));
+        mid.depends_on = vec!["lens-a".into(), "lens-b".into()];
+        graph(vec![
+            node("lens-a", route("first")),
+            node("lens-b", route("first")),
+            mid,
+            verify,
+        ])
+    }
+
+    fn done_as(reference: &str) -> AttemptObservation {
+        AttemptObservation::Terminal {
+            attempt_ref: Some(reference.into()),
+            outcome: AttemptOutcome::Succeeded,
+            launched: true,
+            result: None,
+            result_warning: None,
+            result_path: None,
+            branch: None,
+            commit: None,
+        }
+    }
+
+    fn separation_run(
+        strength: Option<FamilyStrength>,
+        verifier_family: &str,
+    ) -> (FakeOwner, GraphCheckpoint) {
+        let mut owner = FakeOwner {
+            observations: [
+                done_as("h/1"),
+                done_as("h/2"),
+                done_as("h/3"),
+                done_as("h/4"),
+            ]
+            .into(),
+            families: [
+                ("h/1".to_owned(), "anthropic".to_owned()),
+                ("h/2".to_owned(), "anthropic".to_owned()),
+                ("h/3".to_owned(), "anthropic".to_owned()),
+                ("h/4".to_owned(), verifier_family.to_owned()),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &lens_then_verify(strength),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        (owner, run.checkpoint)
+    }
+
+    #[test]
+    fn distinct_from_dependencies_excludes_every_upstream_attempt_and_records_the_separation() {
+        let (owner, checkpoint) = separation_run(None, "openai");
+        let verify = owner.distinct_from.last().unwrap();
+        assert_eq!(verify, &["h/1", "h/2", "h/3"].map(String::from));
+        assert_eq!(owner.require_distinct.last(), Some(&false));
+        let separation = checkpoint.nodes[3].separation.as_ref().unwrap();
+        assert_eq!(separation.strength, FamilyStrength::Prefer);
+        assert_eq!(separation.excluded, ["anthropic"]);
+        assert_eq!(separation.applied.as_deref(), Some("openai"));
+        assert_eq!(separation.outcome, SeparationOutcome::Separated);
+        // Nodes without the option record nothing.
+        assert!(checkpoint.nodes[0].separation.is_none());
+    }
+
+    #[test]
+    fn a_preferred_separation_falls_back_with_a_recorded_note_instead_of_failing() {
+        let (_, checkpoint) = separation_run(Some(FamilyStrength::Prefer), "anthropic");
+        assert!(checkpoint.successful());
+        let separation = checkpoint.nodes[3].separation.as_ref().unwrap();
+        assert_eq!(separation.outcome, SeparationOutcome::Unavailable);
+        assert_eq!(separation.applied.as_deref(), Some("anthropic"));
+    }
+
+    #[test]
+    fn a_required_separation_is_passed_to_the_router_and_recorded_when_refused() {
+        let (owner, checkpoint) = separation_run(Some(FamilyStrength::Require), "openai");
+        assert_eq!(owner.require_distinct.last(), Some(&true));
+        assert_eq!(
+            checkpoint.nodes[3].separation.as_ref().unwrap().outcome,
+            SeparationOutcome::Separated
+        );
+        // The router refused every route outside the used family: the attempt
+        // never launched, and the node fails with the separation recorded.
+        let mut owner = FakeOwner {
+            observations: [
+                done_as("h/1"),
+                done_as("h/2"),
+                done_as("h/3"),
+                AttemptObservation::Terminal {
+                    attempt_ref: Some("h/4".into()),
+                    outcome: AttemptOutcome::AdapterUnavailable,
+                    launched: false,
+                    result: None,
+                    result_warning: None,
+                    result_path: None,
+                    branch: None,
+                    commit: None,
+                },
+            ]
+            .into(),
+            families: [
+                ("h/1".to_owned(), "anthropic".to_owned()),
+                ("h/2".to_owned(), "anthropic".to_owned()),
+                ("h/3".to_owned(), "anthropic".to_owned()),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &lens_then_verify(Some(FamilyStrength::Require)),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        assert!(!run.checkpoint.successful());
+        let separation = run.checkpoint.nodes[3].separation.as_ref().unwrap();
+        assert_eq!(separation.strength, FamilyStrength::Require);
+        assert_eq!(separation.outcome, SeparationOutcome::Unavailable);
+        assert_eq!(separation.applied, None);
+    }
+
+    const DISPOSITIONS: [&str; 3] = ["accepted", "rejected", "deferred"];
+
+    fn synthesis_run(text: &str) -> NodeProgress {
+        let mut synthesis = node("synthesis", route("first"));
+        synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+        let mut owner = FakeOwner {
+            observations: [terminal_with_result(AttemptOutcome::Succeeded, text)].into(),
+            ..Default::default()
+        };
+        advance(
+            &graph(vec![synthesis]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap()
+        .checkpoint
+        .nodes
+        .remove(0)
+    }
+
+    fn findings_text(entries: &str) -> String {
+        format!(
+            "```findings\n{{\"schema_version\":1,\"findings\":[{entries}]}}\n```\nVERDICT: PASS\n"
+        )
+    }
+
+    fn entry(extra: &str) -> String {
+        format!(
+            "{{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a.rs\",\"line\":null,\"summary\":\"s\",\"status\":\"open\"{extra}}}"
+        )
+    }
+
+    #[test]
+    fn a_synthesis_settles_with_a_disposition_and_reason_for_every_finding() {
+        let progress = synthesis_run(&findings_text(&entry(
+            ",\"disposition\":\"accepted\",\"reason\":\"reproduced\"",
+        )));
+        assert_eq!(progress.state, NodeState::Succeeded);
+        let finding = &progress.outputs.unwrap().findings[0];
+        assert_eq!(finding.disposition.as_deref(), Some("accepted"));
+        assert_eq!(finding.reason.as_deref(), Some("reproduced"));
+        // A reviewed change with no findings has nothing to dispose of.
+        assert_eq!(
+            synthesis_run(&findings_text("")).state,
+            NodeState::Succeeded
+        );
+    }
+
+    #[test]
+    fn a_synthesis_without_valid_dispositions_settles_as_failed_with_a_reason() {
+        let cases = [
+            (findings_text(&entry("")), "F1 needs a disposition"),
+            (
+                findings_text(&entry(",\"disposition\":\"maybe\",\"reason\":\"x\"")),
+                "found maybe",
+            ),
+            (
+                findings_text(&entry(",\"disposition\":\"rejected\"")),
+                "needs a reason",
+            ),
+            (
+                findings_text(&entry(",\"disposition\":\"rejected\",\"reason\":\" \"")),
+                "needs a reason",
+            ),
+            ("VERDICT: PASS\n".to_owned(), "missing or invalid"),
+        ];
+        for (text, expected) in cases {
+            let progress = synthesis_run(&text);
+            assert_eq!(progress.state, NodeState::Failed, "{text}");
+            let reason = progress.advance_error.unwrap();
+            assert!(reason.contains(expected), "{reason}");
+        }
+        // A node that declares no dispositions keeps accepting bare findings.
+        let plain = node("plain", route("first"));
+        let mut owner = FakeOwner {
+            observations: [terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry("")),
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![plain]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        assert!(run.checkpoint.successful());
     }
 
     #[test]
@@ -5825,6 +6265,8 @@ mod tests {
             extra: Default::default(),
             composite_members: Vec::new(),
             distinct_from: None,
+            distinct_strength: None,
+            dispositions: Vec::new(),
             composite: None,
             role: None,
             read_roots: Vec::new(),
@@ -6011,6 +6453,8 @@ mod tests {
                 extra: Default::default(),
                 composite_members: Vec::new(),
                 distinct_from: None,
+                distinct_strength: None,
+                dispositions: Vec::new(),
                 composite: None,
                 role: None,
                 read_roots: Vec::new(),
@@ -6270,6 +6714,8 @@ mod tests {
             extra: Default::default(),
             composite_members: Vec::new(),
             distinct_from: None,
+            distinct_strength: None,
+            dispositions: Vec::new(),
             composite: None,
             role: None,
             read_roots: Vec::new(),

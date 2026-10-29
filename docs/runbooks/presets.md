@@ -110,10 +110,16 @@ root; it acquires no Git writer lock.
 
 Two role fields shape review. `prompt_file` appends a bundled prompt, such as
 `code-review/lenses/tests`, to the role prompt; it takes one name or a list and
-refuses unknown names. `distinct_from = "writer"` requires the node's model
-family to differ from the family that wrote the node's source. Route selection
-excludes the writer's family and refuses a route that cannot satisfy it. When
-the source chain has no writer the constraint has no effect.
+refuses unknown names. `distinct_from = "writer"` routes the node away from
+the model family that wrote its source; `distinct_from = "dependencies"` routes
+it away from the families of every upstream attempt (the bundled verifier uses
+it). Strength is `distinct_strength = "prefer"` (default) or `"require"`. Under
+prefer, when no route outside those families is ready the router substitutes
+one and the node records the separation as `unavailable`; under require the
+attempt fails instead. Each node settles with a `separation` record (strength,
+excluded families, applied family, `separated`, `unavailable` or
+`unconstrained`), shown by `graph status`. With no known upstream family the
+constraint has no effect.
 
 An entry can fan out over a list parameter with `for_each = "${lenses}"`. Each
 item needs a `name` of lowercase letters, digits and dashes. The node ID is
@@ -163,10 +169,11 @@ A dotted name is a variant, so an undefined `lens.house` uses `lens`.
 | --- | --- |
 | `card` | Short text placed first in the brief |
 | `references` | `{ ref = "skill:SKILL/PATH", when = "HINT", inline = false }`. The compiler resolves the reference against the release `skills/` directory, records its content digest in the graph and lists it in the brief with its `when` hint. `inline = true` puts the text in the brief. An unknown reference, a `..` part or a link leaving `skills/` is refused. |
-| `family` | `any`, `distinct_from_writer` (see below) or `cross_preferred`, which records on the node that its route should serve another model family (a preference; the scheduler does not enforce it). |
+| `family` | `any`, `distinct_from_writer`, `cross_preferred` (`distinct_from = "dependencies"`, prefer) or `cross_required` (the same, require). A project makes the verifier strict with `[roles."review.verify"] family = "cross_required"` in `.provenant/roles.toml`. |
+| `family_strength` | `prefer` or `require`; sets `distinct_strength` for `distinct_from_writer` or a cross-family role. |
 | `fallback_tier` | Used, and recorded as a substitution, when `tier` names a route the routing configuration does not define. |
 
-Provenance (origins, roles with digests and substituted routes) is kept in the graph document's `provenance` field. A role's `dispositions` list declares the values a synthesis must give each finding (`disposition` and `reason` in its findings block). Each node carries `role` and `role_digest` (a hash of the whole effective role and its reference digests), and `run --explain` lists every
+Provenance (origins, roles with digests and substituted routes) is kept in the graph document's `provenance` field. A role's `dispositions` list declares the values a synthesis must give each finding (`disposition` and `reason` in its findings block). Settlement enforces it: a findings block that is missing, or a finding whose `disposition` is outside the list or whose `reason` is empty, settles the node as failed and `advance_error` names the finding. Each node carries `role` and `role_digest` (a hash of the whole effective role and its reference digests), and `run --explain` lists every
 reference with its digest, so editing a reference changes the digest. A node
 that uses references may read the release `skills/` directory, read-only. A
 role grants no authority: access, write scope and routing come from the stage.

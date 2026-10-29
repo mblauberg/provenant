@@ -474,6 +474,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 loop_pause: None,
                 round: n.round.clone(),
                 gate: None,
+                separation: None,
                 ci: None,
                 title: Some(n.title.as_deref().unwrap_or(&n.id).into()),
                 worktree: n.worktree.clone(),
