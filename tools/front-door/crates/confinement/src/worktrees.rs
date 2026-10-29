@@ -567,12 +567,9 @@ fn observe_worker_holders(
             NativeCwd::Gone => {}
             NativeCwd::Unknown => unknown_all = true,
             NativeCwd::Path(path) => {
-                let canonical = match canonicalize(&path) {
-                    Ok(path) => path,
-                    Err(_) => {
-                        unknown_all = true;
-                        continue;
-                    }
+                let Some(canonical) = canonical_cwd(&path) else {
+                    unknown_all = true;
+                    continue;
                 };
                 record_live_path(&mut states, &canonical);
                 for root in roots.iter().filter(|root| canonical.starts_with(root)) {
@@ -594,6 +591,26 @@ fn observe_worker_holders(
         }
     }
     (states, holders)
+}
+
+/// Canonicalise a process's working directory. A directory that has since been
+/// deleted, such as a removed plugin cache or a pruned worktree, cannot be
+/// resolved, but its place is still known: resolve the nearest existing
+/// ancestor and re-append the rest. A process inside a deleted subdirectory of
+/// a root therefore still counts as inside that root. Any other failure is
+/// unobservable.
+fn canonical_cwd(path: &Path) -> Option<PathBuf> {
+    let mut existing = path;
+    let mut rest = Vec::new();
+    loop {
+        match canonicalize(existing) {
+            Ok(resolved) => return Some(rest.iter().rev().fold(resolved, |p, c| p.join(c))),
+            Err(FsError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+        rest.push(existing.file_name()?.to_owned());
+        existing = existing.parent()?;
+    }
 }
 
 enum NativeCwd {
@@ -4659,6 +4676,75 @@ mod lifecycle_tests {
                 assert_eq!(fs::read_to_string(path.join(".env"))?, "new secret");
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn worker_census_places_a_process_in_a_deleted_directory_by_its_nearest_ancestor()
+    -> Result<(), Box<dyn Error>> {
+        use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
+        struct Processes(Census);
+        impl ProcessObserver for Processes {
+            fn boot_identity(&self) -> Result<String, CensusError> {
+                Ok("boot".into())
+            }
+            fn observe(&self, pid: i64) -> ProcessObservation {
+                match self.0.process(pid) {
+                    ProcessLookup::Present(fact) => ProcessObservation::Present(fact.clone()),
+                    _ => ProcessObservation::Absent,
+                }
+            }
+            fn census(&self, _: usize) -> Result<Census, CensusError> {
+                Ok(self.0.clone())
+            }
+        }
+        struct Cwd(PathBuf);
+        impl CwdObserver for Cwd {
+            fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+                Ok(CwdObservation::Path(self.0.clone()))
+            }
+        }
+        let fixture = Fixture::new()?;
+        let root = canonicalize(&fixture.root)?;
+        let outside = canonicalize(fixture._temp.path())?;
+        let fact = |pid: i64, session_id| ProcessFact {
+            identity: ProcessIdentity {
+                boot: "boot".into(),
+                pid,
+                native_start: pid as u64,
+                group_id: session_id,
+                session_id,
+            },
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let current = fact(100, 100);
+        let processes = Processes(Census::from_observations(
+            [current.clone(), fact(200, 200)],
+            [],
+            [],
+            true,
+            false,
+            32,
+        )?);
+        let observe = |cwd: PathBuf| {
+            observe_worker_roots(
+                std::slice::from_ref(&root),
+                &processes,
+                &Cwd(cwd),
+                &current,
+                false,
+            )[&root]
+        };
+        // A deleted directory elsewhere is unrelated to the root.
+        assert_eq!(
+            observe(outside.join("gone").join("deeper")),
+            WorkerState::Free
+        );
+        // A deleted subdirectory of the root still holds the process inside it.
+        assert_eq!(observe(root.join("gone").join("deeper")), WorkerState::Live);
         Ok(())
     }
 

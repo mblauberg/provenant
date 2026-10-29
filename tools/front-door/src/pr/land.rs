@@ -551,7 +551,8 @@ fn prune_worktree(
 }
 
 /// Move the local base branch to the fetched one, only forward and only in a
-/// checkout with no changes.
+/// checkout with no changes to tracked files. Untracked files do not count:
+/// `git merge --ff-only` itself refuses if one would be overwritten.
 fn fast_forward(
     git: &Git,
     project: &Path,
@@ -575,12 +576,15 @@ fn fast_forward(
     {
         Some(checkout) => {
             let dir = &checkout.path;
-            let changes = git.full(dir, &["status", "--porcelain"])?;
+            let changes = git.full(dir, &["status", "--porcelain", "--untracked-files=no"])?;
             if changes.is_none_or(|changes| !changes.trim().is_empty()) {
                 return Ok(Step::new(
                     "fast_forward",
                     Status::Refused,
-                    format!("the {base} checkout at {} has local changes", dir.display()),
+                    format!(
+                        "the {base} checkout at {} has local changes to tracked files",
+                        dir.display()
+                    ),
                 ));
             }
             git.run(dir, &["merge", "--ff-only", upstream])?
