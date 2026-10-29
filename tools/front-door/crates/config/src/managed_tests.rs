@@ -342,8 +342,8 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
             .iter()
             .filter(|finding| finding.rule == "relocated_stale_entry")
             .count(),
-        // Five managed target entries plus the shared instructions link.
-        7
+        // Five managed target entries plus the shared AGENTS.md and HARNESS.md links.
+        8
     );
     struct StopReporter(usize);
     impl InstallReporter for StopReporter {
