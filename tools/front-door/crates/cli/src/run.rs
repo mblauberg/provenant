@@ -202,6 +202,13 @@ impl Registry<'_> {
         if !REGISTRY.iter().any(|entry| entry.adapter.id() == adapter) {
             return Err(unsupported(format!("unknown provider {adapter}")));
         }
+        if let Some(spec) = provenant_records::AdapterSpec::get(adapter) {
+            spec.check_launch(&provenant_records::LaunchRequest {
+                resume: true,
+                ..Default::default()
+            })
+            .map_err(|error| unsupported(error.to_string()))?;
+        }
         if prior.session.is_none() {
             return Err(unsupported(
                 "the attempt recorded no provider session handle (it predates handle capture or the provider never reported one); dispatch a new lane with the prior result as context".into(),
@@ -2070,6 +2077,129 @@ fn check_delivery_branch(project: &Path, branch: &str) -> Result<(), Fail> {
         .map_err(|error| Fail::new(Status::Refused, ErrorKind::Refused, error.to_string()))
 }
 
+/// Refuse flags outside the named adapters' launch tables before the first
+/// side effect, including `--worktree-branch` creation. Manifest tasks and
+/// named routes are checked again where their adapter is known.
+fn refused(error: provenant_records::UnsupportedLaunch) -> Fail {
+    Fail::new(Status::Refused, ErrorKind::Unsupported, error.to_string())
+}
+/// A pool is refused an effort only when no member's adapter can take it.
+pub(crate) fn pool_effort_refusal(
+    adapters: &[&str],
+    effort: &str,
+) -> Option<provenant_records::UnsupportedLaunch> {
+    let request = provenant_records::LaunchRequest {
+        effort: Some(effort),
+        ..Default::default()
+    };
+    let refusals: Vec<_> = adapters
+        .iter()
+        .filter_map(|name| provenant_records::AdapterSpec::get(name))
+        .map(|spec| spec.check_launch(&request))
+        .collect();
+    let refused: Vec<_> = refusals.into_iter().filter_map(Result::err).collect();
+    let known = adapters
+        .iter()
+        .filter(|name| provenant_records::AdapterSpec::get(name).is_some())
+        .count();
+    (known > 0 && refused.len() == known)
+        .then(|| refused.into_iter().next())
+        .flatten()
+}
+
+pub(crate) fn check_flag_capabilities(
+    command: &Dispatch,
+    roots: Option<&Roots>,
+) -> Result<(), Fail> {
+    let route = requested(
+        command.route.model.as_ref().map(|m| m.0.as_str()),
+        command.route.route.as_deref(),
+        command.route.effort.clone(),
+    );
+    let network = match command.access.network {
+        Some(Switch::On) => Some(run::NetworkAccess::Open),
+        Some(Switch::Off) => Some(run::NetworkAccess::Provider),
+        None => None,
+    };
+    let write = matches!(command.access.mode, Mode::WorktreeWrite);
+    let check = |provider: &str, effort: Option<&str>| {
+        let Some(spec) = provenant_records::AdapterSpec::get(provider) else {
+            return Ok(());
+        };
+        spec.check_launch(&provenant_records::LaunchRequest {
+            effort,
+            resume: false,
+            network,
+            write,
+        })
+        .map_err(refused)
+    };
+    let check_route = |route: run::RequestedRoute| -> Result<(), Fail> {
+        match run::Service::route(route) {
+            Ok(run::RequestedRoute::Model {
+                provider, effort, ..
+            }) => check(&provider, effort.as_deref())?,
+            // A pool whose every member's adapter takes no effort cannot serve one.
+            Ok(run::RequestedRoute::Named {
+                name,
+                effort: Some(effort),
+                ..
+            }) => {
+                if let Some(roots) = roots
+                    && let Ok(members) = crate::route::effective_members(roots, &name)
+                {
+                    let adapters: Vec<&str> = members
+                        .iter()
+                        .map(|member| member.model.adapter())
+                        .collect();
+                    pool_effort_refusal(&adapters, &effort)
+                        .map_or(Ok(()), |error| Err(refused(error)))?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    };
+    let check_fallback = |model: &str, effort: Option<&str>| -> Result<(), Fail> {
+        match model.split_once('/') {
+            Some((provider, _)) => check(provider, effort),
+            None => Ok(()),
+        }
+    };
+    let effort_of = |route: &run::RequestedRoute| match route {
+        run::RequestedRoute::Model { effort, .. }
+        | run::RequestedRoute::Named { effort, .. }
+        | run::RequestedRoute::Review { effort, .. } => effort.clone(),
+    };
+    if let Ok(route) = route {
+        let effort = effort_of(&route);
+        check_route(route)?;
+        for model in &command.route.fallback {
+            check_fallback(&model.0, effort.as_deref())?;
+        }
+    }
+    // Manifest tasks carry their own routes; read them before any worktree exists.
+    // A malformed manifest is reported later by the normal path.
+    if let Some(path) = &command.input.manifest
+        && let Ok(text) = read_bounded(path)
+        && let Ok(manifest) = provenant_records::decode_v1::<Manifest, _>(
+            text.as_bytes(),
+            provenant_records::Limits {
+                max_bytes: PROMPT_LIMIT,
+                ..Default::default()
+            },
+        )
+    {
+        for task in manifest.tasks {
+            let effort = effort_of(&task.route);
+            check_route(task.route)?;
+            for model in &task.fallback {
+                check_fallback(model, effort.as_deref())?;
+            }
+        }
+    }
+    Ok(())
+}
 fn dispatch_inner(
     mut command: Dispatch,
     edge: &Edge<'_>,
@@ -2085,6 +2215,7 @@ fn dispatch_inner(
             "coordination mutations are not allowed inside a lane",
         ));
     }
+    check_flag_capabilities(&command, Some(edge.roots))?;
     if let Some(branch) = &command.worktree_branch {
         if !matches!(command.access.mode, Mode::WorktreeWrite) || crate::fabric::in_lane() {
             return Err(Fail::new(
