@@ -36,8 +36,12 @@ catalogue models record none.
 Configure named argv in the host's effective configuration:
 
 ```toml
-[domains.fabric.commands]
-fmt-check = ["cargo", "fmt", "--check"]
+[domains.fabric.commands.fmt-check]
+argv = ["cargo", "fmt", "--check"]
+
+[domains.fabric.commands.python-check]
+argv = ["./scripts/check.py"]
+runtimes = ["/opt/check/bin/python3"]
 ```
 
 A graph task selects the entry by name:
@@ -58,8 +62,18 @@ Commands use the ordinary supervisor, guardian, deadlines, descendant cleanup
 and operation replay. They run read-only with the shared Rust and Node toolchain
 grants and private build output. Network defaults to off: the recorded
 `provider` mode has no provider API endpoints for this adapter. Explicit local
-or open reach uses the existing access grants. Commands need no provider login or credential grant, and have no session,
-hooks, MCP configuration or quota probe.
+or open reach uses the existing access grants. All known credential stores,
+including both GitHub CLI config directories and keychains, stay denied in
+every network mode. Commands have no session, hooks, MCP configuration or
+quota probe.
+
+`runtimes` is optional and takes absolute interpreter paths. Each path is
+resolved on the host and granted execution only, so a script can use a custom
+shebang interpreter outside the system, Rust and Node toolchains. The grant
+does not allow reading neighbouring files or writing the interpreter directory.
+Exact non-system Mach-O dependencies receive the existing library read grants;
+credential and project write denials still apply. List each interpreter needed
+by the configured command or its child scripts.
 
 Stdout and stderr share a bounded 64 KiB output tail. Captured lines are quoted
 and log `verdict:` markers are escaped, so only the final exit-derived verdict

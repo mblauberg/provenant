@@ -3,7 +3,7 @@ client_label = "agent"
 ssh_executable = "" # empty selects shared system SSH discovery
 home_hosts = {}
 peers = {}
-commands = {} # named argv, e.g. fmt-check = ["cargo", "fmt", "--check"]
+commands = {} # named command tables, e.g. fmt-check = { argv = ["cargo", "fmt", "--check"], runtimes = [] }
 [lanes]
 # A build throttle for cooperative fair sharing of CPU and memory among lanes, not a hard cap:
 # lanes' `cargo` commands that compile wait for a slot; direct `~/.cargo/bin/cargo`, rustc and non-cargo builds are not gated.

@@ -101,6 +101,7 @@ fn command_prepare_preserves_invocation_and_literal_argv_without_a_rust_install(
     let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
     input.command = Some(command::Invocation {
         argv: &argv,
+        runtimes: &[],
         program: Path::new("/fixture/home/.cargo/bin/cargo"),
     });
     let spec = adapter.prepare(input).unwrap();
@@ -143,12 +144,205 @@ fn command_prepare_preserves_invocation_and_literal_argv_without_a_rust_install(
     input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
     input.command = Some(command::Invocation {
         argv: &argv,
+        runtimes: &[],
         program: Path::new("/fixture/tool"),
     });
     assert!(matches!(
         adapter.prepare(input),
         Err(ProviderError::UnsupportedPolicy)
     ));
+}
+
+#[test]
+fn command_credentials_stay_denied_in_every_network_mode() {
+    use provenant_confinement::permissions::{NetworkAccess, PathGrant, PathScope};
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+
+    let base = read_only_plan("/fixture", None);
+    let mut route = route("command", "");
+    route.account_key = None;
+    let prompt = Prompt::new("check".into());
+    let argv = vec!["check".into()];
+    for network in [
+        NetworkAccess::Provider,
+        NetworkAccess::Local,
+        NetworkAccess::Open,
+    ] {
+        let mut permissions = base.permissions().clone();
+        permissions.network = network;
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: base.scope(),
+            permissions,
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+        })
+        .unwrap();
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.command = Some(command::Invocation {
+            argv: &argv,
+            program: Path::new("/fixture/tool"),
+            runtimes: &[],
+        });
+        let mut spec = command::Command.prepare(input).unwrap();
+        assert!(spec.profile.spec.deny_credential_access);
+        assert!(spec.profile.spec.deny_keychain_access);
+        // An overlapping allow must never override the final credential denials.
+        for relative in [
+            ".config/gh",
+            "Library/Application Support/GitHub CLI",
+            "Library/Keychains",
+            ".ssh",
+            ".aws",
+            ".azure",
+            ".gnupg",
+            ".kube",
+            ".secrets",
+            ".codex",
+            ".claude",
+            ".cursor",
+            ".gemini",
+            ".config/gcloud",
+            ".config/cursor",
+            ".config/opencode",
+            ".local/share/opencode",
+            "Monero",
+            "Archives/git-preservation",
+            ".cargo/credentials",
+            ".cargo/credentials.toml",
+        ] {
+            let path = Path::new("/fixture/home").join(relative);
+            spec.profile.spec.runtime_reads.push(PathGrant {
+                path: path.clone(),
+                scope: PathScope::Subtree,
+            });
+            let source = provenant_confinement::permissions::snapshot::render(
+                plan.permissions(),
+                &spec.profile,
+                Path::new("/fixture/home"),
+            )
+            .unwrap();
+            let allow = source
+                .find(&format!(
+                    "(allow file-read* (subpath \"{}\"))",
+                    path.display()
+                ))
+                .unwrap();
+            for operation in ["file-read*", "file-write*"] {
+                let scope = if relative.starts_with(".cargo/credentials") {
+                    "literal"
+                } else {
+                    "subpath"
+                };
+                let denial = format!("(deny {operation} ({scope} \"{}\"))", path.display());
+                assert!(
+                    source.rfind(&denial).unwrap() > allow,
+                    "{network:?}: {denial}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn command_runtimes_grant_exact_execution_only() {
+    let base = read_only_plan("/fixture", None);
+    let mut route = route("command", "");
+    route.account_key = None;
+    let prompt = Prompt::new("check".into());
+    let argv = vec!["./check.py".into()];
+    let runtimes = vec!["/opt/check/bin/python3".into()];
+    let mut input = fixture_input(&route, &base, &prompt, Path::new("/fixture/repo"), None);
+    input.command = Some(command::Invocation {
+        argv: &argv,
+        program: Path::new("/fixture/repo/check.py"),
+        runtimes: &runtimes,
+    });
+    let spec = command::Command.prepare(input).unwrap();
+    let runtime = Path::new("/opt/check/bin/python3");
+    assert!(spec.profile.spec.tool_exec_roots.iter().any(|grant| {
+        grant.path == runtime && grant.scope == provenant_confinement::permissions::PathScope::Exact
+    }));
+    for grant in spec
+        .profile
+        .spec
+        .runtime_reads
+        .iter()
+        .chain(&spec.profile.spec.process_executables)
+        .chain(&spec.profile.spec.state_writes)
+        .chain(&spec.profile.spec.tool_writes)
+    {
+        assert!(!runtime.starts_with(&grant.path));
+    }
+    let source = provenant_confinement::permissions::snapshot::render(
+        base.permissions(),
+        &spec.profile,
+        Path::new("/fixture/home"),
+    )
+    .unwrap();
+    assert!(source.contains("(allow process-exec (literal \"/opt/check/bin/python3\"))"));
+    assert!(!source.contains("(subpath \"/opt/check"));
+    assert!(!source.contains("(allow file-read* (literal \"/opt/check/bin/python3\"))"));
+    assert!(!source.contains("(allow file-write* (literal \"/opt/check/bin/python3\"))"));
+    assert!(source.contains("(deny file-read* (subpath \"/fixture/home/.config/gh\"))"));
+}
+
+#[test]
+fn command_runtimes_include_only_exact_linked_library_reads()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::permissions::PathScope;
+
+    let temp = tempfile::tempdir()?;
+    let library = temp.path().join("libcustom.dylib");
+    std::fs::write(&library, b"fixture dependency")?;
+    let library = library.canonicalize()?;
+    let name = library.to_str().ok_or("library path")?;
+    // A thin Mach-O load command, enough for the production dependency reader.
+    let mut image = vec![0; 32];
+    image[..4].copy_from_slice(&0xfeed_facf_u32.to_le_bytes());
+    image[16..20].copy_from_slice(&1_u32.to_le_bytes());
+    let size = (24 + name.len() + 1).next_multiple_of(8);
+    image.extend(0xc_u32.to_le_bytes());
+    image.extend(u32::try_from(size)?.to_le_bytes());
+    image.extend(24_u32.to_le_bytes());
+    image.resize(32 + 24, 0);
+    image.extend(name.as_bytes());
+    image.resize(32 + size, 0);
+    let runtime = temp.path().join("interpreter");
+    std::fs::write(&runtime, image)?;
+    let runtimes = vec![runtime.clone()];
+    let plan = read_only_plan("/fixture", None);
+    let mut route = route("command", "");
+    route.account_key = None;
+    let prompt = Prompt::new("check".into());
+    let argv = vec!["./check-script".into()];
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.command = Some(command::Invocation {
+        argv: &argv,
+        program: Path::new("/fixture/repo/check-script"),
+        runtimes: &runtimes,
+    });
+    let spec = command::Command.prepare(input)?;
+    assert!(
+        spec.profile
+            .spec
+            .runtime_reads
+            .iter()
+            .any(|grant| { grant.path == library && grant.scope == PathScope::Exact })
+    );
+    assert!(!spec.profile.spec.runtime_reads.iter().any(|grant| {
+        grant.path == runtime
+            || library.starts_with(&grant.path) && grant.scope == PathScope::Subtree
+    }));
+    assert!(
+        !spec
+            .profile
+            .spec
+            .tool_writes
+            .iter()
+            .any(|grant| library.starts_with(&grant.path))
+    );
+    Ok(())
 }
 
 #[test]

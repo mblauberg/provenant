@@ -923,6 +923,7 @@ fn prepare_command(
             format!("command {name} is not configured in domains.fabric.commands")
         })?;
     let program = command
+        .argv
         .first()
         .filter(|program| !program.is_empty())
         .ok_or("configured command has no executable")?;
@@ -933,6 +934,11 @@ fn prepare_command(
         locate(program)?
     };
     let executable = canonical(&invocation)?;
+    let runtimes = command
+        .runtimes
+        .iter()
+        .map(|path| canonical(path))
+        .collect::<Result<Vec<_>, _>>()?;
     let home = canonical(registry.home.ok_or("home directory is unavailable")?)?;
     let assets = registry.assets.ok_or("product assets are unavailable")?;
     let project = registry
@@ -1013,7 +1019,8 @@ fn prepare_command(
         .prepare(PrepareInput {
             route: &route,
             command: Some(provenant_providers::command::Invocation {
-                argv: command,
+                argv: &command.argv,
+                runtimes: &runtimes,
                 program: &invocation,
             }),
             confined: &plan,

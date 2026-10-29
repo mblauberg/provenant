@@ -59,8 +59,23 @@ fn prepared(
     access: Access,
     authentication: Option<&str>,
     include_continuation: bool,
+    network: Option<NetworkAccess>,
 ) -> Result<(PlanPermissions, ProviderProfile), ProviderError> {
-    let confined = fixture_access_plan(access, authentication, include_continuation);
+    let base = fixture_access_plan(access, authentication, include_continuation);
+    let confined = if let Some(network) = network {
+        let mut permissions = base.permissions().clone();
+        permissions.network = network;
+        provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
+            scope: base.scope(),
+            permissions,
+            codex: provenant_confinement::CodexPolicy::Clean,
+            extensions: provenant_confinement::ExtensionPolicy::Deny,
+            agy_state: None,
+        })
+        .expect("network fixture plan")
+    } else {
+        base
+    };
     let mut route = route(id, if id == "command" { "" } else { "fixture-model" });
     route.account_key = None;
     let prompt = Prompt::new("fixture prompt".into());
@@ -77,9 +92,11 @@ fn prepared(
         (id == "claude").then_some(&token),
     );
     let command = vec!["fixture-command".into(), "--check".into()];
+    let runtimes = vec!["/opt/check/bin/python3".into()];
     if id == "command" {
         input.command = Some(crate::command::Invocation {
             argv: &command,
+            runtimes: &runtimes,
             program: input.executable,
         });
     }
@@ -114,7 +131,7 @@ impl Case {
         include_continuation: bool,
         adjust: impl FnOnce(&mut PlanPermissions),
     ) -> Result<Self, ProviderError> {
-        let (mut plan, profile) = prepared(id, access, authentication, include_continuation)?;
+        let (mut plan, profile) = prepared(id, access, authentication, include_continuation, None)?;
         adjust(&mut plan);
         Ok(Self {
             name: name.into(),
@@ -147,6 +164,18 @@ fn cases() -> Result<Vec<Case>, ProviderError> {
                 |_| {},
             )?);
         }
+    }
+    for (mode, network) in [
+        ("open", NetworkAccess::Open),
+        ("local", NetworkAccess::Local),
+    ] {
+        let (plan, profile) = prepared("command", Access::ReadOnly, None, false, Some(network))?;
+        assert!(!profile.spec.deny_network);
+        cases.push(Case {
+            name: format!("command-network-{mode}-read-only"),
+            plan,
+            profile,
+        });
     }
     // Conditional grants: credential unselected, and continuation on.
     cases.push(Case::new(
@@ -222,7 +251,8 @@ fn cases() -> Result<Vec<Case>, ProviderError> {
 #[test]
 fn writer_publish_grants_gh_reads_only_with_open_network() -> Result<(), Box<dyn std::error::Error>>
 {
-    let (mut plan, profile) = prepared("codex", Access::WorktreeWrite, login("codex"), false)?;
+    let (mut plan, profile) =
+        prepared("codex", Access::WorktreeWrite, login("codex"), false, None)?;
     for network in [
         NetworkAccess::Provider,
         NetworkAccess::Local,

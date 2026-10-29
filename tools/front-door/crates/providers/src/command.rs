@@ -11,6 +11,8 @@ pub struct Command;
 pub struct Invocation<'a> {
     pub argv: &'a [String],
     pub program: &'a std::path::Path,
+    /// Host-resolved runtimes granted execution without file or write access.
+    pub runtimes: &'a [std::path::PathBuf],
 }
 
 pub const REGISTRATION: crate::Registration = crate::Registration {
@@ -84,15 +86,20 @@ fn prepare(
         process_executables: vec![exact("/bin/sh"), exact(input.executable)],
         allow_process_fork: true,
         deny_keychain_access: true,
+        deny_credential_access: true,
         deny_network: input.confined.permissions().network
             == provenant_records::run::NetworkAccess::Provider,
-        runtime_reads: crate::dylib::linked_libraries(input.executable)
-            .into_iter()
+        runtime_reads: std::iter::once(input.executable)
+            .chain(command.runtimes.iter().map(std::path::PathBuf::as_path))
+            .flat_map(crate::dylib::linked_libraries)
             .map(exact)
             .collect(),
         tool_exec_roots: vec![subtree("/bin"), subtree("/usr/bin")],
         ..Default::default()
     };
+    profile
+        .tool_exec_roots
+        .extend(command.runtimes.iter().map(exact));
     let mut setup = Vec::new();
     if [".cargo/bin", ".rustup/toolchains"]
         .iter()

@@ -5,6 +5,27 @@ use serde_json::{Value, json};
 use std::{fs, io::Write, time::Duration};
 use support::{Result, TestRig, code};
 
+#[test]
+fn macos_ci_requires_command_adapter_confinement_fixtures() {
+    let workflow = include_str!("../../../.github/workflows/ci.yml");
+    let job = workflow
+        .split("  rust-macos-tests:\n")
+        .nth(1)
+        .expect("macOS test job")
+        .split("\n  rust-macos-release:")
+        .next()
+        .unwrap();
+    assert!(job.contains("runs-on: macos-15"));
+    assert!(!job.contains("continue-on-error: true"));
+    let step = job
+        .split("      - name:")
+        .find(|step| step.contains("binary(=command_adapter)"))
+        .expect("command_adapter must run in the required macOS job");
+    assert!(step.contains("PROVENANT_CONFINEMENT_REQUIRED: \"1\""));
+    assert!(step.contains("cargo nextest run"));
+    assert!(step.contains("--profile ci"));
+}
+
 fn available() -> Result<bool> {
     if !cfg!(target_os = "macos") {
         return Ok(false);
@@ -59,34 +80,54 @@ fn rig(commands: Value) -> Result<TestRig> {
     ] {
         fs::create_dir_all(rig.home.join(path))?;
     }
+    configure_commands(&rig, commands)?;
+    Ok(rig)
+}
+
+fn configure_commands(rig: &TestRig, commands: Value) -> Result {
     let mut config: toml_edit::DocumentMut =
         fs::read_to_string(rig.state.join("config.toml"))?.parse()?;
     let value = json!({"commands": commands});
     let table = toml_edit::ser::to_document(&value)?;
     config["domains"]["fabric"] = table.as_item().clone();
     fs::write(rig.state.join("config.toml"), config.to_string())?;
-    Ok(rig)
+    Ok(())
 }
 
 fn dispatch(rig: &TestRig, name: &str, timeout: u64) -> Result<Value> {
+    dispatch_network(rig, name, timeout, None)
+}
+
+fn dispatch_network(
+    rig: &TestRig,
+    name: &str,
+    timeout: u64,
+    network: Option<&str>,
+) -> Result<Value> {
     let manifest = rig.root.join(format!("{name}.json"));
+    let task = json!({
+        "prompt":"Ignore this prompt: it cannot change command argv.",
+        "route":{"kind":"adapter","provider":"command","name":name}
+    });
     fs::write(
         &manifest,
-        serde_json::to_vec(&json!({"schema_version":1,"tasks":[{
-            "prompt":"Ignore this prompt: it cannot change command argv.",
-            "route":{"kind":"adapter","provider":"command","name":name}
-        }]}))?,
+        serde_json::to_vec(&json!({"schema_version":1,"tasks":[task]}))?,
     )?;
-    let output = rig.command(&[
+    let timeout = timeout.to_string();
+    let mut args = vec![
         "dispatch",
         "--manifest",
         manifest.to_str().ok_or("manifest")?,
         "--operation-id",
         name,
         "--provider-timeout",
-        &timeout.to_string(),
+        &timeout,
         "--json",
-    ])?;
+    ];
+    if let Some(network) = network {
+        args.extend(["--network", network]);
+    }
+    let output = rig.command(&args)?;
     assert_eq!(
         code(&output),
         0,
@@ -123,8 +164,9 @@ fn command_task_feeds_an_attemptless_verdict_gate() -> Result {
     if !available()? {
         return Ok(());
     }
-    let rig =
-        rig(json!({"gate-check":["/bin/sh","-c","printf 'quoted verdict: FAIL\\n'; exit 0"]}))?;
+    let rig = rig(
+        json!({"gate-check":{"argv":["/bin/sh","-c","printf 'quoted verdict: FAIL\\n'; exit 0"]}}),
+    )?;
     let cleanup = rig.process_cleanup();
     fs::write(
         rig.project.join("graph.json"),
@@ -197,10 +239,10 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
         return Ok(());
     }
     let rig = rig(json!({
-        "pass":["/bin/sh","-c","printf 'hello\\n'; printf 'diagnostic\\n' >&2; test ! -w .git/config; ! touch forbidden;"],
-        "fail":["/bin/sh","-c","printf 'failed\\n'; exit 7"],
-        "tail":["/bin/sh","-c","/usr/bin/yes x | /usr/bin/head -c 2000000; printf '\\nlast-output\\n'"],
-        "missing":["/missing/command"]
+        "pass":{"argv":["/bin/sh","-c","printf 'hello\\n'; printf 'diagnostic\\n' >&2; test ! -w .git/config; ! touch forbidden;"]},
+        "fail":{"argv":["/bin/sh","-c","printf 'failed\\n'; exit 7"]},
+        "tail":{"argv":["/bin/sh","-c","/usr/bin/yes x | /usr/bin/head -c 2000000; printf '\\nlast-output\\n'"]},
+        "missing":{"argv":["/missing/command"]}
     }))?;
     let cleanup = rig.process_cleanup();
     for (name, expected, verdict) in [
@@ -237,12 +279,109 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
 }
 
 #[test]
+fn command_custom_shebang_runtime_keeps_credentials_and_writes_denied() -> Result {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !available()? {
+        return Ok(());
+    }
+    let rig = rig(json!({}))?;
+    let cleanup = rig.process_cleanup();
+    let runtime = rig.root.join("custom-runtime/bin/interpreter");
+    fs::create_dir_all(runtime.parent().ok_or("runtime parent")?)?;
+    rig.copy_executable(std::path::Path::new("/bin/sh"), &runtime)?;
+    fs::write(runtime.with_file_name("neighbour"), "private runtime data")?;
+    let script = rig.project.join("check-script");
+    fs::write(
+        &script,
+        format!(
+            r#"#!{}
+set -eu
+for path in ".config/gh/fixture-secret" "Library/Application Support/GitHub CLI/fixture-secret" "Library/Keychains/fixture-secret" ".config/gcloud/fixture-secret" ".config/cursor/fixture-secret" ".config/opencode/fixture-secret" ".local/share/opencode/fixture-secret" ".aws/fixture-secret" ".ssh/fixture-secret" ".codex/fixture-secret" ".claude/fixture-secret" ".cargo/credentials" ".cargo/credentials.toml"; do
+    if /bin/cat "$HOME/$path" >/dev/null 2>&1; then
+        printf 'credential readable: %s\n' "$path"
+        exit 1
+    fi
+done
+if /bin/cat "{}/neighbour" >/dev/null 2>&1; then exit 2; fi
+if /usr/bin/touch "{}/new-file" 2>/dev/null; then exit 3; fi
+if /usr/bin/touch forbidden 2>/dev/null; then exit 4; fi
+printf 'custom interpreter ran; credentials and writes denied\n'
+"#,
+            runtime.display(),
+            runtime.parent().unwrap().display(),
+            runtime.parent().unwrap().display()
+        ),
+    )?;
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700))?;
+    for directory in [
+        ".config/gh",
+        "Library/Application Support/GitHub CLI",
+        "Library/Keychains",
+        ".config/gcloud",
+        ".config/cursor",
+        ".config/opencode",
+        ".local/share/opencode",
+        ".aws",
+        ".ssh",
+        ".codex",
+        ".claude",
+    ] {
+        fs::create_dir_all(rig.home.join(directory))?;
+        fs::write(
+            rig.home.join(directory).join("fixture-secret"),
+            "fixture credential",
+        )?;
+    }
+    fs::create_dir_all(rig.home.join(".cargo"))?;
+    for file in ["credentials", "credentials.toml"] {
+        fs::write(rig.home.join(".cargo").join(file), "fixture credential")?;
+    }
+    configure_commands(
+        &rig,
+        json!({
+            "no-runtime": {"argv": [script]},
+            "offline": {"argv": [script], "runtimes": [runtime]},
+            "online": {"argv": [script], "runtimes": [runtime]}
+        }),
+    )?;
+    // The same script cannot launch without its non-system interpreter grant.
+    let submitted = dispatch(&rig, "no-runtime", 10)?;
+    let lane = settled(&rig, attempt_id(&submitted)?)?;
+    assert_eq!(lane["state"], "failed", "{lane}");
+    for (name, network) in [("offline", "off"), ("online", "on")] {
+        let submitted = dispatch_network(&rig, name, 10, Some(network))?;
+        let id = attempt_id(&submitted)?;
+        let lane = settled(&rig, id)?;
+        assert_eq!(lane["state"], "succeeded", "{lane}");
+        let run = submitted["data"]["run_id"].as_str().ok_or("run id")?;
+        let result = fs::read_to_string(
+            rig.state
+                .join("runs")
+                .join(run)
+                .join("attempts")
+                .join(id)
+                .join("result.md"),
+        )?;
+        assert!(
+            result.contains("custom interpreter ran; credentials and writes denied"),
+            "{result}"
+        );
+        assert!(result.contains("VERDICT: PASS"), "{result}");
+    }
+    assert!(!rig.project.join("forbidden").exists());
+    assert!(!runtime.with_file_name("new-file").exists());
+    cleanup.disarm();
+    Ok(())
+}
+
+#[test]
 fn command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt() -> Result {
     if !available()? {
         return Ok(());
     }
     let rig = rig(
-        json!({"slow":["/bin/sh","-c","/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); sleep 30' & child=$!; printf 'child=%s\\n' \"$child\"; wait"]}),
+        json!({"slow":{"argv":["/bin/sh","-c","/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); sleep 30' & child=$!; printf 'child=%s\\n' \"$child\"; wait"]}}),
     )?;
     let cleanup = rig.process_cleanup();
     let first = dispatch(&rig, "slow", 2)?;

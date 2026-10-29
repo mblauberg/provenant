@@ -11,7 +11,7 @@ pub struct FabricConfig {
     pub client_label: String,
     /// Host-configured argv selected by adapter route name.
     #[serde(default)]
-    pub commands: BTreeMap<String, Vec<String>>,
+    pub commands: BTreeMap<String, CommandConfig>,
     #[serde(default, deserialize_with = "deserialize_ssh_executable")]
     pub ssh_executable: Option<std::path::PathBuf>,
     pub home_hosts: BTreeMap<String, HostId>,
@@ -21,6 +21,16 @@ pub struct FabricConfig {
     pub graph: GraphConfig,
     #[serde(default)]
     pub lanes: Lanes,
+}
+
+/// Named command policy supplied by host configuration, never by task prompts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandConfig {
+    pub argv: Vec<String>,
+    /// Absolute interpreter paths, granted execution only.
+    #[serde(default)]
+    pub runtimes: Vec<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -286,12 +296,16 @@ impl DomainConfig for FabricConfig {
                 reject(name.into());
             }
         }
-        for (name, argv) in &self.commands {
+        for (name, command) in &self.commands {
+            let argv = &command.argv;
             if name.is_empty()
                 || name.contains('\0')
                 || argv.is_empty()
                 || argv[0].is_empty()
                 || argv.iter().any(|arg| arg.contains('\0'))
+                || command.runtimes.iter().any(|path| {
+                    !path.is_absolute() || path.as_os_str().as_encoded_bytes().contains(&0)
+                })
             {
                 reject(format!("commands.{name}"));
             }
@@ -433,7 +447,10 @@ mod tests {
         let mut config = config();
         config.commands.insert(
             "fmt-check".into(),
-            vec!["cargo".into(), "fmt".into(), "a b;$(literal)".into()],
+            CommandConfig {
+                argv: vec!["cargo".into(), "fmt".into(), "a b;$(literal)".into()],
+                runtimes: vec!["/opt/check/bin/python3".into()],
+            },
         );
         assert!(config.validate().is_empty());
         assert_eq!(
@@ -446,7 +463,7 @@ mod tests {
             vec!["cargo\0".into()],
             vec!["cargo".into(), "arg\0".into()],
         ] {
-            config.commands.insert("fmt-check".into(), argv);
+            config.commands.get_mut("fmt-check").unwrap().argv = argv;
             assert!(
                 config
                     .validate()
@@ -454,6 +471,41 @@ mod tests {
                     .any(|error| error.field == "commands.fmt-check")
             );
         }
+    }
+
+    #[test]
+    fn configured_command_runtimes_require_absolute_paths() {
+        let mut config = config();
+        let command: CommandConfig = serde_json::from_value(serde_json::json!({
+            "argv": ["./check.py"],
+            "runtimes": ["/opt/check/bin/python3", "/opt/check/bin/ruby"]
+        }))
+        .unwrap();
+        config.commands.insert("check".into(), command);
+        assert!(config.validate().is_empty());
+        let defaulted: CommandConfig = serde_json::from_value(serde_json::json!({
+            "argv": ["cargo", "fmt"]
+        }))
+        .unwrap();
+        assert!(defaulted.runtimes.is_empty());
+        for path in ["python3", "./bin/python3", "/opt/check/bin/python3\0"] {
+            config.commands.get_mut("check").unwrap().runtimes = vec![path.into()];
+            assert!(
+                config
+                    .validate()
+                    .iter()
+                    .any(|error| error.field == "commands.check")
+            );
+        }
+        assert!(
+            serde_json::from_value::<CommandConfig>(serde_json::json!(["cargo", "fmt"])).is_err()
+        );
+        assert!(
+            serde_json::from_value::<CommandConfig>(serde_json::json!({
+                "argv": ["cargo"], "runtime": ["/opt/check/bin/python3"]
+            }))
+            .is_err()
+        );
     }
 
     #[test]
