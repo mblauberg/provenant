@@ -3,9 +3,9 @@
   "target_skill": "code-review",
   "cases": [
     {
-      "id": "q037",
+      "id": "q1",
       "relation": "positive",
-      "prompt": "Review this pull request source-read-only and trace defects beyond the changed lines.",
+      "prompt": "Review this pull request read-only against its spec and report findings.",
       "tags": [
         "direct"
       ],
@@ -15,9 +15,9 @@
       }
     },
     {
-      "id": "q038",
+      "id": "q2",
       "relation": "positive",
-      "prompt": "Audit this migration diff for regressions, maintainability problems, and missing tests; do not edit.",
+      "prompt": "Run an independent clean-context review of commit abc123 against main before it lands.",
       "tags": [
         "direct"
       ],
@@ -27,9 +27,9 @@
       }
     },
     {
-      "id": "q039",
+      "id": "q3",
       "relation": "positive",
-      "prompt": "Deep-review this refactor through its callers and consumers and return clean if no defect exists.",
+      "prompt": "Review the refactor diff for regressions, broken contracts and tests that no longer prove anything.",
       "tags": [
         "direct"
       ],
@@ -39,10 +39,11 @@
       }
     },
     {
-      "id": "q040",
+      "id": "q4",
       "relation": "negative",
-      "prompt": "This test is failing intermittently; reproduce it and identify the root cause.",
+      "prompt": "This endpoint intermittently returns 500s; find the root cause.",
       "tags": [
+        "near-miss",
         "adjacent"
       ],
       "expected": {
@@ -51,10 +52,11 @@
       }
     },
     {
-      "id": "q041",
+      "id": "q5",
       "relation": "negative",
-      "prompt": "Review and fix this implementation until all checks and re-review are clean.",
+      "prompt": "Fix the findings the reviewer raised and push the repair.",
       "tags": [
+        "near-miss",
         "adjacent"
       ],
       "expected": {
@@ -63,37 +65,35 @@
       }
     },
     {
-      "id": "q042",
+      "id": "q6",
       "relation": "negative",
-      "prompt": "Write the first failing public-interface test for this new behaviour.",
+      "prompt": "Check how the restyled settings page looks in light and dark mode.",
       "tags": [
+        "near-miss",
         "adjacent"
       ],
       "expected": {
-        "primary_skill": "tdd",
-        "companion_skills": [
-          "implement"
-        ]
+        "primary_skill": "ui-ux-design",
+        "companion_skills": []
       }
     },
     {
-      "id": "q043",
-      "relation": "boundary",
-      "prompt": "Review this pull request read-only, then judge whether its structural simplification preserved behaviour.",
+      "id": "q7",
+      "relation": "negative",
+      "prompt": "Write the acceptance criteria for this unsettled feature.",
       "tags": [
-        "composition"
+        "near-miss",
+        "adjacent"
       ],
       "expected": {
-        "primary_skill": "code-review",
-        "companion_skills": [
-          "refactor"
-        ]
+        "primary_skill": "scope",
+        "companion_skills": []
       }
     },
     {
-      "id": "q044",
+      "id": "q8",
       "relation": "boundary",
-      "prompt": "Review this frontend PR for system defects and for UX and accessibility regressions.",
+      "prompt": "Review this pull request that restyles the settings page, including how the changed screens look.",
       "tags": [
         "composition"
       ],
@@ -102,44 +102,6 @@
         "companion_skills": [
           "ui-ux-design"
         ]
-      }
-    },
-    {
-      "id": "q045",
-      "relation": "boundary",
-      "prompt": "The reviewed patch fails in production; reproduce the failure before proposing a fix.",
-      "tags": [
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "diagnose",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q176102",
-      "relation": "negative",
-      "prompt": "The PR review identified the confirmed defect; implement the approved patch through verification and acceptance.",
-      "tags": [
-        "near-miss",
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "implement",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q176103",
-      "relation": "negative",
-      "prompt": "Review the rendered checkout for keyboard navigation and contrast.",
-      "tags": [
-        "near-miss",
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "ui-ux-design",
-        "companion_skills": []
       }
     }
   ]

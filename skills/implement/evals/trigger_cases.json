@@ -3,9 +3,9 @@
   "target_skill": "implement",
   "cases": [
     {
-      "id": "q127",
+      "id": "q1",
       "relation": "positive",
-      "prompt": "Implement this approved feature end-to-end, verify it, obtain independent review, and report acceptance after objective checks and tier-required review.",
+      "prompt": "Implement this approved feature end-to-end through CI, independent review and landing.",
       "tags": [
         "direct"
       ],
@@ -15,9 +15,9 @@
       }
     },
     {
-      "id": "q128",
+      "id": "q2",
       "relation": "positive",
-      "prompt": "Apply the approved bug fix, run the relevant checks, repair review findings, and update owned docs.",
+      "prompt": "Apply the approved bug fix from issue 412, repair any CI failures, and land it.",
       "tags": [
         "direct"
       ],
@@ -27,9 +27,9 @@
       }
     },
     {
-      "id": "q129",
+      "id": "q3",
       "relation": "positive",
-      "prompt": "Complete this approved dependency upgrade through migration, verification, review, and human handoff.",
+      "prompt": "Run the deliver preset for this approved migration and report the outcome.",
       "tags": [
         "direct"
       ],
@@ -39,10 +39,11 @@
       }
     },
     {
-      "id": "q130",
+      "id": "q4",
       "relation": "negative",
-      "prompt": "Requirements are still ambiguous; decide options and produce acceptance criteria first.",
+      "prompt": "Requirements are still ambiguous; decide options and write acceptance criteria first.",
       "tags": [
+        "near-miss",
         "adjacent"
       ],
       "expected": {
@@ -51,10 +52,11 @@
       }
     },
     {
-      "id": "q131",
+      "id": "q5",
       "relation": "negative",
-      "prompt": "Tell me why this service is crashing; do not make a permanent change.",
+      "prompt": "Tell me why this service crashes under load; do not change anything yet.",
       "tags": [
+        "near-miss",
         "adjacent"
       ],
       "expected": {
@@ -63,10 +65,24 @@
       }
     },
     {
-      "id": "q132",
+      "id": "q6",
+      "relation": "negative",
+      "prompt": "Review the finished pull request read-only and report defects without fixing them.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "code-review",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q7",
       "relation": "negative",
       "prompt": "Promote the accepted build to production under the approved rollout plan.",
       "tags": [
+        "near-miss",
         "adjacent"
       ],
       "expected": {
@@ -75,23 +91,9 @@
       }
     },
     {
-      "id": "q133",
+      "id": "q8",
       "relation": "boundary",
-      "prompt": "Implement this approved observable behaviour with a witnessed right-reason failing test first.",
-      "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "implement",
-        "companion_skills": [
-          "tdd"
-        ]
-      }
-    },
-    {
-      "id": "q134",
-      "relation": "boundary",
-      "prompt": "Implement this approved behaviour-preserving module simplification with equivalence evidence.",
+      "prompt": "Implement the approved behaviour-preserving module split and prove equivalence.",
       "tags": [
         "composition"
       ],
@@ -103,96 +105,17 @@
       }
     },
     {
-      "id": "q135",
+      "id": "q9",
       "relation": "boundary",
-      "prompt": "Implement and verify the approved performance fix against the recorded baseline, then review the diff read-only.",
+      "prompt": "Implement the approved change as a batch of four independent lanes.",
       "tags": [
         "composition"
       ],
       "expected": {
         "primary_skill": "implement",
         "companion_skills": [
-          "code-review"
+          "orchestrate"
         ]
-      }
-    },
-    {
-      "id": "q920",
-      "relation": "boundary",
-      "prompt": "Implement the approved change; this project defers test execution to its landing gate, so author the tests first and report them as deferred.",
-      "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "implement",
-        "companion_skills": [
-          "tdd"
-        ]
-      }
-    },
-    {
-      "id": "q930",
-      "relation": "positive",
-      "prompt": "Implement this approved terminal-risk change through objective checks and required review, then obtain explicit user acceptance.",
-      "tags": [
-        "direct",
-        "acceptance-terminal"
-      ],
-      "expected": {
-        "primary_skill": "implement",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q931",
-      "relation": "positive",
-      "prompt": "Implement this approved routine change; its approved scope explicitly asks for user acceptance after checks and required review.",
-      "tags": [
-        "direct",
-        "acceptance-scoped"
-      ],
-      "expected": {
-        "primary_skill": "implement",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q932",
-      "relation": "positive",
-      "prompt": "Implement this approved change in Sealle, where landing is acceptance for everything; follow its authorised landing gate and report the outcome.",
-      "tags": [
-        "direct",
-        "acceptance-landing"
-      ],
-      "expected": {
-        "primary_skill": "implement",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q176116",
-      "relation": "negative",
-      "prompt": "Before implementation, decide the unresolved migration requirements and acceptance criteria.",
-      "tags": [
-        "near-miss",
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "scope",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q176117",
-      "relation": "negative",
-      "prompt": "Review the completed implementation read-only; report defects without applying fixes.",
-      "tags": [
-        "near-miss",
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "code-review",
-        "companion_skills": []
       }
     }
   ]

@@ -3,9 +3,9 @@
   "target_skill": "deliver",
   "cases": [
     {
-      "id": "q055",
+      "id": "q1",
       "relation": "positive",
-      "prompt": "Deliver this approved non-interactive static HTML briefing through link-integrity, render and tier-required review for acceptance; it has no browser interaction or runtime source change.",
+      "prompt": "Verify and accept this research report against its acceptance criteria and write the outcome report.",
       "tags": [
         "direct"
       ],
@@ -15,9 +15,9 @@
       }
     },
     {
-      "id": "q056",
+      "id": "q2",
       "relation": "positive",
-      "prompt": "Complete this approved analysis autonomously and verify every acceptance criterion before handoff.",
+      "prompt": "Check this analysis document against its sources and report what was not verified.",
       "tags": [
         "direct"
       ],
@@ -27,9 +27,9 @@
       }
     },
     {
-      "id": "q057",
+      "id": "q3",
       "relation": "positive",
-      "prompt": "Deliver this approved agent product with typed evidence and tier-required review; its approved scope explicitly asks for user acceptance.",
+      "prompt": "Write the rejectable outcome report for the delivered agent work.",
       "tags": [
         "direct"
       ],
@@ -39,10 +39,11 @@
       }
     },
     {
-      "id": "q058",
+      "id": "q4",
       "relation": "negative",
-      "prompt": "Implement this approved web application that processes consequential user data at terminal risk and stop for explicit user acceptance.",
+      "prompt": "Implement the approved feature and land it through CI.",
       "tags": [
+        "near-miss",
         "adjacent"
       ],
       "expected": {
@@ -51,10 +52,11 @@
       }
     },
     {
-      "id": "q059",
+      "id": "q5",
       "relation": "negative",
-      "prompt": "The outcome is vague; turn it into a spec with decided acceptance criteria.",
+      "prompt": "The scope of this document is still unsettled; decide what it must cover.",
       "tags": [
+        "near-miss",
         "adjacent"
       ],
       "expected": {
@@ -63,10 +65,11 @@
       }
     },
     {
-      "id": "q060",
+      "id": "q6",
       "relation": "negative",
-      "prompt": "Deploy the already accepted build to production and observe the rollout.",
+      "prompt": "Publish the accepted report to the public site.",
       "tags": [
+        "near-miss",
         "adjacent"
       ],
       "expected": {
@@ -75,9 +78,9 @@
       }
     },
     {
-      "id": "q061",
+      "id": "q7",
       "relation": "boundary",
-      "prompt": "Deliver the approved research synthesis using parallel agents and cross-family review.",
+      "prompt": "Deliver this research brief with parallel scouts, then accept it against the criteria.",
       "tags": [
         "composition"
       ],
@@ -86,60 +89,6 @@
         "companion_skills": [
           "orchestrate"
         ]
-      }
-    },
-    {
-      "id": "q062",
-      "relation": "boundary",
-      "prompt": "Deliver this approved prompt-ranking report and attach a repeatable quality evaluation.",
-      "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "deliver",
-        "companion_skills": [
-          "evaluate"
-        ]
-      }
-    },
-    {
-      "id": "q063",
-      "relation": "boundary",
-      "prompt": "Finish the accepted report, then publish that exact artifact to the named audience after approval.",
-      "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "release",
-        "companion_skills": [
-          "deliver"
-        ]
-      }
-    },
-    {
-      "id": "q176106",
-      "relation": "negative",
-      "prompt": "Deliver the already accepted report by publishing it to the approved destination.",
-      "tags": [
-        "near-miss",
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "release",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q176107",
-      "relation": "negative",
-      "prompt": "Deliver this approved software change through implementation, verification and review.",
-      "tags": [
-        "near-miss",
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "implement",
-        "companion_skills": []
       }
     }
   ]

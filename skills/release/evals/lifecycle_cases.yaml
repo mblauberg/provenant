@@ -1,7 +1,0 @@
-schema_version: 1
-target_skill: release
-cases:
-  - {id: lifecycle-release-positive, relation: positive, prompt: "Promote this exact accepted artifact digest to the named target under separate target-bound release authority.", tags: [lifecycle-alignment, direct], expected: {primary_skill: release, companion_skills: []}}
-  - {id: lifecycle-release-negative, relation: negative, prompt: "Implement the approved change and stop after acceptance; no deployment or external promotion is authorised.", tags: [lifecycle-alignment, boundary], expected: {primary_skill: implement, companion_skills: []}}
-  - {id: lifecycle-release-adjacent, relation: adjacent, prompt: "Implement the feature through checks and required review to acceptance, then use a separate gate to release the pinned build to production.", tags: [lifecycle-alignment, composition], expected: {primary_skill: implement, companion_skills: [release]}}
-  - {id: lifecycle-release-portability, relation: portability, prompt: "With Console, Herdr and GitHub unavailable, promote the exact accepted artifact from project artifacts using the authorised target command.", tags: [lifecycle-alignment, portable], adapters: {console: absent, herdr: absent, github: absent}, expected: {primary_skill: release, companion_skills: []}}

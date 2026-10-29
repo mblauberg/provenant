@@ -17,7 +17,7 @@ reviewers = [{ pool = "junior", count = 1 }]
 reviewers = [{ pool = "junior", count = 2, distinct_families = true }]
 [review.shapes.deep]
 reviewers = [
-  { pool = "junior", count = 4, lenses = ["correctness", "security", "failure-isolation", "tests"], distinct_families = true },
+  { pool = "junior", count = 4, lenses = ["correctness-spec", "security-privacy", "concurrency-data-errors", "tests"], distinct_families = true },
   { pool = "senior", count = 2, distinct_families = true },
 ]
 [review.select]

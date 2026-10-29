@@ -1,7 +1,0 @@
-schema_version: 1
-target_skill: implement
-cases:
-  - {id: lifecycle-implement-positive, relation: positive, prompt: "Implement this approved substantial change in a fresh session, adapting the plan and topology as evidence changes.", tags: [lifecycle-alignment, direct], expected: {primary_skill: implement, companion_skills: []}}
-  - {id: lifecycle-implement-negative, relation: negative, prompt: "The intended outcome and authority are unsettled; decide the scope before any implementation.", tags: [lifecycle-alignment, boundary], expected: {primary_skill: scope, companion_skills: []}}
-  - {id: lifecycle-implement-adjacent, relation: adjacent, prompt: "Implement this approved cross-cutting change with adaptive, partitioned agent teams and independent review.", tags: [lifecycle-alignment, composition], expected: {primary_skill: implement, companion_skills: [orchestrate]}}
-  - {id: lifecycle-implement-portability, relation: portability, prompt: "With Console, Herdr and GitHub unavailable, implement the approved change using project artifacts and the canonical delivery receipt.", tags: [lifecycle-alignment, portable], adapters: {console: absent, herdr: absent, github: absent}, expected: {primary_skill: implement, companion_skills: []}}
