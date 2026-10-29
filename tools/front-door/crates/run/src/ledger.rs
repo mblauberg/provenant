@@ -90,6 +90,26 @@ pub(crate) fn open(host: &Path, request: &Request<'_>) -> Result<Connection> {
     }
     Ok(db)
 }
+/// Run `action` while holding the ledger's write lock. Every claim takes that
+/// lock, so no lane is admitted until `action` returns; leases already held,
+/// and the lanes running under them, are untouched. The caller waits within
+/// `request`'s budget and gets `Contention` when another holder keeps the lock.
+pub(crate) fn while_admission_held<T>(
+    host: &Path,
+    request: &Request<'_>,
+    action: impl FnOnce() -> T,
+) -> Result<T> {
+    let db = open(host, request)?;
+    let tx = request.retry(|| {
+        Ok(rusqlite::Transaction::new_unchecked(
+            &db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?)
+    })?;
+    let value = action();
+    tx.rollback()?;
+    Ok(value)
+}
 /// Each class's version 1 start as a start under the current boot. Version 1
 /// kept one wall-time start for every class, which no boot can vouch for and
 /// which a wall clock step can move. The wall clock is not read: any version 1

@@ -28,6 +28,7 @@ mod store;
 mod transcript;
 pub use service::{DispatchRequest, DispatchTask, ErrorKind, Service};
 pub use transcript::locate as locate_transcript;
+pub mod build_dir_gc;
 mod cargo_seed;
 pub mod target_seed;
 pub mod target_seed_gc;

@@ -646,7 +646,7 @@ fn verify_detached_cache(
     Ok(cache)
 }
 
-pub(crate) fn is_cache_digest(name: &str) -> bool {
+pub fn is_cache_digest(name: &str) -> bool {
     name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 

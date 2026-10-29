@@ -121,6 +121,24 @@ pub struct Lanes {
     pub max_concurrent_builds: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub cargo_build_jobs: Option<u64>,
+    /// `CARGO_INCREMENTAL` for lanes; off unless set.
+    pub cargo_incremental: Option<bool>,
+    /// `CARGO_PROFILE_DEV_DEBUG` for lanes; `line-tables-only` unless set.
+    pub cargo_debug: Option<String>,
+    /// Cap on idle lane Cargo profile directories, in apparent bytes.
+    pub build_dir_max_bytes: Option<u64>,
+}
+
+impl Lanes {
+    pub fn build_settings(&self) -> provenant_config::LaneBuildSettings {
+        provenant_config::LaneBuildSettings {
+            max_concurrent_builds: self.max_concurrent_builds,
+            cargo_build_jobs: self.cargo_build_jobs,
+            cargo_incremental: self.cargo_incremental,
+            cargo_debug: self.cargo_debug.clone(),
+            build_dir_max_bytes: self.build_dir_max_bytes,
+        }
+    }
 }
 
 /// Optional host Cargo seeds for writer lanes.
@@ -390,12 +408,7 @@ impl DomainConfig for FabricConfig {
                 reject(format!("lanes.priority.{name}"));
             }
         }
-        for key in (provenant_config::LaneBuildSettings {
-            max_concurrent_builds: self.lanes.max_concurrent_builds,
-            cargo_build_jobs: self.lanes.cargo_build_jobs,
-        })
-        .invalid_keys()
-        {
+        for key in self.lanes.build_settings().invalid_keys() {
             reject(format!("lanes.{key}"));
         }
         errors
