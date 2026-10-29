@@ -52,6 +52,12 @@ pub struct LandRecord {
     /// The host's latest pending or merge note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Next retry of a pending land, which tick wake discovery includes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_at: Option<provenant_core::WallTime>,
+    /// Pending land observations already made, which selects the next backoff.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub pending_observations: u64,
 }
 
 /// One authorised land, pinned to the head the reviews and CI saw.
@@ -216,14 +222,26 @@ pub(super) fn delivered_head(
     checkpoint: &GraphCheckpoint,
     writer: &str,
 ) -> Option<(String, String)> {
+    delivered_within(plan, checkpoint, writer, |_| true)
+}
+
+/// As [`delivered_head`], counting only the chain nodes `include` accepts.
+fn delivered_within(
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    writer: &str,
+    include: impl Fn(usize) -> bool,
+) -> Option<(String, String)> {
     plan.nodes
         .iter()
         .zip(&checkpoint.nodes)
-        .filter(|(node, progress)| {
+        .enumerate()
+        .filter(|(index, (node, progress))| {
             (node.id == writer || node.continues.as_deref() == Some(writer))
                 && progress.state == NodeState::Succeeded
+                && include(*index)
         })
-        .filter_map(|(_, progress)| {
+        .filter_map(|(_, (_, progress))| {
             let outputs = progress.outputs.as_ref()?;
             let settled = progress
                 .attempts
@@ -233,6 +251,77 @@ pub(super) fn delivered_head(
         })
         .max_by_key(|(settled, _, _)| *settled)
         .map(|(_, branch, commit)| (branch, commit))
+}
+
+/// The head a reviewer judged: its pinned source commit or, without one, the
+/// newest head of `writer`'s chain among its own upstream nodes. A review that
+/// ran before a continuation therefore never judges the continuation's head.
+fn reviewed_head(
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+    reviewer: &str,
+    writer: &str,
+) -> Option<String> {
+    let index = *positions.get(reviewer)?;
+    if let Some(commit) = &checkpoint.nodes[index].source_commit {
+        return Some(commit.clone());
+    }
+    let upstream = ancestors(&plan.nodes, positions, reviewer);
+    delivered_within(plan, checkpoint, writer, |index| upstream.contains(&index))
+        .map(|(_, head)| head)
+}
+
+/// Why no passing verdict gate after `writer` accepted `head`, if none did.
+/// Landing needs a gate that passed and whose every input reviewed `head`; a
+/// failed gate whose `on_fail` reaches the land is not acceptance.
+fn acceptance_error(
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+    land: &str,
+    writer: &str,
+    head: &str,
+) -> Option<String> {
+    let writer_index = positions.get(writer).copied();
+    let mut reviewed = Vec::new();
+    for index in ancestors(&plan.nodes, positions, land) {
+        let gate = &plan.nodes[index];
+        let progress = &checkpoint.nodes[index];
+        if !matches!(gate.condition, Some(GateCondition::Verdict { .. }))
+            || !writer_index
+                .is_some_and(|writer| ancestors(&plan.nodes, positions, &gate.id).contains(&writer))
+            || progress.state != NodeState::Succeeded
+            || !progress.gate.as_ref().is_some_and(|gate| gate.passed)
+        {
+            continue;
+        }
+        let subjects: Vec<Option<String>> = gate
+            .inputs
+            .iter()
+            .map(|input| reviewed_head(plan, checkpoint, positions, &input.node, writer))
+            .collect();
+        if !subjects.is_empty()
+            && subjects
+                .iter()
+                .all(|subject| subject.as_deref() == Some(head))
+        {
+            return None;
+        }
+        let subjects: Vec<&str> = subjects
+            .iter()
+            .map(|subject| subject.as_deref().unwrap_or("no head"))
+            .collect();
+        reviewed.push(format!("{} passed {}", gate.id, subjects.join(", ")));
+    }
+    let evidence = if reviewed.is_empty() {
+        "no verdict gate after the writer passed".to_owned()
+    } else {
+        reviewed.join("; ")
+    };
+    Some(format!(
+        "node {land}: no passing verdict gate after {writer} reviewed the land head {head} ({evidence}); route the newest head through review before land"
+    ))
 }
 
 pub(super) fn session<'a>(spec: &'a LandSpec, plan: &'a PlannedGraph) -> Option<&'a str> {
@@ -360,6 +449,7 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
     node: &PlannedNode,
     spec: &LandSpec,
     plan: &PlannedGraph,
+    positions: &BTreeMap<String, usize>,
     checkpoint: &mut GraphCheckpoint,
     owner: &mut R,
     journal: &mut J,
@@ -379,6 +469,11 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
                 journal,
             );
         };
+        if let Some(reason) =
+            acceptance_error(plan, checkpoint, positions, &node.id, &spec.node, &head)
+        {
+            return fail::<R, J>(index, reason, checkpoint, journal);
+        }
         let LandChoice { policy, source } = owner.land_policy(spec.tier);
         let progress = &mut checkpoint.nodes[index];
         progress.land = Some(LandRecord {
@@ -391,6 +486,8 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
             authorised_by: (policy == LandPolicy::Auto).then_some(LandAuthority::Policy),
             pull_request: None,
             note: None,
+            wake_at: None,
+            pending_observations: 0,
         });
         progress.state = NodeState::Running;
         journal.save(checkpoint).map_err(GraphError::Journal)?;
@@ -422,6 +519,7 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
             authority: &authority,
         })
         .map_err(GraphError::Run)?;
+    record.wake_at = None;
     match observation {
         LandObservation::Merged { pull_request, note } => {
             record.pull_request = pull_request;
@@ -430,23 +528,45 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
             progress.outputs = Some(outputs(&record));
             progress.land = Some(record);
             progress.state = NodeState::Succeeded;
+            asks::refresh_wake(checkpoint);
             journal.save(checkpoint).map_err(GraphError::Journal)
         }
         LandObservation::Pending { reason } => {
-            let note = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
-            if record.note != note {
-                record.note = note;
-                checkpoint.nodes[index].land = Some(record);
-                journal.save(checkpoint).map_err(GraphError::Journal)?;
-            }
-            Ok(())
+            // Persist the retry so a scheduled tick wakes the graph again.
+            let id = &node.id;
+            let now = owner.wall_now().ok_or_else(|| {
+                GraphError::Refused(format!(
+                    "node {id}: no wall clock to set its land retry deadline; retry the advance"
+                ))
+            })?;
+            let delay = owner
+                .ci_poll_backoff(id)
+                .delay_seconds(record.pending_observations)
+                .saturating_mul(1_000_000);
+            let wake_at = now
+                .checked_add(provenant_core::DurationMicros::from_micros(delay))
+                .map_err(|_| {
+                    GraphError::Refused(format!(
+                        "node {id}: land retry deadline passes the last representable wall time; lower ci_poll_backoff"
+                    ))
+                })?;
+            record.note = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+            record.wake_at = Some(wake_at);
+            record.pending_observations = record.pending_observations.saturating_add(1);
+            checkpoint.nodes[index].land = Some(record);
+            asks::refresh_wake(checkpoint);
+            journal.save(checkpoint).map_err(GraphError::Journal)
         }
-        LandObservation::Refused { reason } => fail::<R, J>(
-            index,
-            format!("node {}: land refused: {reason}", node.id),
-            checkpoint,
-            journal,
-        ),
+        LandObservation::Refused { reason } => {
+            checkpoint.nodes[index].land = Some(record);
+            asks::refresh_wake(checkpoint);
+            fail::<R, J>(
+                index,
+                format!("node {}: land refused: {reason}", node.id),
+                checkpoint,
+                journal,
+            )
+        }
     }
 }
 
@@ -573,6 +693,11 @@ pub(super) fn validate_progress(
         None => true,
     };
     let valid = authority_valid
+        && (progress.state == NodeState::Running
+            || progress
+                .land
+                .as_ref()
+                .is_none_or(|record| record.wake_at.is_none()))
         && progress.attempts.is_empty()
         && progress.gate.is_none()
         && progress.ci.is_none()

@@ -487,7 +487,7 @@ diverged HEAD is refused.
 
 A node may set `distinct_from = "writer"` or `"dependencies"`. For `writer` the
 runtime walks the source chain to the nearest writer node; for `dependencies`
-it takes every transitive `depends_on` attempt. It gives the owner those
+it takes every transitive dependency's attempt, composite members included. It gives the owner those
 attempt refs, and the owner excludes their model families from route
 selection. `distinct_strength` is `prefer` (default) or `require`. Under
 prefer, when no route outside the families is ready the owner substitutes one;
@@ -499,7 +499,8 @@ the constraint is a no-op.
 
 A node may declare `dispositions`, a list of allowed values. At settlement its
 findings block must parse and every finding must carry a `disposition` from
-the list and a non-empty `reason`; otherwise the attempt settles as
+the list and a non-empty `reason`, and every finding ID selected from an input's
+`findings` must appear exactly once; otherwise the attempt settles as
 `task_failed` and `advance_error` names the first offending finding.
 
 A writer source requires an existing registered worktree. Under writer
@@ -579,7 +580,9 @@ delivered branch and pins its current head SHA. The target must be an upstream
 dependency exposing a delivered branch. The host queries checks for that exact
 SHA and checks the branch again before accepting a result. A newer push supersedes the
 pin, discards stale check evidence and restarts the timeout for the new head;
-a result for the previous head must not pass the gate. Explicitly named checks
+a result for the previous head must not pass the gate. An observation without
+a head SHA keeps the pinned head and restarts nothing; only a different known
+SHA supersedes it. Explicitly named checks
 must pass. Without named checks, the
 host uses required checks from branch protection or rulesets if resolvable;
 otherwise every reported check must pass or be skipped, with at least one pass.
@@ -869,7 +872,13 @@ prompt, route, worktree, inputs, delivery, `required_verdict`, `on_fail` or
 each follow the writer. Land nodes are refused in loop bodies.
 
 When ready, the node pins the branch and newest commit delivered by the
-writer and the writers that continue it, then resolves the host's tier policy
+writer and the writers that continue it. A passing verdict gate after the
+writer must have reviewed that head: each of its inputs judged the head
+through its pinned `source` commit or, without one, as the newest head of the
+writer's chain upstream of it. Otherwise the node fails without calling the
+host and names the heads that were reviewed, so a failed gate whose `on_fail`
+reaches the land, or a review that predates a continuation, never lands. It
+then resolves the host's tier policy
 and saves both in the node's `land` record with the layer the policy came
 from (`default`, `config` or `project`). With policy `auto` the record says
 the policy authorised the land. With `ask` it raises ask `NODE.ask-N` with
@@ -882,7 +891,8 @@ branch, checks CI once, merges with `--match-head-commit` and runs the usual
 cleanup, so the repository's own merge requirements still apply. A merged PR
 succeeds the node with verdict `LANDED`, the branch and head as outputs and an
 excerpt that names who or what authorised it. Pending checks, an unknown merge
-state or an unavailable PR keep the node running for the next advance; a
+state or an unavailable PR keep the node running and save a retry deadline,
+spaced by the node's CI poll backoff, that host tick wake discovery includes; a
 moved head, failed checks, a closed PR or a refused merge fail it. A waiting
 land node does not count toward `concurrency`, and a paused graph does not
 land.
@@ -895,6 +905,9 @@ land.
   `::a_configured_policy_overrides_the_default_and_records_its_source`;
   `::an_ask_tier_without_a_session_fails_with_guidance`;
   `::a_pending_land_is_observed_again_and_a_refusal_fails_the_node`;
+  `::a_pending_land_persists_a_retry_deadline_that_survives_restart`;
+  `::a_failed_review_routed_to_land_never_calls_the_host`;
+  `::a_review_of_an_earlier_head_never_lands_a_continuation`;
   `::a_loop_body_cannot_land`;
   `crates/fabric-runtime/src/config.rs::land_policy_layers_project_then_host_then_default`;
   `src/pr/land.rs::graph_land_tests::a_land_report_maps_to_a_graph_observation`.

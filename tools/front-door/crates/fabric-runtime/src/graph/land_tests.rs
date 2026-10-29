@@ -39,6 +39,11 @@ struct Owner {
     writer_branch: Option<String>,
     /// The newest commit a writer delivered, which CI reports as the head.
     head: Option<String>,
+    /// The verdict line reviewers end with; PASS when unset.
+    review_verdict: Option<&'static str>,
+    wall_seconds: i64,
+    tick: bool,
+    backoff: CiPollBackoff,
 }
 impl CiStatus for Owner {
     fn host_stamp(&self) -> Option<CiHostStamp> {
@@ -64,6 +69,15 @@ impl AttemptOwner for Owner {
     type Error = Infallible;
     fn actor(&self) -> String {
         "fixture".into()
+    }
+    fn wall_now(&self) -> Option<provenant_core::WallTime> {
+        provenant_core::WallTime::from_micros(self.wall_seconds.saturating_mul(1_000_000)).ok()
+    }
+    fn respect_ci_wake(&self) -> bool {
+        self.tick
+    }
+    fn ci_poll_backoff(&self, _: &str) -> CiPollBackoff {
+        self.backoff
     }
     fn ci_status(&mut self) -> Option<&mut dyn CiStatus> {
         Some(self)
@@ -114,8 +128,9 @@ impl AttemptOwner for Owner {
             "write" => (None, self.writer_branch.clone(), Some(WRITE_HEAD)),
             "repair" => (None, replay.branch.map(str::to_owned), Some(REPAIR_HEAD)),
             _ => {
-                let mut capture = crate::result_capture::ResultCapture::new(Some("VERDICT: PASS"));
-                capture.push(b"looks right\nVERDICT: PASS\n");
+                let verdict = self.review_verdict.unwrap_or("VERDICT: PASS");
+                let mut capture = crate::result_capture::ResultCapture::new(None);
+                capture.push(format!("looks right\n{verdict}\n").as_bytes());
                 (Some(capture.finish()), None, None)
             }
         };
@@ -421,6 +436,126 @@ fn a_pending_land_is_observed_again_and_a_refusal_fails_the_node() {
     );
     assert_eq!(owner.lands.len(), 2);
     assert!(owner.lands.iter().all(|(_, head, _)| head == REPAIR_HEAD));
+}
+
+#[test]
+fn a_pending_land_persists_a_retry_deadline_that_survives_restart() {
+    let mut owner = owner();
+    owner.tick = true;
+    owner.backoff = CiPollBackoff {
+        initial_seconds: 60,
+        max_seconds: 240,
+    };
+    owner.outcomes = VecDeque::from([LandObservation::Pending {
+        reason: "CI_PENDING".into(),
+    }]);
+    let document = document("routine", None);
+    let mut journal = Journal::default();
+    let pending = run(&document, &mut owner, &mut journal);
+    let record = node(&pending, "land").land.as_ref().unwrap();
+    assert_eq!(record.wake_at.unwrap().as_micros(), 60_000_000);
+    assert_eq!(record.pending_observations, 1);
+    // Tick wake discovery reads the checkpoint deadline.
+    assert_eq!(pending.wake_at, record.wake_at);
+    assert_eq!(owner.lands.len(), 1);
+
+    journal.0 = Some(serde_json::from_slice(&serde_json::to_vec(&pending).unwrap()).unwrap());
+    owner.wall_seconds = 59;
+    let early = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(early.checkpoint, pending);
+    assert_eq!(owner.lands.len(), 1);
+
+    owner.wall_seconds = 60;
+    let landed = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(landed.status, GraphStatus::Complete);
+    let land = node(&landed.checkpoint, "land");
+    assert_eq!(land.state, NodeState::Succeeded);
+    assert!(land.land.as_ref().unwrap().wake_at.is_none());
+    assert!(landed.checkpoint.wake_at.is_none());
+    assert_eq!(owner.lands.len(), 2);
+}
+
+/// Run `nodes` with reviewers ending in `verdict`, returning the land node.
+fn land_outcome(nodes: serde_json::Value, verdict: &'static str) -> (Owner, NodeProgress) {
+    let document: GraphDocument =
+        serde_json::from_value(json!({"schema_version":1, "graph_id":"g-land", "nodes":nodes}))
+            .unwrap();
+    let mut owner = owner();
+    owner.review_verdict = Some(verdict);
+    let checkpoint = run(&document, &mut owner, &mut Journal::default());
+    let land = node(&checkpoint, "land").clone();
+    (owner, land)
+}
+
+#[test]
+fn a_failed_review_routed_to_land_never_calls_the_host() {
+    let (owner, land) = land_outcome(
+        json!([
+            {"id":"write", "access":"worktree_write", "worktree":"/wt/feature", "delivery":"pr",
+             "prompt":"write it", "route":{"alias":"senior"}},
+            {"id":"review", "access":"read_only", "prompt":"review", "depends_on":["write"],
+             "route":{"alias":"senior"}},
+            {"id":"accepted", "kind":"gate", "access":"read_only", "depends_on":["review"],
+             "inputs":[{"node":"review", "outputs":["verdict"]}], "on_fail":"land",
+             "condition":{"type":"verdict", "expected":"VERDICT: PASS", "threshold":"all"}},
+            {"id":"ci", "kind":"gate", "access":"read_only", "depends_on":["write"],
+             "condition":{"type":"ci", "target":"feature/x"}},
+            {"id":"land", "kind":"land", "access":"read_only", "depends_on":["accepted", "ci"],
+             "land":{"node":"write", "tier":"routine"}}
+        ]),
+        "VERDICT: REPAIR",
+    );
+    assert!(owner.lands.is_empty());
+    assert_eq!(land.state, NodeState::Failed);
+    assert!(land.land.is_none());
+    let error = land.advance_error.unwrap();
+    assert!(
+        error.contains("no passing verdict gate") && error.contains(WRITE_HEAD),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_review_of_an_earlier_head_never_lands_a_continuation() {
+    // write H1, review H1, PASS, repair H2, CI, land: H2 was never reviewed.
+    let (owner, land) = land_outcome(
+        json!([
+            {"id":"write", "access":"worktree_write", "worktree":"/wt/feature", "delivery":"pr",
+             "prompt":"write it", "route":{"alias":"senior"}},
+            {"id":"review", "access":"read_only", "prompt":"review", "depends_on":["write"],
+             "route":{"alias":"senior"}},
+            {"id":"accepted", "kind":"gate", "access":"read_only", "depends_on":["review"],
+             "inputs":[{"node":"review", "outputs":["verdict"]}],
+             "condition":{"type":"verdict", "expected":"VERDICT: PASS", "threshold":"all"}},
+            {"id":"repair", "access":"worktree_write", "worktree":"/wt/feature", "continues":"write",
+             "prompt":"polish", "depends_on":["accepted"], "route":{"alias":"senior"}},
+            {"id":"ci", "kind":"gate", "access":"read_only", "depends_on":["repair"],
+             "condition":{"type":"ci", "target":"feature/x"}},
+            {"id":"land", "kind":"land", "access":"read_only", "depends_on":["ci"],
+             "land":{"node":"write", "tier":"routine"}}
+        ]),
+        "VERDICT: PASS",
+    );
+    assert!(owner.lands.is_empty());
+    assert_eq!(land.state, NodeState::Failed);
+    let error = land.advance_error.unwrap();
+    assert!(
+        error.contains(REPAIR_HEAD) && error.contains(&format!("accepted passed {WRITE_HEAD}")),
+        "{error}"
+    );
+
+    // A reviewer pinned to the writer's commit judged H1 even when it ran
+    // after the repair.
+    let mut nodes = nodes("routine");
+    nodes[3]["source"] = json!({"type":"node", "node":"write"});
+    nodes[3]["depends_on"] = json!(["repair", "write"]);
+    let (owner, land) = land_outcome(nodes, "VERDICT: PASS");
+    assert!(owner.lands.is_empty());
+    assert!(
+        land.advance_error
+            .unwrap()
+            .contains(&format!("accepted passed {WRITE_HEAD}"))
+    );
 }
 
 fn refusal(value: serde_json::Value) -> String {

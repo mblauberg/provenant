@@ -181,21 +181,26 @@ pub(super) fn evaluate<O: AttemptOwner>(
             truncated: false,
         },
     };
-    if observation
+    // An invalid SHA is an incomplete observation, like a missing one.
+    observation.head_sha = observation
         .head_sha
-        .as_ref()
-        .is_none_or(|sha| sha.parse::<provenant_core::GitOid>().is_err())
+        .filter(|sha| sha.parse::<provenant_core::GitOid>().is_ok());
+    if observation.head_sha.is_none()
         && matches!(observation.state, CiState::Passed | CiState::Failed)
     {
         observation.state = CiState::Unavailable;
         observation.summary = "CI observation has no valid head SHA".into();
         observation.failed_checks.clear();
     }
-    observation.head_sha = observation.head_sha.map(|sha| bounded(&sha, 64));
     observation.bound_failed_checks(max_bytes, max_checks);
-    let superseded = prior.as_ref().is_some_and(|prior| {
-        prior.head_sha != observation.head_sha && observation.head_sha.is_some()
-    });
+    // The gate stays bound to the last known head: an observation without a
+    // SHA keeps it, and only a different known SHA supersedes it.
+    let bound = prior.as_ref().and_then(|prior| prior.head_sha.clone());
+    let superseded = bound
+        .as_ref()
+        .zip(observation.head_sha.as_ref())
+        .is_some_and(|(bound, observed)| bound != observed);
+    let head_sha = observation.head_sha.clone().or(bound);
     let mut anchor = prior.as_ref().and_then(|e| e.first_observed_stamp.clone());
     let mut reanchors = prior.as_ref().map_or(0, |e| e.clock_reanchors);
     let mut reanchor_reason = prior.as_ref().and_then(|e| e.clock_reanchor_reason.clone());
@@ -257,7 +262,7 @@ pub(super) fn evaluate<O: AttemptOwner>(
         clock_reanchor_reason: reanchor_reason,
         state,
         summary: bounded(&observation.summary, OUTPUT_FIELD_BYTES),
-        head_sha: observation.head_sha,
+        head_sha,
         failed_checks: observation.failed_checks,
         check_names: names,
         truncated: observation.truncated,

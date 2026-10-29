@@ -1000,3 +1000,52 @@ fn ci_composite_target_resolves_a_transitive_external_ancestor() {
     );
     assert!(validate_plan(&doc).is_ok());
 }
+
+#[test]
+fn ci_observation_without_a_sha_keeps_the_bound_head_across_replay() {
+    let mut incomplete = observation(CiState::Pending, "head unknown");
+    incomplete.head_sha = None;
+    let mut owner = Owner {
+        tick: true,
+        backoff: CiPollBackoff {
+            initial_seconds: 60,
+            max_seconds: 240,
+        },
+        observations: VecDeque::from([
+            observation(CiState::Pending, "A running"),
+            incomplete,
+            observation(CiState::Pending, "A still running"),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    let replay = |journal: &mut Journal, run: &GraphRun| {
+        journal.0 =
+            Some(serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap());
+    };
+    let first = advance(&document(), &mut owner, &mut journal).unwrap();
+    replay(&mut journal, &first);
+    for (seconds, observations, wake) in [(60, 2, 180), (180, 3, 420)] {
+        owner.wall_seconds = seconds;
+        owner.monotonic_micros = u64::try_from(seconds).unwrap() * 1_000_000;
+        let run = advance(&document(), &mut owner, &mut journal).unwrap();
+        let ci = run.checkpoint.nodes[0].ci.as_ref().unwrap();
+        assert_eq!(ci.head_sha.as_deref(), Some("a".repeat(40).as_str()));
+        // No head change: neither the timeout anchor nor the backoff resets.
+        assert_eq!(ci.pending_observations, observations);
+        assert_eq!(ci.elapsed_seconds, u64::try_from(seconds).unwrap());
+        assert_eq!(
+            ci.first_observed_stamp
+                .as_ref()
+                .unwrap()
+                .host_monotonic_micros,
+            0
+        );
+        assert_eq!(
+            run.checkpoint.wake_at.unwrap().as_micros(),
+            wake * 1_000_000
+        );
+        replay(&mut journal, &run);
+    }
+    assert_eq!(owner.targets.len(), 3);
+}

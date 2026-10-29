@@ -177,6 +177,8 @@ fn filled_land(tier: provenant_records::workflow::RiskTier) -> LandRecord {
         }),
         pull_request: Some(u64::MAX),
         note: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
+        wake_at: Some(envelope::latest()),
+        pending_observations: u64::MAX,
     }
 }
 

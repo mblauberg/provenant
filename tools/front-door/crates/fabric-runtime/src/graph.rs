@@ -2100,12 +2100,20 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 continue;
             }
             if let Some(spec) = &node.land {
-                if structural_pause.is_none() && checkpoint.pause_reason.is_none() {
+                let wall_now = owner.wall_now();
+                let waiting = owner.respect_ci_wake()
+                    && checkpoint.nodes[node_index]
+                        .land
+                        .as_ref()
+                        .and_then(|record| record.wake_at)
+                        .is_some_and(|wake| wall_now.is_none_or(|now| now < wake));
+                if structural_pause.is_none() && checkpoint.pause_reason.is_none() && !waiting {
                     land::advance(
                         node_index,
                         node,
                         spec,
                         &plan,
+                        &positions,
                         &mut checkpoint,
                         owner,
                         journal,
@@ -2362,7 +2370,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 // so a framing node between a lens and the writer is skipped.
                 let mut distinct_attempts: Vec<String> = Vec::new();
                 if node.distinct_from == Some(DistinctFrom::Dependencies) {
-                    let mut pending: Vec<&String> = node.depends_on.iter().collect();
+                    // Composite members are dependencies through after_expansion.
+                    let mut pending: Vec<&String> = node.dependencies().collect();
                     let mut seen = std::collections::BTreeSet::new();
                     while let Some(id) = pending.pop() {
                         let Some(index) = positions.get(id) else {
@@ -2377,7 +2386,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 .iter()
                                 .filter_map(|attempt| attempt.attempt_ref.clone()),
                         );
-                        pending.extend(plan.nodes[*index].depends_on.iter());
+                        pending.extend(plan.nodes[*index].dependencies());
                     }
                     distinct_attempts.sort();
                     distinct_attempts.dedup();
@@ -2479,6 +2488,19 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     _ => None,
                 };
+                // Every selected upstream finding identity needs a disposition.
+                let upstream_findings: std::collections::BTreeSet<String> =
+                    if node.dispositions.is_empty() {
+                        Default::default()
+                    } else {
+                        node.inputs
+                            .iter()
+                            .filter(|input| input.outputs.contains(&OutputKind::Findings))
+                            .filter_map(|input| positions.get(&input.node))
+                            .filter_map(|index| checkpoint.nodes[*index].outputs.as_ref())
+                            .flat_map(|outputs| outputs.findings.iter().map(|f| f.id.clone()))
+                            .collect()
+                    };
                 let mut settled_result = None;
                 let should_continue = {
                     let progress = &mut checkpoint.nodes[node_index];
@@ -2523,7 +2545,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 branch,
                                 commit,
                             );
-                            let disposition_error = disposition_error(&node.dispositions, &outputs);
+                            let disposition_error =
+                                disposition_error(&node.dispositions, &upstream_findings, &outputs);
                             let outcome = if warned {
                                 AttemptOutcome::OtherFailure
                             } else if outcome == AttemptOutcome::Succeeded
@@ -3691,9 +3714,14 @@ fn prefix(text: &str, max: usize) -> &str {
 }
 
 /// Why settled outputs lack the dispositions a node declares, if they do.
-/// A findings block must parse, and each finding needs a disposition from the
-/// declared list with a non-empty reason.
-fn disposition_error(dispositions: &[String], outputs: &NodeOutputs) -> Option<String> {
+/// A findings block must parse, each finding needs a disposition from the
+/// declared list with a non-empty reason, and every selected upstream finding
+/// identity must appear exactly once.
+fn disposition_error(
+    dispositions: &[String],
+    upstream: &std::collections::BTreeSet<String>,
+    outputs: &NodeOutputs,
+) -> Option<String> {
     if dispositions.is_empty() || outputs.result.is_none() {
         return None;
     }
@@ -3728,6 +3756,14 @@ fn disposition_error(dispositions: &[String], outputs: &NodeOutputs) -> Option<S
             return Some(format!(
                 "finding {} needs a reason for its disposition",
                 finding.id
+            ));
+        }
+    }
+    for id in upstream {
+        let count = outputs.findings.iter().filter(|f| &f.id == id).count();
+        if count != 1 {
+            return Some(format!(
+                "upstream finding {id} needs exactly one disposition of {allowed}; found {count}"
             ));
         }
     }
@@ -4498,6 +4534,61 @@ mod tests {
     }
 
     #[test]
+    fn distinct_from_dependencies_excludes_the_authors_inside_an_expanded_council() {
+        // The council shape: a framing subject, a lens composite whose members
+        // are dependencies only through expansion, then the verifier.
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "g-council", "nodes": [
+                {"id": "subject", "access": "read_only", "prompt": "frame",
+                 "route": {"adapter": "first", "model": "first/model"}},
+                {"id": "lenses", "kind": "composite", "access": "read_only",
+                 "depends_on": ["subject"], "composite": {"nodes": [
+                    {"id": "lens-a", "access": "read_only", "prompt": "a", "depends_on": ["subject"],
+                     "route": {"adapter": "first", "model": "first/model"}},
+                    {"id": "lens-b", "access": "read_only", "prompt": "b", "depends_on": ["subject"],
+                     "route": {"adapter": "first", "model": "first/model"}}
+                 ], "exports": [{"node": "lens-a", "outputs": ["result"]}]}},
+                {"id": "verify", "access": "read_only", "prompt": "falsify", "depends_on": ["lenses"],
+                 "distinct_from": "dependencies",
+                 "route": {"adapter": "first", "model": "first/model"}}
+            ]
+        }))
+        .unwrap();
+        let mut owner = FakeOwner {
+            observations: [
+                done_as("h/1"),
+                done_as("h/2"),
+                done_as("h/3"),
+                done_as("h/4"),
+            ]
+            .into(),
+            families: [
+                ("h/1".to_owned(), "google".to_owned()),
+                ("h/2".to_owned(), "anthropic".to_owned()),
+                ("h/3".to_owned(), "anthropic".to_owned()),
+                ("h/4".to_owned(), "anthropic".to_owned()),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(
+            owner.distinct_from.last().unwrap(),
+            &["h/1", "h/2", "h/3"].map(String::from)
+        );
+        let verify = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "verify")
+            .unwrap();
+        let separation = verify.separation.as_ref().unwrap();
+        assert_eq!(separation.excluded, ["google", "anthropic"]);
+        // The verifier shares the lens authors' family, so nothing separated it.
+        assert_eq!(separation.outcome, SeparationOutcome::Unavailable);
+    }
+
+    #[test]
     fn a_preferred_separation_falls_back_with_a_recorded_note_instead_of_failing() {
         let (_, checkpoint) = separation_run(Some(FamilyStrength::Prefer), "anthropic");
         assert!(checkpoint.successful());
@@ -4600,6 +4691,64 @@ mod tests {
             synthesis_run(&findings_text("")).state,
             NodeState::Succeeded
         );
+    }
+
+    #[test]
+    fn a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once() {
+        let disposed = |id: &str| {
+            format!(
+                "{{\"id\":\"{id}\",\"severity\":\"high\",\"file\":\"a.rs\",\"line\":null,\"summary\":\"s\",\"status\":\"open\",\"disposition\":\"accepted\",\"reason\":\"reproduced\"}}"
+            )
+        };
+        let run = |text: &str| {
+            let mut synthesis = node("synthesis", route("first"));
+            synthesis.kind = Some(NodeKind::Synthesise);
+            synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+            synthesis.depends_on = vec!["review".into()];
+            synthesis.inputs = vec![GraphInput {
+                extra: Default::default(),
+                node: "review".into(),
+                outputs: vec![OutputKind::Findings],
+            }];
+            let mut owner = FakeOwner {
+                observations: [
+                    terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                    terminal_with_result(AttemptOutcome::Succeeded, text),
+                ]
+                .into(),
+                ..Default::default()
+            };
+            advance(
+                &graph(vec![node("review", route("first")), synthesis]),
+                &mut owner,
+                &mut MemoryJournal::default(),
+            )
+            .unwrap()
+            .checkpoint
+            .nodes
+            .remove(1)
+        };
+        assert_eq!(
+            run(&findings_text(&disposed("F1"))).state,
+            NodeState::Succeeded
+        );
+        for (text, found) in [
+            (findings_text(""), "found 0"),
+            (findings_text(&disposed("F9")), "found 0"),
+            (
+                findings_text(&format!("{},{}", disposed("F1"), disposed("F1"))),
+                "found 2",
+            ),
+        ] {
+            let progress = run(&text);
+            assert_eq!(progress.state, NodeState::Failed, "{text}");
+            let reason = progress.advance_error.unwrap();
+            assert!(
+                reason.contains("upstream finding F1 needs exactly one disposition")
+                    && reason.contains(found),
+                "{reason}"
+            );
+        }
     }
 
     #[test]

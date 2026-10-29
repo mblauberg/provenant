@@ -167,6 +167,8 @@ fn land_skeleton(tier: provenant_records::workflow::RiskTier) -> LandRecord {
         }),
         pull_request: Some(u64::MAX),
         note: Some(String::new()),
+        wake_at: Some(latest()),
+        pending_observations: u64::MAX,
     }
 }
 

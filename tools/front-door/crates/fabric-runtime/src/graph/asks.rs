@@ -384,7 +384,10 @@ fn next_wake(checkpoint: &GraphCheckpoint) -> Option<WallTime> {
                 .nodes
                 .iter()
                 .filter(|node| node.state == NodeState::Running)
-                .filter_map(|node| node.ci.as_ref().and_then(|ci| ci.wake_at)),
+                .filter_map(|node| {
+                    let ci = node.ci.as_ref().and_then(|ci| ci.wake_at);
+                    ci.or_else(|| node.land.as_ref().and_then(|land| land.wake_at))
+                }),
         )
         .min()
 }
