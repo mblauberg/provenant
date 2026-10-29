@@ -698,9 +698,10 @@ SHA-256 of the complete stored result's raw bytes. This identifies the stored
 artifact: it is not a hash of the excerpt or of the redacted output returned by
 run output reads, and cannot be verified by hashing those redacted bytes when
 redaction changed the content. The runtime applies stateful credential
-redaction while streaming the result. Its `excerpt` is a UTF-8 prefix of at
-most 4096 bytes of the redacted text, and `truncated` indicates that either the
-stored result or redacted text exceeded that window. A local attempt may also
+redaction while streaming the result. Its `excerpt` is the longest UTF-8 prefix
+of the redacted text whose canonical JSON encoding fits in 4096 bytes, so
+control characters count at their escaped size. `truncated` indicates that the
+stored result, the redacted text or the encoded excerpt exceeded that window. A local attempt may also
 have a run-file path. The runtime retains only the excerpt and a 16 KiB tail
 of the redacted text for parsing.
 
@@ -771,6 +772,50 @@ detect tampering. Cancelling a graph persists the admission fence first.
 - Test: `crates/fabric-runtime/src/graph.rs::checkpoint_attempts_require_launch_evidence_and_actor`;
   `::cancelled_graph_admits_no_work_and_resume_reuses_the_attempt_key`
 - Owner: `crates/fabric-runtime/src/graph.rs`
+
+### Checkpoint envelope
+
+A graph checkpoint, with its document and host directory, must stay within
+16 MiB of canonical JSON. Before the first save, the runtime computes a
+worst-case size for the expanded plan and refuses a plan that could exceed the
+envelope. The refusal names the bound, for example `graph checkpoint could
+reach 25903705 bytes, over its 16777216-byte limit`. Host preflight shows the
+same message. The bound counts the document and admitted expansions at their
+actual size. To that it adds, for each planned node, the most its progress row
+can hold:
+
+| Stored text | Canonical cap |
+| --- | --- |
+| Result excerpt (composite) | 4096 (65536) bytes |
+| Findings list | 9216 bytes, otherwise the block is invalid |
+| Warning | 512 bytes each, at most 4 |
+| Verdict, path, branch, commit, gate reason, CI summary, PR URL | 1024 bytes each |
+| Advance error, expansion pause, loop reason | 2048 bytes each |
+| Usage failure and unknown-cost reason | 512 bytes each |
+| Graph pause reason | 4096 bytes |
+| Planner fragment and handoff note | 24576 and 8192 bytes, otherwise invalid |
+| Host attempt reference, actor and boot identity | 256 bytes each, reserved |
+
+The runtime cuts each runtime string to its cap when it stores it. Lists that
+grow during a run keep only their newest entries and count the rest:
+`unknown_usage` keeps 64 lines with `unknown_usage_omitted`, and
+`usage_events` keeps 128 events with `usage_events_omitted`. Events are emitted
+once, when their attempt settles. Resume refuses an extension longer than
+256 bytes or one that would take the graph past 256 extensions. A planner
+admission or loop extension whose plan would exceed the envelope pauses with
+that message instead of growing the checkpoint. A checkpoint loads under its
+byte limit alone: the member limit is half the byte limit, so a checkpoint that
+saved can be read back.
+- Why: a graph that was accepted cannot later stop on a checkpoint too large
+  to save or load.
+- Test: `crates/fabric-runtime/src/graph/envelope_tests.rs::worst_case_checkpoint_fits_its_bound`;
+  `::an_oversized_graph_is_refused_before_its_first_save_naming_the_size`;
+  `::a_graph_at_the_default_node_limit_is_admitted`;
+  `::a_loop_extension_past_the_envelope_pauses_instead_of_growing`;
+  `::usage_events_keep_the_newest_and_count_the_rest_without_churn`;
+  `::extensions_are_bounded_in_length_and_count`;
+  `::a_checkpoint_within_the_byte_limit_loads_past_the_old_member_limit`
+- Owner: `crates/fabric-runtime/src/graph/envelope.rs`
 
 ### Fallback only for unavailability
 

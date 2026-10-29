@@ -762,6 +762,9 @@ pub(super) fn prepare_decision_extension(
     if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
         return Err(reason);
     }
+    if let Some(reason) = envelope::reason(document, &checkpoint.expansions, &plan) {
+        return Err(reason);
+    }
     Ok(())
 }
 
@@ -793,8 +796,12 @@ pub(super) fn refresh_pause(checkpoint: &mut GraphCheckpoint) {
         .as_ref()
         .is_none_or(|r| r.starts_with("loops paused:") || r.starts_with("loop "))
     {
-        checkpoint.pause_reason =
-            (!reasons.is_empty()).then(|| format!("loops paused: {}", reasons.join("; ")));
+        checkpoint.pause_reason = (!reasons.is_empty()).then(|| {
+            bounded(
+                &format!("loops paused: {}", reasons.join("; ")),
+                PAUSE_REASON_BYTES,
+            )
+        });
     }
 }
 

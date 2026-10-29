@@ -78,6 +78,13 @@ pub(super) fn validate_spec(node: &GraphNode) -> Result<(), &'static str> {
 
 /// A complete fenced block must fit in one existing capture window. Never
 /// parse a clipped prefix or infer an honest stop from prose.
+/// Raw cap on a planner or handoff block, and the canonical bytes it may
+/// occupy once stored in a checkpoint.
+const BLOCK_BYTES: usize = 12 * 1024;
+pub(super) const STORED_BLOCK_BYTES: usize = 2 * BLOCK_BYTES;
+const NOTE_RAW_BYTES: usize = 4096;
+pub(super) const STORED_NOTE_BYTES: usize = 2 * NOTE_RAW_BYTES;
+
 fn block<'a>(
     capture: &'a crate::result_capture::CapturedResult,
     tag: &str,
@@ -104,8 +111,13 @@ fn block<'a>(
     let (json, _) = rest
         .split_once("\n```")
         .ok_or_else(|| format!("{tag} block incomplete"))?;
-    if json.len() > 12 * 1024 {
-        return Err(format!("{tag} block exceeds 12288 bytes"));
+    if json.len() > BLOCK_BYTES {
+        return Err(format!("{tag} block exceeds {BLOCK_BYTES} bytes"));
+    }
+    if encoded_len(json) > STORED_BLOCK_BYTES {
+        return Err(format!(
+            "{tag} block has too many escaped characters to store in {STORED_BLOCK_BYTES} bytes"
+        ));
     }
     Ok(Some(json))
 }
@@ -121,12 +133,12 @@ pub(super) fn handoff(
     if handoff.schema_version != 1
         || handoff.status != "stopped_early"
         || handoff.note.trim().is_empty()
-        || handoff.note.len() > 4096
+        || handoff.note.len() > NOTE_RAW_BYTES
+        || encoded_len(&handoff.note) > STORED_NOTE_BYTES
     {
-        return Err(
-            "handoff requires schema_version 1, status stopped_early and a note of 1..4096 bytes"
-                .into(),
-        );
+        return Err(format!(
+            "handoff requires schema_version 1, status stopped_early and a note of 1..{NOTE_RAW_BYTES} bytes that stores in {STORED_NOTE_BYTES}"
+        ));
     }
     Ok(Some(handoff.note))
 }
@@ -450,7 +462,7 @@ fn coordinate(
     Ok(())
 }
 
-fn generous() -> crate::config::GraphLimits {
+pub(super) fn generous() -> crate::config::GraphLimits {
     crate::config::GraphLimits {
         nodes: usize::MAX,
         edges: usize::MAX,
@@ -558,6 +570,7 @@ pub(super) fn remaining(
 /// Validate the entire prospective graph before publishing any added node.
 pub(super) fn settle(
     node: &PlannedNode,
+    source: &GraphDocument,
     document: &GraphDocument,
     checkpoint: &mut GraphCheckpoint,
     capture: Option<&crate::result_capture::CapturedResult>,
@@ -603,7 +616,7 @@ pub(super) fn settle(
                 if let Some(outputs) = &mut checkpoint.nodes[index].outputs {
                     outputs.warnings.push(bounded(
                         &format!("ignored optional handoff: {reason}"),
-                        MAX_ADVANCE_ERROR_BYTES,
+                        WARNING_BYTES,
                     ));
                 }
                 return None;
@@ -630,6 +643,11 @@ pub(super) fn settle(
         }
         let (plan, positions) = validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
         if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
+            return Err(reason);
+        }
+        let mut expansions = checkpoint.expansions.clone();
+        expansions.push(addition.clone());
+        if let Some(reason) = envelope::reason(source, &expansions, &plan) {
             return Err(reason);
         }
         Ok((addition, plan, positions, preview))

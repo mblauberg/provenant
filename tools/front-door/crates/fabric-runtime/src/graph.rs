@@ -18,6 +18,7 @@ use thiserror::Error;
 #[path = "graph/ci_tests.rs"]
 mod ci_tests;
 mod composites;
+mod envelope;
 #[cfg(test)]
 #[path = "graph/forward_compatibility.rs"]
 mod forward_compatibility;
@@ -28,7 +29,33 @@ pub use loops::{LoopAsk, LoopDecision, LoopRound, LoopScope, LoopSpec, close_res
 pub use plans::{Expansion, PlanSpec, RemainingBudgets};
 
 const MAX_CHECKPOINT_BYTES: u64 = 16_777_216;
+/// Every JSON member costs at least two bytes, so the byte limit binds first.
+const MAX_CHECKPOINT_MEMBERS: usize = MAX_CHECKPOINT_BYTES as usize / 2;
 const MAX_ADVANCE_ERROR_BYTES: usize = 2_048;
+// Canonical-byte shares for runtime text stored in a checkpoint. The envelope
+// bound in `graph/envelope.rs` adds them up for each plan before admission.
+const RESULT_EXCERPT_BYTES: usize = 4_096;
+const COMPOSITE_EXCERPT_BYTES: usize = 65_536;
+/// The raw findings block is at most 8 KiB of JSON; canonical form adds at
+/// most a null `line` per finding.
+const FINDINGS_BYTES: usize = 9_216;
+const WARNING_BYTES: usize = 512;
+/// `make_outputs` records at most three warnings and a writer handoff one more.
+const MAX_WARNINGS: usize = 4;
+/// Usage failure and unknown-cost reasons.
+const NOTE_BYTES: usize = 512;
+const PAUSE_REASON_BYTES: usize = 4_096;
+/// Host-issued attempt references, actors and boot identities.
+const HOST_ID_BYTES: usize = 256;
+const MAX_UNKNOWN_USAGE: usize = 64;
+const MAX_USAGE_EVENTS: usize = 128;
+const MAX_EXTENSIONS: usize = 256;
+const EXTENSION_BYTES: usize = 256;
+
+/// Canonical encoding length, or `usize::MAX` when the value cannot be encoded.
+fn canonical_len<T: Serialize>(value: &T) -> usize {
+    CanonicalV1::bytes(value).map_or(usize::MAX, |bytes| bytes.as_bytes().len())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphDocument {
@@ -166,8 +193,16 @@ impl GraphNode {
 impl GraphDocument {
     /// Host preflight sees the same bounded static composite/loop expansion as
     /// the scheduler. Planner additions are checked separately before admission.
+    /// A plan whose worst-case checkpoint would not fit is refused here, naming
+    /// the size, rather than stopping mid-run on an oversized checkpoint.
     pub fn expanded(&self, limits: &crate::config::GraphLimits) -> Result<Self, String> {
-        loops::expand(self, &[], limits)
+        let expanded = loops::expand(self, &[], limits)?;
+        if let Ok((plan, _)) = validate_flat_plan(&expanded, &plans::generous())
+            && let Some(reason) = envelope::reason(self, &[], &plan)
+        {
+            return Err(reason);
+        }
+        Ok(expanded)
     }
 
     pub fn inspect(&self, limits: &crate::config::GraphLimits) -> Result<GraphInspection, String> {
@@ -270,6 +305,14 @@ fn default_ci_timeout() -> u64 {
 }
 
 fn is_zero_u8(value: &u8) -> bool {
+    *value == 0
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
+fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
@@ -427,12 +470,18 @@ pub struct GraphCheckpoint {
     pub cancelled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_reason: Option<String>,
-    /// Usage fields unavailable for settled attempts, including partial telemetry.
+    /// Usage fields unavailable for settled attempts, including partial
+    /// telemetry. Only the newest lines are kept.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unknown_usage: Vec<String>,
-    /// Durable, deduplicated observations of unavailable attempt telemetry.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub unknown_usage_omitted: usize,
+    /// Durable, deduplicated observations of unavailable attempt telemetry,
+    /// newest last. Older events beyond the cap are counted, not kept.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub usage_events: Vec<UnknownUsageEvent>,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub usage_events_omitted: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
     /// Warnings about ignored document limit overrides.
@@ -1185,7 +1234,7 @@ fn load_checkpoint(
         Limits {
             max_bytes: MAX_CHECKPOINT_BYTES,
             max_depth: 64,
-            max_members: 100_000,
+            max_members: MAX_CHECKPOINT_MEMBERS,
         },
     )?;
     if stored.schema_version != 1 {
@@ -1437,6 +1486,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             checkpoint
         }
         None => {
+            if let Some(reason) = envelope::reason(document, &[], &plan) {
+                return Err(GraphError::Invalid(reason));
+            }
             let checkpoint = GraphCheckpoint {
                 extra: Default::default(),
                 expansions: Vec::new(),
@@ -1457,7 +1509,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 integration_pin: None,
                 pause_reason: None,
                 unknown_usage: Vec::new(),
+                unknown_usage_omitted: 0,
                 usage_events: Vec::new(),
+                usage_events_omitted: 0,
                 extensions: Vec::new(),
                 limit_notes: Vec::new(),
                 graph_id: plan.graph_id.clone(),
@@ -1499,6 +1553,21 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             &provenant_os::fs::entropy_128().map_err(GraphError::Instance)?,
         ));
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
+    }
+    let added = extensions
+        .iter()
+        .filter(|e| !checkpoint.extensions.contains(e))
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(extension) = added.iter().find(|e| encoded_len(e) > EXTENSION_BYTES) {
+        return Err(GraphError::Extension(format!(
+            "{}: longer than {EXTENSION_BYTES} bytes",
+            bounded(extension, 64)
+        )));
+    }
+    if checkpoint.extensions.len() + added.len() > MAX_EXTENSIONS {
+        return Err(GraphError::Extension(format!(
+            "a graph keeps at most {MAX_EXTENSIONS} extensions"
+        )));
     }
     let mut effective_budget = budget.clone();
     for (extension, replay) in
@@ -1565,7 +1634,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
             let (preview_plan, _) = validate_flat_plan(&preview, &unbounded)
                 .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
-            if let Some(reason) = structural_limit_reason(&preview, &preview_plan, limits) {
+            if let Some(reason) = structural_limit_reason(&preview, &preview_plan, limits)
+                .or_else(|| envelope::reason(document, &checkpoint.expansions, &preview_plan))
+            {
                 for extension in extensions.iter().filter(|e| e.starts_with("loop.")) {
                     let name = extension
                         .strip_prefix("loop.")
@@ -1629,7 +1700,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .iter()
                     .any(|n| n.id == node.id && (n.handoff.is_some() || n.fragment.is_some()))
                 && let Some((next_expanded, next_plan, next_positions)) =
-                    plans::settle(node, &expanded, &mut checkpoint, None, limits)
+                    plans::settle(node, document, &expanded, &mut checkpoint, None, limits)
             {
                 validate_expanded_rows(&checkpoint, &next_plan)?;
                 owner
@@ -1654,7 +1725,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             structural_limit_reason(&expanded, &plan, limits)
         };
         if let Some(reason) = &structural_pause {
-            checkpoint.pause_reason = Some(reason.clone());
+            checkpoint.pause_reason = Some(bounded(reason, PAUSE_REASON_BYTES));
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
 
@@ -1754,7 +1825,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 } = condition
                 {
                     let mut host = owner.ci_status();
-                    let sampled = host.as_ref().and_then(|host| host.host_stamp());
+                    let sampled =
+                        host.as_ref()
+                            .and_then(|host| host.host_stamp())
+                            .map(|mut stamp| {
+                                stamp.boot_identity = bounded(&stamp.boot_identity, HOST_ID_BYTES);
+                                stamp
+                            });
                     let prior = checkpoint.nodes[node_index].ci.as_ref();
                     let mut anchor = prior.and_then(|e| e.first_observed_stamp.clone());
                     let mut reanchor_reason = prior.and_then(|e| e.clock_reanchor_reason.clone());
@@ -1821,7 +1898,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             clock_reanchors: reanchors,
                             clock_reanchor_reason: reanchor_reason,
                             state,
-                            summary: observation.summary,
+                            summary: bounded(&observation.summary, OUTPUT_FIELD_BYTES),
                         });
                         match state {
                             CiState::Pending => {
@@ -1846,7 +1923,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 progress.gate = Some(GateResult {
                     extra: Default::default(),
                     passed: reason.is_none(),
-                    reason,
+                    reason: reason.map(|reason| bounded(&reason, OUTPUT_FIELD_BYTES)),
                     on_fail: node.on_fail.clone(),
                 });
                 progress.outputs = Some(gate_outputs(progress.state == NodeState::Succeeded));
@@ -1915,13 +1992,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }) {
                         break;
                     }
-                    update_usage_warnings(&mut checkpoint, &effective_budget);
+                    update_usage_warnings(&mut checkpoint);
                     if let Some(reason) = checkpoint
                         .pause_reason
                         .clone()
                         .or_else(|| budget_reason(&checkpoint, &effective_budget))
                     {
-                        checkpoint.pause_reason = Some(reason);
+                        checkpoint.pause_reason = Some(bounded(&reason, PAUSE_REASON_BYTES));
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }
@@ -2078,17 +2155,27 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     Some(match owner.usage(reference) {
                         Ok(usage) => usage,
                         Err(error) => {
-                            usage_error = Some(error.to_string());
-                            cost_error = owner.cost_unknown_reason();
+                            usage_error = Some(bounded(&error.to_string(), NOTE_BYTES));
+                            cost_error = owner
+                                .cost_unknown_reason()
+                                .map(|reason| bounded(&reason, NOTE_BYTES));
                             AttemptUsage::default()
                         }
+                    })
+                    .map(|mut usage| {
+                        usage.cost_unknown_reason = usage
+                            .cost_unknown_reason
+                            .map(|reason| bounded(&reason, NOTE_BYTES));
+                        usage
                     })
                 } else {
                     if matches!(
                         &observation,
                         AttemptObservation::Terminal { launched: true, .. }
                     ) {
-                        cost_error = owner.cost_unknown_reason();
+                        cost_error = owner
+                            .cost_unknown_reason()
+                            .map(|reason| bounded(&reason, NOTE_BYTES));
                     }
                     None
                 };
@@ -2177,28 +2264,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         }
                     }
                 };
-                if let Some(reason) = usage_error {
-                    checkpoint.usage_events.push(UnknownUsageEvent {
-                        extra: Default::default(),
-                        node_id: node.id.clone(),
-                        route_index: key.route_index,
-                        metric: "telemetry".to_owned(),
-                        reason: Some(reason),
-                    });
+                if checkpoint.nodes[node_index]
+                    .attempts
+                    .last()
+                    .is_some_and(|attempt| attempt.state == AttemptState::Terminal)
+                {
+                    record_usage_events(&mut checkpoint, node_index, usage_error, cost_error);
                 }
-                if let Some(reason) = cost_error {
-                    checkpoint.usage_events.push(UnknownUsageEvent {
-                        extra: Default::default(),
-                        node_id: node.id.clone(),
-                        route_index: key.route_index,
-                        metric: "cost_usd".to_owned(),
-                        reason: Some(reason),
-                    });
-                }
-                update_usage_warnings(&mut checkpoint, &effective_budget);
+                update_usage_warnings(&mut checkpoint);
                 let appended = if settled_result.is_some() || node.plan.is_some() {
                     plans::settle(
                         node,
+                        document,
                         &expanded,
                         &mut checkpoint,
                         settled_result.as_ref(),
@@ -2240,7 +2317,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         {
             checkpoint.pull_request = owner
                 .deliver_graph(document, &checkpoint)
-                .map_err(GraphError::Run)?;
+                .map_err(GraphError::Run)?
+                .map(|url| bounded(&url, OUTPUT_FIELD_BYTES));
             checkpoint.delivered = true;
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
@@ -2587,56 +2665,96 @@ fn budget_reason(
     })
 }
 
-fn update_usage_warnings(checkpoint: &mut GraphCheckpoint, _budget: &crate::config::GraphBudget) {
+const USAGE_METRICS: [&str; 3] = ["tokens", "cost_usd", "wall_time_seconds"];
+
+fn unknown_metrics(attempt: &GraphAttempt) -> impl Iterator<Item = &'static str> + '_ {
+    let usage = attempt.usage.as_ref();
+    let counted = attempt.state == AttemptState::Terminal && attempt.launched;
+    USAGE_METRICS.into_iter().filter(move |name| {
+        counted
+            && !usage.is_some_and(|value| match *name {
+                "tokens" => value.tokens.is_some() && !value.tokens_partial,
+                "cost_usd" => value.cost_micro_usd.is_some() && !value.cost_partial,
+                _ => value.wall_time_seconds.is_some(),
+            })
+    })
+}
+
+/// Rebuild the unknown-usage lines, keeping the newest `MAX_UNKNOWN_USAGE`.
+fn update_usage_warnings(checkpoint: &mut GraphCheckpoint) {
     let mut warnings = Vec::new();
-    let mut events = Vec::new();
     for node in &checkpoint.nodes {
-        for attempt in node
-            .attempts
-            .iter()
-            .filter(|attempt| attempt.state == AttemptState::Terminal && attempt.launched)
-        {
-            let usage = attempt.usage.as_ref();
-            for (name, known) in [
-                (
-                    "tokens",
-                    usage.is_some_and(|value| value.tokens.is_some() && !value.tokens_partial),
-                ),
-                (
-                    "cost_usd",
-                    usage
-                        .is_some_and(|value| value.cost_micro_usd.is_some() && !value.cost_partial),
-                ),
-                (
-                    "wall_time_seconds",
-                    usage.is_some_and(|value| value.wall_time_seconds.is_some()),
-                ),
-            ] {
-                if !known {
-                    warnings.push(format!(
-                        "node {} route {}: {name} usage unknown",
-                        node.id, attempt.key.route_index
-                    ));
-                    events.push(UnknownUsageEvent {
-                        extra: Default::default(),
-                        node_id: node.id.clone(),
-                        route_index: attempt.key.route_index,
-                        metric: name.to_owned(),
-                        reason: if name == "cost_usd" {
-                            usage.and_then(|value| value.cost_unknown_reason.clone())
-                        } else {
-                            None
-                        },
-                    });
-                }
+        for attempt in &node.attempts {
+            for name in unknown_metrics(attempt) {
+                warnings.push(format!(
+                    "node {} route {}: {name} usage unknown",
+                    node.id, attempt.key.route_index
+                ));
             }
         }
     }
+    let omitted = warnings.len().saturating_sub(MAX_UNKNOWN_USAGE);
+    warnings.drain(..omitted);
     checkpoint.unknown_usage = warnings;
+    checkpoint.unknown_usage_omitted = omitted;
+}
+
+/// Record one usage event once, dropping the oldest beyond `MAX_USAGE_EVENTS`.
+fn push_usage_event(checkpoint: &mut GraphCheckpoint, event: UnknownUsageEvent) {
+    if checkpoint.usage_events.contains(&event) {
+        return;
+    }
+    checkpoint.usage_events.push(event);
+    let omitted = checkpoint
+        .usage_events
+        .len()
+        .saturating_sub(MAX_USAGE_EVENTS);
+    checkpoint.usage_events.drain(..omitted);
+    checkpoint.usage_events_omitted = checkpoint
+        .usage_events_omitted
+        .saturating_add(omitted as u64);
+}
+
+/// Events for an attempt that just settled: host telemetry and cost failures,
+/// then each metric the settled usage leaves unknown.
+fn record_usage_events(
+    checkpoint: &mut GraphCheckpoint,
+    node_index: usize,
+    usage_error: Option<String>,
+    cost_error: Option<String>,
+) {
+    let Some(attempt) = checkpoint.nodes[node_index].attempts.last() else {
+        return;
+    };
+    let node_id = checkpoint.nodes[node_index].id.clone();
+    let route_index = attempt.key.route_index;
+    let event = |metric: &str, reason: Option<String>| UnknownUsageEvent {
+        extra: Default::default(),
+        node_id: node_id.clone(),
+        route_index,
+        metric: metric.to_owned(),
+        reason,
+    };
+    let mut events = Vec::new();
+    if let Some(reason) = usage_error {
+        events.push(event("telemetry", Some(reason)));
+    }
+    if let Some(reason) = cost_error {
+        events.push(event("cost_usd", Some(reason)));
+    }
+    for name in unknown_metrics(attempt) {
+        let reason = (name == "cost_usd")
+            .then(|| {
+                attempt
+                    .usage
+                    .as_ref()
+                    .and_then(|usage| usage.cost_unknown_reason.clone())
+            })
+            .flatten();
+        events.push(event(name, reason));
+    }
     for event in events {
-        if !checkpoint.usage_events.contains(&event) {
-            checkpoint.usage_events.push(event);
-        }
+        push_usage_event(checkpoint, event);
     }
 }
 
@@ -3145,12 +3263,43 @@ fn route_is_bounded(route: &GraphRoute) -> bool {
 const OUTPUT_FIELD_BYTES: usize = 1024;
 const MAX_FINDINGS: usize = 32;
 
+/// Canonical JSON bytes of one character inside a string.
+fn encoded_char(character: char) -> usize {
+    match character {
+        '"' | '\\' | '\u{0008}' | '\t' | '\n' | '\u{000c}' | '\r' => 2,
+        character if character <= '\u{001f}' => 6,
+        character => character.len_utf8(),
+    }
+}
+
+/// Canonical JSON bytes of a string value, including its quotes.
+fn encoded_len(text: &str) -> usize {
+    text.chars().map(encoded_char).sum::<usize>() + 2
+}
+
+/// Longest prefix whose canonical encoding, quotes excluded, fits in `max`
+/// bytes. Every runtime string a checkpoint stores is cut this way, so the
+/// envelope bound holds whatever the text escapes to.
 fn bounded(text: &str, max: usize) -> String {
+    let mut used = 0;
+    let mut end = 0;
+    for (index, character) in text.char_indices() {
+        used += encoded_char(character);
+        if used > max {
+            break;
+        }
+        end = index + character.len_utf8();
+    }
+    text[..end].to_owned()
+}
+
+/// Longest UTF-8 prefix of at most `max` raw bytes, for prompt text.
+fn prefix(text: &str, max: usize) -> &str {
     let mut end = text.len().min(max);
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    text[..end].to_owned()
+    &text[..end]
 }
 
 fn make_outputs(
@@ -3178,7 +3327,7 @@ fn make_outputs(
         [head, tail]
     });
     if let Some(warning) = result_warning {
-        warnings.push(warning);
+        warnings.push(bounded(&warning, WARNING_BYTES));
     }
     let verdict = result
         .and_then(|capture| capture.verdict.as_deref())
@@ -3205,7 +3354,8 @@ fn make_outputs(
                         .all(|field| field.len() <= OUTPUT_FIELD_BYTES)
                 }))
             .then_some(block.findings)
-        });
+        })
+        .filter(|findings| canonical_len(findings) <= FINDINGS_BYTES);
     let findings = parsed.unwrap_or_else(|| {
         if result.is_some() {
             warnings.push("findings block missing or invalid".to_owned());
@@ -3213,7 +3363,7 @@ fn make_outputs(
         Vec::new()
     });
     let path = path.filter(|value| {
-        let valid = value.len() <= OUTPUT_FIELD_BYTES;
+        let valid = encoded_len(value) <= OUTPUT_FIELD_BYTES;
         if !valid {
             warnings.push("result path exceeds byte cap".to_owned());
         }
@@ -3225,14 +3375,19 @@ fn make_outputs(
             .filter(|capture| capture.verdict_invalid)
             .map(|_| "verdict malformed, repeated or not final".to_owned()),
         schema_version: 2,
-        result: result.map(|capture| ResultOutput {
-            extra: Default::default(),
-            digest: capture.digest.clone(),
-            excerpt: capture.excerpt.clone(),
-            truncated: capture.truncated || capture.source_truncated,
-            path,
+        result: result.map(|capture| {
+            let excerpt = bounded(&capture.excerpt, RESULT_EXCERPT_BYTES);
+            ResultOutput {
+                extra: Default::default(),
+                digest: capture.digest.clone(),
+                truncated: capture.truncated
+                    || capture.source_truncated
+                    || excerpt.len() < capture.excerpt.len(),
+                excerpt,
+                path,
+            }
         }),
-        verdict,
+        verdict: verdict.map(|value| bounded(&value, OUTPUT_FIELD_BYTES)),
         findings,
         branch: branch.map(|value| bounded(&value, OUTPUT_FIELD_BYTES)),
         commit: commit.map(|value| bounded(&value, OUTPUT_FIELD_BYTES)),
@@ -3252,7 +3407,7 @@ fn render_input(
     if node.inputs.is_empty() {
         return (node.prompt.clone(), false);
     }
-    let mut prompt = bounded(&node.prompt, cap);
+    let mut prompt = prefix(&node.prompt, cap).to_owned();
     if INPUT_OPEN.len() + INPUT_CLOSE.len() > cap.saturating_sub(prompt.len()) {
         return (prompt, true);
     }
@@ -5205,7 +5360,7 @@ mod tests {
             );
             let mut checkpoint = run.checkpoint;
             let events = checkpoint.usage_events.clone();
-            update_usage_warnings(&mut checkpoint, &budget);
+            update_usage_warnings(&mut checkpoint);
             assert_eq!(checkpoint.usage_events, events);
         }
     }
@@ -6819,6 +6974,9 @@ mod tests {
     }
     mod plan_tests {
         include!("graph/plan_tests.rs");
+    }
+    mod envelope_tests {
+        include!("graph/envelope_tests.rs");
     }
 }
 
