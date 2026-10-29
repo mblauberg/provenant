@@ -180,6 +180,29 @@ fn account_override_is_applied_before_preview_write_admission() -> Result {
     Ok(())
 }
 #[test]
+fn override_set_refuses_an_unknown_provider_without_writing() -> Result {
+    let rig = rig()?;
+    fs::create_dir_all(&rig.state)?;
+    let config = "schema_version = 1\n";
+    fs::write(rig.state.join("config.toml"), config)?;
+    let refused = call(
+        &rig,
+        &[
+            "route",
+            "override",
+            "set",
+            "--provider",
+            "coedx",
+            "--policy",
+            "off",
+        ],
+        2,
+    )?;
+    assert_ne!(refused["ok"], true, "{refused}");
+    assert_eq!(fs::read_to_string(rig.state.join("config.toml"))?, config);
+    Ok(())
+}
+#[test]
 fn override_set_echoes_replaces_lists_and_clears() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;

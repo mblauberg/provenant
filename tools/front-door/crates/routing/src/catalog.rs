@@ -1,3 +1,4 @@
+use crate::policy::Scoped;
 use crate::{
     ModelId, RoutingError,
     request::{effort_valid, identifier},
@@ -76,11 +77,11 @@ impl<'de> Deserialize<'de> for PacingOverride {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Input {
-            account: Option<String>,
-            provider: Option<String>,
+            account: Option<Scoped<String>>,
+            provider: Option<Scoped<String>>,
             policy: PacingPolicy,
             #[serde(default)]
-            schedule: crate::Schedule,
+            schedule: Option<Scoped<crate::Schedule>>,
             #[serde(rename = "starts_unix_seconds")]
             _starts: Option<serde::de::IgnoredAny>,
             #[serde(rename = "expires_unix_seconds")]
@@ -89,11 +90,19 @@ impl<'de> Deserialize<'de> for PacingOverride {
             _windows: Option<serde::de::IgnoredAny>,
         }
         let input = Input::deserialize(deserializer)?;
+        let mut malformed = false;
+        let account = Scoped::take(input.account, &mut malformed);
+        let provider = Scoped::take(input.provider, &mut malformed);
+        let schedule = Scoped::take(input.schedule, &mut malformed).unwrap_or_default();
         Ok(Self {
-            account: input.account,
-            provider: input.provider,
+            account,
+            provider,
             policy: input.policy,
-            schedule: input.schedule,
+            schedule: if malformed {
+                crate::Schedule::malformed()
+            } else {
+                schedule
+            },
         })
     }
 }
@@ -635,8 +644,10 @@ impl DomainConfig for RoutingConfig {
                     code: "selector",
                 });
             } else if !override_.schedule.valid() {
+                // Reported at the override, so recovery drops the override
+                // rather than its schedule, which would make it permanent.
                 errors.push(SectionError {
-                    field: format!("pacing_overrides.{index}.schedule"),
+                    field: format!("pacing_overrides.{index}"),
                     code: "schedule",
                 });
             }

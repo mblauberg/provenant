@@ -257,6 +257,37 @@ impl Schedule {
             && self.windows.len() <= MAX_SCHEDULE_WINDOWS
             && self.windows.iter().all(ScheduleWindow::valid)
     }
+    /// The schedule of a record whose scope was malformed: never valid and
+    /// never active, so validation reports the whole record.
+    pub(crate) fn malformed() -> Self {
+        Self {
+            starts: Some(1),
+            expires: Some(0),
+            ..Self::default()
+        }
+    }
+}
+
+/// A record's selector or schedule as written. A value of the wrong type
+/// decodes as malformed instead of failing, so validation drops or refuses the
+/// whole record. Dropping only the field would widen where or when it applies.
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(crate) enum Scoped<T> {
+    Valid(T),
+    Malformed(serde::de::IgnoredAny),
+}
+impl<T> Scoped<T> {
+    /// The written value, or `None` after flagging a malformed one.
+    pub(crate) fn take(field: Option<Self>, malformed: &mut bool) -> Option<T> {
+        match field? {
+            Self::Valid(value) => Some(value),
+            Self::Malformed(_) => {
+                *malformed = true;
+                None
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -386,10 +417,10 @@ impl<'de> Deserialize<'de> for ModelPolicyRule {
         #[derive(Deserialize, Default)]
         #[serde(default, deny_unknown_fields)]
         struct Input {
-            adapter: Option<String>,
-            model: Option<ModelId>,
-            account: Option<String>,
-            schedule: Schedule,
+            adapter: Option<Scoped<String>>,
+            model: Option<Scoped<ModelId>>,
+            account: Option<Scoped<String>>,
+            schedule: Option<Scoped<Schedule>>,
             policy: ModelPolicy,
             #[serde(rename = "starts_unix_seconds")]
             _starts: Option<serde::de::IgnoredAny>,
@@ -399,11 +430,20 @@ impl<'de> Deserialize<'de> for ModelPolicyRule {
             _windows: Option<serde::de::IgnoredAny>,
         }
         let input = Input::deserialize(deserializer)?;
+        let mut malformed = false;
+        let adapter = Scoped::take(input.adapter, &mut malformed);
+        let model = Scoped::take(input.model, &mut malformed);
+        let account = Scoped::take(input.account, &mut malformed);
+        let schedule = Scoped::take(input.schedule, &mut malformed).unwrap_or_default();
         Ok(Self {
-            adapter: input.adapter,
-            model: input.model,
-            account: input.account,
-            schedule: input.schedule,
+            adapter,
+            model,
+            account,
+            schedule: if malformed {
+                Schedule::malformed()
+            } else {
+                schedule
+            },
             policy: input.policy,
         })
     }

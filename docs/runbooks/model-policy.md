@@ -61,8 +61,9 @@ an empty `weekdays` list matches every day. Window end hours are exclusive and
 overnight windows wrap midnight. Schedules are validated at load: `starts`
 must precede `expires`, `tz` must name an IANA zone, and each window needs
 distinct start and end hours and distinct weekdays, with at most 16 windows. A
-rule with a malformed schedule is dropped with a warning, or refuses the
-configuration when it carries an enforced lane restriction.
+rule with a malformed schedule or selector, including a value of the wrong
+type, is dropped with a warning, or refuses the configuration when it carries
+an enforced lane restriction.
 `provenant route override list` shows policy and pacing schedules, whether
 each is active and the time remaining to expiry.
 

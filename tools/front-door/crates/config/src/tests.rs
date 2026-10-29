@@ -344,7 +344,6 @@ fn config_warns_on_optional_input_but_refuses_syntax_and_versions_without_echoin
             "unknown_key",
         ),
         ("schema_version=1\n[knobs]\nnope=1", "unknown_key"),
-        ("schema_version=1\nknobs=42", "type"),
         ("schema_version=1\n[domains.unknown]", "unknown_key"),
         ("schema_version=1\n[task_classes]", "unknown_key"),
         ("schema_version=1\n[knobs]\n'effort.shift'=1", "unknown_key"),

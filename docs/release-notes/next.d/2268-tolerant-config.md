@@ -6,8 +6,10 @@ lists all warnings with their file and key. Syntax, size, schema version,
 credentials, Git-boundary, authority and confinement checks remain strict, as do
 bundled assets. Recovery never widens a restriction: invalid capability knobs
 such as `lanes.publish`, enforced model policy, Fabric caps, graph limits and
-budgets, and quota ceilings refuse the file. Model policy recovers per field, so
-valid siblings of an invalid value stay in force.
+budgets, quota ceilings, and a `knobs` or `domains` value that is not a table
+refuse the file. Model policy recovers per field, so valid siblings of an
+invalid value stay in force, but a malformed selector or schedule drops its
+whole rule or pacing override.
 
 Persisted state accepts added fields across worktree builds. Agent JSON requests
 ignore unknown fields with source-qualified warnings. PR templates gain missing

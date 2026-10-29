@@ -120,7 +120,9 @@ wrap midnight. `Schedule::valid` is the single load-time check for both: it
 refuses `starts` at or after `expires`, an unknown time zone, more than 16
 windows, out-of-range or equal hours and duplicate or out-of-range weekdays.
 An invalid policy rule is dropped (a boundary when it restricts a lane); an
-invalid pacing override is dropped with a warning. A pacing override needs no
+invalid pacing override is dropped with a warning, reported at
+`pacing_overrides.N`. A selector or schedule of the wrong type invalidates its
+whole record in the same way, never just the field. A pacing override needs no
 expiry. `provenant route override set|list|clear` records, displays and
 removes pacing overrides; `list` also shows scheduled policy rules, each with
 its active state and remaining expiry time, and `set` echoes the recorded rule

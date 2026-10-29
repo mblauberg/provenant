@@ -1367,15 +1367,19 @@ fn reset_pool(roots: &Roots, request: &RouteReset) -> Result<(), EdgeError> {
     })
 }
 
+/// Refuse a provider the registry does not know before anything is written.
+fn known_provider(id: &str) -> Result<(), EdgeError> {
+    if REGISTRY.iter().any(|provider| provider.adapter.id() == id) {
+        Ok(())
+    } else {
+        Err(RoutingError::UnknownAdapter.into())
+    }
+}
+
 /// Record a provider's default pacing policy and describe what was recorded.
 fn set_pacing(roots: &Roots, request: &RoutePacing) -> Result<String, EdgeError> {
     let policy = policy_name(request.policy.into());
-    if !REGISTRY
-        .iter()
-        .any(|provider| provider.adapter.id() == request.provider)
-    {
-        return Err(RoutingError::UnknownAdapter.into());
-    }
+    known_provider(&request.provider)?;
     edit_config(roots, |document| {
         let routing = routing_table(document)?;
         let pacing = routing
@@ -1482,6 +1486,9 @@ fn same_scope(
 }
 
 fn set_override(roots: &Roots, request: &OverrideSet, now: i64) -> Result<Data, EdgeError> {
+    if let Some(provider) = &request.provider {
+        known_provider(provider)?;
+    }
     let starts = request
         .starts
         .as_deref()
