@@ -333,6 +333,18 @@ expansion_depth = 6
 expansion_depth = 12
 ```
 
+A host that configures neither `limits` nor `limit_ceiling` gets the default
+ceiling of 64. Setting either removes that default, so a tightened `limits`
+table is also the effective cap.
+
+Preset and graph `read_roots` must lie inside the project or its linked
+worktrees. List any other directory by absolute path:
+
+```toml
+[domains.fabric.graph]
+allowed_read_roots = ["/absolute/path/to/shared-reference"]
+```
+
 All allowed rounds count
 towards structural and prompt limits even if the first round passes. An
 extension adds to that expansion and must fit host ceilings. The safety bounds

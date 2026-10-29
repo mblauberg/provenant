@@ -8,6 +8,10 @@ bounded slice with a review lens. Roles choose routing tiers, and the chair
 chooses assignments, scopes, worktrees and acceptance evidence. A junior scout
 swarm remains read-only; it can share read roots without Git writer contention.
 
+Four presets are bundled: `scout-swarm`, `implement-with-lens`,
+`review-council` and `big-batch`, alongside the four stage shapes `single`,
+`chain`, `fan-out` and `fan-out-synthesise`.
+
 Inspect the resolved defaults and explain the exact graph before a run:
 
 ```sh
@@ -39,9 +43,24 @@ all role briefs and defaults.
 | Preset | Main parameters | Default work |
 | --- | --- | --- |
 | `scout-swarm` | `width = 4`, `read_roots = []` | Junior scouts, then senior synthesis |
-| `implement-with-lens` | `worktree`, `scope = ["."]`, `subject.commit = "HEAD"`, `lens_tier = "senior"`, `delivery = "none"` | Senior writer, then senior refactor lens |
-| `review-council` | `subject.commit = "HEAD"`, `worktree`, `correctness_tier`, `simplicity_tier`, `risk_tier` (each senior) | Advisory junior test lens, senior lenses and synthesis |
-| `big-batch` | `lane_one_worktree`, `lane_two_worktree`, `batch_worktree`, `lane_one_scope`, `lane_two_scope`, `integration_branch = "batch/graph"`, `width = 4`, `read_roots = []` | Scout, parallel writers, council, principal refactor, two-round repair and principal review |
+| `implement-with-lens` | `worktree`, `scope = ["."]`, `subject.commit = "HEAD"`, `base`, `spec`, `lenses`, `delivery = "none"` | Senior writer, then the lens list over the commit it wrote |
+| `review-council` | `subject.commit = "HEAD"`, `worktree`, `base`, `spec`, `lenses`, `risk`, `review_shape`, `risk_tags` | One lens role fanned out over `lenses`, then senior synthesis |
+| `big-batch` | `lanes`, `batch_worktree`, `base`, `spec`, `integration_branch = "batch/graph"`, `width = 4`, `read_roots = []` | Scout, one writer lane per `lanes` entry, council, principal refactor, two-round repair and review |
+
+Write list parameters in a TOML file and pass `--params-file lanes.toml`. The
+file holds top-level `name = value` pairs, one per preset parameter. `--set`
+overrides it. For example, a three-lane batch:
+
+```toml
+batch_worktree = "/absolute/path/to/batch-writer"
+base = "origin/main"
+spec = "#2187"
+lanes = [
+  { name = "api", worktree = "/absolute/path/to/lane-api", scope = ["src/api"], spec = "#2187" },
+  { name = "cli", worktree = "/absolute/path/to/lane-cli", scope = ["src/cli"], spec = "#2187" },
+  { name = "docs", worktree = "/absolute/path/to/lane-docs", scope = ["docs"], spec = "#2187" },
+]
+```
 
 ## Configure roles and stages
 
@@ -81,11 +100,22 @@ a scope array rather than text.
 Role profiles default to read-only access. A writer explicitly declares
 `access = "worktree_write"`, an existing `worktree` and literal relative
 `write_scope` paths. `tier` chooses a named routing pool. Use either `tier` or
-`route`; `route` accepts a pool name or a graph route table, and `effort`
-configures it. A curated `high-junior` pool must be configured separately.
-Increasing junior effort does not create that tier.
-A read-only role's `worktree` becomes an additional read root; it acquires no
-Git writer lock.
+`routes`; `routes` accepts pool names or graph route tables, and `effort`
+configures them. A read-only role's `worktree` becomes an additional read
+root; it acquires no Git writer lock.
+
+Two role fields shape review. `prompt_file` appends a bundled prompt, such as
+`code-review/lenses/tests`, to the role prompt; it takes one name or a list and
+refuses unknown names. `distinct_from = "writer"` requires the node's model
+family to differ from the family that wrote the node's source. Route selection
+excludes the writer's family and refuses a route that cannot satisfy it. When
+the source chain has no writer the constraint has no effect.
+
+An entry can fan out over a list parameter with `for_each = "${lenses}"`. Each
+item needs a `name` of lowercase letters, digits and dashes. The node ID is
+`ENTRY-NAME` and `${item.FIELD}` reads the item's fields in the role. Use
+`for_each` or `count`, not both. An item with a `when` value runs only when
+`risk_tags` contains that value.
 
 Each child preset keeps its own parameters and roles; an entry's `parameters`
 or `roles` tables customise that child. Command-line overrides use TOML values:
@@ -102,13 +132,26 @@ remain available; every slot, including synthesis, can contain a preset.
 
 ## Review and source subjects
 
-The implementation lens examines redundancy, test quality, cleanup and rigid
-over-engineering. `review-council` combines distinct test, correctness and
-simplicity lenses with synthesis. Junior reviews are advisory when the author
-is senior or principal. Counted acceptance reviews must be at or above the
-author's tier under `HARNESS.md`. Add a principal lens for high-risk areas and
-principal-authored refactoring. Synthesis reconciles the evidence and does not
-turn advisory votes into acceptance.
+`review-council` runs one `lens` role over the `lenses` list: correctness
+against the spec, design fit and reuse, simplicity, conventions and
+readability, and tests. `security-privacy` and `concurrency-data-errors` join
+when `risk_tags` names `security` or `concurrency`, and `adversarial` joins
+when it names `terminal`. `implement-with-lens` takes the same list, with
+correctness against the spec and simplicity by default. Every lens prompt
+carries the same context. The reviewer has read access to the whole
+repository, treats the diff stat and slices as navigation aids rather than the
+scope, reads callers, existing utilities and architecture, and reviews against
+the `spec` (an issue number or file) and the `base` (the diff reference). The
+subject node states both. Prompts live in
+`skills/code-review/references/lenses/`.
+
+The routing review shapes are canonical for who reviews. A lens whose `tier`
+is empty takes its pool from the shape that `routing.review.select_shape`
+picks for `risk` (or the `review_shape` override): `quick` runs one junior
+reviewer, `standard` two, and `deep` up to six with its named lenses. Conditional
+lenses add to that count. Set a lens `tier` to override the shape for that lens.
+`--explain` prints the selected shape. Synthesis reconciles the evidence and
+does not take a majority vote.
 
 Read roots permit scouting another worktree's uncommitted files. For a
 combined review, bind `source` to an immutable commit, a direct dependency's
@@ -146,22 +189,40 @@ repair contexts. Existing clean ancestor contexts fast-forward safely at
 admission; divergent contexts need chair reconciliation. Automatic worktree
 provisioning is outside this workflow.
 
-Bind each batch context explicitly:
+Bind each batch context explicitly, one `lanes` entry per writer:
 
 ```sh
 provenant run --preset big-batch --prompt-file batch.md \
-  --set 'parameters.lane_one_worktree="/absolute/path/to/lane-one"' \
-  --set 'parameters.lane_two_worktree="/absolute/path/to/lane-two"' \
-  --set 'parameters.batch_worktree="/absolute/path/to/batch-writer"' \
-  --set 'parameters.lane_one_scope=["src/one"]' \
-  --set 'parameters.lane_two_scope=["src/two"]' \
+  --params-file lanes.toml \
   --set 'parameters.integration_branch="batch/graph"' --explain
 ```
 
 Use read-only junior swarms for scouting and research. Give implementation
-lanes to seniors or a curated high-junior tier, and put long-horizon principal
-refactoring at batch end. Keep the refactor and over-engineering lens on most
-implementation lanes. Choose review depth from the risk and author tier.
+lanes to seniors, and put long-horizon principal refactoring at batch end.
+Choose review depth from the risk and author tier.
+
+A graph that reads `source = { type = "integration" }` pins the integration
+head when that source first resolves, and the head joins the graph ID. The
+graph stops before synthesis, and before a writer that starts from the pinned
+commit, if the branch has since moved. Rerun the graph to pin the new head.
+A fallback or retry writer that finds the pin already behind its own HEAD
+continues; a HEAD that diverged from the pin is still refused.
+
+## Read roots and planner limits
+
+A node's `read_roots`, and a preset `--read-root`, must resolve inside the
+project or its linked worktrees. Paths are canonicalised before the check, so
+a symlink cannot point out of the project. The host allows other directories
+through an absolute-path allow-list:
+
+```toml
+[domains.fabric.graph]
+allowed_read_roots = ["/absolute/path/to/shared-reference"]
+```
+
+A planner fragment cannot widen what its planner node holds. Each child
+`role` and `source` must equal the planner's, and each child `read_roots` entry
+must already be one of the planner's.
 
 Graph limits and host ceilings cover all children and every possible loop
 round. The ordinary dependency-depth limit remains four. The default host

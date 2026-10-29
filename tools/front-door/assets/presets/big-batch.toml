@@ -2,14 +2,13 @@ integration_branch = "${integration_branch}"
 stages = [
   { id = "scout", preset = "scout-swarm", parameters = { width = "${width}", read_roots = "${read_roots}" } },
   { id = "lanes", parallel = [
-    { id = "one", preset = "implement-with-lens", parameters = { worktree = "${lane_one_worktree}", scope = "${lane_one_scope}", delivery = "integrate:${integration_branch}" } },
-    { id = "two", preset = "implement-with-lens", parameters = { worktree = "${lane_two_worktree}", scope = "${lane_two_scope}", delivery = "integrate:${integration_branch}" } },
+    { id = "lane", for_each = "${lanes}", preset = "implement-with-lens", parameters = { worktree = "${item.worktree}", scope = "${item.scope}", spec = "${item.spec}", base = "${base}", delivery = "integrate:${integration_branch}" } },
   ] },
-  { id = "council", preset = "review-council", parameters = { subject = { type = "integration" }, worktree = "${batch_worktree}" } },
+  { id = "council", preset = "review-council", parameters = { subject = { type = "integration" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", risk = "${risk}", review_shape = "${review_shape}", risk_tags = "${risk_tags}" } },
   { id = "refactor", role = "refactor-principal" },
   { id = "repair", loop = { max_rounds = 2, until = "accept", stages = [
     { id = "fix", role = "repairer" },
-    { id = "review", preset = "review-council", parameters = { subject = { type = "node", node = "fix" }, worktree = "${batch_worktree}", correctness_tier = "principal", simplicity_tier = "principal", risk_tier = "principal" } },
+    { id = "review", preset = "review-council", parameters = { subject = { type = "node", node = "fix" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", risk = "${risk}", review_shape = "${review_shape}", risk_tags = "${risk_tags}" } },
     { id = "accept", kind = "gate", condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
   ] } },
 ]
@@ -21,11 +20,17 @@ expansion_depth = 64
 width = 4
 read_roots = []
 integration_branch = "batch/graph"
-lane_one_worktree = ""
-lane_two_worktree = ""
 batch_worktree = ""
-lane_one_scope = ["."]
-lane_two_scope = ["."]
+base = ""
+spec = ""
+risk = ""
+review_shape = ""
+risk_tags = []
+# One entry per lane: name, worktree, scope and spec. Supply with --params-file.
+lanes = [
+  { name = "one", worktree = "", scope = ["."], spec = "" },
+  { name = "two", worktree = "", scope = ["."], spec = "" },
+]
 
 [roles.refactor-principal]
 tier = "principal"

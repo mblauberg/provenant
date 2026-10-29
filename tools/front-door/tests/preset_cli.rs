@@ -444,3 +444,56 @@ fn integration_sourced_graph_identity_follows_the_integration_head()
     );
     Ok(())
 }
+
+#[test]
+fn params_file_supplies_lists_and_set_wins_over_it() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    let prompt = temp.path().join("prompt");
+    std::fs::write(&prompt, "brief")?;
+    let params = temp.path().join("params.toml");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let root_text = root.display().to_string();
+    std::fs::write(
+        &params,
+        format!(
+            "batch_worktree = '{root_text}'\nlanes = [{{name='a',worktree='{root_text}',scope=['x'],spec='#1'}},{{name='b',worktree='{root_text}',scope=['y'],spec='#2'}}]\n"
+        ),
+    )?;
+    let run = |extra: &[String]| -> Result<std::process::Output, std::io::Error> {
+        Command::new(env!("CARGO_BIN_EXE_provenant"))
+            .current_dir(&root)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path())
+            .args(["--json", "--state-dir"])
+            .arg(&state)
+            .args(["run", "--preset", "big-batch", "--prompt-file"])
+            .arg(&prompt)
+            .arg("--params-file")
+            .arg(&params)
+            .arg("--explain")
+            .args(extra)
+            .output()
+    };
+    let output = run(&[])?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("lane-a") && text.contains("lane-b"), "{text}");
+    assert!(!text.contains("lane-c"));
+    let output = run(&[
+        "--set".to_owned(),
+        format!("parameters.lanes=[{{name='c',worktree='{root_text}',scope=['z'],spec='#3'}}]"),
+    ])?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("lane-c") && !text.contains("lane-a"),
+        "{text}"
+    );
+    Ok(())
+}

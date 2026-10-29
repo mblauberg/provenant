@@ -378,6 +378,7 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                 "prompt_stdin",
                 "preset",
                 "preset_set",
+                "preset_params_file",
                 "explain",
                 "route",
                 "model",
@@ -511,8 +512,12 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             route_valid(&resolve.request)?
         }
         Command::Dispatch(dispatch) | Command::Run(dispatch) => {
-            if dispatch.preset.is_none() && (!dispatch.preset_set.is_empty() || dispatch.explain) {
-                return invalid("--set and --explain require --preset");
+            if dispatch.preset.is_none()
+                && (!dispatch.preset_set.is_empty()
+                    || dispatch.preset_params_file.is_some()
+                    || dispatch.explain)
+            {
+                return invalid("--set, --params-file and --explain require --preset");
             }
             if matches!(inv.command, Command::Dispatch(_)) && dispatch.preset.is_some() {
                 return invalid("--preset is supported by run, not dispatch");

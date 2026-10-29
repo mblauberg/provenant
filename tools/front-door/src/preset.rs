@@ -4,11 +4,77 @@ use std::{
     path::Path,
 };
 
+/// Prompt files shared with the code-review skill, keyed by role `prompt_file`.
+const PROMPT_FILES: [(&str, &str); 9] = [
+    (
+        "code-review/reviewer-context",
+        include_str!("../../../skills/code-review/references/reviewer-context.md"),
+    ),
+    (
+        "code-review/lenses/correctness-spec",
+        include_str!("../../../skills/code-review/references/lenses/correctness-spec.md"),
+    ),
+    (
+        "code-review/lenses/design-fit-reuse",
+        include_str!("../../../skills/code-review/references/lenses/design-fit-reuse.md"),
+    ),
+    (
+        "code-review/lenses/simplicity",
+        include_str!("../../../skills/code-review/references/lenses/simplicity.md"),
+    ),
+    (
+        "code-review/lenses/conventions-readability",
+        include_str!("../../../skills/code-review/references/lenses/conventions-readability.md"),
+    ),
+    (
+        "code-review/lenses/tests",
+        include_str!("../../../skills/code-review/references/lenses/tests.md"),
+    ),
+    (
+        "code-review/lenses/security-privacy",
+        include_str!("../../../skills/code-review/references/lenses/security-privacy.md"),
+    ),
+    (
+        "code-review/lenses/concurrency-data-errors",
+        include_str!("../../../skills/code-review/references/lenses/concurrency-data-errors.md"),
+    ),
+    (
+        "code-review/lenses/adversarial",
+        include_str!("../../../skills/code-review/references/lenses/adversarial.md"),
+    ),
+];
+
+fn prompt_file(name: &str) -> Result<&'static str, String> {
+    PROMPT_FILES
+        .iter()
+        .find(|(key, _)| *key == name)
+        .map(|(_, text)| *text)
+        .ok_or_else(|| {
+            format!(
+                "unknown prompt_file {name}; available: {}",
+                PROMPT_FILES.map(|(key, _)| key).join(", ")
+            )
+        })
+}
+
 const NAMES: [&str; 4] = ["single", "chain", "fan-out", "fan-out-synthesise"];
 const DEPTH: usize = 8;
 
+/// The review shape selected for this run. Review shapes are canonical for who
+/// reviews; presets compose them, so lens counts and tiers default from here.
+#[derive(Clone, Debug, Default)]
+pub struct ShapeHint {
+    pub name: String,
+    pub source: String,
+    /// Reviewer pools in shape order, one entry per reviewer.
+    pub slots: Vec<String>,
+    /// Lens names a shape reviewer group names explicitly, with its pool.
+    pub named: Vec<(String, String)>,
+}
+
 #[derive(Default)]
 pub struct Layers {
+    pub shape: Option<ShapeHint>,
     entries: BTreeMap<String, Vec<(String, Value)>>,
     errors: BTreeMap<String, Vec<String>>,
     repo_files: BTreeSet<String>,
@@ -16,6 +82,7 @@ pub struct Layers {
 
 #[derive(Debug)]
 pub struct Expansion {
+    pub review_shape: Option<String>,
     pub document: Value,
     pub origins: BTreeMap<String, String>,
     pub repo_files: Vec<String>,
@@ -376,8 +443,32 @@ pub fn expand(
     prompt: &str,
     overrides: &[String],
 ) -> Result<Expansion, String> {
+    expand_with(layers, name, prompt, &[], overrides)
+}
+
+/// `params` are parameter values from a `--params-file`; `overrides` are
+/// `--set` items and win over them.
+pub fn expand_with(
+    layers: &Layers,
+    name: &str,
+    prompt: &str,
+    params: &[(String, Value)],
+    overrides: &[String],
+) -> Result<Expansion, String> {
     let mut repo_files = Vec::new();
     let (mut config, mut origins) = layers.resolve_inner(name, &mut Vec::new(), &mut repo_files)?;
+    for (key, value) in params {
+        let path = format!("parameters.{key}");
+        let valid = valid_paths(&config, layers);
+        override_value(
+            &mut config,
+            &path,
+            value.clone(),
+            &mut origins,
+            "--params-file",
+        )
+        .map_err(|error| format!("{error}; valid parameter and slot paths: {valid}"))?;
+    }
     for item in overrides {
         let (path, raw) = item
             .split_once('=')
@@ -434,6 +525,10 @@ pub fn expand(
         return Err("expanded graph exceeds the 8 MiB graph document limit".into());
     }
     Ok(Expansion {
+        review_shape: layers
+            .shape
+            .as_ref()
+            .map(|shape| format!("{} ({})", shape.name, shape.source)),
         document,
         origins,
         repo_files,
@@ -762,10 +857,17 @@ fn interpolate(
             let lookup = |name: &str| match name {
                 "prompt" => Ok(json!(prompt)),
                 "index" => Ok(json!(index)),
-                _ => parameters
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| format!("unknown preset parameter: {name}")),
+                _ => {
+                    let mut parts = name.split('.');
+                    let first = parts.next().unwrap_or_default();
+                    parts
+                        .try_fold(parameters.get(first), |value, part| {
+                            value.map(|value| value.get(part))
+                        })
+                        .flatten()
+                        .cloned()
+                        .ok_or_else(|| format!("unknown preset parameter: {name}"))
+                }
             };
             if let Some(name) = text
                 .strip_prefix("${")
@@ -873,11 +975,11 @@ fn lower_leaf(
             "acceptance_checks",
             "inputs",
             "depends_on",
-            "route",
             "routes",
-            "required_verdict",
             "read_roots",
             "source",
+            "prompt_file",
+            "distinct_from",
         ]
         .contains(&key.as_str())
         {
@@ -885,6 +987,39 @@ fn lower_leaf(
         }
     }
     map.insert("id".into(), json!(id));
+    if let Some(files) = map.remove("prompt_file") {
+        let names: Vec<&str> = match &files {
+            Value::String(name) => vec![name.as_str()],
+            Value::Array(names) => names
+                .iter()
+                .map(|name| name.as_str().ok_or("prompt_file entries must be names"))
+                .collect::<Result<_, _>>()?,
+            _ => return Err("prompt_file must be a name or a list of names".into()),
+        };
+        let mut texts = Vec::new();
+        for name in names.into_iter().filter(|name| !name.is_empty()) {
+            texts.push(prompt_file(name)?);
+        }
+        if !texts.is_empty() {
+            let brief = map
+                .get("prompt")
+                .and_then(Value::as_str)
+                .unwrap_or(prompt)
+                .to_owned();
+            map.insert(
+                "prompt".into(),
+                json!(format!("{brief}\n\n{}", texts.join("\n\n"))),
+            );
+        }
+    }
+    if map.get("distinct_from").is_some_and(|value| value == "") {
+        map.remove("distinct_from");
+    }
+    if let Some(value) = map.get("distinct_from")
+        && value != "writer"
+    {
+        return Err(format!("node {id}: distinct_from must be \"writer\""));
+    }
     let mut dependencies = deps.to_vec();
     if let Some(explicit) = map.remove("depends_on") {
         for dependency in explicit.as_array().ok_or("depends_on must be an array")? {
@@ -917,19 +1052,15 @@ fn lower_leaf(
         map.entry("prompt").or_insert_with(|| json!(prompt));
         let tier = map.remove("tier");
         let effort = map.remove("effort");
-        if tier.is_some() && (map.contains_key("route") || map.contains_key("routes")) {
-            return Err(format!(
-                "node {id}: tier and route/routes are mutually exclusive"
-            ));
+        if tier.is_some() && map.contains_key("routes") {
+            return Err(format!("node {id}: tier and routes are mutually exclusive"));
         }
         if map.contains_key("routes") {
-            if effort.is_some() || map.contains_key("route") {
-                return Err(format!(
-                    "node {id}: routes cannot be combined with route or effort"
-                ));
+            if effort.is_some() {
+                return Err(format!("node {id}: routes cannot be combined with effort"));
             }
         } else {
-            let route = tier.or_else(|| map.remove("route")).unwrap_or_else(|| {
+            let route = tier.unwrap_or_else(|| {
                 parameters
                     .get("route")
                     .cloned()
@@ -939,9 +1070,7 @@ fn lower_leaf(
                 Value::String(name) if !name.is_empty() => json!({"alias":name}),
                 Value::Object(_) => route,
                 _ => {
-                    return Err(format!(
-                        "node {id}: route or tier must be a name or route table"
-                    ));
+                    return Err(format!("node {id}: tier must be a name or route table"));
                 }
             };
             if let Some(effort) = effort {
@@ -1102,6 +1231,58 @@ impl StageBuilder<'_> {
         Ok(incoming)
     }
 
+    /// Apply `when` triggers and the selected review shape to a lens list.
+    /// An item without a tier takes it from the shape, and only such items count
+    /// against the shape's reviewer total; a tier set in the preset is an override.
+    fn select_items(&self, list: Vec<Value>) -> Result<Vec<Value>, String> {
+        let tags: Vec<&str> = self
+            .parameters
+            .get("risk_tags")
+            .and_then(Value::as_array)
+            .map(|tags| tags.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let shape = self.layers.shape.as_ref();
+        let limit = shape.map_or(usize::MAX, |shape| shape.slots.len().max(1));
+        let mut governed = 0usize;
+        let mut selected = Vec::new();
+        for mut item in list {
+            let when = item.get("when").and_then(Value::as_str).unwrap_or_default();
+            if !when.is_empty() && !tags.contains(&when) {
+                continue;
+            }
+            let tier = item.get("tier").and_then(Value::as_str).unwrap_or_default();
+            if tier.is_empty() {
+                let name = item["name"].as_str().unwrap_or_default().to_owned();
+                if when.is_empty() {
+                    if governed >= limit {
+                        continue;
+                    }
+                    governed += 1;
+                }
+                let pool = shape.and_then(|shape| {
+                    shape
+                        .named
+                        .iter()
+                        .find(|(lens, _)| name == *lens || name.starts_with(&format!("{lens}-")))
+                        .map(|(_, pool)| pool.clone())
+                        .or_else(|| {
+                            shape
+                                .slots
+                                .get(governed.saturating_sub(1))
+                                .or(shape.slots.last())
+                                .cloned()
+                        })
+                });
+                item["tier"] = json!(pool.unwrap_or_else(|| "senior".into()));
+            }
+            selected.push(item);
+        }
+        if selected.is_empty() {
+            return Err("for_each selected no items".into());
+        }
+        Ok(selected)
+    }
+
     fn entry(
         &mut self,
         entry: &Value,
@@ -1114,15 +1295,27 @@ impl StageBuilder<'_> {
             return Err(format!("preset composition depth exceeds {DEPTH}"));
         }
         let object = entry.as_object().ok_or("stage entries must be tables")?;
-        let count = interpolate(
-            object.get("count").unwrap_or(&json!(1)),
-            &self.parameters,
-            self.prompt,
-            1,
-        )?
-        .as_u64()
-        .filter(|count| (1..=32).contains(count))
-        .ok_or("entry count must be 1 to 32")?;
+        let items: Vec<Option<Value>> = if let Some(list) = object.get("for_each") {
+            if object.contains_key("count") {
+                return Err("for_each and count are exclusive".into());
+            }
+            match interpolate(list, &self.parameters, self.prompt, 1)? {
+                Value::Array(list) => self.select_items(list)?.into_iter().map(Some).collect(),
+                _ => return Err("for_each must name a list parameter".into()),
+            }
+        } else {
+            let count = interpolate(
+                object.get("count").unwrap_or(&json!(1)),
+                &self.parameters,
+                self.prompt,
+                1,
+            )?
+            .as_u64()
+            .filter(|count| (1..=32).contains(count))
+            .ok_or("entry count must be 1 to 32")?;
+            (0..count).map(|_| None).collect()
+        };
+        let count = items.len();
         let base = object
             .get("id")
             .map(|id| id.as_str().ok_or("entry id must be a string"))
@@ -1132,17 +1325,27 @@ impl StageBuilder<'_> {
             return Err(format!("invalid stage node ID: {base}"));
         }
         let mut ends = Vec::new();
-        for index in 1..=count {
-            let id = if count == 1 {
-                base.to_owned()
-            } else {
-                format!("{base}-{index}")
+        for (position, item) in items.iter().enumerate() {
+            let index = position as u64 + 1;
+            let id = match item {
+                Some(item) => {
+                    let name = item["name"].as_str().filter(|n| valid_name(n)).ok_or(
+                        "for_each items need a name of lowercase letters, digits and dashes",
+                    )?;
+                    format!("{base}-{name}")
+                }
+                None if count == 1 => base.to_owned(),
+                None => format!("{base}-{index}"),
             };
             if nodes.iter().any(|node| node["id"] == id) {
                 return Err(format!("duplicate stage node ID: {id}"));
             }
+            if let Some(item) = item {
+                self.parameters["item"] = item.clone();
+            }
             let mut object = object.clone();
             object.remove("count");
+            object.remove("for_each");
             object.remove("id");
             let outputs = interpolate(
                 object.get("outputs").unwrap_or(&json!(["result"])),
@@ -1289,6 +1492,9 @@ impl StageBuilder<'_> {
                         "composite {id}: brief belongs on its leaves, received {brief}"
                     ));
                 }
+            }
+            if let Some(parameters) = self.parameters.as_object_mut() {
+                parameters.remove("item");
             }
             nodes.push(node);
             if nodes.len() > 512 {
@@ -1667,13 +1873,16 @@ fn explain(expansion: Expansion, globals: &provenant_cli::Globals) -> u8 {
         "Graph {}\nLimits: {}\nExecution: {}\n",
         expansion.document["graph_id"], limits, metrics
     );
+    if let Some(shape) = &expansion.review_shape {
+        human.push_str(&format!("Review shape: {shape}\n"));
+    }
     if !validation_error.is_null() {
         human.push_str(&format!("Requires configuration: {validation_error}\n"));
     }
     if let Some(nodes) = expansion.document["nodes"].as_array() {
         explain_tree(nodes, 0, &mut human);
     }
-    let data = json!({"graph": expansion.document, "origins": expansion.origins, "limits":limits,"execution":metrics,"validation_error":validation_error});
+    let data = json!({"graph": expansion.document, "origins": expansion.origins, "limits":limits,"execution":metrics,"validation_error":validation_error,"review_shape":expansion.review_shape});
     let output = if globals.json {
         serde_json::to_vec(&provenant_records::CommandResult::new(
             "run",
@@ -1726,6 +1935,45 @@ pub fn command(command: provenant_cli::Preset, globals: &provenant_cli::Globals)
     report("preset", result, globals)
 }
 
+/// Parameter values from a `--params-file`: one TOML table of `name = value`.
+fn params_file(path: &Path) -> Result<Vec<(String, Value)>, String> {
+    let mut file = provenant_os::fs::FileHandle::open_source(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let bytes = file
+        .read_bounded(1_048_576)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
+    let table: Value =
+        toml_edit::de::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(table
+        .as_object()
+        .ok_or("params file must be a table")?
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect())
+}
+
+/// A top-level string parameter as supplied by `--params-file` or `--set`.
+fn requested_parameter(
+    key: &str,
+    params: &[(String, Value)],
+    overrides: &[String],
+) -> Option<String> {
+    let mut found = params
+        .iter()
+        .find(|(name, _)| name == key)
+        .and_then(|(_, value)| value.as_str().map(str::to_owned));
+    for item in overrides {
+        if let Some((path, raw)) = item.split_once('=')
+            && path == format!("parameters.{key}")
+            && let Ok(parsed) = toml_edit::de::from_str::<Value>(&format!("value = {raw}"))
+        {
+            found = parsed["value"].as_str().map(str::to_owned);
+        }
+    }
+    found.filter(|value| !value.is_empty())
+}
+
 pub fn run(
     request: provenant_cli::Dispatch,
     globals: &provenant_cli::Globals,
@@ -1744,7 +1992,10 @@ pub fn run(
             .read_bounded(1_048_576)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         let prompt = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
-        let mut expansion = expand(&configured(globals)?, name, prompt, &request.preset_set)?;
+        let params = match &request.preset_params_file {
+            Some(path) => params_file(path)?,
+            None => Vec::new(),
+        };
         let directory = crate::roots::selected_project(globals.project.as_deref(), false)
             .map_err(|e| e.to_string())?;
         let roots = crate::roots::resolve(
@@ -1756,6 +2007,29 @@ pub fn run(
         let config =
             provenant_config::read_with_domains(&roots.roots, &provenant_cli::domains::SECTIONS)
                 .map_err(|e| e.to_string())?;
+        let mut layers = configured(globals)?;
+        let requested = |key: &str| requested_parameter(key, &params, &request.preset_set);
+        let (named, risk) = (requested("review_shape"), requested("risk"));
+        let selected = config.domains.routing.review.select_shape(
+            named.as_deref(),
+            risk.as_deref(),
+            None,
+            &[],
+        )?;
+        let mut hint = ShapeHint {
+            name: selected.name.to_owned(),
+            source: selected.source.to_owned(),
+            ..Default::default()
+        };
+        for group in &selected.shape.reviewers {
+            hint.slots
+                .extend(std::iter::repeat_n(group.pool.clone(), group.count));
+            for lens in &group.lenses {
+                hint.named.push((lens.clone(), group.pool.clone()));
+            }
+        }
+        layers.shape = Some(hint);
+        let mut expansion = expand_with(&layers, name, prompt, &params, &request.preset_set)?;
         let policy =
             ReadRoots::discover(&directory, &config.domains.fabric.graph.allowed_read_roots)?;
         bind_run_context(&mut expansion, &request, &directory, &policy)?;

@@ -2052,7 +2052,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 if node.distinct_from == Some(DistinctFrom::Writer) {
                     let mut current = node;
                     while let Some(SourceBinding::Node { node: source }) = &current.source {
-                        let Some(index) = positions.get(source) else { break };
+                        let Some(index) = positions.get(source) else {
+                            break;
+                        };
                         current = &plan.nodes[*index];
                         if plans::writer(current) {
                             distinct_attempts = checkpoint.nodes[*index]
@@ -3700,7 +3702,8 @@ mod tests {
             self.source_commits
                 .push(node.source_commit.map(str::to_owned));
             self.read_roots.push(node.read_roots.to_vec());
-            self.distinct_from.push(node.distinct_from_attempts.to_vec());
+            self.distinct_from
+                .push(node.distinct_from_attempts.to_vec());
             self.titles.push(node.title.to_owned());
             self.prompts.push(node.prompt.to_owned());
             self.delivery_modes.push(replay.delivery.cloned());
@@ -3767,7 +3770,9 @@ mod tests {
     #[test]
     fn distinct_from_writer_passes_the_writer_attempts_to_the_owner() {
         let mut review = node("review", route("first"));
-        review.source = Some(SourceBinding::Node { node: "write".into() });
+        review.source = Some(SourceBinding::Node {
+            node: "write".into(),
+        });
         review.distinct_from = Some(DistinctFrom::Writer);
         review.depends_on = vec!["write".into()];
         let mut write = node("write", route("first"));
@@ -3787,7 +3792,12 @@ mod tests {
             observations: [writer_done, terminal(AttemptOutcome::Succeeded)].into(),
             ..Default::default()
         };
-        let run = advance(&graph(vec![write, review]), &mut owner, &mut MemoryJournal::default()).unwrap();
+        let run = advance(
+            &graph(vec![write, review]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
         assert!(run.checkpoint.successful());
         assert_eq!(owner.distinct_from[0], Vec::<String>::new());
         assert_eq!(owner.distinct_from[1], vec!["host/7".to_owned()]);
@@ -3798,7 +3808,12 @@ mod tests {
             observations: [terminal(AttemptOutcome::Succeeded)].into(),
             ..Default::default()
         };
-        advance(&graph(vec![unsourced]), &mut lone, &mut MemoryJournal::default()).unwrap();
+        advance(
+            &graph(vec![unsourced]),
+            &mut lone,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
         assert_eq!(lone.distinct_from[0], Vec::<String>::new());
     }
 
@@ -3961,13 +3976,21 @@ mod tests {
         .unwrap();
         let mut journal = MemoryJournal::default();
         let mut crashing = FakeOwner {
-            observations: [terminal_with_result(AttemptOutcome::Succeeded, "evidence A")].into(),
+            observations: [terminal_with_result(
+                AttemptOutcome::Succeeded,
+                "evidence A",
+            )]
+            .into(),
             ..Default::default()
         };
         assert!(advance(&document, &mut crashing, &mut journal).is_err());
         assert_eq!(crashing.calls.len(), 2);
         let mut resumed = FakeOwner {
-            observations: [terminal_with_result(AttemptOutcome::Succeeded, "evidence B")].into(),
+            observations: [terminal_with_result(
+                AttemptOutcome::Succeeded,
+                "evidence B",
+            )]
+            .into(),
             ..Default::default()
         };
         let run = advance(&document, &mut resumed, &mut journal).unwrap();
@@ -3975,7 +3998,17 @@ mod tests {
         assert!(run.checkpoint.successful());
         assert_eq!(resumed.calls.len(), 1);
         assert!(resumed.prompts[0].contains("evidence A") || resumed.prompts[0].contains('b'));
-        let result = run.checkpoint.nodes.last().unwrap().outputs.as_ref().unwrap().result.as_ref().unwrap();
+        let result = run
+            .checkpoint
+            .nodes
+            .last()
+            .unwrap()
+            .outputs
+            .as_ref()
+            .unwrap()
+            .result
+            .as_ref()
+            .unwrap();
         assert!(result.excerpt.contains("evidence A") && result.excerpt.contains("evidence B"));
     }
 

@@ -1,6 +1,8 @@
 stages = [
   { id = "implement", role = "implementer" },
-  { id = "lens", role = "lane-lens" },
+  { id = "lens", parallel = [
+    { id = "lens", for_each = "${lenses}", role = "lane-lens" },
+  ], source = { type = "node", node = "implement" } },
 ]
 exports = [
   { node = "implement", outputs = ["branch", "commit"] },
@@ -12,7 +14,16 @@ worktree = ""
 scope = ["."]
 subject = { type = "commit", commit = "HEAD" }
 delivery = "none"
-lens_tier = "senior"
+# The diff reference the slice is measured from, and the spec it answers.
+base = ""
+spec = ""
+risk = ""
+review_shape = ""
+risk_tags = []
+lenses = [
+  { name = "correctness-spec", tier = "", prompt_file = "code-review/lenses/correctness-spec", distinct_from = "writer", when = "" },
+  { name = "simplicity", tier = "", prompt_file = "code-review/lenses/simplicity", distinct_from = "", when = "" },
+]
 
 [roles.implementer]
 tier = "senior"
@@ -24,19 +35,19 @@ delivery = "${delivery}"
 acceptance_checks = ["Run targeted tests and required static checks", "Commit the completed slice"]
 prompt = """
 Implement one bounded approved slice: ${prompt}
+Spec (acceptance criteria): ${spec}
 Keep changes within the supplied write scope. Run targeted checks and commit.
-Use a curated high-junior tier only when the chair configures that pool.
 """
 
 [roles.lane-lens]
-tier = "${lens_tier}"
+tier = "${item.tier}"
 worktree = "${worktree}"
-source = { type = "node", node = "implement" }
+distinct_from = "${item.distinct_from}"
 outputs = ["result", "commit"]
+prompt_file = ["code-review/reviewer-context", "${item.prompt_file}"]
 prompt = """
-Review this implementation through the refactor and over-engineering lens:
-${prompt}
-Challenge redundancy, test quality, cleanup, rigid abstractions and unnecessary
-machinery. Read the pinned implementation commit. Cite actionable evidence and
-emit one exact VERDICT: PASS or VERDICT: FAIL line. Do not edit files.
+Lens: ${item.name}. Subject: the implementation of ${prompt}
+Base (diff reference): ${base}
+Spec (acceptance criteria): ${spec}
+Check correctness against the spec as well as this lens.
 """

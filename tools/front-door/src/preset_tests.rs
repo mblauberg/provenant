@@ -218,8 +218,7 @@ fn bundled_fixture(name: &str) -> provenant_fabric_runtime::graph::GraphDocument
     let overrides = match name {
         "implement-with-lens" | "review-council" => vec!["parameters.worktree='/repo/lane'".into()],
         "big-batch" => vec![
-            "parameters.lane_one_worktree='/repo/one'".into(),
-            "parameters.lane_two_worktree='/repo/two'".into(),
+            "parameters.lanes=[{name='one',worktree='/repo/one',scope=['.'],spec=''},{name='two',worktree='/repo/two',scope=['.'],spec=''}]".into(),
             "parameters.batch_worktree='/repo/batch'".into(),
         ],
         _ => Vec::new(),
@@ -350,7 +349,8 @@ fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
                 .all(|node| node.attempts.is_empty())
         );
         if name == "big-batch" {
-            assert_eq!(owner.integration_pins, 1);
+            // One resolution, then the moved-head check before synthesis and the refactor writer.
+            assert_eq!(owner.integration_pins, 3);
             let fix = run
                 .checkpoint
                 .nodes
@@ -431,8 +431,9 @@ fn read_only_worktree_bindings_lower_to_read_roots() {
     .unwrap();
     let nodes = &expanded.document["nodes"];
     assert_eq!(nodes[0]["worktree"], "/repo/writer");
-    assert!(nodes[1].get("worktree").is_none());
-    assert_eq!(nodes[1]["read_roots"], json!(["/repo/writer"]));
+    let lens = &nodes[1]["composite"]["nodes"][0];
+    assert!(lens.get("worktree").is_none());
+    assert_eq!(lens["read_roots"], json!(["/repo/writer"]));
     assert_eq!(
         nodes[1]["source"],
         json!({"type":"node","node":"implement"})
@@ -851,4 +852,136 @@ fn read_roots_are_confined_to_the_project_or_the_host_allow_list()
     assert_eq!(allowed.confine(&shared)?, shared);
     assert!(allowed.confine(&sibling).is_err());
     Ok(())
+}
+
+fn council(
+    overrides: &[&str],
+    shape: Option<super::preset::ShapeHint>,
+) -> Result<serde_json::Value, String> {
+    let mut layers = Layers::empty();
+    layers.shape = shape;
+    let overrides: Vec<String> = overrides.iter().map(|s| (*s).to_owned()).collect();
+    expand(&layers, "review-council", "the change", &overrides).map(|e| e.document)
+}
+
+fn lens_ids(document: &serde_json::Value) -> Vec<String> {
+    document["nodes"][1]["composite"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn review_council_fans_out_one_lens_role_over_the_lens_list() {
+    let document = council(&["parameters.worktree='/repo/lane'"], None).unwrap();
+    assert_eq!(
+        lens_ids(&document),
+        [
+            "lens-correctness-spec",
+            "lens-design-fit-reuse",
+            "lens-simplicity",
+            "lens-conventions-readability",
+            "lens-tests",
+        ]
+    );
+    let lens = &document["nodes"][1]["composite"]["nodes"][0];
+    assert_eq!(lens["distinct_from"], "writer");
+    let prompt = lens["prompt"].as_str().unwrap();
+    assert!(prompt.contains("read access to the whole repository"));
+    assert!(prompt.contains("Lens: correctness-spec"));
+    assert!(
+        document["nodes"][1]["composite"]["nodes"][1]
+            .get("distinct_from")
+            .is_none()
+    );
+}
+
+#[test]
+fn triggered_lenses_follow_the_risk_tags() {
+    let document = council(
+        &[
+            "parameters.worktree='/repo/lane'",
+            "parameters.risk_tags=['security','terminal']",
+        ],
+        None,
+    )
+    .unwrap();
+    let ids = lens_ids(&document);
+    assert!(ids.contains(&"lens-security-privacy".to_owned()));
+    assert!(ids.contains(&"lens-adversarial".to_owned()));
+    assert!(!ids.contains(&"lens-concurrency-data-errors".to_owned()));
+}
+
+#[test]
+fn lens_tiers_come_from_the_review_shape_unless_overridden() {
+    let shape = super::preset::ShapeHint {
+        name: "standard".into(),
+        source: "risk".into(),
+        slots: vec!["junior".into(), "junior".into()],
+        named: Vec::new(),
+    };
+    let document = council(&["parameters.worktree='/repo/lane'"], Some(shape.clone())).unwrap();
+    let nodes = document["nodes"][1]["composite"]["nodes"]
+        .as_array()
+        .unwrap();
+    assert_eq!(nodes.len(), 2);
+    assert!(nodes.iter().all(|node| node["route"]["alias"] == "junior"));
+    let document = council(
+        &[
+            "parameters.worktree='/repo/lane'",
+            "parameters.lenses=[{name='tests',tier='principal',prompt_file='code-review/lenses/tests',distinct_from='',when=''}]",
+        ],
+        Some(shape),
+    )
+    .unwrap();
+    let nodes = document["nodes"][1]["composite"]["nodes"]
+        .as_array()
+        .unwrap();
+    assert_eq!(nodes[0]["route"]["alias"], "principal");
+}
+
+#[test]
+fn unknown_prompt_files_and_foreign_distinct_from_values_are_refused() {
+    let error = council(
+        &[
+            "parameters.worktree='/repo/lane'",
+            "parameters.lenses=[{name='x',tier='senior',prompt_file='code-review/lenses/nope',distinct_from='',when=''}]",
+        ],
+        None,
+    )
+    .unwrap_err();
+    assert!(error.contains("prompt_file"), "{error}");
+    let error = council(
+        &[
+            "parameters.worktree='/repo/lane'",
+            "parameters.lenses=[{name='x',tier='senior',prompt_file='code-review/lenses/tests',distinct_from='reviewer',when=''}]",
+        ],
+        None,
+    )
+    .unwrap_err();
+    assert!(error.contains("distinct_from"), "{error}");
+}
+
+#[test]
+fn big_batch_fans_out_one_lane_per_list_entry() {
+    let lanes = "parameters.lanes=[{name='a',worktree='/repo/a',scope=['x'],spec='#1'},{name='b',worktree='/repo/b',scope=['y'],spec='#2'},{name='c',worktree='/repo/c',scope=['z'],spec='#3'}]";
+    let expanded = expand(
+        &Layers::empty(),
+        "big-batch",
+        "the batch",
+        &[
+            lanes.into(),
+            "parameters.batch_worktree='/repo/batch'".into(),
+        ],
+    )
+    .unwrap();
+    let text = expanded.document.to_string();
+    for lane in ["lane-a", "lane-b", "lane-c"] {
+        assert!(
+            text.contains(&format!("\"id\":\"{lane}\"")) || text.contains(lane),
+            "{lane}"
+        );
+    }
 }

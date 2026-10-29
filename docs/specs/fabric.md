@@ -407,7 +407,11 @@ adapter. Routes require an adapter or alias and may mix these forms in a list.
 Agent nodes may declare `read_roots`, a list of additional directories passed
 through ordinary run confinement. A read-only scout can inspect another
 worktree's uncommitted files without acquiring a writer lease. Read roots grant
-no write authority and remain subject to protected-path checks.
+no write authority and remain subject to protected-path checks. Presets
+canonicalise each root and accept only the project, its linked worktrees and
+the host's `[domains.fabric.graph] allowed_read_roots` list. A planner
+fragment may not add `read_roots`, change `source` or change `role` relative
+to its planner node.
 
 An optional `source` pins a node's subject before its first attempt:
 
@@ -424,6 +428,17 @@ the node becomes ready. The checkpoint retains the pinned source for replay
 and route fallback. A read-only review receives this exact subject as its
 attempt head; its own lane launch head is not a combined integration commit.
 Missing subjects fail closed rather than falling back to the current checkout.
+The checkpoint also pins the first resolved integration head. A synthesise
+node, or a writer whose source is that pinned commit, that has not yet
+attempted fails if the integration branch has moved, and a rerun starts a new
+graph. A retry writer whose pin is an ancestor of its HEAD continues; a
+diverged HEAD is refused.
+
+A node may set `distinct_from = "writer"`. The runtime walks the source chain
+to the nearest writer node and gives the owner that node's attempt refs. The
+owner excludes those attempts' model families from route selection and
+refuses a route that cannot satisfy the constraint. Without a writing source
+the constraint is a no-op.
 
 A writer source requires an existing registered worktree. Under writer
 exclusion, a clean ancestor worktree advances to the pinned commit with a

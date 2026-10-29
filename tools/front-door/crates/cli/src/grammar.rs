@@ -499,6 +499,9 @@ pub struct Dispatch {
     /// Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable
     #[arg(long = "set", requires = "preset")]
     pub preset_set: Vec<String>,
+    /// Read preset parameters from a TOML table file; --set overrides it
+    #[arg(long = "params-file", requires = "preset")]
+    pub preset_params_file: Option<PathBuf>,
     /// Explain roles, limits and the expanded graph without running it
     #[arg(long, requires = "preset")]
     pub explain: bool,

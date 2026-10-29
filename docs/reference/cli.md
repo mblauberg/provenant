@@ -1989,6 +1989,7 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"], "name": "preset"}` |
 | `--set` | `{"name": "preset_set", "repeatable": true}` |
+| `--params-file` | `{"name": "preset_params_file"}` |
 | `--explain` | `{"defaults": ["false"], "name": "explain", "values": ["true", "false"]}` |
 | `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"name": "prompt_file"}` |
@@ -2203,6 +2204,7 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"], "name": "preset"}` |
 | `--set` | `{"name": "preset_set", "repeatable": true}` |
+| `--params-file` | `{"name": "preset_params_file"}` |
 | `--explain` | `{"defaults": ["false"], "name": "explain", "values": ["true", "false"]}` |
 | `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"name": "prompt_file"}` |
