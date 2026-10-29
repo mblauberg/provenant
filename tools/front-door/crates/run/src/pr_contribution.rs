@@ -742,6 +742,27 @@ impl Contributions {
         })
     }
 
+    /// Linked attempts with no queue time, which a late close cannot place.
+    pub fn unplaced_for_pr(&self, pr: &PullRequest, call: &Request<'_>) -> Result<u64> {
+        pr.validate()?;
+        if self.1 < 3 {
+            return Ok(0);
+        }
+        call.retry(|| {
+            let count: i64 = self.0.query_row(
+                "SELECT count(*) FROM links l JOIN branch_attempts a USING(attempt)
+                 WHERE l.repository=?1 AND l.number=?2 AND a.queued_at IS NULL",
+                params![
+                    pr.repository,
+                    i64::try_from(pr.number)
+                        .map_err(|_| RunError::Validation("PR number too large"))?
+                ],
+                |row| row.get(0),
+            )?;
+            u64::try_from(count).map_err(|_| RunError::Validation("invalid contribution count"))
+        })
+    }
+
     /// Sealed allocations omitted by automatic resolution, including absent rows.
     pub fn skipped_sealed_for_pr(&self, pr: &PullRequest, call: &Request<'_>) -> Result<u64> {
         pr.validate()?;
@@ -1012,6 +1033,133 @@ mod tests {
         assert_eq!(ids(&old)?, [AttemptId::from_bytes([1; 16])]);
         assert_eq!(ids(&new)?, [2, 3].map(|id| AttemptId::from_bytes([id; 16])));
         assert_eq!(db.reassigned_from_pr(&old, &call)?, 2);
+        Ok(())
+    }
+
+    fn fixture(
+        dir: &Path,
+    ) -> std::result::Result<
+        (
+            crate::ExecutionContext,
+            crate::AttemptRecord,
+            PullRequest,
+            PullRequest,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let context = context(dir)?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = crate::RunStore::open(&context, &call)?;
+        let input = crate::tests::input();
+        store.create(&input, &call)?;
+        let attempt = store.record(input.attempts[0].attempt_id, &call)?;
+        let old = PullRequest {
+            repository: "owner/repo".into(),
+            number: 10,
+        };
+        let new = PullRequest {
+            number: 11,
+            ..old.clone()
+        };
+        Ok((context, attempt, old, new))
+    }
+    #[test]
+    fn late_close_boundary_null_time_and_sealed_attempts_stay_put()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (context, mut attempt, old, new) = fixture(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let db = Contributions::open(context.state_root.as_path(), &call)?;
+        let head = GitOid::parse(&"a".repeat(40))?;
+        db.bind(context.project_id, "feat/x", &old, head, &call)?;
+        let name = |id: u8| AttemptId::from_bytes([id; 16]);
+        for (id, time) in [(1, 100), (2, 200), (3, 300), (4, 300), (5, 300)] {
+            attempt.attempt_id = name(id);
+            attempt.queued_at = WallTime::from_micros(time)?;
+            db.capture(&attempt, "feat/x", "worker", &call)?;
+        }
+        // 3 is sealed; 4 has no queue time; 2 sits exactly on the boundary.
+        db.allocate(name(3), &[(old.clone(), WEIGHT_ONE)], &call)?;
+        db.0.execute(
+            "UPDATE branch_attempts SET queued_at=NULL WHERE attempt=?1",
+            [name(4).to_string()],
+        )?;
+        let before = db.for_pr(&old, &call)?.len();
+        assert_eq!(before, 5);
+        db.close_at(
+            context.project_id,
+            &old,
+            Some(WallTime::from_micros(200)?),
+            &call,
+        )?;
+        db.bind(context.project_id, "feat/x", &new, head, &call)?;
+        let left: Vec<_> = db.for_pr(&old, &call)?.iter().map(|r| r.attempt).collect();
+        assert_eq!(left.len(), 4);
+        assert!(!left.contains(&name(5)));
+        let moved: Vec<_> = db.for_pr(&new, &call)?.iter().map(|r| r.attempt).collect();
+        assert_eq!(moved, [name(5)]);
+        assert_eq!(db.unplaced_for_pr(&old, &call)?, 1);
+        assert_eq!(db.reassigned_from_pr(&old, &call)?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn close_without_a_time_moves_nothing() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (context, mut attempt, old, new) = fixture(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let db = Contributions::open(context.state_root.as_path(), &call)?;
+        let head = GitOid::parse(&"a".repeat(40))?;
+        db.bind(context.project_id, "feat/x", &old, head, &call)?;
+        attempt.attempt_id = AttemptId::from_bytes([1; 16]);
+        attempt.queued_at = WallTime::from_micros(900)?;
+        db.capture(&attempt, "feat/x", "worker", &call)?;
+        db.close_at(context.project_id, &old, None, &call)?;
+        db.bind(context.project_id, "feat/x", &new, head, &call)?;
+        assert_eq!(db.for_pr(&old, &call)?.len(), 1);
+        assert!(db.for_pr(&new, &call)?.is_empty());
+        assert_eq!(db.reassigned_from_pr(&old, &call)?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn v3_store_migrates_to_v4_keeping_its_links()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (context, mut attempt, old, _) = fixture(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let db = Contributions::open(context.state_root.as_path(), &call)?;
+        let head = GitOid::parse(&"a".repeat(40))?;
+        db.bind(context.project_id, "feat/x", &old, head, &call)?;
+        attempt.attempt_id = AttemptId::from_bytes([1; 16]);
+        db.capture(&attempt, "feat/x", "worker", &call)?;
+        db.0.execute_batch("DROP TABLE reassignments; PRAGMA user_version=3;")?;
+        drop(db);
+        let v3 = Contributions::open_read_only(context.state_root.as_path(), &call)?
+            .ok_or("v3 store")?;
+        assert_eq!(v3.for_pr(&old, &call)?.len(), 1);
+        assert_eq!(v3.reassigned_from_pr(&old, &call)?, 0);
+        drop(v3);
+        let db = Contributions::open(context.state_root.as_path(), &call)?;
+        assert_eq!(db.for_pr(&old, &call)?.len(), 1);
+        let tables: i64 = db.0.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name='reassignments'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(tables, 1);
+        assert_eq!(
+            db.0.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+            4
+        );
         Ok(())
     }
 

@@ -137,10 +137,12 @@ bindings in the old generation and span into the new one. A newly bound PR only
 receives attempts from the current generation, even when an older PR remains
 open. Capture resolves only attempts and open PRs sharing a generation. Continuations and validated children inherit their
 parent's generation unless an authorised replacement changes branches.
-Capture stays offline. The sweep protects attempts captured after the next
-binding; it cannot retrospectively distinguish attempts captured between an
-external closure and that observation. To establish the boundary before new
-work, use `pr status N` or `pr contributions N --bind` on the old PR first.
+Capture stays offline. Each observed closure reads `mergedAt`/`closedAt` and
+moves unsealed attempts queued after it to the new generation, reported as
+`coverage.reassigned`; attempts with no queue time stay and count as
+`coverage.unplaced`. GitHub times have 1 s precision and are compared with the
+local clock that stamped `queued_at`, so attempts within clock skew of the
+boundary may be misplaced.
 A closed-then-reopened PR is not re-tracked, even with `--bind`: closure is an
 immutable generation boundary and replay cannot reopen its binding. Open a new
 PR to track subsequent work. Historical links remain
