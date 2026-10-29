@@ -86,6 +86,22 @@ pub enum FetchError {
     },
 }
 
+impl FetchError {
+    /// Stable identifier independent of the displayed explanation.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Invalid(_) => "invalid",
+            Self::Json(_) => "json",
+            Self::Canonical(_) => "canonical",
+            Self::Filesystem(_) => "filesystem",
+            Self::UnsafeDirectory => "unsafe_directory",
+            Self::FileDigest { .. } => "file_digest",
+            Self::DestinationExists { .. } => "destination_exists",
+            Self::VisibleDurabilityUnconfirmed { .. } => "visible_durability_unconfirmed",
+        }
+    }
+}
+
 type Result<T> = std::result::Result<T, FetchError>;
 
 impl FetchManifest {

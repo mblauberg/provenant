@@ -17,6 +17,17 @@ pub enum IdentityError {
     Label,
 }
 
+impl IdentityError {
+    /// Stable identifier independent of the displayed explanation.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::OutsideHome => "outside_home",
+            Self::Encoding => "encoding",
+            Self::Label => "label",
+        }
+    }
+}
+
 pub fn validate_label(label: &str) -> Result<(), IdentityError> {
     if label.is_empty()
         || label.len() > 128

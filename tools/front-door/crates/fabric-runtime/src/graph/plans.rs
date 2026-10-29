@@ -901,6 +901,10 @@ pub(super) fn settle(
                     .nodes
                     .iter()
                     .find_map(|n| n.expansion_pause.clone());
+                checkpoint.pause_code = checkpoint
+                    .pause_reason
+                    .as_ref()
+                    .map(|_| "invalid_plan_expansion".into());
             }
             checkpoint.expansions.push(addition);
             loops::reconcile(checkpoint, &plan);
@@ -914,6 +918,7 @@ pub(super) fn settle(
             );
             checkpoint.nodes[index].expansion_pause = Some(reason.clone());
             checkpoint.pause_reason = Some(reason);
+            checkpoint.pause_code = Some("invalid_plan_expansion".into());
             None
         }
     }

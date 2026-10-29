@@ -469,6 +469,7 @@ pub(super) fn land_ask(
 
 fn fail<R: AttemptOwner, J: GraphJournal>(
     index: usize,
+    code: &'static str,
     reason: String,
     checkpoint: &mut GraphCheckpoint,
     journal: &mut J,
@@ -477,6 +478,7 @@ fn fail<R: AttemptOwner, J: GraphJournal>(
     progress.state = NodeState::Failed;
     progress.outputs = None;
     progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+    progress.advance_error_code = Some(code.into());
     journal.save(checkpoint).map_err(GraphError::Journal)
 }
 
@@ -541,6 +543,7 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
         let Some((branch, head)) = delivered_head(plan, checkpoint, &spec.node) else {
             return fail::<R, J>(
                 index,
+                "land_delivery_missing",
                 format!(
                     "node {}: writer {} delivered no branch and commit to land",
                     node.id, spec.node
@@ -552,7 +555,7 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
         if let Some(reason) =
             acceptance_error(plan, checkpoint, positions, &node.id, &spec.node, &head)
         {
-            return fail::<R, J>(index, reason, checkpoint, journal);
+            return fail::<R, J>(index, "land_review_required", reason, checkpoint, journal);
         }
         let LandChoice { policy, source } = owner.land_policy(spec.tier);
         let progress = &mut checkpoint.nodes[index];
@@ -640,6 +643,7 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
             asks::refresh_wake(checkpoint);
             fail::<R, J>(
                 index,
+                "land_refused",
                 format!("node {}: land refused: {reason}", node.id),
                 checkpoint,
                 journal,
@@ -669,6 +673,7 @@ fn ask_chair<R: AttemptOwner, J: GraphJournal>(
             let Some(session) = session(spec, plan).map(str::to_owned) else {
                 fail::<R, J>(
                     index,
+                    "land_session_missing",
                     format!(
                         "node {}: the {} tier asks before landing, but neither the land node nor the graph names a decision session; set land.session or decision_session, or land {} at {} by hand with provenant land",
                         node.id,
@@ -704,6 +709,11 @@ fn ask_chair<R: AttemptOwner, J: GraphJournal>(
     };
     let answer = asks::answered(reply);
     let actor = answer.actor.clone().unwrap_or_default();
+    let code = if answer.option.as_deref() == Some(HOLD) {
+        "land_held"
+    } else {
+        "land_answer_cannot_approve"
+    };
     let reason = if answer.option.as_deref() == Some(HOLD) {
         format!("node {}: land held by {actor} in {ask_id}", node.id)
     } else {
@@ -715,6 +725,7 @@ fn ask_chair<R: AttemptOwner, J: GraphJournal>(
     let progress = &mut checkpoint.nodes[index];
     progress.state = NodeState::Failed;
     progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+    progress.advance_error_code = Some(code.into());
     // A failed land keeps no retry deadline from an earlier pending observation.
     if let Some(land) = progress.land.as_mut() {
         land.wake_at = None;

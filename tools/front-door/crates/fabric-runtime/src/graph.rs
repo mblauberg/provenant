@@ -38,7 +38,9 @@ pub use asks::{
 };
 pub use composites::CompositeSpec;
 pub use land::{LandAuthority, LandObservation, LandRecord, LandRequest, LandSpec};
-pub use loops::{LegacyLoopAsk, LoopDecision, LoopRound, LoopSpec, legacy_loop_asks};
+pub use loops::{
+    InvalidLoopDecision, LegacyLoopAsk, LoopDecision, LoopRound, LoopSpec, legacy_loop_asks,
+};
 pub use plans::{
     Expansion, PatternInstantiation, PatternParameter, PatternParameterKind, PatternSpec, PlanSpec,
     RemainingBudgets,
@@ -606,6 +608,9 @@ pub struct GraphCheckpoint {
     pub cancelled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_reason: Option<String>,
+    /// Stable cause of the pause, independent of its displayed explanation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_code: Option<String>,
     /// Usage fields unavailable for settled attempts, including partial
     /// telemetry. Only the newest lines are kept.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -670,6 +675,8 @@ pub struct NodeProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_pause: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_pause_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round: Option<LoopRound>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<GateResult>,
@@ -690,6 +697,9 @@ pub struct NodeProgress {
     /// An actionable admission or settlement failure, retained for status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advance_error: Option<String>,
+    /// Stable cause of an admission or settlement failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advance_error_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outputs: Option<NodeOutputs>,
     /// One durable row per route actually tried, in route order.
@@ -1109,6 +1119,24 @@ pub enum JournalError {
     BadEnvelope,
     #[error("graph checkpoint digest does not match its contents")]
     BadDigest,
+}
+
+impl JournalError {
+    /// Stable identifier independent of the displayed explanation.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidGraphId => "invalid_graph_id",
+            Self::GraphMismatch => "graph_mismatch",
+            Self::TooLarge => "too_large",
+            Self::DurabilityUnconfirmed(_) => "durability_unconfirmed",
+            Self::Filesystem(_) => "filesystem",
+            Self::Canonical(_) => "canonical",
+            Self::Decode(_) => "decode",
+            Self::Io(_) => "io",
+            Self::BadEnvelope => "bad_envelope",
+            Self::BadDigest => "bad_digest",
+        }
+    }
 }
 
 /// Safe, atomic checkpoint file journal. The held owner lock fences concurrent
@@ -1551,6 +1579,23 @@ pub enum GraphError<RunError: Error + 'static, JournalError: Error + 'static> {
     Journal(#[source] JournalError),
 }
 
+impl<R: Error + 'static, J: Error + 'static> GraphError<R, J> {
+    /// Stable identifier independent of the displayed explanation.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Instance(_) => "instance",
+            Self::Invalid(_) => "invalid_graph",
+            Self::Extension(_) => "invalid_extension",
+            Self::Refused(_) => "graph_refused",
+            Self::PlanChanged => "plan_changed",
+            Self::BadCheckpoint => "bad_checkpoint",
+            Self::Canonical(_) => "canonical",
+            Self::Run(_) => "run",
+            Self::Journal(_) => "journal",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedGraph {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1829,6 +1874,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 cancelled: false,
                 integration_pin: None,
                 pause_reason: None,
+                pause_code: None,
                 unknown_usage: Vec::new(),
                 unknown_usage_omitted: 0,
                 usage_events: Vec::new(),
@@ -1849,6 +1895,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         handoff: None,
                         expansion_pause: None,
                         loop_pause: None,
+                        loop_pause_code: None,
                         round: node.round.clone(),
                         gate: None,
                         separation: None,
@@ -1859,6 +1906,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         worktree: node.worktree.clone(),
                         state: NodeState::Pending,
                         advance_error: None,
+                        advance_error_code: None,
                         outputs: None,
                         attempts: Vec::new(),
                     })
@@ -1914,7 +1962,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             }
         } else {
             apply_extension(&mut effective_budget, extension, replay)
-                .map_err(GraphError::Extension)?;
+                .map_err(|error| GraphError::Extension(error.to_string()))?;
         }
     }
     let limit_notes = document_limit_notes(document);
@@ -1990,6 +2038,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             }
         }
         checkpoint.pause_reason = None;
+        checkpoint.pause_code = None;
         if extensions.iter().any(|e| e.starts_with("loop.")) {
             let expanded = plans::expand(
                 document,
@@ -2008,6 +2057,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .ok_or(GraphError::Invalid(String::from("loop extension")))?;
                 if let Some(node) = checkpoint.nodes.iter_mut().find(|n| n.id == name) {
                     node.loop_pause = None;
+                    node.loop_pause_code = None;
                 }
             }
             loops::reconcile(&mut checkpoint, &extended);
@@ -2054,6 +2104,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             .find_map(|n| n.expansion_pause.clone())
         {
             checkpoint.pause_reason = Some(reason);
+            checkpoint.pause_code = Some("invalid_plan_expansion".into());
         }
         let structural_pause = if checkpoint.nodes.iter().all(|node| node.state.settled()) {
             None
@@ -2062,6 +2113,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         };
         if let Some(reason) = &structural_pause {
             checkpoint.pause_reason = Some(bounded(reason, PAUSE_REASON_BYTES));
+            checkpoint.pause_code = Some("structural_limit".into());
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
 
@@ -2127,6 +2179,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             if ask.node.as_deref() == Some(node.id.as_str()) {
                                 ask.resolved = true;
                                 if let Some(answer) = ask.answer.as_mut() {
+                                    answer
+                                        .rejection_code
+                                        .get_or_insert_with(|| "invalid_loop_decision".into());
                                     answer.rejected.get_or_insert_with(|| {
                                         bounded(&reason, MAX_ADVANCE_ERROR_BYTES)
                                     });
@@ -2318,23 +2373,33 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         .or_else(|| budget_reason(&checkpoint, &effective_budget))
                     {
                         checkpoint.pause_reason = Some(bounded(&reason, PAUSE_REASON_BYTES));
+                        checkpoint
+                            .pause_code
+                            .get_or_insert_with(|| "budget_exceeded".into());
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }
                     if !node.inputs.is_empty() && render_input(node, &checkpoint, &positions, cap).1
                     {
-                        let reason = if node
+                        let (code, reason) = if node
                             .prompt
                             .len()
                             .saturating_add(INPUT_OPEN.len())
                             .saturating_add(INPUT_CLOSE.len())
                             > cap
                         {
-                            "node prompt leaves no room for upstream data"
+                            (
+                                "input_prompt_too_large",
+                                "node prompt leaves no room for upstream data",
+                            )
                         } else {
-                            "selected upstream outputs do not fit"
+                            (
+                                "upstream_outputs_too_large",
+                                "selected upstream outputs do not fit",
+                            )
                         };
                         let progress = &mut checkpoint.nodes[node_index];
+                        progress.advance_error_code = Some(code.into());
                         progress.advance_error = Some(format!(
                             "node {}: {reason}; increase node_prompt_bytes and restart the graph",
                             node.id
@@ -2365,6 +2430,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             .is_none_or(|commit| commit.parse::<provenant_core::GitOid>().is_err())
                         {
                             progress.state = NodeState::Failed;
+                            progress.advance_error_code = Some("source_commit_unavailable".into());
                             progress.advance_error = Some(format!(
                                 "node {}: source commit unavailable or invalid",
                                 node.id
@@ -2389,6 +2455,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     {
                         let progress = &mut checkpoint.nodes[node_index];
                         progress.state = NodeState::Failed;
+                        progress.advance_error_code = Some("integration_head_moved".into());
                         progress.advance_error = Some(format!(
                             "node {}: the integration branch moved from the pinned {pin} to {head} after the review subject was pinned; rerun the graph to review the new head",
                             node.id
@@ -2401,6 +2468,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     {
                         let progress = &mut checkpoint.nodes[node_index];
                         progress.state = NodeState::Failed;
+                        progress.advance_error_code = Some("continuation_delivery_missing".into());
                         progress.advance_error = Some(format!(
                             "node {}: the writer it continues recorded no delivery branch",
                             node.id
@@ -2649,8 +2717,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             };
                             attempt.outcome = Some(outcome);
                             if outcome == AttemptOutcome::TaskFailed
-                                && let Some(reason) = disposition_error
+                                && let Some((code, reason)) = disposition_error
                             {
+                                progress.advance_error_code = Some(code.into());
                                 progress.advance_error =
                                     Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
                             }
@@ -2728,6 +2797,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             && checkpoint.nodes.iter().all(|n| n.expansion_pause.is_none())
             && checkpoint.pause_reason.take().is_some()
         {
+            checkpoint.pause_code = None;
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
         // Close asks only after an obsolete pause is cleared, so its ask closes too.
@@ -2997,56 +3067,107 @@ fn structural_limit_reason(
         })
 }
 
+#[derive(Debug, Error)]
+#[error("{message}")]
+struct BudgetExtensionError {
+    code: &'static str,
+    message: String,
+}
+
+impl BudgetExtensionError {
+    fn new(code: &'static str, message: String) -> Self {
+        Self { code, message }
+    }
+
+    fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
 fn apply_extension(
     budget: &mut crate::config::GraphBudget,
     extension: &str,
     replay: bool,
-) -> Result<(), String> {
-    let (key, value) = extension
-        .split_once('=')
-        .ok_or_else(|| format!("{extension}: expected KEY=VALUE"))?;
+) -> Result<(), BudgetExtensionError> {
+    let (key, value) = extension.split_once('=').ok_or_else(|| {
+        BudgetExtensionError::new(
+            "budget_extension_syntax",
+            format!("{extension}: expected KEY=VALUE"),
+        )
+    })?;
     let key = key.strip_prefix("budget.").unwrap_or(key);
-    let (scope, field) = key
-        .split_once('.')
-        .ok_or_else(|| format!("{extension}: unknown budget key"))?;
+    let (scope, field) = key.split_once('.').ok_or_else(|| {
+        BudgetExtensionError::new(
+            "budget_extension_key",
+            format!("{extension}: unknown budget key"),
+        )
+    })?;
     let target = match scope {
         "per_node" => &mut budget.per_node,
         "per_graph" => &mut budget.per_graph,
-        _ => return Err(format!("{extension}: unknown budget key")),
+        _ => {
+            return Err(BudgetExtensionError::new(
+                "budget_extension_key",
+                format!("{extension}: unknown budget key"),
+            ));
+        }
     };
     match field {
         "tokens" | "wall_time_seconds" => {
-            let number: u64 = value
-                .parse()
-                .map_err(|_| format!("{extension}: invalid budget value"))?;
+            let number: u64 = value.parse().map_err(|_| {
+                BudgetExtensionError::new(
+                    "budget_extension_value",
+                    format!("{extension}: invalid budget value"),
+                )
+            })?;
             let slot = if field == "tokens" {
                 &mut target.tokens
             } else {
                 &mut target.wall_time_seconds
             };
             if number == 0 {
-                return Err(format!("{extension}: budget must be positive"));
+                return Err(BudgetExtensionError::new(
+                    "budget_extension_value",
+                    format!("{extension}: budget must be positive"),
+                ));
             }
             if let Some(old) = slot.as_mut() {
                 *old = (*old).max(number);
             } else if !replay {
-                return Err(format!("{key} is not configured"));
+                return Err(BudgetExtensionError::new(
+                    "budget_extension_unconfigured",
+                    format!("{key} is not configured"),
+                ));
             }
         }
         "cost_usd" => {
-            let number: f64 = value
-                .parse()
-                .map_err(|_| format!("{extension}: invalid budget value"))?;
+            let number: f64 = value.parse().map_err(|_| {
+                BudgetExtensionError::new(
+                    "budget_extension_value",
+                    format!("{extension}: invalid budget value"),
+                )
+            })?;
             if !number.is_finite() || number <= 0.0 {
-                return Err(format!("{extension}: budget must be finite and positive"));
+                return Err(BudgetExtensionError::new(
+                    "budget_extension_value",
+                    format!("{extension}: budget must be finite and positive"),
+                ));
             }
             if let Some(old) = target.cost_usd.as_mut() {
                 *old = old.max(number);
             } else if !replay {
-                return Err(format!("{key} is not configured"));
+                return Err(BudgetExtensionError::new(
+                    "budget_extension_unconfigured",
+                    format!("{key} is not configured"),
+                ));
             }
         }
-        _ => return Err(format!("{extension}: unknown budget key")),
+        _ => {
+            return Err(BudgetExtensionError::new(
+                "budget_extension_key",
+                format!("{extension}: unknown budget key"),
+            ));
+        }
     }
     Ok(())
 }
@@ -3840,7 +3961,7 @@ fn disposition_error(
     dispositions: &[String],
     upstream: &std::collections::BTreeSet<String>,
     outputs: &NodeOutputs,
-) -> Option<String> {
+) -> Option<(&'static str, String)> {
     if dispositions.is_empty() || outputs.result.is_none() {
         return None;
     }
@@ -3851,8 +3972,9 @@ fn disposition_error(
             .iter()
             .any(|warning| warning == FINDINGS_INVALID)
     {
-        return Some(format!(
-            "dispositions required ({allowed}): the findings block is missing or invalid"
+        return Some((
+            "disposition_findings_invalid",
+            format!("dispositions required ({allowed}): the findings block is missing or invalid"),
         ));
     }
     for finding in &outputs.findings {
@@ -3861,10 +3983,13 @@ fn disposition_error(
             .as_ref()
             .is_some_and(|value| dispositions.contains(value));
         if !valid {
-            return Some(format!(
-                "finding {} needs a disposition of {allowed}; found {}",
-                finding.id,
-                finding.disposition.as_deref().unwrap_or("none"),
+            return Some((
+                "disposition_invalid",
+                format!(
+                    "finding {} needs a disposition of {allowed}; found {}",
+                    finding.id,
+                    finding.disposition.as_deref().unwrap_or("none"),
+                ),
             ));
         }
         if finding
@@ -3872,17 +3997,20 @@ fn disposition_error(
             .as_ref()
             .is_none_or(|reason| reason.trim().is_empty())
         {
-            return Some(format!(
-                "finding {} needs a reason for its disposition",
-                finding.id
+            return Some((
+                "disposition_reason_missing",
+                format!("finding {} needs a reason for its disposition", finding.id),
             ));
         }
     }
     for id in upstream {
         let count = outputs.findings.iter().filter(|f| &f.id == id).count();
         if count != 1 {
-            return Some(format!(
-                "upstream finding {id} needs exactly one disposition of {allowed}; found {count}"
+            return Some((
+                "disposition_count",
+                format!(
+                    "upstream finding {id} needs exactly one disposition of {allowed}; found {count}"
+                ),
             ));
         }
     }
@@ -4883,21 +5011,16 @@ mod tests {
             run(&findings_text(&disposed("F1"))).state,
             NodeState::Succeeded
         );
-        for (text, found) in [
-            (findings_text(""), "found 0"),
-            (findings_text(&disposed("F9")), "found 0"),
-            (
-                findings_text(&format!("{},{}", disposed("F1"), disposed("F1"))),
-                "found 2",
-            ),
+        for text in [
+            findings_text(""),
+            findings_text(&disposed("F9")),
+            findings_text(&format!("{},{}", disposed("F1"), disposed("F1"))),
         ] {
             let progress = run(&text);
             assert_eq!(progress.state, NodeState::Failed, "{text}");
-            let reason = progress.advance_error.unwrap();
-            assert!(
-                reason.contains("upstream finding F1 needs exactly one disposition")
-                    && reason.contains(found),
-                "{reason}"
+            assert_eq!(
+                progress.advance_error_code.as_deref(),
+                Some("disposition_count")
             );
         }
     }
@@ -4905,26 +5028,25 @@ mod tests {
     #[test]
     fn a_synthesis_without_valid_dispositions_settles_as_failed_with_a_reason() {
         let cases = [
-            (findings_text(&entry("")), "F1 needs a disposition"),
+            (findings_text(&entry("")), "disposition_invalid"),
             (
                 findings_text(&entry(",\"disposition\":\"maybe\",\"reason\":\"x\"")),
-                "found maybe",
+                "disposition_invalid",
             ),
             (
                 findings_text(&entry(",\"disposition\":\"rejected\"")),
-                "needs a reason",
+                "disposition_reason_missing",
             ),
             (
                 findings_text(&entry(",\"disposition\":\"rejected\",\"reason\":\" \"")),
-                "needs a reason",
+                "disposition_reason_missing",
             ),
-            ("VERDICT: PASS\n".to_owned(), "missing or invalid"),
+            ("VERDICT: PASS\n".to_owned(), "disposition_findings_invalid"),
         ];
         for (text, expected) in cases {
             let progress = synthesis_run(&text);
             assert_eq!(progress.state, NodeState::Failed, "{text}");
-            let reason = progress.advance_error.unwrap();
-            assert!(reason.contains(expected), "{reason}");
+            assert_eq!(progress.advance_error_code.as_deref(), Some(expected));
         }
         // A node that declares no dispositions keeps accepting bare findings.
         let plain = node("plain", route("first"));
@@ -4973,8 +5095,10 @@ mod tests {
             assert_eq!(run.checkpoint.successful(), expected);
             assert_eq!(run.checkpoint.integration_pin, Some(pin.clone()));
             if !expected {
-                let reason = run.checkpoint.nodes[1].advance_error.as_deref().unwrap();
-                assert!(reason.contains("moved"), "{reason}");
+                assert_eq!(
+                    run.checkpoint.nodes[1].advance_error_code.as_deref(),
+                    Some("integration_head_moved")
+                );
                 assert_eq!(owner.calls.len(), 1);
             }
         }
@@ -5596,11 +5720,11 @@ mod tests {
             agent.kind = kind;
             let mut wire = serde_json::to_value(graph(vec![agent])).unwrap();
             wire["nodes"][0].as_object_mut().unwrap().remove("access");
-            assert!(
+            assert_eq!(
                 serde_json::from_value::<GraphDocument>(wire)
                     .unwrap_err()
-                    .to_string()
-                    .contains("missing field `access`")
+                    .classify(),
+                serde_json::error::Category::Data
             );
         }
     }
@@ -6158,10 +6282,7 @@ mod tests {
             "per_graph.wall_time_seconds=10",
         ] {
             let err = apply_extension(&mut Default::default(), extension, false).unwrap_err();
-            assert!(
-                err.contains(extension.split('=').next().unwrap())
-                    && err.contains("not configured")
-            );
+            assert_eq!(err.code(), "budget_extension_unconfigured");
         }
     }
 
@@ -6192,12 +6313,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(paused.status, GraphStatus::Paused);
-        assert!(
-            paused
-                .checkpoint
-                .pause_reason
-                .unwrap()
-                .contains("limits.nodes=1")
+        assert_eq!(
+            paused.checkpoint.pause_code.as_deref(),
+            Some("structural_limit")
         );
         assert!(owner.calls.is_empty());
         let raised = crate::config::GraphLimits { nodes: 2, ..limits };
@@ -6223,21 +6341,15 @@ mod tests {
         let mut c = node("c", route("first"));
         c.depends_on.push("a".into());
         let document = graph(vec![root, a, b, c]);
-        for (limits, key) in [
-            (
-                crate::config::GraphLimits {
-                    fan_out_width: 1,
-                    ..Default::default()
-                },
-                "fan_out_width",
-            ),
-            (
-                crate::config::GraphLimits {
-                    expansion_depth: 1,
-                    ..Default::default()
-                },
-                "expansion_depth",
-            ),
+        for limits in [
+            crate::config::GraphLimits {
+                fan_out_width: 1,
+                ..Default::default()
+            },
+            crate::config::GraphLimits {
+                expansion_depth: 1,
+                ..Default::default()
+            },
         ] {
             let mut owner = FakeOwner::default();
             let run = advance_with_budget(
@@ -6249,7 +6361,10 @@ mod tests {
             )
             .unwrap();
             assert_eq!(run.status, GraphStatus::Paused);
-            assert!(run.checkpoint.pause_reason.unwrap().contains(key));
+            assert_eq!(
+                run.checkpoint.pause_code.as_deref(),
+                Some("structural_limit")
+            );
             assert!(owner.calls.is_empty());
         }
     }
@@ -6468,12 +6583,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(run.status, GraphStatus::Paused);
-        assert!(
-            run.checkpoint
-                .pause_reason
-                .as_ref()
-                .unwrap()
-                .contains("tokens")
+        assert_eq!(
+            run.checkpoint.pause_code.as_deref(),
+            Some("budget_exceeded")
         );
         let mut checkpoint = run.checkpoint;
         let wall_budget = crate::config::GraphBudget {
@@ -7414,10 +7526,9 @@ mod tests {
         .unwrap();
         assert_eq!(owner.prompts.len(), 1);
         assert_eq!(run.checkpoint.nodes[1].state, NodeState::Failed);
-        assert!(
-            run.advance_error
-                .unwrap()
-                .contains("selected upstream outputs do not fit")
+        assert_eq!(
+            run.checkpoint.nodes[1].advance_error_code.as_deref(),
+            Some("upstream_outputs_too_large")
         );
     }
 
@@ -7553,11 +7664,11 @@ mod tests {
         assert!(owner.prompts[1].starts_with("Rank and deduplicate findings"));
         let mut invalid = wire;
         invalid["nodes"][1]["kind"] = serde_json::json!("synthesis");
-        assert!(
+        assert_eq!(
             serde_json::from_value::<GraphDocument>(invalid)
                 .unwrap_err()
-                .to_string()
-                .contains("unknown variant")
+                .classify(),
+            serde_json::error::Category::Data
         );
     }
 
@@ -7627,10 +7738,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(run.checkpoint.nodes[1].state, NodeState::Failed);
-        assert!(
-            run.advance_error
-                .unwrap()
-                .contains("node prompt leaves no room for upstream data")
+        assert_eq!(
+            run.checkpoint.nodes[1].advance_error_code.as_deref(),
+            Some("input_prompt_too_large")
         );
         assert_eq!(owner.calls.len(), 1);
         assert!(run.checkpoint.nodes[1].attempts.is_empty());

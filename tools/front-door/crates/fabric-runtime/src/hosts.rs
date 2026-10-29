@@ -624,6 +624,13 @@ pub struct PeerResultError {
     pub extra: provenant_records::ExtraFields,
 }
 
+impl PeerResultError {
+    /// Preserve the refusal code supplied by the peer.
+    pub fn code(&self) -> &'static str {
+        self.error.code()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PeerResponse<R = PeerResult> {
     #[serde(flatten)]
