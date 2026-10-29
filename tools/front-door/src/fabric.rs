@@ -235,6 +235,7 @@ impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
                 session,
                 patch,
                 expect_revision,
+                operation_id,
             } => {
                 args.extend([
                     "summary".into(),
@@ -245,6 +246,9 @@ impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
                     "--expect-revision".into(),
                     expect_revision.to_string(),
                 ]);
+                if let Some(id) = operation_id {
+                    args.extend(["--operation-id".into(), id]);
+                }
                 body = Some(serde_json::to_vec(&patch)?);
             }
             ChairInput::LogList {

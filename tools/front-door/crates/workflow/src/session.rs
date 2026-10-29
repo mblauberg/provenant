@@ -48,8 +48,52 @@ struct Manifest {
     /// Oldest first; the last is the checkpoint in `checkpoint.md`.
     revisions: Vec<Revision>,
 }
+/// Every decision of one checkpoint publication, journaled before any file
+/// changes so that recovery replays exactly what was intended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PublishPlan {
+    pub(super) now: UtcMicros,
+    /// The replaced revision number and text, stored before the checkpoint.
+    #[serde(with = "utf8_pair")]
+    prev: Option<(u64, Vec<u8>)>,
+    #[serde(with = "utf8_bytes")]
+    text: Vec<u8>,
+    /// The whole chain before pruning, oldest first.
+    chain: Vec<Revision>,
+    unchanged: bool,
+    keep: u64,
+}
+/// Checkpoints are UTF-8, so plans carry them as JSON strings.
+mod utf8_bytes {
+    pub fn serialize<S: serde::Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(std::str::from_utf8(bytes).map_err(serde::ser::Error::custom)?)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        <String as serde::Deserialize>::deserialize(d).map(String::into_bytes)
+    }
+}
+mod utf8_pair {
+    use serde::{Deserialize, Serialize};
+    pub fn serialize<S: serde::Serializer>(
+        pair: &Option<(u64, Vec<u8>)>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        let text = pair
+            .as_ref()
+            .map(|(n, b)| std::str::from_utf8(b).map(|t| (*n, t)))
+            .transpose()
+            .map_err(serde::ser::Error::custom)?;
+        text.serialize(s)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<(u64, Vec<u8>)>, D::Error> {
+        Ok(<Option<(u64, String)>>::deserialize(d)?.map(|(n, t)| (n, t.into_bytes())))
+    }
+}
 /// What a save recorded.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Saved {
     pub revision: u64,
     pub parent: Option<u64>,
@@ -225,6 +269,10 @@ pub enum SessionError {
     Summary(#[from] SummaryError),
     #[error("checkpoint for session {session} not found")]
     MissingCheckpoint { session: String },
+    #[error("operation id was already used with a different summary update")]
+    OperationConflict,
+    #[error("pending summary journal is unreadable")]
+    Journal,
     #[error("summary update would exceed the 8192-byte frontmatter limit")]
     SummaryTooLarge,
 }
@@ -346,7 +394,8 @@ impl SessionStore {
         self.publish_revision_locked(&dir, text, clock, false, publish_discovery)
     }
 
-    /// Publish a replacement while holding the checkpoint lock.
+    /// Publish a replacement while holding the checkpoint lock. Any pending
+    /// summary journal is replayed first, so no writer interleaves with it.
     fn publish_revision_locked(
         &self,
         dir: &Directory,
@@ -355,24 +404,38 @@ impl SessionStore {
         field_update: bool,
         publish_discovery: impl FnOnce(&Directory, &SessionDiscovery) -> Result<(), SessionError>,
     ) -> Result<Saved, SessionError> {
+        self.recover_pending(dir)?;
+        let plan = self.plan_publication(dir, text, clock.wall_now()?)?;
+        self.execute_plan(dir, &plan, field_update, publish_discovery)
+    }
+
+    /// Decide every publication step from the current state. The result is
+    /// self-contained, so replaying it after a crash repeats the same steps
+    /// and yields the same history, whatever the files now hold.
+    fn plan_publication(
+        &self,
+        dir: &Directory,
+        text: &[u8],
+        now: UtcMicros,
+    ) -> Result<PublishPlan, SessionError> {
         if text.len() as u64 > CHECKPOINT_LIMIT {
             return Err(SessionError::TooLarge);
         }
-        let markdown = std::str::from_utf8(text)?;
-        let now = clock.wall_now()?;
+        std::str::from_utf8(text)?;
         // A checkpoint that cannot be read (a symlink, say) is replaced, not kept.
         let existing = read_current(dir).ok().flatten();
         let discovery = self.load_discovery(dir)?;
         self.check_discovery_identity(discovery.as_ref())?;
-        let mut manifest = load(dir).unwrap_or_default();
+        let manifest = load(dir).unwrap_or_default();
         let floor = highest_revision_file(dir)?;
         let mut chain = reconcile(&manifest, existing.as_ref(), floor);
         let digest = provenant_records::CanonicalV1::file_digest(text);
         let unchanged = chain.last().is_some_and(|last| last.sha256 == digest);
+        let mut prev = None;
         if !unchanged {
             // Keep the text being replaced before replacing it.
             if let (Some(last), Some((bytes, _))) = (chain.last(), existing.as_ref()) {
-                publish(dir, &revision_file(last.revision), bytes)?;
+                prev = Some((last.revision, bytes.clone()));
             }
             let parent = chain.last().map(|last| last.revision);
             chain.push(Revision {
@@ -383,12 +446,39 @@ impl SessionStore {
                 saved_at: now,
             });
         }
-        publish(dir, "checkpoint.md", text)?;
+        Ok(PublishPlan {
+            now,
+            prev,
+            text: text.to_vec(),
+            chain,
+            unchanged,
+            keep: self.keep,
+        })
+    }
+
+    /// Perform a plan's steps in order. Each step is idempotent.
+    fn execute_plan(
+        &self,
+        dir: &Directory,
+        plan: &PublishPlan,
+        field_update: bool,
+        publish_discovery: impl FnOnce(&Directory, &SessionDiscovery) -> Result<(), SessionError>,
+    ) -> Result<Saved, SessionError> {
+        let markdown = std::str::from_utf8(&plan.text)?;
+        let now = plan.now;
+        let discovery = self.load_discovery(dir)?;
+        if let Some((revision, bytes)) = &plan.prev {
+            publish(dir, &revision_file(*revision), bytes)?;
+        }
+        publish(dir, "checkpoint.md", &plan.text)?;
+        let mut chain = plan.chain.clone();
         let current = chain.last().cloned().ok_or(SessionError::History)?;
-        let keep = usize::try_from(self.keep).unwrap_or(usize::MAX);
+        let keep = usize::try_from(plan.keep).unwrap_or(usize::MAX);
         let pruned: Vec<Revision> = chain.drain(..chain.len().saturating_sub(keep)).collect();
-        manifest.schema_version = 1;
-        manifest.revisions = chain;
+        let manifest = Manifest {
+            schema_version: 1,
+            revisions: chain,
+        };
         let manifest_bytes = serde_json::to_vec(&manifest).map_err(|_| SessionError::History)?;
         publish(dir, MANIFEST, &manifest_bytes)?;
         let mut warnings = Vec::new();
@@ -423,7 +513,7 @@ impl SessionStore {
         Ok(Saved {
             revision: current.revision,
             parent: current.parent,
-            unchanged,
+            unchanged: plan.unchanged,
             retained: manifest.revisions.len(),
             warnings,
         })
@@ -653,6 +743,7 @@ impl SessionStore {
             cancel,
             clock,
         )?;
+        self.recover_pending(&dir)?;
         self.check_discovery_identity(self.load_discovery(&dir)?.as_ref())?;
         let current = match dir.open_read(OsStr::new("checkpoint.md")) {
             Ok(mut file) => {
@@ -719,6 +810,9 @@ mod tests {
             project,
             HostSessionId::parse(session).unwrap(),
         )
+    }
+    fn op(text: &str) -> provenant_core::OperationId {
+        provenant_core::OperationId::parse(text).unwrap()
     }
     fn clock(micros: i64) -> TestClock {
         TestClock::new(
@@ -1287,7 +1381,7 @@ mod tests {
         let history = original.revisions().unwrap();
         let discovery = original.discovery().unwrap();
         assert!(matches!(
-            unbound.update_summary(patch(), 1, budget, &CancelToken::new(), &clock),
+            unbound.update_summary(patch(), 1, &op("a"), budget, &CancelToken::new(), &clock),
             Err(SessionError::ChairIdentityRequired)
         ));
         assert_eq!(original.read().unwrap(), before);
@@ -1302,7 +1396,8 @@ mod tests {
         let discovery = unbound.discovery().unwrap();
         // A stale revision would otherwise return SummaryStale from the edit
         // closure, before the publication path can check the new binding.
-        let result = original.update_summary(patch(), 999, budget, &CancelToken::new(), &clock);
+        let result =
+            original.update_summary(patch(), 999, &op("a"), budget, &CancelToken::new(), &clock);
         assert!(
             matches!(&result, Err(SessionError::DiscoveryIdentity)),
             "{result:?}"
@@ -1343,7 +1438,7 @@ mod tests {
             let selected_ref = &selected;
             let changed_ref = &changed;
             let saving = scope.spawn(move || {
-                let clock = SystemClock::new();
+                let clock = provenant_os::clock::SystemClock::new();
                 selected_ref
                     .save_revision_with(
                         changed_ref.as_bytes(),
@@ -1372,6 +1467,7 @@ mod tests {
                         ..Default::default()
                     },
                     1,
+                    &op("a"),
                     budget,
                     &CancelToken::new(),
                     &expired
@@ -1388,6 +1484,7 @@ mod tests {
                         ..Default::default()
                     },
                     1,
+                    &op("b"),
                     budget,
                     &CancelToken::new(),
                     &clock,
@@ -1415,7 +1512,7 @@ mod tests {
             let attempt = |value: &'static str, barrier: Arc<Barrier>| {
                 let selected = &selected;
                 scope.spawn(move || {
-                    let clock = SystemClock::new();
+                    let clock = provenant_os::clock::SystemClock::new();
                     barrier.wait();
                     selected.update_summary(
                         SummaryPatch {
@@ -1423,6 +1520,7 @@ mod tests {
                             ..Default::default()
                         },
                         2,
+                        &op(value),
                         WaitBudget::cli(clock.mono_now(), 5).unwrap(),
                         &CancelToken::new(),
                         &clock,
@@ -1475,7 +1573,7 @@ mod tests {
             ..Default::default()
         };
         selected
-            .update_summary(patch, 0, budget, &CancelToken::new(), &clock)
+            .update_summary(patch, 0, &op("a"), budget, &CancelToken::new(), &clock)
             .unwrap();
         let before = selected.read().unwrap().unwrap().markdown;
         assert!(before.contains("# existing comment\r\n\r\nprovenant_summary:"));
@@ -1487,12 +1585,248 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            selected.update_summary(patch, 1, budget, &CancelToken::new(), &clock),
+            selected.update_summary(patch, 1, &op("b"), budget, &CancelToken::new(), &clock),
             Err(SessionError::SummaryTooLarge)
         ));
         assert_eq!(selected.read().unwrap().unwrap().markdown, before);
         assert_eq!(selected.revisions().unwrap(), revisions);
         assert_eq!(selected.discovery().unwrap().unwrap(), discovery);
+    }
+    const CHAIR_TEXT: &str = "---\nprovenant_summary:\n  schema_version: 1\n  revision: 1\n  updated_at: \"2026-10-28T03:00:00Z\"\n  now: \"First\"\n  next: \"Next\"\n  needs_you: []\n  risk: \"None\"\n---\nBody\n";
+    fn chair_store(root: &StateRoot, project: ProjectId) -> SessionStore {
+        use provenant_core::{ActorId, HostId};
+        store(root, project, "chair")
+            .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([4; 16]))
+    }
+    fn change(text: &str) -> SummaryPatch {
+        SummaryPatch {
+            now: Some(text.into()),
+            ..Default::default()
+        }
+    }
+    fn update_at(
+        store: &SessionStore,
+        patch: SummaryPatch,
+        expected: u64,
+        id: &str,
+        micros: i64,
+    ) -> Result<SummaryOutcome, SessionError> {
+        let clock = clock(micros);
+        store.update_summary(
+            patch,
+            expected,
+            &op(id),
+            WaitBudget::cli(clock.mono_now(), 1).unwrap(),
+            &CancelToken::new(),
+            &clock,
+        )
+    }
+
+    #[test]
+    fn summary_operation_replays_and_refuses_a_different_request() {
+        let (_temp, root, project) = setup();
+        let chair = chair_store(&root, project);
+        saved(&chair, CHAIR_TEXT);
+        let first = update_at(&chair, change("one"), 1, "op-1", 10).unwrap();
+        assert!(!first.replayed);
+        let revisions = chair.revisions().unwrap();
+        // A retry after a lost response replays the receipt, later and with
+        // the revision already advanced.
+        let again = update_at(&chair, change("one"), 1, "op-1", 99).unwrap();
+        assert!(again.replayed);
+        assert_eq!(again.summary, first.summary);
+        assert_eq!(again.saved, first.saved);
+        assert_eq!(chair.revisions().unwrap(), revisions);
+        assert!(matches!(
+            update_at(&chair, change("two"), 1, "op-1", 99),
+            Err(SessionError::OperationConflict)
+        ));
+        assert!(matches!(
+            update_at(&chair, change("one"), 2, "op-1", 99),
+            Err(SessionError::OperationConflict)
+        ));
+        // A new id with the old revision is an ordinary stale write.
+        assert!(matches!(
+            update_at(&chair, change("one"), 1, "op-2", 99),
+            Err(SessionError::SummaryStale {
+                current_revision: 2
+            })
+        ));
+        assert_eq!(
+            parse_summary(&chair.read().unwrap().unwrap().markdown)
+                .unwrap()
+                .unwrap()
+                .now,
+            "one"
+        );
+    }
+
+    #[test]
+    fn concurrent_retries_of_one_operation_apply_once() {
+        let (_temp, root, project) = setup();
+        let chair = chair_store(&root, project);
+        saved(&chair, CHAIR_TEXT);
+        let results: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let chair = &chair;
+                    scope.spawn(move || {
+                        let clock = provenant_os::clock::SystemClock::new();
+                        chair.update_summary(
+                            change("once"),
+                            1,
+                            &op("same"),
+                            WaitBudget::cli(clock.mono_now(), 5).unwrap(),
+                            &CancelToken::new(),
+                            &clock,
+                        )
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap().unwrap())
+                .collect()
+        });
+        assert_eq!(results.iter().filter(|r| !r.replayed).count(), 1);
+        assert!(results.iter().all(|r| r.summary.revision == 2));
+        assert_eq!(chair.revisions().unwrap().len(), 2);
+    }
+
+    /// Stop a summary update after `stage` publication steps, as a crash would.
+    fn crash_after(chair: &SessionStore, stage: u8, id: &str) {
+        let clock = clock(10);
+        let dir = chair.directory(false).unwrap();
+        let _lock = dir
+            .lock(
+                OsStr::new("checkpoint.lock"),
+                LockMode::Exclusive,
+                WaitBudget::cli(clock.mono_now(), 1).unwrap(),
+                &CancelToken::new(),
+                &clock,
+            )
+            .unwrap();
+        let begun = chair
+            .begin_update(
+                &dir,
+                change("crashed"),
+                1,
+                &op(id),
+                WaitBudget::cli(clock.mono_now(), 1).unwrap(),
+                &CancelToken::new(),
+                &clock,
+            )
+            .unwrap();
+        let summary::Begun::Pending(pending) = begun else {
+            panic!("fresh operation");
+        };
+        let plan = &pending.plan;
+        match stage {
+            0 => {}
+            1 => publish(
+                &dir,
+                &revision_file(plan.prev.as_ref().unwrap().0),
+                &plan.prev.as_ref().unwrap().1,
+            )
+            .unwrap(),
+            2 => {
+                let (n, bytes) = plan.prev.as_ref().unwrap();
+                publish(&dir, &revision_file(*n), bytes).unwrap();
+                publish(&dir, "checkpoint.md", &plan.text).unwrap();
+            }
+            3 => {
+                chair.execute_plan(&dir, plan, true, |_, _| Ok(())).unwrap();
+            }
+            _ => {
+                // Everything done and the receipt written; only the journal
+                // removal is lost.
+                let journal = std::fs::read(
+                    path(&root_of(chair), chair.project, "chair").join("summary-pending.json"),
+                )
+                .unwrap();
+                chair.finish_pending(&dir, pending).unwrap();
+                publish(&dir, "summary-pending.json", &journal).unwrap();
+            }
+        }
+    }
+    fn root_of(chair: &SessionStore) -> StateRoot {
+        chair.root.clone()
+    }
+
+    #[test]
+    fn summary_crash_recovery_replays_the_journaled_plan_at_every_step() {
+        let (_c, control_root, control_project) = setup();
+        let control = chair_store(&control_root, control_project);
+        saved(&control, CHAIR_TEXT);
+        let expected = update_at(&control, change("crashed"), 1, "op-1", 10).unwrap();
+        for stage in 0..=4u8 {
+            let (_t, root, project) = setup();
+            let chair = chair_store(&root, project);
+            saved(&chair, CHAIR_TEXT);
+            crash_after(&chair, stage, "op-1");
+            // The retry runs later; the replayed plan keeps the original time,
+            // revision numbers and history.
+            let retry = update_at(&chair, change("crashed"), 1, "op-1", 99).unwrap();
+            assert!(retry.replayed || stage < 4, "stage {stage}");
+            assert_eq!(retry.summary, expected.summary, "stage {stage}");
+            assert_eq!(
+                retry.saved.revision, expected.saved.revision,
+                "stage {stage}"
+            );
+            assert_eq!(
+                chair.revisions().unwrap(),
+                control.revisions().unwrap(),
+                "stage {stage}"
+            );
+            assert_eq!(
+                chair.read().unwrap().unwrap().markdown,
+                control.read().unwrap().unwrap().markdown,
+                "stage {stage}"
+            );
+            for number in control.revisions().unwrap().iter().map(|r| r.revision) {
+                assert_eq!(
+                    chair.read_revision(number).unwrap().map(|r| r.markdown),
+                    control.read_revision(number).unwrap().map(|r| r.markdown),
+                    "stage {stage}"
+                );
+            }
+            let dir = chair.directory(false).unwrap();
+            assert!(
+                dir.read_bounded(OsStr::new("summary-pending.json"), 1024)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn another_writer_completes_a_pending_summary_before_saving() {
+        for stage in 0..=3u8 {
+            let (_t, root, project) = setup();
+            let chair = chair_store(&root, project);
+            saved(&chair, CHAIR_TEXT);
+            crash_after(&chair, stage, "op-1");
+            let next = saved(&chair, "---\n---\nlater\n");
+            assert_eq!(next.revision, 3, "stage {stage}");
+            let numbers: Vec<_> = chair
+                .revisions()
+                .unwrap()
+                .iter()
+                .map(|r| r.revision)
+                .collect();
+            assert_eq!(numbers, [1, 2, 3], "stage {stage}");
+            assert!(
+                chair
+                    .read_revision(2)
+                    .unwrap()
+                    .unwrap()
+                    .markdown
+                    .contains("crashed")
+            );
+            // The crashed update is not applied twice and still replays.
+            let retry = update_at(&chair, change("crashed"), 1, "op-1", 99).unwrap();
+            assert!(retry.replayed);
+            assert_eq!(retry.summary.revision, 2);
+        }
     }
     #[test]
     fn enforces_utf8_and_byte_bounds_on_read_and_write() {

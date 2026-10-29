@@ -2939,6 +2939,7 @@ Accepted by every command, before or after the subcommand.
 | `session` | `{"name": "session", "positional": true, "required": true}` |
 | `--file` | `{"name": "file", "required": true}` |
 | `--expect-revision` | `{"name": "expect_revision", "required": true}` |
+| `--operation-id` | `{"name": "operation_id"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2949,7 +2950,8 @@ Accepted by every command, before or after the subcommand.
       "arguments": [
         "session",
         "file",
-        "expect_revision"
+        "expect_revision",
+        "operation_id"
       ],
       "multiple": true,
       "name": "Update",

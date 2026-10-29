@@ -377,6 +377,10 @@ pub enum ChairSummary {
         /// Expected summary revision; use 0 to create a summary
         #[arg(long)]
         expect_revision: u64,
+        /// Stable retry key; generated when omitted. The same key with the same
+        /// request replays the original result, and with another is refused.
+        #[arg(long, value_parser = explicit_operation_id)]
+        operation_id: Option<OperationId>,
     },
 }
 #[derive(Debug, Subcommand)]
