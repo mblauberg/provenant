@@ -200,6 +200,9 @@ fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> R
         .set_len(CAP)?;
     record_cli(&roots, CLOCK, "root", 0, 1, None);
     assert!(std::fs::metadata(&log)?.len() > CAP);
+    // The report reads the newest CAP bytes. The first event, which lies before
+    // that window, is not counted; the second one starts it and is counted. The
+    // newest event follows zero-filled space and is counted too.
     assert_eq!(count(report(&roots, inventory(), None, None)?), Some(2));
     drop(lock);
     // MCP logging only appends; existing workers perform rotation.
@@ -210,7 +213,8 @@ fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> R
     record_cli(&roots, CLOCK, "root", 0, 1, None);
     assert!(std::fs::metadata(roots.state.as_path().join(BACKUP))?.len() >= CAP);
     assert!(std::fs::metadata(&log)?.len() < LINE_CAP as u64);
-    assert_eq!(count(report(&roots, inventory(), None, None)?), Some(3));
+    // Only the newest backup event is in the window, plus the one in the new log.
+    assert_eq!(count(report(&roots, inventory(), None, None)?), Some(2));
     // A torn line is ignored, including an event appended to that line.
     std::fs::write(&log, b"{partial")?;
     record_cli(&roots, CLOCK, "root", 0, 1, None);
@@ -233,6 +237,30 @@ fn oversized_log_reads_recent_complete_events() -> Result {
     std::fs::create_dir(roots.state.as_path())?;
     let mut bytes = vec![b'x'; CAP as usize];
     bytes.extend_from_slice(b"\n{\"kind\":\"cli.verb\",\"unit\":\"root\",\"duration_ms\":0,\"timestamp\":\"2026-10-26T00:00:00.000000Z\"}\n");
+    std::fs::write(roots.state.as_path().join(LOG), bytes)?;
+    let report = report(&roots, inventory(), None, None)?;
+    assert_eq!(
+        report
+            .units
+            .iter()
+            .find(|unit| unit.unit == "root")
+            .unwrap()
+            .calls,
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn window_starting_on_a_record_start_keeps_that_record() -> Result {
+    let (_temp, base) = tempdir()?;
+    let roots = roots(&base)?;
+    std::fs::create_dir(roots.state.as_path())?;
+    let event = b"{\"kind\":\"cli.verb\",\"unit\":\"root\",\"duration_ms\":0,\"timestamp\":\"2026-10-26T00:00:00.000000Z\"}\n";
+    // The newline before the event puts the window's start exactly on the event.
+    let mut bytes = b"x\n".to_vec();
+    bytes.extend_from_slice(event);
+    bytes.resize(2 + CAP as usize, b'x');
     std::fs::write(roots.state.as_path().join(LOG), bytes)?;
     let report = report(&roots, inventory(), None, None)?;
     assert_eq!(
