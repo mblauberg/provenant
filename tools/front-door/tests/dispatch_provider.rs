@@ -280,7 +280,10 @@ fn policy_codex_fixture() -> Result<TestRig> {
 }
 /// `settled` is the exit `run` gives when the whole retry chain settles
 /// inside its own wait; otherwise it times out (124) and `lanes` waits on.
-/// Which one happens depends on host speed, so both are accepted.
+/// Which one happens depends on host speed, so both are accepted. A wait that
+/// starts while a successor is still pending counts only that successor, so
+/// once the chain has settled the run is read again: a wholly settled named
+/// selection returns every terminal row.
 fn settled_policy_lanes(
     rig: &TestRig,
     output: provenant_os::exec::ExecOutcome,
@@ -298,7 +301,15 @@ fn settled_policy_lanes(
         let lanes = rig.command(&["lanes", "--id", run_id, "--all", "--wait", "5s", "--json"])?;
         if code(&lanes) != 124 {
             assert_eq!(code(&lanes), 0, "{lanes:?}");
-            return Ok(serde_json::from_slice(&lanes.stdout.bytes)?);
+            let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+            if lanes["data"]["ignored_settled"].is_null() {
+                return Ok(lanes);
+            }
+            let all = rig.command(&["lanes", "--id", run_id, "--all", "--wait", "5s", "--json"])?;
+            assert_eq!(code(&all), 0, "{all:?}");
+            let all: Value = serde_json::from_slice(&all.stdout.bytes)?;
+            assert!(all["data"]["ignored_settled"].is_null(), "{all}");
+            return Ok(all);
         }
     }
     Err("policy successors did not settle within the fixture budget".into())
