@@ -341,23 +341,43 @@ fn sweep_cache_root(
         let name = match entry {
             Ok(name) => name,
             Err(error) => {
-                failures.push(cache_fs_error("readdir", Path::new("."))(error).to_string());
+                failures.push((None, cache_fs_error("readdir", Path::new("."))(error)));
                 continue;
             }
         };
         if let Err(error) =
             prune_worktree_cache(root, cache_root, &name, policy, report, writer_guard, false)
         {
-            failures.push(format!("{:?}: {error}", name));
+            failures.push((Some(name), error));
         }
     }
     if !failures.is_empty() {
         return Err(PermissionError::CacheSweepIo(std::io::Error::other(
-            failures.join("; "),
+            CacheSweepFailures(failures),
         )));
     }
     Ok(())
 }
+
+#[derive(Debug)]
+struct CacheSweepFailures(Vec<(Option<OsString>, PermissionError)>);
+
+impl std::fmt::Display for CacheSweepFailures {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, (name, error)) in self.0.iter().enumerate() {
+            if index > 0 {
+                write!(f, "; ")?;
+            }
+            if let Some(name) = name {
+                write!(f, "{name:?}: ")?;
+            }
+            write!(f, "{error}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for CacheSweepFailures {}
 
 fn prune_worktree_cache(
     root: &provenant_os::fs::Directory,
@@ -1779,12 +1799,25 @@ mod tests {
                 }),
             )
             .expect_err("swapped tombstone must be refused");
-            let message = error.to_string();
+            let PermissionError::CacheSweepIo(source) = &*error.source else {
+                panic!("unexpected error: {error:?}");
+            };
+            let failures = source
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<CacheSweepFailures>()
+                .unwrap();
             assert!(
-                message.contains("lane cache open verified directory failed at \".gc-"),
-                "{message}"
+                matches!(
+                    &failures.0[0].1,
+                    PermissionError::CacheSweepFilesystem {
+                        operation: "open verified directory",
+                        source: FsError::RaceRefused { .. },
+                        ..
+                    }
+                ),
+                "{error:?}"
             );
-            assert!(message.contains("entry changed identity"), "{message}");
             assert_eq!(error.report.bytes_freed, 0);
             Ok(())
         }
@@ -1867,11 +1900,21 @@ mod tests {
             assert!(message.contains("unlink"), "{message}");
             assert!(message.contains("/z-fail"), "{message}");
             assert!(message.contains("PermissionDenied"), "{message}");
-            assert!(message.contains("os error 13"), "{message}");
-            assert!(
-                message.contains("lane cache unlink failed at \".gc-"),
-                "{message}"
-            );
+            let PermissionError::CacheSweepIo(source) = &*error.source else {
+                panic!("unexpected error: {error:?}");
+            };
+            let failures = source
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<CacheSweepFailures>()
+                .unwrap();
+            assert!(matches!(
+                &failures.0[0].1,
+                PermissionError::CacheSweepFilesystem {
+                    operation: "unlink",
+                    ..
+                }
+            ));
             assert_eq!(error.report.removed.len(), 1);
             assert!(!ordinary.exists());
             let root = path.parent().ok_or("cache parent")?;
