@@ -59,6 +59,7 @@ pub struct HelpErrorCode {
 #[derive(Debug, Serialize)]
 pub struct HelpCommand {
     pub command: String,
+    pub description: Option<String>,
     pub arguments: Vec<HelpArgument>,
     pub groups: Vec<HelpGroup>,
     pub constraints: Vec<String>,
@@ -73,6 +74,7 @@ pub struct HelpGroup {
 #[derive(Debug, Serialize)]
 pub struct HelpArgument {
     pub name: String,
+    pub description: Option<String>,
     pub long: Option<String>,
     pub positional: bool,
     pub required: bool,

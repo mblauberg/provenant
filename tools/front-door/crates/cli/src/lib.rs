@@ -163,7 +163,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
             text: if command.is_empty() && !all {
                 CORE_HELP.into()
             } else {
-                selected.render_long_help().to_string()
+                if command.is_empty() && *all {
+                    format!(
+                        "{}\nFor advanced options, run provenant help COMMAND.\n",
+                        selected.render_long_help()
+                    )
+                } else {
+                    selected.render_long_help().to_string()
+                }
             },
             catalog: scoped(
                 catalog(if command.is_empty() && !all {
@@ -801,6 +808,7 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
             .map(|arg| {
                 let name = arg.get_id().to_string();
                 HelpArgument {
+                    description: arg.get_help().map(ToString::to_string),
                     bounds: arg
                         .get_num_args()
                         .filter(|range| range.max_values() > 1 && range.max_values() < usize::MAX)
@@ -860,6 +868,7 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
             .collect();
         commands.push(HelpCommand {
             command: path.clone(),
+            description: command.get_about().map(ToString::to_string),
             arguments,
             groups,
             constraints: constraints(&path),
@@ -999,6 +1008,17 @@ fn bounds(path: &str, name: &str) -> Option<(u64, u64)> {
 fn requirements(path: &str, name: &str) -> Vec<String> {
     let names: &[&str] = match (path, name) {
         (_, "condition") => &["wait"],
+        ("provenant run" | "provenant dispatch", "preset") => &["prompt_file"],
+        ("provenant run" | "provenant dispatch", "preset_set" | "preset_params_file") => {
+            &["preset"]
+        }
+        ("provenant run" | "provenant dispatch", "deliver_remote") => {
+            &["deliver_branch", "writer_target"]
+        }
+        ("provenant run" | "provenant dispatch", "deliver_branch" | "open_pr") => {
+            &["deliver_remote"]
+        }
+        ("provenant dispatch", "branch") => &["host", "base"],
         ("provenant dispatch", "concurrency") => &["manifest"],
         ("provenant chair log append", "operation_id") => &["issued_at"],
         ("provenant chair log append", "issued_at") => &["operation_id"],
@@ -1098,6 +1118,61 @@ mod tests {
         ));
         invalid(&["pr", "merge", "1947", "--head", &"a".repeat(40)]);
         invalid(&["pr", "land", "1947", "--head", &"a".repeat(40)]);
+    }
+    #[test]
+    fn expanded_help_catalogue_describes_commands_and_requirements() {
+        let ParseOutcome::Help { text, catalog, .. } = parsed(&["help", "--all"]) else {
+            panic!("help");
+        };
+        assert!(text.contains("provenant help COMMAND"));
+        for path in ["provenant run", "provenant dispatch"] {
+            let command = catalog.commands.iter().find(|c| c.command == path).unwrap();
+            assert!(
+                command
+                    .description
+                    .as_deref()
+                    .is_some_and(|s| !s.is_empty())
+            );
+            for (name, expected) in [
+                ("preset_set", vec!["preset"]),
+                ("preset_params_file", vec!["preset"]),
+                ("preset", vec!["prompt_file"]),
+                ("deliver_remote", vec!["deliver_branch", "writer_target"]),
+                ("deliver_branch", vec!["deliver_remote"]),
+                ("open_pr", vec!["deliver_remote"]),
+            ] {
+                let arg = command.arguments.iter().find(|a| a.name == name).unwrap();
+                assert_eq!(arg.requires, expected);
+                assert!(arg.description.as_deref().is_some_and(|s| !s.is_empty()));
+            }
+        }
+        let dispatch = catalog
+            .commands
+            .iter()
+            .find(|c| c.command == "provenant dispatch")
+            .unwrap();
+        assert_eq!(
+            dispatch
+                .arguments
+                .iter()
+                .find(|a| a.name == "branch")
+                .unwrap()
+                .requires,
+            ["host", "base"]
+        );
+        let run = catalog
+            .commands
+            .iter()
+            .find(|c| c.command == "provenant run")
+            .unwrap();
+        assert!(
+            run.arguments
+                .iter()
+                .find(|a| a.name == "branch")
+                .unwrap()
+                .requires
+                .is_empty()
+        );
     }
     #[test]
     fn chair_log_help_explains_generated_retry_keys() {

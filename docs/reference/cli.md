@@ -14,17 +14,17 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
+| `--json` | `{"description": "Print machine-readable JSON output", "name": "json", "values": ["true", "false"]}` |
+| `--full` | `{"description": "Show all human-readable detail instead of a compact summary", "name": "full", "values": ["true", "false"]}` |
+| `--state-dir` | `{"description": "Use this absolute directory for state", "name": "state_dir"}` |
+| `--project` | `{"description": "Use this directory as the project", "name": "project"}` |
 
 ## `provenant`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
@@ -54,13 +54,14 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `command` | `{"name": "command", "positional": true, "repeatable": true}` |
-| `--all` | `{"defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `command` | `{"description": "Command path to describe, such as &#96;quota tick&#96;", "name": "command", "positional": true, "repeatable": true}` |
+| `--all` | `{"defaults": ["false"], "description": "Include advanced commands and options", "name": "all", "values": ["true", "false"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Show help for a command",
   "groups": [
     {
       "arguments": [
@@ -79,21 +80,28 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Print the resolved release root"
+}
+```
 
 ## `provenant ask`
 
 | Argument | Contract |
 |---|---|
-| `--file` | `{"name": "file", "required": true}` |
-| `--session` | `{"name": "session", "required": true}` |
+| `--file` | `{"description": "JSON request content, including work links, replacement and deadline; ownership comes from Fabric", "name": "file", "required": true}` |
+| `--session` | `{"description": "Explicit originating chair session; never inferred from the agent label", "name": "session", "required": true}` |
 | `--operation-id` | `{"name": "operation_id"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Post a human decision, assumption or question",
   "groups": [
     {
       "arguments": [
@@ -116,14 +124,15 @@ Accepted by every command, before or after the subcommand.
 | `id` | `{"name": "id", "positional": true}` |
 | `--state` | `{"defaults": ["open"], "name": "state", "values": ["open", "all"]}` |
 | `--session` | `{"name": "session"}` |
-| `--host` | `{"name": "host"}` |
+| `--host` | `{"description": "Owner host label or host ID", "name": "host"}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
 | `--cursor` | `{"name": "cursor"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "List, inspect, close and acknowledge human requests",
   "groups": [
     {
       "arguments": [
@@ -147,16 +156,17 @@ Accepted by every command, before or after the subcommand.
 | Argument | Contract |
 |---|---|
 | `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--host` | `{"name": "host"}` |
+| `--host` | `{"description": "Owner host label or host ID", "name": "host"}` |
 | `--state` | `{"name": "state", "required": true, "values": ["withdrawn", "superseded", "expired"]}` |
 | `--reason` | `{"bounds": [0, 256], "name": "reason", "required": true}` |
 | `--expect-revision` | `{"name": "expect_revision", "required": true}` |
 | `--operation-id` | `{"name": "operation_id"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Close without treating silence as approval",
   "groups": [
     {
       "arguments": [
@@ -180,15 +190,16 @@ Accepted by every command, before or after the subcommand.
 | Argument | Contract |
 |---|---|
 | `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--host` | `{"name": "host"}` |
+| `--host` | `{"description": "Owner host label or host ID", "name": "host"}` |
 | `--answer` | `{"name": "answer", "required": true}` |
 | `--session` | `{"name": "session", "required": true}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Record consumption by the exact owning chair session and actor",
   "groups": [
     {
       "arguments": [
@@ -211,19 +222,20 @@ Accepted by every command, before or after the subcommand.
 | Argument | Contract |
 |---|---|
 | `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--host` | `{"name": "host"}` |
+| `--host` | `{"description": "Owner host label or host ID", "name": "host"}` |
 | `--action` | `{"name": "action", "required": true, "values": ["choose", "reply", "confirm", "override"]}` |
 | `--option` | `{"name": "option"}` |
-| `--text-stdin` | `{"defaults": ["false"], "name": "text_stdin", "values": ["true", "false"]}` |
-| `--text-file` | `{"conflicts": ["text_stdin"], "name": "text_file"}` |
+| `--text-stdin` | `{"defaults": ["false"], "description": "Read piped answer text (at most 4 KiB; input must finish within 5 seconds)", "name": "text_stdin", "values": ["true", "false"]}` |
+| `--text-file` | `{"conflicts": ["text_stdin"], "description": "Read a UTF-8 reply composed in a file (at most 4 KiB)", "name": "text_file"}` |
 | `--expect-revision` | `{"name": "expect_revision", "required": true}` |
 | `--channel` | `{"name": "channel", "required": true, "values": ["chat", "console", "phone_remote", "cli", "unknown"]}` |
 | `--operation-id` | `{"name": "operation_id"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Answer a request using the revision you saw",
   "groups": [
     {
       "arguments": [
@@ -249,31 +261,44 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Register and list provider accounts"
+}
+```
 
 ## `provenant accounts list`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "List registered accounts"
+}
+```
 
 ## `provenant accounts register`
 
 | Argument | Contract |
 |---|---|
-| `label` | `{"name": "label", "positional": true, "required": true}` |
-| `--adapter` | `{"name": "adapter", "required": true}` |
-| `--directory` | `{"name": "directory", "required": true}` |
-| `--plan` | `{"name": "plan"}` |
-| `--priority` | `{"name": "priority"}` |
-| `--billing-anchor` | `{"name": "billing_anchor"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `label` | `{"description": "Account label", "name": "label", "positional": true, "required": true}` |
+| `--adapter` | `{"description": "Adapter the account belongs to, such as &#96;claude&#96;", "name": "adapter", "required": true}` |
+| `--directory` | `{"description": "Account's configuration directory", "name": "directory", "required": true}` |
+| `--plan` | `{"description": "Provider plan name", "name": "plan"}` |
+| `--priority` | `{"description": "Account priority for quota scheduling", "name": "priority"}` |
+| `--billing-anchor` | `{"description": "Billing cycle anchor", "name": "billing_anchor"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Register an account for an adapter",
   "groups": [
     {
       "arguments": [
@@ -296,15 +321,16 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--dry-run` | `{"defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
-| `--adopt` | `{"name": "adopt"}` |
-| `--force-settings` | `{"defaults": ["false"], "name": "force_settings", "values": ["true", "false"]}` |
-| `--prune-orphans` | `{"defaults": ["false"], "name": "prune_orphans", "values": ["true", "false"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--dry-run` | `{"defaults": ["false"], "description": "Plan the repair without changing anything", "name": "dry_run", "values": ["true", "false"]}` |
+| `--adopt` | `{"description": "Pull this account's locally edited shared settings into the source settings file, then sync every account (ACCOUNT as for &#96;accounts set&#96;)", "name": "adopt"}` |
+| `--force-settings` | `{"defaults": ["false"], "description": "Overwrite locally edited shared settings with the source's values", "name": "force_settings", "values": ["true", "false"]}` |
+| `--prune-orphans` | `{"defaults": ["false"], "description": "Remove managed content from install targets whose account is no longer registered", "name": "prune_orphans", "values": ["true", "false"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Bring every registered account directory to the installed release",
   "groups": [
     {
       "arguments": [
@@ -325,16 +351,17 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `account` | `{"name": "account", "positional": true, "required": true}` |
-| `--display-name` | `{"name": "display_name"}` |
-| `--hidden` | `{"name": "hidden", "values": ["true", "false"]}` |
-| `--order` | `{"name": "order"}` |
-| `--headline` | `{"name": "headline", "values": ["auto", "5h", "weekly", "default"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `account` | `{"description": "Entry id or unique label of the account", "name": "account", "positional": true, "required": true}` |
+| `--display-name` | `{"description": "Name shown in the menu bar (up to 64 characters); empty clears it", "name": "display_name"}` |
+| `--hidden` | `{"description": "Hide the account from the menu bar", "name": "hidden", "values": ["true", "false"]}` |
+| `--order` | `{"description": "Menu bar position, 1 to 999; 0 clears it", "name": "order"}` |
+| `--headline` | `{"description": "Window to lead with for this account: auto, 5h, weekly, or default to follow the global choice", "name": "headline", "values": ["auto", "5h", "weekly", "default"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Set how an account appears in the menu bar",
   "groups": [
     {
       "arguments": [
@@ -356,11 +383,12 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "List hosts and their readiness; `doctor` checks remote sign-in",
   "groups": [
     {
       "arguments": [],
@@ -376,12 +404,13 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `host` | `{"name": "host", "positional": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `host` | `{"description": "SSH alias to probe; all configured hosts when omitted", "name": "host", "positional": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Probe sign-in without inference or credential access",
   "groups": [
     {
       "arguments": [
@@ -399,20 +428,27 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Show and edit configuration"
+}
+```
 
 ## `provenant config check`
 
 | Argument | Contract |
 |---|---|
-| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
-| `--cursor` | `{"name": "cursor"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum results per page (1 to 100)", "name": "limit"}` |
+| `--cursor` | `{"description": "Continue from a previous page's cursor", "name": "cursor"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "List configuration warnings with their source file and key",
   "groups": [
     {
       "arguments": [
@@ -431,28 +467,41 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Print the effective configuration and knobs with their source layer and the configuration revision"
+}
+```
 
 ## `provenant config schema`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "List each editable field with its type, bounds, default, effective value, source layer and whether a restart is needed"
+}
+```
 
 ## `provenant config apply`
 
 | Argument | Contract |
 |---|---|
-| `--file` | `{"name": "file", "required": true}` |
-| `--expect-revision` | `{"name": "expect_revision", "required": true}` |
-| `--dry-run` | `{"defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--file` | `{"description": "JSON patch file", "name": "file", "required": true}` |
+| `--expect-revision` | `{"description": "Revision from &#96;config show&#96;; a stale revision is refused", "name": "expect_revision", "required": true}` |
+| `--dry-run` | `{"defaults": ["false"], "description": "Validate and report the change without writing", "name": "dry_run", "values": ["true", "false"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Validate a JSON patch of `{\"field\": value}` (null clears a field) and commit all of it or none, if the configuration is still at the revision",
   "groups": [
     {
       "arguments": [
@@ -472,13 +521,14 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--since` | `{"name": "since"}` |
-| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--since` | `{"description": "Only entries since this RFC3339 time or this many seconds ago", "name": "since"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum entries (1 to 500)", "name": "limit"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "List the bounded history of applied configuration changes, newest first",
   "groups": [
     {
       "arguments": [
@@ -497,13 +547,14 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `name` | `{"name": "name", "positional": true, "required": true}` |
-| `value` | `{"name": "value", "positional": true, "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `name` | `{"description": "Setting name, such as &#96;profile&#96;", "name": "name", "positional": true, "required": true}` |
+| `value` | `{"description": "New value", "name": "value", "positional": true, "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Set `profile` (balanced, economy or rigorous) or a registry knob such as `lanes.max_concurrency`",
   "groups": [
     {
       "arguments": [
@@ -522,12 +573,13 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `name` | `{"name": "name", "positional": true, "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `name` | `{"description": "Setting name to clear", "name": "name", "positional": true, "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Remove a knob override so the profile preset or default applies",
   "groups": [
     {
       "arguments": [
@@ -545,19 +597,26 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Coordinate messages, tasks, claims and landings between agents"
+}
+```
 
 ## `provenant fabric mcp`
 
 | Argument | Contract |
 |---|---|
-| `--client` | `{"name": "client", "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--client` | `{"description": "Harness the client is", "name": "client", "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Serve the Fabric MCP transport on standard input and output",
   "groups": [
     {
       "arguments": [
@@ -575,26 +634,39 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Show this agent's project and inbox identity"
+}
+```
 
 ## `provenant fabric graph`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Run and track task graphs"
+}
+```
 
 ## `provenant fabric graph run`
 
 | Argument | Contract |
 |---|---|
-| `--document` | `{"name": "document", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--document` | `{"description": "Project-local graph file; bare names default to .provenant/scratch/graphs (or .agent-run/graphs)", "name": "document", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Run a task graph document",
   "groups": [
     {
       "arguments": [
@@ -612,12 +684,13 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `id` | `{"description": "Graph ID", "name": "id", "positional": true, "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Show a task graph's status",
   "groups": [
     {
       "arguments": [
@@ -635,12 +708,13 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `id` | `{"description": "Graph ID", "name": "id", "positional": true, "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Cancel a task graph",
   "groups": [
     {
       "arguments": [
@@ -658,13 +732,14 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--document` | `{"name": "document", "required": true}` |
-| `--extend` | `{"name": "extend", "repeatable": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--document` | `{"description": "Project-local graph document", "name": "document", "required": true}` |
+| `--extend` | `{"description": "Raise a limit, budget or loop allowance, or decide a paused loop (KEY=VALUE); may be repeated", "name": "extend", "repeatable": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Resume a task graph from its document",
   "groups": [
     {
       "arguments": [
@@ -683,24 +758,31 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Send and read inbox messages"
+}
+```
 
 ## `provenant fabric mail send`
 
 | Argument | Contract |
 |---|---|
-| `--to` | `{"name": "to", "repeatable": true, "required": true}` |
-| `--kind` | `{"defaults": ["note"], "name": "kind", "values": ["request", "response", "note"]}` |
-| `--body` | `{"name": "body", "required": true}` |
-| `--reply-to` | `{"name": "reply_to"}` |
-| `--task` | `{"name": "task"}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--to` | `{"description": "Inbox label on this host, or HOST_ID/LABEL", "name": "to", "repeatable": true, "required": true}` |
+| `--kind` | `{"defaults": ["note"], "description": "Message kind", "name": "kind", "values": ["request", "response", "note"]}` |
+| `--body` | `{"description": "Message body", "name": "body", "required": true}` |
+| `--reply-to` | `{"description": "Message this replies to", "name": "reply_to"}` |
+| `--task` | `{"description": "Task this message concerns", "name": "task"}` |
+| `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Send a message to one or more inboxes",
   "groups": [
     {
       "arguments": [],
@@ -724,14 +806,15 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--after` | `{"name": "after"}` |
-| `--limit` | `{"bounds": [1, 100], "defaults": ["100"], "name": "limit"}` |
-| `--session` | `{"name": "session"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--after` | `{"description": "Return entries after this sequence number", "name": "after"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["100"], "description": "Maximum entries (1 to 100)", "name": "limit"}` |
+| `--session` | `{"description": "Exact chair session whose mailbox to read, instead of this agent's", "name": "session"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Read inbox messages; --session reads that chair session's control mail",
   "groups": [
     {
       "arguments": [],
@@ -756,14 +839,15 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `through` | `{"name": "through", "positional": true, "required": true}` |
-| `--session` | `{"name": "session"}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `through` | `{"description": "Last sequence number to mark read", "name": "through", "positional": true, "required": true}` |
+| `--session` | `{"description": "Exact chair session whose mailbox to mark, instead of this agent's", "name": "session"}` |
+| `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Mark messages read up to a sequence number",
   "groups": [
     {
       "arguments": [],
@@ -787,21 +871,28 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Create, claim and finish shared tasks"
+}
+```
 
 ## `provenant fabric task create`
 
 | Argument | Contract |
 |---|---|
-| `--objective` | `{"name": "objective", "required": true}` |
-| `--note` | `{"name": "note"}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--objective` | `{"description": "Task objective", "name": "objective", "required": true}` |
+| `--note` | `{"description": "Note to attach", "name": "note"}` |
+| `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Create a shared task",
   "groups": [
     {
       "arguments": [],
@@ -825,14 +916,15 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--state` | `{"name": "state", "values": ["open", "done", "cancelled"]}` |
-| `--after` | `{"name": "after"}` |
-| `--limit` | `{"bounds": [1, 100], "defaults": ["100"], "name": "limit"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--state` | `{"description": "Only tasks in this state", "name": "state", "values": ["open", "done", "cancelled"]}` |
+| `--after` | `{"description": "Return tasks after this ID", "name": "after"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["100"], "description": "Maximum tasks (1 to 100)", "name": "limit"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "List shared tasks",
   "groups": [
     {
       "arguments": [
@@ -852,14 +944,15 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--lease-seconds` | `{"defaults": ["300"], "name": "lease_seconds"}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `id` | `{"description": "Task ID", "name": "id", "positional": true, "required": true}` |
+| `--lease-seconds` | `{"defaults": ["300"], "description": "Lease duration in seconds (1 to 3600)", "name": "lease_seconds"}` |
+| `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Claim a task under a lease",
   "groups": [
     {
       "arguments": [],
@@ -891,17 +984,18 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--generation` | `{"name": "generation", "required": true}` |
-| `--token` | `{"name": "token", "required": true}` |
+| `id` | `{"description": "Task ID", "name": "id", "positional": true, "required": true}` |
+| `--generation` | `{"description": "Fence generation", "name": "generation", "required": true}` |
+| `--token` | `{"description": "Fence token (32 lowercase hex digits)", "name": "token", "required": true}` |
 | `--objective` | `{"name": "objective", "required": true}` |
 | `--note` | `{"name": "note"}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Update a claimed task",
   "groups": [
     {
       "arguments": [],
@@ -940,16 +1034,17 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--generation` | `{"name": "generation", "required": true}` |
-| `--token` | `{"name": "token", "required": true}` |
-| `--state` | `{"defaults": ["done"], "name": "state", "values": ["done", "cancelled"]}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `id` | `{"description": "Task ID", "name": "id", "positional": true, "required": true}` |
+| `--generation` | `{"description": "Fence generation", "name": "generation", "required": true}` |
+| `--token` | `{"description": "Fence token (32 lowercase hex digits)", "name": "token", "required": true}` |
+| `--state` | `{"defaults": ["done"], "description": "Final state", "name": "state", "values": ["done", "cancelled"]}` |
+| `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Finish a claimed task",
   "groups": [
     {
       "arguments": [],
@@ -988,15 +1083,16 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--generation` | `{"name": "generation", "required": true}` |
-| `--token` | `{"name": "token", "required": true}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `id` | `{"description": "Task ID", "name": "id", "positional": true, "required": true}` |
+| `--generation` | `{"description": "Fence generation", "name": "generation", "required": true}` |
+| `--token` | `{"description": "Fence token (32 lowercase hex digits)", "name": "token", "required": true}` |
+| `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Release a claimed task",
   "groups": [
     {
       "arguments": [],
@@ -1035,21 +1131,28 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Read and add to the activity log"
+}
+```
 
 ## `provenant fabric events read`
 
 | Argument | Contract |
 |---|---|
-| `--after` | `{"name": "after"}` |
-| `--limit` | `{"bounds": [1, 100], "defaults": ["100"], "name": "limit"}` |
-| `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--after` | `{"description": "Return entries after this sequence number", "name": "after"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["100"], "description": "Maximum entries (1 to 100)", "name": "limit"}` |
+| `--wait` | `{"bounds": [1, 14400], "description": "Wait up to this many seconds for new entries", "name": "wait"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Read activity log entries",
   "groups": [
     {
       "arguments": [],
@@ -1074,13 +1177,14 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--note` | `{"name": "note", "required": true}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--note` | `{"description": "Note text", "name": "note", "required": true}` |
+| `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Add a note to the activity log",
   "groups": [
     {
       "arguments": [],
@@ -1104,23 +1208,30 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Claim issues, paths and worktrees"
+}
+```
 
 ## `provenant fabric claim acquire`
 
 | Argument | Contract |
 |---|---|
-| `--issue` | `{"name": "issue"}` |
-| `--path` | `{"name": "path", "repeatable": true}` |
-| `--worktree` | `{"name": "worktree"}` |
-| `--lease-seconds` | `{"defaults": ["300"], "name": "lease_seconds"}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--issue` | `{"description": "Claim an issue by key", "name": "issue"}` |
+| `--path` | `{"description": "Claim this path (repeatable)", "name": "path", "repeatable": true}` |
+| `--worktree` | `{"description": "Claim this worktree", "name": "worktree"}` |
+| `--lease-seconds` | `{"defaults": ["300"], "description": "Lease duration in seconds (1 to 3600)", "name": "lease_seconds"}` |
+| `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Acquire a work claim",
   "groups": [
     {
       "arguments": [],
@@ -1162,16 +1273,17 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--generation` | `{"name": "generation", "required": true}` |
-| `--token` | `{"name": "token", "required": true}` |
-| `--lease-seconds` | `{"defaults": ["300"], "name": "lease_seconds"}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `id` | `{"description": "Claim ID", "name": "id", "positional": true, "required": true}` |
+| `--generation` | `{"description": "Fence generation", "name": "generation", "required": true}` |
+| `--token` | `{"description": "Fence token (32 lowercase hex digits)", "name": "token", "required": true}` |
+| `--lease-seconds` | `{"defaults": ["300"], "description": "Lease duration in seconds (1 to 3600)", "name": "lease_seconds"}` |
+| `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Renew a work claim",
   "groups": [
     {
       "arguments": [],
@@ -1218,14 +1330,15 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--generation` | `{"name": "generation", "required": true}` |
-| `--token` | `{"name": "token", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `id` | `{"description": "Claim ID", "name": "id", "positional": true, "required": true}` |
+| `--generation` | `{"description": "Fence generation", "name": "generation", "required": true}` |
+| `--token` | `{"description": "Fence token (32 lowercase hex digits)", "name": "token", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Verify a work claim is still held",
   "groups": [
     {
       "arguments": [],
@@ -1250,15 +1363,16 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--generation` | `{"name": "generation", "required": true}` |
-| `--token` | `{"name": "token", "required": true}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `id` | `{"description": "Claim ID", "name": "id", "positional": true, "required": true}` |
+| `--generation` | `{"description": "Fence generation", "name": "generation", "required": true}` |
+| `--token` | `{"description": "Fence token (32 lowercase hex digits)", "name": "token", "required": true}` |
+| `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Release a work claim",
   "groups": [
     {
       "arguments": [],
@@ -1297,13 +1411,14 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--after` | `{"name": "after"}` |
-| `--limit` | `{"bounds": [1, 100], "defaults": ["100"], "name": "limit"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--after` | `{"description": "Return claims after this ID", "name": "after"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["100"], "description": "Maximum claims (1 to 100)", "name": "limit"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "List work claims",
   "groups": [
     {
       "arguments": [
@@ -1322,22 +1437,29 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Fence and land pushes to a shared reference"
+}
+```
 
 ## `provenant fabric landing push`
 
 | Argument | Contract |
 |---|---|
-| `--reference` | `{"name": "reference", "required": true}` |
-| `--id` | `{"name": "id", "required": true}` |
-| `--generation` | `{"name": "generation", "required": true}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--reference` | `{"description": "Git reference being landed", "name": "reference", "required": true}` |
+| `--id` | `{"description": "Landing lease ID", "name": "id", "required": true}` |
+| `--generation` | `{"description": "Lease generation", "name": "generation", "required": true}` |
+| `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Push the candidate under a landing lease",
   "groups": [
     {
       "arguments": [],
@@ -1371,15 +1493,16 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--reference` | `{"name": "reference", "required": true}` |
-| `--id` | `{"bounds": [0, 100], "name": "id", "required": true}` |
-| `--generation` | `{"name": "generation", "required": true}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--reference` | `{"description": "Git reference being landed", "name": "reference", "required": true}` |
+| `--id` | `{"bounds": [0, 100], "description": "Landing lease ID", "name": "id", "required": true}` |
+| `--generation` | `{"description": "Lease generation", "name": "generation", "required": true}` |
+| `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Settle an interrupted landing push",
   "groups": [
     {
       "arguments": [],
@@ -1414,15 +1537,16 @@ Accepted by every command, before or after the subcommand.
 | Argument | Contract |
 |---|---|
 | `--reference` | `{"name": "reference", "required": true}` |
-| `--expected` | `{"name": "expected", "required": true}` |
-| `--candidate` | `{"name": "candidate", "required": true}` |
-| `--lease-seconds` | `{"defaults": ["300"], "name": "lease_seconds"}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--expected` | `{"description": "Commit the reference must currently point to", "name": "expected", "required": true}` |
+| `--candidate` | `{"description": "Commit to land", "name": "candidate", "required": true}` |
+| `--lease-seconds` | `{"defaults": ["300"], "description": "Lease duration in seconds (1 to 3600)", "name": "lease_seconds"}` |
+| `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Acquire a landing lease on a reference",
   "groups": [
     {
       "arguments": [],
@@ -1454,16 +1578,17 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--reference` | `{"name": "reference", "required": true}` |
-| `--id` | `{"name": "id", "required": true}` |
-| `--generation` | `{"name": "generation", "required": true}` |
-| `--lease-seconds` | `{"defaults": ["300"], "name": "lease_seconds"}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--reference` | `{"description": "Git reference being landed", "name": "reference", "required": true}` |
+| `--id` | `{"description": "Landing lease ID", "name": "id", "required": true}` |
+| `--generation` | `{"description": "Lease generation", "name": "generation", "required": true}` |
+| `--lease-seconds` | `{"defaults": ["300"], "description": "Lease duration in seconds (1 to 3600)", "name": "lease_seconds"}` |
+| `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Renew a landing lease",
   "groups": [
     {
       "arguments": [],
@@ -1505,14 +1630,15 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--reference` | `{"name": "reference", "required": true}` |
-| `--id` | `{"name": "id", "required": true}` |
-| `--generation` | `{"name": "generation", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--reference` | `{"description": "Git reference being landed", "name": "reference", "required": true}` |
+| `--id` | `{"description": "Landing lease ID", "name": "id", "required": true}` |
+| `--generation` | `{"description": "Lease generation", "name": "generation", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Verify a landing lease is still held",
   "groups": [
     {
       "arguments": [
@@ -1532,15 +1658,16 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--reference` | `{"name": "reference", "required": true}` |
-| `--id` | `{"name": "id", "required": true}` |
-| `--generation` | `{"name": "generation", "required": true}` |
-| `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--reference` | `{"description": "Git reference being landed", "name": "reference", "required": true}` |
+| `--id` | `{"description": "Landing lease ID", "name": "id", "required": true}` |
+| `--generation` | `{"description": "Lease generation", "name": "generation", "required": true}` |
+| `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Release a landing lease",
   "groups": [
     {
       "arguments": [],
@@ -1574,14 +1701,15 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--reference` | `{"name": "reference", "required": true}` |
-| `--generation` | `{"name": "generation", "required": true}` |
-| `--wait` | `{"bounds": [1, 14400], "name": "wait", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--reference` | `{"description": "Git reference to watch", "name": "reference", "required": true}` |
+| `--generation` | `{"description": "Generation to wait beyond", "name": "generation", "required": true}` |
+| `--wait` | `{"bounds": [1, 14400], "description": "Seconds to wait (1 to 14400)", "name": "wait", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Wait for a reference's landing generation to advance",
   "groups": [
     {
       "arguments": [
@@ -1601,17 +1729,18 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--source` | `{"name": "source", "required": true}` |
-| `--harness` | `{"name": "harness", "repeatable": true, "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
-| `--bin-dir` | `{"name": "bin_dir"}` |
-| `--hooks` | `{"name": "hooks", "values": ["on", "off"]}` |
-| `--adopt-existing` | `{"defaults": ["false"], "name": "adopt_existing", "values": ["true", "false"]}` |
-| `--dry-run` | `{"defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--source` | `{"description": "Release directory to install from", "name": "source", "required": true}` |
+| `--harness` | `{"description": "Harness to install for (repeatable; defaults to the receipt or detected CLIs)", "name": "harness", "repeatable": true, "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
+| `--bin-dir` | `{"description": "Directory for the installed binary", "name": "bin_dir"}` |
+| `--hooks` | `{"description": "Enable hooks, or remove unchanged owned hooks (omission keeps ownership)", "name": "hooks", "values": ["on", "off"]}` |
+| `--adopt-existing` | `{"defaults": ["false"], "description": "Adopt matching existing files instead of refusing", "name": "adopt_existing", "values": ["true", "false"]}` |
+| `--dry-run` | `{"defaults": ["false"], "description": "Plan the install without changing anything", "name": "dry_run", "values": ["true", "false"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Install the release for chosen harnesses",
   "groups": [
     {
       "arguments": [
@@ -1634,13 +1763,14 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--from-source` | `{"name": "from_source"}` |
-| `--hosts` | `{"defaults": ["all"], "name": "hosts", "values": ["all"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--from-source` | `{"description": "Build this checkout instead of downloading the latest release", "name": "from_source"}` |
+| `--hosts` | `{"defaults": ["all"], "description": "Upgrade this host and every registered Fabric peer", "name": "hosts", "values": ["all"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Upgrade the recorded installation on this host and Fabric peers",
   "groups": [
     {
       "arguments": [
@@ -1659,12 +1789,13 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--harness` | `{"name": "harness", "repeatable": true, "required": true, "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--harness` | `{"description": "Harness to remove (repeatable)", "name": "harness", "repeatable": true, "required": true, "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Remove installed harness integrations",
   "groups": [
     {
       "arguments": [
@@ -1682,21 +1813,28 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Inspect and edit model routing"
+}
+```
 
 ## `provenant route list`
 
 | Argument | Contract |
 |---|---|
-| `--valid` | `{"defaults": ["false"], "name": "valid", "values": ["true", "false"]}` |
-| `--adapter` | `{"name": "adapter"}` |
-| `--pool` | `{"name": "pool"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--valid` | `{"defaults": ["false"], "description": "List catalogued model/effort pairs accepted by the resolver (no live probe)", "name": "valid", "values": ["true", "false"]}` |
+| `--adapter` | `{"description": "Limit models, named routes and pool members to this adapter", "name": "adapter"}` |
+| `--pool` | `{"description": "Show only this effective pool", "name": "pool"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Show the catalogue, pools, configured weights and pacing policy",
   "groups": [
     {
       "arguments": [
@@ -1716,17 +1854,18 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--writes` | `{"defaults": ["false"], "name": "writes", "values": ["true", "false"]}` |
-| `--account` | `{"name": "account"}` |
-| `name` | `{"conflicts": ["model", "route"], "name": "name", "positional": true}` |
-| `--read-heavy` | `{"defaults": ["false"], "name": "read_heavy", "values": ["true", "false"]}` |
-| `--model` | `{"conflicts": ["route"], "name": "model"}` |
-| `--route` | `{"name": "route"}` |
-| `--effort` | `{"name": "effort"}` |
-| `--confidential` | `{"defaults": ["false"], "name": "confidential", "values": ["true", "false"]}` |
-| `--fallback` | `{"bounds": [0, 2], "name": "fallback"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--writes` | `{"defaults": ["false"], "description": "Preview a route that needs write access", "name": "writes", "values": ["true", "false"]}` |
+| `--account` | `{"description": "Account key for policy preview", "name": "account"}` |
+| `name` | `{"conflicts": ["model", "route"], "description": "Route name, ADAPTER/ID model, or a model ID given without its adapter", "name": "name", "positional": true}` |
+| `--read-heavy` | `{"defaults": ["false"], "description": "Optimise selection for read-heavy work", "name": "read_heavy", "values": ["true", "false"]}` |
+| `--model` | `{"conflicts": ["route"], "description": "Exact model in ADAPTER/ID form", "name": "model"}` |
+| `--route` | `{"description": "Named route, or ADAPTER/NAME for a model-less adapter such as command/fmt-check", "name": "route"}` |
+| `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
+| `--confidential` | `{"defaults": ["false"], "description": "Require a confidential-safe route", "name": "confidential", "values": ["true", "false"]}` |
+| `--allow-free` | `{"defaults": ["false"], "description": "Allow free-tier models", "name": "allow_free", "values": ["true", "false"]}` |
+| `--fallback` | `{"bounds": [0, 2], "description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
@@ -1734,6 +1873,7 @@ Accepted by every command, before or after the subcommand.
     "exactly one of NAME, model or route",
     "fallback has at most two distinct models"
   ],
+  "description": "Resolve a named route or exact model for preview",
   "groups": [
     {
       "arguments": [],
@@ -1748,6 +1888,7 @@ Accepted by every command, before or after the subcommand.
         "route",
         "effort",
         "confidential",
+        "allow_free",
         "fallback"
       ],
       "multiple": true,
@@ -1772,16 +1913,17 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `pool` | `{"name": "pool", "positional": true, "required": true}` |
-| `model` | `{"name": "model", "positional": true, "required": true}` |
-| `--weight` | `{"name": "weight"}` |
-| `--effort` | `{"name": "effort"}` |
-| `--efforts` | `{"name": "efforts"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `pool` | `{"description": "Pool name to update or create", "name": "pool", "positional": true, "required": true}` |
+| `model` | `{"description": "Exact catalogue model in ADAPTER/ID form", "name": "model", "positional": true, "required": true}` |
+| `--weight` | `{"description": "Selection weight from 0 (fallback only) to 100", "name": "weight"}` |
+| `--effort` | `{"description": "Default effort for this member", "name": "effort"}` |
+| `--efforts` | `{"description": "Allowed caller effort values, comma separated", "name": "efforts"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Add or update a model in a user-configured pool",
   "groups": [
     {
       "arguments": [
@@ -1803,13 +1945,14 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `pool` | `{"name": "pool", "positional": true, "required": true}` |
-| `model` | `{"name": "model", "positional": true, "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `pool` | `{"description": "Pool name to update", "name": "pool", "positional": true, "required": true}` |
+| `model` | `{"description": "Exact catalogue model to remove", "name": "model", "positional": true, "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Remove a model from a user-configured pool",
   "groups": [
     {
       "arguments": [
@@ -1828,12 +1971,13 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `pool` | `{"name": "pool", "positional": true, "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `pool` | `{"description": "Bundled pool whose user override should be cleared", "name": "pool", "positional": true, "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Restore one bundled pool and clear its override",
   "groups": [
     {
       "arguments": [
@@ -1851,13 +1995,14 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `provider` | `{"name": "provider", "positional": true, "required": true}` |
-| `policy` | `{"name": "policy", "positional": true, "required": true, "values": ["pace", "spend", "max", "off"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `provider` | `{"description": "Registered provider ID", "name": "provider", "positional": true, "required": true}` |
+| `policy` | `{"description": "Default pacing policy for the provider", "name": "policy", "positional": true, "required": true, "values": ["pace", "spend", "max", "off"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Set a provider's default pacing policy",
   "groups": [
     {
       "arguments": [
@@ -1876,11 +2021,12 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Record, list or clear scheduled pacing overrides; the list also shows scheduled model policy rules",
   "groups": [
     {
       "arguments": [],
@@ -1896,19 +2042,20 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--account` | `{"name": "account"}` |
-| `--provider` | `{"name": "provider"}` |
-| `--all` | `{"defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
-| `--policy` | `{"name": "policy", "required": true, "values": ["pace", "spend", "max", "off"]}` |
-| `--starts` | `{"name": "starts"}` |
-| `--until` | `{"name": "until"}` |
-| `--window` | `{"name": "window", "repeatable": true}` |
-| `--tz` | `{"name": "tz"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--account` | `{"description": "Apply the override to this account (label, entry or adapter/key)", "name": "account"}` |
+| `--provider` | `{"description": "Apply the override to this provider", "name": "provider"}` |
+| `--all` | `{"defaults": ["false"], "description": "Apply the override to all accounts", "name": "all", "values": ["true", "false"]}` |
+| `--policy` | `{"description": "Pacing policy while the override is active", "name": "policy", "required": true, "values": ["pace", "spend", "max", "off"]}` |
+| `--starts` | `{"description": "First active instant: an RFC 3339 timestamp or a duration from now (e.g. 30m)", "name": "starts"}` |
+| `--until` | `{"description": "Expiry: a future RFC 3339 timestamp or a duration from now (e.g. 2h, 1d). Without it the override stays until cleared", "name": "until"}` |
+| `--window` | `{"description": "Hour window as [DAYS@]START-END, repeatable; DAYS lists weekdays (mon..sun or 0..6, Monday = 0) or ranges, such as mon-fri@9-17 or 23-2", "name": "window", "repeatable": true}` |
+| `--tz` | `{"description": "IANA time zone for the windows. Missing means UTC", "name": "tz"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Record a pacing override for one scope and echo the recorded rule",
   "groups": [
     {
       "arguments": [
@@ -1943,20 +2090,27 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "List recorded schedules, their current activity and remaining time"
+}
+```
 
 ## `provenant route override clear`
 
 | Argument | Contract |
 |---|---|
-| `--account` | `{"conflicts": ["provider"], "name": "account"}` |
-| `--provider` | `{"conflicts": ["account"], "name": "provider"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--account` | `{"conflicts": ["provider"], "description": "Clear only this account's override", "name": "account"}` |
+| `--provider` | `{"conflicts": ["account"], "description": "Clear only this provider's override", "name": "provider"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Remove pacing overrides: one scope's, or every one without a selector",
   "groups": [
     {
       "arguments": [
@@ -1975,27 +2129,40 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "List and inspect pipeline presets"
+}
+```
 
 ## `provenant preset list`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "List available presets"
+}
+```
 
 ## `provenant preset show`
 
 | Argument | Contract |
 |---|---|
-| `name` | `{"name": "name", "positional": true}` |
-| `--roles` | `{"defaults": ["false"], "name": "roles", "values": ["true", "false"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `name` | `{"description": "Preset name, or with --roles a role name to show", "name": "name", "positional": true}` |
+| `--roles` | `{"defaults": ["false"], "description": "List the role library (cards, tiers, families, references and origins)", "name": "roles", "values": ["true", "false"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Show effective preset values and their origins, or the role library",
   "groups": [
     {
       "arguments": [
@@ -2014,18 +2181,19 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `name` | `{"name": "name", "positional": true}` |
-| `--risk` | `{"name": "risk"}` |
-| `--kind` | `{"name": "kind"}` |
-| `--path` | `{"name": "paths", "repeatable": true}` |
-| `--size` | `{"name": "size"}` |
-| `--ready` | `{"defaults": ["false"], "name": "ready", "values": ["true", "false"]}` |
-| `--underspecified` | `{"conflicts": ["ready"], "defaults": ["false"], "name": "underspecified", "values": ["true", "false"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `name` | `{"description": "Explain one preset, or omit to explain the current rule selection", "name": "name", "positional": true}` |
+| `--risk` | `{"description": "Risk tier supplied to selection rules", "name": "risk"}` |
+| `--kind` | `{"description": "Task kind supplied to selection rules", "name": "kind"}` |
+| `--path` | `{"description": "Changed or declared path supplied to selection rules (repeatable)", "name": "paths", "repeatable": true}` |
+| `--size` | `{"description": "Prompt size band supplied to selection rules", "name": "size"}` |
+| `--ready` | `{"defaults": ["false"], "description": "Mark the work as ready, bypassing the readiness route", "name": "ready", "values": ["true", "false"]}` |
+| `--underspecified` | `{"conflicts": ["ready"], "defaults": ["false"], "description": "Route underspecified work through the configured readiness rule", "name": "underspecified", "values": ["true", "false"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Explain when to use a preset, its cost, and its typed parameters",
   "groups": [
     {
       "arguments": [
@@ -2049,49 +2217,50 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "name": "preset"}` |
-| `--set` | `{"name": "preset_set", "repeatable": true}` |
-| `--params-file` | `{"name": "preset_params_file"}` |
-| `--explain` | `{"defaults": ["false"], "name": "explain", "values": ["true", "false"]}` |
-| `--risk-tier` | `{"name": "risk_tier"}` |
-| `--task-kind` | `{"name": "task_kind"}` |
-| `--path` | `{"name": "selection_paths", "repeatable": true}` |
-| `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
-| `--prompt-file` | `{"name": "prompt_file"}` |
-| `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
-| `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
-| `--title` | `{"conflicts": ["manifest"], "name": "title"}` |
-| `--task-id` | `{"name": "task_id"}` |
-| `--delivery-id` | `{"name": "delivery_id"}` |
-| `--deliver` | `{"conflicts": ["deliver_remote", "deliver_branch", "open_pr"], "name": "deliver"}` |
-| `--deliver-remote` | `{"name": "deliver_remote"}` |
-| `--deliver-branch` | `{"name": "deliver_branch"}` |
-| `--open-pr` | `{"defaults": ["false"], "name": "open_pr", "values": ["true", "false"]}` |
-| `--read-heavy` | `{"defaults": ["false"], "name": "read_heavy", "values": ["true", "false"]}` |
-| `--route` | `{"name": "route"}` |
-| `--effort` | `{"name": "effort"}` |
-| `--confidential` | `{"defaults": ["false"], "name": "confidential", "values": ["true", "false"]}` |
-| `--fallback` | `{"bounds": [0, 2], "name": "fallback"}` |
-| `--account` | `{"name": "account"}` |
-| `--mode` | `{"name": "mode", "values": ["read-only", "worktree-write"]}` |
-| `--read-root` | `{"bounds": [0, 32], "name": "read_root", "repeatable": true}` |
-| `--write-root` | `{"bounds": [0, 32], "name": "write_root", "repeatable": true}` |
-| `--network` | `{"name": "network", "values": ["on", "off"]}` |
-| `--capability` | `{"bounds": [0, 16], "name": "capability", "repeatable": true}` |
-| `--provider-timeout` | `{"bounds": [1, 14400], "conditional_defaults": [["read-only", "3600"], ["worktree-write", "10800"]], "defaults": ["3600"], "name": "provider_timeout"}` |
-| `--concurrency` | `{"bounds": [1, 16], "name": "concurrency"}` |
-| `--knob` | `{"name": "knobs", "repeatable": true}` |
-| `--host` | `{"name": "host"}` |
-| `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "name": "worktree_branch"}` |
-| `--head` | `{"name": "head"}` |
-| `--base` | `{"name": "base"}` |
-| `--model` | `{"conflicts": ["route"], "name": "model"}` |
-| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "capability"], "name": "manifest"}` |
-| `--worktree` | `{"name": "worktree"}` |
-| `--wait` | `{"bounds": [1, 14400], "defaults": ["240"], "name": "wait"}` |
-| `--branch` | `{"name": "branch"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
+| `--set` | `{"description": "Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable", "name": "preset_set", "repeatable": true, "requires": ["preset"]}` |
+| `--params-file` | `{"description": "Read preset parameters from a TOML table file; --set overrides it", "name": "preset_params_file", "requires": ["preset"]}` |
+| `--explain` | `{"defaults": ["false"], "description": "Explain roles, limits and the expanded graph without running it", "name": "explain", "values": ["true", "false"]}` |
+| `--risk-tier` | `{"description": "Risk tier supplied to automatic preset selection", "name": "risk_tier"}` |
+| `--task-kind` | `{"description": "Task kind supplied to automatic preset selection", "name": "task_kind"}` |
+| `--path` | `{"description": "Changed or declared path supplied to automatic preset selection (repeatable)", "name": "selection_paths", "repeatable": true}` |
+| `--build-heavy` | `{"defaults": ["false"], "description": "Use the build-heavy scheduling priority", "name": "build_heavy", "values": ["true", "false"]}` |
+| `--prompt-file` | `{"description": "Read the prompt from this file", "name": "prompt_file"}` |
+| `--prompt-stdin` | `{"defaults": ["false"], "description": "Read the prompt from standard input", "name": "prompt_stdin", "values": ["true", "false"]}` |
+| `--operation-id` | `{"defaults": [""], "description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id"}` |
+| `--title` | `{"conflicts": ["manifest"], "description": "Short human title for this task", "name": "title"}` |
+| `--task-id` | `{"description": "Fabric task this lane serves", "name": "task_id"}` |
+| `--delivery-id` | `{"description": "Delivery this lane belongs to", "name": "delivery_id"}` |
+| `--deliver` | `{"conflicts": ["deliver_remote", "deliver_branch", "open_pr"], "description": "Host delivery: none, push, integrate:<branch> (local), or pr (origin)", "name": "deliver"}` |
+| `--deliver-remote` | `{"description": "Fetch and deliver this writer's final head on the host", "name": "deliver_remote", "requires": ["deliver_branch", "writer_target"]}` |
+| `--deliver-branch` | `{"description": "Branch to push the writer's head to", "name": "deliver_branch", "requires": ["deliver_remote"]}` |
+| `--open-pr` | `{"defaults": ["false"], "description": "Create a pull request after the host verifies the pushed head", "name": "open_pr", "requires": ["deliver_remote"], "values": ["true", "false"]}` |
+| `--read-heavy` | `{"defaults": ["false"], "description": "Optimise selection for read-heavy work", "name": "read_heavy", "values": ["true", "false"]}` |
+| `--route` | `{"description": "Named route, or ADAPTER/NAME for a model-less adapter such as command/fmt-check", "name": "route"}` |
+| `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
+| `--confidential` | `{"defaults": ["false"], "description": "Require a confidential-safe route", "name": "confidential", "values": ["true", "false"]}` |
+| `--allow-free` | `{"defaults": ["false"], "description": "Allow free-tier models", "name": "allow_free", "values": ["true", "false"]}` |
+| `--fallback` | `{"bounds": [0, 2], "description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
+| `--account` | `{"description": "Pin a registered account (key or label) instead of resolving one", "name": "account"}` |
+| `--mode` | `{"description": "Access mode: read-only or worktree-write [default: read-only]", "name": "mode", "values": ["read-only", "worktree-write"]}` |
+| `--read-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may read (repeatable)", "name": "read_root", "repeatable": true}` |
+| `--write-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
+| `--network` | `{"description": "Network access [default: on]", "name": "network", "values": ["on", "off"]}` |
+| `--capability` | `{"bounds": [0, 16], "description": "Grant a named capability: postgres (repeatable)", "name": "capability", "repeatable": true}` |
+| `--provider-timeout` | `{"bounds": [1, 14400], "conditional_defaults": [["read-only", "3600"], ["worktree-write", "10800"]], "defaults": ["3600"], "description": "Provider timeout in seconds", "name": "provider_timeout"}` |
+| `--concurrency` | `{"bounds": [1, 16], "description": "Manifest lanes or preset graph attempts to run at once (1 to 16)", "name": "concurrency"}` |
+| `--knob` | `{"description": "Override an effective harness knob for this dispatch (NAME=VALUE)", "name": "knobs", "repeatable": true}` |
+| `--host` | `{"description": "Configured peer (label or host ID) to run the dispatch on", "name": "host"}` |
+| `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "description": "Create or reuse a clean local writer worktree owned by this lane", "name": "worktree_branch"}` |
+| `--head` | `{"description": "Chair-verified full commit SHA to review (must exist on the executing host)", "name": "head"}` |
+| `--base` | `{"description": "Git base for attempt history and a new writer branch", "name": "base"}` |
+| `--model` | `{"conflicts": ["route"], "description": "Exact model in ADAPTER/ID form", "name": "model"}` |
+| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "capability"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
+| `--worktree` | `{"description": "Bind an existing preset writer worktree; single tasks can create an owned worktree for a missing branch name", "name": "worktree"}` |
+| `--wait` | `{"bounds": [1, 14400], "defaults": ["240"], "description": "Wait for task or preset graph settlement (seconds, or a duration such as 30m)", "name": "wait"}` |
+| `--branch` | `{"description": "Create or reuse an owned writer worktree for this branch, locally or on --host", "name": "branch"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
@@ -2105,6 +2274,7 @@ Accepted by every command, before or after the subcommand.
     "fallback conflicts with a writer and has at most two distinct models",
     "prompt and manifest inputs are at most 1 MiB"
   ],
+  "description": "Dispatch, wait and read the result",
   "groups": [
     {
       "arguments": [],
@@ -2129,6 +2299,7 @@ Accepted by every command, before or after the subcommand.
         "route",
         "effort",
         "confidential",
+        "allow_free",
         "fallback"
       ],
       "multiple": true,
@@ -2166,18 +2337,19 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `target` | `{"name": "target", "positional": true, "required": true}` |
-| `--brief-file` | `{"name": "brief_file", "required": true}` |
-| `--shape` | `{"name": "shape"}` |
-| `--risk` | `{"name": "risk"}` |
-| `--kind` | `{"name": "kind"}` |
-| `--range` | `{"name": "range"}` |
-| `--wait` | `{"bounds": [1, 14400], "defaults": ["3600"], "name": "wait"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `target` | `{"description": "Git commit to review", "name": "target", "positional": true, "required": true}` |
+| `--brief-file` | `{"description": "File containing the review brief", "name": "brief_file", "required": true}` |
+| `--shape` | `{"description": "Override the selected review shape", "name": "shape"}` |
+| `--risk` | `{"description": "Risk tier used to select a shape", "name": "risk"}` |
+| `--kind` | `{"description": "Task kind used to select a shape", "name": "kind"}` |
+| `--range` | `{"description": "Git range whose changed paths select the shape", "name": "range"}` |
+| `--wait` | `{"bounds": [1, 14400], "defaults": ["3600"], "description": "Overall wait limit (seconds or a duration such as 30m)", "name": "wait"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Dispatch and collect a configured review shape",
   "groups": [
     {
       "arguments": [
@@ -2201,15 +2373,16 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `id` | `{"name": "id", "positional": true}` |
-| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
-| `--cursor` | `{"name": "cursor"}` |
-| `--all` | `{"defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `id` | `{"description": "Show this run, task or attempt ID, including settled lanes", "name": "id", "positional": true}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum full records per page", "name": "limit"}` |
+| `--cursor` | `{"description": "Continue a full-record page from its cursor", "name": "cursor"}` |
+| `--all` | `{"defaults": ["false"], "description": "Include full records and older lanes", "name": "all", "values": ["true", "false"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Show active and recent lanes, newest first",
   "groups": [
     {
       "arguments": [
@@ -2231,10 +2404,10 @@ Accepted by every command, before or after the subcommand.
 | Argument | Contract |
 |---|---|
 | `number` | `{"name": "number", "positional": true, "required": true}` |
-| `--head` | `{"name": "head"}` |
-| `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--head` | `{"description": "Pin a reviewed head instead of using the current PR head", "name": "head"}` |
+| `--wait` | `{"bounds": [1, 14400], "description": "Wait for this head's CI (default 1 hour; maximum 4 hours)", "name": "wait"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
@@ -2243,6 +2416,7 @@ Accepted by every command, before or after the subcommand.
     "required checks must register and pass on the same head; head changes refuse merging",
     "already-merged PRs retry safe cleanup without CI or another merge"
   ],
+  "description": "Merge on green CI and prune the merged worktree",
   "groups": [
     {
       "arguments": [
@@ -2262,49 +2436,50 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "name": "preset"}` |
-| `--set` | `{"name": "preset_set", "repeatable": true}` |
-| `--params-file` | `{"name": "preset_params_file"}` |
-| `--explain` | `{"defaults": ["false"], "name": "explain", "values": ["true", "false"]}` |
-| `--risk-tier` | `{"name": "risk_tier"}` |
-| `--task-kind` | `{"name": "task_kind"}` |
-| `--path` | `{"name": "selection_paths", "repeatable": true}` |
-| `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
-| `--prompt-file` | `{"name": "prompt_file"}` |
-| `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
-| `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
-| `--title` | `{"conflicts": ["manifest"], "name": "title"}` |
-| `--task-id` | `{"name": "task_id"}` |
-| `--delivery-id` | `{"name": "delivery_id"}` |
-| `--deliver` | `{"conflicts": ["deliver_remote", "deliver_branch", "open_pr"], "name": "deliver"}` |
-| `--deliver-remote` | `{"name": "deliver_remote"}` |
-| `--deliver-branch` | `{"name": "deliver_branch"}` |
-| `--open-pr` | `{"defaults": ["false"], "name": "open_pr", "values": ["true", "false"]}` |
-| `--read-heavy` | `{"defaults": ["false"], "name": "read_heavy", "values": ["true", "false"]}` |
-| `--route` | `{"name": "route"}` |
-| `--effort` | `{"name": "effort"}` |
-| `--confidential` | `{"defaults": ["false"], "name": "confidential", "values": ["true", "false"]}` |
-| `--fallback` | `{"bounds": [0, 2], "name": "fallback"}` |
-| `--account` | `{"name": "account"}` |
-| `--mode` | `{"name": "mode", "values": ["read-only", "worktree-write"]}` |
-| `--worktree` | `{"name": "worktree"}` |
-| `--read-root` | `{"bounds": [0, 32], "name": "read_root", "repeatable": true}` |
-| `--write-root` | `{"bounds": [0, 32], "name": "write_root", "repeatable": true}` |
-| `--network` | `{"name": "network", "values": ["on", "off"]}` |
-| `--capability` | `{"bounds": [0, 16], "name": "capability", "repeatable": true}` |
-| `--provider-timeout` | `{"bounds": [1, 14400], "conditional_defaults": [["read-only", "3600"], ["worktree-write", "10800"]], "defaults": ["3600"], "name": "provider_timeout"}` |
-| `--concurrency` | `{"bounds": [1, 16], "name": "concurrency", "requires": ["manifest"]}` |
-| `--knob` | `{"name": "knobs", "repeatable": true}` |
-| `--host` | `{"name": "host"}` |
-| `--branch` | `{"name": "branch"}` |
-| `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "name": "worktree_branch"}` |
-| `--head` | `{"name": "head"}` |
-| `--base` | `{"name": "base"}` |
-| `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
-| `--model` | `{"conflicts": ["route"], "name": "model"}` |
-| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "capability"], "name": "manifest"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
+| `--set` | `{"description": "Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable", "name": "preset_set", "repeatable": true, "requires": ["preset"]}` |
+| `--params-file` | `{"description": "Read preset parameters from a TOML table file; --set overrides it", "name": "preset_params_file", "requires": ["preset"]}` |
+| `--explain` | `{"defaults": ["false"], "description": "Explain roles, limits and the expanded graph without running it", "name": "explain", "values": ["true", "false"]}` |
+| `--risk-tier` | `{"description": "Risk tier supplied to automatic preset selection", "name": "risk_tier"}` |
+| `--task-kind` | `{"description": "Task kind supplied to automatic preset selection", "name": "task_kind"}` |
+| `--path` | `{"description": "Changed or declared path supplied to automatic preset selection (repeatable)", "name": "selection_paths", "repeatable": true}` |
+| `--build-heavy` | `{"defaults": ["false"], "description": "Use the build-heavy scheduling priority", "name": "build_heavy", "values": ["true", "false"]}` |
+| `--prompt-file` | `{"description": "Read the prompt from this file", "name": "prompt_file"}` |
+| `--prompt-stdin` | `{"defaults": ["false"], "description": "Read the prompt from standard input", "name": "prompt_stdin", "values": ["true", "false"]}` |
+| `--operation-id` | `{"defaults": [""], "description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id"}` |
+| `--title` | `{"conflicts": ["manifest"], "description": "Short human title for this task", "name": "title"}` |
+| `--task-id` | `{"description": "Fabric task this lane serves", "name": "task_id"}` |
+| `--delivery-id` | `{"description": "Delivery this lane belongs to", "name": "delivery_id"}` |
+| `--deliver` | `{"conflicts": ["deliver_remote", "deliver_branch", "open_pr"], "description": "Host delivery: none, push, integrate:<branch> (local), or pr (origin)", "name": "deliver"}` |
+| `--deliver-remote` | `{"description": "Fetch and deliver this writer's final head on the host", "name": "deliver_remote", "requires": ["deliver_branch", "writer_target"]}` |
+| `--deliver-branch` | `{"description": "Branch to push the writer's head to", "name": "deliver_branch", "requires": ["deliver_remote"]}` |
+| `--open-pr` | `{"defaults": ["false"], "description": "Create a pull request after the host verifies the pushed head", "name": "open_pr", "requires": ["deliver_remote"], "values": ["true", "false"]}` |
+| `--read-heavy` | `{"defaults": ["false"], "description": "Optimise selection for read-heavy work", "name": "read_heavy", "values": ["true", "false"]}` |
+| `--route` | `{"description": "Named route, or ADAPTER/NAME for a model-less adapter such as command/fmt-check", "name": "route"}` |
+| `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
+| `--confidential` | `{"defaults": ["false"], "description": "Require a confidential-safe route", "name": "confidential", "values": ["true", "false"]}` |
+| `--allow-free` | `{"defaults": ["false"], "description": "Allow free-tier models", "name": "allow_free", "values": ["true", "false"]}` |
+| `--fallback` | `{"bounds": [0, 2], "description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
+| `--account` | `{"description": "Pin a registered account (key or label) instead of resolving one", "name": "account"}` |
+| `--mode` | `{"description": "Access mode: read-only or worktree-write [default: read-only]", "name": "mode", "values": ["read-only", "worktree-write"]}` |
+| `--worktree` | `{"description": "Writer worktree; local run creates an owned worktree for a missing branch name", "name": "worktree"}` |
+| `--read-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may read (repeatable)", "name": "read_root", "repeatable": true}` |
+| `--write-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
+| `--network` | `{"description": "Network access [default: on]", "name": "network", "values": ["on", "off"]}` |
+| `--capability` | `{"bounds": [0, 16], "description": "Grant a named capability: postgres (repeatable)", "name": "capability", "repeatable": true}` |
+| `--provider-timeout` | `{"bounds": [1, 14400], "conditional_defaults": [["read-only", "3600"], ["worktree-write", "10800"]], "defaults": ["3600"], "description": "Provider timeout in seconds", "name": "provider_timeout"}` |
+| `--concurrency` | `{"bounds": [1, 16], "description": "Manifest lanes or preset graph attempts to run at once (1 to 16)", "name": "concurrency", "requires": ["manifest"]}` |
+| `--knob` | `{"description": "Override an effective harness knob for this dispatch (NAME=VALUE)", "name": "knobs", "repeatable": true}` |
+| `--host` | `{"description": "Configured peer (label or host ID) to run the dispatch on", "name": "host"}` |
+| `--branch` | `{"description": "New writer branch; run creates an owned worktree locally or on --host", "name": "branch", "requires": ["host", "base"]}` |
+| `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "description": "Create or reuse a clean local writer worktree owned by this lane", "name": "worktree_branch"}` |
+| `--head` | `{"description": "Chair-verified full commit SHA to review (must exist on the executing host)", "name": "head"}` |
+| `--base` | `{"description": "Git base for attempt history and a new writer branch", "name": "base"}` |
+| `--wait` | `{"bounds": [1, 14400], "description": "Wait for task or preset graph settlement (seconds, or a duration such as 30m)", "name": "wait"}` |
+| `--model` | `{"conflicts": ["route"], "description": "Exact model in ADAPTER/ID form", "name": "model"}` |
+| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "capability"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
@@ -2317,6 +2492,7 @@ Accepted by every command, before or after the subcommand.
     "fallback conflicts with a writer and has at most two distinct models",
     "prompt and manifest inputs are at most 1 MiB"
   ],
+  "description": "Start a provider lane or manifest of lanes",
   "groups": [
     {
       "arguments": [],
@@ -2341,6 +2517,7 @@ Accepted by every command, before or after the subcommand.
         "route",
         "effort",
         "confidential",
+        "allow_free",
         "fallback"
       ],
       "multiple": true,
@@ -2378,22 +2555,23 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--id` | `{"bounds": [0, 100], "name": "id", "repeatable": true}` |
-| `--host` | `{"conflicts": ["id", "cursor"], "name": "host"}` |
-| `--session` | `{"conflicts": ["all"], "name": "session"}` |
-| `--all` | `{"defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
-| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
-| `--cursor` | `{"conflicts": ["wait", "watch"], "name": "cursor"}` |
-| `--wait` | `{"bounds": [1, 14400], "conflicts": ["watch"], "name": "wait"}` |
-| `--condition` | `{"conflicts": ["watch"], "defaults": ["any"], "name": "condition", "requires": ["wait"], "values": ["any", "all"]}` |
-| `--watch` | `{"conflicts": ["all", "states", "cursor"], "name": "watch"}` |
-| `--state` | `{"conflicts": ["wait", "watch"], "name": "states", "repeatable": true, "values": ["queued", "starting", "running", "settling", "succeeded", "review_required", "failed", "rejected", "timed_out", "rate_limited", "quota_limited", "auth_required", "model_unavailable", "permission_denied", "quarantined", "lost", "uncommitted", "cancelled", "input_required"]}` |
-| `--since` | `{"name": "since"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--id` | `{"bounds": [0, 100], "description": "Show this attempt ID or RUN[/TASK[/ATTEMPT]] (repeatable)", "name": "id", "repeatable": true}` |
+| `--host` | `{"conflicts": ["id", "cursor"], "description": "List, wait on or watch a configured peer's own lanes, by label or host ID", "name": "host"}` |
+| `--session` | `{"conflicts": ["all"], "description": "Keep lanes submitted by this session (its agent label)", "name": "session"}` |
+| `--all` | `{"defaults": ["false"], "description": "Show every lane", "name": "all", "values": ["true", "false"]}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum lanes per page (1 to 100)", "name": "limit"}` |
+| `--cursor` | `{"conflicts": ["wait", "watch"], "description": "Continue from a previous page's cursor", "name": "cursor"}` |
+| `--wait` | `{"bounds": [1, 14400], "conflicts": ["watch"], "description": "Wait for settlement (seconds, or a duration such as 30m)", "name": "wait"}` |
+| `--condition` | `{"conflicts": ["watch"], "defaults": ["any"], "description": "Wait for any or all lanes to settle", "name": "condition", "requires": ["wait"], "values": ["any", "all"]}` |
+| `--watch` | `{"conflicts": ["all", "states", "cursor"], "description": "Print one line per lane state change until every selected lane has settled or this many seconds pass (default 14400)", "name": "watch"}` |
+| `--state` | `{"conflicts": ["wait", "watch"], "description": "Keep lanes in any of these states", "name": "states", "repeatable": true, "values": ["queued", "starting", "running", "settling", "succeeded", "review_required", "failed", "rejected", "timed_out", "rate_limited", "quota_limited", "auth_required", "model_unavailable", "permission_denied", "quarantined", "lost", "uncommitted", "cancelled", "input_required"]}` |
+| `--since` | `{"description": "Keep lanes queued within this many seconds, or since an RFC3339 time. With --wait or --watch, count lanes that settled since then", "name": "since"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "List lanes or wait on their state",
   "groups": [
     {
       "arguments": [
@@ -2421,15 +2599,15 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `attempt` | `{"name": "attempt", "positional": true, "required": true}` |
-| `--host` | `{"name": "host"}` |
-| `--part` | `{"defaults": ["result"], "name": "part", "values": ["result", "prompt", "stderr", "events", "receipt", "transcript"]}` |
-| `--offset` | `{"conflicts": ["tail"], "defaults": ["0"], "name": "offset"}` |
-| `--tail` | `{"name": "tail"}` |
-| `--max-bytes` | `{"bounds": [1, 65536], "defaults": ["65536"], "name": "max_bytes"}` |
-| `--trace` | `{"conflicts": ["part", "offset", "tail", "max_bytes"], "defaults": ["false"], "name": "trace", "values": ["true", "false"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `attempt` | `{"description": "Attempt ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT; receipt also accepts a unique RUN or RUN/TASK", "name": "attempt", "positional": true, "required": true}` |
+| `--host` | `{"description": "Read a configured peer's own attempt, by label or host ID", "name": "host"}` |
+| `--part` | `{"defaults": ["result"], "description": "Which part to read", "name": "part", "values": ["result", "prompt", "stderr", "events", "receipt", "transcript"]}` |
+| `--offset` | `{"conflicts": ["tail"], "defaults": ["0"], "description": "Byte offset to start from", "name": "offset"}` |
+| `--tail` | `{"description": "Read the last N lines instead of an offset (above 500 is clamped to 500)", "name": "tail"}` |
+| `--max-bytes` | `{"bounds": [1, 65536], "defaults": ["65536"], "description": "Maximum bytes to return", "name": "max_bytes"}` |
+| `--trace` | `{"conflicts": ["part", "offset", "tail", "max_bytes"], "defaults": ["false"], "description": "Print the attempt's trace and its parent chain instead of a part", "name": "trace", "values": ["true", "false"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
@@ -2439,6 +2617,7 @@ Accepted by every command, before or after the subcommand.
     "a result shows whole up to 12 KiB, then its head and tail; at most 8 changed paths of 120 bytes are named; missing evidence is null",
     "peer tail scans share a 30-second deadline and reject changing artifacts"
   ],
+  "description": "Read a lane attempt's output",
   "groups": [
     {
       "arguments": [
@@ -2462,15 +2641,16 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `target` | `{"name": "target", "positional": true, "required": true}` |
-| `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
-| `--reason` | `{"bounds": [0, 256], "name": "reason"}` |
-| `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `target` | `{"description": "Attempt ID or RUN[/TASK[/ATTEMPT]]", "name": "target", "positional": true, "required": true}` |
+| `--operation-id` | `{"defaults": [""], "description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id"}` |
+| `--reason` | `{"bounds": [0, 256], "description": "Reason to record (up to 256 bytes)", "name": "reason"}` |
+| `--wait` | `{"bounds": [1, 14400], "description": "Wait up to this many seconds for cancellation to settle", "name": "wait"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Cancel a run, task or attempt",
   "groups": [
     {
       "arguments": [
@@ -2491,14 +2671,14 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `attempt` | `{"name": "attempt", "positional": true, "required": true}` |
-| `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
-| `--no-fallback` | `{"defaults": ["false"], "name": "no_fallback", "values": ["true", "false"]}` |
-| `--prompt-file` | `{"name": "prompt_file"}` |
-| `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
-| `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `attempt` | `{"description": "Attempt ID, or RUN/ATTEMPT or RUN/TASK/ATTEMPT", "name": "attempt", "positional": true, "required": true}` |
+| `--operation-id` | `{"defaults": [""], "description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id"}` |
+| `--no-fallback` | `{"defaults": ["false"], "description": "Refuse instead of starting fresh when provider continuation is unavailable", "name": "no_fallback", "values": ["true", "false"]}` |
+| `--prompt-file` | `{"description": "Read the prompt from this file", "name": "prompt_file"}` |
+| `--prompt-stdin` | `{"defaults": ["false"], "description": "Read the prompt from standard input", "name": "prompt_stdin", "values": ["true", "false"]}` |
+| `--wait` | `{"bounds": [1, 14400], "description": "Wait up to this many seconds for the attempt to settle", "name": "wait"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
@@ -2507,6 +2687,7 @@ Accepted by every command, before or after the subcommand.
     "prompt is at most 1 MiB; expected generation is 0",
     "operation-id is generated when omitted; supply it for planned retries"
   ],
+  "description": "Resume an attempt with a new prompt",
   "groups": [
     {
       "arguments": [],
@@ -2531,14 +2712,15 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `attempt` | `{"name": "attempt", "positional": true, "required": true}` |
-| `--text-stdin` | `{"defaults": ["false"], "name": "text_stdin", "required": true, "values": ["true", "false"]}` |
+| `attempt` | `{"description": "Attempt ID", "name": "attempt", "positional": true, "required": true}` |
+| `--text-stdin` | `{"defaults": ["false"], "description": "Read the message from standard input (at most 4 KiB; input must finish within 5 seconds)", "name": "text_stdin", "required": true, "values": ["true", "false"]}` |
 | `--operation-id` | `{"name": "operation_id"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Queue a steering message for a lane when its provider supports control",
   "groups": [
     {
       "arguments": [
@@ -2558,21 +2740,28 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Deliver a settled writer attempt"
+}
+```
 
 ## `provenant lane deliver`
 
 | Argument | Contract |
 |---|---|
 | `attempt` | `{"name": "attempt", "positional": true, "required": true}` |
-| `--deliver` | `{"name": "deliver"}` |
-| `--accept-review` | `{"defaults": ["false"], "name": "accept_review", "values": ["true", "false"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--deliver` | `{"description": "Override the recorded delivery mode (default push when none recorded)", "name": "deliver"}` |
+| `--accept-review` | `{"defaults": ["false"], "description": "Accept the settled writer's protected-path review as chair", "name": "accept_review", "values": ["true", "false"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Re-run host delivery, requiring the settled receipt's clean, exact head",
   "groups": [
     {
       "arguments": [
@@ -2592,12 +2781,13 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--id` | `{"bounds": [0, 100], "name": "id", "repeatable": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--id` | `{"bounds": [0, 100], "description": "Reconcile only this run (repeatable)", "name": "id", "repeatable": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Settle open runs and report uncertain custody",
   "groups": [
     {
       "arguments": [
@@ -2615,29 +2805,35 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Report local usage and cost"
+}
+```
 
 ## `provenant telemetry stats`
 
 | Argument | Contract |
 |---|---|
-| `--outcomes` | `{"conflicts": ["usage", "claude_subagents", "by"], "defaults": ["false"], "name": "outcomes", "values": ["true", "false"]}` |
-| `--suggest` | `{"conflicts": ["usage", "claude_subagents", "by"], "defaults": ["false"], "name": "suggest", "values": ["true", "false"]}` |
-| `--main-ref` | `{"defaults": ["main"], "name": "main_ref"}` |
-| `--ci-file` | `{"name": "ci_file"}` |
-| `--outcome-days` | `{"defaults": ["14"], "name": "outcome_days"}` |
-| `--min-samples` | `{"defaults": ["20"], "name": "min_samples"}` |
-| `--expiry-days` | `{"defaults": ["14"], "name": "expiry_days"}` |
-| `--claude-subagents` | `{"conflicts": ["usage", "since", "until", "run_id", "by"], "name": "claude_subagents"}` |
-| `--usage` | `{"defaults": ["false"], "name": "usage", "values": ["true", "false"]}` |
-| `--since` | `{"name": "since"}` |
-| `--until` | `{"name": "until"}` |
-| `--run-id` | `{"name": "run_id"}` |
-| `--by` | `{"conflicts": ["usage"], "name": "by", "values": ["pr", "issue", "graph", "node", "pattern", "preset", "role"]}` |
-| `--detail` | `{"conflicts": ["usage"], "defaults": ["false"], "name": "detail", "values": ["true", "false"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--outcomes` | `{"conflicts": ["usage", "claude_subagents", "by"], "defaults": ["false"], "description": "Include offline post-merge outcomes and stratified ranking", "name": "outcomes", "values": ["true", "false"]}` |
+| `--suggest` | `{"conflicts": ["usage", "claude_subagents", "by"], "defaults": ["false"], "description": "Include advisory expiring suggestions from offline pipeline evidence", "name": "suggest", "values": ["true", "false"]}` |
+| `--main-ref` | `{"defaults": ["main"], "description": "Local main-line ref to analyse; no fetch is performed", "name": "main_ref"}` |
+| `--ci-file` | `{"description": "Recorded gh main-branch run list JSON; absent means CI not_measured", "name": "ci_file"}` |
+| `--outcome-days` | `{"defaults": ["14"], "description": "Days after a merge to attribute escaped defects", "name": "outcome_days"}` |
+| `--min-samples` | `{"defaults": ["20"], "description": "Independent graphs and mature merges required per arm", "name": "min_samples"}` |
+| `--expiry-days` | `{"defaults": ["14"], "description": "Days until a suggestion expires", "name": "expiry_days"}` |
+| `--claude-subagents` | `{"conflicts": ["usage", "since", "until", "run_id", "by"], "description": "Report native Claude subagents from one session's subagents directory instead of supervised attempts", "name": "claude_subagents"}` |
+| `--usage` | `{"defaults": ["false"], "description": "Count local CLI verbs and MCP tools, including unused installed units", "name": "usage", "values": ["true", "false"]}` |
+| `--since` | `{"description": "Count from this date or timestamp, or this many seconds ago", "name": "since"}` |
+| `--until` | `{"description": "Count up to this date or timestamp", "name": "until"}` |
+| `--run-id` | `{"description": "Restrict usage and cost to one run", "name": "run_id"}` |
+| `--by` | `{"conflicts": ["usage"], "description": "Group supervised attempts by work context or merged pull request", "name": "by", "values": ["pr", "issue", "graph", "node", "pattern", "preset", "role"]}` |
+| `--detail` | `{"conflicts": ["usage"], "defaults": ["false"], "description": "Include per-attempt detail", "name": "detail", "values": ["true", "false"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
@@ -2645,6 +2841,7 @@ Accepted by every command, before or after the subcommand.
     "dates mean midnight UTC; timestamps need an offset",
     "since must precede until"
   ],
+  "description": "Summarise local attempts, usage and cost",
   "groups": [
     {
       "arguments": [],
@@ -2672,15 +2869,16 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--out` | `{"defaults": ["provenant-trace.json"], "name": "out"}` |
-| `--since` | `{"name": "since"}` |
-| `--run` | `{"name": "run"}` |
-| `--peers` | `{"defaults": ["false"], "name": "peers", "values": ["true", "false"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--out` | `{"defaults": ["provenant-trace.json"], "description": "Output file (default &#96;provenant-trace.json&#96;)", "name": "out"}` |
+| `--since` | `{"description": "Include attempts finished from this date or timestamp, or this many seconds ago", "name": "since"}` |
+| `--run` | `{"description": "Restrict the trace to one run", "name": "run"}` |
+| `--peers` | `{"defaults": ["false"], "description": "Also read the attempts of runs placed on peers, one SSH status read per peer", "name": "peers", "values": ["true", "false"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Write attempts as a Chrome Trace Event file for ui.perfetto.dev",
   "groups": [
     {
       "arguments": [
@@ -2701,11 +2899,12 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Maintain the telemetry price sheet",
   "groups": [
     {
       "arguments": [],
@@ -2721,15 +2920,16 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--source` | `{"defaults": ["openrouter"], "name": "source", "values": ["openrouter", "litellm"]}` |
-| `--openrouter-file` | `{"name": "openrouter_file"}` |
-| `--litellm-file` | `{"name": "litellm_file"}` |
-| `--out` | `{"defaults": ["telemetry-prices.proposed.json"], "name": "out"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--source` | `{"defaults": ["openrouter"], "description": "Primary source; the other is the cross-check (default openrouter)", "name": "source", "values": ["openrouter", "litellm"]}` |
+| `--openrouter-file` | `{"description": "Read the OpenRouter models document from this file instead of fetching it", "name": "openrouter_file"}` |
+| `--litellm-file` | `{"description": "Read the LiteLLM price document from this file instead of fetching it", "name": "litellm_file"}` |
+| `--out` | `{"defaults": ["telemetry-prices.proposed.json"], "description": "Proposal file (default &#96;telemetry-prices.proposed.json&#96;)", "name": "out"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Fetch market prices and write a proposed diff; never edits the sheet",
   "groups": [
     {
       "arguments": [
@@ -2750,13 +2950,14 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--provider` | `{"name": "provider"}` |
-| `--since` | `{"name": "since"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--provider` | `{"description": "Ingest only this provider's sessions (only &#96;claude&#96; writes native transcripts)", "name": "provider"}` |
+| `--since` | `{"description": "Ingest transcripts written, and messages stamped, from this date or timestamp, or this many seconds ago", "name": "since"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Record native chair and sub-agent token usage per account",
   "groups": [
     {
       "arguments": [
@@ -2775,18 +2976,19 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--account` | `{"name": "account"}` |
-| `--window` | `{"name": "window"}` |
-| `--model` | `{"name": "model"}` |
-| `--since` | `{"name": "since"}` |
-| `--min-runs` | `{"defaults": ["10"], "name": "min_runs"}` |
-| `--fall-percent` | `{"defaults": ["20"], "name": "fall_percent"}` |
-| `--recent-days` | `{"defaults": ["7"], "name": "recent_days"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--account` | `{"description": "Account label or key", "name": "account"}` |
+| `--window` | `{"description": "Quota window, such as five_hour or weekly (default every window)", "name": "window"}` |
+| `--model` | `{"description": "Count only usage of this exact model; quota deltas still cover every model, so mileage is understated", "name": "model"}` |
+| `--since` | `{"description": "Use readings and usage from this date or timestamp, or this many seconds ago", "name": "since"}` |
+| `--min-runs` | `{"defaults": ["10"], "description": "Runs needed on each side before a capacity trend is judged", "name": "min_runs"}` |
+| `--fall-percent` | `{"defaults": ["20"], "description": "Fall in capacity, in percent, that is flagged rather than inconclusive", "name": "fall_percent"}` |
+| `--recent-days` | `{"defaults": ["7"], "description": "Days in the recent side of a capacity step change", "name": "recent_days"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Report quota mileage and effective token rates from quota history and ingested usage",
   "groups": [
     {
       "arguments": [
@@ -2810,24 +3012,31 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Compare experiment arms using offline pipeline outcomes"
+}
+```
 
 ## `provenant telemetry experiments show`
 
 | Argument | Contract |
 |---|---|
-| `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--main-ref` | `{"defaults": ["main"], "name": "main_ref"}` |
-| `--ci-file` | `{"name": "ci_file"}` |
-| `--outcome-days` | `{"defaults": ["14"], "name": "outcome_days"}` |
-| `--min-samples` | `{"defaults": ["20"], "name": "min_samples"}` |
-| `--expiry-days` | `{"defaults": ["14"], "name": "expiry_days"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `id` | `{"description": "Experiment name from domains.fabric.pipelines.experiment", "name": "id", "positional": true, "required": true}` |
+| `--main-ref` | `{"defaults": ["main"], "description": "Local main-line ref to analyse; no fetch is performed", "name": "main_ref"}` |
+| `--ci-file` | `{"description": "Recorded gh main-branch run list JSON; absent means CI not_measured", "name": "ci_file"}` |
+| `--outcome-days` | `{"defaults": ["14"], "description": "Days after a merge to attribute escaped defects", "name": "outcome_days"}` |
+| `--min-samples` | `{"defaults": ["20"], "description": "Independent graphs and mature merges required per arm", "name": "min_samples"}` |
+| `--expiry-days` | `{"defaults": ["14"], "description": "Days until a suggestion expires", "name": "expiry_days"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Show one experiment's stratified arm comparison",
   "groups": [
     {
       "arguments": [],
@@ -2855,11 +3064,12 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Show and refresh provider quota",
   "groups": [
     {
       "arguments": [],
@@ -2875,12 +3085,13 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--adapter` | `{"name": "adapter"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--adapter` | `{"description": "Restrict to this adapter", "name": "adapter"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Show recorded provider quota",
   "groups": [
     {
       "arguments": [
@@ -2898,13 +3109,14 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--adapter` | `{"name": "adapter"}` |
-| `--days` | `{"defaults": ["7"], "name": "days"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--adapter` | `{"description": "Restrict to this adapter", "name": "adapter"}` |
+| `--days` | `{"defaults": ["7"], "description": "Days to include, as a rolling window back from now", "name": "days"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Show recorded use by account and project, with chair sessions and lane tokens",
   "groups": [
     {
       "arguments": [],
@@ -2928,15 +3140,16 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--account` | `{"name": "account"}` |
-| `--since` | `{"name": "since"}` |
-| `--until` | `{"name": "until"}` |
-| `--limit` | `{"bounds": [1, 100], "defaults": ["1000"], "name": "limit"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--account` | `{"description": "Account label or key", "name": "account"}` |
+| `--since` | `{"description": "Earliest reading", "name": "since"}` |
+| `--until` | `{"description": "Latest reading", "name": "until"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["1000"], "description": "Most readings to return", "name": "limit"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "List recorded quota readings with resets, plan changes and the plan price in force",
   "groups": [
     {
       "arguments": [
@@ -2957,13 +3170,14 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--headline` | `{"name": "headline", "values": ["auto", "5h", "weekly"]}` |
-| `--icon` | `{"name": "icon"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--headline` | `{"description": "Window the menu bar leads with", "name": "headline", "values": ["auto", "5h", "weekly"]}` |
+| `--icon` | `{"description": "Account the menu bar icon follows, or &#96;most_constrained&#96;", "name": "icon"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Set menu bar display choices, then show quota",
   "groups": [
     {
       "arguments": [
@@ -2982,14 +3196,15 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--adapter` | `{"name": "adapter"}` |
-| `--trigger` | `{"defaults": ["manual"], "name": "trigger", "values": ["timer", "panel", "manual", "wake", "power"]}` |
-| `--power` | `{"defaults": ["ac"], "name": "power", "values": ["ac", "battery", "low"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--adapter` | `{"description": "Restrict to this adapter", "name": "adapter"}` |
+| `--trigger` | `{"defaults": ["manual"], "description": "What caused this tick", "name": "trigger", "values": ["timer", "panel", "manual", "wake", "power"]}` |
+| `--power` | `{"defaults": ["ac"], "description": "Current power state", "name": "power", "values": ["ac", "battery", "low"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Refresh quota and record a pacing tick",
   "groups": [
     {
       "arguments": [],
@@ -3013,19 +3228,26 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Read the local console catalogue"
+}
+```
 
 ## `provenant console changes`
 
 | Argument | Contract |
 |---|---|
-| `--since` | `{"name": "since"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--since` | `{"description": "Previous generations as a JSON object", "name": "since"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Read local owner change generations",
   "groups": [
     {
       "arguments": [
@@ -3043,15 +3265,16 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--max-depth` | `{"defaults": ["8"], "name": "max_depth"}` |
-| `--max-nodes` | `{"defaults": ["100"], "name": "max_nodes"}` |
-| `--detail` | `{"defaults": ["false"], "name": "detail", "values": ["true", "false"]}` |
-| `--hosts` | `{"name": "hosts"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--max-depth` | `{"defaults": ["8"], "description": "Maximum store depth, including the host store", "name": "max_depth"}` |
+| `--max-nodes` | `{"defaults": ["100"], "description": "Maximum attempts to include", "name": "max_nodes"}` |
+| `--detail` | `{"defaults": ["false"], "description": "Include complete run and attempt records", "name": "detail", "values": ["true", "false"]}` |
+| `--hosts` | `{"description": "Include configured peers: all or a comma-separated list of labels", "name": "hosts"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Read a bounded local tree of nested runs",
   "groups": [
     {
       "arguments": [
@@ -3072,15 +3295,16 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--all` | `{"defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
-| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
-| `--cursor` | `{"name": "cursor"}` |
-| `--hosts` | `{"name": "hosts"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--all` | `{"defaults": ["false"], "description": "Include retained terminal attempts", "name": "all", "values": ["true", "false"]}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum rows in a page", "name": "limit"}` |
+| `--cursor` | `{"description": "Continue the same filters and attempt high-water mark", "name": "cursor"}` |
+| `--hosts` | `{"description": "Include configured peers: all or a comma-separated list of labels", "name": "hosts"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Read a local board snapshot without artifact bodies",
   "groups": [
     {
       "arguments": [
@@ -3102,11 +3326,12 @@ Accepted by every command, before or after the subcommand.
 | Argument | Contract |
 |---|---|
 | `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Read one attempt's bounded metadata and artifact inventory",
   "groups": [
     {
       "arguments": [
@@ -3131,11 +3356,12 @@ Search is local only; peers are not searched. Only the first match per artifact 
 | `--session` | `{"name": "session"}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
 | `--cursor` | `{"name": "cursor"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Search local prompt or result content; returns the first match per artifact. Each cursor page rescans the bounded local content; peers are not searched",
   "groups": [
     {
       "arguments": [
@@ -3157,35 +3383,54 @@ Search is local only; peers are not searched. Only the first match per artifact 
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Summarise local attention and running work"
+}
+```
 
 ## `provenant console open`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Open the native console app (macOS)"
+}
+```
 
 ## `provenant console projects`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "List registered local projects"
+}
+```
 
 ## `provenant console sessions`
 
 | Argument | Contract |
 |---|---|
-| `session` | `{"name": "session", "positional": true}` |
-| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
-| `--cursor` | `{"name": "cursor"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `session` | `{"description": "Select a host session ID", "name": "session", "positional": true}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum rows in a page", "name": "limit"}` |
+| `--cursor` | `{"description": "Continue an unchanged catalogue snapshot", "name": "cursor"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "List explicitly registered local chair sessions",
   "groups": [
     {
       "arguments": [
@@ -3205,15 +3450,27 @@ Search is local only; peers are not searched. Only the first match per artifact 
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Manage the chair session"
+}
+```
 
 ## `provenant chair viewer`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Read and update viewer-owned presentation state"
+}
+```
 
 ## `provenant chair viewer request`
 
@@ -3221,11 +3478,12 @@ Search is local only; peers are not searched. Only the first match per artifact 
 |---|---|
 | `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
 | `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Show presentation state for one request",
   "groups": [
     {
       "arguments": [
@@ -3246,14 +3504,15 @@ Search is local only; peers are not searched. Only the first match per artifact 
 |---|---|
 | `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
 | `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--seen-revision` | `{"name": "seen_revision"}` |
-| `--snoozed-until` | `{"name": "snoozed_until"}` |
-| `--dismissed` | `{"defaults": ["false"], "name": "dismissed", "values": ["true", "false"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--seen-revision` | `{"description": "Revision actually viewed, or omit for unread", "name": "seen_revision"}` |
+| `--snoozed-until` | `{"description": "Snooze until this UTC timestamp", "name": "snoozed_until"}` |
+| `--dismissed` | `{"defaults": ["false"], "description": "Hide this item for this viewer", "name": "dismissed", "values": ["true", "false"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Set presentation state for one request; this never resolves it",
   "groups": [
     {
       "arguments": [
@@ -3278,11 +3537,12 @@ Search is local only; peers are not searched. Only the first match per artifact 
 | `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
 | `session` | `{"name": "session", "positional": true, "required": true}` |
 | `--to` | `{"name": "to"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Compare a viewer's last rendered summary with a chosen revision",
   "groups": [
     {
       "arguments": [
@@ -3305,11 +3565,12 @@ Search is local only; peers are not searched. Only the first match per artifact 
 | `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
 | `session` | `{"name": "session", "positional": true, "required": true}` |
 | `--revision` | `{"name": "revision", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Record the summary revision actually rendered by this viewer",
   "groups": [
     {
       "arguments": [
@@ -3331,11 +3592,12 @@ Search is local only; peers are not searched. Only the first match per artifact 
 |---|---|
 | `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
 | `session` | `{"name": "session", "positional": true, "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Forget a viewer's summary baseline",
   "groups": [
     {
       "arguments": [
@@ -3354,19 +3616,26 @@ Search is local only; peers are not searched. Only the first match per artifact 
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Read and update a chair session's structured summary"
+}
+```
 
 ## `provenant chair summary show`
 
 | Argument | Contract |
 |---|---|
-| `session` | `{"name": "session", "positional": true, "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `session` | `{"description": "Chair session ID", "name": "session", "positional": true, "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Show the current structured summary",
   "groups": [
     {
       "arguments": [
@@ -3384,14 +3653,15 @@ Search is local only; peers are not searched. Only the first match per artifact 
 
 | Argument | Contract |
 |---|---|
-| `session` | `{"name": "session", "positional": true, "required": true}` |
-| `--from` | `{"name": "from", "required": true}` |
-| `--to` | `{"name": "to"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `session` | `{"description": "Chair session ID", "name": "session", "positional": true, "required": true}` |
+| `--from` | `{"description": "Earlier summary revision", "name": "from", "required": true}` |
+| `--to` | `{"description": "Later summary revision (defaults to current)", "name": "to"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Compare two retained summary revisions",
   "groups": [
     {
       "arguments": [
@@ -3411,15 +3681,16 @@ Search is local only; peers are not searched. Only the first match per artifact 
 
 | Argument | Contract |
 |---|---|
-| `session` | `{"name": "session", "positional": true, "required": true}` |
-| `--file` | `{"name": "file", "required": true}` |
-| `--expect-revision` | `{"name": "expect_revision", "required": true}` |
-| `--operation-id` | `{"name": "operation_id"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `session` | `{"description": "Chair session ID", "name": "session", "positional": true, "required": true}` |
+| `--file` | `{"description": "JSON patch file, or - for standard input", "name": "file", "required": true}` |
+| `--expect-revision` | `{"description": "Expected summary revision; use 0 to create a summary", "name": "expect_revision", "required": true}` |
+| `--operation-id` | `{"description": "Stable retry key; generated when omitted. The same key with the same request replays the original result, and with another is refused", "name": "operation_id"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Update selected fields from a JSON patch",
   "groups": [
     {
       "arguments": [
@@ -3440,25 +3711,32 @@ Search is local only; peers are not searched. Only the first match per artifact 
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Append and read a chair session's authored updates"
+}
+```
 
 ## `provenant chair log append`
 
 | Argument | Contract |
 |---|---|
-| `--session` | `{"name": "session", "required": true}` |
-| `--file` | `{"name": "file", "required": true}` |
-| `--operation-id` | `{"name": "operation_id", "requires": ["issued_at"]}` |
-| `--issued-at` | `{"name": "issued_at", "requires": ["operation_id"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--session` | `{"description": "Chair session ID", "name": "session", "required": true}` |
+| `--file` | `{"description": "JSON containing markdown, kind, channel and optional links", "name": "file", "required": true}` |
+| `--operation-id` | `{"description": "Stable retry key; generated when omitted", "name": "operation_id", "requires": ["issued_at"]}` |
+| `--issued-at` | `{"description": "Original operation creation time in UTC Unix seconds; reuse for retries", "name": "issued_at", "requires": ["operation_id"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
   "constraints": [
     "operation-id and issued-at are generated when omitted; supply both for planned retries"
   ],
+  "description": "Append an update from a JSON file, or standard input with `-`",
   "groups": [
     {
       "arguments": [
@@ -3479,14 +3757,15 @@ Search is local only; peers are not searched. Only the first match per artifact 
 
 | Argument | Contract |
 |---|---|
-| `--session` | `{"name": "session", "required": true}` |
-| `--after` | `{"name": "after"}` |
-| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--session` | `{"description": "Chair session ID", "name": "session", "required": true}` |
+| `--after` | `{"description": "Return entries after this sequence", "name": "after"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum entries in this page", "name": "limit"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "List a bounded page of updates in sequence order",
   "groups": [
     {
       "arguments": [
@@ -3506,15 +3785,16 @@ Search is local only; peers are not searched. Only the first match per artifact 
 
 | Argument | Contract |
 |---|---|
-| `session` | `{"name": "session", "positional": true, "required": true}` |
-| `--text-stdin` | `{"defaults": ["false"], "name": "text_stdin", "required": true, "values": ["true", "false"]}` |
+| `session` | `{"description": "Registered chair session ID", "name": "session", "positional": true, "required": true}` |
+| `--text-stdin` | `{"defaults": ["false"], "description": "Read the message from standard input (at most 4 KiB; input must finish within 5 seconds)", "name": "text_stdin", "required": true, "values": ["true", "false"]}` |
 | `--channel` | `{"name": "channel", "required": true, "values": ["chat", "console", "phone_remote", "cli", "unknown"]}` |
 | `--operation-id` | `{"name": "operation_id"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Queue a message for an exact registered chair session",
   "groups": [
     {
       "arguments": [
@@ -3535,14 +3815,15 @@ Search is local only; peers are not searched. Only the first match per artifact 
 
 | Argument | Contract |
 |---|---|
-| `--to` | `{"name": "to"}` |
-| `--dry-run` | `{"defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
-| `--session-id` | `{"name": "session_id"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--to` | `{"description": "Registered Claude account to switch to", "name": "to"}` |
+| `--dry-run` | `{"defaults": ["false"], "description": "Report the switch without performing it", "name": "dry_run", "values": ["true", "false"]}` |
+| `--session-id` | `{"description": "Source session; required for real runs unless CLAUDE_SESSION_ID is set", "name": "session_id"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Checkpoint and continue under an allowed registered Claude account",
   "groups": [
     {
       "arguments": [
@@ -3562,27 +3843,40 @@ Search is local only; peers are not searched. Only the first match per artifact 
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Create, list and remove worktrees"
+}
+```
 
 ## `provenant worktree seed-build`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Build and publish a host-owned Cargo target seed from origin/main"
+}
+```
 
 ## `provenant worktree create`
 
 | Argument | Contract |
 |---|---|
-| `branch` | `{"name": "branch", "positional": true, "required": true}` |
-| `--base` | `{"name": "base"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `branch` | `{"description": "New branch name", "name": "branch", "positional": true, "required": true}` |
+| `--base` | `{"description": "Base ref; the current head when omitted", "name": "base"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Create a worktree on a new branch",
   "groups": [
     {
       "arguments": [
@@ -3601,24 +3895,31 @@ Search is local only; peers are not searched. Only the first match per artifact 
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "List worktrees"
+}
+```
 
 ## `provenant worktree remove`
 
 | Argument | Contract |
 |---|---|
-| `name` | `{"conflicts": ["merged", "branch", "since"], "name": "name", "positional": true}` |
-| `--discard` | `{"conflicts": ["merged"], "defaults": ["false"], "name": "discard", "values": ["true", "false"]}` |
-| `--merged` | `{"defaults": ["false"], "name": "merged", "requires": ["integration", "remove_scope"], "values": ["true", "false"]}` |
-| `--integration` | `{"name": "integration"}` |
-| `--branch` | `{"bounds": [0, 100], "conflicts": ["since"], "name": "branch", "repeatable": true, "requires": ["merged"]}` |
-| `--since` | `{"name": "since", "requires": ["merged"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `name` | `{"conflicts": ["merged", "branch", "since"], "description": "Worktree to remove", "name": "name", "positional": true}` |
+| `--discard` | `{"conflicts": ["merged"], "defaults": ["false"], "description": "With NAME: also delete the branch when it is not merged (clean worktree only)", "name": "discard", "values": ["true", "false"]}` |
+| `--merged` | `{"defaults": ["false"], "description": "Remove worktrees already merged into the integration branch", "name": "merged", "requires": ["integration", "remove_scope"], "values": ["true", "false"]}` |
+| `--integration` | `{"description": "Integration ref to check merges against: a branch or a remote-tracking ref such as origin/main (NAME: fetched upstream default, falling back to the primary's branch when unavailable)", "name": "integration"}` |
+| `--branch` | `{"bounds": [0, 100], "conflicts": ["since"], "description": "Limit to this branch (repeatable)", "name": "branch", "repeatable": true, "requires": ["merged"]}` |
+| `--since` | `{"description": "Limit to worktrees created since this commit", "name": "since", "requires": ["merged"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Remove a worktree or merged ones, allowing declared ignored output",
   "groups": [
     {
       "arguments": [
@@ -3650,8 +3951,14 @@ Search is local only; peers are not searched. Only the first match per artifact 
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Watch pull request CI and merge a verified head"
+}
+```
 
 ## `provenant pr contributions`
 
@@ -3660,12 +3967,13 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | Argument | Contract |
 |---|---|
 | `number` | `{"name": "number", "positional": true, "required": true}` |
-| `--bind` | `{"defaults": ["false"], "name": "bind", "values": ["true", "false"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--bind` | `{"defaults": ["false"], "description": "Retry host binding to the observed PR branch and head; close ended bindings", "name": "bind", "values": ["true", "false"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "List retained local attempt contributions and missing peer coverage",
   "groups": [
     {
       "arguments": [
@@ -3685,11 +3993,12 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | Argument | Contract |
 |---|---|
 | `number` | `{"name": "number", "positional": true, "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Wait for CI and report pass or fail with the pull request head",
   "groups": [
     {
       "arguments": [
@@ -3707,19 +4016,20 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--from-attempt` | `{"name": "from_attempt", "required": true}` |
-| `--review` | `{"name": "review", "repeatable": true}` |
-| `--summary-file` | `{"name": "summary_file", "required": true}` |
-| `--issue` | `{"name": "issue", "repeatable": true}` |
-| `--branch` | `{"name": "branch"}` |
-| `--base` | `{"name": "base"}` |
-| `--draft` | `{"defaults": ["false"], "name": "draft", "values": ["true", "false"]}` |
-| `--dry-run` | `{"defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--from-attempt` | `{"description": "The writer attempt that made the change", "name": "from_attempt", "required": true}` |
+| `--review` | `{"description": "An independent review attempt (repeatable); the attempt's delivery receipt supplies them when omitted", "name": "review", "repeatable": true}` |
+| `--summary-file` | `{"description": "Markdown for the summary section; its first line titles the pull request", "name": "summary_file", "required": true}` |
+| `--issue` | `{"description": "Issue the pull request closes (repeatable)", "name": "issue", "repeatable": true}` |
+| `--branch` | `{"description": "Branch to open from; the attempt's delivered branch when omitted", "name": "branch"}` |
+| `--base` | `{"description": "Branch to merge into; the repository default when omitted", "name": "base"}` |
+| `--draft` | `{"defaults": ["false"], "description": "Open as a draft", "name": "draft", "values": ["true", "false"]}` |
+| `--dry-run` | `{"defaults": ["false"], "description": "Print the title and body without opening anything", "name": "dry_run", "values": ["true", "false"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Open a pull request with the repository template filled from receipts",
   "groups": [
     {
       "arguments": [
@@ -3744,10 +4054,10 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `numbers` | `{"name": "numbers", "positional": true, "repeatable": true}` |
-| `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `numbers` | `{"description": "Pull requests to report; this account's open ones when omitted", "name": "numbers", "positional": true, "repeatable": true}` |
+| `--wait` | `{"bounds": [1, 14400], "description": "Block until the snapshot changes (default 5 minutes; maximum 4 hours)", "name": "wait"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
@@ -3755,6 +4065,7 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
     "one head-and-checks snapshot per PR; unavailable PRs preserve other rows",
     "wait without a value means five minutes; unchanged snapshots exit 124"
   ],
+  "description": "Print one line per pull request: state, head, checks, merge and review",
   "groups": [
     {
       "arguments": [
@@ -3773,17 +4084,18 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--scheduled` | `{"defaults": ["false"], "name": "scheduled", "values": ["true", "false"]}` |
-| `--pressure` | `{"defaults": ["false"], "name": "pressure", "values": ["true", "false"]}` |
-| `--free-floor` | `{"name": "free_floor"}` |
-| `--dry-run` | `{"conflicts": ["apply"], "defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
-| `--apply` | `{"defaults": ["false"], "name": "apply", "values": ["true", "false"]}` |
-| `--idle-days` | `{"defaults": ["7"], "name": "idle_days"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--scheduled` | `{"defaults": ["false"], "description": "Run for registered projects from the scheduled per-user agent", "name": "scheduled", "values": ["true", "false"]}` |
+| `--pressure` | `{"defaults": ["false"], "description": "Collect pressure classes without fetching or removing worktrees", "name": "pressure", "values": ["true", "false"]}` |
+| `--free-floor` | `{"description": "Keep at least this much free space (20G, or plain GiB)", "name": "free_floor"}` |
+| `--dry-run` | `{"conflicts": ["apply"], "defaults": ["false"], "description": "Report what would be removed without deleting anything", "name": "dry_run", "values": ["true", "false"]}` |
+| `--apply` | `{"defaults": ["false"], "description": "Also delete merged worktrees and ignored declared output (otherwise previewed)", "name": "apply", "values": ["true", "false"]}` |
+| `--idle-days` | `{"defaults": ["7"], "description": "Minimum idle age for caches, ignored output and opt-in foreign worktrees", "name": "idle_days"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Collect lane caches, ignored output, merged worktrees and expired captures",
   "groups": [
     {
       "arguments": [
@@ -3806,40 +4118,65 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Advance due graphs and run scheduled host tasks"
+}
+```
 
 ## `provenant disk`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Inspect disk use without changing files"
+}
+```
 
 ## `provenant disk report`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Report disk use and reclaim classifications without changing files"
+}
+```
 
 ## `provenant bench`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Mine, verify and run benchmark tasks"
+}
+```
 
 ## `provenant bench mine`
 
 | Argument | Contract |
 |---|---|
-| `--limit` | `{"bounds": [1, 100], "name": "limit"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--limit` | `{"bounds": [1, 100], "description": "Maximum tasks to propose (1 to 100)", "name": "limit"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Propose tasks from merge commits that changed Rust tests",
   "groups": [
     {
       "arguments": [
@@ -3857,12 +4194,13 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `task` | `{"name": "task", "positional": true, "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `task` | `{"description": "Frozen task file", "name": "task", "positional": true, "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Check that a frozen task's tests fail on its parent and pass on its merge",
   "groups": [
     {
       "arguments": [
@@ -3880,14 +4218,15 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--route` | `{"name": "route", "required": true}` |
-| `--split` | `{"defaults": ["acceptance"], "name": "split", "values": ["search", "acceptance", "held-out"]}` |
-| `--limit` | `{"bounds": [1, 100], "name": "limit"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--route` | `{"description": "Route name or model, optionally followed by @effort", "name": "route", "required": true}` |
+| `--split` | `{"defaults": ["acceptance"], "description": "Task split to replay", "name": "split", "values": ["search", "acceptance", "held-out"]}` |
+| `--limit` | `{"bounds": [1, 100], "description": "Maximum tasks to run (1 to 100)", "name": "limit"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Replay tasks through the selected dispatch route",
   "groups": [
     {
       "arguments": [
@@ -3907,19 +4246,26 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Check reviews and keep receipts and session checkpoints"
+}
+```
 
 ## `provenant workflow review`
 
 | Argument | Contract |
 |---|---|
-| `--request` | `{"name": "request", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--request` | `{"description": "Request JSON file, or &#96;-&#96; for standard input", "name": "request", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Check bound reviews against the receipt's risk tier",
   "groups": [
     {
       "arguments": [
@@ -3937,19 +4283,26 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Show and save delivery receipts"
+}
+```
 
 ## `provenant workflow receipt show`
 
 | Argument | Contract |
 |---|---|
-| `delivery_id` | `{"name": "delivery_id", "positional": true, "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `delivery_id` | `{"description": "Delivery ID", "name": "delivery_id", "positional": true, "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Show a delivery receipt",
   "groups": [
     {
       "arguments": [
@@ -3967,14 +4320,15 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `delivery_id` | `{"name": "delivery_id", "positional": true, "required": true}` |
-| `--expected-revision` | `{"name": "expected_revision", "required": true}` |
-| `--request` | `{"name": "request", "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `delivery_id` | `{"description": "Delivery ID", "name": "delivery_id", "positional": true, "required": true}` |
+| `--expected-revision` | `{"description": "Zero creates the receipt; otherwise the stored revision", "name": "expected_revision", "required": true}` |
+| `--request` | `{"description": "Request JSON file, or &#96;-&#96; for standard input", "name": "request", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Save a delivery receipt",
   "groups": [
     {
       "arguments": [],
@@ -3998,22 +4352,29 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Save and show session checkpoints"
+}
+```
 
 ## `provenant workflow session save`
 
 | Argument | Contract |
 |---|---|
-| `session_id` | `{"name": "session_id", "positional": true, "required": true}` |
-| `--file` | `{"name": "file", "required": true}` |
-| `--client` | `{"name": "client", "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
-| `--rebind` | `{"defaults": ["false"], "name": "rebind", "values": ["true", "false"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `session_id` | `{"description": "Session ID", "name": "session_id", "positional": true, "required": true}` |
+| `--file` | `{"description": "Markdown checkpoint file, or &#96;-&#96; for standard input", "name": "file", "required": true}` |
+| `--client` | `{"description": "Chair harness client; falls back to active harness environment markers", "name": "client", "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
+| `--rebind` | `{"defaults": ["false"], "description": "Replace the registered chair binding and record its previous identity", "name": "rebind", "values": ["true", "false"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Save a session checkpoint (up to 256 KiB); requires a checkout or --project",
   "groups": [
     {
       "arguments": [
@@ -4034,14 +4395,15 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `session_id` | `{"name": "session_id", "positional": true, "required": true}` |
-| `--rev` | `{"name": "rev"}` |
-| `--revisions` | `{"conflicts": ["rev"], "defaults": ["false"], "name": "revisions", "values": ["true", "false"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `session_id` | `{"description": "Session ID", "name": "session_id", "positional": true, "required": true}` |
+| `--rev` | `{"description": "Show this retained revision's text instead of the current one", "name": "rev"}` |
+| `--revisions` | `{"conflicts": ["rev"], "defaults": ["false"], "description": "List the retained revisions with their parents and hashes", "name": "revisions", "values": ["true", "false"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Show a session checkpoint, one of its retained revisions or their list",
   "groups": [
     {
       "arguments": [
@@ -4061,13 +4423,14 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `session_id` | `{"name": "session_id", "positional": true, "required": true}` |
-| `rev` | `{"name": "rev", "positional": true, "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `session_id` | `{"description": "Session ID", "name": "session_id", "positional": true, "required": true}` |
+| `rev` | `{"description": "Revision to compare with the current checkpoint", "name": "rev", "positional": true, "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Show what changed between a retained revision and the current checkpoint",
   "groups": [
     {
       "arguments": [
@@ -4086,25 +4449,26 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--to` | `{"name": "to", "required": true}` |
-| `--account` | `{"name": "account", "required": true}` |
-| `--note` | `{"name": "notes", "repeatable": true}` |
-| `--attach` | `{"name": "attachments", "repeatable": true}` |
-| `--prompt-file` | `{"name": "prompt_file"}` |
-| `--no-checkpoint` | `{"defaults": ["false"], "name": "no_checkpoint", "values": ["true", "false"]}` |
-| `--provider` | `{"defaults": ["claude"], "name": "provider"}` |
-| `--model` | `{"name": "model"}` |
-| `--wip` | `{"conflicts": ["allow_dirty"], "defaults": ["false"], "name": "wip", "values": ["true", "false"]}` |
-| `--allow-dirty` | `{"defaults": ["false"], "name": "allow_dirty", "values": ["true", "false"]}` |
-| `--dry-run` | `{"defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
-| `--no-launch` | `{"defaults": ["false"], "name": "no_launch", "values": ["true", "false"]}` |
-| `--session-id` | `{"name": "session_id"}` |
-| `--client` | `{"name": "client", "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--to` | `{"description": "Peer host, by label or host ID", "name": "to", "required": true}` |
+| `--account` | `{"description": "Registered Claude account on the peer", "name": "account", "required": true}` |
+| `--note` | `{"description": "Add a line to the prompt (repeatable)", "name": "notes", "repeatable": true}` |
+| `--attach` | `{"description": "Send this file with the prompt (repeatable; 512 KiB in total)", "name": "attachments", "repeatable": true}` |
+| `--prompt-file` | `{"description": "Use this Markdown file as the prompt body instead of the generated one", "name": "prompt_file"}` |
+| `--no-checkpoint` | `{"defaults": ["false"], "description": "Neither read nor save the session checkpoint", "name": "no_checkpoint", "values": ["true", "false"]}` |
+| `--provider` | `{"defaults": ["claude"], "description": "Provider for the new session; only &#96;claude&#96; is supported", "name": "provider"}` |
+| `--model` | `{"description": "Model for the new session", "name": "model"}` |
+| `--wip` | `{"conflicts": ["allow_dirty"], "defaults": ["false"], "description": "Commit and push dirty or unpushed worktrees as WIP first", "name": "wip", "values": ["true", "false"]}` |
+| `--allow-dirty` | `{"defaults": ["false"], "description": "Proceed with dirty or unpushed worktrees and list them in the prompt", "name": "allow_dirty", "values": ["true", "false"]}` |
+| `--dry-run` | `{"defaults": ["false"], "description": "Print the prompt and plan without sending anything", "name": "dry_run", "values": ["true", "false"]}` |
+| `--no-launch` | `{"defaults": ["false"], "description": "Deliver everything but do not open Terminal on the peer", "name": "no_launch", "values": ["true", "false"]}` |
+| `--session-id` | `{"description": "Source session ID; defaults to CLAUDE_CODE_SESSION_ID, then CLAUDE_SESSION_ID", "name": "session_id"}` |
+| `--client` | `{"description": "Source chair harness client; falls back to active harness environment markers", "name": "client", "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Hand this session to a fresh Claude session on a peer host",
   "groups": [
     {
       "arguments": [
@@ -4135,20 +4499,27 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Run fast repository checks"
+}
+```
 
 ## `provenant check config`
 
 | Argument | Contract |
 |---|---|
-| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
-| `--cursor` | `{"name": "cursor"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum results per page (1 to 100)", "name": "limit"}` |
+| `--cursor` | `{"description": "Continue from a previous page's cursor", "name": "cursor"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Check configuration files",
   "groups": [
     {
       "arguments": [
@@ -4167,14 +4538,15 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--source` | `{"name": "source"}` |
-| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
-| `--cursor` | `{"name": "cursor"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--source` | `{"description": "Release directory to check; the installed one when omitted", "name": "source"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum results per page (1 to 100)", "name": "limit"}` |
+| `--cursor` | `{"description": "Continue from a previous page's cursor", "name": "cursor"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Check the installed release",
   "groups": [
     {
       "arguments": [],
@@ -4199,15 +4571,16 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--base` | `{"name": "base", "requires": ["head"]}` |
-| `--head` | `{"name": "head", "requires": ["base"]}` |
-| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
-| `--cursor` | `{"name": "cursor"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--base` | `{"description": "Base commit of the range", "name": "base", "requires": ["head"]}` |
+| `--head` | `{"description": "Head commit of the range", "name": "head", "requires": ["base"]}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum results per page (1 to 100)", "name": "limit"}` |
+| `--cursor` | `{"description": "Continue from a previous page's cursor", "name": "cursor"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Check a release range for blocking findings",
   "groups": [
     {
       "arguments": [],
@@ -4232,15 +4605,16 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `paths` | `{"bounds": [1, 256], "name": "paths", "positional": true, "repeatable": true, "required": true}` |
-| `--rules` | `{"defaults": ["general"], "name": "rules", "values": ["general", "academic", "legal"]}` |
-| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
-| `--cursor` | `{"name": "cursor"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `paths` | `{"bounds": [1, 256], "description": "Files to check", "name": "paths", "positional": true, "repeatable": true, "required": true}` |
+| `--rules` | `{"defaults": ["general"], "description": "Writing rule set", "name": "rules", "values": ["general", "academic", "legal"]}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum results per page (1 to 100)", "name": "limit"}` |
+| `--cursor` | `{"description": "Continue from a previous page's cursor", "name": "cursor"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Check prose files against writing rules",
   "groups": [
     {
       "arguments": [],
@@ -4265,14 +4639,15 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
   "constraints": [
     "json transport is invalid for execution"
-  ]
+  ],
+  "description": "Run harness and git hook handlers"
 }
 ```
 
@@ -4280,90 +4655,157 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Handle Claude Code hook events"
+}
+```
 
 ## `provenant hook claude chair-prompt`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Handle the chair user-prompt hook"
+}
+```
 
 ## `provenant hook claude chair-start`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Handle the chair session-start hook"
+}
+```
 
 ## `provenant hook claude pre-tool-use`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Check a tool call before it runs"
+}
+```
 
 ## `provenant hook claude pre-compact`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Save lane, PR and worktree state into the checkpoint before compaction"
+}
+```
 
 ## `provenant hook claude compact`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Restore the checkpoint and report lanes and pull requests after compaction"
+}
+```
 
 ## `provenant hook claude session-start`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Report the checkpoint, lanes and pull requests when a session starts, resumes or clears"
+}
+```
 
 ## `provenant hook claude stop`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Refresh an existing checkpoint's lane, PR and worktree state when a turn ends"
+}
+```
 
 ## `provenant hook claude worktree-create`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Create a Claude Code worktree through `provenant worktree create`"
+}
+```
 
 ## `provenant hook claude worktree-remove`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Remove a Claude Code worktree through `provenant worktree remove`"
+}
+```
 
 ## `provenant hook git`
 
 | Argument | Contract |
 |---|---|
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Handle git hook events"
+}
+```
 
 ## `provenant hook git pre-push`
 
 | Argument | Contract |
 |---|---|
-| `remote` | `{"name": "remote", "positional": true, "required": true}` |
-| `location` | `{"name": "location", "positional": true, "required": true}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
+| `remote` | `{"description": "Remote name", "name": "remote", "positional": true, "required": true}` |
+| `location` | `{"description": "Remote location", "name": "location", "positional": true, "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
+  "description": "Check a push before it happens",
   "groups": [
     {
       "arguments": [
