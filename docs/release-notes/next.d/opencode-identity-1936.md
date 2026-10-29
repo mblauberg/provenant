@@ -1,3 +1,3 @@
 ## Fixes
 
-- OpenCode lanes no longer end failed with "provider identity was not observed". The answering model is now read from OpenCode's own session record, keyed by the stream session id. A missing or conflicting record still fails the lane.
+- OpenCode lanes no longer fail with "provider identity was not observed". The answering model is read from OpenCode's own session record, and a missing or conflicting record still fails the lane (#1936).

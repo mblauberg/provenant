@@ -1,0 +1,4 @@
+## Additions
+
+- `provenant pr contributions N [--json]` lists the attempts that took part in a pull request, with role, model, account and allocation. Participation is captured at worktree dispatch, continuation, PR creation and landing, and survives GC and worktree removal. Read-only work has the `read_only` role. Ambiguous participation across several PRs and truncated links are flagged, and unknown facts and missing peer coverage are stated. A project that is not registered reports as unbound (#1968).
+- If binding fails, PR creation and landing warn and continue. Retry with `provenant pr contributions N --bind`. Before binding a reused branch, stale PR bindings are checked against GitHub. A closed binding keeps its observed head and does not resume if the PR is reopened. Attempts with sealed allocations are skipped, and their number is reported as `coverage.skipped_sealed` (#1968).

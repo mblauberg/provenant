@@ -1,3 +1,3 @@
 ## Fixes
 
-- Redact malformed remote URL credentials in delivery diagnostics and constrain host preparation fetches to remote-tracking refs.
+- Delivery diagnostics redact credentials in malformed remote URLs, and host preparation fetches are limited to remote-tracking refs (#2113).

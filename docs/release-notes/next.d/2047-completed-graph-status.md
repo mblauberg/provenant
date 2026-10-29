@@ -1,3 +1,3 @@
 ## Fixes
 
-- Report completed graphs correctly after a crash leaves a stale structural pause in the final checkpoint.
+- A completed graph is reported as completed after a crash, instead of paused (#2047).

@@ -1,0 +1,5 @@
+## Additions
+
+- Chair sessions can append updates and corrections that are safe to retry, and read them in bounded pages. Per-session retention is configurable: old payloads are pruned, while operation receipts are kept for a configurable replay period. A stale retry is refused after its receipt expires (#1968).
+- Direct dispatches are bound to an explicit chair Fabric identity. Nested launches and continuations inherit the binding, and conflicting bindings are refused. Runs with no chair binding, peer executions and graph-created runs stay unbound, and a worker's provider session never implies chair ownership (#1968).
+- Chair summaries can be read and edited by field, guarded by revision, and checkpoint summary metadata is recorded for discovery. A summary diff compares two retained revisions, defaults `--to` to the current one, and lists added and removed request IDs. Summary requests are checked against the local inbox, and unknown references are reported when coverage is incomplete (#1968).

@@ -1,3 +1,3 @@
 ## Behaviour changes
 
-- Clear an account's quota authentication error when a lane on that account succeeds. Menu-open and wake events compare credential and profile metadata and retry signed-out accounts when it changes, without reading credential contents or adding a polling loop. Unchanged signed-out accounts keep the paced fallback retry; manual refresh also retries them.
+- A successful lane clears its account's quota authentication error. Opening the menu or waking the host rechecks signed-out accounts when their credential or profile metadata has changed, without reading credential contents or polling. Unchanged signed-out accounts keep the paced fallback retry, and manual refresh also retries them (#1969).

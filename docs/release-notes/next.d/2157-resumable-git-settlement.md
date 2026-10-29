@@ -1,7 +1,8 @@
 ## Behaviour changes
 
-- Resume durable import, publication, recording and release phases after a crash.
-  Release host build capacity at provider exit and keep cancel and reconcile
-  responsive while Git runs without the worktree writer lock.
-- Deduplicate background settlement workers and expire unknown native owners
-  after ten minutes so recovery can continue.
+- Writer lanes have a complete private Git directory, with their own index, refs, rebase state and operation state. Shared Git metadata, including branch refs, remote-tracking refs and reflogs, is read-only to lanes. Because lane writers no longer hold grants on the shared repository's refs, the lane Git grant digest changes and stored authorities from earlier releases no longer match (#2130, #2139, #2158).
+- Lane Git objects stay private until the host verifies them at settlement. Import uses Git receive quarantine and strict pack checks, and refuses symlinks and foreign alternates. Delivery checks only the lane's graph delta, and still refuses corrupt reachable shared content. Abandoned import directories are reclaimed after 24 hours (#2131, #2138, #2158).
+- Launch bases stay pinned until terminal publication. Terminal outcomes remove temporary refs, and restored index flags cannot hide uncommitted changes (#2158).
+- Settlement resumes the import, publication, recording and release phases after a crash. Host build capacity is released at provider exit, and `cancel` and `reconcile` stay responsive while Git runs. Durable cancellation stops Git import and delivery without waiting for the worktree writer lock (#2154, #2157).
+- Lane waits stay in settlement until custody release is durable, so a terminal result no longer needs a second `reconcile`. Only attempts that reach object import count towards the three-attempt limit, claims back off, and a terminal import refusal releases custody and keeps the private Git for host recovery. Background settlement workers are deduplicated, and unknown native owners expire after ten minutes (#2141, #2151, #2157).
+- Drain writer lanes before upgrading, because running policies from before this change keep their old shared-object write grants. An interrupted older attempt with private objects can resume. Without them, the host names the recovery path and requires a fresh run (#2131, #2158).

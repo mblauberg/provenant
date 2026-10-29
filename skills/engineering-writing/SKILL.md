@@ -27,7 +27,9 @@ thesis AI tells stay with the hub's academic prose reference.
    for already-decided pre-build content, [architecture and communication](references/architecture-and-presentations.md)
    for approved designs, ADRs, presentations and briefs, or
    [academic artefacts](references/academic-artefacts.md) for thesis and paper
-   LaTeX command and layout invariants. Do not load more than one.
+   LaTeX command and layout invariants. Do not load more than one. For release
+   notes, changelogs and release fragments, load [release notes](references/release-notes.md)
+   after the pattern.
 3. Structure before sentences: front-load the point, use decision-oriented
    headings and one idea or requirement per unit, then move wrong-home material.
 4. Lock facts, logic, stance, evidence, obligations, behaviour, identifiers,

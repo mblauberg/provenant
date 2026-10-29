@@ -1,3 +1,3 @@
 ## Fixes
 
-- OpenCode lanes now observe the answering model from the current session database schema, allowing successful answers to complete and remain resumable.
+- OpenCode lanes now read the answering model from the current session database schema, so successful answers complete and can be resumed (#1972).

@@ -1,3 +1,3 @@
 ## Fixes
 
-- `telemetry stats` reports unknown cost when no cost data is available, with priced and missing attempt counts in JSON and partial-coverage text.
+- `telemetry stats` reports cost as unknown when no cost data is available. JSON output gives the priced and missing attempt counts, and text output notes partial coverage (#1984).

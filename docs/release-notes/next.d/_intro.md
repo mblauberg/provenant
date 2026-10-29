@@ -1,12 +1,3 @@
-This patch release fixes problems found while upgrading hosts to 1.2.0:
-- The peer LaunchAgent restarts on the new binary after an upgrade.
-- Writer attempts orphaned before a reboot can be settled instead of staying `running`.
-- `lanes` shows when a lane's guardian has paused builds for disk pressure.
+This release moves Provenant to a smaller core command set, makes writer lanes run with a private Git directory and adds a chair inbox and console for human decisions. It also removes the disk guard, tightens the Claude Bash hook, and adds graph plan nodes, review shapes and per-account pacing. Several changes require every host to upgrade together; Fabric moves to schema 9 on upgrade.
 
-## Stability
-
-There is no stability promise. Commands, flags, `--json` output, `config.toml`
-keys, the state layout and Fabric MCP tool names and schemas can change in any
-release, with no deprecation period or compatibility shims. Each release's notes
-list its breaking changes. Upgrade every host together, since peers on different
-versions are not supported.
+Provenant makes no stability promise; see [stability](../../release-notes/README.md#stability).

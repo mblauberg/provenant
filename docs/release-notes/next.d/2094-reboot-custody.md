@@ -1,3 +1,3 @@
 ## Fixes
 
-- Recover previous-boot writer custody when filesystem device numbers change, while retaining reservations when the evidence is insufficient.
+- Writer custody from a previous boot is now recovered when filesystem device numbers change. When the evidence is insufficient, the reservation is kept (#2094).

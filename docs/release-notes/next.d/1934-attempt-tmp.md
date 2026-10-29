@@ -1,3 +1,3 @@
 ## Fixes
 
-- Remove released attempts' temporary build output at settlement, and preserve scratch when an attempt is lost without exit evidence.
+- Settling an attempt now removes its temporary build output. Scratch is kept when an attempt is lost without exit evidence.

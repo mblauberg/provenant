@@ -1,3 +1,3 @@
 ## Fixes
 
-- Bound console board and tree peer reads by one shared deadline, preserving local results when peers time out.
+- Console board and tree reads share one deadline across peers. Local results are kept when peers time out (#2128).

@@ -1,4 +1,4 @@
 ## Behaviour changes
 
-- On macOS, Fabric lowers writer provider priority by default to nice 10; read-only lanes default to 5 and build-heavy lanes to 15. Configure these values or use `--build-heavy` for build-intensive work, and inspect the applied value with `lanes --json` (#2018).
+- On macOS, lanes now run at lower priority by default: nice 10 for writers, 5 for read-only lanes and 15 for build-heavy lanes. Set these values in configuration, pass `--build-heavy` for build-intensive work, and read the applied value from `lanes --json` (#2018).
 - Peer hosts must upgrade together to use the updated Fabric protocol (#2018).

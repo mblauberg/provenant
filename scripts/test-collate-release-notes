@@ -19,4 +19,7 @@ for heading in '## Fixes' '## Unexpected'; do
   fi
   grep -F "$dir/invalid.md" "$tmp/err" > /dev/null
 done
+rm -f "$dir/invalid.md"
+printf 'See [policy](../../release-notes/README.md).\n' > "$dir/_intro.md"
+"$script" | grep -F '(../release-notes/README.md)' > /dev/null
 echo 'release notes heading validation passed'

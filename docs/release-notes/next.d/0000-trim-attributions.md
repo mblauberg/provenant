@@ -1,4 +1,3 @@
 ## Fixes
 
-- Remove third-party notices and licence copies for material no longer shipped;
-  retain brief credits and require the repository licence in release checks.
+- Release packages no longer carry third-party notices and licence copies for material that is not shipped. Brief credits remain, and release checks now require the repository licence.

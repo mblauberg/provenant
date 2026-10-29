@@ -1,9 +1,5 @@
 ## Fixes
 
-- `telemetry stats` matches recorded model identities to the bundled price
-  table, estimates available usage at API-equivalent prices and counts
-  subscription-marked entries. An explicit Claude Code sub-agent report groups
-  native usage by model without including message bodies or requiring a
-  project or run store. It counts incomplete final transcript records and
-  skips them. Native JSON costs use money objects and identify the reviewed
-  price table; dated model snapshots are priced when listed in that table.
+- `telemetry stats` matches recorded model names to the bundled price table, estimates usage at API-equivalent prices and counts subscription-marked entries. Dated model snapshots are priced when the table lists them.
+- A Claude Code sub-agent report groups native usage by model without message bodies and without needing a project or run store. Incomplete final transcript records are skipped and counted.
+- Native JSON costs use money objects and name the reviewed price table.

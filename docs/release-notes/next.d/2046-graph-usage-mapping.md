@@ -1,3 +1,3 @@
 ## Fixes
 
-- Cover graph budget usage mapping from attempt telemetry, including partial and unpriced usage.
+- Graph budgets now count usage correctly from attempt telemetry, including partial and unpriced usage (#2046).

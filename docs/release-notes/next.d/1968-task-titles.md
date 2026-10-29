@@ -1,3 +1,3 @@
 ## Additions
-- Run submissions can carry optional human-written task titles through CLI and Fabric MCP, preserving them across restarts.
-- `lanes` shows task titles when supplied. Titles cannot contain control characters.
+
+- Run submissions take an optional human-written task title through the CLI and Fabric MCP. Titles persist across restarts, cannot contain control characters, and `lanes` shows them (#1968).

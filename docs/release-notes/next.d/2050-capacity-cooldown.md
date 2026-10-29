@@ -1,3 +1,3 @@
 ## Behaviour changes
 
-- Pace model draws after a provider capacity error with a host cooldown configured by `domains.routing.capacity_cooldown_seconds` (default 600 seconds; zero disables new cooldowns). Explicit models and resumes remain available, and quota and lanes show live cooldowns.
+- After a provider capacity error, model selection backs off that model for a host cooldown set by `domains.routing.capacity_cooldown_seconds` (default 600; `0` disables new cooldowns). Explicit models and resumes stay available, and `quota` and `lanes` show live cooldowns (#2050).

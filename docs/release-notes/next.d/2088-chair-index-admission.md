@@ -1,3 +1,3 @@
 ## Fixes
 
-- Refuse lane-chosen child and continuation run IDs before creating host chair associations, using the existing derived-ID scheme. Chair indexing seals the validated request despite concurrent lane rewrites. Retained legacy host rows remain readable and replayable; root replay repairs only the original chair binding.
+- Lane-chosen child and continuation run IDs are now refused before a host chair association is created, and the validated request is sealed against concurrent lane rewrites. Existing host rows stay readable and replayable (#2088).

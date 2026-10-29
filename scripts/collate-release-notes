@@ -50,7 +50,7 @@ collate() {
     echo "# Next release"
   fi
   echo
-  cat "$dir/_intro.md"
+  sed 's|](\.\./\.\./|](../|g' "$dir/_intro.md"
   printf '%s\n' "$sections" | while IFS= read -r heading; do
     body=$(for f in "$dir"/*.md; do
       [ -e "$f" ] || continue

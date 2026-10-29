@@ -1,6 +1,3 @@
 ## Fixes
 
-- Allow read-only lanes to run Git commands that need temporary objects in
-  private scratch through the shell Git wrapper, while keeping the shared
-  object store read-only. Scope the override to the bound repository and its
-  linked worktrees so other repositories and submodules retain their own stores.
+- Read-only lanes can run Git commands that need temporary objects through the shell Git wrapper, which writes them to private scratch. The shared object store stays read-only, and other repositories and submodules keep their own stores (#2016).
