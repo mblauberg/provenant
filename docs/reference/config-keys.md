@@ -12,6 +12,11 @@ Set these in `[domains.fabric.lanes]` in the host configuration. Omit a key for 
 |---|---|---|
 | `max_concurrent_builds` | 1 at 16 GiB or less, otherwise 2 | Maximum active worktree-write lanes across the host. (1 to 64 or -1 for auto). |
 | `cargo_build_jobs` | Half the available cores, at least 1 | Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence. (1 to 1024 or -1 for auto). |
+| `cargo_incremental` | false | CARGO_INCREMENTAL for lanes. Incremental sessions grow a lane's target without bound and are rarely reused; a value already in the lane environment takes precedence. (true or false). |
+| `cargo_debug` | line-tables-only | CARGO_PROFILE_DEV_DEBUG for lanes. Line tables keep backtraces at a fraction of the size of full debug information; a value already in the lane environment takes precedence. (none, line-directives-only, line-tables-only, limited, full, 0, 1, 2, true or false). |
+| `build_dir_max_bytes` | 21474836480 (20 GiB) | Cap on the allocated bytes of all Cargo profile directories in lane caches, idle and busy alike. Collection removes idle directories, least recently used first, after a lane settles, when admission finds the disk below gc.free_floor, and in `provenant gc`; a directory whose Cargo locks are held is never removed. When busy directories alone exceed the cap, every eligible idle directory is removed and the total stays over. (bytes, 0 or more). |
+| `build_dir_grace_seconds` | 900 (15 minutes) | A profile directory whose newest file or directory modification is within this many seconds is never removed, even when its Cargo locks are free: test and run binaries execute after Cargo drops its locks, and Cargo may be opening its lock files. Zero removes the protection. It protects only recently written directories: a test or run binary that runs longer than the grace without writing under target/ is unprotected unless a Cargo lock is still held. (seconds, 0 or more). |
+| `build_dir_survey_interval_seconds` | 300 (5 minutes) | Settlement-triggered collection walks the lane caches at most this often, unless free space is below gc.free_floor or the last walk found the total within 10% of the cap. While free space stays below the floor, every settlement walks. Zero walks on every settlement. (seconds, 0 or more). |
 
 ## Provider updates
 

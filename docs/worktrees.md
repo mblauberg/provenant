@@ -68,6 +68,14 @@ unmerged branch is kept and reported as `not_merged`; `--discard` deletes it
 too and returns its head, which recovers it with `git branch NAME HEAD` while
 Git still holds the objects.
 
+A registered checkout with a detached HEAD can be removed by its directory
+name. The same custody and dirty checks apply, and no branch is deleted.
+If its HEAD is not contained in the integration branch, removal names the
+commit and refuses unless `--discard` is explicit. Preserve that commit with
+`git -C PATH branch NAME HEAD` before retrying with `--discard`, or use `--discard`
+when the detached work is no longer needed. A detached primary checkout needs
+an explicit `--integration BRANCH`.
+
 Confinement validates repository identity and refuses primary, dirty
 and live writers. `worktree list` reports a tree whose only changes are
 ignored files as `ignored`; removal refuses it like a dirty tree, and a
@@ -90,6 +98,9 @@ and a repair. `worktree adopt PATH --owner NAME`, run from outside the tree,
 replaces a stale registration. It still refuses a held writer lock, a
 reservation and a live process, and names the process by pid and command, as
 `pr land` does.
+An incomplete native process census alone does not identify a live writer:
+ordinary adoption, like removal, can proceed while holding the exclusive writer
+lock with no reservation. A positive live-process observation still refuses.
 
 When a filesystem renumbers its device, a registered tree can refresh that
 number under the worktree registry lock. Its recorded root inode, path, branch
@@ -212,11 +223,24 @@ is retained. `cargo-target-setup.json` records whether
 preparation seeded, skipped or fell back, including mismatch reasons. The lane
 starts with an empty target if no matching generation can be cloned. The
 configuration above limits retained generations to three and 20 GiB of apparent
-file size; `provenant gc` removes the oldest generations over either limit.
+file size (a different measure from the allocated bytes that cap lane build
+output); `provenant gc` removes the oldest generations over either limit.
 It also reclaims abandoned build staging trees once no seed build is active,
 and removes incomplete generations. Only one host seed build runs at a time.
 Generations created before the completion marker was introduced are treated
 as incomplete; build a fresh generation after upgrading.
+
+Lane targets are collected separately. `provenant gc` also removes idle Cargo
+profile directories (those whose `.cargo-lock`, `.cargo-build-lock` and
+`.cargo-artifact-lock` can all be locked) from lane caches, least recently used
+first, until the total of all profile directories, idle and busy, is within
+`build_dir_max_bytes` and free space meets the floor. A directory written within
+`build_dir_grace_seconds` (15 minutes by default) is kept (only recent writes are protected: a binary that runs longer without writing under `target/` is unprotected unless a Cargo lock is held), and so is every busy
+one, so the total can stay over the cap. It reports the bytes reclaimed and the
+lane build output that remains.
+A lane settling and an admission below the floor trigger the same collection.
+Lanes also build with `CARGO_INCREMENTAL=0` and `CARGO_PROFILE_DEV_DEBUG=line-tables-only`.
+See the [configuration runbook](runbooks/configuration.md#lane-build-output).
 GC skips the store while a lane is cloning. Zero for either limit removes all
 generations at the next GC.
 
