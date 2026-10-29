@@ -1640,20 +1640,23 @@ fn stale_complete_census_does_not_signal_a_late_shared_group_owner(root: &Path) 
     Ok(())
 }
 
+/// Waits for the guardian to record `field`, since a fixture can signal
+/// readiness before the guardian republishes its reservation.
 fn reservation_identity(writer_path: &Path, field: &str) -> Result<ProcessIdentity> {
-    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(
-        writer_path
-            .join(scope().attempt.to_string())
-            .join("reservation.json"),
-    )?)?;
-    serde_json::from_value(
-        value
-            .get(field)
-            .filter(|identity| !identity.is_null())
-            .cloned()
-            .ok_or_else(|| io::Error::other(format!("reservation omitted {field} identity")))?,
-    )
-    .map_err(Into::into)
+    let path = writer_path
+        .join(scope().attempt.to_string())
+        .join("reservation.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        if let Some(identity) = value.get(field).filter(|identity| !identity.is_null()) {
+            return serde_json::from_value(identity.clone()).map_err(Into::into);
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other(format!("reservation omitted {field} identity")).into());
+        }
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
 }
 
 fn assert_peer_open(stream: &mut UnixStream) -> Result<()> {
