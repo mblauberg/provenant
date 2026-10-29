@@ -612,7 +612,6 @@ pub(crate) fn capture(
                         value,
                         extra: Default::default(),
                     },
-                    extra: Default::default(),
                 });
             }
             if synced.bytes != old {
