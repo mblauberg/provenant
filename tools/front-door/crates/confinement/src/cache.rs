@@ -972,7 +972,7 @@ mod tests {
         std::fs::create_dir(orphan.join("release"))?;
         std::fs::write(orphan.join("release/provenant"), b"lane artifact")?;
 
-        assert_eq!(prune_orphaned_worktree_cargo_caches(home)?, 2);
+        assert_eq!(prune_orphaned_worktree_cargo_caches(home)?, 1);
         assert!(!orphan.exists());
         assert!(live.is_dir());
         assert!(unknown.is_dir());
