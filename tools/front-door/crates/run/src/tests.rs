@@ -1487,7 +1487,7 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
 }
 
 #[test]
-fn temporary_tracking_initialises_at_version_four_without_spacing() -> TestResult {
+fn the_store_initialises_at_version_five_without_spacing() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -1500,7 +1500,7 @@ fn temporary_tracking_initialises_at_version_four_without_spacing() -> TestResul
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     let spacing: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM sqlite_schema WHERE name='spacing'",
         [],
@@ -1557,12 +1557,12 @@ fn temporary_tracking_upgrade_drops_version_two_spacing() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     Ok(())
 }
 
 #[test]
-fn temporary_tracking_refuses_a_store_newer_than_version_four() -> TestResult {
+fn the_store_refuses_a_version_newer_than_five() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -1570,11 +1570,62 @@ fn temporary_tracking_refuses_a_store_newer_than_version_four() -> TestResult {
     let call = call(&clock, &cancel);
     RunStore::open(&context, &call)?
         .db
-        .execute_batch("PRAGMA user_version=5;")?;
+        .execute_batch("PRAGMA user_version=6;")?;
     assert!(matches!(
         RunStore::open(&context, &call),
-        Err(RunError::Version(5))
+        Err(RunError::Version(6))
     ));
+    Ok(())
+}
+
+#[test]
+fn version_five_lets_one_run_continue_several_targets() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let input = input();
+    let store = RunStore::open(&context, &call)?;
+    store.create(&input, &call)?;
+    let first = input.attempts[0].attempt_id.to_string();
+    let run = input.run_id.to_string();
+    // Shape the table as version 4 left it, with one row to carry over.
+    store.db.execute_batch(&format!(
+        "DROP INDEX continuation_runs; DROP TABLE continuations; CREATE TABLE continuations (target TEXT PRIMARY KEY REFERENCES attempts(id), run TEXT NOT NULL UNIQUE REFERENCES runs(id)) STRICT; INSERT INTO continuations VALUES ('{first}','{run}'); PRAGMA user_version=4;"
+    ))?;
+    drop(store);
+    let store = RunStore::open(&context, &call)?;
+    let kept: String = store.db.query_row(
+        "SELECT run FROM continuations WHERE target=?1",
+        [&first],
+        |r| r.get(0),
+    )?;
+    assert_eq!(kept, run);
+    // A second attempt in the same run can now be continued as well.
+    let mut second = store.record(input.attempts[0].attempt_id, &call)?;
+    second.attempt_id = AttemptId::from_bytes([42; 16]);
+    second.attempt_number = 2;
+    store.db.execute(
+        "INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,2,1,0,?5)",
+        rusqlite::params![
+            second.attempt_id.to_string(),
+            run,
+            second.project_id.to_string(),
+            second.task_id.to_string(),
+            crate::db::bytes(&second)?
+        ],
+    )?;
+    store.db.execute(
+        "INSERT INTO continuations(target,run) VALUES (?1,?2)",
+        rusqlite::params![second.attempt_id.to_string(), run],
+    )?;
+    let rows: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM continuations WHERE run=?1",
+        [&run],
+        |r| r.get(0),
+    )?;
+    assert_eq!(rows, 2);
     Ok(())
 }
 

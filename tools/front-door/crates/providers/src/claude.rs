@@ -833,6 +833,37 @@ struct CacheCreation {
     #[serde(default)]
     ephemeral_1h_input_tokens: Option<u64>,
 }
+/// A rate limit holds the account only when its text names a plan allowance:
+/// a usage, session, five-hour, daily, weekly or monthly limit. A reset alone
+/// is not enough, since a per-minute limit also names one. Any other 429 is
+/// transient, retried like capacity rather than recorded as a refusal that
+/// would hold the account for an hour.
+fn rate_limited(text: Option<String>, fallback: &str) -> E {
+    let usage = text.as_deref().is_some_and(|text| {
+        let text = text.to_ascii_lowercase();
+        [
+            "usage limit",
+            "session limit",
+            "weekly limit",
+            "hour limit",
+            "daily limit",
+            "monthly limit",
+        ]
+        .iter()
+        .any(|marker| text.contains(marker))
+    });
+    let message = text.unwrap_or_else(|| fallback.into());
+    if usage {
+        E::QuotaLimited {
+            message,
+            pool: None,
+            resets_in_seconds: None,
+        }
+    } else {
+        E::ModelOverloaded { message }
+    }
+}
+
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     Ok(match wire::<Event>(bytes)? {
         Event::System {
@@ -861,16 +892,18 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             if failed {
                 let overload = api_error_status == Some(529)
                     || matches!(error.as_deref(), Some("overloaded" | "overloaded_error"));
+                let text = message.content.iter().find_map(|content| match content {
+                    Content::Text { text } if !text.is_empty() => Some(text.clone()),
+                    _ => None,
+                });
+                let limited =
+                    error.as_deref() == Some("rate_limit") || api_error_status == Some(429);
                 events.push(if overload {
-                    let message = message
-                        .content
-                        .iter()
-                        .find_map(|content| match content {
-                            Content::Text { text } if !text.is_empty() => Some(text.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| "provider overloaded".into());
-                    E::ModelOverloaded { message }
+                    E::ModelOverloaded {
+                        message: text.unwrap_or_else(|| "provider overloaded".into()),
+                    }
+                } else if limited {
+                    rate_limited(text, "provider rate limited")
                 } else if error.as_deref() == Some("authentication_failed")
                     || api_error_status == Some(401)
                 {
@@ -921,6 +954,11 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                             .filter(|message| !message.is_empty())
                             .unwrap_or_else(|| "provider overloaded (HTTP 529)".into()),
                     });
+                } else if api_error_status == Some(429) {
+                    events.push(rate_limited(
+                        result.filter(|message| !message.is_empty()),
+                        "provider rate limited (HTTP 429)",
+                    ));
                 } else {
                     events.push(E::Error);
                 }
@@ -967,6 +1005,55 @@ mod overload_tests {
             !events
                 .iter()
                 .any(|event| matches!(event, E::ModelOverloaded { .. }))
+        );
+    }
+
+    #[test]
+    fn usage_limit_is_a_typed_quota_refusal_not_a_generic_failure() {
+        let raw = br#"{"type":"assistant","session_id":"s","error":"rate_limit","is_api_error_message":true,"message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"You've hit your weekly limit \u00b7 resets Nov 1 at 11am"}]}}"#;
+        let events = decode(raw).unwrap();
+        assert!(events.contains(&E::QuotaLimited {
+            message: "You've hit your weekly limit \u{b7} resets Nov 1 at 11am".into(),
+            pool: None,
+            resets_in_seconds: None,
+        }));
+        assert!(!events.contains(&E::Error));
+        let events = decode(br#"{"type":"result","session_id":"s","subtype":"success","is_error":true,"api_error_status":429,"result":"You've hit your weekly limit"}"#).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, E::QuotaLimited { .. }))
+        );
+        // A per-minute 429 that names no usage limit is transient capacity,
+        // never a refusal that holds the account.
+        for raw in [
+            &br#"{"type":"assistant","session_id":"s","error":"rate_limit","is_api_error_message":true,"message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Rate limited: too many requests, please slow down"}]}}"#[..],
+            br#"{"type":"result","session_id":"s","subtype":"success","is_error":true,"api_error_status":429,"result":""}"#,
+            // A short window names a reset too; that alone is not an allowance.
+            br#"{"type":"assistant","session_id":"s","error":"rate_limit","is_api_error_message":true,"message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Rate limit exceeded; resets in 60 seconds"}]}}"#,
+            br#"{"type":"result","session_id":"s","subtype":"success","is_error":true,"api_error_status":429,"result":"Rate limit exceeded; resets in 60 seconds"}"#,
+        ] {
+            let events = decode(raw).unwrap();
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, E::ModelOverloaded { .. })),
+                "{events:?}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, E::QuotaLimited { .. }))
+            );
+        }
+        // Other API errors stay generic failures.
+        let raw = br#"{"type":"assistant","session_id":"s","error":"invalid_request","is_api_error_message":true,"message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"bad"}]}}"#;
+        let events = decode(raw).unwrap();
+        assert!(events.contains(&E::Error));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, E::QuotaLimited { .. }))
         );
     }
 

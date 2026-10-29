@@ -16,6 +16,19 @@ pub struct Refusal {
     pub observed_unix_seconds: i64,
     pub resets_unix_seconds: Option<i64>,
 }
+impl Refusal {
+    /// When the refusal stops holding: its reset, or one hour after it was
+    /// observed when the provider named no reset.
+    pub fn expires_unix_seconds(&self) -> Result<i64, QuotaError> {
+        match self.resets_unix_seconds {
+            Some(resets) => Ok(resets),
+            None => self
+                .observed_unix_seconds
+                .checked_add(3600)
+                .ok_or(QuotaError::TimeRange),
+        }
+    }
+}
 /// Short-lived provider capacity evidence, separate from quota admission.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapacityCooldown {
@@ -174,12 +187,7 @@ impl Admission<'_> {
                             && self.pools.iter().any(|pool| Some(pool.as_str()) == free)))
             })
         {
-            let expires = refusal.resets_unix_seconds.unwrap_or(
-                refusal
-                    .observed_unix_seconds
-                    .checked_add(3600)
-                    .ok_or(QuotaError::TimeRange)?,
-            );
+            let expires = refusal.expires_unix_seconds()?;
             let comparable_newer = fresh
                 && record.is_some_and(|r| r.last_error.is_none())
                 && snapshot.is_some_and(|s| {

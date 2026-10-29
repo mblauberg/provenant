@@ -10,6 +10,11 @@ use provenant_records::{AttemptFile, CanonicalV1};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
+/// Attempts one run may reach through policy successors, its first included.
+/// It bounds a chain that configuration sets, so a corrupt sealed record cannot
+/// queue successors without end; routing's settlement retry limit stays below it.
+pub const POLICY_ATTEMPT_CEILING: u64 = 33;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyRetry {
@@ -19,11 +24,43 @@ pub struct PolicyRetry {
     /// Attempts in this run including its first, capped again by the store.
     pub max_attempts: u64,
     pub instruction: String,
+    /// Earliest wall time, in Unix seconds, at which the successor may
+    /// launch. The settling guardian waits for it; a later sweep that finds
+    /// the successor still queued may launch it once this has passed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before_unix_seconds: Option<i64>,
 }
 #[derive(Default)]
 pub struct ResultAssessment {
     pub refusal: Option<String>,
     pub retry: Option<PolicyRetry>,
+    /// Appended to the settled reason when the retry is staged.
+    pub note: Option<String>,
+}
+/// A fresh retry may use write authority only on what the task was granted:
+/// its requested route drawn again, or the exact model that route already
+/// applied. Neither widens what the task may do.
+fn retry_within_authority(retry: &PolicyRetry, task: &TaskRequest, old: &AttemptRecord) -> bool {
+    let applied_model = match (&retry.route, old.applied_route.as_ref()) {
+        (
+            RequestedRoute::Model {
+                provider,
+                model,
+                effort,
+                ..
+            },
+            Some(applied),
+        ) => {
+            applied.provider.as_ref() == Some(provider)
+                && applied.model.as_ref() == Some(model)
+                && applied.effort == *effort
+        }
+        _ => false,
+    };
+    retry.resume
+        || retry.route == task.route
+        || applied_model
+        || (task.writer.is_none() && task.access.write_roots.is_empty())
 }
 
 impl RunStore {
@@ -54,10 +91,7 @@ impl RunStore {
             .ok_or(RunError::Validation("policy attempt ordinal"))
     }
 
-    pub(crate) fn staged_policy_retry(
-        &self,
-        record: &AttemptRecord,
-    ) -> Result<Option<PolicyRetry>> {
+    pub fn staged_policy_retry(&self, record: &AttemptRecord) -> Result<Option<PolicyRetry>> {
         let directory = self.attempt_dir(record.run_id, record.attempt_id, false)?;
         read_sealed(&directory, AttemptFile::PolicyRetry.name(), RECORD_LIMIT)?
             .map(|raw| decode(&raw))
@@ -71,7 +105,7 @@ impl RunStore {
         if self.request(current.run_id, call)?.parent_attempt.is_some() {
             return Ok(current);
         }
-        for _ in 0..9 {
+        for _ in 0..POLICY_ATTEMPT_CEILING {
             let next: Option<String> = call.retry(|| {
                 Ok(self
                     .db
@@ -105,12 +139,13 @@ impl RunStore {
         }
         Err(RunError::Validation("policy successor chain limit"))
     }
+    /// Seal the retry decision; true when this call staged it.
     pub(crate) fn stage_policy_retry(
         &self,
         record: &AttemptRecord,
         retry: &PolicyRetry,
         call: &Request<'_>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let request = self.request(record.run_id, call)?;
         // Child stores are lane-writable. Automatic retries cannot introduce
         // a second source of launch authority there.
@@ -118,7 +153,7 @@ impl RunStore {
             || request.parent_attempt.is_some()
             || self.context.state_root.as_path() != self.writer_registry()
         {
-            return Ok(());
+            return Ok(false);
         }
         let task = request
             .tasks
@@ -126,8 +161,8 @@ impl RunStore {
             .find(|task| task.task_id == record.task_id)
             .ok_or(RunError::Validation("policy retry task missing"))?;
         if retry.schema_version != 1
-            || (!retry.resume && (task.writer.is_some() || !task.access.write_roots.is_empty()))
-            || retry.max_attempts > 9
+            || !retry_within_authority(retry, task, record)
+            || retry.max_attempts > POLICY_ATTEMPT_CEILING
             || retry.max_attempts < 2
             || retry.instruction.is_empty()
             || retry.instruction.len() > 4096
@@ -136,10 +171,10 @@ impl RunStore {
         }
         if self.staged_policy_retry(record)?.is_some() {
             // The first sealed decision survives crashes and expiring rules.
-            return Ok(());
+            return Ok(false);
         }
         if self.policy_attempt_number(record, call)? >= retry.max_attempts {
-            return Ok(());
+            return Ok(false);
         }
         let directory = self.attempt_dir(record.run_id, record.attempt_id, false)?;
         seal(
@@ -147,7 +182,8 @@ impl RunStore {
             AttemptFile::PolicyRetry.name(),
             &bytes(retry)?,
             RECORD_LIMIT,
-        )
+        )?;
+        Ok(true)
     }
 
     /// Prepare artefacts before the terminal transaction. Its INSERT and the
@@ -158,7 +194,7 @@ impl RunStore {
         old: &AttemptRecord,
         terminal: &AttemptRecord,
         call: &Request<'_>,
-    ) -> Result<Option<AttemptRecord>> {
+    ) -> Result<Option<(AttemptRecord, u64)>> {
         let directory = self.attempt_dir(old.run_id, old.attempt_id, false)?;
         if matches!(
             terminal.state,
@@ -185,7 +221,9 @@ impl RunStore {
             return Ok(None);
         };
         let retry: PolicyRetry = decode(&raw)?;
-        if self.policy_attempt_number(old, call)? >= retry.max_attempts || retry.max_attempts > 9 {
+        if self.policy_attempt_number(old, call)? >= retry.max_attempts
+            || retry.max_attempts > POLICY_ATTEMPT_CEILING
+        {
             return Err(RunError::Validation("policy retry attempt limit"));
         }
         let request = self.request(old.run_id, call)?;
@@ -202,9 +240,9 @@ impl RunStore {
             .iter()
             .find(|task| task.task_id == old.task_id)
             .ok_or(RunError::Validation("policy retry task missing"))?;
-        if !retry.resume && (task.writer.is_some() || !task.access.write_roots.is_empty()) {
+        if !retry_within_authority(&retry, task, old) {
             return Err(RunError::Validation(
-                "policy fallback requires read-only authority",
+                "policy fallback to another route requires read-only authority",
             ));
         }
         let prompt = self.artifact_bytes(old.run_id, &old.prompt, RECORD_LIMIT)?;
@@ -226,6 +264,17 @@ impl RunStore {
         let AttemptState::Terminal { finished_at, .. } = terminal.state else {
             return Err(RunError::Nonterminal);
         };
+        // The successor's admission window opens when its sealed wait ends,
+        // so a long backoff cannot spend the window before launch.
+        let wait_seconds = retry
+            .not_before_unix_seconds
+            .and_then(|not_before| {
+                u64::try_from(
+                    not_before.saturating_sub(finished_at.as_micros().div_euclid(1_000_000)),
+                )
+                .ok()
+            })
+            .unwrap_or(0);
         let mut next = old.clone();
         next.attempt_id = id;
         next.attempt_number = old
@@ -286,13 +335,14 @@ impl RunStore {
         crate::reader::validate_attempt(&next)?;
         let directory = self.attempt_dir(old.run_id, id, true)?;
         seal(&directory, "prompt.txt", prompt.as_bytes(), RECORD_LIMIT)?;
-        Ok(Some(next))
+        Ok(Some((next, wait_seconds)))
     }
 
     pub(crate) fn insert_policy_successor(
         &self,
         tx: &rusqlite::Connection,
         next: &AttemptRecord,
+        wait_seconds: u64,
         request: &CanonicalRequest,
         disk_floor_bytes: u64,
     ) -> Result<()> {
@@ -324,7 +374,7 @@ impl RunStore {
             },
             request.concurrency,
             crate::admission::Allowance {
-                queue_seconds: 0,
+                queue_seconds: wait_seconds,
                 runtime_seconds: task.provider_timeout_seconds,
             },
             disk_floor_bytes,
@@ -361,6 +411,7 @@ mod tests {
             resume: false,
             max_attempts: 2,
             instruction: "Complete the original task.".into(),
+            not_before_unix_seconds: None,
         };
         store.stage_policy_retry(&old, &retry, &call)?;
         let mut changed_policy = retry.clone();
@@ -413,7 +464,67 @@ mod tests {
     }
 
     #[test]
-    fn policy_fallback_cannot_use_write_authority_or_child_stores()
+    fn a_policy_retry_chain_continues_each_attempt_in_one_run()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let store = RunStore::open(&context(temp.path())?, &call(&clock, &cancel))?;
+        let input = input();
+        store.create(&input, &call(&clock, &cancel))?;
+        let retry = PolicyRetry {
+            schema_version: 1,
+            route: store
+                .record(input.attempts[0].attempt_id, &call(&clock, &cancel))?
+                .requested_route,
+            resume: false,
+            max_attempts: 3,
+            instruction: "Complete the original task.".into(),
+            not_before_unix_seconds: None,
+        };
+        let mut publication = publication();
+        publication.outcome = Outcome::Failed;
+        let mut id = input.attempts[0].attempt_id;
+        // Each settled attempt seals a retry and queues its successor; the
+        // second successor must not collide with the first in the same run.
+        for number in 2..=3 {
+            let at = i64::try_from(number)? * 100;
+            publication.started_at = Some(provenant_core::WallTime::from_micros(at + 50)?);
+            publication.finished_at = provenant_core::WallTime::from_micros(at + 90)?;
+            let mut observation = exit();
+            observation.scope.attempt = id;
+            let mut sealed = crate::tests::input();
+            sealed.attempts[0].attempt_id = id;
+            seal_observation(&store, &sealed, &observation)?;
+            let old = store.record(id, &call(&clock, &cancel))?;
+            assert!(store.stage_policy_retry(&old, &retry, &call(&clock, &cancel))?);
+            store
+                .db
+                .execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
+            store.publish_terminal(
+                id,
+                old.revision,
+                &publication,
+                &observation,
+                &call(&clock, &cancel),
+            )?;
+            let queued = store.pending_attempts(input.run_id, &call(&clock, &cancel))?;
+            assert_eq!(queued.len(), 1);
+            assert_eq!(queued[0].attempt_number, number);
+            assert_eq!(queued[0].retry_of, Some(id));
+            id = queued[0].attempt_id;
+        }
+        assert_eq!(
+            store
+                .policy_tail(input.attempts[0].attempt_id, &call(&clock, &cancel))?
+                .attempt_id,
+            id
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn writer_retry_keeps_its_granted_route_and_child_stores_never_retry()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let clock = clock();
@@ -433,15 +544,40 @@ mod tests {
             resume: false,
             max_attempts: 2,
             instruction: "Retry.".into(),
+            not_before_unix_seconds: None,
         };
-        assert!(matches!(
-            store.stage_policy_retry(&old, &retry, &call),
-            Err(RunError::Validation("policy retry bounds"))
-        ));
         let child_store = store.with_sealed_requester(provenant_core::ActorId::from_bytes([8; 16]));
-        child_store.stage_policy_retry(&old, &retry, &call)?;
+        assert!(!child_store.stage_policy_retry(&old, &retry, &call)?);
         let directory = child_store.attempt_dir(input.run_id, old.attempt_id, false)?;
         assert!(read_sealed(&directory, AttemptFile::PolicyRetry.name(), RECORD_LIMIT)?.is_none());
+        // Another route would widen write authority; the granted one does not.
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let elsewhere = PolicyRetry {
+            route: RequestedRoute::Model {
+                extra: Default::default(),
+                provider: "codex".into(),
+                model: "codex/gpt-6.1-sol".into(),
+                effort: None,
+            },
+            ..retry.clone()
+        };
+        assert_ne!(elsewhere.route, old.requested_route);
+        assert!(matches!(
+            store.stage_policy_retry(&old, &elsewhere, &call),
+            Err(RunError::Validation("policy retry bounds"))
+        ));
+        // The exact model the granted route applied is also within authority.
+        let task = &input.request.tasks[0];
+        let mut applied = old.clone();
+        applied.applied_route = Some(RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6.1-sol".into()),
+            ..Default::default()
+        });
+        assert!(super::retry_within_authority(&elsewhere, task, &applied));
+        assert!(!super::retry_within_authority(&elsewhere, task, &old));
+        assert!(store.stage_policy_retry(&old, &retry, &call)?);
+        assert!(read_sealed(&directory, AttemptFile::PolicyRetry.name(), RECORD_LIMIT)?.is_some());
         Ok(())
     }
 
@@ -476,6 +612,7 @@ mod tests {
             resume: false,
             max_attempts: 2,
             instruction: "Retry the new task.".into(),
+            not_before_unix_seconds: None,
         };
         store.stage_policy_retry(&old, &retry, &call)?;
         let directory = store.attempt_dir(old.run_id, old.attempt_id, false)?;
@@ -504,6 +641,7 @@ mod tests {
                 resume: false,
                 max_attempts: 2,
                 instruction: "Retry.".into(),
+                not_before_unix_seconds: None,
             },
             &call,
         )?;

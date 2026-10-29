@@ -3341,8 +3341,13 @@ pub(crate) fn advance_settled_graphs(
     let Some(settled) = holder.settled()? else {
         return Ok(());
     };
-    provenant_cli::run::launch_policy_successor(&settled).map_err(std::io::Error::other)?;
-    advance_graphs_after_settlement(&settled, workers)
+    // A delayed retry advances graphs before its wait, not after it.
+    let mut advanced = None;
+    provenant_cli::run::launch_policy_successor(&settled, || {
+        advanced = Some(advance_graphs_after_settlement(&settled, workers));
+    })
+    .map_err(std::io::Error::other)?;
+    advanced.unwrap_or_else(|| advance_graphs_after_settlement(&settled, workers))
 }
 
 fn advance_graphs_after_settlement(

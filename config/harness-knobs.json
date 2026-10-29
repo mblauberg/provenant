@@ -113,6 +113,30 @@
       "effect": "Avoid a model and account in automatic draws for this many seconds after a provider capacity error. Zero disables new cooldowns.",
       "trade_off": "Longer cooldowns reduce repeated capacity errors but keep affected models out of automatic draws for longer."
     },
+    "domains.routing.settlement_retries": {
+      "type": "int", "min": 0, "max": 32, "default": 2, "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/run.rs",
+      "effect": "Retry a lane that settled for provider capacity or a spent account up to this many times. A capacity stop resumes its session where the adapter supports resume, or redraws the route when it has none. A quota stop retries the applied model at once when another unpinned, unspent account serves it, and admission skips the spent account. Zero disables these retries.",
+      "trade_off": "More retries recover more lanes without a chair turn but spend more attempts when a provider stays at capacity."
+    },
+    "domains.routing.capacity_retry_seconds": {
+      "type": "int", "min": 0, "max": 604800, "default": 30, "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/run.rs",
+      "effect": "Wait this long before a capacity retry, multiplied by the retry's number, plus up to a quarter of jitter, then capped by domains.routing.capacity_retry_max_seconds and domains.routing.retry_delay_ceiling_seconds. Quota retries do not wait.",
+      "trade_off": "A longer wait gives the provider time to recover but delays the lane."
+    },
+    "domains.routing.capacity_retry_max_seconds": {
+      "type": "int", "min": 0, "max": 604800, "default": 600, "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/run.rs",
+      "effect": "Cap one capacity retry's wait, jitter included, at this many seconds.",
+      "trade_off": "A higher cap lets later retries back off further from a provider that stays at capacity, at the cost of a longer stall."
+    },
+    "domains.routing.retry_delay_ceiling_seconds": {
+      "type": "int", "min": 0, "max": 604800, "default": 3600, "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/run.rs",
+      "effect": "Ceiling on the wait any settlement retry seals before its successor may launch. The successor's admission window opens when the wait ends.",
+      "trade_off": "A higher ceiling allows long waits for a recovering provider but holds a queued successor for longer."
+    },
     "usage.project_attribution": {
       "type": "bool", "default": false, "status": "wired",
       "reader": "tools/front-door/src/usage.rs",
