@@ -441,6 +441,12 @@ override of a bundled preset may add parameters of its own. An optional `[patter
 `select_when` and `tags`. Parents pass `risk_tier` and `subject` to a child
 that declares them unless the entry sets them; `prompt` is always available.
 
+`--set PATH+=VALUE` appends to a list parameter and is refused on a scalar.
+Composite `inputs` and `exports` are typed by output kind: lowering refuses a
+selection its source node cannot supply (`commit` needs write access or a
+pinned source, inherited from an enclosing composite; `branch` needs write
+access; loops supply neither), with an error naming both nodes. Selections
+resolve against the enclosing scopes, and `previous.X` against the loop body.
 `--set` addresses a top-level stage by id (`sN` by position when it has none):
 `--set first.width=3` sets a parameter of the preset that stage runs, and on a
 role stage `--set task.tier=junior` sets that entry field. Stage `id` and
