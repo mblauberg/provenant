@@ -95,6 +95,8 @@ pub struct QuotaDetails {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub calibrated_windows: Vec<String>,
     pub plan: Option<String>,
+    /// Subscription tier when the provider response reports one.
+    pub tier: Option<String>,
     pub billing_anchor: Option<String>,
     pub fingerprint: Option<String>,
     pub priority: Option<u64>,

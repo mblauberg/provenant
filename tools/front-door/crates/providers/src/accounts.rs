@@ -42,6 +42,9 @@ pub struct Registration {
     pub directory: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
+    /// Subscription prices over time, for value reporting. Not the detected `plan`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plans: Vec<provenant_quota::PlanPrice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,6 +104,7 @@ impl Settings {
             entry.key = key.into();
             entry.label = key.into();
             entry.plan = None;
+            entry.plans.clear();
             entry.limits = None;
             entry.billing_anchor = None;
             entry.display_name = None;
@@ -189,6 +193,16 @@ impl DomainConfig for Settings {
             errors.push(SectionError {
                 field: "entries".into(),
                 code: "registration",
+            });
+        }
+        if self
+            .entries
+            .values()
+            .any(|e| !provenant_quota::valid_plans(&e.plans))
+        {
+            errors.push(SectionError {
+                field: "entries".into(),
+                code: "plans",
             });
         }
         if self.entries.iter().any(|(id, e)| !valid_display(id, e)) {
