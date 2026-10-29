@@ -77,6 +77,8 @@ const LAYERS: &[(&str, &[&str])] = &[
             "routing",
             "run",
             "fabric-runtime",
+            "fabric-mcp",
+            "fabric-store",
             "workflow",
             "os",
             "supervisor",

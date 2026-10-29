@@ -337,6 +337,138 @@ impl ToolCall {
         )
     }
 
+    fn lane_mutation(&self) -> Option<(Mutation, Option<OperationId>)> {
+        if !self.is_mutation() {
+            return None;
+        }
+        match self {
+            Self::Mail(input, id) => Some((Mutation::Mail(input.clone()), id.clone())),
+            Self::Task(input, id) => Some((Mutation::Task(input.clone()), id.clone())),
+            Self::Events(input, id) => Some((Mutation::Events(input.clone()), id.clone())),
+            Self::Claim(input, id) => Some((Mutation::Claim(input.clone()), id.clone())),
+            _ => None,
+        }
+    }
+
+    fn lane_observation(&self) -> bool {
+        matches!(
+            self,
+            Self::Mail(MailInput::Read { .. }, _)
+                | Self::Task(TaskInput::List { .. }, _)
+                | Self::Events(EventsInput::Read { .. }, _)
+                | Self::Claim(ClaimInput::Verify { .. } | ClaimInput::List { .. }, _)
+                | Self::Landing(LandingInput::Verify { .. } | LandingInput::Wait { .. }, _)
+        )
+    }
+
+    pub(crate) fn lane_request(&self) -> Result<crate::lane::Request, ServiceError> {
+        if self.lane_mutation().is_none() && !self.lane_observation() {
+            return Err(CoordinationError::LaneMutation.into());
+        }
+        let mut arguments = match self {
+            Self::Mail(input, _) => serde_json::to_value(input)?,
+            Self::Task(input, _) => serde_json::to_value(input)?,
+            Self::Events(input, _) => serde_json::to_value(input)?,
+            Self::Claim(input, _) => serde_json::to_value(input)?,
+            Self::Landing(input, _) => serde_json::to_value(input)?,
+            _ => return Err(CoordinationError::LaneMutation.into()),
+        };
+        let id = match self {
+            Self::Mail(_, id)
+            | Self::Task(_, id)
+            | Self::Events(_, id)
+            | Self::Claim(_, id)
+            | Self::Landing(_, id) => id,
+            _ => return Err(CoordinationError::LaneMutation.into()),
+        };
+        if let Some(id) = id {
+            arguments["operation_id"] = serde_json::to_value(id)?;
+        }
+        Ok(crate::lane::Request {
+            tool: self.name().into(),
+            arguments,
+        })
+    }
+
+    /// Relay coordination to the guardian. Identity remains host-bound.
+    pub fn relay(
+        &self,
+        path: &std::path::Path,
+        cancel: &CancelToken,
+    ) -> Result<Value, ServiceError> {
+        let seconds = match self {
+            Self::Events(
+                EventsInput::Read {
+                    wait_seconds: Some(seconds),
+                    ..
+                },
+                _,
+            )
+            | Self::Landing(
+                LandingInput::Wait {
+                    wait_seconds: seconds,
+                    ..
+                },
+                _,
+            ) => *seconds,
+            _ => crate::MAX_WAIT_SECONDS,
+        };
+        self.relay_within(path, cancel, std::time::Duration::from_secs(seconds))
+    }
+
+    /// Preserve a CLI caller's remaining budget through admission and execution.
+    pub fn relay_within(
+        &self,
+        path: &std::path::Path,
+        cancel: &CancelToken,
+        within: std::time::Duration,
+    ) -> Result<Value, ServiceError> {
+        crate::lane::mutate(path, &self.lane_request()?, cancel, within)
+    }
+
+    /// Host-only entry. The caller binds the service to its sealed attempt;
+    /// parsing remains strict and landing mutations, inbox and execution are excluded.
+    pub fn execute_lane_coordination(
+        self,
+        coordination: &CoordinationService<'_>,
+        limits: &Limits,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<Value, ServiceError> {
+        self.validate_limits(limits)
+            .map_err(ServiceError::Invalid)?;
+        if let Some((input, id)) = self.lane_mutation() {
+            return Ok(serde_json::to_value(CoordinationApi::mutate(
+                coordination,
+                input,
+                id,
+                budget,
+                cancel,
+            )?)?);
+        }
+        if !self.lane_observation() {
+            return Err(CoordinationError::LaneMutation.into());
+        }
+        match self {
+            Self::Mail(input, _) => Ok(serde_json::to_value(
+                coordination.mail(input, budget, cancel)?,
+            )?),
+            Self::Task(input, _) => Ok(serde_json::to_value(
+                coordination.task(input, budget, cancel)?,
+            )?),
+            Self::Events(input, _) => Ok(serde_json::to_value(
+                coordination.events(input, budget, cancel)?,
+            )?),
+            Self::Claim(input, _) => Ok(serde_json::to_value(
+                coordination.claim(input, budget, cancel)?,
+            )?),
+            Self::Landing(input, _) => Ok(serde_json::to_value(
+                coordination.landing(input, budget, cancel)?,
+            )?),
+            _ => Err(CoordinationError::LaneMutation.into()),
+        }
+    }
+
     /// MCP arguments remain strict even when shared peer records retain fields
     /// from newer writers. The catalogue owns the argument field boundary.
     pub fn parse(name: &str, arguments: Value) -> Result<Self, InvalidInput> {
@@ -658,6 +790,23 @@ impl ToolCall {
         if let Some(limits) = &service.limits {
             self.validate_limits(limits)
                 .map_err(ServiceError::Invalid)?;
+        }
+        if service.in_lane
+            && service.lane_relay_reads
+            && self.lane_observation()
+            && service.lane_relay.is_none()
+        {
+            return Err(FacadeError::OwnerUnavailable.into());
+        }
+        if service.in_lane
+            && (self.lane_mutation().is_some()
+                || ((service.lane_relay_reads
+                    || matches!(&self, Self::Landing(LandingInput::Verify { .. }, _)))
+                    && self.lane_observation()))
+            && let Some(path) = &service.lane_relay
+        {
+            let value = self.relay(path, cancel)?;
+            return service.limit_response(response(self.name(), value), self.is_mutation(), false);
         }
         if service.in_lane
             && self.is_mutation()
@@ -1213,6 +1362,8 @@ pub struct Service<'a, F> {
     clock: &'a dyn Clock,
     limits: Option<Limits>,
     in_lane: bool,
+    lane_relay: Option<std::path::PathBuf>,
+    lane_relay_reads: bool,
 }
 
 impl<'a, F> Service<'a, F> {
@@ -1223,6 +1374,8 @@ impl<'a, F> Service<'a, F> {
             clock,
             limits: None,
             in_lane: false,
+            lane_relay: None,
+            lane_relay_reads: false,
         }
     }
 
@@ -1232,11 +1385,22 @@ impl<'a, F> Service<'a, F> {
         self
     }
 
-    /// The composition edge captures this from the host-set MCP environment.
-    /// Tool arguments cannot change it. Lanes still have direct SQLite writes;
-    /// this guards the tool surface pending lane-store-isolation (Fabric spec).
+    /// Capture lane restrictions at the composition edge. Host-relayed
+    /// coordination remains separate from authority-bearing tools.
     pub fn with_lane_restrictions(mut self, in_lane: bool) -> Self {
         self.in_lane = in_lane;
+        self
+    }
+
+    /// Select the attempt endpoint. The host independently captures sender identity.
+    pub fn with_lane_relay(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.lane_relay = path;
+        self
+    }
+
+    /// Remote-home observations must use the host owner rather than a local mirror.
+    pub fn with_lane_relay_reads(mut self, enabled: bool) -> Self {
+        self.lane_relay_reads = enabled;
         self
     }
 

@@ -207,6 +207,16 @@ impl WaitBudget {
             WaitTransport::Mcp,
         )
     }
+    /// Shorten a validated budget to an external deadline, including subsecond
+    /// or expired bounds. This never turns expiry into an immediate probe.
+    pub fn cap_at(self, deadline: MonoTime) -> Self {
+        Self {
+            deadline: Deadline(self.deadline.0.min(deadline)),
+            allowance: None,
+            ..self
+        }
+    }
+
     pub const fn deadline(self) -> Deadline {
         self.deadline
     }
@@ -308,6 +318,27 @@ impl Clock for TestClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_deadline_caps_subsecond_waits_without_reopening_a_probe() {
+        let now = MonoTime::from_micros(1_000_000);
+        let later = MonoTime::from_micros(1_250_000);
+        let budget = WaitBudget::per_transaction(now, 5).unwrap().cap_at(later);
+        assert_eq!(budget.remaining(now).as_micros(), 250_000);
+        assert_eq!(
+            budget.for_transaction(later).remaining(later).as_micros(),
+            0
+        );
+        assert!(!budget.is_nonblocking());
+        assert_eq!(budget.cap_at(now).remaining(now).as_micros(), 0);
+        assert_eq!(
+            budget
+                .cap_at(MonoTime::from_micros(9_000_000))
+                .deadline()
+                .as_mono_time(),
+            later
+        );
+    }
     #[test]
     fn host_time_refuses_unless_a_clock_provides_it() {
         struct Plain;

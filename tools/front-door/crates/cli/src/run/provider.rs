@@ -2117,22 +2117,26 @@ fn host_indexes_protected(
         )
         .ok()
     };
-    ["fabric/host.sqlite3", run::WORK_INDEX_FILE]
-        .iter()
-        .flat_map(|file| {
-            ["", "-wal", "-shm", "-journal", ".lock"].map(|suffix| format!("{file}{suffix}"))
-        })
-        .all(|file| {
-            let Some(path) = resolve(&state.join(file)) else {
-                return false;
-            };
-            grants.iter().all(|grant| {
-                resolve(&grant.path).is_some_and(|root| match grant.scope {
-                    PathScope::Exact => root != path && !(root.is_dir() && path.starts_with(root)),
-                    PathScope::Subtree => !path.starts_with(root),
-                })
+    [
+        "fabric/fabric.sqlite3",
+        "fabric/host.sqlite3",
+        run::WORK_INDEX_FILE,
+    ]
+    .iter()
+    .flat_map(|file| {
+        ["", "-wal", "-shm", "-journal", ".lock"].map(|suffix| format!("{file}{suffix}"))
+    })
+    .all(|file| {
+        let Some(path) = resolve(&state.join(file)) else {
+            return false;
+        };
+        grants.iter().all(|grant| {
+            resolve(&grant.path).is_some_and(|root| match grant.scope {
+                PathScope::Exact => root != path && !(root.is_dir() && path.starts_with(root)),
+                PathScope::Subtree => !path.starts_with(root),
             })
         })
+    })
 }
 
 fn target_seeds_protected(
@@ -2168,6 +2172,10 @@ fn configured_grants_cannot_expose_host_indexes() -> Result<(), Box<dyn std::err
         "/state/work-index.sqlite3-journal",
         "/state/work-index.sqlite3.lock",
         "/state/fabric",
+        "/state/fabric/fabric.sqlite3",
+        "/state/fabric/fabric.sqlite3-wal",
+        "/state/fabric/fabric.sqlite3-shm",
+        "/state/fabric/fabric.sqlite3-journal",
         "/state/fabric/host.sqlite3",
         "/state/fabric/host.sqlite3-wal",
         "/state/fabric/host.sqlite3-shm",
@@ -5267,4 +5275,77 @@ mod tests {
         std::fs::remove_dir_all(&base)?;
         result
     }
+}
+
+/// Called only by the host guardian with the context accepted under custody.
+/// The attempt determines the actor, regardless of request or environment labels.
+pub(super) fn start_fabric_relay(
+    context: &run::HolderContext,
+) -> Result<provenant_fabric_mcp::lane::HostRelay, String> {
+    use provenant_core::{CancelToken, Clock, WaitBudget};
+    use provenant_fabric_runtime::{coordination::CoordinationService, identity::Address};
+    let launch = context
+        .launch
+        .as_ref()
+        .ok_or("host launch context missing")?;
+    let mut inputs =
+        provenant_core::RootInputs::new(context.roots.home.clone(), context.roots.checkout.clone());
+    inputs.state_dir = Some(launch.configuration_root.clone());
+    let roots = inputs
+        .resolve(&provenant_os::fs::SystemPathResolver)
+        .map_err(|e| e.to_string())?;
+    let mut ctx = crate::fabric::Context::open(roots, &context.roots.home, &launch.cwd)
+        .map_err(|e| e.to_string())?;
+    if ctx.identity.project != context.project_id {
+        return Err("Fabric relay project mismatch".into());
+    }
+    ctx.identity.inbox = Address::new(ctx.identity.host, &format!("lane-{}", context.attempt_id))
+        .map_err(|e| e.to_string())?;
+    let home = context.roots.home.clone();
+    let cwd = launch.cwd.clone();
+    let clock = provenant_os::clock::SystemClock::new();
+    let executor = provenant_os::exec::SystemExecutor::new(provenant_fabric_mcp::lane::WORKERS)
+        .map_err(|e| e.to_string())?;
+    let cancel = CancelToken::new();
+    // Initialise and retain the WAL before a lane opens its read-only connection.
+    drop(
+        CoordinationService::for_identity(
+            &ctx.roots.state,
+            &ctx.identity,
+            &ctx.config,
+            &home,
+            &cwd,
+            &executor,
+            &clock,
+            &provenant_fabric_runtime::coordination::ThreadWait,
+            WaitBudget::mcp(clock.mono_now(), 5).map_err(|e| e.to_string())?,
+            &cancel,
+        )
+        .map_err(|e| e.to_string())?,
+    );
+    provenant_fabric_mcp::lane::HostRelay::start(
+        LaneRuntime::fabric_socket(context.attempt_id),
+        provenant_records::Limits {
+            max_bytes: ctx.config.limits.input_frame_bytes,
+            max_depth: usize::try_from(ctx.config.limits.json_depth).unwrap_or(64),
+            max_members: 100_000,
+        },
+        move |call, cancel, within| {
+            let budget = provenant_fabric_mcp::lane::host_budget(&clock, within)?;
+            let coordination = CoordinationService::for_identity(
+                &ctx.roots.state,
+                &ctx.identity,
+                &ctx.config,
+                &home,
+                &cwd,
+                &executor,
+                &clock,
+                &provenant_fabric_runtime::coordination::ThreadWait,
+                budget,
+                cancel,
+            )?;
+            call.execute_lane_coordination(&coordination, &ctx.config.limits, budget, cancel)
+        },
+    )
+    .map_err(|e| e.to_string())
 }

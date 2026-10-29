@@ -376,3 +376,280 @@ fn five_tools_reach_the_real_store_through_runtime_and_keep_fences_scoped()
 use crate::test_facade::local_inbox_owner;
 local_inbox_owner!(SubmitFacade);
 local_inbox_owner!(FakeFacade);
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Native socket framing and read-only WAL deadlines.
+fn lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.join("state"));
+    let root = inputs.resolve(&Resolver)?.state;
+    let clock = relay_test_clock();
+    let project = ProjectId::from_bytes([1; 16]);
+    let actor = ActorId::from_bytes([2; 16]);
+    let budget = WaitBudget::mcp(clock.mono_now(), 5)?;
+    // The host creates the WAL; the lane keeps only a read-only connection.
+    let _host_connection = CoordinationService::open(
+        &root,
+        project,
+        actor,
+        &clock,
+        &ThreadWait,
+        budget,
+        &CancelToken::new(),
+    )?;
+    let host_root = root.clone();
+    let handler = move |call: ToolCall, cancel: &CancelToken, within: std::time::Duration| {
+        let clock = relay_test_clock();
+        let budget = crate::lane::host_budget(&clock, within)?;
+        let coordination = CoordinationService::open(
+            &host_root,
+            project,
+            actor,
+            &clock,
+            &ThreadWait,
+            budget,
+            cancel,
+        )?;
+        call.execute_lane_coordination(&coordination, &relay_limits(), budget, cancel)
+    };
+    let relay_call = |tool: &str, args: Value| -> Result<Value, ServiceError> {
+        let request = crate::lane::Request {
+            tool: tool.into(),
+            arguments: args,
+        };
+        let (mut client, mut server) =
+            std::os::unix::net::UnixStream::pair().map_err(|_| FacadeError::OwnerUnavailable)?;
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                crate::lane::serve_one(
+                    &mut server,
+                    provenant_records::Limits {
+                        max_bytes: 65536,
+                        max_depth: 64,
+                        max_members: 100_000,
+                    },
+                    &handler,
+                    &CancelToken::new(),
+                )
+            });
+            crate::lane::exchange(&mut client, &request, &CancelToken::new())
+        })
+    };
+    let store = provenant_fabric_store::Store::open_read_only(
+        &root,
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    )?
+    .ok_or("missing store")?
+    .live_read_only()?;
+    // A forged lane actor cannot influence the host's captured actor.
+    let coordination = CoordinationService::new(
+        store,
+        project,
+        ActorId::from_bytes([99; 16]),
+        &clock,
+        &ThreadWait,
+    );
+    let mut lane = Service::new(coordination, FakeFacade, &clock).with_lane_restrictions(true);
+    let args = json!({"op":"send","recipients":[actor],"kind":"note","body":"hello host","artifacts":[],"operation_id":"relay-send"});
+    let sent = relay_call("fabric_mail", args.clone())?;
+    assert_eq!(sent, relay_call("fabric_mail", args)?);
+    let task = relay_call(
+        "fabric_task",
+        json!({"op":"create","objective":"Review","operation_id":"relay-task"}),
+    )?;
+    let claimed = relay_call(
+        "fabric_task",
+        json!({"op":"claim","id":task["task"]["id"],"lease_seconds":10,"operation_id":"relay-claim"}),
+    )?;
+    assert_eq!(claimed["result"], "claimed");
+    // A long-lived reader observes changes made after its first observation.
+    let before = call(&mut lane, "fabric_task", json!({"op":"list","limit":10}))?;
+    assert_eq!(before["page"]["items"][0]["owner"], json!(actor));
+    relay_call(
+        "fabric_task",
+        json!({"op":"finish","proof":claimed["proof"],"state":"done","operation_id":"relay-finish"}),
+    )?;
+    let after = call(&mut lane, "fabric_task", json!({"op":"list","limit":10}))?;
+    assert_ne!(before, after);
+    let host = CoordinationService::open(
+        &root,
+        project,
+        actor,
+        &clock,
+        &ThreadWait,
+        budget,
+        &CancelToken::new(),
+    )?;
+    let mail = serde_json::to_value(host.mail(
+        MailInput::Read {
+            extra: Default::default(),
+            after: Some(0),
+            limit: 10,
+        },
+        budget,
+        &CancelToken::new(),
+    )?)?;
+    let messages = mail["page"]["items"].as_array().ok_or("mail")?;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["message"]["sender"], json!(actor));
+    assert_eq!(messages[0]["message"]["id"], sent["id"]);
+    let held = serde_json::to_value(host.mutate(
+        Mutation::Landing(LandingInput::Acquire {
+            extra: Default::default(),
+            reference: "refs/heads/main".into(),
+            expected: provenant_core::GitOid::parse(&"a".repeat(40))?,
+            candidate: provenant_core::GitOid::parse(&"b".repeat(40))?,
+            lease_seconds: 10,
+        }),
+        &provenant_core::OperationId::parse("host-landing")?,
+        budget,
+        &CancelToken::new(),
+    )?)?;
+    let verified = relay_call(
+        "fabric_lease",
+        json!({"op":"landing_verify","proof":held["proof"]}),
+    )?;
+    assert_eq!(verified["result"], "verified");
+    let relayed_read = relay_call("fabric_mail", json!({"op":"read","after":0,"limit":10}))?;
+    assert_eq!(
+        relayed_read["page"]["items"][0]["message"]["sender"],
+        json!(actor)
+    );
+    let forged = crate::lane::Request {
+        tool: "fabric_mail".into(),
+        arguments: json!({"op":"send","sender":actor,"recipients":[actor],"kind":"note","body":"forged"}),
+    };
+    assert_eq!(
+        relay_call(&forged.tool, forged.arguments)
+            .err()
+            .ok_or("forgery accepted")?
+            .code(),
+        "invalid_input"
+    );
+    let landing = crate::lane::Request {
+        tool: "fabric_lease".into(),
+        arguments: json!({"op":"landing_acquire","reference":"refs/heads/main","expected":"a".repeat(40),"candidate":"b".repeat(40),"lease_seconds":1}),
+    };
+    assert_eq!(
+        relay_call(&landing.tool, landing.arguments)
+            .err()
+            .ok_or("landing accepted")?
+            .code(),
+        "lane_coordination_refused"
+    );
+    assert!(
+        call(
+            &mut lane,
+            "fabric_events",
+            json!({"op":"note","note":"closed"})
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+fn relay_test_clock() -> TestClock {
+    TestClock::new(
+        WallTime::from_micros(2_000_000_000_000_000).unwrap(),
+        MonoTime::from_micros(0),
+    )
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Exercise real host wait and response deadlines.
+fn empty_one_second_host_wait_returns_timeout_data_before_transport_expiry()
+-> Result<(), Box<dyn Error>> {
+    struct Realtime(std::time::Instant);
+    impl Clock for Realtime {
+        fn wall_now(&self) -> Result<WallTime, provenant_core::TimeError> {
+            WallTime::from_micros(2_000_000_000_000_000)
+        }
+        fn mono_now(&self) -> MonoTime {
+            MonoTime::from_micros(self.0.elapsed().as_micros() as u64)
+        }
+        fn wait_until(&self, deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
+            while self.mono_now() < deadline {
+                std::thread::park_timeout(std::time::Duration::from_micros(
+                    deadline
+                        .as_micros()
+                        .saturating_sub(self.mono_now().as_micros()),
+                ));
+            }
+            Ok(())
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.join("state"));
+    let root = inputs.resolve(&Resolver)?.state;
+    let clock = Realtime(std::time::Instant::now());
+    let cancel = CancelToken::new();
+    let project = ProjectId::from_bytes([1; 16]);
+    let actor = ActorId::from_bytes([2; 16]);
+    let _host = CoordinationService::open(
+        &root,
+        project,
+        actor,
+        &clock,
+        &ThreadWait,
+        WaitBudget::mcp(clock.mono_now(), 5)?,
+        &cancel,
+    )?;
+    let (mut client, mut server) = std::os::unix::net::UnixStream::pair()?;
+    let request = ToolCall::parse(
+        "fabric_events",
+        json!({"op":"read","after":0,"limit":10,"wait_seconds":1}),
+    )?
+    .lane_request()?;
+    std::thread::scope(|scope| -> Result<(), Box<dyn Error>> {
+        let serving = scope.spawn(|| {
+            crate::lane::serve_one(
+                &mut server,
+                provenant_records::Limits::CONFIG,
+                &|call, cancel, within| {
+                    let budget = crate::lane::host_budget(&clock, within)?;
+                    let owner = CoordinationService::open(
+                        &root,
+                        project,
+                        actor,
+                        &clock,
+                        &ThreadWait,
+                        budget,
+                        cancel,
+                    )?;
+                    call.execute_lane_coordination(&owner, &relay_limits(), budget, cancel)
+                },
+                &cancel,
+            )
+        });
+        let result = crate::lane::exchange_within(
+            &mut client,
+            &request,
+            &cancel,
+            std::time::Duration::from_secs(1),
+        )?;
+        assert_eq!(result["timed_out"], true);
+        serving.join().unwrap()?;
+        Ok(())
+    })
+}
+
+fn relay_limits() -> provenant_fabric_runtime::config::Limits {
+    provenant_fabric_runtime::config::Limits {
+        body_bytes: 65536,
+        input_frame_bytes: 65536,
+        json_depth: 64,
+        page_rows: 20,
+        output_lines: 100,
+        output_bytes: 16384,
+        result_bytes: 3000,
+        lease_seconds: 300,
+        peer_seconds: 30,
+        graph_timeout_seconds: 14400,
+        bundle_bytes: 65536,
+    }
+}

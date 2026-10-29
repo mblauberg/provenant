@@ -17,6 +17,7 @@ struct Service {
 /// and observing cancellation while child provider preparation runs.
 pub struct HostHolder<'a> {
     inner: &'a dyn Holder,
+    fabric_relay: Mutex<Option<provenant_fabric_mcp::lane::HostRelay>>,
     service: Mutex<Option<Service>>,
     settled: Mutex<Option<run::HolderContext>>,
 }
@@ -24,6 +25,7 @@ impl<'a> HostHolder<'a> {
     pub fn new(inner: &'a dyn Holder) -> Self {
         Self {
             inner,
+            fabric_relay: Mutex::new(None),
             service: Mutex::new(None),
             settled: Mutex::new(None),
         }
@@ -37,6 +39,12 @@ impl<'a> HostHolder<'a> {
             .take())
     }
     fn stop(&self, reason: Option<StopReason>) -> custody::Result<()> {
+        drop(
+            self.fabric_relay
+                .lock()
+                .map_err(|_| custody::CustodyError::InvalidRecord)?
+                .take(),
+        );
         let service = self
             .service
             .lock()
@@ -133,6 +141,13 @@ impl Holder for HostHolder<'_> {
         if context.launch.is_none() {
             return Ok(());
         }
+        *self
+            .fabric_relay
+            .lock()
+            .map_err(|_| custody::CustodyError::InvalidRecord)? = Some(
+            provider::start_fabric_relay(&context)
+                .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?,
+        );
         let cancel = CancelToken::new();
         let worker_cancel = cancel.clone();
         let reason = Arc::new(Mutex::new(None));

@@ -32,15 +32,35 @@ never prove a model family.
 
 ### Lane store isolation
 
-Fabric refuses coordination mutations from lanes at the tool surface
-([nested lanes](routing.md#lane-identity-and-refusals)), and `fabric peer`
-and `peer-agent` refuse to start under the lane environment. Lanes still
-have direct write access to `fabric.sqlite3`, because opening the store
-needs a writable WAL connection.
-- Why: the tool refusal is today's boundary; the residual is recorded.
-- Test: `tests/fabric_transport.rs::lane_graph_status_does_not_create_shared_graph_store`.
-  The direct SQLite write grant is an open gap.
-- Owner: `crates/fabric-runtime/src/coordination.rs`
+Lane observations open `Store::open_read_only`, with exact read grants for
+`fabric/fabric.sqlite3` and its `-wal`, `-shm` and `-journal` companions.
+No lane profile grants writes to these files, Fabric locks or the Fabric
+directory. Long-lived lane readers release the initial snapshot so subsequent
+observations see fresh WAL commits, without creating or updating companions.
+
+The guardian starts an attempt-bound host MCP relay before provider spawn and
+closes it on provider exit, failed spawn or guardian teardown. Each lane may
+connect only to its own exact Unix socket under a private, short-lived host
+directory. The host captures the project and `lane-<attempt>` actor from the
+custody context; request fields and lane environment labels cannot select the
+sender. Mail, tasks, event notes and advisory claims use the existing atomic
+operation receipts. Observations of a configured remote home also use this
+relay, preserving the sole owner rather than reading a local mirror. Landing
+verification also uses the host because it requires an OS lock.
+
+Relay frames obey configured input byte/depth limits, absolute I/O deadlines
+and cancellation. After admission the caller confirms its remaining budget
+before the host executes; an abandoned queued request cannot mutate later.
+The relay excludes landing mutations, inbox writes, chair writes, graphs and
+execution. CLI coordination mutations still refuse inside lanes. Peer ingress
+and `peer-agent` remain unavailable to lanes. The socket is removed on normal
+teardown; an existing socket directory is never reused or removed on startup.
+- Why: a lane must not forge records that the host or another agent trusts.
+- Test: `crates/providers/src/seatbelt_snapshots.rs::fabric_profiles_only_read_database_and_allow_only_the_attempt_socket`;
+  `crates/fabric-mcp/src/coordination_tests.rs::lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal`;
+  `tests/fabric_lane.rs`.
+- Owner: `crates/cli/src/run/provider.rs`, `crates/fabric-mcp/src/lane.rs`,
+  `crates/fabric-store/src/db.rs`
 
 ### Private, versioned database
 
@@ -85,7 +105,7 @@ claim complete coverage.
 Viewer request presentation state is separate from resolution and blocking.
 Viewer names are caller-supplied labels, like agent labels: they are not an
 authentication boundary. A local caller that knows a label can change that
-viewer's state; the direct SQLite access residual above also applies.
+viewer's state; lanes cannot write this viewer state through the host relay.
 Quotas are per project and viewer, with a combined per-project cap. Writes
 reclaim closed or expired request rows. A new summary baseline is refused at
 capacity rather than evicting an existing one.

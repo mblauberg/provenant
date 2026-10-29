@@ -78,6 +78,40 @@ fn project() -> ProjectId {
 fn actor(n: u8) -> ActorId {
     ActorId::from_bytes([n; 16])
 }
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Native read-only WAL open deadline.
+fn live_read_only_observations_refresh_wal_and_refuse_mutations() {
+    let f = Fixture::new();
+    let writer = f.open();
+    let reader = Store::open_read_only(
+        &f.root,
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    )
+    .unwrap()
+    .unwrap()
+    .live_read_only()
+    .unwrap();
+    assert!(
+        reader
+            .read_mail(project(), actor(3), Some(0), 10, &f.request())
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    writer.send(&message(&f, 5), &f.request()).unwrap();
+    assert_eq!(
+        reader
+            .read_mail(project(), actor(3), Some(0), 10, &f.request())
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert!(reader.send(&message(&f, 6), &f.request()).is_err());
+    assert!(reader.db.execute_batch("DELETE FROM messages").is_err());
+    assert!(f.open().live_read_only().is_err());
+}
 fn message(f: &Fixture, n: u8) -> Message {
     Message {
         extra: Default::default(),

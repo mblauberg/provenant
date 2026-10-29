@@ -168,7 +168,11 @@ impl Context {
             .ok_or(EdgeError::Invalid)?;
         let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;
         let key = if discovered.repository.is_some() {
-            Some(CrossHostProjectKey::from_home(home, binding.common_dir())?)
+            match CrossHostProjectKey::from_home(home, binding.common_dir()) {
+                Ok(key) => Some(key),
+                Err(IdentityError::OutsideHome) => None,
+                Err(error) => return Err(error.into()),
+            }
         } else {
             None
         };
@@ -191,6 +195,24 @@ impl Context {
             cwd: cwd.to_path_buf(),
         })
     }
+    /// A configured remote home is the sole coordination owner.
+    pub fn remote_home(&self) -> bool {
+        self.identity.federation.as_ref().is_some_and(|project| {
+            self.config
+                .home_hosts
+                .get(project.key.as_str())
+                .is_some_and(|host| *host != self.identity.host)
+        })
+    }
+    /// This selects a socket, never sender authority; the host binds the actor.
+    pub fn lane_relay_socket(&self) -> Result<PathBuf, EdgeError> {
+        let attempt = std::env::var("PROVENANT_PARENT_ATTEMPT_ID")
+            .ok()
+            .and_then(|id| provenant_core::AttemptId::parse(&id).ok())
+            .ok_or(EdgeError::Invalid)?;
+        Ok(provenant_providers::LaneRuntime::fabric_socket(attempt))
+    }
+
     pub fn inbox_address(
         &self,
         client: Option<provenant_records::Harness>,
