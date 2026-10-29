@@ -1869,10 +1869,10 @@ fn rolling_window_limits_go_despite_monthly_headroom() -> Result<(), Box<dyn std
     use provenant_quota::{QuotaStatus, QuotaWindow};
     let catalogue = Catalogue::bundled()?;
     let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pools": {"trial": [{"model":"opencode/opencode-go/claude-haiku-5-5", "weight":1, "efforts":[]}]},
+        "pools": {"trial": [{"model":"opencode/opencode-go/minimax-m3.1-flash", "weight":1, "efforts":[]}]},
         "pacing": {"accounts": {"go": {"policy":"pace", "windows":["rolling", "seven_day", "monthly"], "reserve":{"rolling":0}}}}
     }))?;
-    let model = "opencode/opencode-go/claude-haiku-5-5";
+    let model = "opencode/opencode-go/minimax-m3.1-flash";
     let mut record = availability();
     record.adapter = "opencode".into();
     record.account_key = Some("go".into());
