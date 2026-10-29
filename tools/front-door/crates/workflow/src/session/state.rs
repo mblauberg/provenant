@@ -755,21 +755,23 @@ mod tests {
     #[test]
     fn the_digest_title_names_the_store_it_was_read_from() {
         let cwd = std::path::Path::new("/work");
-        let with = |dir: &str| SessionState {
-            commands: CommandPrefix::new(Some(std::path::Path::new(dir)), cwd),
+        // Nothing is drawn from an empty state, so the fixtures carry one lane.
+        let with = |dir: Option<&str>| SessionState {
+            active: vec![lane("run/task/a")],
+            commands: CommandPrefix::new(dir.map(std::path::Path::new), cwd),
             ..Default::default()
         };
-        let title = with("/s/a b").digest(DIGEST_LIMIT);
+        let title = with(Some("/s/a b")).digest(DIGEST_LIMIT);
         assert!(
             title.contains(
                 "`provenant --state-dir '/s/a b' lanes` and `provenant --state-dir '/s/a b' pr status`"
             ),
             "{title}"
         );
-        let title = with("/s/a>b").digest(DIGEST_LIMIT);
+        let title = with(Some("/s/a>b")).digest(DIGEST_LIMIT);
         assert!(!title.contains("`provenant"), "{title}");
         assert!(title.contains("this hook's --state-dir"), "{title}");
-        let title = SessionState::default().digest(DIGEST_LIMIT);
+        let title = with(None).digest(DIGEST_LIMIT);
         assert!(title.contains("`provenant lanes` and `provenant pr status`"));
     }
 

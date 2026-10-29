@@ -1101,6 +1101,63 @@ fn checkpoint_warns_only_above_eight_kib() -> Result {
 }
 
 #[test]
+fn checkpoint_honours_the_project_soft_budget() -> Result {
+    let rig = TestRig::new()?;
+    let file = rig.root.join("budget.md");
+    let save = |bytes: usize| -> Result<Value> {
+        std::fs::write(&file, "x".repeat(bytes - 1) + "\n")?;
+        call(
+            &rig,
+            &[
+                "workflow",
+                "session",
+                "save",
+                "s-budget",
+                "--file",
+                &file.to_string_lossy(),
+            ],
+            0,
+        )
+    };
+    let project = save(12 * 1024)?["data"]["project"]
+        .as_str()
+        .ok_or("project")?
+        .to_owned();
+    let config = rig.state.join("config.toml");
+    let mut doc: toml_edit::DocumentMut = std::fs::read_to_string(&config)?.parse()?;
+    let retention = doc
+        .as_table_mut()
+        .entry("retention")
+        .or_insert(toml_edit::table())
+        .as_table_mut()
+        .ok_or("retention")?;
+    let projects = retention
+        .entry("projects")
+        .or_insert(toml_edit::table())
+        .as_table_mut()
+        .ok_or("projects")?;
+    let entry = projects
+        .entry(&project)
+        .or_insert(toml_edit::table())
+        .as_table_mut()
+        .ok_or("project entry")?;
+    entry["checkpoint_soft_bytes"] = toml_edit::value(32 * 1024);
+    std::fs::write(&config, doc.to_string())?;
+    // The raised budget keeps a checkpoint quiet that the default would warn on.
+    assert_eq!(save(12 * 1024)?["data"]["warnings"], json!([]));
+    let warned = save(32 * 1024 + 1)?;
+    let warnings = warned["data"]["warnings"].as_array().ok_or("warnings")?;
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0]
+            .as_str()
+            .ok_or("warning")?
+            .contains("the soft budget is 32768")
+    );
+    Ok(())
+}
+
+#[test]
 fn session_save_reads_stdin_and_never_rewrites_its_source() -> Result {
     let rig = TestRig::new()?;
     let source = rig.root.join("checkpoint.md");
