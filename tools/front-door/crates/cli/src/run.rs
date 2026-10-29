@@ -1316,7 +1316,7 @@ pub fn requested(
                 Fail::new(
                     Status::Invalid,
                     ErrorKind::Invalid,
-                    "model must be ADAPTER/ID",
+                    crate::route::model_form_message(model),
                 )
             })?;
             Ok(run::RequestedRoute::Model {
@@ -1980,6 +1980,7 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
     }
     let timed_out = result.result.status == Status::Timeout;
     let mut next = None;
+    let mut wait = None;
     for row in rows {
         let Some(id) = row["attempt_id"].as_str() else {
             continue;
@@ -2034,6 +2035,13 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
                 ));
             }
         }
+        // The first lane still in flight when the wait ends names the wait to keep.
+        if timed_out
+            && wait.is_none()
+            && matches!(state, "queued" | "starting" | "running" | "settling")
+        {
+            wait = Some(format!("provenant lanes --id {id} --wait 4m"));
+        }
         // One typed next step: the first lane that needs one.
         if next.is_none() {
             if timed_out && matches!(state, "queued" | "starting" | "running" | "settling") {
@@ -2049,6 +2057,16 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
             && !matches!(state, "succeeded" | "review_required" | "input_required")
         {
             result.result.status = Status::Failed;
+        }
+    }
+    if timed_out {
+        // The wait ended before the run settled. Its lanes keep running, so
+        // this is not a failure: exit 0, and name the command that keeps waiting.
+        result.result.status = Status::Waiting;
+        if let Some(command) = &wait {
+            human.push_str(&format!(
+                "run is still running; keep waiting with `{command}`\n"
+            ));
         }
     }
     result.summary = Some(crate::Summary::verbatim(&human, next));
@@ -2489,6 +2507,10 @@ fn operation_reply(reply: &mut Reply, id: &OperationId) {
     reply.result.data["operation_id"] = json!(id);
     if let Some(error) = &mut reply.result.error {
         error.message.push_str(&format!("; operation {id}"));
+        // The same operation replays its request, so a retry cannot admit twice.
+        if error.code == ErrorKind::Contention.code() {
+            error.repair = Some(format!("retry the same command with --operation-id {id}"));
+        }
     } else {
         reply.human = format!("operation {id}\n{}", reply.human);
     }
@@ -2529,6 +2551,44 @@ pub(crate) fn pool_effort_refusal(
         .flatten()
 }
 
+/// Refuse a model the catalogue does not record, or an effort its recorded
+/// model does not take, before any run record exists. A typo gets the nearest
+/// recorded IDs. Routing applies the same rules, but only after launch prep.
+fn catalogued(model: &str, effort: Option<&str>) -> Result<(), Fail> {
+    let Ok(id) = ModelId::parse(model) else {
+        return Ok(());
+    };
+    let catalogue = provenant_routing::Catalogue::bundled()
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
+    let Some(entry) = catalogue.model(&id) else {
+        let nearest = catalogue.nearest_models(&id);
+        let hint = if nearest.is_empty() {
+            String::new()
+        } else {
+            format!("; nearest catalogued IDs: {}", nearest.join(", "))
+        };
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            format!("model {model} is not in the catalogue{hint}"),
+        ));
+    };
+    match effort {
+        Some(effort) if !entry.efforts.iter().any(|supported| supported == effort) => {
+            let support = if entry.efforts.is_empty() {
+                "this model takes no effort".to_owned()
+            } else {
+                format!("supported efforts: {}", entry.efforts.join(", "))
+            };
+            Err(Fail::new(
+                Status::Refused,
+                ErrorKind::Unsupported,
+                format!("model {model} does not take effort {effort}; {support}"),
+            ))
+        }
+        _ => Ok(()),
+    }
+}
 pub(crate) fn check_flag_capabilities(
     command: &Dispatch,
     roots: Option<&Roots>,
@@ -2572,7 +2632,10 @@ pub(crate) fn check_flag_capabilities(
                     model,
                     effort,
                     ..
-                }) => check(&provider, Some(&model), effort.as_deref(), network)?,
+                }) => {
+                    check(&provider, Some(&model), effort.as_deref(), network)?;
+                    catalogued(&model, effort.as_deref())?;
+                }
                 // A pool whose every member's adapter takes no effort cannot serve one.
                 Ok(run::RequestedRoute::Named {
                     name,
@@ -2598,6 +2661,7 @@ pub(crate) fn check_flag_capabilities(
                           effort: Option<&str>,
                           network: Option<run::NetworkAccess>|
      -> Result<(), Fail> {
+        catalogued(model, None)?;
         match model.split_once('/') {
             Some((provider, _)) => check(provider, Some(model), effort, network),
             None => Ok(()),
@@ -3004,16 +3068,38 @@ fn dispatch_inner(
         Some(json!({"path": info.path, "branch": owned.branch, "owned": true}))
     } else if let Some(path) = &command.access.worktree {
         let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
+        // A replayed operation returns the run it already started, even while
+        // that run holds the writer; only a new admission is refused.
+        let replay = session
+            .store
+            .operation(&command.operation_id, &call)?
+            .is_some();
         Some(provenant_confinement::worktrees::with_context(
             edge.roots, edge.home, &writer.project, &clock, &cancel, |context| {
                 use provenant_confinement::worktrees;
                 let info = worktrees::list(context, &cancel)?.into_iter()
                     .find(|tree| tree.path == writer.worktree)
-                    .ok_or(worktrees::WorktreeError::InvalidRequest)?;
-                let branch = info.branch.ok_or(worktrees::WorktreeError::InvalidRequest)?;
+                    .ok_or(worktrees::WorktreeError::NotFound)?;
+                let branch = info.branch.ok_or(worktrees::WorktreeError::DetachedWorktree { head: info.head })?;
+                if !replay {
+                    match worktrees::cache_writer_probe(context.project_state, &info.path) {
+                        Ok(_) => {}
+                        Err(worktrees::WorkerState::Busy) => {
+                            let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+                            let holder = worktrees::load_owner(&tree)?.and_then(|owner| owner.attempt_id);
+                            return Err(worktrees::WorktreeError::WriterBusy { holder });
+                        }
+                        Err(_) => return Err(worktrees::WorktreeError::UnknownWriter),
+                    }
+                }
                 Ok(json!({"path": info.path, "branch": branch.trim_start_matches("refs/heads/"), "owned": false}))
             },
-        ).map_err(run::RunError::from)?)
+        ).map_err(|error| match error {
+            provenant_confinement::worktrees::WorktreeError::NotFound => {
+                run::RunError::WorktreeUnregistered(writer.worktree.clone())
+            }
+            other => run::RunError::from(other),
+        })?)
     } else {
         None
     };
@@ -3152,14 +3238,27 @@ fn own_worktree(
             let (info, pinned) = match existing {
                 Some(info) => {
                     let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
-                    if worktrees::load_owner(&tree)?
+                    let owner = worktrees::load_owner(&tree)?;
+                    if owner
+                        .as_ref()
                         .is_some_and(|owner| owner.origin != WorktreeOrigin::Lane)
                     {
                         owner_refused = true;
                         return Err(worktrees::WorktreeError::UnknownWriter);
                     }
-                    if info.dirty != WorktreeCondition::Clean || info.writer != WriterState::Free {
-                        return Err(worktrees::WorktreeError::InvalidRequest);
+                    if info.dirty != WorktreeCondition::Clean {
+                        return Err(worktrees::WorktreeError::Dirty);
+                    }
+                    match info.writer {
+                        WriterState::Free => {}
+                        WriterState::Busy | WriterState::Live => {
+                            return Err(worktrees::WorktreeError::WriterBusy {
+                                holder: owner.and_then(|owner| owner.attempt_id),
+                            });
+                        }
+                        WriterState::Unknown => {
+                            return Err(worktrees::WorktreeError::UnknownWriter);
+                        }
                     }
                     (info, None)
                 }
@@ -9679,7 +9778,14 @@ mod tests {
                 .human
                 .contains("codex/test (effort: high, network: open)")
         );
-        assert_eq!(report.result.status, Status::Timeout);
+        assert_eq!(report.result.status, Status::Waiting);
+        assert!(
+            report.human.contains(
+                "run is still running; keep waiting with `provenant lanes --id 01010101010101010101010101010101 --wait 4m`"
+            ),
+            "{}",
+            report.human
+        );
         let next = |reply: &super::Reply| {
             reply
                 .summary
@@ -9718,6 +9824,326 @@ mod tests {
             history,
             "[history unavailable: prior worktree is missing or reassigned]"
         );
+    }
+
+    #[test]
+    fn submit_names_the_fix_for_a_bare_word_model_and_unsupported_effort()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let Err(bare) = super::requested(Some("junior"), None, None) else {
+            panic!("bare-word model accepted");
+        };
+        assert_eq!(bare.status, Status::Invalid);
+        assert!(
+            bare.message.ends_with("did you mean --route junior?"),
+            "{}",
+            bare.message
+        );
+        let Err(unknown) = super::catalogued("codex/gpt-6-lunaa", None) else {
+            panic!("uncatalogued model accepted");
+        };
+        assert_eq!(unknown.status, Status::Invalid);
+        assert!(
+            unknown
+                .message
+                .starts_with("model codex/gpt-6-lunaa is not in the catalogue"),
+            "{}",
+            unknown.message
+        );
+        let Err(effort) = super::catalogued("claude/claude-sonnet-5-5", Some("low")) else {
+            panic!("unsupported effort accepted");
+        };
+        assert_eq!(effort.status, Status::Refused);
+        assert_eq!(effort.kind.code(), "UNSUPPORTED");
+        assert!(
+            effort
+                .message
+                .ends_with("supported efforts: medium, high, xhigh"),
+            "{}",
+            effort.message
+        );
+        let Err(none) =
+            super::catalogued("opencode/opencode/deepseek-v4.1-flash-free", Some("high"))
+        else {
+            panic!("effort accepted for a model that takes none");
+        };
+        assert!(
+            none.message.ends_with("this model takes no effort"),
+            "{}",
+            none.message
+        );
+        assert!(super::catalogued("codex/gpt-6-luna", Some("xhigh")).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn contention_reply_names_the_operation_to_retry() -> Result<(), Box<dyn std::error::Error>> {
+        let id = OperationId::parse("retry-lane")?;
+        let mut reply = super::reply(
+            "run",
+            Err(Fail::new(
+                Status::Refused,
+                ErrorKind::Contention,
+                "the lane is being admitted",
+            )),
+        );
+        super::operation_reply(&mut reply, &id);
+        let repair = reply
+            .result
+            .error
+            .as_ref()
+            .and_then(|error| error.repair.as_deref());
+        assert_eq!(
+            repair,
+            Some("retry the same command with --operation-id retry-lane")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dispatch_existing_worktree_checks_custody_and_replays()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::worktrees::{self, WorktreeOrigin, WorktreeOwner};
+        use provenant_os::exec::{
+            ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+        };
+        use provenant_supervisor::custody::{self, Scope};
+        use std::ffi::OsString;
+        use std::os::unix::fs::DirBuilderExt;
+        const MARKER: &str = "PROVENANT_TEST_WORKTREE_ADMISSION";
+        let executor = SystemExecutor::new(1)?;
+        let parent = AttemptId::from_bytes([8; 16]);
+        let Some(root) = std::env::var_os(MARKER).map(PathBuf::from) else {
+            let fixture = linked_fixture()?;
+            let argv = vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "\"$@\" & child=$!; wait \"$child\"".into(),
+                "worktree-admission".into(),
+                std::env::current_exe()?.into_os_string(),
+                "--exact".into(),
+                "run::tests::dispatch_existing_worktree_checks_custody_and_replays".into(),
+                "--nocapture".into(),
+            ];
+            let mut env: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| {
+                    !key.to_string_lossy().starts_with("GIT_")
+                        && key != MARKER
+                        && key != provenant_core::RUN_STATE_DIRECTORY_ENV
+                        && key != run::LANE_DEPTH_ENV
+                        && key != run::PARENT_ATTEMPT_ENV
+                })
+                .collect();
+            env.extend([
+                (MARKER.into(), fixture.root.as_os_str().to_owned()),
+                ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                (
+                    provenant_core::RUN_STATE_DIRECTORY_ENV.into(),
+                    fixture
+                        .root
+                        .join("state/children")
+                        .join(parent.to_string())
+                        .into_os_string(),
+                ),
+                (run::LANE_DEPTH_ENV.into(), "1".into()),
+                (run::PARENT_ATTEMPT_ENV.into(), parent.to_string().into()),
+            ]);
+            // Nested writer proposals must stay beneath the primary checkout.
+            let tree = fixture.project.join("writer");
+            let move_argv = vec![
+                provenant_os::git::git_executable()
+                    .ok_or("Git unavailable")?
+                    .into_os_string(),
+                "worktree".into(),
+                "move".into(),
+                fixture.tree.as_os_str().to_owned(),
+                tree.as_os_str().to_owned(),
+            ];
+            let mut options =
+                ExecOptions::new(&move_argv, &fixture.project, Duration::from_secs(5));
+            options.env = Some(&env);
+            let out = executor.execute(options)?;
+            assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+            // Both the submitting process and its parent shell are inside the tree.
+            let mut options = ExecOptions::new(&argv, &tree, Duration::from_secs(30));
+            options.env = Some(&env);
+            options.stdout = StreamPolicy::Capture { limit: 65_536 };
+            options.stderr = StreamPolicy::Capture { limit: 65_536 };
+            let out = executor.execute(options)?;
+            assert_eq!(
+                out.termination,
+                Termination::Exit(0),
+                "{}\n{}",
+                String::from_utf8_lossy(&out.stdout.bytes),
+                String::from_utf8_lossy(&out.stderr.bytes)
+            );
+            return Ok(());
+        };
+        let project = root.join("project");
+        let tree = project.join("writer");
+        let prompt = root.join("prompt.md");
+        std::fs::write(&prompt, "reply OK")?;
+        with_edge(
+            &root,
+            &tree,
+            |edge| -> Result<(), Box<dyn std::error::Error>> {
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(edge.roots.state.as_path())?;
+                provenant_config::bind_project(
+                    edge.roots,
+                    provenant_config::ProjectLocation::new(project.join(".git"))?,
+                )?;
+                provenant_config::bind_host(edge.roots)?;
+                let clock = SystemClock::new();
+                let cancel = CancelToken::new();
+                let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+                let session = open(edge, &call).map_err(|fail| fail.message)?;
+                let command = |operation| {
+                    parsed_run(&[
+                        "--operation-id",
+                        operation,
+                        "--model",
+                        "codex/gpt-6-luna",
+                        "--mode",
+                        "worktree-write",
+                        "--worktree",
+                        tree.to_str().unwrap(),
+                        "--prompt-file",
+                        prompt.to_str().unwrap(),
+                    ])
+                    .map(|mut command| {
+                        command.wait = None;
+                        command
+                    })
+                };
+                let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+                let switch = |args: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
+                    let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
+                        .chain(args.iter().map(OsString::from))
+                        .collect();
+                    let out =
+                        executor.execute(ExecOptions::new(&argv, &tree, Duration::from_secs(5)))?;
+                    assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+                    Ok(())
+                };
+                switch(&["switch", "--detach"])?;
+                let detached = dispatch(command("detached-tree")?, edge);
+                assert_eq!(detached.result.status, Status::Refused);
+                let message = &detached
+                    .result
+                    .error
+                    .as_ref()
+                    .ok_or("detached error")?
+                    .message;
+                assert!(message.contains("detached HEAD at"), "{message}");
+                assert!(
+                    message.contains("remove --worktree and pass --mode read-only"),
+                    "{message}"
+                );
+                assert!(
+                    session
+                        .store
+                        .operation(&"detached-tree".parse()?, &call)?
+                        .is_none()
+                );
+                switch(&["switch", "writer"])?;
+                let admitted = dispatch(command("free-tree")?, edge);
+                assert_eq!(
+                    admitted.result.status,
+                    Status::Ok,
+                    "{:?}",
+                    admitted.result.error
+                );
+                let run_id = admitted.result.data["run_id"].clone();
+                assert!(!run_id.is_null(), "{:?}", admitted.result.data);
+                let holder = AttemptId::from_bytes([7; 16]);
+                let held = worktrees::with_context(
+                    edge.roots,
+                    edge.home,
+                    &project,
+                    &clock,
+                    &cancel,
+                    |context| {
+                        let verified = provenant_confinement::verify_worktree(context.repo, &tree)?;
+                        let info = worktrees::list(context, &cancel)?
+                            .into_iter()
+                            .find(|info| info.path == tree)
+                            .ok_or(worktrees::WorktreeError::NotFound)?;
+                        let (directory, binding) = worktrees::writer_custody(
+                            context.project_state,
+                            &verified,
+                            &provenant_confinement::repo::GitRefName::branch("writer").unwrap(),
+                            info.head,
+                            || {
+                                Ok(provenant_confinement::run_utility(
+                                    context.executor,
+                                    provenant_confinement::GitRead::WorktreeList,
+                                    context.repo,
+                                    context.utility,
+                                    context.utility_budget,
+                                    &cancel,
+                                )?
+                                .stdout
+                                .bytes)
+                            },
+                        )?;
+                        worktrees::save_owner(
+                            &verified,
+                            &WorktreeOwner {
+                                attempt_id: Some(holder),
+                                operation_id: Some("holder".parse().unwrap()),
+                                branch: "writer".into(),
+                                base: info.head.to_string(),
+                                host: provenant_config::bind_host(edge.roots).unwrap(),
+                                created_at: WallTime::from_micros(1).unwrap(),
+                                origin: WorktreeOrigin::Lane,
+                                label: None,
+                            },
+                        )?;
+                        Ok((directory, binding))
+                    },
+                )?;
+                let lease = custody::acquire_writer(
+                    held.0,
+                    Scope {
+                        run: RunId::from_bytes([7; 16]),
+                        attempt: holder,
+                        generation: 1,
+                    },
+                    held.1,
+                    provenant_core::WaitBudget::cli(clock.mono_now(), 1)?,
+                    &cancel,
+                    &clock,
+                )?;
+                let busy = dispatch(command("busy-tree")?, edge);
+                assert_eq!(busy.result.status, Status::Refused);
+                let message = &busy.result.error.as_ref().ok_or("busy error")?.message;
+                assert!(
+                    message.contains(&format!(
+                        "worktree writer is busy, held by attempt {holder}"
+                    )),
+                    "{message}"
+                );
+                assert!(
+                    session
+                        .store
+                        .operation(&"busy-tree".parse()?, &call)?
+                        .is_none()
+                );
+                let replay = dispatch(command("free-tree")?, edge);
+                assert_eq!(
+                    replay.result.status,
+                    Status::Ok,
+                    "{:?}",
+                    replay.result.error
+                );
+                assert_eq!(replay.result.data["run_id"], run_id);
+                drop(lease);
+                Ok(())
+            },
+        )??;
+        Ok(())
     }
 
     #[test]

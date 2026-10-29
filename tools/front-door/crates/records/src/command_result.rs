@@ -14,6 +14,9 @@ pub enum Outcome {
     /// The request was accepted but its effect has not happened yet, such as
     /// a merge queued by the repository.
     Pending,
+    /// A wait ended before the work settled. The work continues, so this is
+    /// not a failure: the caller polls or waits again.
+    Waiting,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct CommandError {
