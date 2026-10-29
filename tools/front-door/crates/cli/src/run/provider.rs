@@ -3075,6 +3075,16 @@ mod tests {
         std::fs::create_dir_all(private_common.join("refs"))?;
         std::fs::write(private_common.join("HEAD"), b"ref: refs/heads/writer\n")?;
         std::fs::copy(project.join(".git/config"), private_common.join("config"))?;
+        let private_objects = publishing_paths.temporary.join("candidate-0/git-objects");
+        std::fs::create_dir_all(private_objects.join("info"))?;
+        std::fs::write(
+            private_objects.join("info/alternates"),
+            format!("{}\n", project.join(".git/objects").display()),
+        )?;
+        let shared_config = std::fs::read(project.join(".git/config"))?;
+        let shared_index = std::fs::read(project.join(".git/index"))?;
+        let shared_refs = std::fs::read_dir(project.join(".git/refs/heads"))?.count();
+
         std::fs::write(
             worktree.join("private-blob-fixture"),
             b"publishing private object fixture\n",
@@ -3106,6 +3116,16 @@ mod tests {
                 .is_file()
         );
         assert!(!project.join(".git/objects").join(&object).exists());
+        assert_eq!(std::fs::read(project.join(".git/config"))?, shared_config);
+        assert_eq!(std::fs::read(project.join(".git/index"))?, shared_index);
+        assert_eq!(
+            std::fs::read_dir(project.join(".git/refs/heads"))?.count(),
+            shared_refs
+        );
+        let credential = run_git(&["config", "--get", "credential.helper"])?;
+        assert_eq!(credential.termination, Termination::Exit(0));
+        assert!(String::from_utf8_lossy(&credential.stdout.bytes).contains("auth git-credential"));
+
         let shim = publishing_paths.temporary.join("candidate-0/bin/gh");
         let run_shim = |label: &str| {
             use provenant_os::exec::{ExecOptions, Executor};

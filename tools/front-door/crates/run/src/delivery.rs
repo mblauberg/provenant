@@ -16,7 +16,6 @@ use std::{
     ffi::{OsStr, OsString},
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
-    sync::Mutex,
     time::Duration,
 };
 
@@ -26,9 +25,8 @@ pub struct HostDeliveryContext {
     environment: Vec<(Vec<u8>, Vec<u8>)>,
     tools: Option<HostTools>,
     bound: Option<BoundDelivery>,
-    /// Verification belongs to one host operation and never crosses handoff.
     #[serde(skip)]
-    verification: Mutex<crate::objects::VerificationCache>,
+    cancellation: Option<provenant_core::CancelToken>,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BoundDelivery {
@@ -76,14 +74,14 @@ fn publish_pickup(
         .require_durable()
         .map_err(RunError::from)
 }
-// Verification is operation-local host state, absent from handoffs and equality.
+// Runtime cancellation is host-local, absent from handoffs and equality.
 impl Clone for HostDeliveryContext {
     fn clone(&self) -> Self {
         Self {
             environment: self.environment.clone(),
             tools: self.tools.clone(),
             bound: self.bound.clone(),
-            verification: Mutex::default(),
+            cancellation: self.cancellation.clone(),
         }
     }
 }
@@ -103,6 +101,11 @@ impl std::fmt::Debug for HostDeliveryContext {
 }
 
 impl HostDeliveryContext {
+    pub(crate) fn cancellable(&self, cancel: &provenant_core::CancelToken) -> Self {
+        let mut context = self.clone();
+        context.cancellation = Some(cancel.clone());
+        context
+    }
     /// Integration authority never includes the default or primary checkout ref.
     pub fn validate_integration_target(project: &Path, target: &str) -> Result<()> {
         let branch = target.strip_prefix("origin/").unwrap_or(target);
@@ -424,7 +427,7 @@ impl HostDeliveryContext {
                 .collect(),
             bound: None,
             tools: None,
-            verification: Mutex::default(),
+            cancellation: None,
         }
     }
     /// Preserve normal host credential/config discovery without Git's ambient
@@ -490,7 +493,6 @@ impl HostDeliveryContext {
         request: &WriterDeliveryRequest,
         fetch: bool,
     ) -> Result<Self> {
-        self.verification = Mutex::default();
         validate(request)?;
         self.host_environment(writer)?;
         let stage = Stage::Prepare;
@@ -712,40 +714,20 @@ impl HostDeliveryContext {
         Ok(())
     }
 
-    /// Refresh under setup custody and use the verified remote-advertised object ID.
+    /// Refresh and use the remote-advertised OID. Git serialises each ref
+    /// transaction; a later integration publishes with an explicit lease.
     fn refresh_target_and_resolve(
         &self,
         writer: &WriterRequest,
         branch: &str,
         stage: Stage,
     ) -> Result<String> {
-        use provenant_core::{CancelToken, Clock, WaitBudget};
-        use provenant_os::{clock::SystemClock, fs::LockMode};
         let branch_ref = GitRefName::branch(branch).map_err(|_| RunError::Delivery(stage))?;
         let common = self.command(
             &writer.worktree,
             "git",
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
             stage,
-        )?;
-        let directory = Directory::open_anchor(Path::new(&common))?;
-        let name = OsStr::new("provenant-lane-setup.lock");
-        match directory.create_new(name) {
-            Ok(file) => {
-                file.sync()?;
-                directory.sync()?;
-            }
-            Err(failure) if failure.is_exists() => {}
-            Err(failure) => return Err(failure.into()),
-        }
-        let clock = SystemClock;
-        let cancel = CancelToken::new();
-        let _lock = directory.lock(
-            name,
-            LockMode::Exclusive,
-            WaitBudget::cli(clock.mono_now(), 120).map_err(|_| RunError::Delivery(stage))?,
-            &cancel,
-            &clock,
         )?;
         crate::writer::verify_writer_git_paths(Path::new(&common), &branch_ref)?;
         self.validate_transport_helpers(writer)?;
@@ -1060,6 +1042,8 @@ impl HostDeliveryContext {
             None
         };
         let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(30));
+        options.cancel = self.cancellation.as_ref();
+        options.process_group = true;
         options.env = Some(&environment);
         options.stdin = Some(input);
         let commit_log = tool == "git" && args.first() == Some(&"log");
@@ -1133,11 +1117,15 @@ impl HostDeliveryContext {
             .and_then(|bound| bound.common_git_dir.clone())
             .map(Ok)
             .unwrap_or_else(|| self.trusted_common_git_dir(writer, stage))?;
-        self.verification
-            .lock()
-            .map_err(|_| RunError::Delivery(stage))?
-            .verify_graph(git, &common, &writer.project, head)
-            .map_err(|_| RunError::Delivery(stage))
+        crate::objects::require_commit(
+            git,
+            &common,
+            &writer.project,
+            head,
+            self.bound.as_ref().map(|bound| bound.base_head),
+            self.cancellation.as_ref(),
+        )
+        .map_err(|_| RunError::Delivery(stage))
     }
     fn trusted_common_git_dir(&self, writer: &WriterRequest, stage: Stage) -> Result<PathBuf> {
         // Old handoffs have no sealed common directory. Resolve through the
@@ -1206,61 +1194,19 @@ impl HostDeliveryContext {
         Ok(cap_pr_body(format!("{identity}\n\n{commits}")))
     }
 
-    /// Serialise by destination in the common Git directory. merge-tree and
-    /// commit-tree create objects only; CAS publishes after a conflict-free
-    /// result, so conflicts never leave an index, sequencer or checkout changed.
+    /// Prepare objects without changing a checkout, then publish optimistically
+    /// with an expected-old ref or explicit remote lease. A competing update
+    /// refuses publication and can be retried through explicit host pickup.
     pub(super) fn integrate(
         &self,
         writer: &WriterRequest,
         request: &WriterDeliveryRequest,
         head: GitOid,
     ) -> Result<()> {
-        use provenant_core::{CancelToken, Clock, WaitBudget};
-        use provenant_os::{clock::SystemClock, fs::LockMode};
         let stage = Stage::Integrate;
         self.refuse_protected_target(writer, &request.branch)
             .map_err(|_| RunError::Delivery(stage))?;
         let bound = self.bound.as_ref().ok_or(RunError::Delivery(stage))?;
-        let common = self.command(
-            &writer.worktree,
-            "git",
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            stage,
-        )?;
-        let directory =
-            Directory::open_anchor(Path::new(&common)).map_err(|_| RunError::Delivery(stage))?;
-        let clock = SystemClock;
-        let cancel = CancelToken::new();
-        let lock_name = format!(
-            "provenant-integrate-{}.lock",
-            provenant_core::hex(
-                provenant_records::CanonicalV1::file_digest(
-                    format!("{}/{}", request.remote, request.branch).as_bytes()
-                )
-                .bytes()
-            )
-        );
-        // Establish the owner inode before concurrent acquisitions. Native
-        // macOS can refuse a racing O_CREAT open with ENOENT.
-        match directory.create_new(OsStr::new(&lock_name)) {
-            Ok(file) => {
-                file.sync()?;
-                directory.sync()?;
-            }
-            Err(error) if error.is_exists() => {}
-            Err(_) => return Err(RunError::Delivery(stage)),
-        }
-        let _lock = directory
-            .lock_existing(
-                OsStr::new(&lock_name),
-                LockMode::Exclusive,
-                // Each of at most 24 commands under this lock has a 30s deadline.
-                WaitBudget::cli(clock.mono_now(), 24 * 30 + 60)
-                    .map_err(|_| RunError::Delivery(stage))?,
-                &cancel,
-                &clock,
-            )
-            .map_err(|_| RunError::Delivery(stage))?;
         self.refuse_protected_target(writer, &request.branch)
             .map_err(|_| RunError::Delivery(stage))?;
         self.verify_objects(writer, head, stage)?;
@@ -2016,7 +1962,6 @@ impl crate::RunStore {
             }
         }
         let host = host.prepare(&writer, &request)?;
-        diagnose_legacy_git_policy(&attempt, &format!("Run {} Attempt {id}", record.run_id))?;
         host.clean(&writer)?;
         if host.head(&writer)? != head {
             return Err(RunError::Validation(
@@ -2067,13 +2012,6 @@ impl crate::RunStore {
     }
 }
 
-fn diagnose_legacy_git_policy(attempt: &Directory, identity: &str) -> Result<()> {
-    if crate::objects::legacy_policy(attempt)? {
-        crate::objects::legacy_policy_diagnostic(identity);
-    }
-    Ok(())
-}
-
 /// The live holder calls this only after success and confinement checks. A
 /// sealed start marker prevents repeating external effects after interruption.
 pub(crate) fn deliver_once(
@@ -2083,16 +2021,10 @@ pub(crate) fn deliver_once(
     attempt: &Directory,
     identity: &str,
 ) -> Result<WriterDeliveryReceipt> {
-    *host
-        .verification
-        .lock()
-        .map_err(|_| RunError::Delivery(Stage::Prepare))? =
-        crate::objects::VerificationCache::default();
     if let Some(raw) = crate::artifacts::read_sealed(attempt, "delivery.json", crate::RECORD_LIMIT)?
     {
         return crate::db::decode(&raw);
     }
-    diagnose_legacy_git_policy(attempt, identity)?;
     if host
         .bound
         .as_ref()

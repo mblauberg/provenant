@@ -1113,3 +1113,24 @@ pub fn advance_attempt(
 ) -> crate::custody::Result<()> {
     writer.advance_with(next, &RecordedBootObserver)
 }
+
+/// Bind an unlaunched fixture reservation to its owned attempt directory.
+pub fn bind_writer_attempt(
+    mut lease: crate::custody::CustodyLease,
+    attempt: &provenant_os::fs::Directory,
+) -> crate::custody::Result<crate::custody::CustodyLease> {
+    let metadata = attempt.metadata()?;
+    lease.reservation.attempt_device = Some(metadata.device);
+    lease.reservation.attempt_inode = Some(metadata.inode);
+    lease.reservation.launch_state = crate::custody::LaunchState::NeverSpawned;
+    lease.reservation.unresolved_cleanup = false;
+    lease.reservation.census_incomplete = false;
+    crate::custody::write_record(
+        &lease.directory,
+        "reservation.json",
+        &lease.reservation,
+        provenant_os::fs::PublishMode::Replace,
+    )?
+    .require_durable()?;
+    Ok(lease)
+}

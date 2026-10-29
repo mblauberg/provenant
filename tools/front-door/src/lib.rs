@@ -461,6 +461,21 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Internal(provenant_cli::Internal::Supervise { descriptors }) => {
             supervise(&descriptors, globals, process)
         }
+        Command::Internal(provenant_cli::Internal::Settle { request }) => {
+            match provenant_run::settlement::resume(
+                &request,
+                &provenant_cli::run::Registry::default(),
+            ) {
+                Ok(()) => 0,
+                Err(error) => fail(
+                    &inv.leaf,
+                    Outcome::Error,
+                    "SETTLEMENT",
+                    &error.to_string(),
+                    globals,
+                ),
+            }
+        }
         Command::Internal(provenant_cli::Internal::ProviderUpdates) => {
             match roots::resolve(globals, Workspace::Project, Product::Required) {
                 Ok(resolved) => match provenant_cli::provider_updates::housekeep(

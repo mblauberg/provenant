@@ -1,11 +1,11 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Advisory CI signal: stress-run the tests a pull request added or changed.
 #   run-stress-tests <base> [<head>]
 # Runs nextest with --stress-count 20 and no retries over just those tests,
 # stopped after STRESS_DURATION (default 15m) so a large diff cannot outrun
 # the job timeout and lose its log. Reaching the budget is not a failure.
 # A failure becomes a warning annotation and summary; the script always exits 0.
-set -eu
+set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd -P)
 base=${1:?usage: run-stress-tests <base> [<head>]}
@@ -35,7 +35,7 @@ status=0
 $budget cargo nextest run --profile ci --workspace --locked \
   --features provenant-providers/recording \
   --stress-count "$count" --retries 0 --failure-output immediate \
-  --no-tests=pass -E "$filter" > "$log" 2>&1 || status=$?
+  --no-tests=pass -E "$filter" 2>&1 | tee "$log" || status=$?
 
 if [ "$status" -eq 0 ]; then
   tail -n 200 "$log"

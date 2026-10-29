@@ -43,8 +43,8 @@ fn ok(output: Output) -> String {
 }
 
 #[test]
-fn linked_lane_uses_private_objects_and_cannot_mutate_shared_objects() -> Result<(), Box<dyn Error>>
-{
+fn lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only()
+-> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = fs::canonicalize(temp.path())?;
     let home = root.join("home");
@@ -365,6 +365,7 @@ fn linked_lane_uses_private_objects_and_cannot_mutate_shared_objects() -> Result
         lane_objects.join("info/alternates"),
         format!("{}\n", repo_git.join("objects").display()),
     )?;
+    let shared_index = fs::read(linked.repo().private_git_dir().join("index"))?;
     let private_common = scratch.join("git-common");
     fs::create_dir_all(private_common.join("objects"))?;
     fs::create_dir_all(private_common.join("refs/heads/lane"))?;
@@ -390,6 +391,7 @@ fn linked_lane_uses_private_objects_and_cannot_mutate_shared_objects() -> Result
         format!("# pack-refs with: sorted\n{refs}"),
     )?;
     fs::write(private_common.join("refs/heads/lane/test"), &oid)?;
+    fs::write(private_common.join("index"), &shared_index)?;
     let mut paths = required_anchors(&plan, &profile, Some((&linked, &selected)));
     paths.insert(push.clone());
     let directories = paths
@@ -446,7 +448,14 @@ fn linked_lane_uses_private_objects_and_cannot_mutate_shared_objects() -> Result
             .env("GIT_CONFIG_VALUE_0", "0")
             .env("GIT_CONFIG_KEY_1", "maintenance.auto")
             .env("GIT_CONFIG_VALUE_1", "false")
-            .env("GIT_INDEX_FILE", private.join("index"))
+            .env(
+                "GIT_INDEX_FILE",
+                if overlay {
+                    private_common.join("index")
+                } else {
+                    private.join("index")
+                },
+            )
             .env("GIT_WORK_TREE", &lane)
             .env("HOME", &home)
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -531,6 +540,8 @@ fn linked_lane_uses_private_objects_and_cannot_mutate_shared_objects() -> Result
         assert_eq!(fs::read(target)?, before);
     }
     for name in [
+        "index",
+        "index.lock",
         "HEAD",
         "HEAD.lock",
         "FETCH_HEAD",
@@ -549,6 +560,24 @@ fn linked_lane_uses_private_objects_and_cannot_mutate_shared_objects() -> Result
             "actual linked metadata {name} must stay immutable: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+    for relative in [
+        "config",
+        "refs/heads/lane/test",
+        "hooks/pre-commit",
+        "info/exclude",
+    ] {
+        let target = repo_git.join(relative);
+        assert!(target.parent().is_some_and(Path::is_dir));
+        let before = fs::read(&target).ok();
+        let output = shell("printf replacement > \"$1\"", &target, &scratch);
+        assert!(
+            !output.status.success()
+                && String::from_utf8_lossy(&output.stderr).contains("Operation not permitted"),
+            "shared {relative} write was not refused by Seatbelt: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(&target).ok(), before);
     }
     // Positive control: all executable probes must be able to mutate scratch.
     for script in [
@@ -637,13 +666,31 @@ fn linked_lane_uses_private_objects_and_cannot_mutate_shared_objects() -> Result
             .join(&lane_blob[2..])
             .exists()
     );
+    fs::write(lane.join("lane-blob"), "stashed lane edit\n")?;
+    ok(run(&["stash", "push", "-m", "private index stash"]));
+    assert_eq!(fs::read(lane.join("lane-blob"))?, b"private lane blob\n");
+    ok(run(&["stash", "pop"]));
+    assert_eq!(fs::read(lane.join("lane-blob"))?, b"stashed lane edit\n");
+    ok(run(&["add", "lane-blob"]));
+    ok(run(&["commit", "-m", "stashed edit"]));
+    ok(run(&["rebase", "FETCH_HEAD"]));
+    assert_eq!(
+        ok(run(&["symbolic-ref", "HEAD"])).trim(),
+        "refs/heads/lane/test"
+    );
+    ok(run(&["switch", "-c", "lane-merge-side", "FETCH_HEAD"]));
+    fs::write(lane.join("merge-side"), "private merge side\n")?;
+    ok(run(&["add", "merge-side"]));
+    ok(run(&["commit", "-m", "merge side"]));
+    ok(run(&["switch", "lane/test"]));
     ok(run(&[
         "merge",
         "--no-ff",
         "-m",
-        "merge fetched head",
-        "FETCH_HEAD",
+        "private merge",
+        "lane-merge-side",
     ]));
+    assert_eq!(fs::read(lane.join("merge-side"))?, b"private merge side\n");
     assert_eq!(fs::read(lane.join("upstream"))?, b"fetched blob\n");
     ok(run(&[
         "-c",
@@ -820,54 +867,6 @@ fn linked_lane_uses_private_objects_and_cannot_mutate_shared_objects() -> Result
         )),
         ok(run(&["rev-parse", "FETCH_HEAD"]))
     );
-    // The sole shared write exception must not reopen object content through
-    // a symlink at its allowed pathname. Run after Git releases index.lock.
-    let index_alias = private.join("index.lock");
-    for target in &shared_objects {
-        assert!(fs::symlink_metadata(&index_alias).is_err());
-        let before = fs::read(target)?;
-        let mode = fs::metadata(target)?.permissions().mode();
-        let created = shell("/bin/ln -s \"$1\" \"$2\"", target, &index_alias);
-        if created.status.success() {
-            assert!(created.stdout.is_empty() && created.stderr.is_empty());
-            assert!(fs::symlink_metadata(&index_alias)?.file_type().is_symlink());
-            assert_eq!(fs::read_link(&index_alias)?, *target);
-            for script in [
-                "printf replacement > \"$1\"",
-                ": > \"$1\"",
-                "/bin/chmod 600 \"$1\"",
-                "/bin/chmod 600 \"$1\" && printf replacement > \"$1\"",
-            ] {
-                let output = shell(script, &index_alias, &scratch.join("replacement"));
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                assert!(
-                    !output.status.success()
-                        && output.stdout.is_empty()
-                        && !stderr.is_empty()
-                        && stderr
-                            .lines()
-                            .all(|line| line.contains("Operation not permitted")),
-                    "shared object index alias bypass for {}: {stderr}",
-                    target.display()
-                );
-                assert_eq!(fs::read(target)?, before);
-                assert_eq!(fs::metadata(target)?.permissions().mode(), mode);
-            }
-            fs::remove_file(&index_alias)?;
-        } else {
-            let stderr = String::from_utf8_lossy(&created.stderr);
-            assert!(
-                created.stdout.is_empty()
-                    && !stderr.is_empty()
-                    && stderr
-                        .lines()
-                        .all(|line| line.contains("Operation not permitted")),
-                "index alias creation failed without a native denial: {stderr}"
-            );
-            assert!(fs::symlink_metadata(&index_alias).is_err());
-        }
-        assert_eq!(fs::read(target)?, before);
-        assert_eq!(fs::metadata(target)?.permissions().mode(), mode);
-    }
+    assert_eq!(fs::read(private.join("index"))?, shared_index);
     Ok(())
 }
