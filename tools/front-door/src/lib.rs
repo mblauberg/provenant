@@ -417,6 +417,29 @@ fn config_command(
         }
     }
 }
+/// Unsupported pool efforts are advisory at load and remain visible in
+/// routine diagnostics with the origin recorded for each configured value.
+pub(crate) fn pool_effort_warnings(roots: &provenant_core::Roots) -> Vec<String> {
+    let Ok(config) = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
+    else {
+        return Vec::new();
+    };
+    let Ok(catalogue) = provenant_routing::Catalogue::bundled() else {
+        return Vec::new();
+    };
+    config
+        .domains
+        .routing
+        .pool_effort_warnings_with_sources(&catalogue, |key| match config.origins.get(key) {
+            Some(provenant_config::Origin::User { .. }) => {
+                format!("config.toml ({key})")
+            }
+            Some(provenant_config::Origin::Compiled { profile }) => {
+                format!("compiled {profile:?} profile ({key})")
+            }
+            None => format!("compiled defaults ({key})"),
+        })
+}
 /// Registered account settings, read through the binary's domain aggregate.
 fn account_settings(
     roots: &provenant_core::Roots,

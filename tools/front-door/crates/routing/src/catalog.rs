@@ -262,18 +262,57 @@ impl Default for PacingReserve {
     }
 }
 impl RoutingConfig {
-    /// One warning per configured pool member whose efforts the catalogue no
-    /// longer lists. The efforts are dropped at resolution; this only reports.
+    /// Dispatch warning for each configured pool member whose efforts no
+    /// longer appear in the catalogue. The efforts are dropped at resolution.
     pub fn pool_effort_warnings(&self, catalogue: &Catalogue) -> Vec<String> {
+        self.pools
+            .iter()
+            .flat_map(|(name, members)| {
+                members.iter().enumerate().filter_map(move |(index, member)| {
+                    let (_, dropped) = member.reconciled(catalogue.model(&member.model));
+                    (!dropped.is_empty()).then(|| {
+                        format!(
+                            "warning: domains.routing.pools.{name}[{index}].efforts: {} does not list {}; dropped",
+                            member.model.as_str(),
+                            dropped.join(", ")
+                        )
+                    })
+                })
+            })
+            .collect()
+    }
+
+    /// As above, including the origin of each configured value for diagnostics.
+    pub fn pool_effort_warnings_with_sources(
+        &self,
+        catalogue: &Catalogue,
+        mut source: impl FnMut(&str) -> String,
+    ) -> Vec<String> {
         let mut warnings = Vec::new();
         for (name, members) in &self.pools {
             for (index, member) in members.iter().enumerate() {
                 let (_, dropped) = member.reconciled(catalogue.model(&member.model));
-                if !dropped.is_empty() {
+                let member_path = format!("domains.routing.pools.{name}.{index}");
+                for effort in dropped {
+                    let mut value_sources = Vec::new();
+                    if member.effort.as_deref() == Some(effort.as_str()) {
+                        value_sources.push(format!(
+                            "effort source: {}",
+                            source(&format!("{member_path}.effort"))
+                        ));
+                    }
+                    if member.efforts.iter().any(|value| value == &effort) {
+                        value_sources.push(format!(
+                            "efforts source: {}",
+                            source(&format!("{member_path}.efforts"))
+                        ));
+                    }
                     warnings.push(format!(
-                        "warning: domains.routing.pools.{name}[{index}].efforts: {} does not list {}; dropped",
+                        "warning: domains.routing.pools.{name}[{index}].efforts: pool {name} effort {effort} for model {} is unsupported and will be dropped (pool source: {}; model source: {}; {})",
                         member.model.as_str(),
-                        dropped.join(", ")
+                        source(&format!("domains.routing.pools.{name}")),
+                        source(&format!("{member_path}.model")),
+                        value_sources.join("; "),
                     ));
                 }
             }
