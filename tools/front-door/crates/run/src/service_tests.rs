@@ -68,7 +68,6 @@ fn peer_wait_views_remain_settling_until_terminal_custody_is_released() -> TestR
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)]
 fn dispatch_validates_review_commits() -> TestResult {
     let temp = tempfile::tempdir()?;
     let root = std::fs::canonicalize(temp.path())?;
@@ -601,24 +600,33 @@ fn each_refusal_has_its_own_stable_code() {
             "CONFINEMENT",
         ),
         (RunError::Refused, "REFUSED"),
-        (RunError::DiskFloor { free: 1, floor: 2 }, "DISK_FLOOR"),
         (
-            RunError::MemoryPressure {
+            RunError::Admission(AdmissionError::Disk { free: 1, floor: 2 }),
+            "DISK_FLOOR",
+        ),
+        (
+            RunError::Admission(AdmissionError::MemoryPressure {
                 level: "critical".into(),
-            },
+            }),
             "MEMORY_PRESSURE",
         ),
         (
-            RunError::LaneCap {
+            RunError::Admission(AdmissionError::LaneCap {
                 active: 3,
                 limit: 3,
                 scope: "host",
-            },
+            }),
             "LANE_CAP",
         ),
-        (RunError::BuildSettings, "BUILD_SETTINGS"),
-        (RunError::GuardianIdentityUnavailable, "GUARDIAN_IDENTITY"),
-        (RunError::HostClock, "HOST_CLOCK"),
+        (
+            RunError::Admission(AdmissionError::BuildSettings),
+            "BUILD_SETTINGS",
+        ),
+        (
+            RunError::Admission(AdmissionError::GuardianIdentity),
+            "GUARDIAN_IDENTITY",
+        ),
+        (RunError::Admission(AdmissionError::Clock), "HOST_CLOCK"),
         (
             RunError::WriterRefLocked("ref.lock".into()),
             "WRITER_REF_LOCKED",

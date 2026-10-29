@@ -18,6 +18,7 @@ mod paths;
 pub use paths::*;
 mod roots;
 pub use roots::*;
+pub mod retry;
 
 /// Validate a user-facing task title. The limit is measured in UTF-8 bytes.
 pub fn validate_task_title(title: &str) -> Result<(), &'static str> {

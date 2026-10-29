@@ -229,20 +229,7 @@ impl Resources for LaneResources<'_> {
 }
 fn custody_error(error: RunError) -> CustodyError {
     match error {
-        RunError::HostClock => CustodyError::AdmissionClock,
-        RunError::BuildSettings => CustodyError::AdmissionBuildSettings,
-        RunError::GuardianIdentityUnavailable => CustodyError::AdmissionGuardianIdentity,
-        RunError::DiskFloor { free, floor } => CustodyError::AdmissionDisk { free, floor },
-        RunError::MemoryPressure { level } => CustodyError::AdmissionMemoryPressure { level },
-        RunError::LaneCap {
-            active,
-            limit,
-            scope,
-        } => CustodyError::AdmissionLaneCap {
-            active,
-            limit,
-            scope,
-        },
+        RunError::Admission(error) => CustodyError::Admission(error),
         other => CustodyError::Io(std::io::Error::other(other.to_string())),
     }
 }
@@ -558,7 +545,7 @@ impl RunStore {
             return self.recover_terminal(id, exit, call);
         }
         let (mut settlement, retry_limit) =
-            match crate::settlement::Guard::claim(attempt, exit.scope) {
+            match crate::settlement::Guard::claim(attempt, exit.scope, call.clock) {
                 Ok(Some(driver)) => (Some(driver), false),
                 Ok(None) => return Err(RunError::Contention),
                 Err(RunError::ObjectImportLimit(_)) => (None, true),
@@ -1202,20 +1189,20 @@ mod host_clock_tests {
     #[test]
     fn admission_failures_reach_guardian_as_typed_causes() {
         assert!(matches!(
-            custody_error(RunError::BuildSettings),
-            CustodyError::AdmissionBuildSettings
+            custody_error(RunError::Admission(AdmissionError::BuildSettings)),
+            CustodyError::Admission(AdmissionError::BuildSettings)
         ));
         assert!(matches!(
-            custody_error(RunError::GuardianIdentityUnavailable),
-            CustodyError::AdmissionGuardianIdentity
+            custody_error(RunError::Admission(AdmissionError::GuardianIdentity)),
+            CustodyError::Admission(AdmissionError::GuardianIdentity)
         ));
     }
 
     #[test]
     fn an_unreadable_host_clock_reaches_the_guardian_as_itself() {
         assert!(matches!(
-            custody_error(RunError::HostClock),
-            CustodyError::AdmissionClock
+            custody_error(RunError::Admission(AdmissionError::Clock)),
+            CustodyError::Admission(AdmissionError::Clock)
         ));
         assert!(matches!(
             custody_error(RunError::Validation("wall clock")),
@@ -1288,14 +1275,14 @@ mod disk_admission_tests {
     #[test]
     fn disk_refusal_reaches_the_guardian_as_safe_numeric_evidence() {
         assert!(matches!(
-            custody_error(RunError::DiskFloor {
+            custody_error(RunError::Admission(AdmissionError::Disk {
                 free: 99,
                 floor: 100
-            }),
-            CustodyError::AdmissionDisk {
+            })),
+            CustodyError::Admission(AdmissionError::Disk {
                 free: 99,
                 floor: 100
-            }
+            })
         ));
     }
 }

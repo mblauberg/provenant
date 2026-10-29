@@ -841,7 +841,6 @@ mod tests {
 
     /// The table above can drift from Git; ask the installed Git directly.
     #[test]
-    #[allow(clippy::disallowed_methods)]
     fn branch_names_match_the_installed_git() {
         let Some(git) = provenant_os::git::git_executable() else {
             return;

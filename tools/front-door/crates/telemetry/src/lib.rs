@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 mod chair;
+mod claude;
 pub mod experiments;
 pub mod ingest;
 pub mod mileage;

@@ -43,7 +43,9 @@ pub struct ExperimentConfig {
     pub tiers: Vec<String>,
     pub budget_usd: Option<f64>,
     pub max_cost_ratio: Option<f64>,
-    pub expires: Option<String>,
+    /// RFC 3339 instant after which the experiment stops assigning.
+    #[serde(default, with = "provenant_core::rfc3339::option")]
+    pub expires: Option<provenant_core::WallTime>,
 }
 
 fn default_assign() -> String {

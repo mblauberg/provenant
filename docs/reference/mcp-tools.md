@@ -50,9 +50,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
             "const": "inspect"
           }
         },
-        "required": [
-          "op"
-        ],
+        "required": [],
         "type": "object"
       }
     ],
@@ -433,7 +431,6 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
           }
         },
         "required": [
-          "artifacts",
           "body",
           "kind",
           "op",

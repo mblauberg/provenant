@@ -328,13 +328,8 @@ impl HostDeliveryContext {
         use provenant_core::{CancelToken, Clock, WaitBudget};
         use provenant_os::{clock::SystemClock, fs::LockMode};
         let stage = Stage::Push;
-        let common = self.command(
-            project,
-            "git",
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            stage,
-        )?;
-        let directory = Directory::open_anchor(Path::new(&common))?;
+        let common = self.common_git_dir(project, stage)?;
+        let directory = Directory::open_anchor(&common)?;
         let clock = SystemClock;
         let cancel = CancelToken::new();
         let _lock = directory.lock(
@@ -798,13 +793,8 @@ impl HostDeliveryContext {
         stage: Stage,
     ) -> Result<String> {
         let branch_ref = GitRefName::branch(branch).map_err(|_| RunError::Delivery(stage))?;
-        let common = self.command(
-            &writer.worktree,
-            "git",
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            stage,
-        )?;
-        crate::writer::verify_writer_git_paths(Path::new(&common), &branch_ref)?;
+        let common = self.common_git_dir(&writer.project, stage)?;
+        crate::writer::verify_writer_git_paths(&common, &branch_ref)?;
         self.validate_transport_helpers(writer)?;
         let source = format!("refs/heads/{branch}");
         // Read and fetch the same sealed destination used for the later push.
@@ -1276,12 +1266,7 @@ impl HostDeliveryContext {
     }
     fn verify_objects(&self, writer: &WriterRequest, head: GitOid, stage: Stage) -> Result<()> {
         let git = &self.tools.as_ref().ok_or(RunError::Delivery(stage))?.git;
-        let common = self
-            .bound
-            .as_ref()
-            .and_then(|bound| bound.common_git_dir.clone())
-            .map(Ok)
-            .unwrap_or_else(|| self.trusted_common_git_dir(writer, stage))?;
+        let common = self.common_git_dir(&writer.project, stage)?;
         crate::objects::require_commit(
             git,
             &common,
@@ -1293,17 +1278,44 @@ impl HostDeliveryContext {
         .map_err(|_| RunError::Delivery(stage))
     }
     fn trusted_common_git_dir(&self, writer: &WriterRequest, stage: Stage) -> Result<PathBuf> {
-        // Old handoffs have no sealed common directory. Resolve through the
-        // protected host checkout, without installing the lane's GIT_DIR.
-        let mut host = self.clone();
-        host.bound = None;
-        let common = host.command(
-            &writer.project,
-            "git",
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            stage,
-        )?;
-        std::fs::canonicalize(common).map_err(|_| RunError::Delivery(stage))
+        self.discover_common_git_dir(&writer.project, stage)
+    }
+
+    pub(super) fn common_git_dir(&self, project: &Path, stage: Stage) -> Result<PathBuf> {
+        match self
+            .bound
+            .as_ref()
+            .and_then(|bound| bound.common_git_dir.clone())
+        {
+            Some(common) => Ok(common),
+            None => self.discover_common_git_dir(project, stage),
+        }
+    }
+
+    fn discover_common_git_dir(&self, project: &Path, stage: Stage) -> Result<PathBuf> {
+        // Use the validated host executable and checkout; never resolve through
+        // lane-writable Git metadata after delivery has been bound.
+        let failure = |reason: String| {
+            if stage == Stage::Prepare {
+                prepare_error("HEAD", reason)
+            } else {
+                RunError::Delivery(stage)
+            }
+        };
+        let git = &self
+            .tools
+            .as_ref()
+            .ok_or_else(|| failure("host tools are unavailable".into()))?
+            .git;
+        let executor = SystemExecutor::new(1).map_err(|error| failure(error.to_string()))?;
+        provenant_os::git::repository_path_with_cancel(
+            &executor,
+            git,
+            project,
+            provenant_os::git::RepositoryPath::CommonDir,
+            self.cancellation.as_ref(),
+        )
+        .map_err(|error| failure(error.to_string()))
     }
     fn clean(&self, writer: &WriterRequest) -> Result<()> {
         let path = writer.worktree.to_str().ok_or_else(|| {

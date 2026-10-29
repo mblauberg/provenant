@@ -894,6 +894,41 @@ fn unread_chair_sessions_are_counted_not_dropped() {
 }
 
 #[test]
+fn chair_cost_is_complete_only_when_every_session_is_read() {
+    use crate::usage::ChairSession;
+    let chair = |session: &str, unread| ChairSession {
+        adapter: "claude".into(),
+        account: crate::usage::UNATTRIBUTED.into(),
+        session: session.into(),
+        project: None,
+        config: None,
+        usage: Vec::new(),
+        unread,
+    };
+    let read = stats_with_chair([], [chair("a", None)], &prices(None), Window::default())
+        .unwrap()
+        .chair
+        .unwrap();
+    assert!(read.complete);
+    assert!(read.cost.complete.is_some());
+    let partly_read = stats_with_chair(
+        [],
+        [
+            chair("a", None),
+            chair("b", Some(crate::Unread::TranscriptUnreadable)),
+        ],
+        &prices(None),
+        Window::default(),
+    )
+    .unwrap()
+    .chair
+    .unwrap();
+    assert!(!partly_read.complete);
+    assert!(partly_read.cost.complete.is_none());
+    assert!(partly_read.cost.known_lower_bound.is_some());
+}
+
+#[test]
 fn groups_by_context_including_missing() {
     let mut first = fact(1, Some(10));
     first.context = Some(provenant_records::run::WorkContext {

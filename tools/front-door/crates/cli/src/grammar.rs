@@ -578,7 +578,7 @@ pub struct DispatchInput {
 #[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
 pub struct Dispatch {
     /// Expand and run a named pipeline preset
-    #[arg(long, requires = "prompt_file", conflicts_with_all = ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"])]
+    #[arg(long, requires = "prompt_file", conflicts_with_all = ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"])]
     pub preset: Option<String>,
     /// Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable
     #[arg(long = "set", requires = "preset")]
@@ -833,7 +833,7 @@ pub struct Lanes {
     /// Keep lanes submitted by this session (its agent label)
     #[arg(long, value_parser = session_label, conflicts_with = "all")]
     pub session: Option<String>,
-    /// Show every lane
+    /// Show every lane, newest first
     #[arg(long)]
     pub all: bool,
     /// Maximum lanes per page (1 to 100)
@@ -891,7 +891,7 @@ pub enum Part {
 }
 #[derive(Debug, Args)]
 pub struct Output {
-    /// Attempt ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT; receipt also accepts a unique RUN or RUN/TASK
+    /// Attempt ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT; a RUN or RUN/TASK reads its newest settled attempt, and receipt needs exactly one
     pub attempt: Attempt,
     /// Read a configured peer's own attempt, by label or host ID
     #[arg(long)]
@@ -899,6 +899,12 @@ pub struct Output {
     /// Which part to read
     #[arg(long, value_enum, default_value = "result")]
     pub part: Part,
+    /// Write the selected range to FILE, replacing it, instead of printing it
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["path", "trace"])]
+    pub to: Option<PathBuf>,
+    /// Print the attempt's artifact path for this part instead of its content
+    #[arg(long, conflicts_with_all = ["to", "trace", "offset", "tail", "max_bytes"])]
+    pub path: bool,
     /// Byte offset to start from
     #[arg(long, default_value = "0", conflicts_with = "tail")]
     pub offset: u64,
@@ -1110,7 +1116,7 @@ pub struct Stats {
     /// Restrict usage and cost to one run.
     #[arg(long)]
     pub run_id: Option<Target>,
-    /// Group supervised attempts by work context or merged pull request
+    /// Group supervised attempts by work context or merged pull request; attempts with no value form an `unattributed` group
     #[arg(long, value_enum, conflicts_with = "usage")]
     pub by: Option<StatsBy>,
     /// Include per-attempt detail
@@ -1324,7 +1330,11 @@ pub(crate) fn since(value: &str) -> Result<jiff::Timestamp, String> {
         if seconds <= 0 {
             return Err("duration must be positive".into());
         }
-        return jiff::Timestamp::now()
+        use provenant_core::Clock;
+        return provenant_os::clock::SystemClock::new()
+            .wall_now()
+            .map_err(|error| error.to_string())?
+            .as_timestamp()
             .checked_sub(jiff::SignedDuration::from_secs(seconds))
             .map_err(|error| error.to_string());
     }
@@ -1338,9 +1348,11 @@ mod target_tests {
 
     #[test]
     fn since_accepts_whole_seconds_only() {
-        let before = jiff::Timestamp::now();
+        use provenant_core::Clock;
+        let clock = provenant_os::clock::SystemClock::new();
+        let before = clock.wall_now().unwrap().as_timestamp();
         let start = since("86400").unwrap();
-        let after = jiff::Timestamp::now();
+        let after = clock.wall_now().unwrap().as_timestamp();
         let duration = jiff::SignedDuration::from_secs(86_400);
         assert!(start >= before.checked_sub(duration).unwrap());
         assert!(start <= after.checked_sub(duration).unwrap());

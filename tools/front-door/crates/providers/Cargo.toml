@@ -21,7 +21,7 @@ provenant-quota = { workspace = true }
 
 [features]
 # Enables the recorder example for collecting redacted replay fixtures.
-recording = []
+recording = ["provenant-os/fixture"]
 
 [dev-dependencies]
 provenant-os = { workspace = true, features = ["fixture"] }

@@ -79,7 +79,6 @@ impl Store {
     /// are opened read-only too; an unavailable WAL index fails closed.
     /// Filesystem calls are blocking. The deadline is checked between steps;
     /// callers needing a hard bound must run this off-thread with a timeout.
-    #[allow(clippy::disallowed_methods)]
     pub fn open_read_only(root: &StateRoot, deadline: std::time::Instant) -> Result<Option<Self>> {
         Self::open_local_delivery(root, deadline, false)
     }
@@ -104,7 +103,6 @@ impl Store {
         Self::open_local_delivery(root, deadline, true)
     }
 
-    #[allow(clippy::disallowed_methods)]
     pub(crate) fn open_local_delivery(
         root: &StateRoot,
         deadline: std::time::Instant,

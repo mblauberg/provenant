@@ -85,6 +85,19 @@ final class InboxClientTests: XCTestCase {
         }
     }
 
+    func testScheduledCallPreservesErrorsAndValidatesEnvelope() throws {
+        func output(_ json: String, status: Int32 = 1) -> CLI.Output {
+            CLI.Output(status: status, signalled: false, timedOut: false, truncated: false, out: Data(json.utf8), err: "fallback")
+        }
+        let failure = output(#"{"schema_version":1,"command":"console overview","status":"error","error":{"code":"broken","message":"Broken.","repair":"Repair it."}}"#)
+        XCTAssertThrowsError(try CLIClient.decode(failure, command: "console overview", as: InboxReceipt.self)) { error in
+            XCTAssertEqual((error as? ClientError)?.message, "Broken. Repair it.")
+        }
+        XCTAssertThrowsError(try CLIClient.decode(failure, command: "quota show", as: InboxReceipt.self)) { error in
+            guard case .malformed = error as? ClientError else { return XCTFail("expected malformed envelope") }
+        }
+    }
+
     func testUnreadableOutputIsTypedAndBounded() async {
         let garbage = CLIClient { _, _ in CLI.Output(status: 0, signalled: false, timedOut: false, truncated: false, out: Data("nope".utf8), err: "") }
         let big = CLIClient { _, _ in CLI.Output(status: 0, signalled: false, timedOut: false, truncated: true, out: Data(), err: "") }

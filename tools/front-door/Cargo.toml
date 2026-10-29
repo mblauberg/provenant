@@ -97,6 +97,7 @@ provenant-confinement = { workspace = true }
 provenant-sqlite = { workspace = true }
 
 [build-dependencies]
+provenant-os = { workspace = true }
 provenant-records = { workspace = true }
 toml_edit = { workspace = true }
 

@@ -2,8 +2,6 @@
 use super::*;
 
 impl Driver<'_> {
-    // Cleanup phases use bounded real-time windows around OS process events.
-    #[allow(clippy::disallowed_methods)]
     pub(super) fn persist_tracking(&mut self, warnings: &mut Vec<String>, omitted: &mut u64) {
         self.reservation.descendants = self.tracked.iter().take(128).cloned().collect();
         self.reservation.omitted_descendants = self.tracked.len().saturating_sub(128) as u64;

@@ -52,7 +52,7 @@ max_turns = 100
 [[domains.routing.model_policy.rules]]
 model = "opencode/opencode-go/deepseek-v4.1-flash"
 [domains.routing.model_policy.rules.schedule]
-expires = 1793491200
+expires = "2026-11-01T00:00:00Z"
 windows = [{ weekdays = [0, 1, 2, 3, 4], start_hour = 1, end_hour = 4 }, { weekdays = [0, 1, 2, 3, 4], start_hour = 6, end_hour = 10 }]
 [domains.routing.model_policy.rules.policy.cache]
 price_multiplier = 2.0
@@ -62,14 +62,16 @@ read_heavy_weight = 2
 model = "agy/gemini-3.8-flash"
 account = "agy/work"
 [domains.routing.model_policy.rules.schedule]
-expires = 1793491200
+expires = "2026-11-01T00:00:00Z"
 [domains.routing.model_policy.rules.policy.result]
 sections = ["## Findings", "## Evidence"]
 fallback = "codex/gpt-6-luna"
 fallback_effort = "high"
 ```
 
-Schedules may set `tz` to an IANA time zone; omitted `tz` uses UTC. Weekdays use Monday-based indexes, Monday `0` through Sunday `6`;
+`starts` and `expires` are quoted RFC 3339 timestamps in any offset; an
+unquoted number is the wrong type and drops the rule. Schedules may set `tz`
+to an IANA time zone; omitted `tz` uses UTC. Weekdays use Monday-based indexes, Monday `0` through Sunday `6`;
 an empty `weekdays` list matches every day. Window end hours are exclusive and
 overnight windows wrap midnight. Schedules are validated at load: `starts`
 must precede `expires`, `tz` must name an IANA zone, and each window needs
@@ -86,8 +88,9 @@ the replacement, such as
 `domains.routing.pacing_overrides.0: ignored invalid configuration (domain: moved_to_schedule.expires)`;
 other records still load. A rule that enforces a lane restriction refuses the
 configuration instead, at the retired key. Move `starts_unix_seconds` to
-`schedule.starts`, `expires_unix_seconds` to `schedule.expires` and a
-top-level `windows` to `schedule.windows`.
+`schedule.starts` and `expires_unix_seconds` to `schedule.expires`, each
+written as an RFC 3339 timestamp, and a top-level `windows` to
+`schedule.windows`.
 
 The bundled policy follows issues #2177 and #2185 and the repository's price
 table. These are adjustable operating defaults:

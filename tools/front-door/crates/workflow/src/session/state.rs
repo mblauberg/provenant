@@ -26,12 +26,15 @@ pub struct CommandPrefix {
     /// False when the directory cannot be quoted faithfully (not UTF-8, or
     /// holds control characters): no runnable command may then be shown.
     shown: bool,
+    /// The directory the hook ran in, quoted, for `--project`.
+    checkout: Option<String>,
 }
 impl Default for CommandPrefix {
     fn default() -> Self {
         Self {
             text: "provenant".into(),
             shown: true,
+            checkout: None,
         }
     }
 }
@@ -39,7 +42,13 @@ impl CommandPrefix {
     /// A relative directory is made absolute against `cwd` (where the hook
     /// ran) and quoted for a POSIX shell.
     pub fn new(state_dir: Option<&std::path::Path>, cwd: &std::path::Path) -> Self {
-        let mut prefix = Self::default();
+        let mut prefix = Self {
+            checkout: cwd
+                .to_str()
+                .filter(|s| !s.chars().any(char::is_control))
+                .map(shell_quote),
+            ..Self::default()
+        };
         if let Some(state) = state_dir {
             match cwd
                 .join(state)
@@ -62,6 +71,21 @@ impl CommandPrefix {
     pub fn runnable(&self, rest: &str) -> Option<String> {
         let command = format!("{} {rest}", self.text);
         (self.shown && clean(&command, NEXT_PAGE_LIMIT) == command).then_some(command)
+    }
+
+    /// ` --project DIR` naming the hook's checkout, so a save reaches this
+    /// project from any directory the agent is in. Empty when the path would
+    /// not survive rendering.
+    pub fn project_flag(&self) -> String {
+        let Some(checkout) = &self.checkout else {
+            return String::new();
+        };
+        let flag = format!(" --project {checkout}");
+        if clean(&flag, NEXT_PAGE_LIMIT) == flag {
+            flag
+        } else {
+            String::new()
+        }
     }
 
     /// The command, or a plain note when the directory cannot be shown safely.
@@ -210,8 +234,12 @@ impl SessionState {
             }),
         }
         };
+        // A lane section with no lanes and no partial note is omitted: an empty
+        // count says nothing the agent can act on.
         if !self.unavailable.iter().any(|name| name == "lanes") {
-            sections.push(lanes("Lanes in flight", &self.active, &self.active_more));
+            if !self.active.is_empty() || self.active_more.is_some() {
+                sections.push(lanes("Lanes in flight", &self.active, &self.active_more));
+            }
             let mut settled = lanes(
                 "Lanes settled since the last chair save",
                 &self.settled,
@@ -244,7 +272,9 @@ impl SessionState {
                     .map(|lane| lane.render()),
             );
             settled.more = failures.len().saturating_sub(SECTION_LINES);
-            sections.push(settled);
+            if !self.settled.is_empty() || self.settled_more.is_some() {
+                sections.push(settled);
+            }
         }
         if !self.prs.is_empty() || !self.prs_unread.is_empty() {
             let mut lines: Vec<String> = self
@@ -332,6 +362,10 @@ impl SessionState {
 
     /// Bounded text for a SessionStart hook. Read-only; nothing is saved.
     pub fn digest(&self, limit: usize) -> String {
+        let sections = self.sections(false);
+        if sections.is_empty() {
+            return String::new();
+        }
         let how = match (
             self.commands.runnable("lanes"),
             self.commands.runnable("pr status"),
@@ -341,7 +375,7 @@ impl SessionState {
         };
         render(
             &format!("Provenant state for this project (read-only; re-derive with {how})"),
-            &self.sections(false),
+            &sections,
             limit,
             &self.commands,
         )
@@ -597,6 +631,33 @@ mod tests {
     }
 
     #[test]
+    fn empty_lane_sections_are_omitted_and_nothing_is_empty_text() {
+        assert_eq!(SessionState::default().digest(DIGEST_LIMIT), "");
+        let state = SessionState {
+            settled: vec![lane("r/t/a")],
+            ..Default::default()
+        };
+        let digest = state.digest(DIGEST_LIMIT);
+        assert!(!digest.contains("Lanes in flight"), "{digest}");
+        assert!(
+            digest.contains("Lanes settled since the last chair save (1)"),
+            "{digest}"
+        );
+    }
+
+    #[test]
+    fn the_save_command_names_the_hooks_checkout_only_when_it_renders() {
+        let cwd = std::path::Path::new("/work/proj");
+        assert_eq!(
+            CommandPrefix::new(None, cwd).project_flag(),
+            " --project '/work/proj'"
+        );
+        assert_eq!(CommandPrefix::default().project_flag(), "");
+        let hostile = std::path::Path::new("/work/a<b>");
+        assert_eq!(CommandPrefix::new(None, hostile).project_flag(), "");
+    }
+
+    #[test]
     fn unreadable_sections_are_named_not_shown_empty() {
         let state = SessionState {
             unavailable: vec!["lanes".into()],
@@ -694,21 +755,23 @@ mod tests {
     #[test]
     fn the_digest_title_names_the_store_it_was_read_from() {
         let cwd = std::path::Path::new("/work");
-        let with = |dir: &str| SessionState {
-            commands: CommandPrefix::new(Some(std::path::Path::new(dir)), cwd),
+        // Nothing is drawn from an empty state, so the fixtures carry one lane.
+        let with = |dir: Option<&str>| SessionState {
+            active: vec![lane("run/task/a")],
+            commands: CommandPrefix::new(dir.map(std::path::Path::new), cwd),
             ..Default::default()
         };
-        let title = with("/s/a b").digest(DIGEST_LIMIT);
+        let title = with(Some("/s/a b")).digest(DIGEST_LIMIT);
         assert!(
             title.contains(
                 "`provenant --state-dir '/s/a b' lanes` and `provenant --state-dir '/s/a b' pr status`"
             ),
             "{title}"
         );
-        let title = with("/s/a>b").digest(DIGEST_LIMIT);
+        let title = with(Some("/s/a>b")).digest(DIGEST_LIMIT);
         assert!(!title.contains("`provenant"), "{title}");
         assert!(title.contains("this hook's --state-dir"), "{title}");
-        let title = SessionState::default().digest(DIGEST_LIMIT);
+        let title = with(None).digest(DIGEST_LIMIT);
         assert!(title.contains("`provenant lanes` and `provenant pr status`"));
     }
 

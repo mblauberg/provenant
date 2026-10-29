@@ -3,6 +3,14 @@ use provenant_os::clock::SystemClock;
 use std::error::Error;
 use std::os::unix::fs::PermissionsExt;
 
+#[test]
+fn admission_clock_error_preserves_wire_message() {
+    assert_eq!(
+        CustodyError::from(AdmissionError::Clock).to_string(),
+        "startup spacing cannot be judged: the host monotonic clock or boot identity cannot be read"
+    );
+}
+
 type TestResult = std::result::Result<(), Box<dyn Error>>;
 #[test]
 fn reservation_listing_isolates_an_inaccessible_slot() -> TestResult {

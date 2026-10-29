@@ -3497,6 +3497,22 @@ fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
     assert_eq!(waited["data"]["condition_met"], true);
 
     let peer_text = peer.to_string();
+    for target_args in [
+        vec!["output", &target],
+        vec!["output", &attempt, "--host", "workshop"],
+    ] {
+        let mut words = target_args;
+        words.extend(["--part", "stderr", "--path", "--json"]);
+        let (status, output) = json_command(&rig, &words)?;
+        assert_ne!(status, 0, "{words:?} {output}");
+        assert_eq!(output["error"]["code"], "UNSUPPORTED", "{output}");
+        assert!(
+            output["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("--path")),
+            "{output}"
+        );
+    }
     let (status, stderr) = json_command(&rig, &["output", &target, "--part", "stderr", "--json"])?;
     if backend.is_ok() {
         assert_eq!(status, 0, "{stderr} {placed}");

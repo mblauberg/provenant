@@ -837,7 +837,6 @@ mod cargo_setup_tests {
     use super::*;
 
     #[test]
-    #[allow(clippy::disallowed_methods)]
     fn packed_writer_ref_and_upstream_are_prepared_with_fresh_handles()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;

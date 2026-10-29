@@ -102,6 +102,30 @@ mod tests {
     }
 
     #[test]
+    fn calibration_entry_is_created_by_one_patch() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        let edited = edit(
+            &roots,
+            json!({
+                "domains.quota.calibration.codex.five_hour": 40,
+                "domains.quota.calibration.codex.expires": "2030-01-01T00:00:00Z",
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            edited.config.domains.quota.calibration["codex"].five_hour,
+            Some(40)
+        );
+        let (config, revision) = provenant_config::show(&roots, &SECTIONS).unwrap();
+        let schema = provenant_config::schema(&config, &SECTIONS, revision).unwrap();
+        assert!(schema.fields.iter().any(|field| {
+            field.path == "domains.quota.calibration.codex.five_hour"
+                && (field.kind, field.min, field.max) == ("int", Some(0), Some(100))
+        }));
+    }
+
+    #[test]
     fn mixed_valid_invalid_domain_patch_writes_nothing() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);

@@ -132,8 +132,6 @@ pub struct RouteRequest {
     #[serde(default)]
     pub confidential: bool,
     #[serde(default)]
-    pub allow_free: bool,
-    #[serde(default)]
     pub fallback: Fallback,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

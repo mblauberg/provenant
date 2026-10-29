@@ -323,10 +323,12 @@ fn darwin_settlement_requires_complete_absence_of_members_and_recorded_escapes()
 
 #[test]
 fn published_disk_admission_refusal_names_figures_and_repair() {
-    let reason = super::admission_refusal(&super::CustodyError::AdmissionDisk {
-        free: 99,
-        floor: 100,
-    });
+    let reason = super::admission_refusal(&super::CustodyError::Admission(
+        super::AdmissionError::Disk {
+            free: 99,
+            floor: 100,
+        },
+    ));
     assert_eq!(
         reason,
         "insufficient disk space: 99 bytes available, gc.free_floor 100 bytes; run `provenant gc --apply`"
@@ -335,9 +337,13 @@ fn published_disk_admission_refusal_names_figures_and_repair() {
 
 #[test]
 fn admission_configuration_and_guardian_failures_are_named() {
-    let configuration = super::admission_refusal(&super::CustodyError::AdmissionBuildSettings);
+    let configuration = super::admission_refusal(&super::CustodyError::Admission(
+        super::AdmissionError::BuildSettings,
+    ));
     assert!(configuration.contains("domains.fabric.lanes.max_concurrent_builds"));
-    let guardian = super::admission_refusal(&super::CustodyError::AdmissionGuardianIdentity);
+    let guardian = super::admission_refusal(&super::CustodyError::Admission(
+        super::AdmissionError::GuardianIdentity,
+    ));
     assert!(guardian.contains("guardian process identity unavailable"));
 }
 

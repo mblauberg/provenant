@@ -19,14 +19,19 @@ tail, with a footer for reading more. Set `--wait 30m` or `--wait 3600s` for a
 longer budget and run that wait in the background. A timeout leaves the lane
 running and prints the attempt ID and exact command to keep waiting. Follow
 that command rather than submitting again. For a writer, add
-`--branch feat/name --base main` to create its registered checkout;
+`--mode worktree-write --branch feat/name --base main` to create its registered checkout;
 `--worktree PATH` can select an existing one or create a new checkout.
+Choose `--route NAME` for a weighted pool or `--model ADAPTER/ID` for an exact
+model; the flags conflict.
 
 `status` lists active and recent lanes newest first, with short ID, state,
 model, age and reason. Use `--all` or `--json` for full records. `land N` checks
 CI at the PR's current head before merging and pruning; pass `--head SHA` to
 pin a reviewed head. `help --all` lists advanced commands and `help COMMAND`
 shows all controls for one command.
+For CI without landing, `provenant pr status N --wait` waits for a change;
+an unchanged snapshot exits 124. Capture the command's own exit status, as in
+the [shell pitfalls](../../../docs/runbooks/shell-pitfalls.md), before reading a tail.
 
 CLI `run`, `dispatch`, `cancel` and `resume` generate and print an operation ID
 when omitted. Supply `--operation-id ID` for planned retries and replay the
@@ -74,14 +79,18 @@ push|reconcile`. A terminal without MCP cancels with `provenant cancel ATTEMPT`.
    lane. If custody is lost, keep the worktree reserved and follow [chair
    recovery](../../../docs/worktrees.md#writer-custody-recovery).
 5. CLI `run` already waits and prints a result tail. For MCP or a batch
-   submission, keep one bounded `provenant lanes --wait N` in the background;
+   submission, keep one bounded `provenant lanes --id ID1 --id ID2 --wait N
+   --condition all` in the background to wait for both;
    read the settled rows when it exits ([chair-loop.md](chair-loop.md#waiting)).
    A submitted sub-agent blocks on its worker in the foreground
    ([worker-liveness.md](worker-liveness.md)).
 6. Use `provenant status` after compaction or restart; request full records
    with `--all` or `--json`. Inspect a terminal attempt with `fabric_run`'s
-   `status` operation. Read extra retained bytes only when needed, using
-   `provenant output ATTEMPT --part events` and its byte offset.
+   `status` operation. Select the succeeded attempt and read its result and
+   fenced handoff with `provenant output ATTEMPT --part result`; read events
+   and their byte offsets only when needed. After reviewing a writer marked
+   `review_required`, use `provenant lane deliver ATTEMPT --accept-review` to
+   accept the protected-path review and deliver it, within existing authority.
 7. For a question, call `fabric_run` with its `resume` operation and the answer
    in `prompt`, targeting `target: { attempt: ATTEMPT }` and providing
    `expected_generation: 0` (it counts earlier continuations, not the attempt

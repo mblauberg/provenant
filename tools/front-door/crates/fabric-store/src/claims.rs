@@ -499,28 +499,20 @@ impl Store {
         request.check()?;
         let limit = page(0, limit)?;
         let mut stmt=self.db.prepare("SELECT substr(record,1,?4) FROM claims WHERE project=?1 AND kind='work' AND (?2 IS NULL OR id>?2) ORDER BY id LIMIT ?3")?;
-        let mut rows = stmt.query(params![
-            project.to_string(),
-            after.map(|id| id.to_string()),
-            limit,
-            MAX_RECORD_READ_BYTES
-        ])?;
-        let mut items = Vec::new();
-        let mut total = 0;
-        let mut truncated = false;
-        while let Some(row) = rows.next()? {
-            let bytes: Vec<u8> = row.get(0)?;
-            total += bytes.len();
-            if total > MAX_PAGE_BYTES {
-                truncated = true;
-                break;
-            }
-            items.push(decode(&bytes)?);
-        }
+        let rows = stmt.query_map(
+            params![
+                project.to_string(),
+                after.map(|id| id.to_string()),
+                limit,
+                MAX_RECORD_READ_BYTES
+            ],
+            |row| Ok((row.get(0)?, ())),
+        )?;
+        let rows = bounded_rows(rows, |bytes, ()| decode(&bytes))?;
         Ok(Page {
             extra: Default::default(),
-            items,
-            truncated,
+            items: rows.items,
+            truncated: rows.truncated,
         })
     }
 }
