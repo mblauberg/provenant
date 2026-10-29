@@ -218,7 +218,9 @@ fn final_reservation_sync_failure_blocks_exit_until_durable(root: &Path) -> Resu
     let attempt = root.join(format!("{name}-attempt"));
     let writer_path = root.join(format!("{name}-writer"));
     let exit_path = attempt.join("process-exit.json");
-    let reservation_path = writer_path.join("reservation.json");
+    let reservation_path = writer_path
+        .join(scope().attempt.to_string())
+        .join("reservation.json");
     assert!(
         reservation_path.is_file(),
         "replace should be visible before sync"

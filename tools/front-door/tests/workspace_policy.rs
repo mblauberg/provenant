@@ -98,6 +98,8 @@ const LAYERS: &[(&str, &[&str])] = &[
             "routing",
             "run",
             "fabric-store",
+            // The binary sets the process-wide store busy timeout at startup.
+            "sqlite",
             "fabric-runtime",
             "fabric-mcp",
             "workflow",
