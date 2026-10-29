@@ -127,15 +127,26 @@ pub(crate) fn resolve_ref(git: &Path, repo: &VerifiedRepo, reference: &str) -> R
 
 // Shared objects are host-owned. receive-pack checks newly introduced content
 // and connectivity; delivery never hashes unrelated shared history.
-pub(crate) fn verify_graph(git: &Path, common: &Path, cwd: &Path, head: GitOid) -> Result<()> {
-    command(
+pub(crate) fn require_commit(
+    git: &Path,
+    common: &Path,
+    cwd: &Path,
+    head: GitOid,
+    cancel: Option<&CancelToken>,
+) -> Result<()> {
+    execute(
         git,
         common,
         cwd,
         &args(&["cat-file", "-e", &format!("{head}^{{commit}}")]),
-        None,
+        cancel,
     )
     .map(drop)
+}
+
+#[cfg(test)]
+pub(crate) fn verify_graph(git: &Path, common: &Path, cwd: &Path, head: GitOid) -> Result<()> {
+    require_commit(git, common, cwd, head, None)
 }
 
 pub(crate) fn prepare_refs(

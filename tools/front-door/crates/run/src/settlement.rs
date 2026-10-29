@@ -106,6 +106,7 @@ impl Guard {
             attempt: attempt.try_clone()?,
             journal,
             owner,
+            cancel: CancelToken::new(),
         }))
     }
 }
@@ -115,9 +116,13 @@ pub(crate) struct Driver {
     attempt: Directory,
     journal: Journal,
     owner: ProcessIdentity,
+    cancel: CancelToken,
 }
 
 impl Driver {
+    pub(crate) fn cancellation(&self) -> CancelToken {
+        self.cancel.clone()
+    }
     pub(crate) fn phase(&self) -> Phase {
         self.journal.phase
     }

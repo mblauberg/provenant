@@ -523,7 +523,8 @@ provider has already stopped consuming host build capacity and live custody.
 
 `cancel` durably records the request and signals the supervisor without waiting
 for a writer lock. The settlement driver checks it between phases and polls it
-every 50 ms during import, stopping its Git child before recording `cancelled`.
+every 50 ms during import, instruction checks and optional automatic delivery,
+stopping the owned Git child before recording `cancelled`.
 Public `reconcile` starts the same binary's detached `internal settle` worker
 and promptly reports pending settlement. Neither CLI waits for object transfer
 or an existing settlement owner; the supervisor owns this work after return.
@@ -838,15 +839,17 @@ Accepted operations compare and replay their immutable inputs before checking
 current branch protection; later protection changes do not invalidate replay.
 Actual delivery still rechecks protection.
 
-Integration serialises by destination using a stable lock in the common Git
-directory. It fast-forwards when possible, otherwise uses `merge-tree` and
-`commit-tree` to prepare a merge commit without switching checkouts. A conflict
-or configured custom merge driver refuses before publishing a ref. A local
-integration branch checked out in any worktree is refused. Publication uses
-expected-old ref comparison locally or an explicit remote lease after an
-ancestry proof. Before resolving an origin integration target, the host refreshes
-the exact remote branch under the repository setup lock and refuses delivery if
-the refresh fails. Final graph PR delivery follows the same rule.
+Integration prepares objects without holding an application lock through Git.
+It fast-forwards when possible, otherwise uses merge-tree and commit-tree to
+prepare a merge commit without switching checkouts. A conflict or configured
+custom merge driver refuses before publishing a ref. A local integration branch
+checked out in any worktree is refused. Publication uses expected-old ref
+comparison locally or an explicit remote lease after an ancestry proof.
+A concurrent publisher can win; the losing delivery records an integration
+failure for explicit host pickup rather than adding another retry counter.
+Before resolving an origin integration target, the host refreshes the exact
+remote branch and refuses delivery if the refresh fails. Final graph PR
+delivery follows the same refresh rule.
 
 `lane deliver ATTEMPT [--deliver MODE]` uses the recorded destination, or
 origin push when the settled lane recorded none. It requires a succeeded

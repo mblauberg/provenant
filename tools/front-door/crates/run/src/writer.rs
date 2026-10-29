@@ -1220,17 +1220,15 @@ impl WriterLaunch {
         {
             return Err(RunError::Validation("writer HEAD is not the lane branch"));
         }
-        let import_cancel = CancelToken::new();
+        let import_cancel = settlement.cancellation();
         if settlement.phase() == crate::settlement::Phase::Import {
-            crate::settlement::with_cancellation(attempt, custody.scope(), &import_cancel, || {
-                crate::objects::settle_cancel(
-                    &git_executable,
-                    self.worktree.repo(),
-                    source.as_ref().map(|source| &source.objects),
-                    verified_tip,
-                    Some(&import_cancel),
-                )
-            })?;
+            crate::objects::settle_cancel(
+                &git_executable,
+                self.worktree.repo(),
+                source.as_ref().map(|source| &source.objects),
+                verified_tip,
+                Some(&import_cancel),
+            )?;
             settlement.advance(crate::settlement::Phase::Publish)?;
         }
         if crate::artifacts::read_sealed(attempt, "cancel.json", crate::RECORD_LIMIT)?.is_some() {
@@ -1254,7 +1252,7 @@ impl WriterLaunch {
         let utility = runtime(state)?;
         let executor =
             SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-        let cancel = CancelToken::new();
+        let cancel = import_cancel;
         let git = provenant_confinement::Git::new(
             &executor,
             self.worktree.repo(),
@@ -1420,6 +1418,7 @@ impl WriterLaunch {
         &self,
         state: &Path,
         custody: &provenant_supervisor::custody::Recovery,
+        cancel: &CancelToken,
     ) -> Result<Option<String>> {
         let base = custody
             .writer_base(
@@ -1434,13 +1433,12 @@ impl WriterLaunch {
         let utility = runtime(state)?;
         let executor =
             SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-        let cancel = CancelToken::new();
         let git = provenant_confinement::Git::new(
             &executor,
             self.worktree.repo(),
             &utility,
             budget()?,
-            &cancel,
+            cancel,
         );
         let paths = git.uncommitted_since(base).map_err(error(
             "read writer uncommitted changes",

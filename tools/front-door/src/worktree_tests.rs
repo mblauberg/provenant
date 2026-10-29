@@ -759,7 +759,7 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
     assert_eq!(evidence["review_required"], true);
     wait_for_writer_release(&store)?;
 
-    // The same terminal boundary must refuse a rewind of the recorded base.
+    // A private rewind may publish through CAS, retaining instruction review.
     fs::remove_file(
         writer
             .worktree
@@ -814,9 +814,13 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
     fs::write(private_ref, format!("{previous}\n"))?;
     fs::write(release, b"release")?;
     let terminal = await_terminal(&store, attempt, &call)?;
-    assert_terminal_outcome(&terminal, provenant_run::Outcome::Failed)?;
+    assert_terminal_outcome(&terminal, provenant_run::Outcome::ReviewRequired)?;
     assert!(
-        matches!(terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason.contains("no longer descends from its recorded base"))
+        matches!(terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason == "protected changes require review")
+    );
+    assert_eq!(
+        git(&rig, &["-C", path_text, "rev-parse", "HEAD"])?,
+        previous
     );
     wait_for_writer_release(&store)?;
     cleanup.disarm();

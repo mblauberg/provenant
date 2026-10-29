@@ -686,7 +686,7 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
     let first_head = first.head(&fixture.writer)?;
     let second_head = second.head(&second_writer)?;
     let barrier = std::sync::Barrier::new(2);
-    std::thread::scope(|scope| {
+    let (one, two) = std::thread::scope(|scope| {
         let one = scope.spawn(|| {
             barrier.wait();
             first.integrate(&fixture.writer, &fixture.request, first_head)
@@ -695,13 +695,27 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
             barrier.wait();
             second.integrate(&second_writer, &fixture.request, second_head)
         });
-        one.join()
-            .expect("first lane thread")
-            .expect("first integration");
-        two.join()
-            .expect("second lane thread")
-            .expect("second integration");
+        (
+            one.join().expect("first lane thread"),
+            two.join().expect("second lane thread"),
+        )
     });
+    // Optimistic publication can refuse the loser. Explicit host pickup uses
+    // the new destination tip and preserves both contributions.
+    if let Err(error) = one {
+        assert!(
+            matches!(error, RunError::Delivery(WriterDeliveryStage::Integrate)),
+            "{error}"
+        );
+        first.integrate(&fixture.writer, &fixture.request, first_head)?;
+    }
+    if let Err(error) = two {
+        assert!(
+            matches!(error, RunError::Delivery(WriterDeliveryStage::Integrate)),
+            "{error}"
+        );
+        second.integrate(&second_writer, &fixture.request, second_head)?;
+    }
     for head in [first_head, second_head] {
         first.command(
             &fixture.writer.project,
@@ -2621,5 +2635,118 @@ fn terminal_resumes_after_branch_publication_before_its_phase_checkpoint()
         b"durable branch\n"
     );
     assert!(fixture.root.join("attempt/writer-terminal.json").is_file());
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn automatic_integration_does_not_hold_application_locks_during_git()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::fs::LockMode;
+    use std::{ffi::OsStr, time::Instant};
+    let mut fixture = PrepareFixture::new()?;
+    fixture.git(&["push", "origin", "HEAD:refs/heads/integration"])?;
+    fixture.request = HostDeliveryContext::destination(
+        DeliveryMode::Integrate("origin/integration".into()),
+        "lane",
+    )?
+    .ok_or("destination")?;
+    let native = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let wrapper = fixture.root.join("blocked-fetch-git");
+    let entered = fixture.root.join("fetch-entered");
+    let resume = fixture.root.join("fetch-resume");
+    let armed = fixture.root.join("armed");
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    fixture.executable(&wrapper, &format!(
+        "#!/bin/sh\nfor arg do\nif [ \"$arg\" = fetch ] && [ -e {} ] && [ ! -e {} ]; then\n: > {}\ntries=0\nwhile [ ! -e {} ]; do\n[ \"$tries\" -lt 200 ] || exit 91\n/bin/sleep 0.05\ntries=$((tries+1))\ndone\nfi\ndone\nexec {} \"$@\"\n",
+        quote(&armed), quote(&resume), quote(&entered), quote(&resume), quote(&native)
+    ))?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    let host = fixture.prepare()?;
+    fixture.commit(&fixture.writer.worktree, "lane for optimistic integration")?;
+    let head = host.head(&fixture.writer)?;
+    let directory = Directory::open_anchor(&fixture.writer.project.join(".git"))?;
+    let integrate = format!(
+        "provenant-integrate-{}.lock",
+        provenant_core::hex(
+            provenant_records::CanonicalV1::file_digest(b"origin/integration").bytes()
+        )
+    );
+    // Upgrades may leave the old lock inodes. New commands must not hold them.
+    for name in ["provenant-lane-setup.lock", &integrate] {
+        if directory.metadata_at(OsStr::new(name), false).is_err() {
+            directory.create_new(OsStr::new(name))?;
+        }
+    }
+    std::fs::write(&armed, b"ready")?;
+    std::thread::scope(
+        |scope| -> std::result::Result<(), Box<dyn std::error::Error>> {
+            let worker = scope.spawn(|| host.integrate(&fixture.writer, &fixture.request, head));
+            let started = Instant::now();
+            while !entered.exists() && started.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let seen = entered.exists();
+            let available = seen
+                && ["provenant-lane-setup.lock", &integrate]
+                    .iter()
+                    .all(|name| {
+                        directory
+                            .try_lock_existing(OsStr::new(name), LockMode::Exclusive)
+                            .is_ok()
+                    });
+            std::fs::write(&resume, b"resume")?;
+            worker.join().map_err(|_| "integration panicked")??;
+            assert!(seen, "integration never fetched");
+            assert!(
+                available,
+                "automatic integration held an application lock during Git"
+            );
+            Ok(())
+        },
+    )?;
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn delivery_cancellation_stops_its_running_git_child()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use std::time::Instant;
+    let mut fixture = PrepareFixture::new()?;
+    let native = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let wrapper = fixture.root.join("blocked-delivery-git");
+    let entered = fixture.root.join("delivery-entered");
+    let armed = fixture.root.join("armed");
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    fixture.executable(&wrapper, &format!("#!/bin/sh\nfor arg do\nif [ \"$arg\" = cat-file ] && [ -e {} ]; then\n: > {}\n/bin/sleep 30\nfi\ndone\nexec {} \"$@\"\n", quote(&armed), quote(&entered), quote(&native)))?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    let host = fixture.prepare()?;
+    let cancel = provenant_core::CancelToken::new();
+    let host = host.cancellable(&cancel);
+    std::fs::write(&armed, b"ready")?;
+    std::thread::scope(
+        |scope| -> std::result::Result<(), Box<dyn std::error::Error>> {
+            let worker = scope.spawn(|| host.head(&fixture.writer));
+            let started = Instant::now();
+            while !entered.exists() && started.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let seen = entered.exists();
+            let requested = Instant::now();
+            cancel.cancel();
+            assert!(matches!(
+                worker.join().map_err(|_| "delivery panicked")?,
+                Err(RunError::Delivery(WriterDeliveryStage::Head))
+            ));
+            assert!(seen, "delivery never reached Git");
+            assert!(requested.elapsed() < Duration::from_secs(2));
+            Ok(())
+        },
+    )?;
     Ok(())
 }

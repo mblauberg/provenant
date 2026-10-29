@@ -678,17 +678,22 @@ impl RunStore {
             } else {
                 crate::prepare_writer(writer, &self.writer_registry, record.project_id).and_then(
                     |writer| {
-                        writer.terminal(
-                            self.context.state_root.as_path(),
-                            attempt,
-                            recovery
-                                .ok_or(RunError::Validation("writer terminal custody missing"))?,
-                            task.deliver
-                                .as_ref()
-                                .map_or("origin", |deliver| deliver.remote.as_str()),
-                            task.base.as_deref(),
-                            settlement.as_mut().ok_or(RunError::Contention)?,
-                        )
+                        let driver = settlement.as_mut().ok_or(RunError::Contention)?;
+                        let cancel = driver.cancellation();
+                        crate::settlement::with_cancellation(attempt, exit.scope, &cancel, || {
+                            writer.terminal(
+                                self.context.state_root.as_path(),
+                                attempt,
+                                recovery.ok_or(RunError::Validation(
+                                    "writer terminal custody missing",
+                                ))?,
+                                task.deliver
+                                    .as_ref()
+                                    .map_or("origin", |deliver| deliver.remote.as_str()),
+                                task.base.as_deref(),
+                                driver,
+                            )
+                        })
                     },
                 )
             };
@@ -793,11 +798,22 @@ impl RunStore {
                     let left =
                         crate::prepare_writer(writer, &self.writer_registry, record.project_id)
                             .and_then(|launch| {
-                                launch.uncommitted(
-                                    self.context.state_root.as_path(),
-                                    recovery.ok_or(RunError::Validation(
-                                        "writer terminal custody missing",
-                                    ))?,
+                                let cancel = settlement
+                                    .as_ref()
+                                    .map_or_else(CancelToken::new, |driver| driver.cancellation());
+                                crate::settlement::with_cancellation(
+                                    attempt,
+                                    exit.scope,
+                                    &cancel,
+                                    || {
+                                        launch.uncommitted(
+                                            self.context.state_root.as_path(),
+                                            recovery.ok_or(RunError::Validation(
+                                                "writer terminal custody missing",
+                                            ))?,
+                                            &cancel,
+                                        )
+                                    },
                                 )
                             });
                     let note = match left {
@@ -949,13 +965,23 @@ impl RunStore {
             } = &completion
             && let (Some(writer), Some(deliver)) = (&task.writer, &task.deliver)
         {
-            crate::delivery::deliver_once(
-                host,
-                writer,
-                deliver,
-                attempt,
-                &format!("Run {}\nAttempt {id}", record.run_id),
-            )?;
+            let cancel = settlement
+                .as_ref()
+                .map_or_else(CancelToken::new, |driver| driver.cancellation());
+            let host = host.cancellable(&cancel);
+            crate::settlement::with_cancellation(attempt, exit.scope, &cancel, || {
+                crate::delivery::deliver_once(
+                    &host,
+                    writer,
+                    deliver,
+                    attempt,
+                    &format!("Run {}\nAttempt {id}", record.run_id),
+                )
+            })?;
+            if read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some() {
+                decoded.outcome = Outcome::Cancelled;
+                decoded.reason = Some("cancelled during delivery".into());
+            }
         }
         let publication = TerminalPublication {
             outcome: decoded.outcome,
