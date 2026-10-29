@@ -2,9 +2,7 @@
 use crate::grammar::{Page, Rules, absolute};
 use clap::{Subcommand, builder::TypedValueParser};
 use provenant_confinement::utility::run_release_read_utility;
-use provenant_confinement::{
-    GitRead, ReadOnlyRepo, UtilityBudget, UtilityRuntime, run_read_utility,
-};
+use provenant_confinement::{GitRead, ReadOnlyRepo, UtilityBudget, UtilityRuntime};
 use provenant_core::{CancelToken, GitOid, RelativePath};
 use provenant_os::{
     exec::{ExecOutcome, Executor, Termination},
@@ -20,7 +18,6 @@ use std::{
 use thiserror::Error;
 #[cfg(test)]
 mod dates;
-mod harness;
 mod release;
 #[derive(Debug, Subcommand)]
 pub enum Check {
@@ -34,8 +31,6 @@ pub enum Check {
         #[command(flatten)]
         page: Page,
     },
-    /// Check harness instruction and skill files
-    Harness(Page),
     /// Check a release range for blocking findings
     Release {
         /// Base commit of the range
@@ -253,13 +248,7 @@ pub struct GitContext<'a> {
     pub cancel: &'a CancelToken,
 }
 impl GitContext<'_> {
-    pub(super) fn read(&self, op: GitRead) -> Result<Vec<u8>, CheckError> {
-        checked_bytes(self.read_mode(op, false)?)
-    }
     pub(super) fn read_release(&self, op: GitRead) -> Result<ExecOutcome, CheckError> {
-        self.read_mode(op, true)
-    }
-    fn read_mode(&self, op: GitRead, release: bool) -> Result<ExecOutcome, CheckError> {
         let budget = UtilityBudget::new(
             Duration::from_secs(5),
             Duration::from_millis(250),
@@ -267,12 +256,7 @@ impl GitContext<'_> {
             64 * 1024 * 1024,
             64 * 1024,
         )?;
-        let read = if release {
-            run_release_read_utility
-        } else {
-            run_read_utility
-        };
-        Ok(read(
+        Ok(run_release_read_utility(
             self.executor,
             op,
             self.repo,
@@ -512,18 +496,6 @@ pub fn install_page(
     }
     paginate(scan, selector, page)
 }
-pub fn harness_page(
-    git: &GitContext<'_>,
-    installed_skill_roots: &[PathBuf],
-    selector: impl Serialize,
-    page: &Page,
-) -> Result<CheckPage, CheckError> {
-    paginate(
-        harness::inspect(git, installed_skill_roots)?,
-        selector,
-        page,
-    )
-}
 pub fn release_page(
     git: &GitContext<'_>,
     range: Option<(GitOid, GitOid)>,
@@ -560,7 +532,7 @@ mod tests {
         assert_eq!(cursor.offset, page.findings.len() as u64);
         let mut bytes = Vec::new();
         crate::render(
-            &provenant_records::CommandResult::new("check harness", page.outcome(), &page),
+            &provenant_records::CommandResult::new("check release", page.outcome(), &page),
             crate::RenderMode::Json,
             &mut bytes,
         )?;

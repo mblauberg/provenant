@@ -56,9 +56,9 @@ body:
   - type: textarea
     id: check-output
     attributes:
-      label: provenant check harness output
+      label: scripts/check-harness output
       description: >-
-        Run provenant check harness with the affected project selected and paste the output,
+        Run scripts/check-harness in the affected checkout and paste the output,
         whether it passes or fails. A bug that the gate already catches is a
         different bug from one it misses, and we cannot tell which you have
         without this.
