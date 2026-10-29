@@ -62,7 +62,13 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
     let client = hook.spec().registration.harness;
     match hook.spec().handler {
         Handler::ChairPrompt => crate::chair::hook(false, globals),
-        Handler::ChairStart => crate::chair::hook(true, globals),
+        Handler::ChairStart => {
+            let status = crate::chair::hook(true, globals);
+            // The chair's spend is most of the total, so its SessionStart also
+            // tops up the native ingest store. The call is bounded and silent.
+            crate::usage::ingest_after_chair_hook(globals);
+            status
+        }
         Handler::Guard => guard(globals, deadline, client, hook.spec().registration.event),
         Handler::PreCompact => advisory(Moment::PreCompact, globals, started, client),
         Handler::Compact => advisory(Moment::Compact, globals, started, client),

@@ -4,6 +4,8 @@
 #![forbid(unsafe_code)]
 
 mod chair;
+pub mod ingest;
+pub mod mileage;
 mod native;
 mod prices;
 mod reducer;

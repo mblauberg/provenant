@@ -2009,7 +2009,7 @@ Accepted by every command, before or after the subcommand.
 | `--allow-free` | `{"defaults": ["false"], "name": "allow_free", "values": ["true", "false"]}` |
 | `--fallback` | `{"bounds": [0, 2], "name": "fallback"}` |
 | `--account` | `{"name": "account"}` |
-| `--mode` | `{"defaults": ["read-only"], "name": "mode", "values": ["read-only", "worktree-write"]}` |
+| `--mode` | `{"name": "mode", "values": ["read-only", "worktree-write"]}` |
 | `--read-root` | `{"bounds": [0, 32], "name": "read_root", "repeatable": true}` |
 | `--write-root` | `{"bounds": [0, 32], "name": "write_root", "repeatable": true}` |
 | `--network` | `{"name": "network", "values": ["on", "off"]}` |
@@ -2224,7 +2224,7 @@ Accepted by every command, before or after the subcommand.
 | `--allow-free` | `{"defaults": ["false"], "name": "allow_free", "values": ["true", "false"]}` |
 | `--fallback` | `{"bounds": [0, 2], "name": "fallback"}` |
 | `--account` | `{"name": "account"}` |
-| `--mode` | `{"defaults": ["read-only"], "name": "mode", "values": ["read-only", "worktree-write"]}` |
+| `--mode` | `{"name": "mode", "values": ["read-only", "worktree-write"]}` |
 | `--worktree` | `{"name": "worktree"}` |
 | `--read-root` | `{"bounds": [0, 32], "name": "read_root", "repeatable": true}` |
 | `--write-root` | `{"bounds": [0, 32], "name": "write_root", "repeatable": true}` |
@@ -2641,6 +2641,66 @@ Accepted by every command, before or after the subcommand.
       ],
       "multiple": true,
       "name": "PricesRefresh",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant telemetry ingest`
+
+| Argument | Contract |
+|---|---|
+| `--provider` | `{"name": "provider"}` |
+| `--since` | `{"name": "since"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "provider",
+        "since"
+      ],
+      "multiple": true,
+      "name": "Ingest",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant telemetry mileage`
+
+| Argument | Contract |
+|---|---|
+| `--account` | `{"name": "account"}` |
+| `--window` | `{"name": "window"}` |
+| `--model` | `{"name": "model"}` |
+| `--since` | `{"name": "since"}` |
+| `--min-runs` | `{"defaults": ["10"], "name": "min_runs"}` |
+| `--fall-percent` | `{"defaults": ["20"], "name": "fall_percent"}` |
+| `--recent-days` | `{"defaults": ["7"], "name": "recent_days"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "account",
+        "window",
+        "model",
+        "since",
+        "min_runs",
+        "fall_percent",
+        "recent_days"
+      ],
+      "multiple": true,
+      "name": "Mileage",
       "required": false
     }
   ]
