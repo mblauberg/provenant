@@ -2941,6 +2941,62 @@ fn receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts()
     Ok(())
 }
 
+fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
+    let (rig, terminal) = persisted_attempt(
+        "codex",
+        "codex/gpt-6.1-sol",
+        ("work", "fixture"),
+        b"",
+        b"provider 500: upstream failed\n",
+        1,
+    )?;
+    let run = terminal.run_id.to_string();
+    let task = terminal.task_id.to_string();
+    let attempt = terminal.attempt_id.to_string();
+    let target = format!("{run}/{task}/{attempt}");
+    // A run or task names its settled attempt, and the reply says which one.
+    for named in [run.clone(), format!("{run}/{task}")] {
+        let output = rig.command(&["output", &named, "--part", "stderr", "--json"])?;
+        let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(code(&output), 0, "{data}");
+        assert_eq!(data["data"]["attempt_id"], attempt);
+        assert_eq!(data["data"]["selected"]["attempts"], 1);
+        assert_eq!(data["data"]["selected"]["rule"], "newest settled");
+    }
+    // A failed attempt's result names its provider error and its result path.
+    let output = rig.command(&["output", &target, "--json"])?;
+    let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(code(&output), 0, "{data}");
+    assert_eq!(data["data"]["state"], "failed");
+    assert_eq!(
+        data["data"]["provider_error"],
+        "provider 500: upstream failed"
+    );
+    let path = rig.command(&["output", &target, "--part", "stderr", "--path", "--json"])?;
+    let data: Value = serde_json::from_slice(&path.stdout.bytes)?;
+    assert_eq!(code(&path), 0, "{data}");
+    assert!(
+        data["data"]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("stderr.log")),
+        "{data}"
+    );
+    let saved = rig.root.join("saved.txt");
+    let written = rig.command(&[
+        "output",
+        &target,
+        "--part",
+        "stderr",
+        "--to",
+        saved.to_str().ok_or("saved path is not UTF-8")?,
+        "--json",
+    ])?;
+    let data: Value = serde_json::from_slice(&written.stdout.bytes)?;
+    assert_eq!(code(&written), 0, "{data}");
+    assert_eq!(std::fs::read(&saved)?, b"provider 500: upstream failed\n");
+    Ok(())
+}
+
 fn receipt_output_reports_unknown_route_for_settled_lost_attempt() -> Result {
     let (rig, record) = persisted_attempt_with(
         "codex",
@@ -3590,6 +3646,7 @@ fn main() -> ExitCode {
             &[
                 "cancel_wait_settles_stalled_import_with_durable_exit",
                 "receipt_output_reports_unknown_route_for_settled_lost_attempt",
+                "output_names_the_attempt_it_reads_and_writes_or_locates_parts",
                 "receipt_output_resolves_run_task_and_attempt",
                 "receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts",
                 "owned_dispatch_retains_failed_attempt_and_replays",
@@ -3623,6 +3680,9 @@ fn main() -> ExitCode {
                     "cancel_wait_settles_stalled_import_with_durable_exit" => cancel_wait_settles_stalled_import_with_durable_exit(),
                     "receipt_output_reports_unknown_route_for_settled_lost_attempt" => {
                         receipt_output_reports_unknown_route_for_settled_lost_attempt()
+                    }
+                    "output_names_the_attempt_it_reads_and_writes_or_locates_parts" => {
+                        output_names_the_attempt_it_reads_and_writes_or_locates_parts()
                     }
                     "receipt_output_resolves_run_task_and_attempt" => {
                         receipt_output_resolves_run_task_and_attempt()

@@ -34,7 +34,7 @@ pub fn run(globals: &Globals) -> u8 {
         String::new()
     } else {
         match result.data.as_ref().map(serde_json::to_value).transpose() {
-            Ok(Some(value)) => provenant_cli::terse(&value),
+            Ok(Some(value)) => human_report(value),
             Ok(None) => String::new(),
             Err(error) => {
                 result.status = Outcome::Error;
@@ -56,6 +56,23 @@ pub fn run(globals: &Globals) -> u8 {
         &mut io::stdout().lock(),
         &mut io::stderr().lock(),
     )
+}
+
+/// `terse` prints a nested object as one escaped JSON string, so the volume and
+/// class totals are split out and printed as plain key-value lines.
+fn human_report(mut value: serde_json::Value) -> String {
+    let volume = value.as_object_mut().and_then(|map| map.remove("volume"));
+    let totals = value.as_object_mut().and_then(|map| map.remove("totals"));
+    let mut text = provenant_cli::terse(&value);
+    if let Some(volume) = volume {
+        text.push_str(&format!("volume {}", provenant_cli::terse(&volume)));
+    }
+    if let Some(serde_json::Value::Object(totals)) = totals {
+        for (class, total) in totals {
+            text.push_str(&format!("total {class} {}", provenant_cli::terse(&total)));
+        }
+    }
+    text
 }
 
 // Deliberately use the bounded renderer directly: overflow publication creates
@@ -289,6 +306,28 @@ fn other_state(path: &Path, report: &mut DiskReport) {
 mod tests {
     #[allow(unused_imports)] // The worktree driver includes this module without libtest.
     use super::*;
+
+    #[test]
+    fn human_report_prints_volume_and_totals_as_key_value_lines() {
+        let text = human_report(serde_json::json!({
+            "schema_version": 1,
+            "volume": {"path": "/volume", "available_bytes": 5},
+            "totals": {"worktree": {"count": 1, "allocated_bytes": 2, "unshared_bytes": 3}},
+            "entries": [],
+            "errors": []
+        }));
+        assert!(text.contains("\nvolume "), "{text}");
+        assert!(
+            text.contains("path=/volume") && text.contains("available_bytes=5"),
+            "{text}"
+        );
+        assert!(text.contains("\ntotal worktree "), "{text}");
+        assert!(
+            text.contains("count=1") && text.contains("unshared_bytes=3"),
+            "{text}"
+        );
+        assert!(!text.contains('\\'), "escaped JSON leaked: {text}");
+    }
 
     #[test]
     fn disk_report_inventories_worktrees_and_unindexed_state_without_writes()

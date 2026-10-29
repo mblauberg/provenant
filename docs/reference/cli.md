@@ -2430,6 +2430,8 @@ Accepted by every command, before or after the subcommand.
 | `attempt` | `{"name": "attempt", "positional": true, "required": true}` |
 | `--host` | `{"name": "host"}` |
 | `--part` | `{"defaults": ["result"], "name": "part", "values": ["result", "prompt", "stderr", "events", "receipt", "transcript"]}` |
+| `--to` | `{"conflicts": ["path", "trace"], "name": "to"}` |
+| `--path` | `{"conflicts": ["to", "trace", "offset", "tail", "max_bytes"], "defaults": ["false"], "name": "path", "values": ["true", "false"]}` |
 | `--offset` | `{"conflicts": ["tail"], "defaults": ["0"], "name": "offset"}` |
 | `--tail` | `{"name": "tail"}` |
 | `--max-bytes` | `{"bounds": [1, 65536], "defaults": ["65536"], "name": "max_bytes"}` |
@@ -2451,6 +2453,8 @@ Accepted by every command, before or after the subcommand.
         "attempt",
         "host",
         "part",
+        "to",
+        "path",
         "offset",
         "tail",
         "max_bytes",
