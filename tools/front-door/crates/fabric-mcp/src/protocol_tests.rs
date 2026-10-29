@@ -321,7 +321,7 @@ fn unknown_argument_names_the_lone_near_match() {
     );
     let error = call(json!({"op":"summary_show","zzz":"s"}));
     assert!(error["message"].as_str().unwrap().contains("expected"));
-    let error = call(json!({"op":"summary_shwo","session":"s"}));
+    let error = call(json!({"op":"summary_shw","session":"s"}));
     assert_eq!(
         error["message"],
         "Invalid argument at arguments.op; did you mean 'summary_show'?"

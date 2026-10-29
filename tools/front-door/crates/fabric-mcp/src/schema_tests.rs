@@ -760,7 +760,7 @@ fn relaxed_wire_text_still_reports_strict_invalid_paths() {
 
 #[test]
 fn near_argument_suggests_only_a_unique_close_name() {
-    assert_eq!(nearest("abe", ["abc", "abd"].into_iter()), None);
+    assert_eq!(nearest("cut", ["cat", "cot"].into_iter()), None);
     assert_eq!(nearest("ab", ["xy"].into_iter()), None);
     assert_eq!(nearest("tmp", ["sessions", "lease"].into_iter()), None);
     assert_eq!(
