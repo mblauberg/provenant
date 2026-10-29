@@ -1,3 +1,4 @@
 ## Additions
+### Pipelines and graphs
 
-- Run presets with graph-aware waiting, worktree and read-root bindings, concurrency overrides and a compact explanation of roles, limits and work. Bundle scout-swarm, implement-with-lens, review-council and big-batch presets using tier-based roles.
+- Run presets with graph-aware waiting, worktree and read-root bindings, concurrency overrides and a compact explanation of roles, limits and work. The bundled `scout-swarm`, `implement-with-lens`, `review-council` and `big-batch` presets use tier-based roles (#2194).

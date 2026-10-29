@@ -1,2 +1,4 @@
 ## Fixes
-- Report model capacity failures as `model_unavailable` with their reason in lanes. Read-only graph routes can fall back, while manual resume can continue a recorded provider session where supported. Writers are not replayed automatically.
+### Accounts, quota and routing
+
+- `lanes` shows a model capacity failure as `model_unavailable`, with the reason. Read-only graph routes fall back to another model, and a manual resume can continue the provider session where supported (#2029).

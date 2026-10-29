@@ -1,3 +1,4 @@
 ## Fixes
+### Git and safety
 
-- Writer lanes commit with the host's configured Git name and email, while global Git configuration stays isolated.
+- Writer lanes commit with the host's configured Git name and email, while global Git configuration stays isolated (#1959).

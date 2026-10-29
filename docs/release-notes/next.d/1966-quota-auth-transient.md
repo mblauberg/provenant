@@ -1,3 +1,4 @@
 ## Fixes
+### Accounts, quota and routing
 
-- Treat transient Claude credential and identity read failures as unknown and retry with a growing delay from 15 to 300 seconds. Reserve authentication failures for explicit rejections or missing credentials, and allow manual quota checks to retry accounts in authentication backoff.
+- Transient Claude credential or identity read failures are now retried with a growing delay instead of reported as authentication failures. A manual quota check can retry an account in backoff (#1966).

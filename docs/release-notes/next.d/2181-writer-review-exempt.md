@@ -1,3 +1,4 @@
 ## Behaviour changes
+### Lanes and settlement
 
-- Writers no longer stop at `review_required` or `uncommitted` over paths every implementation changes. The new `[domains.run] review_exempt` list (default: release-note fragments, `docs/specs/`, `Cargo.lock` and `.tracker-input`; replaceable per project under `[domains.run.projects."ID"]`) exempts committed changes, renamed or unmerged entries and uncommitted leftovers on those paths. Git metadata, hooks, provider control roots and CI workflows can never be listed. Instruction documents (`AGENTS.md`, `CLAUDE.md`, `HARNESS.md`, `GEMINI.md`) and the `.agents/` tree are exemptable only by an explicit exact path, never through a directory or bare name, and a symlink is never exempt. `provenant status` ends with the list in force (#2181).
+- Writers no longer stop at `review_required` or `uncommitted` over paths every implementation changes. The new `[domains.run] review_exempt` list defaults to release-note fragments, `docs/specs/`, `Cargo.lock` and `.tracker-input`, and Git metadata, hooks, provider control roots and CI workflows can never be listed (#2181).

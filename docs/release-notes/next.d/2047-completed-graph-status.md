@@ -1,3 +1,4 @@
 ## Fixes
+### Pipelines and graphs
 
-- Report completed graphs correctly after a crash leaves a stale structural pause in the final checkpoint.
+- A completed graph is reported as completed after a crash, not paused (#2047).

@@ -1,11 +1,4 @@
 ## Additions
+### Lanes and settlement
 
-- A lane that finishes only part of its brief is flagged instead of reading as
-  complete. An attempt that settles `succeeded`, `review_required` or
-  `uncommitted` carries `partial_signals` when its final answer ends with a
-  valid `stopped_early` `handoff` block, the provider reports a stop other than a
-  finished turn (a token or turn limit), or a writer left uncommitted edits.
-  `lanes` shows `(partial)` beside the state with the signals and a resume
-  hint; the outcome is unchanged and the chair decides whether to resume. Launch
-  prompts now ask a lane that stops with work left to end with the `handoff`
-  block. Prose is never read for the flag.
+- A lane that finishes only part of its brief is now flagged instead of reading as complete. An attempt carries `partial_signals` when its final answer ends with a valid `stopped_early` `handoff` block, the provider reports a stop other than a finished turn, or a writer left uncommitted edits, and `lanes` shows `(partial)` with a resume hint (#2178).

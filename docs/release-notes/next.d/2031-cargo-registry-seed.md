@@ -1,4 +1,4 @@
 ## Additions
+### Lanes and settlement
 
-- Hosts can opt writer lanes into private APFS clones of the host Cargo registry and Git store.
-- Hosts can build target seed generations from trusted `origin/main` for private writer targets, with bounded retention and a host measurement script.
+- Hosts can opt writer lanes into private APFS clones of the host Cargo registry and Git store, and build target seed generations from `origin/main` for writer targets (#2031).

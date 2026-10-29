@@ -1,3 +1,4 @@
 ## Fixes
+### Lanes and settlement
 
-- Recover previous-boot writer custody when filesystem device numbers change, while retaining reservations when the evidence is insufficient.
+- Writer custody from an earlier boot is recovered when filesystem device numbers change. If the evidence is insufficient, the reservation is kept (#2094).
