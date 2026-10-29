@@ -2009,7 +2009,7 @@ Accepted by every command, before or after the subcommand.
 | `--allow-free` | `{"defaults": ["false"], "name": "allow_free", "values": ["true", "false"]}` |
 | `--fallback` | `{"bounds": [0, 2], "name": "fallback"}` |
 | `--account` | `{"name": "account"}` |
-| `--mode` | `{"defaults": ["read-only"], "name": "mode", "values": ["read-only", "worktree-write"]}` |
+| `--mode` | `{"name": "mode", "values": ["read-only", "worktree-write"]}` |
 | `--read-root` | `{"bounds": [0, 32], "name": "read_root", "repeatable": true}` |
 | `--write-root` | `{"bounds": [0, 32], "name": "write_root", "repeatable": true}` |
 | `--network` | `{"name": "network", "values": ["on", "off"]}` |
@@ -2224,7 +2224,7 @@ Accepted by every command, before or after the subcommand.
 | `--allow-free` | `{"defaults": ["false"], "name": "allow_free", "values": ["true", "false"]}` |
 | `--fallback` | `{"bounds": [0, 2], "name": "fallback"}` |
 | `--account` | `{"name": "account"}` |
-| `--mode` | `{"defaults": ["read-only"], "name": "mode", "values": ["read-only", "worktree-write"]}` |
+| `--mode` | `{"name": "mode", "values": ["read-only", "worktree-write"]}` |
 | `--worktree` | `{"name": "worktree"}` |
 | `--read-root` | `{"bounds": [0, 32], "name": "read_root", "repeatable": true}` |
 | `--write-root` | `{"bounds": [0, 32], "name": "write_root", "repeatable": true}` |

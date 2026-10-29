@@ -1,0 +1,5 @@
+# Catalogue classes for the writer cost advisory. Exact IDs, never name inference.
+label = "Opus"
+warn_models = ["claude/claude-opus-5-5", "agy/claude-opus-4-6-thinking"]
+cheaper_models = ["claude/claude-sonnet-5", "claude/claude-sonnet-5-5", "agy/claude-sonnet-4-6", "codex/gpt-6-luna", "codex/gpt-6.1-sol", "codex/gpt-6.1-terra"]
+pool_priority = ["principal", "senior", "junior", "design", "writing", "utility"]

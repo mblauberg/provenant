@@ -1,5 +1,6 @@
 //! Fabric MCP stdio server, tool registration and result rendering.
 #![forbid(unsafe_code)]
+pub mod lane;
 pub mod protocol;
 pub mod render;
 pub mod schema;

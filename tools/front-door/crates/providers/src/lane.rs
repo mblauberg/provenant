@@ -310,6 +310,18 @@ pub struct LaneRuntime<'a> {
 }
 
 impl LaneRuntime<'_> {
+    /// Short, attempt-specific path, including for deeply nested child stores.
+    pub fn fabric_socket(attempt: AttemptId) -> PathBuf {
+        let root = if cfg!(target_os = "macos") {
+            "/private/tmp"
+        } else {
+            "/tmp"
+        };
+        Path::new(root)
+            .join(format!("provenant-fabric-{attempt}"))
+            .join("relay.sock")
+    }
+
     pub(crate) fn mcp(&self, harness: Harness) -> Result<Value, ProviderError> {
         if ![
             self.executable,
@@ -441,8 +453,7 @@ impl LaneRuntime<'_> {
         Ok(())
     }
 
-    /// Rust Fabric uses stdio and SQLite, so it needs no daemon socket grant.
-    /// Keep configuration read-only and writable state confined to its owners.
+    /// Fabric reads WAL without writes; mutations use the attempt's host socket.
     pub(crate) fn grant(
         &self,
         profile: &mut ProviderProfileSpec,
@@ -468,26 +479,19 @@ impl LaneRuntime<'_> {
         profile
             .runtime_reads
             .push(subtree(self.state.join("projects")));
-        // The parent pre-creates anchors. Run databases and custody are private
-        // to child_state. Shared SQLite still needs writes even for reads:
-        // Store::open enables WAL and checks migrations. The lane MCP guard is
-        // only a tool-surface guard, not a full boundary against direct writes.
-        // TODO(lane-store-isolation): remove shared SQLite and lock write grants
-        // after the read-only store follow-up in docs/specs/fabric.md lands.
+        // Run databases and custody are private to child_state. Explicit exact
+        // reads include WAL companions; never grant the Fabric directory.
         setup.push(SetupStep::CreateDir(self.child_state.to_owned()));
         profile.state_writes.push(subtree(self.child_state));
-        let locks = self.state.join("fabric/locks");
-        setup.push(SetupStep::CreateDir(locks.clone()));
-        profile.state_writes.push(subtree(locks));
         for name in [
             "fabric/fabric.sqlite3",
             "fabric/fabric.sqlite3-wal",
             "fabric/fabric.sqlite3-shm",
             "fabric/fabric.sqlite3-journal",
-            "host-binding.lock",
         ] {
-            profile.state_writes.push(exact(self.state.join(name)));
+            profile.runtime_reads.push(exact(self.state.join(name)));
         }
+        profile.fabric_socket = Some(exact(Self::fabric_socket(self.attempt)));
         if hooks {
             // Claude executes command hooks through its shell. This does not
             // enable the model's Bash tool.

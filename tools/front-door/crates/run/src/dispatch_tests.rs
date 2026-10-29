@@ -3020,7 +3020,7 @@ fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
 const STOPPED_EARLY: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"Parser done; renderer and tests remain.\"}\n```";
 
 #[test]
-fn a_terra_style_early_stop_settles_succeeded_but_flagged_partial() -> TestResult {
+fn a_declared_stop_settles_review_required() -> TestResult {
     let record = settle_with(
         &format!("Done: parser.\n\n{STOPPED_EARLY}\n"),
         Some(Outcome::Succeeded),
@@ -3032,8 +3032,7 @@ fn a_terra_style_early_stop_settles_succeeded_but_flagged_partial() -> TestResul
     else {
         return Err("not terminal".into());
     };
-    // Advisory: the outcome is not downgraded.
-    assert_eq!(*outcome, Outcome::Succeeded);
+    assert_eq!(*outcome, Outcome::ReviewRequired);
     assert_eq!(record.partial_signals, [PartialSignal::DeclaredStop]);
     let reason = reason.as_deref().ok_or("no reason")?;
     assert!(
@@ -3041,6 +3040,16 @@ fn a_terra_style_early_stop_settles_succeeded_but_flagged_partial() -> TestResul
         "{reason}"
     );
     assert!(reason.contains("renderer and tests remain"), "{reason}");
+    let blocked = STOPPED_EARLY.replace("stopped_early", "blocked");
+    let record = settle_with(&blocked, Some(Outcome::Succeeded), Vec::new())?;
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::ReviewRequired,
+            ..
+        }
+    ));
+    assert_eq!(record.partial_signals, [PartialSignal::DeclaredStop]);
     Ok(())
 }
 

@@ -20,6 +20,7 @@ fn native_stats_runs_without_a_project_or_store_and_sanitises_output() -> Result
             "{\"type\":\"assistant\""
         ),
     )?;
+    fs::write(directory.join("notes.jsonl"), "not a subagent transcript\n")?;
     let path = directory.to_str().ok_or("path")?;
     let output = rig.command(&["telemetry", "stats", "--claude-subagents", path])?;
     assert_eq!(
@@ -41,6 +42,17 @@ fn native_stats_runs_without_a_project_or_store_and_sanitises_output() -> Result
         1
     );
     assert!(json["data"].get("totals").is_none());
+    #[cfg(unix)]
+    {
+        let non_regular = directory.join("agent-x.jsonl");
+        std::os::unix::fs::symlink("agent-one.jsonl", &non_regular)?;
+        let output = rig.command(&["telemetry", "stats", "--claude-subagents", path])?;
+        assert_eq!(code(&output), 2, "symlink transcript must be refused");
+        fs::remove_file(&non_regular)?;
+        fs::create_dir(&non_regular)?;
+        let output = rig.command(&["telemetry", "stats", "--claude-subagents", path])?;
+        assert_eq!(code(&output), 2, "directory transcript must be refused");
+    }
     let output = rig.command(&["telemetry", "stats", "--claude-subagents", "/missing"])?;
     assert_eq!(code(&output), 2);
     Ok(())

@@ -36,7 +36,7 @@ Recovery never widens an enforced restriction, so these also refuse the file:
 - Fabric protocol caps (`limits.*`, which may only be lowered), graph limits
   and budgets, `graph.allowed_read_roots`, `home_hosts` and executable
   overrides;
-- quota probe and history ceilings.
+- quota probe and history bounds.
 
 Bundled assets remain strict. Knob overrides live in a `[knobs]` table:
 
@@ -400,6 +400,26 @@ floor is enabled. Choose a model with a documented allowance at or above the
 floor, or lower the floor to admit it. The separate OpenCode Zen account is not subject to this
 floor. This policy is independent of the quota calibration below.
 
+## Quota probe batching
+
+Quota probe ticks batch accounts and share one wall budget. Set them in
+`[domains.quota]` in the selected state root's `config.toml`:
+
+```toml
+[domains.quota]
+max_parallel = 3
+wall_budget_seconds = 55
+```
+
+`max_parallel` accepts 1 to 16 accounts per batch, and
+`wall_budget_seconds` accepts 1 to 600 seconds for the whole tick. The defaults
+remain 3 and 55. Batches and probes currently run sequentially, so
+`max_parallel` does not create concurrent probes. Each probe also has a
+55-second claim window and receives a deadline no later than one second before
+that claim expires; the tick wall budget bounds the total time across probes.
+Values outside these ranges refuse the file because they control probe
+admission and deadlines.
+
 ## OpenCode Go quota calibration
 
 Go usage from this host's ledger is a partial lower bound. Enter dashboard
@@ -444,6 +464,25 @@ describe the local server interface. No documented authoritative account-wide
 quota source was found. The [Go docs](https://opencode.ai/docs/go/)
 describe the allowance windows and per-response consumption; those do not
 establish total usage across devices.
+
+## Quota polling intervals
+
+Timer and panel polling intervals are set per adapter, in seconds, under the
+quota domain:
+
+```toml
+[domains.quota.polling_intervals.codex]
+timer_seconds = 600
+panel_seconds = 120
+```
+
+The adapter must be a registered ID. Each value must be a whole number of
+seconds from 1 to `i64::MAX / 4`. Omitted values keep the provider default.
+Unlike the probe and history ceilings above, these may be raised or lowered.
+Battery doubles each interval. Low power quadruples it, and adapters that do not
+poll in low power stay idle. Manual ticks keep their 30-second interval. Quota
+ticks, `quota show` staleness and routing admission all use the configured
+values. `probe_seconds`, `low_power` and `solo` keep the provider's settings.
 
 ## Lane cache collection
 
@@ -662,6 +701,21 @@ Fabric supplies private Cargo paths to each lane; see
 per-host target outside worktrees, taking care to run the intended checkout's
 test binaries. The optional host Cargo registry seed is configured by hand in
 `config.toml`, not through `config set`; see [worktrees](../worktrees.md).
+
+## Pre-push conflict-marker check
+
+The Git pre-push hook refuses added lines that start with `<<<<<<<` or
+`>>>>>>>`. This literal check is advisory and can be turned off for fixtures
+that intentionally contain markers:
+
+```toml
+[domains.run]
+push_conflict_markers = false
+```
+
+The default is `true`. Default-branch deletion, non-fast-forward updates and
+default-branch pushes from linked worktrees are still refused, so the Git lane
+boundary is unchanged. An unreadable config keeps the check on.
 
 ## Routing pools
 

@@ -127,20 +127,18 @@ fn import_subagents(
             entry.map_err(|e| NativeError::Io(format!("cannot read subagents directory: {e}")))?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.ends_with(".jsonl") {
+        if !name.ends_with(".jsonl")
+            || !name.starts_with("agent-")
+            || name.len() <= "agent-.jsonl".len()
+        {
             continue;
         }
-        if !name.starts_with("agent-")
-            || !name.ends_with(".jsonl")
-            || name.len() <= "agent-.jsonl".len()
-            || !entry
-                .file_type()
-                .map_err(|e| NativeError::Io(e.to_string()))?
-                .is_file()
+        if !entry
+            .file_type()
+            .map_err(|e| NativeError::Io(e.to_string()))?
+            .is_file()
         {
-            return Err(
-                "subagents directory contains an invalid or non-regular agent transcript".into(),
-            );
+            return Err("subagent transcript is not a regular file".into());
         }
         if files.len() == MAX_FILES {
             return Err("too many native subagent transcripts".into());
@@ -390,13 +388,9 @@ output_excluding_reasoning = 2000000
         );
         std::fs::remove_file(session.join("agent-torn.jsonl"))?;
         std::fs::write(session.join("unexpected.jsonl"), "{}\n")?;
-        assert!(
-            import_subagents(&session, dir.path(), &validate_prices(&config)?)
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("invalid or non-regular")
-        );
+        let report = import_subagents(&session, dir.path(), &validate_prices(&config)?)?;
+        assert_eq!(report.agents, 2);
+        assert_eq!(report.models[0].messages, 1);
         std::fs::remove_file(session.join("unexpected.jsonl"))?;
         let mut max_line = b"{}".to_vec();
         max_line.resize(MAX_LINE_BYTES as usize, b' ');
@@ -425,7 +419,7 @@ output_excluding_reasoning = 2000000
                     .err()
                     .unwrap()
                     .to_string()
-                    .contains("non-regular")
+                    .contains("not a regular file")
             );
         }
         Ok(())

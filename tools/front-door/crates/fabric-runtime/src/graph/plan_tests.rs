@@ -22,6 +22,50 @@ fn result(nodes: Vec<Value>) -> String {
     format!("```fragment\n{}\n```", json!({"schema_version":1,"nodes":nodes}))
 }
 
+fn pattern_definition() -> Value {
+    json!({
+        "name": "generator",
+        "parameters": {
+            "label": {"type": "string", "default": "the slice"},
+            "scope": {"type": "list", "default": ["src"]},
+            "retries": {"type": "integer", "default": 1, "min": 0, "max": 2}
+        },
+        "nodes": [
+            {"id": "write", "goal": "Do ${label}", "access": "worktree_write",
+             "worktree": ".worktrees/impl", "write_scope": "${scope}",
+             "acceptance_checks": ["Verify the slice"]},
+            {"id": "review", "goal": "Review the work", "access": "read_only",
+             "depends_on": ["write"], "write_scope": ["src"],
+             "acceptance_checks": ["Verify the review"]}
+        ],
+        "exports": [{"node": "review", "outputs": ["result", "findings"]}]
+    })
+}
+
+fn pattern_planner(max_nodes: usize) -> GraphDocument {
+    serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"planned-patterns", "nodes":[
+            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Slice the work",
+             "route":{"alias":"senior"}, "plan":{"kinds":["task"], "max_nodes":max_nodes,
+             "patterns":[pattern_definition()]}},
+            {"id":"after", "access":"read_only", "prompt":"Check all slices",
+             "depends_on":["plan"], "route":{"alias":"senior"}}
+        ]
+    })).unwrap()
+}
+
+fn pattern_result(instance: Value) -> String {
+    format!(
+        "```fragment\n{}\n```",
+        json!({"schema_version":1,"nodes":[],"patterns":[instance]})
+    )
+}
+
+fn by_id(mut nodes: Vec<GraphNode>) -> Vec<GraphNode> {
+    nodes.sort_by(|left, right| left.id.cmp(&right.id));
+    nodes
+}
+
 fn fixture_owner(results: &[&str]) -> FakeOwner {
     FakeOwner { observations: results.iter().map(|text| terminal_with_result(AttemptOutcome::Succeeded, text)).collect(), ..Default::default() }
 }
@@ -160,6 +204,35 @@ fn planner_prompt_uses_wire_kinds_and_required_field_names() {
     assert!(prompt.contains("`worktree`"));
     assert!(prompt.contains("`inputs`"));
     assert!(prompt.contains("`acceptance_checks`"));
+    assert!(prompt.contains("Do not emit presets or review shapes"));
+}
+
+#[test]
+fn planner_prompt_names_only_the_nodes_allow_listed_patterns() {
+    let prompt = plans::prompt(&pattern_planner(4).nodes[0]);
+    assert!(prompt.contains("Allowed patterns: generator"));
+    assert!(prompt.contains("label:string"));
+    assert!(prompt.contains("\"patterns\""));
+    assert!(prompt.contains("Do not emit other presets or review shapes"));
+}
+
+#[test]
+fn planner_requires_write_scope_only_for_writers() {
+    let doc = planner(1);
+    let reader = json!({"id":"read","goal":"Read","access":"read_only","acceptance_checks":["check"]});
+    let mut owner = fixture_owner(&[&result(vec![reader]), "read", "checked"]);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.checkpoint.expansions.len(), 1, "{:?}", run.checkpoint.pause_reason);
+    assert_eq!(run.status, GraphStatus::Complete);
+
+    let writer = json!({"id":"write","goal":"Write","access":"worktree_write","worktree":".worktrees/write","acceptance_checks":["check"]});
+    let mut owner = fixture_owner(&[&result(vec![writer])]);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert!(run.checkpoint.pause_reason.as_ref().unwrap().contains("write_scope"));
+    assert!(run.checkpoint.expansions.is_empty());
 }
 
 #[test]
@@ -229,6 +302,139 @@ fn plan_validates_host_limits_before_saving() {
         assert!(run.checkpoint.expansions.is_empty());
         assert_eq!(owner.calls.len(), 1);
     }
+}
+
+#[test]
+fn allowed_pattern_instantiation_records_parameters_and_matches_a_static_composite() {
+    let instance = json!({"id":"impl", "pattern":"generator",
+        "parameters":{"label":"the slice", "scope":["src/a"]}});
+    let mut owner = fixture_owner(&[
+        &pattern_result(instance),
+        "implemented",
+        "reviewed",
+        "checked",
+    ]);
+    let run = advance(&pattern_planner(4), &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    assert!(run.checkpoint.successful());
+
+    let expansion = &run.checkpoint.expansions[0];
+    assert_eq!(expansion.patterns.len(), 1);
+    let recorded = &expansion.patterns[0];
+    assert_eq!(recorded.id, "plan--impl");
+    assert_eq!(recorded.name, "generator");
+    assert_eq!(
+        recorded.parameters,
+        json!({"label":"the slice", "scope":["src/a"], "retries":1})
+    );
+    assert_eq!(
+        recorded.nodes,
+        vec!["plan--impl--review", "plan--impl--write"]
+    );
+
+    let write_prompt = "Do the slice\n\nWrite scope: src/a\nAcceptance checks:\nVerify the slice";
+    let review_prompt =
+        "Review the work\n\nWrite scope: src\nAcceptance checks:\nVerify the review";
+    let mut static_doc = pattern_planner(4);
+    static_doc.nodes.push(
+        serde_json::from_value(json!({
+            "id":"plan--impl", "kind":"composite", "access":"read_only", "depends_on":["plan"],
+            "composite":{
+                "nodes":[
+                    {"id":"write", "prompt":write_prompt, "access":"worktree_write",
+                     "worktree":".worktrees/impl", "write_scope":["src/a"],
+                     "acceptance_checks":["Verify the slice"], "route":{"alias":"senior"}},
+                    {"id":"review", "prompt":review_prompt, "access":"read_only",
+                     "depends_on":["write"], "write_scope":["src"], "acceptance_checks":["Verify the review"],
+                     "route":{"alias":"senior"}}
+                ],
+                "exports":[{"node":"review","outputs":["result","findings"]}]
+            }
+        }))
+        .unwrap(),
+    );
+    let expanded = composites::expand(&static_doc, &plans::generous()).unwrap();
+    let expected: Vec<_> = expanded
+        .nodes
+        .into_iter()
+        .filter(|node| node.id.starts_with("plan--impl"))
+        .collect();
+    assert_eq!(by_id(expansion.nodes.clone()), by_id(expected));
+}
+
+#[test]
+fn plan_patterns_refuse_unlisted_invalid_and_widening_instances() {
+    let cases = [
+        (json!({"id":"impl", "pattern":"other"}), "allow-list"),
+        (
+            json!({"id":"impl", "pattern":"generator", "parameters":{"label":7}}),
+            "label",
+        ),
+        (
+            json!({"id":"impl", "pattern":"generator", "parameters":{"retries":9}}),
+            "retries",
+        ),
+        (
+            json!({"id":"impl", "pattern":"generator", "access":"worktree_write"}),
+            "access",
+        ),
+        (
+            json!({"id":"impl", "pattern":"generator", "read_roots":["/elsewhere"]}),
+            "read_roots",
+        ),
+    ];
+    for (instance, reason) in cases {
+        let mut owner = fixture_owner(&[&pattern_result(instance)]);
+        let run = advance(&pattern_planner(4), &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(run.status, GraphStatus::Paused, "{reason}");
+        assert!(
+            run.checkpoint
+                .pause_reason
+                .as_ref()
+                .unwrap()
+                .contains(reason),
+            "{:?}",
+            run.checkpoint.pause_reason
+        );
+        assert!(run.checkpoint.expansions.is_empty());
+        assert_eq!(owner.calls.len(), 1);
+    }
+}
+
+#[test]
+fn refused_pattern_instantiation_raises_a_pause_decision() {
+    let mut doc = pattern_planner(4);
+    doc.decision_session = Some("chair-session".into());
+    let instance = json!({"id":"impl", "pattern":"other"});
+    let mut owner = fixture_owner(&[&pattern_result(instance)]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    let ask = &run.checkpoint.asks[0];
+    assert_eq!((ask.ask_id.as_str(), ask.kind), ("pause-1", AskKind::Pause));
+    assert!(ask.body.contains("allow-list"));
+    assert!(run.checkpoint.expansions.is_empty());
+}
+
+#[test]
+fn pattern_expansion_counts_against_the_graph_node_limit() {
+    let instance = json!({"id":"impl", "pattern":"generator"});
+    let limits = crate::config::GraphLimits { nodes: 3, ..Default::default() };
+    let mut owner = fixture_owner(&[&pattern_result(instance)]);
+    let run = advance_with_budget(
+        &pattern_planner(4),
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert!(
+        run.checkpoint.pause_reason.as_ref().unwrap().contains("limits.nodes"),
+        "{:?}",
+        run.checkpoint.pause_reason
+    );
+    assert!(run.checkpoint.expansions.is_empty());
 }
 
 #[test]

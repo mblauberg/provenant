@@ -47,6 +47,8 @@ pub struct PushContext<'a> {
     pub executor: &'a dyn Executor,
     pub budget: UtilityBudget,
     pub cancel: &'a CancelToken,
+    /// Literal conflict-marker detection is advisory and may be turned off.
+    pub check_conflict_markers: bool,
 }
 impl PushContext<'_> {
     fn read(&self, request: GitRead) -> Result<provenant_os::exec::ExecOutcome, PushRefusal> {
@@ -106,23 +108,25 @@ impl PushContext<'_> {
                     _ => return Err(PushRefusal::Evidence),
                 }
             }
-            let patch = self.read(GitRead::PushPatch {
-                base: (!is_zero(update.remote)).then_some(update.remote),
-                head: update.local,
-            })?;
-            if patch.termination != Termination::Exit(0) {
-                return Err(PushRefusal::Evidence);
-            }
-            if patch.stdout.bytes.split(|b| *b == b'\n').any(|line| {
-                [b"+<<<<<<<".as_slice(), b"+>>>>>>>".as_slice()]
-                    .iter()
-                    .any(|marker| {
-                        line.strip_prefix(*marker).is_some_and(|tail| {
-                            tail.is_empty() || tail.first().is_some_and(u8::is_ascii_whitespace)
+            if self.check_conflict_markers {
+                let patch = self.read(GitRead::PushPatch {
+                    base: (!is_zero(update.remote)).then_some(update.remote),
+                    head: update.local,
+                })?;
+                if patch.termination != Termination::Exit(0) {
+                    return Err(PushRefusal::Evidence);
+                }
+                if patch.stdout.bytes.split(|b| *b == b'\n').any(|line| {
+                    [b"+<<<<<<<".as_slice(), b"+>>>>>>>".as_slice()]
+                        .iter()
+                        .any(|marker| {
+                            line.strip_prefix(*marker).is_some_and(|tail| {
+                                tail.is_empty() || tail.first().is_some_and(u8::is_ascii_whitespace)
+                            })
                         })
-                    })
-            }) {
-                return Err(PushRefusal::ConflictMarkers);
+                }) {
+                    return Err(PushRefusal::ConflictMarkers);
+                }
             }
         }
         Ok(())
@@ -161,6 +165,7 @@ mod tests {
             executor: &fixture.executor,
             budget: fixture.budget()?,
             cancel: &cancel,
+            check_conflict_markers: true,
         };
         let update = PushUpdate {
             local: GitOid::parse(&"0".repeat(40))?,

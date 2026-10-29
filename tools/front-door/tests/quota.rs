@@ -282,6 +282,16 @@ fn configuration_cannot_raise_probe_limits_and_publication_failure_is_io() -> Re
         rig.state.join("config.toml"),
         "schema_version = 1\n[domains.quota]\nmax_parallel = 4\n",
     )?;
+    assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 0);
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.quota]\nmax_parallel = 17\n",
+    )?;
+    assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 2);
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.quota]\nwall_budget_seconds = 601\n",
+    )?;
     assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 2);
     fs::write(
         rig.state.join("config.toml"),
@@ -955,4 +965,57 @@ fn history_without_state_is_empty_and_creates_nothing() -> Result {
     assert_eq!(report["data"]["count"], 0);
     assert!(!rig.state.exists());
     Ok(())
+}
+
+#[test]
+fn configured_polling_intervals_reach_show_and_tick() -> Result {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let rig = quota_rig()?;
+    let auth = serde_json::to_vec(&serde_json::json!({
+        "tokens": {"account_id": "quota-test"}
+    }))?;
+    let key = provenant_providers::identity::codex_account(&auth).ok_or("Codex fixture key")?;
+    // Codex defaults to a 900 s timer, so this 400 s-old snapshot is fresh until overridden.
+    let now = jiff_time()?;
+    let account = serde_json::json!({"adapter":"codex","account_key":key,"label":"default"});
+    let record = serde_json::json!({
+        "schema_version":1,"account":account,"revision":1,
+        "snapshot":{"schema_version":1,"account":account,"revision":1,"status":"available",
+          "observed_unix_seconds":now-400,"source_ref":"fixture","authority_ref":null,"windows":[]},
+        "claim":null,"last_attempt_unix_seconds":now-400,"backoff_until_unix_seconds":null,
+        "failures":0,"last_error":null,"refusals":[]
+    });
+    let quota = rig.state.join("quota");
+    let directory = quota.join(&key);
+    fs::create_dir_all(&directory)?;
+    for path in [&quota, &directory] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    let path = directory.join("codex.json");
+    fs::write(&path, serde_json::to_vec(&record)?)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    let row = |args: &[&str]| -> Result<serde_json::Value> {
+        let out = rig.command(args)?;
+        assert_eq!(
+            code(&out),
+            0,
+            "{}",
+            String::from_utf8_lossy(&out.stdout.bytes)
+        );
+        Ok(json(&out)?["data"]["accounts"][0].clone())
+    };
+    assert_eq!(row(&["quota", "show", "--json"])?["status"], "available");
+    // Not due under the 900 s timer default, so a timer tick must not probe the account.
+    assert!(row(&["quota", "tick", "--trigger", "timer", "--json"])?["error"].is_null());
+    let config = rig.state.join("config.toml");
+    let mut text = fs::read_to_string(&config)?;
+    text.push_str("\n[domains.quota.polling_intervals.codex]\ntimer_seconds = 300\n");
+    fs::write(&config, text)?;
+    assert_eq!(row(&["quota", "show", "--json"])?["status"], "stale");
+    // Due under the 300 s override, so a timer tick probes and the missing Codex CLI is reported.
+    assert_eq!(
+        row(&["quota", "tick", "--trigger", "timer", "--json"])?["error"],
+        "missing_cli"
+    );
+    rig.assert_legacy_unchanged()
 }

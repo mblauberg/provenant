@@ -2793,10 +2793,18 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                     "/fixture/state/config.toml",
                     "/fixture/state/host-id",
                     "/fixture/state/projects",
-                    "/fixture/state/fabric",
                 ]
                 .iter()
                 .any(|path| grant.path == std::path::Path::new(path))
+                || ([
+                    "/fixture/state/fabric/fabric.sqlite3",
+                    "/fixture/state/fabric/fabric.sqlite3-wal",
+                    "/fixture/state/fabric/fabric.sqlite3-shm",
+                    "/fixture/state/fabric/fabric.sqlite3-journal",
+                ]
+                .iter()
+                .any(|path| grant.path == Path::new(path))
+                    && grant.scope == provenant_confinement::permissions::PathScope::Exact)
         }));
         assert!(
             spec.profile
@@ -5207,21 +5215,10 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
                     .iter()
                     .filter(|g| g.path.starts_with("/fixture/state"))
                     .collect::<Vec<_>>();
-                let mut expected = vec![
+                let expected = [
                     crate::launch::subtree("/fixture/state/children/attempt"),
-                    crate::launch::subtree("/fixture/state/fabric/locks"),
                     crate::launch::subtree("/fixture/state/workflow"),
                 ];
-                expected.extend(
-                    [
-                        "fabric/fabric.sqlite3",
-                        "fabric/fabric.sqlite3-wal",
-                        "fabric/fabric.sqlite3-shm",
-                        "fabric/fabric.sqlite3-journal",
-                        "host-binding.lock",
-                    ]
-                    .map(|name| crate::launch::exact(Path::new("/fixture/state").join(name))),
-                );
                 assert_eq!(lane.len(), expected.len());
                 assert!(expected.iter().all(|grant| lane.contains(&grant)));
             } else {

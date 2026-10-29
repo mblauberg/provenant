@@ -32,15 +32,35 @@ never prove a model family.
 
 ### Lane store isolation
 
-Fabric refuses coordination mutations from lanes at the tool surface
-([nested lanes](routing.md#lane-identity-and-refusals)), and `fabric peer`
-and `peer-agent` refuse to start under the lane environment. Lanes still
-have direct write access to `fabric.sqlite3`, because opening the store
-needs a writable WAL connection.
-- Why: the tool refusal is today's boundary; the residual is recorded.
-- Test: `tests/fabric_transport.rs::lane_graph_status_does_not_create_shared_graph_store`.
-  The direct SQLite write grant is an open gap.
-- Owner: `crates/fabric-runtime/src/coordination.rs`
+Lane observations open `Store::open_read_only`, with exact read grants for
+`fabric/fabric.sqlite3` and its `-wal`, `-shm` and `-journal` companions.
+No lane profile grants writes to these files, Fabric locks or the Fabric
+directory. Long-lived lane readers release the initial snapshot so subsequent
+observations see fresh WAL commits, without creating or updating companions.
+
+The guardian starts an attempt-bound host MCP relay before provider spawn and
+closes it on provider exit, failed spawn or guardian teardown. Each lane may
+connect only to its own exact Unix socket under a private, short-lived host
+directory. The host captures the project and `lane-<attempt>` actor from the
+custody context; request fields and lane environment labels cannot select the
+sender. Mail, tasks, event notes and advisory claims use the existing atomic
+operation receipts. Observations of a configured remote home also use this
+relay, preserving the sole owner rather than reading a local mirror. Landing
+verification also uses the host because it requires an OS lock.
+
+Relay frames obey configured input byte/depth limits, absolute I/O deadlines
+and cancellation. After admission the caller confirms its remaining budget
+before the host executes; an abandoned queued request cannot mutate later.
+The relay excludes landing mutations, inbox writes, chair writes, graphs and
+execution. CLI coordination mutations, including `fabric ... send`, still refuse inside lanes. Peer ingress
+and `peer-agent` remain unavailable to lanes. The socket is removed on normal
+teardown; on restart, a stale socket directory is removed only if it is a real directory owned by the current user with mode 0700.
+- Why: a lane must not forge records that the host or another agent trusts.
+- Test: `crates/providers/src/seatbelt_snapshots.rs::fabric_profiles_only_read_database_and_allow_only_the_attempt_socket`;
+  `crates/fabric-mcp/src/coordination_tests.rs::lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal`;
+  `tests/fabric_lane.rs`.
+- Owner: `crates/cli/src/run/provider.rs`, `crates/fabric-mcp/src/lane.rs`,
+  `crates/fabric-store/src/db.rs`
 
 ### Private, versioned database
 
@@ -86,12 +106,18 @@ Viewer request presentation state is separate from resolution and blocking.
 Viewer names are caller-supplied labels, like agent labels: they are not an
 authentication boundary. A local caller that knows a label can change that
 viewer's state; the direct SQLite access residual above also applies.
+A lane may dismiss or snooze a request in any viewer, including `console`.
+Snoozing never grants authority.
+A lane may change only the bounded request presentation fields `seen_revision`,
+`snoozed_until` and `dismissed`; it never changes resolution, answers or the
+blocking state, and summary baselines remain outside a lane.
 Quotas are per project and viewer, with a combined per-project cap. Writes
 reclaim closed or expired request rows. A new summary baseline is refused at
 capacity rather than evicting an existing one.
 - Why: viewing and snoozing do not authorise an answer or unblock work.
-- Test: `crates/fabric-store/src/tests/human_inbox.rs::viewer_isolation`
-- Owner: `crates/fabric-store/src/viewer.rs`
+- Test: `crates/fabric-store/src/tests/human_inbox.rs::viewer_isolation`;
+  `tests/inbox.rs::viewer_cli_isolation_and_render_race`
+- Owner: `crates/fabric-store/src/viewer.rs`, `src/chair.rs`
 
 Human requests, immutable answers, revision history and the delivery outbox
 belong to Fabric. CLI and MCP must use the same service. The service binds
@@ -1010,8 +1036,9 @@ land.
 A read-only `plan` node must declare `plan.kinds` and a positive
 `plan.max_nodes` (at most 512). Its result must contain a complete fenced
 `fragment` JSON block, schema version 1, within 12 KiB. Agent children require
-a goal or brief, relative literal write scopes, dependencies and acceptance
-checks; omitted routes resolve through `senior`. Gates use their deterministic
+a goal or brief, dependencies and acceptance checks; writers also require
+relative literal write scopes, while read-only children may omit them. Omitted
+routes resolve through `senior`. Gates use their deterministic
 condition and decide nodes their `decide` object. Supported fragment kinds are
 `task`, `plan`, `synthesise`, `gate` and `decide`.
 The kind allow-list is the extension point for future fragment capabilities;
@@ -1048,7 +1075,7 @@ custody excludes concurrent managed writers across graphs.
 A successful writer task may report a structured `handoff` block with schema
 version 2, status `stopped_early`, a non-empty note, and `remaining[]`,
 `decisions[]` and `verify[]`. It uses the shared handoff codec and bounds from
-[the run contract](run.md#a-partial-finish-is-flagged-not-failed). The fence
+[the run contract](run.md#a-partial-finish-is-visible). The fence
 must end the answer; `done` and `blocked` do not request graph continuation.
 This must create exactly one continuation per stopped node, in the same
 checkout, carrying the handoff and original completion contract. Consumers'
@@ -1070,6 +1097,7 @@ edge and continuation slots, including when every current attempt has settled.
   `crates/fabric-runtime/src/graph/plan_tests.rs::plan_validates_effective_limits_and_ceiling_before_saving`;
   `::plan_overlapping_writers_share_one_worktree_integrate_and_deliver_once`;
   `::plan_disjoint_writers_are_admitted_while_a_peer_is_running`;
+  `::planner_requires_write_scope_only_for_writers`;
   `::planner_integrate_delivery_needs_the_documents_integration_branch`;
   `::honest_stop_continues_once_on_same_checkout_with_handoff_and_verdict_contract`;
   `::continuation_budget_pauses_then_extends_without_duplicating_prior_work`;

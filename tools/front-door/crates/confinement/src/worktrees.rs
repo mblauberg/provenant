@@ -982,6 +982,25 @@ pub fn check_writer_terminal(repo: &VerifiedRepo) -> Result<(), WorktreeError> {
     Ok(())
 }
 
+/// A gitlink only runs a nested clean filter when its checkout exists. An
+/// uninitialised gitlink has no `.git` marker, so status cannot follow it into
+/// lane-controlled configuration and the tree can be reported as it is.
+fn initialised_gitlink(root: &Path, path: &[u8]) -> Result<bool, WorktreeError> {
+    let relative = Path::new(OsStr::from_bytes(path));
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(WorktreeError::InvalidOutput);
+    }
+    match std::fs::symlink_metadata(root.join(relative).join(".git")) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(WorktreeError::UnknownWriter),
+    }
+}
+
 fn worktree_dirty_at(
     context: &WorktreeContext<'_>,
     repo: &VerifiedRepo,
@@ -1003,14 +1022,13 @@ fn worktree_dirty_at(
     if exit_code(&index)? != 0 {
         return Ok(WorktreeCondition::Unknown);
     }
-    let mut has_gitlink = false;
     for entry in
         parse_index_entries(&index.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?
     {
-        has_gitlink |= entry.map_err(|_| WorktreeError::InvalidOutput)?.mode == 0o160000;
-    }
-    if has_gitlink {
-        return Ok(WorktreeCondition::Unknown);
+        let entry = entry.map_err(|_| WorktreeError::InvalidOutput)?;
+        if entry.mode == 0o160000 && initialised_gitlink(repo.root_path(), entry.path)? {
+            return Ok(WorktreeCondition::Unknown);
+        }
     }
     let outcome = run_git(context, repo, GitRead::StatusIncludingIgnored, cancel)?;
     if exit_code(&outcome)? != 0 {
@@ -6059,6 +6077,44 @@ mod lifecycle_tests {
             fs::read_to_string(unmerged.path.join("ignored.txt"))?,
             "unmerged branch data\n"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn create_accepts_uninitialised_gitlinks_and_still_rejects_initialised_ones()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fixture.run(&["branch", "-M", "main"])?;
+        let head = fixture.head()?;
+        fixture.run(&[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{head},sub"),
+        ])?;
+        fixture.run(&["commit", "-m", "tracked but uninitialised gitlink"])?;
+        let test_context = TestContext::new(&fixture)?;
+        let context = test_context.context();
+        let created = create(
+            &context,
+            WorktreeCreate {
+                branch: "feature/uninitialised-gitlink".to_owned(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        assert_eq!(created.dirty, WorktreeCondition::Clean);
+        assert!(list(&context, &cancel())?.iter().any(|entry| {
+            entry.branch.as_deref() == Some("refs/heads/feature/uninitialised-gitlink")
+                && entry.dirty == WorktreeCondition::Clean
+        }));
+
+        let marker = fixture._temp.path().join("initialised-filter-ran");
+        add_poisoned_gitlink(&fixture, &created.path, "sub", &marker)?;
+        assert!(list(&context, &cancel())?.iter().any(|entry| {
+            entry.branch.as_deref() == Some("refs/heads/feature/uninitialised-gitlink")
+                && entry.dirty == WorktreeCondition::Unknown
+        }));
         Ok(())
     }
 

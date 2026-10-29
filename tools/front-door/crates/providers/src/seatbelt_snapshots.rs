@@ -62,20 +62,20 @@ fn prepared(
     network: Option<NetworkAccess>,
 ) -> Result<(PlanPermissions, ProviderProfile), ProviderError> {
     let base = fixture_access_plan(access, authentication, include_continuation);
-    let confined = if let Some(network) = network {
-        let mut permissions = base.permissions().clone();
+    let mut permissions = base.permissions().clone();
+    // Provider state is attempt-private, separate from the host Fabric root.
+    permissions.private_state = Some(grant("/fixture/provider-state", PathScope::Subtree));
+    if let Some(network) = network {
         permissions.network = network;
-        provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
-            scope: base.scope(),
-            permissions,
-            codex: provenant_confinement::CodexPolicy::Clean,
-            extensions: provenant_confinement::ExtensionPolicy::Deny,
-            agy_state: None,
-        })
-        .expect("network fixture plan")
-    } else {
-        base
-    };
+    }
+    let confined = provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
+        scope: base.scope(),
+        permissions,
+        codex: provenant_confinement::CodexPolicy::Clean,
+        extensions: provenant_confinement::ExtensionPolicy::Deny,
+        agy_state: None,
+    })
+    .expect("snapshot fixture plan");
     let mut route = route(id, if id == "command" { "" } else { "fixture-model" });
     route.account_key = None;
     let prompt = Prompt::new("fixture prompt".into());
@@ -107,6 +107,10 @@ fn prepared(
         &mut profile.spec.tool_exec_roots,
     ] {
         grants.retain(|grant| !host_probed(&grant.path));
+    }
+    if let Some(socket) = &mut profile.spec.fabric_socket {
+        // Golden profiles are shared by macOS and Linux.
+        socket.path = "/fixture/host/fabric-relay.sock".into();
     }
     Ok((confined.permissions().clone(), profile))
 }
@@ -287,6 +291,80 @@ fn writer_publish_grants_gh_reads_only_with_open_network() -> Result<(), Box<dyn
     let disabled = render(&plan, &profile, Path::new(HOME))?;
     assert!(disabled.contains("(deny file-read* (subpath \"/fixture/home/.config/gh\"))"));
     assert!(!disabled.contains("(allow file-read* (subpath \"/fixture/home/.config/gh\"))"));
+    Ok(())
+}
+
+#[test]
+fn fabric_profiles_only_read_database_and_allow_only_the_attempt_socket()
+-> Result<(), Box<dyn std::error::Error>> {
+    for case in cases()? {
+        let rendered = render(&case.plan, &case.profile, Path::new(HOME))?;
+        if case.profile.spec.fabric_socket.is_none() {
+            assert!(!rendered.contains("fabric.sqlite3"));
+            continue;
+        }
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let path = format!("/fixture/state/fabric/fabric.sqlite3{suffix}");
+            assert!(
+                case.profile
+                    .spec
+                    .runtime_reads
+                    .contains(&grant(&path, PathScope::Exact)),
+                "{}: {path}",
+                case.name
+            );
+            assert!(
+                rendered.contains(&format!("(allow file-read* (literal \"{path}\"))")),
+                "{}: {path}",
+                case.name
+            );
+            assert!(
+                !rendered
+                    .lines()
+                    .any(|line| line.contains("allow file-write")
+                        && (line.contains("/fixture/state/fabric")
+                            || line.contains("(subpath \"/fixture/state\")"))),
+                "{}",
+                case.name
+            );
+        }
+        let fabric = Path::new("/fixture/state/fabric");
+        for write in case
+            .plan
+            .write_roots
+            .iter()
+            .chain(&case.profile.spec.state_writes)
+            .chain(&case.profile.spec.tool_writes)
+            .chain(
+                case.profile
+                    .spec
+                    .authentication
+                    .iter()
+                    .flat_map(|auth| &auth.in_place_writes),
+            )
+        {
+            assert!(
+                !(write.path == fabric
+                    || write.path.starts_with(fabric)
+                    || (write.scope == PathScope::Subtree && fabric.starts_with(&write.path))),
+                "{}: write grant {:?}",
+                case.name,
+                write
+            );
+        }
+        let socket = case
+            .profile
+            .spec
+            .fabric_socket
+            .as_ref()
+            .ok_or("missing socket")?;
+        assert_eq!(socket.scope, PathScope::Exact);
+        assert!(rendered.contains(&format!(
+            "(allow network-outbound (remote unix-socket (path-literal \"{}\")))",
+            socket.path.display()
+        )));
+        assert!(!rendered.contains("provenant-peer.sock"));
+    }
     Ok(())
 }
 

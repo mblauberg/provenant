@@ -15,6 +15,22 @@ reference](../reference/config-keys.md), and bundled pools in
 
 ## Resolution
 
+### Bundled policy data and overrides
+
+`crates/routing/assets/model-policy.toml` supplies embedded `ModelPolicyRule`
+data, including cache ratios, compaction windows, lane and result guidance,
+and DeepSeek's peak adjustment. User defaults overlay the bundled result,
+then scoped rules overlay those defaults. Account rules can override any
+bundled field. The price table keeps base rates without a second schedule.
+Writer advice uses exact catalogue classes and pool order in
+`assets/writer-advisory.toml`, replaceable under `domains.routing.writer_advisory`.
+Provider-family assurance remains established by provider evidence.
+- Why: changing operating policy should not require a Rust branch or model-name inference.
+- Test: `crates/routing/src/policy.rs::tests::bundled_policy_matches_pre_data_golden`;
+  `::bundled_fields_and_peak_schedule_can_be_overridden_per_account`;
+  `crates/routing/src/catalog.rs::tests::writer_advisory_classes_and_pool_priority_are_overridable`
+- Owner: `crates/routing/src/{policy,catalog}.rs`
+
 ### Exact selection, seeded pools
 
 A request names exactly one `--model ADAPTER/ID` or `--route NAME`. No

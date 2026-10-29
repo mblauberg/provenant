@@ -84,7 +84,28 @@ fn viewer_cli_isolation_and_render_race() -> Result {
         "PROVENANT_RUN_STATE_DIR".into(),
         rig.state.clone().into_os_string(),
     ));
-    assert_eq!(call(&rig, &args, None, 1)?["error"]["code"], "VIEWER_LANE");
+    let in_lane = call(&rig, &args, None, 0)?;
+    assert_eq!(in_lane["data"]["view"]["dismissed"], true);
+    let shown_in_lane = call(
+        &rig,
+        &["chair", "viewer", "request", "console", id],
+        None,
+        0,
+    )?;
+    assert_eq!(shown_in_lane["data"]["request"]["state"], "open");
+    assert_eq!(
+        shown_in_lane["data"]["request"]["request"]["blocking"],
+        true
+    );
+    assert_eq!(
+        call(
+            &rig,
+            &["chair", "viewer", "forget", "console", "chair-a"],
+            None,
+            1
+        )?["error"]["code"],
+        "VIEWER_LANE"
+    );
     rig.env.pop();
 
     let checkpoint = rig.root.join("viewer-checkpoint.md");

@@ -603,7 +603,7 @@ transcript except Codex's post-exit identity projection.
   `crates/confinement/src/git_evidence.rs::exempt_paths_left_uncommitted_do_not_count`
 - Owner: `crates/run/src/holder.rs`, `crates/run/src/writer.rs`, `crates/confinement/src/review_exempt.rs`
 
-## A partial finish is flagged, not failed
+## A partial finish is visible
 
 An attempt that settles `succeeded`, `review_required` or `uncommitted` carries
 `partial_signals` when there is structured evidence that part of the brief is
@@ -612,10 +612,16 @@ schema v2 block with status `stopped_early` or `blocked`, and nothing after it),
 `provider_stop` (the provider reported a stop reason other
 than a finished turn, such as Claude's `stop_reason` `max_tokens` or a
 `terminal_reason` other than `completed`) and `uncommitted_work`. Prose is never
-read, and a quoted, repeated or trailing-text block is no flag. The outcome is
-not changed, so delivery and fallback behave as before; the reason carries a
-`partial finish (...)` note, and `lanes` shows `(partial)` beside the state,
-the signals, and a `provenant resume` hint. A failed lane carries no flag. Every
+read, and a quoted, repeated or trailing-text block is no flag. A declared stop
+(`stopped_early` or `blocked`) changes an otherwise `succeeded` outcome to
+`review_required`; other outcomes remain unchanged. The settled outcome is what
+the graph reads: `tools/front-door/src/fabric.rs` maps any outcome other than
+`succeeded`, including `review_required`, to a failed graph node attempt.
+Delivery is gated on the outcome before the stop, so a lane that succeeded
+before stopping still delivers its partial work once its publication is
+durable. The reason carries a `partial finish (...)` note, and `lanes` shows
+`(partial)` beside the state, the signals, and a `provenant resume` hint. A
+failed lane carries no flag. Every
 launch prompt asks for the same final `handoff` block on every finish. Its JSON
 has `schema_version: 2`, `status` (`done`, `stopped_early`, `blocked`), `note`,
 `remaining[]`, `decisions[]` and `verify[]`. Unknown fields are retained. The
@@ -638,7 +644,7 @@ original brief and worktree state, rather than a result transcript. Policy
 continuations use `stopped_early`; `blocked` needs a decision or external change.
 The `Status:` line protocol is removed.
 - Why: a lane that did part of its brief must not read as one that did all of it.
-- Test: `crates/run/src/dispatch_tests.rs::a_terra_style_early_stop_settles_succeeded_but_flagged_partial`;
+- Test: `crates/run/src/dispatch_tests.rs::a_declared_stop_settles_review_required`;
   `::a_complete_finish_and_prose_about_remaining_work_are_not_flagged`;
   `crates/run/src/completion.rs::tests`;
   `crates/providers/src/tests.rs::claude_success_that_stopped_for_another_reason_is_an_early_stop`
@@ -958,6 +964,14 @@ in [nested lanes, MCP and hooks](routing.md#nested-lanes-mcp-and-hooks).
 
 ## Lane-owned worktrees and Git membership
 
+A `run` submitted from a linked Git worktree with neither `--mode` nor a
+target (`--worktree`, `--branch` or `--worktree-branch`) is refused with code
+`REFUSED`. The repair names both choices: `--worktree <path>` for a writer, or
+`--mode read-only` for a reader. This prevents an intended writer from silently
+starting read-only. An explicit `--mode read-only` or an explicit worktree
+dispatches normally. A submodule's gitfile names `.git/modules/`, not a
+`worktrees/` entry, so a run inside a submodule is not refused.
+
 Dispatch may opt into local lifecycle ownership with `--worktree-branch BRANCH
 [--base REF]`, exclusive with `--worktree` and peer `--branch`. Creation uses
 confinement's existing registered-worktree path. Reuse requires the same branch,
@@ -965,7 +979,10 @@ a clean tree and free writer custody; an explicit base applies at creation.
 Reuse preserves the existing lane owner's creation base and refuses adopted
 owners without changing their records. Operation replay
 returns its original run, including after owned cleanup, and checks changed
-inputs before any worktree creation.
+inputs before any worktree creation. A tracked gitlink whose checkout is not
+initialised has no nested Git configuration, so creation and status accept it;
+a gitlink with a `.git` marker still reports unknown and requires review
+because status could follow lane-controlled nested filters.
 The private Git admin directory holds `provenant-owner.json` as a bounded,
 atomic `WorktreeOwner`: optional attempt and operation IDs, short branch,
 pinned base OID, host, creation time, origin (`lane` or `adopted`) and optional
@@ -1001,6 +1018,11 @@ or change an adopted worktree's receipt. Concurrent refreshes of the same
 branch may race and produce a warning.
 - Why: a lane may reclaim only work it owns and commits proven retained elsewhere.
 - Test: `crates/confinement/src/worktrees.rs::git_inventory_accepts_unregistered_and_recreated_worktrees`;
+  `crates/cli/src/run.rs::tests::run_in_linked_worktree_requires_explicit_target`;
+  `::explicit_target_or_mode_passes_the_linked_worktree_guard`;
+  `::explicit_read_only_from_a_linked_worktree_dispatches`;
+  `::submodule_gitfile_is_not_a_linked_worktree`;
+  `crates/confinement/src/worktrees.rs::create_accepts_uninitialised_gitlinks_and_still_rejects_initialised_ones`;
   `::owned_cleanup_refuses_dirty_unmerged_and_adopted_trees`;
   `tests/dispatch_provider.rs::owned_dispatch_creates_and_replays_after_pruning`;
   `tools/front-door/src/gc_support.rs::writer_tracking_refresh_handles_remote_branch_absence_and_failure`;

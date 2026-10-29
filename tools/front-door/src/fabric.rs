@@ -60,9 +60,25 @@ struct Factory {
     workers: &'static dyn WorkerObserver,
 }
 impl Factory {
+    #[allow(clippy::disallowed_methods)] // Native read-only store open deadline.
     fn coordination(&self) -> Result<CoordinationService<'_>, CoordinationError> {
         let ctx = &self.context;
         let cancel = CancelToken::new();
+        if ctx.in_lane {
+            let store = provenant_fabric_store::Store::open_read_only(
+                &ctx.roots.state,
+                Instant::now() + std::time::Duration::from_secs(5),
+            )?
+            .ok_or(provenant_fabric_store::Error::NotFound)?
+            .live_read_only()?;
+            return Ok(CoordinationService::new(
+                store,
+                ctx.identity.project,
+                ctx.identity.inbox.actor,
+                &self.clock,
+                &self.backoff,
+            ));
+        }
         CoordinationService::for_identity(
             &ctx.roots.state,
             &ctx.identity,
@@ -100,6 +116,7 @@ impl stdio::Factory for Factory {
     }
     type Facade<'a> = BoundFacade<'a>;
     fn preflight(&self, call: &provenant_fabric_mcp::tools::ToolCall) -> Result<(), ServiceError> {
+        use provenant_fabric_mcp::tools::ToolCall;
         if let provenant_fabric_mcp::tools::ToolCall::Inbox(input, _) = call {
             let ctx = &self.context;
             provenant_fabric_runtime::inbox::validate_request(
@@ -108,6 +125,13 @@ impl stdio::Factory for Factory {
                 ctx.in_lane,
                 input,
             )?;
+        }
+        if matches!(
+            call,
+            ToolCall::Submit(SubmitInput::Submit { host: None, .. })
+                | ToolCall::SubmitWait(SubmitInput::Submit { host: None, .. }, ..)
+        ) {
+            provenant_cli::run::nested_dispatch_context(&self.context.roots).map_err(fail_error)?;
         }
         Ok(())
     }
@@ -130,7 +154,16 @@ impl stdio::Factory for Factory {
         Ok(
             Service::new(coordination, BoundFacade { factory: self }, &self.clock)
                 .with_limits(self.context.config.limits.clone())
-                .with_lane_restrictions(self.context.in_lane),
+                .with_lane_restrictions(self.context.in_lane)
+                .with_lane_relay(if self.context.in_lane {
+                    std::env::var("PROVENANT_PARENT_ATTEMPT_ID")
+                        .ok()
+                        .and_then(|id| provenant_core::AttemptId::parse(&id).ok())
+                        .map(provenant_providers::LaneRuntime::fabric_socket)
+                } else {
+                    None
+                })
+                .with_lane_relay_reads(self.context.in_lane && self.context.remote_home()),
         )
     }
 }
@@ -818,7 +851,11 @@ fn factory(
         crate::roots::Workspace::Project,
         crate::roots::Product::Required,
     )?;
-    let context = Context::open(resolved.roots, &resolved.home, &resolved.project)?;
+    let context = if provenant_cli::fabric::in_lane() {
+        Context::open_read_only(resolved.roots, &resolved.home, &resolved.project)?
+    } else {
+        Context::open(resolved.roots, &resolved.home, &resolved.project)?
+    };
     Ok(Factory {
         project_attribution: crate::usage::attribution_enabled(&context.roots),
         context,
@@ -4771,7 +4808,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             );
             let grants = provenant_cli::run::lane_access(
                 &provenant_cli::Access {
-                    mode: provenant_cli::Mode::ReadOnly,
+                    mode: Some(provenant_cli::Mode::ReadOnly),
                     worktree: None,
                     read_root: node
                         .read_roots
@@ -5965,16 +6002,28 @@ pub fn events(
             let result = if budget.remaining(factory.clock.mono_now()).as_micros() == 0 {
                 EventsResult::empty_timeout(page.after)
             } else {
-                match service.events(
-                    EventsInput::Read {
-                        extra: Default::default(),
-                        after: page.after,
-                        limit: page.limit,
-                        wait_seconds: None,
-                    },
-                    budget,
-                    &cancel,
-                ) {
+                let input = EventsInput::Read {
+                    extra: Default::default(),
+                    after: page.after,
+                    limit: page.limit,
+                    wait_seconds: None,
+                };
+                let observation: Result<EventsResult, Box<dyn std::error::Error>> =
+                    if factory.context.in_lane && factory.context.remote_home() {
+                        provenant_fabric_mcp::tools::ToolCall::Events(input, None)
+                            .relay_within(
+                                &factory.context.lane_relay_socket()?,
+                                &cancel,
+                                std::time::Duration::from_micros(
+                                    budget.remaining(factory.clock.mono_now()).as_micros(),
+                                ),
+                            )
+                            .map_err(Into::into)
+                            .and_then(|value| serde_json::from_value(value).map_err(Into::into))
+                    } else {
+                        service.events(input, budget, &cancel).map_err(Into::into)
+                    };
+                match observation {
                     Ok(value) => value,
                     Err(_)
                         if wait.is_some()
@@ -5982,7 +6031,7 @@ pub fn events(
                     {
                         EventsResult::empty_timeout(page.after)
                     }
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return Err(error),
                 }
             };
             let EventsResult::Read {

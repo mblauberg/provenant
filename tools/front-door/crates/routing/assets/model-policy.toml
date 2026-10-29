@@ -1,0 +1,100 @@
+# Operating defaults, evaluated by the same selectors and schedules as overrides.
+[defaults.cache]
+read_share_target = 0.90
+
+[[rules]]
+adapter = "claude"
+[rules.policy.compaction]
+window = 275000
+mode = "task_boundary"
+min_turns = 14
+[rules.policy.cache]
+write_ratio = 1.25
+output_ratio = 5.0
+
+[[rules]]
+adapter = "codex"
+[rules.policy.cache]
+write_ratio = 1.25
+output_ratio = 5.0
+
+[[rules]]
+model = "claude/claude-opus-5-5"
+[rules.policy.cache]
+read_ratio = 0.05
+
+[[rules]]
+model = "claude/claude-sonnet-5-5"
+[rules.policy.cache]
+read_ratio = 0.05
+
+[[rules]]
+model = "claude/claude-haiku-5-5"
+[rules.policy.cache]
+read_ratio = 0.10
+
+[[rules]]
+model = "claude/claude-sonnet-5"
+[rules.policy.cache]
+read_ratio = 0.10
+
+[[rules]]
+model = "codex/gpt-6.1-sol"
+[rules.policy.cache]
+read_ratio = 0.05
+
+[[rules]]
+model = "codex/gpt-6.1-terra"
+[rules.policy.cache]
+read_ratio = 0.05
+[rules.policy.lane]
+stop_early_ok = false
+max_continuations = 2
+
+[[rules]]
+model = "codex/gpt-6-luna"
+[rules.policy.cache]
+read_ratio = 0.10
+
+[[rules]]
+model = "opencode/opencode-go/deepseek-v4.1-flash"
+[rules.policy.cache]
+read_ratio = 0.02
+write_ratio = 0.0
+output_ratio = 4.0
+context_window = 1000000
+read_heavy_weight = 3
+price_multiplier = 1.0
+[rules.policy.compaction]
+window = 800000
+mode = "task_boundary"
+min_turns = 20
+
+# Single source for DeepSeek's weekday peak adjustment, including telemetry consumers.
+[[rules]]
+model = "opencode/opencode-go/deepseek-v4.1-flash"
+[rules.schedule]
+windows = [{ weekdays = [0, 1, 2, 3, 4], start_hour = 1, end_hour = 4 }, { weekdays = [0, 1, 2, 3, 4], start_hour = 6, end_hour = 10 }]
+[rules.policy.cache]
+price_multiplier = 2.0
+
+[[rules]]
+model = "agy/gemini-3.8-flash"
+[rules.policy.lane]
+read_only = true
+[rules.policy.result]
+check = true
+sections = ["## Findings", "## Evidence"]
+fallback = "codex/gpt-6-luna"
+fallback_effort = "high"
+
+[[rules]]
+adapter = "opencode"
+model_suffix = "-free"
+[rules.policy.lane]
+read_only = true
+[rules.policy.result]
+check = true
+sections = ["## Findings", "## Evidence"]
+fallback = "codex/gpt-6-luna"
+fallback_effort = "high"

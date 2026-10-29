@@ -290,8 +290,9 @@ the common Git directory.
 Network is a level: `provider` (API endpoints, when network is off),
 `local` (adds localhost and the Postgres socket, when network is off with
 Postgres capability) or `open` (adds outbound IP, the default for every lane).
-At every level the only Unix-socket peers are the DNS responder and, from
-`local`, Postgres, so no lane reaches the peer agent's socket.
+At every level the Unix-socket peers are the DNS responder, the attempt-bound
+[host Fabric relay](fabric.md#lane-store-isolation) and, from `local`, Postgres.
+No lane reaches the peer agent's socket.
 - Why: the peer agent relays to unconfined `fabric peer` children.
 - Test: `crates/confinement/src/permissions.rs::native_sandbox_blocks_path_escape_probes`
 - Owner: `crates/confinement/src/permissions.rs`

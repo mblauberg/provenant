@@ -457,3 +457,23 @@ through gc or disk reclaim.
   `src/fabric.rs::graph_submission_replays_an_accepted_push_after_protection_changes`;
   `crates/fabric-runtime/src/graph.rs::graph_delivers_nodes_and_opens_one_final_pr_only_after_success`.
 - Owner: `crates/run/src/delivery.rs`, `src/fabric.rs`; acceptance remains with `crates/workflow`
+
+## Bounded planner pattern expansion
+
+A plan node may declare an allow-list of patterns with typed parameters and
+fixed nodes. A fragment instantiates a listed pattern by name and parameter
+values only; it cannot replace the pattern's access, role, source or read
+roots. The runtime validates parameters against their schemas and expands the
+pattern at the same composite boundary a statically written preset uses, with
+the pattern name and effective parameters retained in the expansion. Unlisted
+patterns, invalid parameters and widening attempts pause the graph without
+admitting children, and graph node, edge, fan-out and depth ceilings include
+the expanded nodes. Pattern expansion grants no review, delivery or merge
+authority.
+- Why: a plan may grow a pipeline from known-good shapes without letting the
+  planner choose authority or exceed host limits.
+- Test: `crates/fabric-runtime/src/graph/plan_tests.rs::allowed_pattern_instantiation_records_parameters_and_matches_a_static_composite`;
+  `::plan_patterns_refuse_unlisted_invalid_and_widening_instances`;
+  `::pattern_expansion_counts_against_the_graph_node_limit`.
+- Owner: `crates/fabric-runtime/src/graph/plans.rs`,
+  `crates/fabric-runtime/src/graph/pattern_plan.rs`

@@ -52,6 +52,16 @@ pub fn quota_policies(registry: &[Registration]) -> Vec<provenant_quota::QuotaPo
         .collect()
 }
 
+/// Registry policies with `[domains.quota.polling_intervals]` applied. Scheduling and staleness checks use this, not `quota_policies`.
+pub fn scheduling_policies(
+    settings: &provenant_quota::Settings,
+    registry: &[Registration],
+) -> Vec<provenant_quota::QuotaPolicy> {
+    let mut policies = quota_policies(registry);
+    settings.apply_polling_intervals(&mut policies);
+    policies
+}
+
 // Shared mechanics; each adapter supplies its own `prepare` builder.
 macro_rules! adapter {
     ($ty:ty, $id:literal, $prepare:path $(, $diagnostic:path)?) => {

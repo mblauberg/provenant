@@ -2756,6 +2756,9 @@ fn lane_prepare_isolates_nested_state() -> Result {
         "{}",
         String::from_utf8_lossy(&identity.stderr.bytes)
     );
+    // The host owns and initialises the Fabric store before a lane opens it
+    // read-only. Identity alone does not create the coordination database.
+    ok(&rig, &["fabric", "events", "read", "--json"])?;
     let home = rig.root.join("fixture-home");
     fs::create_dir_all(home.join(".claude-fixture"))?;
     if !cfg!(target_os = "macos") {
@@ -3864,9 +3867,9 @@ fn verify_lane_profile(
     );
     host.provider_exited(&parent.encode()?, None)?;
     fs::write(state.join("config.toml"), config(1))?;
-    // The child store's git-home is the in-lane fabric context's own, not the
-    // host's: its preparation keeps its git home under the host root.
-    assert!(child.join("tmp/git-home").is_dir());
+    // The in-lane fabric context opens read-only and reaches the host through
+    // the relay, so it creates no git home in the child store.
+    assert!(!child.join("tmp/git-home").exists());
     // Host probes leave no directory or lease behind once the child launched.
     let probes: Vec<_> = fs::read_dir(state)?
         .filter_map(|entry| entry.ok()?.file_name().into_string().ok())

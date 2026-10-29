@@ -61,7 +61,8 @@ const LAYERS: &[(&str, &[&str])] = &[
         "fabric-runtime",
         &["core", "records", "config", "os", "fabric-store"],
     ),
-    ("fabric-mcp", &["core", "records", "fabric-runtime"]),
+    // The relay validates its socket directory against the effective UID.
+    ("fabric-mcp", &["core", "records", "os", "fabric-runtime"]),
     // Chair logs use the lower-level SQLite helper for their durable receipt store.
     ("workflow", &["core", "records", "os", "sqlite"]),
     (
@@ -77,6 +78,8 @@ const LAYERS: &[(&str, &[&str])] = &[
             "routing",
             "run",
             "fabric-runtime",
+            "fabric-mcp",
+            "fabric-store",
             "workflow",
             "os",
             "supervisor",

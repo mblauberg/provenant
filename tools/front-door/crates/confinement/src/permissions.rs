@@ -285,6 +285,8 @@ pub struct ProviderProfileSpec {
     /// and only the terminals this sandbox allocates, never another `ttys`.
     pub allow_pseudo_tty: bool,
     pub runtime_reads: Vec<PathGrant>,
+    /// Exact attempt-bound host Fabric mutation endpoint.
+    pub fabric_socket: Option<PathGrant>,
     /// Literal directory discovery; never the contents of provider config.
     pub discovery_reads: Vec<PathGrant>,
     pub authentication: Vec<AuthenticationProfile>,
@@ -918,6 +920,7 @@ pub fn required_anchors(
         .chain(&plan.private_state)
         .chain(&spec.process_executables)
         .chain(&spec.runtime_reads)
+        .chain(spec.fabric_socket.iter())
         .chain(&spec.discovery_reads)
         .chain(&spec.state_writes)
         .chain(&spec.tool_exec_roots)
@@ -1773,6 +1776,19 @@ fn render_profile(
         }
     }
 
+    if let Some(socket) = &profile.spec.fabric_socket {
+        push_rule(
+            &mut source,
+            "allow",
+            "file-read*",
+            &socket.path,
+            PathScope::Exact,
+        )?;
+        source.push_str(&format!(
+            "(allow network-outbound (remote unix-socket (path-literal \"{}\")))\n",
+            sbpl_path(&socket.path)?
+        ));
+    }
     for endpoint in &profile.spec.provider_api {
         push_network_endpoint(&mut source, endpoint)?;
     }
@@ -2031,6 +2047,12 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
         validate_read_exec_grant(executable)?;
         if executable.scope != PathScope::Exact {
             return Err(PermissionError::InvalidPath(executable.path.clone()));
+        }
+    }
+    if let Some(socket) = &spec.fabric_socket {
+        validate_noncredential_grant(socket)?;
+        if socket.scope != PathScope::Exact {
+            return Err(PermissionError::InvalidPath(socket.path.clone()));
         }
     }
     for grant in &spec.runtime_reads {
