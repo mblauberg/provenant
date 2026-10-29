@@ -181,8 +181,18 @@ fn policy_codex_fixture() -> Result<TestRig> {
     ));
     Ok(rig)
 }
-fn settled_policy_lanes(rig: &TestRig, output: provenant_os::exec::ExecOutcome) -> Result<Value> {
-    assert!(matches!(code(&output), 0 | 124), "{output:?}");
+/// `settled` is the exit `run` gives when the whole retry chain settles
+/// inside its own wait; otherwise it times out (124) and `lanes` waits on.
+/// Which one happens depends on host speed, so both are accepted.
+fn settled_policy_lanes(
+    rig: &TestRig,
+    output: provenant_os::exec::ExecOutcome,
+    settled: i64,
+) -> Result<Value> {
+    assert!(
+        code(&output) == settled || code(&output) == 124,
+        "{output:?}"
+    );
     let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
     let run_id = output["data"]["run_id"].as_str().ok_or("run ID")?;
     // Keep each command below the rig's ten-second watchdog while allowing
@@ -224,7 +234,7 @@ fn policy_empty_result_falls_back_without_a_chair_turn() -> Result {
         "3s",
         "--json",
     ])?;
-    let lanes = settled_policy_lanes(&rig, output)?;
+    let lanes = settled_policy_lanes(&rig, output, 0)?;
     let rows = lanes["data"]["lanes"].as_array().ok_or("lane rows")?;
     assert_eq!(rows.len(), 2, "{lanes}");
     let first = rows
@@ -264,7 +274,7 @@ fn policy_incomplete_result_continues_the_retained_session() -> Result {
         "3s",
         "--json",
     ])?;
-    let lanes = settled_policy_lanes(&rig, output)?;
+    let lanes = settled_policy_lanes(&rig, output, 0)?;
     let rows = lanes["data"]["lanes"].as_array().ok_or("lane rows")?;
     assert_eq!(rows.len(), 2, "{lanes}");
     let first = rows
@@ -314,11 +324,13 @@ fn capacity_settlement_resumes_the_same_session() -> Result {
         "capacity-retry",
         "--prompt-file",
         prompt.to_str().ok_or("prompt path")?,
+        // Long enough for both attempts to settle on most hosts, so `run`
+        // reports the failed tail (exit 1); a slow host times out instead.
         "--wait",
-        "3s",
+        "7s",
         "--json",
     ])?;
-    let lanes = settled_policy_lanes(&rig, output)?;
+    let lanes = settled_policy_lanes(&rig, output, 1)?;
     let rows = lanes["data"]["lanes"].as_array().ok_or("lane rows")?;
     assert_eq!(rows.len(), 2, "{lanes}");
     let first = rows
