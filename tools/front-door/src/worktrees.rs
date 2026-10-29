@@ -1538,14 +1538,15 @@ mod gc_preview_tests {
         data.build_dirs.bytes = 4096;
         data.build_dirs.cache_bytes = 8192;
         data.build_dirs.busy.push("/cache/b/target/debug".into());
+        data.build_dirs.recent.push("/cache/c/target/debug".into());
         for (dry_run, expected) in [
             (
                 true,
-                "1 lane build director(ies), 4096 bytes reclaimable; 8192 bytes of lane build output remain, 1 busy\n",
+                "1 lane build director(ies), 4096 bytes reclaimable; 8192 bytes of lane build output remain, 1 busy, 1 recent\n",
             ),
             (
                 false,
-                "1 lane build director(ies), 4096 bytes reclaimed; 8192 bytes of lane build output remain, 1 busy\n",
+                "1 lane build director(ies), 4096 bytes reclaimed; 8192 bytes of lane build output remain, 1 busy, 1 recent\n",
             ),
         ] {
             data.report.dry_run = dry_run;
@@ -1557,6 +1558,7 @@ mod gc_preview_tests {
         assert_eq!(json["build_dir_bytes"], 8192);
         let json = serde_json::to_value(gc_result_data(&data, true)).unwrap_or_default();
         assert_eq!(json["build_dirs"]["cache_bytes"], 8192);
+        assert_eq!(json["build_dirs"]["recent"][0], "/cache/c/target/debug");
     }
     #[test]
     fn gc_summary_reports_event_expiry_in_preview_and_applied_mode() {
