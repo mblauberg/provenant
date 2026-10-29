@@ -2972,6 +2972,15 @@ fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
         data["data"]["provider_error"],
         "provider 500: upstream failed"
     );
+    for args in [
+        vec!["lanes", "--id", &attempt],
+        vec!["lanes", "--id", &attempt, "--wait", "1"],
+    ] {
+        let listing = rig.command(&args)?;
+        let human = String::from_utf8(listing.stdout.bytes)?;
+        assert!(human.contains("provider 500: upstream failed"), "{human}");
+        assert!(human.contains("result:"), "{human}");
+    }
     let path = rig.command(&["output", &target, "--part", "stderr", "--path", "--json"])?;
     let data: Value = serde_json::from_slice(&path.stdout.bytes)?;
     assert_eq!(code(&path), 0, "{data}");

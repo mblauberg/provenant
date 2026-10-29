@@ -4655,15 +4655,40 @@ fn render_settled(
             cancel: &cancel,
         },
     );
-    let (mut data, human) = render_lanes(
+    let (mut data, mut human) = render_lanes(
         lanes,
         &waits,
         None,
         session.context.state_root.as_path(),
         cooldowns,
     );
+    append_provider_errors(session, lanes, &mut human);
     attach_handoffs(session, lanes, &mut data);
     Ok((data, human))
+}
+fn append_provider_errors(session: &Session, lanes: &[run::AttemptRecord], human: &mut String) {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    for lane in lanes {
+        if matches!(
+            lane.state,
+            run::AttemptState::Terminal {
+                outcome: run::Outcome::Failed,
+                ..
+            }
+        ) && let Some(error) = provider_error_line(session, lane.attempt_id, &call)
+        {
+            human.push_str(&format!(
+                "  provider error {}: {}\n",
+                lane.attempt_id,
+                plain_text(&error, usize::MAX)
+            ));
+        }
+    }
 }
 /// Each row's `handoff`: the settlement snapshot's parsed object, or null when
 /// the attempt recorded none. Rows follow `lanes`, as `render_lanes` makes them.
@@ -5080,13 +5105,14 @@ fn lanes_inner(
     };
     let waits = session.store.lane_waits(&lanes, &call);
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
-    let (mut data, human) = render_lanes(
+    let (mut data, mut human) = render_lanes(
         &lanes,
         &waits,
         next,
         session.context.state_root.as_path(),
         lane_cooldown_view(&cooldowns),
     );
+    append_provider_errors(&session, &lanes, &mut human);
     attach_handoffs(&session, &lanes, &mut data);
     Ok((data, human, false))
 }
