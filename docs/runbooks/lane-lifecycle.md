@@ -175,8 +175,8 @@ the competing host verification finishes. Copying and indexing have a separate
 the private evidence for recovery. See the
 [verification deadlines](../specs/run.md#writer-object-isolation).
 
-On macOS, existing hard-linked files in the writable worktree stay readable
-but are write-denied, including inside ignored directories. Excessive denials
-still refuse launch; see the [writer limits and recovery advice](providers.md#writer-lanes).
+On macOS, existing hard-linked files in the writable worktree no longer refuse
+a launch or become write-denied; only Git control files with another name do.
+See the [writer limits](providers.md#writer-lanes).
 The hard-link fixtures remain enabled in macOS CI because lane sandboxes can
 deny their `hard_link` calls before the launch check runs.

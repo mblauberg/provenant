@@ -36,26 +36,6 @@ const MAX_NETWORK_GRANTS: usize = 128;
 #[cfg(target_os = "macos")]
 const MAX_GIT_HEAD_BYTES: u64 = 1024;
 #[cfg(target_os = "macos")]
-const MAX_WRITABLE_TREE_ENTRIES: usize = 100_000;
-/// Include ignored build and dependency trees, without an unbounded walk.
-#[cfg(target_os = "macos")]
-const MAX_WORKTREE_ENTRIES: usize = 500_000;
-/// Allow thousands of build/dependency aliases, bounded by both count and bytes.
-#[cfg(any(target_os = "macos", feature = "snapshot"))]
-const MAX_HARD_LINK_DENIES: usize = 4096;
-/// Profiles travel in argv: leave headroom below macOS's 1 MiB ARG_MAX for
-/// provider arguments and environment. The ordinary profile keeps its 64 KiB cap.
-#[cfg(any(target_os = "macos", feature = "snapshot"))]
-const HARD_LINK_PROFILE_LIMIT: usize = 512 * 1024;
-/// The lane build cache is disposable but grows with every build (a Rust
-/// workspace's `target/` holds ~100,000 entries), so its census bound is
-/// higher than a worktree's. It stays bounded and censused.
-#[cfg(target_os = "macos")]
-const MAX_CACHE_TREE_ENTRIES: usize = 500_000;
-/// The retained provider state copy shares this depth limit.
-#[cfg(target_os = "macos")]
-const MAX_WRITABLE_TREE_DEPTH: usize = 32;
-#[cfg(target_os = "macos")]
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 const DYLD_BOOTSTRAP_RULES: &str = r#"
@@ -148,8 +128,10 @@ const PSEUDO_TTY_RULES: &str = r##"(allow pseudo-tty)
 (allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))
 (allow file-read* file-write* file-ioctl (require-all (regex #"^/dev/ttys[0-9]+$") (extension "com.apple.sandbox.pty")))
 "##;
+/// Profiles travel in argv: leave headroom below macOS's 1 MiB ARG_MAX for
+/// provider arguments and environment.
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
-const PROFILE_LIMIT: usize = 64 * 1024;
+const PROFILE_LIMIT: usize = 512 * 1024;
 #[cfg(target_os = "macos")]
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(target_os = "macos")]
@@ -191,20 +173,12 @@ pub enum PermissionError {
     ProtectedOverlap,
     #[error("required held path anchor is missing or changed")]
     AnchorMismatch,
-    #[error("required held path anchor is missing or changed at {path:?} during {stage}")]
+    #[error("held path check failed at {path:?}: {stage}")]
     AnchorMismatchAt { path: PathBuf, stage: &'static str },
     #[error(
-        "writable tree contains a hard-linked regular file: {0:?}; inspect it and remove or rebuild it if it is disposable build output, then retry"
+        "Git control file has other hard links: {0:?}; a lane could write it through the other name. Find the other name with `find . -samefile {0:?}` from the repository root, remove it, then retry"
     )]
-    HardLinkedWritableFile(PathBuf),
-    #[error(
-        "hard-link write denials exceed the {bound} limit ({limit}) in {directory:?}; delete or move disposable build/dependency output from this directory, then retry; Rust lanes should use Fabric's Cargo environment"
-    )]
-    HardLinkDenyBound {
-        directory: PathBuf,
-        bound: &'static str,
-        limit: usize,
-    },
+    GitControlHardLinked(PathBuf),
     #[error("path is not valid UTF-8 for the SBPL source format")]
     NonUtf8Path,
     #[error("profile or fixture record is malformed")]
@@ -217,8 +191,10 @@ pub enum PermissionError {
     GitWriteAuthorityMissing,
     #[error("nested confinement is unsupported by this backend")]
     NestedConfinementUnsupported,
-    #[error("compiled profile exceeds its byte bound")]
-    ProfileTooLarge,
+    #[error(
+        "compiled profile is {bytes} bytes, over the {limit}-byte launch limit (profiles travel in argv); reduce the read, write or executable roots this lane is granted"
+    )]
+    ProfileTooLarge { bytes: usize, limit: usize },
     #[error("{family} exceeds its bound of {limit}: {path:?}")]
     BoundExceeded {
         family: &'static str,
@@ -746,6 +722,13 @@ pub struct ProviderProfile {
     pub observations: BTreeMap<FixtureOperation, FixtureOutcome>,
 }
 
+fn anchor_at(path: &Path, stage: &'static str) -> PermissionError {
+    PermissionError::AnchorMismatchAt {
+        path: path.to_owned(),
+        stage,
+    }
+}
+
 pub struct AnchoredDirectory {
     path: PathBuf,
     #[cfg(target_os = "macos")]
@@ -768,7 +751,7 @@ impl AnchoredDirectory {
         let directory = Directory::open_anchor(path).map_err(PermissionError::Filesystem)?;
         let identity = directory.metadata().map_err(PermissionError::Filesystem)?;
         if identity.kind != FileKind::Directory {
-            return Err(PermissionError::AnchorMismatch);
+            return Err(anchor_at(path, "path is not a directory"));
         }
         Ok(Self {
             path: path.to_owned(),
@@ -788,7 +771,7 @@ impl AnchoredDirectory {
         let canonical =
             provenant_os::fs::canonicalize(&self.path).map_err(PermissionError::Filesystem)?;
         if canonical.as_path() != self.path {
-            return Err(PermissionError::AnchorMismatch);
+            return Err(anchor_at(&self.path, "path no longer resolves to itself"));
         }
         let named = Directory::open_anchor(&self.path).map_err(PermissionError::Filesystem)?;
         let named_identity = named.metadata().map_err(PermissionError::Filesystem)?;
@@ -801,7 +784,10 @@ impl AnchoredDirectory {
             || !named_identity.same_identity(&self.identity)
             || !held_identity.same_identity(&self.identity)
         {
-            return Err(PermissionError::AnchorMismatch);
+            return Err(anchor_at(
+                &self.path,
+                "directory was replaced after it was held",
+            ));
         }
         Ok(())
     }
@@ -820,13 +806,7 @@ pub struct Anchors<'a> {
 impl Anchors<'_> {
     fn verify_all(&self) -> Result<(), PermissionError> {
         for anchor in self.directories {
-            anchor.verify().map_err(|error| match error {
-                PermissionError::AnchorMismatch => PermissionError::AnchorMismatchAt {
-                    path: anchor.path.clone(),
-                    stage: "held directory revalidation",
-                },
-                error => error,
-            })?;
+            anchor.verify()?;
         }
         Ok(())
     }
@@ -854,10 +834,7 @@ impl Anchors<'_> {
             .iter()
             .find(|anchor| anchor.path == parent)
             .ok_or_else(|| mismatch("discovery parent anchor lookup"))?;
-        anchor.verify().map_err(|error| match error {
-            PermissionError::AnchorMismatch => mismatch("discovery parent revalidation"),
-            error => error,
-        })?;
+        anchor.verify()?;
         match anchor.directory.metadata_at(name, false) {
             Ok(metadata) if metadata.kind == FileKind::Directory => Ok(()),
             Ok(_) => Err(mismatch("discovery entry type check")),
@@ -873,7 +850,7 @@ impl Anchors<'_> {
                     .directories
                     .iter()
                     .find(|anchor| anchor.path == grant.path)
-                    .ok_or(PermissionError::AnchorMismatch)?;
+                    .ok_or_else(|| anchor_at(&grant.path, "directory anchor not held"))?;
                 anchor.verify()
             }
             PathScope::Exact => {
@@ -889,7 +866,7 @@ impl Anchors<'_> {
         }
         match self.exact_grant_metadata(&grant.path)? {
             Some(_) => Ok(()),
-            None => Err(PermissionError::AnchorMismatch),
+            None => Err(anchor_at(&grant.path, "executable is missing")),
         }
     }
 
@@ -899,7 +876,7 @@ impl Anchors<'_> {
         }
         match self.exact_grant_metadata(&grant.path)? {
             Some(metadata) if metadata.links == 1 => Ok(()),
-            Some(_) => Err(PermissionError::AnchorMismatch),
+            Some(_) => Err(anchor_at(&grant.path, "file has other hard links")),
             None => Ok(()),
         }
     }
@@ -911,15 +888,18 @@ impl Anchors<'_> {
         let name = path
             .file_name()
             .ok_or_else(|| PermissionError::InvalidPath(path.to_owned()))?;
-        let anchor = self
-            .directories
-            .iter()
-            .find(|anchor| anchor.path == parent)
-            .ok_or(PermissionError::AnchorMismatch)?;
+        let Some(anchor) = self.directories.iter().find(|anchor| anchor.path == parent) else {
+            // A grant on a file in a directory that does not exist grants
+            // nothing: only a held, present parent can be written through.
+            return match std::fs::symlink_metadata(parent) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                _ => Err(anchor_at(parent, "parent directory anchor not held")),
+            };
+        };
         anchor.verify()?;
         match anchor.directory.metadata_at(name, false) {
             Ok(metadata) if metadata.kind == FileKind::Regular => Ok(Some(metadata)),
-            Ok(_) => Err(PermissionError::AnchorMismatch),
+            Ok(_) => Err(anchor_at(path, "path is not a regular file")),
             Err(error) if error.is_not_found() => Ok(None),
             Err(error) => Err(PermissionError::Filesystem(error)),
         }
@@ -1016,7 +996,12 @@ pub fn required_anchors(
         .into_iter()
         .filter_map(|grant| match grant.scope {
             PathScope::Subtree => Some(grant.path.clone()),
-            PathScope::Exact => grant.path.parent().map(Path::to_owned),
+            // A file in a directory that does not exist yet needs no anchor.
+            PathScope::Exact => grant
+                .path
+                .parent()
+                .filter(|parent| std::fs::symlink_metadata(parent).is_ok())
+                .map(Path::to_owned),
         })
         .collect()
 }
@@ -1033,8 +1018,9 @@ pub trait ConfinementBackend: Send + Sync {
 
     /// Compile immediately before launch while holding writer exclusion over
     /// every writable root through the child handoff. The pathname sandbox
-    /// denies child-created hard links but cannot stop an external writer from
-    /// adding an alias after this census.
+    /// denies child-created hard links; compile inspects only the Git control
+    /// files for other names, and cannot stop an external writer from adding
+    /// an alias to one after that check.
     fn compile(
         &self,
         plan: &PlanPermissions,
@@ -1283,10 +1269,6 @@ fn compile_sbpl(
             Some(verify_worktree_authority(authority, anchors)?)
         }
     };
-    let mut hard_link_denies = BTreeSet::new();
-    if let Some(grants) = &worktree_grants {
-        hard_link_denies = verify_worktree_tree(&grants.worktree.path, anchors)?;
-    }
     if let Some(read_only) = &plan.read_only {
         if !matches!(plan.mode, AccessMode::ReadOnly) {
             return Err(PermissionError::InvalidReadOnlyPolicy);
@@ -1303,12 +1285,10 @@ fn compile_sbpl(
             {
                 return Err(PermissionError::ProtectedOverlap);
             }
-            verify_writable_tree(&grant.path, anchors)?;
+            anchors.verify_grant_held(grant)?;
         }
     }
-    let mut grants = GrantSet::build(plan, profile, anchors.home, worktree_grants)?;
-    grants.hard_link_denies = hard_link_denies;
-    let hard_link_denies = &grants.hard_link_denies;
+    let grants = GrantSet::build(plan, profile, anchors.home, worktree_grants)?;
     let read_grants = &grants.reads;
     let all_reads = || read_grants.iter().chain(&profile.spec.discovery_reads);
     let credential_writes = &grants.credential_writes;
@@ -1343,17 +1323,12 @@ fn compile_sbpl(
     }
     verify_state_writes(plan, profile, anchors)?;
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        verify_state_write(
-            plan,
-            &authority.cargo_cache,
-            anchors,
-            MAX_CACHE_TREE_ENTRIES,
-        )?;
+        verify_state_write(plan, &authority.cargo_cache, anchors)?;
         let cache = anchors
             .directories
             .iter()
             .find(|anchor| anchor.path == authority.cargo_cache.path)
-            .ok_or(PermissionError::AnchorMismatch)?;
+            .ok_or_else(|| anchor_at(&authority.cargo_cache.path, "lane cache anchor not held"))?;
         verify_cache_metadata(
             &cache
                 .directory
@@ -1451,11 +1426,6 @@ fn compile_sbpl(
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
         verify_worktree_authority(authority, anchors)?;
     }
-    if let Some(grants) = &worktree_grants
-        && verify_worktree_tree(&grants.worktree.path, anchors)? != *hard_link_denies
-    {
-        return Err(PermissionError::AnchorMismatch);
-    }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
     if let Some(state) = &plan.private_state {
         verify_private_scratch(state, &scratch_exclusions, anchors)?;
@@ -1464,21 +1434,16 @@ fn compile_sbpl(
     if let Some(read_only) = &plan.read_only {
         read_only.revalidate()?;
         for grant in &read_only.writes {
-            verify_writable_tree(&grant.path, anchors)?;
+            anchors.verify_grant_held(grant)?;
         }
     }
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        verify_state_write(
-            plan,
-            &authority.cargo_cache,
-            anchors,
-            MAX_CACHE_TREE_ENTRIES,
-        )?;
+        verify_state_write(plan, &authority.cargo_cache, anchors)?;
         let cache = anchors
             .directories
             .iter()
             .find(|anchor| anchor.path == authority.cargo_cache.path)
-            .ok_or(PermissionError::AnchorMismatch)?;
+            .ok_or_else(|| anchor_at(&authority.cargo_cache.path, "lane cache anchor not held"))?;
         verify_cache_metadata(
             &cache
                 .directory
@@ -1512,7 +1477,6 @@ pub(crate) struct GrantSet<'a> {
     reads: Vec<PathGrant>,
     credential_writes: Vec<PathGrant>,
     worktree: Option<WorktreeWriteGrants>,
-    hard_link_denies: BTreeSet<PathBuf>,
 }
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
@@ -1554,7 +1518,6 @@ impl<'a> GrantSet<'a> {
             reads,
             credential_writes,
             worktree,
-            hard_link_denies: BTreeSet::new(),
         })
     }
 }
@@ -1562,7 +1525,7 @@ impl<'a> GrantSet<'a> {
 /// Render a built grant set without filesystem or environment access.
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 pub(crate) fn render(grants: &GrantSet<'_>) -> Result<String, PermissionError> {
-    let mut source = String::from_utf8(render_profile(
+    let source = String::from_utf8(render_profile(
         grants.plan,
         grants.profile,
         &grants.reads,
@@ -1571,59 +1534,10 @@ pub(crate) fn render(grants: &GrantSet<'_>) -> Result<String, PermissionError> {
         grants.home,
     )?)
     .map_err(|_| PermissionError::NonUtf8Path)?;
-    if grants.hard_link_denies.len() > MAX_HARD_LINK_DENIES {
-        return Err(PermissionError::HardLinkDenyBound {
-            directory: grants
-                .worktree
-                .as_ref()
-                .ok_or(PermissionError::AnchorMismatch)?
-                .worktree
-                .path
-                .clone(),
-            bound: "path count",
-            limit: MAX_HARD_LINK_DENIES,
-        });
-    }
-    let mut ancestors = BTreeSet::new();
-    for path in &grants.hard_link_denies {
-        push_rule(&mut source, "deny", "file-write*", path, PathScope::Exact)?;
-        if let Some(worktree) = &grants.worktree {
-            ancestors.extend(
-                path.ancestors()
-                    .skip(1)
-                    .take_while(|parent| parent.starts_with(&worktree.worktree.path))
-                    .map(Path::to_owned),
-            );
-        }
-    }
-    // A directory rename would otherwise give a shared inode a new pathname
-    // outside its literal deny. Keep ancestors in place, but allow other writes.
-    for path in ancestors {
-        push_rule(
-            &mut source,
-            "deny",
-            "file-write-unlink",
-            &path,
-            PathScope::Exact,
-        )?;
-    }
-    if source.len() > HARD_LINK_PROFILE_LIMIT {
-        let directory = grants
-            .worktree
-            .as_ref()
-            .map(|worktree| worktree.worktree.path.clone())
-            .ok_or(PermissionError::AnchorMismatch)?;
-        return Err(PermissionError::HardLinkDenyBound {
-            directory,
-            bound: "profile byte count",
-            limit: HARD_LINK_PROFILE_LIMIT,
-        });
-    }
     Ok(source)
 }
 
-/// Provider state writes stay outside every secret, protected and Git root, and
-/// carry the same hard-link census as other writable trees.
+/// Provider state writes stay outside every secret, protected and Git root.
 #[cfg(target_os = "macos")]
 fn verify_state_writes(
     plan: &PlanPermissions,
@@ -1631,7 +1545,7 @@ fn verify_state_writes(
     anchors: &Anchors<'_>,
 ) -> Result<(), PermissionError> {
     for grant in &profile.spec.state_writes {
-        verify_state_write(plan, grant, anchors, MAX_WRITABLE_TREE_ENTRIES)?;
+        verify_state_write(plan, grant, anchors)?;
     }
     Ok(())
 }
@@ -1641,7 +1555,6 @@ fn verify_state_write(
     plan: &PlanPermissions,
     grant: &PathGrant,
     anchors: &Anchors<'_>,
-    entry_limit: usize,
 ) -> Result<(), PermissionError> {
     grant.validate()?;
     if plan
@@ -1666,18 +1579,13 @@ fn verify_state_write(
         }
     }
     match grant.scope {
-        PathScope::Subtree => verify_writable_tree_within(
-            &grant.path,
-            anchors,
-            entry_limit,
-            &mut WritableTreeLinks::Refuse,
-        )?,
+        PathScope::Subtree => anchors.verify_grant_held(grant)?,
         PathScope::Exact => anchors.verify_single_link_grant(grant)?,
     }
     Ok(())
 }
 
-/// Shared tool stores and dispatch write roots are deliberately not censused:
+/// Shared tool stores and dispatch write roots are not inspected beyond this:
 /// they can be large (a pnpm store), and the child cannot add hard links.
 /// They still stay clear of every secret, protected, private and Git root.
 #[cfg(target_os = "macos")]
@@ -1761,7 +1669,7 @@ fn verify_private_scratch(
         .directories
         .iter()
         .find(|anchor| anchor.path == scratch.path)
-        .ok_or(PermissionError::AnchorMismatch)?;
+        .ok_or_else(|| anchor_at(&scratch.path, "scratch anchor not held"))?;
     anchor.verify()?;
     let metadata = anchor
         .directory
@@ -1771,167 +1679,10 @@ fn verify_private_scratch(
         || metadata.uid != provenant_os::fs::effective_uid()
         || metadata.mode & 0o077 != 0
     {
-        return Err(PermissionError::AnchorMismatch);
-    }
-    verify_writable_tree(&scratch.path, anchors)?;
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn verify_writable_tree(path: &Path, anchors: &Anchors<'_>) -> Result<(), PermissionError> {
-    verify_writable_tree_within(
-        path,
-        anchors,
-        MAX_WRITABLE_TREE_ENTRIES,
-        &mut WritableTreeLinks::Refuse,
-    )
-}
-
-/// Ignored directories receive the same census as source directories. Every
-/// pathname of a multi-linked regular file is denied, even for in-tree aliases.
-#[cfg(target_os = "macos")]
-fn verify_worktree_tree(
-    path: &Path,
-    anchors: &Anchors<'_>,
-) -> Result<BTreeSet<PathBuf>, PermissionError> {
-    let mut links = WritableTreeLinks::Deny {
-        root: path.to_owned(),
-        paths: BTreeSet::new(),
-    };
-    verify_writable_tree_within(path, anchors, MAX_WORKTREE_ENTRIES, &mut links)?;
-    let WritableTreeLinks::Deny { paths, .. } = links else {
-        return Err(PermissionError::AnchorMismatch);
-    };
-    Ok(paths)
-}
-
-#[cfg(target_os = "macos")]
-enum WritableTreeLinks {
-    Refuse,
-    Deny {
-        root: PathBuf,
-        paths: BTreeSet<PathBuf>,
-    },
-}
-
-#[cfg(target_os = "macos")]
-impl WritableTreeLinks {
-    fn record(&mut self, path: PathBuf, metadata: &Metadata) -> Result<(), PermissionError> {
-        if metadata.kind != FileKind::Regular || metadata.links <= 1 {
-            return Ok(());
-        }
-        match self {
-            Self::Refuse => Err(PermissionError::HardLinkedWritableFile(path)),
-            Self::Deny { root, paths } => {
-                let directory = path.parent().unwrap_or(root).to_owned();
-                paths.insert(path);
-                if paths.len() > MAX_HARD_LINK_DENIES {
-                    return Err(PermissionError::HardLinkDenyBound {
-                        directory,
-                        bound: "path count",
-                        limit: MAX_HARD_LINK_DENIES,
-                    });
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn verify_writable_tree_within(
-    path: &Path,
-    anchors: &Anchors<'_>,
-    entry_limit: usize,
-    links: &mut WritableTreeLinks,
-) -> Result<(), PermissionError> {
-    let root = anchors
-        .directories
-        .iter()
-        .find(|anchor| anchor.path == path)
-        .ok_or(PermissionError::AnchorMismatch)?;
-    root.verify()?;
-    let identity = root
-        .directory
-        .metadata()
-        .map_err(PermissionError::Filesystem)?;
-    if identity.kind != FileKind::Directory {
-        return Err(PermissionError::AnchorMismatch);
-    }
-    let mut entries = 0;
-    inspect_writable_directory(&root.directory, path, 0, &mut entries, entry_limit, links)?;
-    let after = root
-        .directory
-        .metadata()
-        .map_err(PermissionError::Filesystem)?;
-    root.verify()?;
-    if !identity.unchanged(&after) || after.kind != FileKind::Directory {
-        return Err(PermissionError::AnchorMismatch);
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn inspect_writable_directory(
-    directory: &Directory,
-    path: &Path,
-    depth: usize,
-    count: &mut usize,
-    entry_limit: usize,
-    links: &mut WritableTreeLinks,
-) -> Result<(), PermissionError> {
-    if depth > MAX_WRITABLE_TREE_DEPTH {
-        return Err(PermissionError::BoundExceeded {
-            family: "writable tree depth",
-            limit: MAX_WRITABLE_TREE_DEPTH,
-            path: path.to_owned(),
-        });
-    }
-    for name in directory.entries().map_err(PermissionError::Filesystem)? {
-        let name = name.map_err(PermissionError::Filesystem)?;
-        *count += 1;
-        if *count > entry_limit {
-            return Err(PermissionError::BoundExceeded {
-                family: "writable tree entry count",
-                limit: entry_limit,
-                path: path.to_owned(),
-            });
-        }
-        let before = directory
-            .metadata_at(&name, false)
-            .map_err(PermissionError::Filesystem)?;
-        links.record(path.join(&name), &before)?;
-        if before.kind == FileKind::Directory {
-            let child = directory
-                .open_verified_directory(&name)
-                .map_err(PermissionError::Filesystem)?;
-            let opened = child.metadata().map_err(PermissionError::Filesystem)?;
-            if !before.unchanged(&opened) {
-                return Err(PermissionError::AnchorMismatch);
-            }
-            inspect_writable_directory(
-                &child,
-                &path.join(&name),
-                depth + 1,
-                count,
-                entry_limit,
-                links,
-            )?;
-            let after = directory
-                .metadata_at(&name, false)
-                .map_err(PermissionError::Filesystem)?;
-            if after.kind != FileKind::Directory || !opened.unchanged(&after) {
-                return Err(PermissionError::AnchorMismatch);
-            }
-        } else {
-            let after = directory
-                .metadata_at(&name, false)
-                .map_err(PermissionError::Filesystem)?;
-            if !before.unchanged(&after) {
-                return Err(PermissionError::AnchorMismatch);
-            }
-            links.record(path.join(&name), &after)?;
-        }
+        return Err(anchor_at(
+            &scratch.path,
+            "directory is not private to this user (owner or group/other mode bits)",
+        ));
     }
     Ok(())
 }
@@ -2136,7 +1887,10 @@ fn render_profile(
         )?;
     }
     if source.len() > PROFILE_LIMIT {
-        return Err(PermissionError::ProfileTooLarge);
+        return Err(PermissionError::ProfileTooLarge {
+            bytes: source.len(),
+            limit: PROFILE_LIMIT,
+        });
     }
     Ok(source.into_bytes())
 }
@@ -2211,7 +1965,63 @@ fn verify_worktree_authority(
             PathScope::Exact => anchors.verify_single_link_grant(grant)?,
         }
     }
+    verify_git_control_links(verified.repo())?;
     Ok(grants)
+}
+
+/// Git config, hooks and `info/` are read-only to the lane by path, so each
+/// must have one name: a second name inside the worktree would be writable.
+/// A lane cannot make one (`deny file-link`), and a host tool does not link
+/// into Git metadata, so only the few control files are inspected, not the
+/// worktree.
+#[cfg(target_os = "macos")]
+fn verify_git_control_links(repo: &crate::repo::VerifiedRepo) -> Result<(), PermissionError> {
+    const ENTRIES_PER_DIRECTORY: usize = 512;
+    let check = |directory: &Directory, parent: &Path, name: &OsStr| match directory
+        .metadata_at(name, false)
+    {
+        Ok(metadata) if metadata.kind == FileKind::Regular && metadata.links > 1 => {
+            Err(PermissionError::GitControlHardLinked(parent.join(name)))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.is_not_found() => Ok(()),
+        Err(error) => Err(PermissionError::Filesystem(error)),
+    };
+    for name in ["config", "packed-refs"] {
+        check(repo.common_dir(), repo.common_git_dir(), OsStr::new(name))?;
+    }
+    check(
+        repo.private_dir(),
+        repo.private_git_dir(),
+        OsStr::new("config.worktree"),
+    )?;
+    for name in ["hooks", "info"] {
+        let parent = repo.common_git_dir().join(name);
+        let directory = match repo.common_dir().open_verified_directory(OsStr::new(name)) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => continue,
+            Err(error) => return Err(PermissionError::Filesystem(error)),
+        };
+        for (seen, entry) in directory
+            .entries()
+            .map_err(PermissionError::Filesystem)?
+            .enumerate()
+        {
+            if seen == ENTRIES_PER_DIRECTORY {
+                return Err(PermissionError::BoundExceeded {
+                    family: "Git control directory entry count",
+                    limit: ENTRIES_PER_DIRECTORY,
+                    path: parent,
+                });
+            }
+            check(
+                &directory,
+                &parent,
+                &entry.map_err(PermissionError::Filesystem)?,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -2228,8 +2038,14 @@ fn verify_selected_head(worktree: &VerifiedWorktree, branch: &str) -> Result<(),
         .open_read(name)
         .map_err(PermissionError::Filesystem)?;
     let opened = file.metadata().map_err(PermissionError::Filesystem)?;
+    let changed = || {
+        anchor_at(
+            &worktree.repo().private_git_dir().join("HEAD"),
+            "HEAD changed while it was read",
+        )
+    };
     if !opened.same_identity(&before) {
-        return Err(PermissionError::AnchorMismatch);
+        return Err(changed());
     }
     let mut bytes = Vec::new();
     (&mut file)
@@ -2248,7 +2064,7 @@ fn verify_selected_head(worktree: &VerifiedWorktree, branch: &str) -> Result<(),
         || byte_count != opened.size
         || byte_count > MAX_GIT_HEAD_BYTES
     {
-        return Err(PermissionError::AnchorMismatch);
+        return Err(changed());
     }
     let expected = format!("ref: refs/heads/{branch}\n");
     if bytes.as_slice() != expected.as_bytes() {
@@ -2611,204 +2427,174 @@ mod tests {
     use provenant_os::exec::SystemExecutor;
 
     #[test]
-    fn hard_link_refusal_renders_path_and_recovery() {
-        let error = PermissionError::HardLinkedWritableFile("/repo/target/object.o".into());
+    fn git_control_link_refusal_names_the_file_and_the_recovery() {
+        let error = PermissionError::GitControlHardLinked("/repo/.git/config".into());
         let message = error.to_string();
-        assert!(message.contains("/repo/target/object.o"));
-        assert!(message.contains("disposable build output"));
+        assert!(message.contains("/repo/.git/config"));
+        assert!(message.contains("samefile"));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     // CI-required fixture: lane sandboxes may deny hard_link with EPERM.
-    // Keep enabled for the macOS confinement job; the pure diagnostic test
-    // above runs even when the launch sandbox cannot construct this fixture.
-    fn writable_tree_hard_link_refusal_names_nested_file() -> Result<(), Box<dyn std::error::Error>>
+    fn only_git_control_files_are_checked_for_other_names() -> Result<(), Box<dyn std::error::Error>>
     {
-        let temp = tempfile::tempdir()?;
-        let nested = temp.path().join("target/debug");
-        std::fs::create_dir_all(&nested)?;
-        let original = temp.path().join("original");
-        std::fs::write(&original, b"object")?;
-        let alias = nested.join("object.o");
-        std::fs::hard_link(&original, &alias)?;
-        let directory = Directory::open_anchor(&nested)?;
-        let error = inspect_writable_directory(
-            &directory,
-            &nested,
-            0,
-            &mut 0,
-            MAX_WRITABLE_TREE_ENTRIES,
-            &mut WritableTreeLinks::Refuse,
-        )
-        .unwrap_err();
-        assert!(matches!(&error, PermissionError::HardLinkedWritableFile(path) if path == &alias));
-        assert!(error.to_string().contains("disposable build output"));
-        std::fs::remove_file(alias)?;
-        inspect_writable_directory(
-            &directory,
-            &nested,
-            0,
-            &mut 0,
-            MAX_WRITABLE_TREE_ENTRIES,
-            &mut WritableTreeLinks::Refuse,
-        )?;
-        Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn writable_tree_entry_overflow_names_its_family_not_the_profile_bytes()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        for index in 0..5 {
-            std::fs::write(temp.path().join(format!("file-{index}")), b"x")?;
+        let fixture = crate::test_support::Fixture::new()?;
+        let git_dir = fixture.repo.common_git_dir().to_owned();
+        verify_git_control_links(&fixture.repo)?;
+        // Build output and dependency trees hold hard links and are not walked.
+        let tree = fixture.root.join("target/debug");
+        std::fs::create_dir_all(&tree)?;
+        std::fs::write(tree.join("object"), b"o")?;
+        std::fs::hard_link(tree.join("object"), tree.join("alias"))?;
+        verify_git_control_links(&fixture.repo)?;
+        std::fs::create_dir_all(git_dir.join("hooks"))?;
+        std::fs::create_dir_all(git_dir.join("info"))?;
+        std::fs::write(git_dir.join("hooks/pre-commit"), b"#!/bin/sh\n")?;
+        std::fs::write(git_dir.join("info/exclude"), b"")?;
+        for control in ["config", "hooks/pre-commit", "info/exclude"] {
+            let alias = fixture.root.join("alias");
+            std::fs::hard_link(git_dir.join(control), &alias)?;
+            let error = verify_git_control_links(&fixture.repo).unwrap_err();
+            assert!(
+                matches!(&error, PermissionError::GitControlHardLinked(path) if path == &git_dir.join(control)),
+                "{control}: {error}"
+            );
+            std::fs::remove_file(alias)?;
+            verify_git_control_links(&fixture.repo)?;
         }
-        let directory = Directory::open_anchor(temp.path())?;
-        let error = inspect_writable_directory(
-            &directory,
-            temp.path(),
-            0,
-            &mut 0,
-            3,
-            &mut WritableTreeLinks::Refuse,
-        )
-        .unwrap_err();
-        assert!(matches!(
-            &error,
-            PermissionError::BoundExceeded { family, limit: 3, path }
-                if *family == "writable tree entry count" && path == temp.path()
-        ));
-        assert!(!error.to_string().contains("byte bound"));
-        // The disposable lane build cache outgrows a worktree-sized census.
-        const { assert!(MAX_CACHE_TREE_ENTRIES >= 5 * MAX_WRITABLE_TREE_ENTRIES) };
         Ok(())
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", feature = "snapshot"))]
     #[test]
-    fn the_census_walks_and_counts_ignored_directories() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let root = std::fs::canonicalize(temp.path())?;
-        std::fs::write(root.join(".gitignore"), "target/\n")?;
-        std::fs::create_dir_all(root.join("target/debug"))?;
-        std::fs::write(root.join("kept"), b"x")?;
-        for index in 0..5 {
-            std::fs::write(root.join(format!("target/debug/file-{index}")), b"x")?;
-        }
-        let directory = Directory::open_anchor(&root)?;
-        let links = &mut WritableTreeLinks::Deny {
-            root: root.clone(),
-            paths: BTreeSet::new(),
-        };
-        let error = inspect_writable_directory(&directory, &root, 0, &mut 0, 3, links).unwrap_err();
-        assert!(matches!(
-            error,
-            PermissionError::BoundExceeded {
-                family: "writable tree entry count",
-                limit: 3,
-                ..
-            }
-        ));
-        let mut count = 0;
-        inspect_writable_directory(&directory, &root, 0, &mut count, 100, links)?;
-        assert_eq!(count, 9); // .gitignore, kept, target, debug and five files.
-        Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn hard_link_deny_count_is_bounded_and_actionable() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::NamedTempFile::new()?;
-        let mut metadata = Metadata::from_std(temp.as_file().metadata()?);
-        metadata.links = 2;
-        let root = PathBuf::from("/fixture/repo/node_modules");
-        let mut links = WritableTreeLinks::Deny {
-            root: root.clone(),
-            paths: BTreeSet::new(),
-        };
-        for index in 0..MAX_HARD_LINK_DENIES {
-            links.record(root.join(index.to_string()), &metadata)?;
-        }
-        // Recording the same path twice (before/after metadata) costs one slot.
-        links.record(root.join("0"), &metadata)?;
-        let error = links.record(root.join("overflow"), &metadata).unwrap_err();
-        assert!(
-            matches!(&error, PermissionError::HardLinkDenyBound { directory, bound: "path count", limit: MAX_HARD_LINK_DENIES } if directory == &root)
-        );
-        assert!(error.to_string().contains("/fixture/repo/node_modules"));
-        assert!(error.to_string().contains("delete or move"));
-        assert!(
-            error
-                .to_string()
-                .contains("Rust lanes should use Fabric's Cargo environment")
-        );
-        Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn hard_link_denies_keep_aliases_and_ancestors_immutable_with_a_byte_bound()
+    fn profiles_between_the_old_and_new_limits_compile_and_larger_ones_name_their_size()
     -> Result<(), Box<dyn std::error::Error>> {
         let (plan, profile) = write_grants_fixture();
-        let mut grants = GrantSet::build(
-            &plan,
-            &profile,
-            Path::new("/fixture/home"),
-            Some(worktree_grants_fixture()),
-        )?;
-        for path in [
-            "/fixture/repo/target/debug/object.o",
-            "/fixture/repo/node_modules/pkg/file",
-            "/fixture/repo/node_modules/pkg/alias",
-        ] {
-            grants.hard_link_denies.insert(path.into());
-        }
+        let mut grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), None)?;
+        let root = |index: usize, width: usize| PathGrant {
+            path: PathBuf::from(format!("/fixture/reads/{index}/{}", "x".repeat(width))),
+            scope: PathScope::Subtree,
+        };
+        // About 130 KiB: over the former 64 KiB cap, inside the launch limit.
+        grants.reads = (0..1000).map(|index| root(index, 100)).collect();
         let source = render(&grants)?;
-        for path in &grants.hard_link_denies {
-            assert!(source.contains(&format!(
-                "(deny file-write* (literal \"{}\"))",
-                path.display()
-            )));
-        }
-        for path in [
-            "/fixture/repo",
-            "/fixture/repo/target",
-            "/fixture/repo/target/debug",
-            "/fixture/repo/node_modules",
-            "/fixture/repo/node_modules/pkg",
-        ] {
-            assert!(source.contains(&format!("(deny file-write-unlink (literal \"{path}\"))")));
-            assert!(!source.contains(&format!("(deny file-write* (subpath \"{path}\"))")));
-        }
-        // A typical short-path batch fits; long paths must fail with recovery
-        // advice even while below the path-count bound.
-        grants.hard_link_denies = (0..MAX_HARD_LINK_DENIES)
-            .map(|index| PathBuf::from(format!("/fixture/repo/node_modules/pkg/file-{index}")))
-            .collect();
-        assert!(render(&grants)?.len() <= HARD_LINK_PROFILE_LIMIT);
-        grants.hard_link_denies = (0..MAX_HARD_LINK_DENIES / 2)
-            .map(|index| {
-                PathBuf::from(format!(
-                    "/fixture/repo/node_modules/{}/file-{index}",
-                    "x".repeat(240)
-                ))
-            })
-            .collect();
+        assert!(source.len() > 64 * 1024 && source.len() <= PROFILE_LIMIT);
+        grants.reads = (0..4000).map(|index| root(index, 200)).collect();
         let error = render(&grants).unwrap_err();
-        assert!(matches!(
-            error,
-            PermissionError::HardLinkDenyBound {
-                bound: "profile byte count",
-                limit: HARD_LINK_PROFILE_LIMIT,
-                ..
-            }
-        ));
         assert!(
-            error
-                .to_string()
-                .contains("Rust lanes should use Fabric's Cargo environment")
+            matches!(error, PermissionError::ProfileTooLarge { bytes, limit: PROFILE_LIMIT } if bytes > PROFILE_LIMIT)
         );
+        assert!(error.to_string().contains("launch limit"));
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    // CI-required fixture: lane sandboxes may deny hard_link with EPERM.
+    fn a_hard_linked_exact_grant_names_its_path() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        std::fs::write(root.join("file"), b"x")?;
+        std::fs::hard_link(root.join("file"), root.join("linked"))?;
+        let directories = [AnchoredDirectory::open_canonical(&root)?];
+        let anchors = Anchors {
+            home: &root,
+            directories: &directories,
+            worktree: None,
+        };
+        let grant = |name: &str| PathGrant {
+            path: root.join(name),
+            scope: PathScope::Exact,
+        };
+        assert!(matches!(
+            anchors.verify_single_link_grant(&grant("linked")),
+            Err(PermissionError::AnchorMismatchAt { path, stage })
+                if path == root.join("linked") && stage == "file has other hard links"
+        ));
+        anchors.verify_single_link_grant(&grant("absent"))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn held_path_failures_name_the_path_and_the_check() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let present = root.join("present");
+        std::fs::create_dir(&present)?;
+        std::fs::write(present.join("file"), b"x")?;
+        let directories = [AnchoredDirectory::open_canonical(&present)?];
+        let anchors = Anchors {
+            home: &root,
+            directories: &directories,
+            worktree: None,
+        };
+        let exact = |path: PathBuf| PathGrant {
+            path,
+            scope: PathScope::Exact,
+        };
+        let at = |error: PermissionError| match error {
+            PermissionError::AnchorMismatchAt { path, stage } => (path, stage),
+            other => panic!("unexpected {other}"),
+        };
+        assert_eq!(
+            at(anchors
+                .verify_executable(&exact(present.join("gone")))
+                .unwrap_err()),
+            (present.join("gone"), "executable is missing")
+        );
+        assert_eq!(
+            at(anchors
+                .verify_grant_held(&PathGrant {
+                    path: root.clone(),
+                    scope: PathScope::Subtree,
+                })
+                .unwrap_err()),
+            (root.clone(), "directory anchor not held")
+        );
+        // A parent that exists but was never held is an error; one that does
+        // not exist grants nothing.
+        std::fs::create_dir(root.join("elsewhere"))?;
+        assert_eq!(
+            at(anchors
+                .verify_grant_held(&exact(root.join("elsewhere/file")))
+                .unwrap_err()),
+            (root.join("elsewhere"), "parent directory anchor not held")
+        );
+        anchors.verify_grant_held(&exact(root.join("absent/file")))?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_grant_in_a_directory_that_does_not_exist_needs_no_anchor()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let (mut plan, profile) = write_grants_fixture();
+        plan.scratch = PathGrant {
+            path: root.join("scratch"),
+            scope: PathScope::Subtree,
+        };
+        plan.private_state = None;
+        plan.read_only = None;
+        let missing = root.join("not-yet/created");
+        let mut profile = profile;
+        profile.spec.state_writes = vec![
+            PathGrant {
+                path: missing.join("session"),
+                scope: PathScope::Exact,
+            },
+            PathGrant {
+                path: root.join("present-file"),
+                scope: PathScope::Exact,
+            },
+        ];
+        let anchors = required_anchors(&plan, &profile, None);
+        assert!(!anchors.contains(&missing));
+        assert!(anchors.contains(&root));
+        std::fs::create_dir_all(&missing)?;
+        assert!(required_anchors(&plan, &profile, None).contains(&missing));
         Ok(())
     }
 
@@ -3368,7 +3154,7 @@ mod tests {
                 &profile,
                 &anchors
             ),
-            Err(PermissionError::AnchorMismatch)
+            Err(PermissionError::AnchorMismatchAt { .. })
         ));
     }
 
@@ -3412,7 +3198,7 @@ mod tests {
                 .to_string()
                 .contains(path.to_str().expect("UTF-8 fixture"))
         );
-        assert!(error.to_string().contains("held directory revalidation"));
+        assert!(error.to_string().contains("replaced after it was held"));
     }
 
     #[cfg(target_os = "macos")]
@@ -3560,7 +3346,7 @@ mod tests {
                 .push(profile.spec.discovery_reads[0].clone());
             assert!(matches!(
                 compile_sbpl(&plan, &profile, &anchors),
-                Err(PermissionError::AnchorMismatch)
+                Err(PermissionError::AnchorMismatchAt { .. })
             ));
             profile.spec.runtime_reads.pop();
             let path = &profile.spec.discovery_reads[0].path;
@@ -4127,7 +3913,7 @@ mod tests {
         std::fs::hard_link(&private_head_log, &hardlink_alias)?;
         assert!(matches!(
             verify_worktree_authority(&authority, &anchors),
-            Err(PermissionError::AnchorMismatch)
+            Err(PermissionError::AnchorMismatchAt { .. })
         ));
         std::fs::remove_file(&hardlink_alias)?;
         std::fs::remove_file(&private_head_log)?;
@@ -4139,7 +3925,7 @@ mod tests {
             std::fs::hard_link(&fetch_head, &hardlink_alias)?;
             assert!(matches!(
                 verify_worktree_authority(&authority, &anchors),
-                Err(PermissionError::AnchorMismatch)
+                Err(PermissionError::AnchorMismatchAt { .. })
             ));
             std::fs::remove_file(&hardlink_alias)?;
             std::fs::remove_file(&fetch_head)?;
@@ -4224,7 +4010,7 @@ mod tests {
         std::fs::set_permissions(&scratch_path, std::fs::Permissions::from_mode(0o755))?;
         assert!(matches!(
             verify_private_scratch(&scratch, &[], &anchors),
-            Err(PermissionError::AnchorMismatch)
+            Err(PermissionError::AnchorMismatchAt { .. })
         ));
         Ok(())
     }
@@ -4463,16 +4249,12 @@ mod tests {
             worktree: Some((&linked, &selected_ref)),
         };
         let backend = MacOsSandboxBackend { ready: true };
+        // Existing hard links in the scratch, the worktree and its ignored
+        // build and dependency trees do not refuse the launch: the sandbox
+        // denies new links, and the few Git control files are checked directly.
+        let alias = scratch.join("hardlink-probe");
+        std::fs::hard_link(&protected_file, &alias)?;
         let hardlink_path = linked.path().join("hardlink");
-        {
-            let alias = scratch.join("hardlink-probe");
-            std::fs::hard_link(&protected_file, &alias)?;
-            assert!(matches!(
-                backend.compile(&plan, &profile, &anchors),
-                Err(PermissionError::HardLinkedWritableFile(path)) if path == alias
-            ));
-            std::fs::remove_file(alias)?;
-        }
         std::fs::write(linked.path().join(".gitignore"), "target/\nnode_modules/\n")?;
         let aliases = [
             "target/debug/object.o",
@@ -4486,42 +4268,20 @@ mod tests {
         }
         let compiled = backend.compile(&plan, &profile, &anchors)?;
         let sbpl = String::from_utf8(compiled.profile)?;
+        assert!(!sbpl.contains("hardlink-probe"));
         for alias in &aliases {
-            assert!(sbpl.contains(&format!(
-                "(deny file-write* (literal \"{}\"))",
-                alias.display()
-            )));
+            assert!(!sbpl.contains(&alias.display().to_string()));
         }
-        for directory in [
-            linked.path().join("target"),
-            linked.path().join("node_modules/pkg"),
-        ] {
-            assert!(sbpl.contains(&format!(
-                "(deny file-write-unlink (literal \"{}\"))",
-                directory.display()
-            )));
-        }
-        // Refuse excessive denials before producing a launch, with recovery advice.
-        let overflow = linked.path().join("target/overflow");
-        std::fs::create_dir(&overflow)?;
-        for index in 0..MAX_HARD_LINK_DENIES {
-            std::fs::hard_link(&protected_file, overflow.join(index.to_string()))?;
-        }
-        let error = backend
-            .compile(&plan, &profile, &anchors)
-            .err()
-            .ok_or("overflow accepted")?;
-        assert!(
-            matches!(&error, PermissionError::HardLinkDenyBound { bound: "path count", limit: MAX_HARD_LINK_DENIES, directory } if directory.starts_with(linked.path()))
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("Rust lanes should use Fabric's Cargo environment")
-        );
-        for index in 0..MAX_HARD_LINK_DENIES {
-            std::fs::remove_file(overflow.join(index.to_string()))?;
-        }
+        assert!(!sbpl.contains("file-write-unlink"));
+        std::fs::remove_file(alias)?;
+        // A second name for a Git control file is the one link that refuses.
+        let config_alias = linked.path().join("config-alias");
+        std::fs::hard_link(common.join("config"), &config_alias)?;
+        assert!(matches!(
+            backend.compile(&plan, &profile, &anchors),
+            Err(PermissionError::GitControlHardLinked(path)) if path == common.join("config")
+        ));
+        std::fs::remove_file(config_alias)?;
         assert!(sbpl.contains("(deny file-link)"));
         assert!(sbpl.contains("(allow sysctl-read)"));
         // A writer may run what it builds into a write root.
@@ -4586,22 +4346,6 @@ mod tests {
             executor.execute(options).expect("bounded sandbox child")
         };
         let run = |program: &Path, args: &[&Path]| run_in(&sbpl, program, args);
-        for alias in &aliases {
-            assert!(denied_probe(&run(&executables[0], &[alias])));
-        }
-        // Rename through Perl so this probes filesystem permissions, without
-        // depending on whether a separate mv binary has execution authority.
-        let rename = run(
-            &executables[6],
-            &[
-                Path::new("-e"),
-                Path::new("rename $ARGV[0], $ARGV[1] or die \"rename: $!\\n\""),
-                &linked.path().join("node_modules"),
-                &linked.path().join("moved-modules"),
-            ],
-        );
-        assert!(denied_probe(&rename));
-
         // The per-user peer agent relays to fresh `fabric peer` children in
         // the login session, so no lane may connect to its socket. The
         // unconfined connection proves the listener; the system DNS socket

@@ -710,18 +710,32 @@ guard, not a security boundary: a lane can invoke the real `gh` directly.
   `crates/providers/src/lane.rs::github_policy_guards_labels_and_verb_prefixes`
 - Owner: `crates/config/src/github_policy.rs`; `crates/providers/src/lane.rs`
 
-## Writer hard-link refusal
+## Writer hard-link boundary
 
-On macOS, launch refuses a writable worktree containing an existing hard-linked
-regular file and names the offending path. Directories Git ignores wholesale,
-such as an in-tree Cargo `target/` or `node_modules/`, are skipped by the
-census and its entry bound. An operator can inspect a refused file and remove or
-rebuild it if it is disposable output before retrying.
-- Why: a writable hard link could modify data outside the granted tree.
-- Test: `crates/confinement/src/permissions.rs::writable_tree_hard_link_refusal_names_nested_file`;
-  `::the_census_neither_walks_nor_counts_skipped_directories`;
-  `crates/confinement/src/ignored.rs::wholly_ignored_directories_are_listed_and_others_are_not`
-- Owner: `crates/confinement/src/permissions.rs`, `crates/confinement/src/ignored.rs`
+The sandbox profile carries `(deny file-link)`, so a lane cannot create a hard
+link. Launch no longer walks the writable worktree, scratch, provider state or
+lane build cache for existing hard links, and no hard-linked build or
+dependency file refuses a launch or adds a per-path deny. Launch inspects only
+what a second name would let the lane write: the exact write grants (Git index,
+HEAD and reflog files, provider credential files) and the Git control files the
+lane may not write, `config`, `packed-refs`, `config.worktree`, `hooks/*` and
+`info/*`. Any of those with another hard link refuses the launch and names the
+file. A held directory that fails revalidation, a provider executable that is
+missing and a scratch directory that is not private each name their path and
+check. A grant on a file in a directory that does not exist grants nothing and
+needs no anchor. The compiled profile may be up to 512 KiB and the error names
+its size.
+- Why: a writable hard link could modify data outside the granted tree, but
+  only a link made by something other than the lane can exist, and only the
+  Git control files make such a link dangerous; refusing whole build trees cost
+  launches without protecting anything.
+- Test: `crates/confinement/src/permissions.rs::only_git_control_files_are_checked_for_other_names`;
+  `::a_hard_linked_exact_grant_names_its_path`;
+  `::held_path_failures_name_the_path_and_the_check`;
+  `::a_grant_in_a_directory_that_does_not_exist_needs_no_anchor`;
+  `::profiles_between_the_old_and_new_limits_compile_and_larger_ones_name_their_size`;
+  `::native_sandbox_blocks_path_escape_probes`
+- Owner: `crates/confinement/src/permissions.rs`
 
 ## Reconcile and temporary cleanup
 
