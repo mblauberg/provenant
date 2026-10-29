@@ -418,12 +418,7 @@ fn chair_log_cli_retention_replay_and_lane_refusal() -> Result {
     assert_eq!(append(&rig, &first, "first", 0)?["data"], original["data"]);
     rig.env.push(("PROVENANT_LANE_DEPTH".into(), "1".into()));
     let refused = append(&rig, &first, "lane", 1)?;
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("lane cannot append")
-    );
+    assert_eq!(refused["error"]["code"], "IN_LANE", "{refused}");
     Ok(())
 }
 
