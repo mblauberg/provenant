@@ -181,6 +181,21 @@ fn policy_codex_fixture() -> Result<TestRig> {
     ));
     Ok(rig)
 }
+fn settled_policy_lanes(rig: &TestRig, output: provenant_os::exec::ExecOutcome) -> Result<Value> {
+    assert!(matches!(code(&output), 0 | 124), "{output:?}");
+    let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let run_id = output["data"]["run_id"].as_str().ok_or("run ID")?;
+    // Keep each command below the rig's ten-second watchdog while allowing
+    // sequential guardians to settle and launch their successor.
+    for _ in 0..6 {
+        let lanes = rig.command(&["lanes", "--id", run_id, "--all", "--wait", "5s", "--json"])?;
+        if code(&lanes) != 124 {
+            assert_eq!(code(&lanes), 0, "{lanes:?}");
+            return Ok(serde_json::from_slice(&lanes.stdout.bytes)?);
+        }
+    }
+    Err("policy successors did not settle within the fixture budget".into())
+}
 fn policy_empty_result_falls_back_without_a_chair_turn() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -206,14 +221,10 @@ fn policy_empty_result_falls_back_without_a_chair_turn() -> Result {
         "--prompt-file",
         prompt.to_str().ok_or("prompt path")?,
         "--wait",
-        "30s",
+        "3s",
         "--json",
     ])?;
-    assert_eq!(code(&output), 0, "{output:?}");
-    let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    let run_id = output["data"]["run_id"].as_str().ok_or("run ID")?;
-    let lanes = rig.command(&["lanes", "--id", run_id, "--all", "--json"])?;
-    let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    let lanes = settled_policy_lanes(&rig, output)?;
     let rows = lanes["data"]["lanes"].as_array().ok_or("lane rows")?;
     assert_eq!(rows.len(), 2, "{lanes}");
     let first = rows
@@ -250,14 +261,10 @@ fn policy_incomplete_result_continues_the_retained_session() -> Result {
         "--prompt-file",
         prompt.to_str().ok_or("prompt path")?,
         "--wait",
-        "30s",
+        "3s",
         "--json",
     ])?;
-    assert_eq!(code(&output), 0, "{output:?}");
-    let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    let run_id = output["data"]["run_id"].as_str().ok_or("run ID")?;
-    let lanes = rig.command(&["lanes", "--id", run_id, "--all", "--json"])?;
-    let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    let lanes = settled_policy_lanes(&rig, output)?;
     let rows = lanes["data"]["lanes"].as_array().ok_or("lane rows")?;
     assert_eq!(rows.len(), 2, "{lanes}");
     let first = rows
