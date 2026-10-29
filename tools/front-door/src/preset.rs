@@ -1071,6 +1071,7 @@ fn lower_leaf(
             "card",
             "references",
             "family",
+            "family_strength",
             "fallback_tier",
             "purpose",
             "dispositions",
@@ -1132,6 +1133,7 @@ fn lower_leaf(
         .map(|card| card.as_str().map(str::to_owned).ok_or("card must be text"))
         .transpose()?;
     let family = map.remove("family");
+    let family_strength = map.remove("family_strength");
     map.remove("purpose");
     let fallback_tier = map.remove("fallback_tier");
     if card.is_some() || !references.is_empty() {
@@ -1177,10 +1179,15 @@ fn lower_leaf(
     }
     match family.as_ref().and_then(Value::as_str) {
         None | Some("" | "any") => {}
-        Some("cross_preferred") => {
-            // Recorded as a preference: routing does not yet exclude the
-            // families of upstream attempts, so this is not enforced.
-            map.insert("family".into(), json!("cross_preferred"));
+        Some("cross_preferred" | "cross_required") => {
+            // The scheduler excludes the families of every upstream attempt.
+            // `cross_required` fails the attempt rather than substitute one.
+            map.entry("distinct_from")
+                .or_insert_with(|| json!("dependencies"));
+            if family.as_ref().and_then(Value::as_str) == Some("cross_required") {
+                map.entry("distinct_strength")
+                    .or_insert_with(|| json!("require"));
+            }
         }
         Some("distinct_from_writer") => {
             map.entry("distinct_from")
@@ -1188,7 +1195,18 @@ fn lower_leaf(
         }
         Some(other) => {
             return Err(format!(
-                "node {id}: unknown family constraint {other}; use any, cross_preferred or distinct_from_writer"
+                "node {id}: unknown family constraint {other}; use any, cross_preferred, cross_required or distinct_from_writer"
+            ));
+        }
+    }
+    match family_strength.as_ref().and_then(Value::as_str) {
+        None | Some("") => {}
+        Some(strength @ ("prefer" | "require")) => {
+            map.insert("distinct_strength".into(), json!(strength));
+        }
+        Some(other) => {
+            return Err(format!(
+                "node {id}: unknown family_strength {other}; use prefer or require"
             ));
         }
     }
@@ -1244,8 +1262,11 @@ fn lower_leaf(
     }
     if let Some(value) = map.get("distinct_from")
         && value != "writer"
+        && value != "dependencies"
     {
-        return Err(format!("node {id}: distinct_from must be \"writer\""));
+        return Err(format!(
+            "node {id}: distinct_from must be \"writer\" or \"dependencies\""
+        ));
     }
     let mut dependencies = deps.to_vec();
     if let Some(explicit) = map.remove("depends_on") {
@@ -2131,14 +2152,17 @@ pub(crate) fn bind_run_context(
     Ok(())
 }
 
-/// The family constraint a node carries: `any`, `cross_preferred` (recorded, not enforced) or `distinct_from_writer`.
+/// The family constraint a node carries: `any`, `distinct_from_writer`,
+/// `cross_preferred` or `cross_required`, with `+require` when a writer
+/// separation is strict.
 fn family(node: &Value) -> String {
-    if let Some(family) = node["family"].as_str() {
-        family.into()
-    } else if node["distinct_from"] == "writer" {
-        "distinct_from_writer".into()
-    } else {
-        "any".into()
+    let required = node["distinct_strength"] == "require";
+    match node["distinct_from"].as_str() {
+        Some("dependencies") if required => "cross_required".into(),
+        Some("dependencies") => "cross_preferred".into(),
+        Some("writer") if required => "distinct_from_writer+require".into(),
+        Some("writer") => "distinct_from_writer".into(),
+        _ => "any".into(),
     }
 }
 

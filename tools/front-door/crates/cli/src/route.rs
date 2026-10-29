@@ -672,9 +672,13 @@ pub(crate) fn resolve_dispatch(
     availability: &[AvailabilityRecord],
     access: &[AccessContext<'_>],
     host: &str,
-    excluded_families: Option<&[String]>,
+    excluded_families: Option<(&[String], bool)>,
 ) -> Result<provenant_records::ResolvedRoute, String> {
     let catalogue = Catalogue::bundled().map_err(|error| error.to_string())?;
+    let (excluded_families, required) = match excluded_families {
+        Some((families, required)) => (Some(families), required),
+        None => (None, false),
+    };
     let excluded: Vec<ModelId> = catalogue
         .models()
         .iter()
@@ -696,7 +700,12 @@ pub(crate) fn resolve_dispatch(
     );
     let exhausted =
         matches!(&selected, Err(error) if error.starts_with("no eligible pool member:"));
-    if !excluded.is_empty() && exhausted {
+    if required && exhausted {
+        Err(format!(
+            "no route outside model families {} and family separation is required",
+            excluded_families.unwrap_or_default().join(", ")
+        ))
+    } else if !excluded.is_empty() && exhausted {
         resolve_dispatch_excluding(
             request,
             roots,
@@ -2438,7 +2447,7 @@ mod route_tests {
                 &availability,
                 &access,
                 "fixture",
-                Some(excluded),
+                Some((excluded, false)),
             )
         };
         let first = resolve(&[])?;
@@ -2456,6 +2465,23 @@ mod route_tests {
             .and_then(|row| row.family.clone())
             .ok_or("family")?;
         assert_ne!(family, other);
+        let all = [family.clone(), other.clone()];
+        let refused = super::resolve_dispatch(
+            &request,
+            &roots,
+            None,
+            ("fixture", 0),
+            &availability,
+            &access,
+            "fixture",
+            Some((&all, true)),
+        )
+        .err()
+        .ok_or("a required separation must not substitute")?;
+        assert!(
+            refused.contains("family separation is required"),
+            "{refused}"
+        );
         let fallback = resolve(&[family, other])?;
         assert!(matches!(
             fallback.readiness,
@@ -2471,7 +2497,7 @@ mod route_tests {
             &availability[..1],
             &access,
             "fixture",
-            Some(&["openai".into()]),
+            Some((&["openai".into()], false)),
         )?;
         assert_eq!(deferred.adapter, "claude");
         assert!(matches!(

@@ -178,6 +178,13 @@ fn node_bound(
             reason: Some(String::new()),
             on_fail: node.on_fail.clone(),
         }),
+        separation: node.distinct_from.map(|_| FamilySeparation {
+            extra: Default::default(),
+            strength: FamilyStrength::Require,
+            excluded: Vec::new(),
+            applied: Some(String::new()),
+            outcome: SeparationOutcome::Unconstrained,
+        }),
         ci: ci.then(|| CiEvidence {
             extra: Default::default(),
             first_observed_stamp: Some(CiHostStamp {
@@ -253,6 +260,10 @@ fn node_bound(
     }
     if gate {
         bytes += OUTPUT_FIELD_BYTES; // gate reason
+    }
+    if node.distinct_from.is_some() {
+        // excluded families and the applied family
+        bytes += (SEPARATION_FAMILIES + 1) * (FAMILY_BYTES + 3);
     }
     if ci {
         bytes += HOST_ID_BYTES + 64 + OUTPUT_FIELD_BYTES;

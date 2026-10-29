@@ -288,8 +288,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
         result.push(if self.failing.contains(&key.node_id) {
             b"Blocked on the user.\nVERDICT: FAIL\n".as_slice()
         } else {
-            format!("Evidence checked for {}.\nVERDICT: PASS\n", key.node_id)
-                .leak()
+            format!(
+                "Evidence checked for {}.\n```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\nVERDICT: PASS\n",
+                key.node_id
+            )
+            .leak()
                 .as_bytes()
         });
         Ok(AttemptObservation::Terminal {
@@ -1296,7 +1299,7 @@ fn review_council_verifies_between_the_lenses_and_the_synthesis() {
         .collect();
     assert_eq!(ids, ["subject", "lenses", "verify", "synthesis"]);
     let verify = node(&expanded.document, "verify");
-    assert_eq!(verify["family"], "cross_preferred");
+    assert_eq!(verify["distinct_from"], "dependencies");
     assert_eq!(verify["source"], json!({"type": "node", "node": "subject"}));
     assert_eq!(verify["route"]["alias"], "verifier");
     assert_eq!(verify["depends_on"], json!(["lenses", "subject"]));
@@ -1786,7 +1789,7 @@ fn bundled_presets_fit_the_default_host_depth_limit() {
 }
 
 #[test]
-fn cross_family_is_recorded_as_a_preference_not_an_enforced_constraint() {
+fn cross_family_prefers_by_default_and_a_project_may_require_it() {
     let expanded = expand(
         &Layers::empty(),
         "review-council",
@@ -1795,8 +1798,23 @@ fn cross_family_is_recorded_as_a_preference_not_an_enforced_constraint() {
     )
     .unwrap();
     let verify = node(&expanded.document, "verify");
-    assert_eq!(verify["family"], "cross_preferred");
-    assert!(verify.get("distinct_from").is_none());
+    assert_eq!(verify["distinct_from"], "dependencies");
+    assert!(verify.get("distinct_strength").is_none());
+    assert!(verify.get("family").is_none());
+    let required =
+        council_with_roles("[roles.\"review.verify\"]\nfamily = 'cross_required'\n").unwrap();
+    let verify = node(&required.document, "verify");
+    assert_eq!(verify["distinct_from"], "dependencies");
+    assert_eq!(verify["distinct_strength"], "require");
+    let strict =
+        council_with_roles("[roles.\"review.verify\"]\nfamily_strength = 'require'\n").unwrap();
+    assert_eq!(
+        node(&strict.document, "verify")["distinct_strength"],
+        "require"
+    );
+    let error =
+        council_with_roles("[roles.\"review.verify\"]\nfamily_strength = 'maybe'\n").unwrap_err();
+    assert!(error.contains("family_strength"), "{error}");
 }
 
 #[test]

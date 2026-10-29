@@ -369,6 +369,7 @@ impl<'a> Service<'a> {
                 effort,
                 excluded_families,
                 distinct_families,
+                require_distinct,
                 ..
             } if !name.is_empty() => Ok(RequestedRoute::Review {
                 extra: Default::default(),
@@ -376,6 +377,7 @@ impl<'a> Service<'a> {
                 effort,
                 excluded_families,
                 distinct_families,
+                require_distinct,
             }),
             _ => Err(input_error(
                 ErrorKind::Invalid,

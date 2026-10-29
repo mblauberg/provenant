@@ -455,11 +455,22 @@ attempted fails if the integration branch has moved, and a rerun starts a new
 graph. A retry writer whose pin is an ancestor of its HEAD continues; a
 diverged HEAD is refused.
 
-A node may set `distinct_from = "writer"`. The runtime walks the source chain
-to the nearest writer node and gives the owner that node's attempt refs. The
-owner excludes those attempts' model families from route selection and
-refuses a route that cannot satisfy the constraint. Without a writing source
+A node may set `distinct_from = "writer"` or `"dependencies"`. For `writer` the
+runtime walks the source chain to the nearest writer node; for `dependencies`
+it takes every transitive `depends_on` attempt. It gives the owner those
+attempt refs, and the owner excludes their model families from route
+selection. `distinct_strength` is `prefer` (default) or `require`. Under
+prefer, when no route outside the families is ready the owner substitutes one;
+under require the attempt is refused before launch. After each terminal
+attempt the scheduler resolves the applied family and stores a `separation`
+record on the node (`strength`, `excluded`, `applied`, `outcome` of
+`separated`, `unavailable` or `unconstrained`). With no known upstream family
 the constraint is a no-op.
+
+A node may declare `dispositions`, a list of allowed values. At settlement its
+findings block must parse and every finding must carry a `disposition` from
+the list and a non-empty `reason`; otherwise the attempt settles as
+`task_failed` and `advance_error` names the first offending finding.
 
 A writer source requires an existing registered worktree. Under writer
 exclusion, a clean ancestor worktree advances to the pinned commit with a
