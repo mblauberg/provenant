@@ -956,9 +956,14 @@ impl RunStore {
             cancel: call.cancel,
         };
         let call = &record_call;
-        let cancelled = read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some();
+        let cancellation = read_sealed(attempt, "cancel.json", RECORD_LIMIT)?;
+        let cancelled = cancellation.is_some();
         if cancelled {
             decoded.outcome = Outcome::Cancelled;
+            if !exit.never_spawned {
+                let reason = cancellation_reason(cancellation.as_deref());
+                decoded.reason = Some(format!("cancelled: {reason}"));
+            }
         }
         if decoded.result.len() as u64 > RESULT_LIMIT {
             let mut end = RESULT_LIMIT as usize;
@@ -986,8 +991,20 @@ impl RunStore {
                 decoded.outcome = Outcome::Failed;
                 // Keep the decoder's typed identity evidence error, if any.
                 decoded.reason = Some(match decoded.reason.take() {
-                    Some(detail) if reason == "provider identity was not observed" => {
-                        format!("{reason}: {detail}")
+                    detail if reason == "provider identity was not observed" => {
+                        format!(
+                            "{reason}: requested model {}; observed model {}",
+                            record
+                                .resolved_route
+                                .as_ref()
+                                .and_then(|route| route.model.as_deref())
+                                .unwrap_or("unknown"),
+                            decoded
+                                .observed_route
+                                .as_ref()
+                                .and_then(|route| route.model.as_deref())
+                                .unwrap_or("unknown"),
+                        ) + &detail.map(|value| format!("; {value}")).unwrap_or_default()
                     }
                     _ => reason.into(),
                 });
@@ -1073,6 +1090,10 @@ impl RunStore {
                     None => note,
                 });
             }
+        } else if handoff.as_ref().is_some_and(|handoff| handoff.unfinished()) {
+            partial.push(PartialSignal::DeclaredStop);
+            partial.sort();
+            partial.dedup();
         } else {
             partial.clear();
         }
@@ -1520,5 +1541,29 @@ mod writer_recovery_tests {
             "terminal state must not hide corrupt retained custody"
         );
         Ok(())
+    }
+}
+
+fn cancellation_reason(bytes: Option<&[u8]>) -> String {
+    bytes
+        .and_then(|bytes| {
+            serde_json::from_slice::<serde_json::Value>(bytes)
+                .ok()?
+                .get("reason")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "unknown".into())
+}
+
+#[cfg(test)]
+mod friction_tests {
+    #[test]
+    fn cancellation_reason_uses_request_reason() {
+        assert_eq!(
+            super::cancellation_reason(Some(br#"{"reason":"explicit_cancellation"}"#)),
+            "explicit_cancellation"
+        );
+        assert_eq!(super::cancellation_reason(Some(b"{}")), "unknown");
     }
 }
