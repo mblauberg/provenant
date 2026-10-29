@@ -1315,7 +1315,8 @@ fn candidate(
         },
     })
 }
-/// Free routes train on nothing, yet they are not for confidential work.
+/// Confidential work needs a model that does not train on prompts. Free routes
+/// are excluded as well: their terms are promotional and can change without notice.
 fn privacy_allowed(model: &ModelId, confidential: bool, catalogue: &Catalogue) -> bool {
     !confidential
         || (!catalogue.is_free_model(model)
