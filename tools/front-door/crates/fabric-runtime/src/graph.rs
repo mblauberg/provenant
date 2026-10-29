@@ -492,6 +492,9 @@ pub struct GraphCheckpoint {
     pub usage_events: Vec<UnknownUsageEvent>,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub usage_events_omitted: u64,
+    /// Attempts settled so far, which orders each attempt's `settled`.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub settlements: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
     /// Inbox decisions raised by loops, decide nodes and pauses, by ask ID.
@@ -579,6 +582,9 @@ pub struct GraphAttempt {
     pub input_cap: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<AttemptUsage>,
+    /// When the attempt settled, as a graph-wide order from 1; zero while it runs.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub settled: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -833,7 +839,8 @@ pub trait AttemptOwner {
     fn close_node_ask(&mut self, _scope: AskScope<'_>) -> Result<(), Self::Error> {
         Ok(())
     }
-    /// Wall clock for ask deadlines. Without one, a deadline never fires.
+    /// Wall clock for ask deadlines. Without one, a decide node with a timeout
+    /// refuses to ask, and a stored deadline does not fire.
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
         None
     }
@@ -1330,6 +1337,9 @@ pub enum GraphError<RunError: Error + 'static, JournalError: Error + 'static> {
     Invalid(String),
     #[error("invalid extension: {0}")]
     Extension(String),
+    /// The graph cannot advance as it stands; the text names the next step.
+    #[error("{0}")]
+    Refused(String),
     #[error("graph checkpoint does not match the submitted plan")]
     PlanChanged,
     #[error("graph checkpoint is inconsistent or unsupported")]
@@ -1512,6 +1522,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
 
     let mut checkpoint = match stored {
         Some(checkpoint) => {
+            if let Some(reason) = loops::legacy(&checkpoint) {
+                return Err(GraphError::Refused(reason));
+            }
             validate_checkpoint(&checkpoint, &plan, &plan_digest)?;
             checkpoint
         }
@@ -1547,6 +1560,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 unknown_usage_omitted: 0,
                 usage_events: Vec::new(),
                 usage_events_omitted: 0,
+                settlements: 0,
                 extensions: Vec::new(),
                 limit_notes: Vec::new(),
                 graph_id: plan.graph_id.clone(),
@@ -2043,6 +2057,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     && node.state == NodeState::Running
                                     && node.ci.is_none()
                                     && plan.nodes[*index].composite.is_none()
+                                    && plan.nodes[*index].decide.is_none()
                             })
                             .count()
                             >= cap
@@ -2140,6 +2155,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         outcome: None,
                         launched: true,
                         launch_actor: owner.actor(),
+                        settled: 0,
                         input_cap: (!node.inputs.is_empty()).then_some(cap),
                         usage: None,
                     });
@@ -2326,6 +2342,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .last()
                     .is_some_and(|attempt| attempt.state == AttemptState::Terminal)
                 {
+                    stamp_settlement(&mut checkpoint, node_index);
                     record_usage_events(&mut checkpoint, node_index, usage_error, cost_error);
                 }
                 update_usage_warnings(&mut checkpoint);
@@ -2359,7 +2376,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             }
         }
 
-        close_resolved_asks(&mut checkpoint, owner, journal)?;
         loops::refresh_pause(&mut checkpoint);
         let all_settled = checkpoint.nodes.iter().all(|node| node.state.settled());
         if all_settled
@@ -2368,6 +2384,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         {
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
+        // Close asks only after an obsolete pause is cleared, so its ask closes too.
+        close_resolved_asks(&mut checkpoint, owner, journal)?;
         if asks::pause(
             document,
             &plan,
@@ -2756,17 +2774,33 @@ fn unknown_metrics(attempt: &GraphAttempt) -> impl Iterator<Item = &'static str>
     })
 }
 
-/// Rebuild the unknown-usage lines, keeping the newest `MAX_UNKNOWN_USAGE`.
+/// Give a node's newly settled attempt the next settlement order.
+fn stamp_settlement(checkpoint: &mut GraphCheckpoint, node_index: usize) {
+    let next = checkpoint.settlements.saturating_add(1);
+    if let Some(attempt) = checkpoint.nodes[node_index].attempts.last_mut()
+        && attempt.settled == 0
+    {
+        attempt.settled = next;
+        checkpoint.settlements = next;
+    }
+}
+
+/// Rebuild the unknown-usage lines in settlement order, keeping the newest
+/// `MAX_UNKNOWN_USAGE`.
 fn update_usage_warnings(checkpoint: &mut GraphCheckpoint) {
+    let mut settled: Vec<_> = checkpoint
+        .nodes
+        .iter()
+        .flat_map(|node| node.attempts.iter().map(move |attempt| (node, attempt)))
+        .collect();
+    settled.sort_by_key(|(_, attempt)| attempt.settled);
     let mut warnings = Vec::new();
-    for node in &checkpoint.nodes {
-        for attempt in &node.attempts {
-            for name in unknown_metrics(attempt) {
-                warnings.push(format!(
-                    "node {} route {}: {name} usage unknown",
-                    node.id, attempt.key.route_index
-                ));
-            }
+    for (node, attempt) in settled {
+        for name in unknown_metrics(attempt) {
+            warnings.push(format!(
+                "node {} route {}: {name} usage unknown",
+                node.id, attempt.key.route_index
+            ));
         }
     }
     let omitted = warnings.len().saturating_sub(MAX_UNKNOWN_USAGE);
@@ -2976,7 +3010,11 @@ fn validate_flat_plan(
         if is_decide != node.decide.is_some() {
             return Err("decide requires a question and options");
         }
-        asks::validate_decide(node, document.decision_session.as_deref())?;
+        asks::validate_decide(
+            &document.graph_id,
+            node,
+            document.decision_session.as_deref(),
+        )?;
         let is_gate = node.kind == Some(NodeKind::Gate);
         if is_gate != node.condition.is_some()
             || !is_gate && node.on_fail.is_some()

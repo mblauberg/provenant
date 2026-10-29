@@ -2966,7 +2966,12 @@ fn graph_ask_input(
                 extra: Default::default(),
                 id: option.id.clone(),
                 label: option.label.clone(),
-                description: option.description.clone(),
+                // The inbox needs a description; a decide option may leave it out.
+                description: if option.description.is_empty() {
+                    option.label.clone()
+                } else {
+                    option.description.clone()
+                },
             })
             .collect(),
         recommended_option_id: ask.default.clone(),
@@ -4709,7 +4714,8 @@ impl Factory {
                 provenant_fabric_runtime::graph::GraphError::Invalid(_) => {
                     FacadeError::InvalidInput
                 }
-                provenant_fabric_runtime::graph::GraphError::Extension(reason) => {
+                provenant_fabric_runtime::graph::GraphError::Extension(reason)
+                | provenant_fabric_runtime::graph::GraphError::Refused(reason) => {
                     FacadeError::DispatchRefused { reason }
                 }
                 provenant_fabric_runtime::graph::GraphError::PlanChanged => FacadeError::Conflict,
@@ -5462,7 +5468,7 @@ pub fn events(
     }
 }
 #[cfg(test)]
-#[allow(unused_imports)] // The custom worktree driver compiles without a test harness.
+#[allow(unused_imports, dead_code)] // The custom worktree driver compiles without a test harness.
 mod graph_ask_inbox_tests {
     use super::*;
     use provenant_fabric_runtime::{
@@ -5652,6 +5658,180 @@ mod graph_ask_inbox_tests {
                 .iter()
                 .all(|item| item.state == RequestState::Superseded)
         );
+        Ok(())
+    }
+
+    /// A graph owner whose asks go through a real inbox and which runs no agents.
+    struct InboxOwner<'a> {
+        service: &'a InboxService<'a>,
+        clock: &'a SystemClock,
+        cancel: &'a CancelToken,
+        actor: String,
+    }
+
+    impl InboxOwner<'_> {
+        fn budget(&self) -> Result<WaitBudget, FacadeError> {
+            WaitBudget::cli(self.clock.mono_now(), 5).map_err(|_| FacadeError::Busy)
+        }
+    }
+
+    impl provenant_fabric_runtime::graph::AttemptOwner for InboxOwner<'_> {
+        type Error = FacadeError;
+
+        fn actor(&self) -> String {
+            self.actor.clone()
+        }
+        fn node_ask(
+            &mut self,
+            scope: AskScope<'_>,
+        ) -> Result<Option<provenant_fabric_runtime::graph::AskReply>, FacadeError> {
+            graph_ask_poll(self.service, &scope, self.budget()?, self.cancel)
+        }
+        fn close_node_ask(&mut self, scope: AskScope<'_>) -> Result<(), FacadeError> {
+            let actor = scope.actor.parse().map_err(|_| FacadeError::StateCorrupt)?;
+            graph_ask_close(self.service, &scope, actor, self.budget()?, self.cancel)
+        }
+        fn observe_or_start(
+            &mut self,
+            _key: &provenant_fabric_runtime::graph::AttemptKey,
+            _node: provenant_fabric_runtime::graph::NodeInput<'_>,
+            _route: &provenant_fabric_runtime::graph::GraphRoute,
+            _access: provenant_fabric_runtime::graph::AccessMode,
+            _worktree: Option<&str>,
+            _replay: provenant_fabric_runtime::graph::Replay<'_>,
+        ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, FacadeError> {
+            Err(FacadeError::OwnerUnavailable)
+        }
+    }
+
+    #[derive(Default)]
+    struct MemoryJournal(Option<provenant_fabric_runtime::graph::GraphCheckpoint>);
+
+    impl provenant_fabric_runtime::graph::GraphJournal for MemoryJournal {
+        type Error = std::convert::Infallible;
+
+        fn load(
+            &mut self,
+            _graph_id: &str,
+        ) -> Result<Option<provenant_fabric_runtime::graph::GraphCheckpoint>, Self::Error> {
+            Ok(self.0.clone())
+        }
+        fn save(
+            &mut self,
+            checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+        ) -> Result<(), Self::Error> {
+            self.0 = Some(checkpoint.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn graph_decide_asks_stay_fresh_across_repeated_cancel_and_resume()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{
+            GraphDocument, GraphStatus, NodeState, advance_with_budget, resume_with_budget,
+        };
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("assets"));
+        inputs.state_dir = Some(base.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let host = provenant_core::HostId::from_bytes([1; 16]);
+        let identity = Identity {
+            project: provenant_core::ProjectId::from_bytes([2; 16]),
+            host,
+            inbox: provenant_fabric_runtime::identity::Address::new(host, "chair")?,
+            client: "test".into(),
+            cwd: provenant_records::AbsolutePath::new(&base)?,
+            common_dir: provenant_records::AbsolutePath::new(&base)?,
+            federation: None,
+        };
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let service = InboxService::open(
+            &roots.state,
+            &identity,
+            &clock,
+            WaitBudget::cli(clock.mono_now(), 5)?,
+            &cancel,
+        )?;
+        let mut owner = InboxOwner {
+            service: &service,
+            clock: &clock,
+            cancel: &cancel,
+            actor: identity.inbox.actor.to_string(),
+        };
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "decide-cancel", "decision_session": "chair-session",
+            "nodes": [{"id": "choose", "kind": "decide", "access": "read_only", "decide": {
+                "question": "Ship the change?",
+                "options": [{"id": "ship", "label": "Ship"}, {"id": "hold", "label": "Hold"}]}}]
+        }))?;
+        let mut journal = MemoryJournal::default();
+        let limits = Default::default();
+        let graph_budget = Default::default();
+        advance_with_budget(&document, &mut owner, &mut journal, &limits, &graph_budget)?;
+        for _ in 0..2 {
+            journal.0.as_mut().ok_or("missing checkpoint")?.cancelled = true;
+            let cancelled =
+                advance_with_budget(&document, &mut owner, &mut journal, &limits, &graph_budget)?;
+            assert_eq!(cancelled.status, GraphStatus::Cancelled);
+            resume_with_budget(
+                &document,
+                &mut owner,
+                &mut journal,
+                &limits,
+                &graph_budget,
+                &[],
+            )?;
+        }
+        let checkpoint = journal.0.as_ref().ok_or("missing checkpoint")?;
+        assert_eq!(checkpoint.asks[0].ask_id, "choose.ask-3");
+        assert_eq!(checkpoint.asks[0].inbox_error, None);
+        let InboxResult::Listed { items, .. } = service.execute(
+            InboxInput::List {
+                extra: Default::default(),
+                id: None,
+                session: Some("chair-session".into()),
+                state: InboxFilter::All,
+                limit: 50,
+                cursor: None,
+            },
+            WaitBudget::cli(clock.mono_now(), 5)?,
+            &cancel,
+        )?
+        else {
+            return Err("missing inbox listing".into());
+        };
+        // Each resume raised a new request; the third is not a replay of the second.
+        assert_eq!(items.len(), 3);
+        let open: Vec<_> = items
+            .iter()
+            .filter(|item| item.state == RequestState::Open)
+            .collect();
+        assert_eq!(open.len(), 1);
+        service.execute(
+            InboxInput::Answer {
+                extra: Default::default(),
+                id: open[0].id,
+                action: AnswerAction::Choose,
+                option_id: Some("ship".into()),
+                text: None,
+                expect_revision: open[0].revision,
+                channel: InteractionChannel::Cli,
+                operation_id: None,
+            },
+            WaitBudget::cli(clock.mono_now(), 5)?,
+            &cancel,
+        )?;
+        let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &graph_budget)?;
+        assert_eq!(run.status, GraphStatus::Complete);
+        assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+        let verdict = run.checkpoint.nodes[0]
+            .outputs
+            .as_ref()
+            .and_then(|o| o.verdict.as_deref());
+        assert_eq!(verdict, Some("ship"));
         Ok(())
     }
 }

@@ -487,6 +487,24 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
         .collect();
 }
 
+/// Node fields that held loop decisions before node asks. A checkpoint that
+/// still carries them is not migrated: it can be cancelled, then rerun.
+const LEGACY_LOOP_FIELDS: [&str; 3] = ["loop_asks", "loop_inbox_error", "loop_decision_actor"];
+
+/// Why a checkpoint written before node asks cannot advance, if it was.
+pub(super) fn legacy(checkpoint: &GraphCheckpoint) -> Option<String> {
+    checkpoint
+        .nodes
+        .iter()
+        .any(|node| LEGACY_LOOP_FIELDS.iter().any(|key| node.extra.contains_key(*key)))
+        .then(|| {
+            let id = &checkpoint.graph_id;
+            format!(
+                "graph {id} checkpoint predates node asks and cannot advance; cancel it with `provenant fabric graph cancel {id}`, then rerun the document under a new graph_id"
+            )
+        })
+}
+
 pub(super) fn validate_progress(
     progress: &NodeProgress,
     node: &PlannedNode,

@@ -1785,3 +1785,34 @@ fn loop_reply_rejects_zero_unknown_fields_and_unstructured_text() {
         Ok(LoopDecision::Extend { rounds: 2 })
     );
 }
+
+#[test]
+fn loop_checkpoint_from_before_node_asks_refuses_to_advance_but_can_be_cancelled() {
+    let document = fixture("exhaust");
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut reviews(&["VERDICT: FAIL", "VERDICT: FAIL"]), &mut journal).unwrap();
+    let stored = journal.0.as_mut().unwrap();
+    stored.ask_actor = None;
+    stored.asks.clear();
+    let wrapper = stored.nodes.iter_mut().find(|n| n.id == "revise").unwrap();
+    wrapper.extra.insert("loop_asks".into(), serde_json::json!([]));
+    wrapper.extra.insert("loop_decision_actor".into(), serde_json::json!("chair"));
+
+    for run in [
+        advance(&document, &mut reviews(&[]), &mut journal),
+        resume(&document, &mut reviews(&[]), &mut journal),
+    ] {
+        let Err(GraphError::Refused(reason)) = run else {
+            panic!("legacy checkpoint advanced: {run:?}");
+        };
+        assert!(reason.contains("predates node asks"), "{reason}");
+        assert!(reason.contains("provenant fabric graph cancel loop-exhausts"), "{reason}");
+    }
+
+    // The host's cancel path loads, fences and closes asks without validating.
+    let mut checkpoint = journal.0.clone().unwrap();
+    checkpoint.cancelled = true;
+    journal.save(&checkpoint).unwrap();
+    close_resolved_asks(&mut checkpoint, &mut reviews(&[]), &mut journal).unwrap();
+    assert!(journal.0.as_ref().unwrap().cancelled);
+}

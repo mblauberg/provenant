@@ -77,31 +77,124 @@ fn decide_answer_becomes_the_verdict_and_routes_the_chosen_edge() {
 }
 
 #[test]
-fn decide_reply_text_naming_an_option_is_accepted_and_other_text_fails_the_node() {
-    for (text, chosen) in [(" hold\n", Some("hold")), ("maybe later", None)] {
-        let document = routed(None);
-        let mut owner = FakeOwner {
-            observations: [terminal(AttemptOutcome::Succeeded)].into(),
-            ..Default::default()
-        };
-        owner.answers.insert("choose.ask-1".into(), reply(None, Some(text)));
-        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-        let choose = run.checkpoint.nodes.iter().find(|n| n.id == "choose").unwrap();
-        match chosen {
-            Some(option) => {
-                assert_eq!(choose.outputs.as_ref().unwrap().verdict.as_deref(), Some(option));
-                assert_eq!(state(&run, "hold-work"), NodeState::Succeeded);
-            }
-            None => {
-                assert_eq!(choose.state, NodeState::Failed);
-                let error = choose.advance_error.as_deref().unwrap();
-                assert!(error.contains("answer must choose one of ship, hold"), "{error}");
-                let answer = run.checkpoint.asks[0].answer.as_ref().unwrap();
-                assert!(answer.rejected.is_some());
-                assert!(owner.calls.is_empty());
-            }
-        }
+fn decide_reply_text_naming_an_option_is_accepted_and_other_text_asks_again() {
+    let document = routed(None);
+    let mut owner = FakeOwner {
+        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        ..Default::default()
+    };
+    owner.answers.insert("choose.ask-1".into(), reply(None, Some(" hold\n")));
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let choose = run.checkpoint.nodes.iter().find(|n| n.id == "choose").unwrap();
+    assert_eq!(choose.outputs.as_ref().unwrap().verdict.as_deref(), Some("hold"));
+    assert_eq!(state(&run, "hold-work"), NodeState::Succeeded);
+
+    // A rejected answer keeps the node open and the next advance asks again.
+    let mut owner = FakeOwner {
+        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        ..Default::default()
+    };
+    owner.answers.insert("choose.ask-1".into(), reply(None, Some("maybe later")));
+    let mut journal = MemoryJournal::default();
+    let rejected = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(rejected.status, GraphStatus::Pending);
+    assert_eq!(state(&rejected, "choose"), NodeState::Running);
+    let first = &rejected.checkpoint.asks[0];
+    let reason = first.answer.as_ref().unwrap().rejected.as_deref().unwrap();
+    assert!(reason.contains("answer must choose one of ship, hold"), "{reason}");
+    assert!(first.resolved && first.closed);
+    assert!(owner.calls.is_empty());
+
+    let again = advance(&document, &mut owner, &mut journal).unwrap();
+    let second = &again.checkpoint.asks[0];
+    assert_eq!(second.ask_id, "choose.ask-2");
+    assert!(!second.resolved);
+    assert!(second.body.ends_with(
+        "The previous answer was not applied: answer must choose one of ship, hold"
+    ));
+    owner.answers.insert("choose.ask-2".into(), reply(Some("ship"), None));
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert_eq!(state(&run, "ship-work"), NodeState::Succeeded);
+}
+
+#[test]
+fn decide_ids_stay_unique_across_repeated_cancel_and_resume() {
+    let document = routed(None);
+    let mut owner = FakeOwner::default();
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    for _ in 0..2 {
+        journal.0.as_mut().unwrap().cancelled = true;
+        let cancelled = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(cancelled.status, GraphStatus::Cancelled);
+        resume(&document, &mut owner, &mut journal).unwrap();
     }
+    let checkpoint = journal.0.as_ref().unwrap();
+    let ids: Vec<_> = checkpoint.asks.iter().map(|ask| ask.ask_id.as_str()).collect();
+    assert_eq!(ids, ["choose.ask-3"]);
+    assert_eq!(owner.closed_asks, ["choose.ask-1", "choose.ask-2"]);
+}
+
+#[test]
+fn waiting_decide_nodes_do_not_use_up_concurrency() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"decide-concurrency", "decision_session":"chair-session", "nodes":[
+            decide("choose", None),
+            {"id":"work", "access":"read_only", "prompt":"work", "route":fixture_route()}
+        ]
+    }))
+    .unwrap();
+    let mut owner = FakeOwner {
+        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        ..Default::default()
+    };
+    let limits = crate::config::GraphLimits { concurrency: Some(1), ..Default::default() };
+    let run = advance_with_budget(&document, &mut owner, &mut MemoryJournal::default(), &limits, &Default::default())
+        .unwrap();
+    assert_eq!(state(&run, "choose"), NodeState::Running);
+    assert_eq!(state(&run, "work"), NodeState::Succeeded);
+    assert_eq!(owner.calls.len(), 1);
+}
+
+#[test]
+fn decide_deadlines_wait_for_a_clock_instead_of_dropping_the_timeout() {
+    let document = routed(Some(60));
+    let mut owner = FakeOwner::default();
+    let mut journal = MemoryJournal::default();
+    let error = advance(&document, &mut owner, &mut journal).unwrap_err();
+    assert!(matches!(&error, GraphError::Refused(reason) if reason.contains("no wall clock")), "{error}");
+    assert!(journal.0.as_ref().is_none_or(|checkpoint| checkpoint.asks.is_empty()));
+    assert!(owner.asked.is_empty());
+
+    owner.now = Some(at(0));
+    let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(waiting.checkpoint.asks[0].wake_at, Some(at(60)));
+}
+
+#[test]
+fn completion_closes_a_pause_ask_left_by_lowered_limits() {
+    let mut document = graph(vec![node("one", route("first")), node("two", route("first"))]);
+    document.decision_session = Some("chair-session".into());
+    let pending = || AttemptObservation::Pending { attempt_ref: Some("host/attempt".into()) };
+    let mut owner = FakeOwner {
+        observations: [pending(), pending(), pending(), pending()].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let lowered = crate::config::GraphLimits { nodes: 1, ..Default::default() };
+    let paused = advance_with_budget(&document, &mut owner, &mut journal, &lowered, &Default::default()).unwrap();
+    assert_eq!(paused.status, GraphStatus::Paused);
+    assert_eq!(owner.asked, ["pause-1"]);
+    assert!(!paused.checkpoint.asks[0].resolved);
+
+    owner.observations = [terminal(AttemptOutcome::Succeeded), terminal(AttemptOutcome::Succeeded)].into();
+    let run = advance_with_budget(&document, &mut owner, &mut journal, &lowered, &Default::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert!(run.checkpoint.pause_reason.is_none());
+    assert!(run.checkpoint.asks.iter().all(|ask| ask.resolved && ask.closed));
+    assert_eq!(owner.closed_asks, ["pause-1"]);
 }
 
 #[test]
@@ -191,7 +284,7 @@ fn decide_configuration_is_checked_against_the_inbox_contract() {
     let base = routed(Some(60));
     validate_plan(&base).unwrap();
     type Change = fn(&mut GraphNode);
-    let cases: [(&str, Change); 9] = [
+    let cases: [(&str, Change); 12] = [
         ("one option", |n| n.decide.as_mut().unwrap().options.truncate(1)),
         ("duplicate IDs", |n| n.decide.as_mut().unwrap().options[1].id = "ship".into()),
         ("bad option ID", |n| n.decide.as_mut().unwrap().options[1].id = "has space".into()),
@@ -199,6 +292,11 @@ fn decide_configuration_is_checked_against_the_inbox_contract() {
         ("timeout without default", |n| n.decide.as_mut().unwrap().default = None),
         ("zero timeout", |n| n.decide.as_mut().unwrap().timeout_seconds = Some(0)),
         ("empty question", |n| n.decide.as_mut().unwrap().question = " ".into()),
+        ("timeout past 100 years", |n| {
+            n.decide.as_mut().unwrap().timeout_seconds = Some(asks::MAX_TIMEOUT_SECONDS + 1)
+        }),
+        ("unrepresentable timeout", |n| n.decide.as_mut().unwrap().timeout_seconds = Some(u64::MAX)),
+        ("body past the inbox limit", |n| n.decide.as_mut().unwrap().question = "q".repeat(8_000)),
         ("prompt", |n| n.prompt = "run an agent".into()),
         ("route", |n| n.route = Some(route("fixture"))),
     ];
@@ -207,6 +305,11 @@ fn decide_configuration_is_checked_against_the_inbox_contract() {
         change(&mut document.nodes[0]);
         assert!(validate_plan(&document).is_err(), "{name}");
     }
+    let mut longest = base.clone();
+    longest.nodes[0].decide.as_mut().unwrap().timeout_seconds = Some(asks::MAX_TIMEOUT_SECONDS);
+    // The question may use whatever the rendered body leaves of the inbox limit.
+    longest.nodes[0].decide.as_mut().unwrap().question = "q".repeat(7_800);
+    validate_plan(&longest).unwrap();
     let mut sessionless = base.clone();
     sessionless.decision_session = None;
     assert!(validate_plan(&sessionless).is_err());

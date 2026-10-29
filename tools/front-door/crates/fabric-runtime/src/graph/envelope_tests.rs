@@ -126,7 +126,15 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
         }
         if let Some(spec) = &node.decide {
             let session = asks::decide_session(spec, plan.decision_session.as_deref()).unwrap();
-            asks.push(filled_ask(asks::decide_ask(&plan.graph_id, node, spec, session, usize::MAX, None)));
+            asks.push(filled_ask(asks::decide_ask(
+                &plan.graph_id,
+                node,
+                spec,
+                session,
+                u64::MAX,
+                None,
+                Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
+            )));
         }
     }
     if let Some(session) = &plan.decision_session {
@@ -213,6 +221,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                         outcome: Some(AttemptOutcome::AdapterUnavailable),
                         launch_actor: worst(HOST_ID_BYTES),
                         input_cap: Some(usize::MAX),
+                        settled: u64::MAX,
                         usage: Some(AttemptUsage {
                             extra: Default::default(),
                             tokens: Some(u64::MAX),
@@ -263,6 +272,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
             MAX_USAGE_EVENTS
         ],
         usage_events_omitted: u64::MAX,
+        settlements: u64::MAX,
         extensions: vec![worst(256); 64],
         limit_notes: document_limit_notes(document),
         schema_version: 1,
@@ -475,4 +485,27 @@ fn a_checkpoint_within_the_byte_limit_loads_past_the_old_member_limit() {
         .unwrap();
     journal.save(&checkpoint).unwrap();
     assert_eq!(journal.load(&document.graph_id).unwrap(), Some(checkpoint));
+}
+
+#[test]
+fn usage_warnings_keep_the_most_recently_settled_attempts() {
+    let document = graph(vec![node("one", route("first")), node("two", route("first"))]);
+    let mut owner = FakeOwner {
+        observations: [terminal(AttemptOutcome::Succeeded), terminal(AttemptOutcome::Succeeded)].into(),
+        ..Default::default()
+    };
+    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap().checkpoint;
+    let settled: Vec<_> = checkpoint.nodes.iter().map(|n| n.attempts[0].settled).collect();
+    assert_eq!((settled, checkpoint.settlements), (vec![1, 2], 2));
+
+    // Node one settled last, so its lines are the newest despite node order.
+    let copies = MAX_UNKNOWN_USAGE / 3 + 1;
+    for (node, first) in [(0, 100), (1, 1)] {
+        let attempt = checkpoint.nodes[node].attempts[0].clone();
+        checkpoint.nodes[node].attempts =
+            (0..copies as u64).map(|i| GraphAttempt { settled: first + i, ..attempt.clone() }).collect();
+    }
+    update_usage_warnings(&mut checkpoint);
+    assert_eq!(checkpoint.unknown_usage.len(), MAX_UNKNOWN_USAGE);
+    assert!(checkpoint.unknown_usage.iter().all(|line| line.starts_with("node one ")), "{:?}", checkpoint.unknown_usage);
 }

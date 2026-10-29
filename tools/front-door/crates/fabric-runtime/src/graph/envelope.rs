@@ -90,6 +90,7 @@ pub(super) fn checkpoint_bound(
         unknown_usage_omitted: usize::MAX,
         usage_events: Vec::new(),
         usage_events_omitted: u64::MAX,
+        settlements: u64::MAX,
         extensions: extensions.to_vec(),
         limit_notes: document_limit_notes(document),
         schema_version: 1,
@@ -239,8 +240,16 @@ fn node_bound(
     if let Some(spec) = &node.decide {
         // One ask per decide node: a withdrawn ask is replaced, not kept.
         let session = asks::decide_session(spec, plan.decision_session.as_deref()).unwrap_or("");
-        let ask = asks::decide_ask(&plan.graph_id, node, spec, session, usize::MAX, None);
-        bytes += ask_bound(ask, 0);
+        let ask = asks::decide_ask(
+            &plan.graph_id,
+            node,
+            spec,
+            session,
+            u64::MAX,
+            None,
+            Some(""),
+        );
+        bytes += ask_bound(ask, MAX_ADVANCE_ERROR_BYTES);
     }
     if gate {
         bytes += OUTPUT_FIELD_BYTES; // gate reason
@@ -280,6 +289,7 @@ fn node_bound(
             outcome: Some(AttemptOutcome::AdapterUnavailable),
             launch_actor: String::new(),
             input_cap: Some(usize::MAX),
+            settled: u64::MAX,
             usage: Some(AttemptUsage {
                 extra: Default::default(),
                 tokens: Some(u64::MAX),

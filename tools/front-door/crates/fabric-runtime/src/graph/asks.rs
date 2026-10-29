@@ -188,20 +188,52 @@ pub fn loop_ask(graph_id: &str, node: &str, rounds: usize, session: &str) -> Nod
     ask
 }
 
-pub(super) fn decide_ask(
-    graph_id: &str,
-    node: &PlannedNode,
-    spec: &DecideSpec,
-    session: &str,
-    sequence: usize,
-    wake_at: Option<WallTime>,
-) -> NodeAsk {
+/// The longest decide timeout, 100 years, so a deadline set from any present
+/// wall time is representable. An unrepresentable deadline is never stored.
+pub(super) const MAX_TIMEOUT_SECONDS: u64 = 100 * 366 * 86_400;
+const PREVIOUS_ANSWER: &str = "\n\nThe previous answer was not applied: ";
+
+/// The rendered decide request body. A rejected previous answer is noted at
+/// the end, shortened to keep the body within the inbox limit.
+fn decide_body(graph_id: &str, node_id: &str, spec: &DecideSpec, previous: Option<&str>) -> String {
     let fallback = match (&spec.default, spec.timeout_seconds) {
         (Some(default), Some(seconds)) => {
             format!("\n\nWith no answer within {seconds} seconds, the graph takes {default}.")
         }
         _ => String::new(),
     };
+    let mut body = format!(
+        "Graph {graph_id}, node {node_id}.\n\n{}{fallback}\n\nThe chosen option becomes this node's verdict. This decision does not replace review or grant new authority.",
+        spec.question
+    );
+    let room = provenant_records::inbox::REQUEST_BODY_BYTES
+        .saturating_sub(body.len() + PREVIOUS_ANSWER.len());
+    if let Some(reason) = previous.filter(|_| room > 0) {
+        body.push_str(PREVIOUS_ANSWER);
+        body.push_str(prefix(reason, room));
+    }
+    body
+}
+
+/// The ID sequence of a decide ask, so a replacement never reuses an ID.
+fn decide_sequence(ask: &NodeAsk, node_id: &str) -> Option<u64> {
+    ask.ask_id
+        .strip_prefix(node_id)?
+        .strip_prefix(".ask-")?
+        .parse()
+        .ok()
+        .filter(|sequence| *sequence > 0)
+}
+
+pub(super) fn decide_ask(
+    graph_id: &str,
+    node: &PlannedNode,
+    spec: &DecideSpec,
+    session: &str,
+    sequence: u64,
+    wake_at: Option<WallTime>,
+    previous: Option<&str>,
+) -> NodeAsk {
     let mut ask = ask(
         format!("{}.ask-{sequence}", node.id),
         AskKind::Decide,
@@ -210,10 +242,7 @@ pub(super) fn decide_ask(
             "Graph decision: {}",
             prefix(node.title.as_deref().unwrap_or(&node.id), 200)
         ),
-        format!(
-            "Graph {graph_id}, node {}.\n\n{}{fallback}\n\nThe chosen option becomes this node's verdict. This decision does not replace review or grant new authority.",
-            node.id, spec.question
-        ),
+        decide_body(graph_id, &node.id, spec, previous),
     );
     ask.node = Some(node.id.clone());
     ask.options = spec.options.clone();
@@ -257,6 +286,7 @@ pub(super) fn decide_session<'a>(
 
 /// Static checks shared by every place a decide node can be declared.
 pub(super) fn validate_decide(
+    graph_id: &str,
     node: &GraphNode,
     decision_session: Option<&str>,
 ) -> Result<(), &'static str> {
@@ -277,7 +307,6 @@ pub(super) fn validate_decide(
     }
     let mut ids = std::collections::BTreeSet::new();
     if spec.question.trim().is_empty()
-        || spec.question.len() > provenant_records::inbox::REQUEST_BODY_BYTES / 2
         || spec.options.len() < 2
         || spec.options.len() > provenant_records::inbox::MAX_OPTIONS
         || spec.options.iter().any(|option| {
@@ -294,10 +323,20 @@ pub(super) fn validate_decide(
         .default
         .as_ref()
         .is_some_and(|default| !ids.contains(default.as_str()))
-        || spec.timeout_seconds == Some(0)
         || spec.timeout_seconds.is_some() && spec.default.is_none()
     {
         return Err("decide default must name an option, and a timeout needs a default");
+    }
+    if spec
+        .timeout_seconds
+        .is_some_and(|seconds| seconds == 0 || seconds > MAX_TIMEOUT_SECONDS)
+    {
+        return Err("decide timeout_seconds must be from 1 to 3162240000 (100 years)");
+    }
+    if decide_body(graph_id, &node.id, spec, None).len()
+        > provenant_records::inbox::REQUEST_BODY_BYTES
+    {
+        return Err("decide question makes the request body longer than the inbox's 8192 bytes");
     }
     if decide_session(spec, decision_session).is_none_or(|s| crate::inbox::session_id(s).is_err()) {
         return Err("decide needs a valid session or graph decision_session");
@@ -403,15 +442,43 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
             let session = decide_session(spec, plan.decision_session.as_deref())
                 .ok_or(GraphError::BadCheckpoint)?
                 .to_owned();
+            // A deadline is fixed before the ask exists. Without a clock the
+            // advance is refused and retried, so the timeout is never lost.
+            let wake_at = match spec.timeout_seconds {
+                None => None,
+                Some(seconds) => Some(
+                    owner
+                        .wall_now()
+                        .and_then(|now| {
+                            now.checked_add(DurationMicros::from_seconds(seconds).ok()?)
+                                .ok()
+                        })
+                        .ok_or_else(|| {
+                            GraphError::Refused(format!(
+                                "node {}: no wall clock to set its decide deadline; retry the advance",
+                                node.id
+                            ))
+                        })?,
+                ),
+            };
             identity::<R, J::Error>(checkpoint, owner)?;
-            let sequence = checkpoint.asks.iter().filter(|ask| mine(ask)).count() + 1;
-            let wake_at = spec.timeout_seconds.and_then(|seconds| {
-                owner
-                    .wall_now()?
-                    .checked_add(DurationMicros::from_seconds(seconds).ok()?)
-                    .ok()
-            });
-            let ask = decide_ask(&plan.graph_id, node, spec, &session, sequence, wake_at);
+            let previous = latest.map(|position| &checkpoint.asks[position]);
+            let sequence = previous
+                .and_then(|ask| decide_sequence(ask, &node.id))
+                .unwrap_or(0)
+                .saturating_add(1);
+            let rejected = previous
+                .and_then(|ask| ask.answer.as_ref())
+                .and_then(|answer| answer.rejected.as_deref());
+            let ask = decide_ask(
+                &plan.graph_id,
+                node,
+                spec,
+                &session,
+                sequence,
+                wake_at,
+                rejected,
+            );
             checkpoint.asks.retain(|ask| !mine(ask));
             checkpoint.asks.push(ask);
             checkpoint.nodes[index].state = NodeState::Running;
@@ -455,26 +522,18 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
             .iter()
             .map(|option| option.id.as_str())
             .collect();
-        answer.rejected = Some(format!("answer must choose one of {}", ids.join(", ")));
+        answer.rejected = Some(bounded(
+            &format!("answer must choose one of {}", ids.join(", ")),
+            MAX_ADVANCE_ERROR_BYTES,
+        ));
     }
-    let progress = &mut checkpoint.nodes[index];
-    match (&answer.rejected, chosen) {
-        (None, Some(chosen)) => {
-            progress.state = NodeState::Succeeded;
-            progress.outputs = Some(decision_outputs(&ask_id, &chosen, &answer));
-            answer.option = Some(chosen);
-        }
-        (reason, _) => {
-            progress.state = NodeState::Failed;
-            progress.advance_error = Some(bounded(
-                &format!(
-                    "node {}: decision cannot be applied: {}; rerun the graph to ask again",
-                    node.id,
-                    reason.as_deref().unwrap_or("no option chosen")
-                ),
-                MAX_ADVANCE_ERROR_BYTES,
-            ));
-        }
+    // A rejected answer keeps the node open: once its request is closed, the
+    // next advance asks again under a new ask ID and says why.
+    if let (None, Some(chosen)) = (&answer.rejected, chosen) {
+        let progress = &mut checkpoint.nodes[index];
+        progress.state = NodeState::Succeeded;
+        progress.outputs = Some(decision_outputs(&ask_id, &chosen, &answer));
+        answer.option = Some(chosen);
     }
     let ask = &mut checkpoint.asks[position];
     ask.answer = Some(answer);
@@ -786,9 +845,12 @@ pub(super) fn validate(checkpoint: &GraphCheckpoint, plan: &PlannedGraph) -> Res
                             .and_then(|spec| spec.decision_session.as_deref())
                             == session
                 }
-                (AskKind::Decide, Some(node)) => node.decide.as_ref().is_some_and(|spec| {
-                    decide_session(spec, plan.decision_session.as_deref()) == session
-                }),
+                (AskKind::Decide, Some(node)) => {
+                    decide_sequence(ask, &node.id).is_some()
+                        && node.decide.as_ref().is_some_and(|spec| {
+                            decide_session(spec, plan.decision_session.as_deref()) == session
+                        })
+                }
                 (AskKind::Pause, None) => plan.decision_session.as_deref() == session,
                 _ => false,
             };
