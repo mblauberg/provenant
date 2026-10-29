@@ -17,5 +17,9 @@ stable.
 | [0027](0027-rust-front-door.md) | One Rust binary and domain-owned workspace |
 | [0028](0028-rust-port-dependencies.md) | A small allowlist of major Rust dependencies |
 | [0031](0031-retain-provider-history-and-expire-resume-state.md) | Retain provider history and expire resume state |
+| [0032](0032-fabric-graphs-and-presets-are-the-pipeline-runtime.md) | Fabric graphs, with presets lowered into them, run pipelines |
+| [0033](0033-weighted-route-pools-are-the-routing-unit.md) | Weighted route pools are the routing unit |
+| [0034](0034-refusals-carry-stable-typed-codes.md) | Refusals carry stable typed codes |
+| [0035](0035-four-hard-boundaries-and-flexible-everything-else.md) | Four hard boundaries, flexible everything else |
 
 Run `scripts/check-adr-index` to check file coverage and index targets.
