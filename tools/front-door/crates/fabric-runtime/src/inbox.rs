@@ -41,6 +41,16 @@ pub enum OverviewError {
     Unavailable,
 }
 
+impl OverviewError {
+    /// Stable overview status, shared with the console projection.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Incompatible => "incompatible",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
 /// Open existing state without initialising it and read one bounded batch.
 pub fn overview(
     root: &StateRoot,
