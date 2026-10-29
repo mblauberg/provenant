@@ -1214,6 +1214,8 @@ pub enum ServiceError {
     Coordination(#[from] CoordinationError),
     #[error("execution facade refused the request: {0}")]
     Facade(#[from] FacadeError),
+    #[error("host Fabric endpoint unavailable; check the host guardian and retry")]
+    FabricOwnerUnavailable,
     #[error("tool response could not be encoded")]
     Encode(#[from] serde_json::Error),
     #[error("tool result exceeds the configured output limit")]
@@ -1231,6 +1233,7 @@ impl ServiceError {
             Self::Invalid(_) => "invalid_input",
             Self::Coordination(error) => error.code(),
             Self::Facade(error) => error.code(),
+            Self::FabricOwnerUnavailable => "owner_unavailable",
             Self::Encode(_) => "state_corrupt",
             Self::ResultTooLarge => "result_too_large",
             Self::Time(_) => "invalid_input",
@@ -1292,6 +1295,9 @@ impl ServiceError {
             }
             _ => serde_json::json!({"code":self.code()}),
         };
+        if self.code() == "busy" {
+            detail["retryable"] = Value::Bool(true);
+        }
         detail["message"] = Value::String(self.to_string());
         detail["hint"] = Value::String(
             match self {

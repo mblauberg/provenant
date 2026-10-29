@@ -306,6 +306,14 @@ fn fabric_profiles_only_read_database_and_allow_only_the_attempt_socket()
         for suffix in ["", "-wal", "-shm", "-journal"] {
             let path = format!("/fixture/state/fabric/fabric.sqlite3{suffix}");
             assert!(
+                case.profile
+                    .spec
+                    .runtime_reads
+                    .contains(&grant(&path, PathScope::Exact)),
+                "{}: {path}",
+                case.name
+            );
+            assert!(
                 rendered.contains(&format!("(allow file-read* (literal \"{path}\"))")),
                 "{}: {path}",
                 case.name
@@ -318,6 +326,30 @@ fn fabric_profiles_only_read_database_and_allow_only_the_attempt_socket()
                             || line.contains("(subpath \"/fixture/state\")"))),
                 "{}",
                 case.name
+            );
+        }
+        let fabric = Path::new("/fixture/state/fabric");
+        for write in case
+            .plan
+            .write_roots
+            .iter()
+            .chain(&case.profile.spec.state_writes)
+            .chain(&case.profile.spec.tool_writes)
+            .chain(
+                case.profile
+                    .spec
+                    .authentication
+                    .iter()
+                    .flat_map(|auth| &auth.in_place_writes),
+            )
+        {
+            assert!(
+                !(write.path == fabric
+                    || write.path.starts_with(fabric)
+                    || (write.scope == PathScope::Subtree && fabric.starts_with(&write.path))),
+                "{}: write grant {:?}",
+                case.name,
+                write
             );
         }
         let socket = case

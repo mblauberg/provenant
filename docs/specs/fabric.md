@@ -52,9 +52,9 @@ Relay frames obey configured input byte/depth limits, absolute I/O deadlines
 and cancellation. After admission the caller confirms its remaining budget
 before the host executes; an abandoned queued request cannot mutate later.
 The relay excludes landing mutations, inbox writes, chair writes, graphs and
-execution. CLI coordination mutations still refuse inside lanes. Peer ingress
+execution. CLI coordination mutations, including `fabric ... send`, still refuse inside lanes. Peer ingress
 and `peer-agent` remain unavailable to lanes. The socket is removed on normal
-teardown; an existing socket directory is never reused or removed on startup.
+teardown; on restart, a stale socket directory is removed only if it is a real directory owned by the current user with mode 0700.
 - Why: a lane must not forge records that the host or another agent trusts.
 - Test: `crates/providers/src/seatbelt_snapshots.rs::fabric_profiles_only_read_database_and_allow_only_the_attempt_socket`;
   `crates/fabric-mcp/src/coordination_tests.rs::lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal`;

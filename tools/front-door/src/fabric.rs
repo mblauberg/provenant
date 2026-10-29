@@ -154,7 +154,6 @@ impl stdio::Factory for Factory {
                         .ok()
                         .and_then(|id| provenant_core::AttemptId::parse(&id).ok())
                         .map(provenant_providers::LaneRuntime::fabric_socket)
-                        .filter(|socket| socket.exists())
                 } else {
                     None
                 })

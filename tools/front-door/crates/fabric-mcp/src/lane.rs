@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::{
     io::{self, Read, Write},
     os::unix::{
-        fs::{DirBuilderExt, PermissionsExt},
+        fs::{DirBuilderExt, MetadataExt, PermissionsExt},
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
@@ -64,9 +64,27 @@ impl HostRelay {
         + Sync
         + 'static,
     ) -> io::Result<Self> {
-        // Never reuse or remove an existing entry belonging to another owner.
         let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
-        std::fs::DirBuilder::new().mode(0o700).create(parent)?;
+        match std::fs::DirBuilder::new().mode(0o700).create(parent) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let metadata = std::fs::symlink_metadata(parent)?;
+                if !metadata.file_type().is_dir()
+                    || metadata.uid() != provenant_os::fs::effective_uid()
+                    || metadata.mode() & 0o7777 != 0o700
+                {
+                    return Err(error);
+                }
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+                std::fs::remove_dir(parent)?;
+                std::fs::DirBuilder::new().mode(0o700).create(parent)?;
+            }
+            Err(error) => return Err(error),
+        }
         let mut relay = Self {
             path,
             cancel: CancelToken::new(),
@@ -288,7 +306,19 @@ pub(crate) fn serve_one(
             detail: Value::Null,
         },
     };
-    write(stream, &reply, Instant::now() + IO_TIMEOUT, cancel)
+    let deadline = Instant::now() + IO_TIMEOUT;
+    if serde_json::to_vec(&reply)?.len() as u64 > MAX_BYTES {
+        return write(
+            stream,
+            &Reply::Error {
+                code: "response_too_large".into(),
+                detail: Value::Null,
+            },
+            deadline,
+            cancel,
+        );
+    }
+    write(stream, &reply, deadline, cancel)
 }
 
 pub(crate) fn mutate(
@@ -297,7 +327,7 @@ pub(crate) fn mutate(
     cancel: &CancelToken,
     within: Duration,
 ) -> Result<Value, ServiceError> {
-    let mut stream = UnixStream::connect(path).map_err(|_| FacadeError::OwnerUnavailable)?;
+    let mut stream = UnixStream::connect(path).map_err(|_| ServiceError::FabricOwnerUnavailable)?;
     exchange_within(&mut stream, request, cancel, within)
 }
 #[cfg(test)]
@@ -326,7 +356,7 @@ pub(crate) fn exchange_within(
         } else if error.kind() == io::ErrorKind::TimedOut {
             ServiceError::Facade(FacadeError::Timeout)
         } else {
-            ServiceError::Facade(FacadeError::OwnerUnavailable)
+            ServiceError::FabricOwnerUnavailable
         }
     };
     stream.set_nonblocking(true).map_err(unavailable)?;
@@ -360,11 +390,32 @@ pub(crate) fn exchange_within(
     };
     match reply {
         Reply::Ok(value) => Ok(value),
-        Reply::Error { code, detail } => Err(ServiceError::Cli {
-            code,
-            message: "host Fabric coordination refused".into(),
-            data: detail,
-        }),
+        Reply::Error { code, detail } => {
+            if code == "result_too_large" || code == "response_too_large" {
+                return Err(ServiceError::ResultTooLarge);
+            }
+            if (detail.is_null()
+                || detail.as_object().is_some_and(|fields| {
+                    fields.keys().all(|key| {
+                        matches!(key.as_str(), "code" | "message" | "hint" | "retryable")
+                    })
+                }))
+                && let Ok(error) =
+                    serde_json::from_value::<FacadeError>(serde_json::json!({"code": code}))
+            {
+                return Err(error.into());
+            }
+            let message = detail
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("host Fabric coordination refused")
+                .to_owned();
+            Err(ServiceError::Cli {
+                code,
+                message,
+                data: detail,
+            })
+        }
         Reply::Ready => Err(FacadeError::StateCorrupt.into()),
     }
 }
@@ -379,6 +430,147 @@ mod tests {
             tool: "fabric_events".into(),
             arguments: serde_json::json!({"op":"note","note":"queued"}),
         }
+    }
+
+    #[test]
+    fn relay_drop_cancels_handler_and_next_call_is_unavailable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::Builder::new().prefix("pf-").tempdir_in(".")?;
+        let path = temp
+            .path()
+            .strip_prefix(std::env::current_dir()?)?
+            .join("relay/socket");
+        let (started, ready) = mpsc::sync_channel(1);
+        let relay = HostRelay::start(
+            path.clone(),
+            provenant_records::Limits::CONFIG,
+            move |_, cancel, _| {
+                started.send(()).unwrap();
+                while !cancel.is_cancelled() {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(FacadeError::Cancelled.into())
+            },
+        )?;
+        thread::scope(|scope| {
+            let path = path.clone();
+            let call = scope.spawn(move || {
+                mutate(
+                    &path,
+                    &request(),
+                    &CancelToken::new(),
+                    Duration::from_secs(5),
+                )
+            });
+            ready.recv_timeout(IO_TIMEOUT).unwrap();
+            let start = Instant::now();
+            drop(relay);
+            assert!(start.elapsed() < IO_TIMEOUT);
+            assert!(call.join().unwrap().is_err());
+        });
+        let start = Instant::now();
+        let error = mutate(
+            &path,
+            &request(),
+            &CancelToken::new(),
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(matches!(error, ServiceError::FabricOwnerUnavailable));
+        assert!(
+            error
+                .to_string()
+                .contains("host Fabric endpoint unavailable")
+        );
+        assert!(start.elapsed() < IO_TIMEOUT);
+        Ok(())
+    }
+
+    #[test]
+    fn host_errors_keep_codes_messages_and_retryability() -> Result<(), Box<dyn std::error::Error>>
+    {
+        for error in [
+            FacadeError::Busy,
+            FacadeError::Conflict,
+            FacadeError::Cancelled,
+        ] {
+            let (mut client, mut server) = UnixStream::pair()?;
+            thread::scope(|scope| {
+                let expected = error.clone();
+                let serving = scope.spawn(move || {
+                    serve_one(
+                        &mut server,
+                        provenant_records::Limits::CONFIG,
+                        &|_, _, _| Err(expected.clone().into()),
+                        &CancelToken::new(),
+                    )
+                });
+                let received = exchange(&mut client, &request(), &CancelToken::new()).unwrap_err();
+                assert!(matches!(&received, ServiceError::Facade(actual) if *actual == error));
+                if error == FacadeError::Busy {
+                    assert_eq!(received.structured_error()["retryable"], true);
+                }
+                serving.join().unwrap().unwrap();
+            });
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_response_is_reported() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, mut server) = UnixStream::pair()?;
+        thread::scope(|scope| {
+            let serving = scope.spawn(|| {
+                serve_one(
+                    &mut server,
+                    provenant_records::Limits::CONFIG,
+                    &|_, _, _| Ok(Value::String("x".repeat(MAX_BYTES as usize))),
+                    &CancelToken::new(),
+                )
+            });
+            assert!(matches!(
+                exchange(&mut client, &request(), &CancelToken::new()),
+                Err(ServiceError::ResultTooLarge)
+            ));
+            serving.join().unwrap().unwrap();
+        });
+        Ok(())
+    }
+
+    #[test]
+    fn stale_directory_recovery_checks_permissions_and_symlinks() -> io::Result<()> {
+        let temp = tempfile::Builder::new().prefix("pf-").tempdir_in(".")?;
+        let parent = temp
+            .path()
+            .strip_prefix(std::env::current_dir()?)
+            .map_err(io::Error::other)?
+            .join("relay");
+        std::fs::DirBuilder::new().mode(0o700).create(&parent)?;
+        let path = parent.join("socket");
+        drop(UnixListener::bind(&path)?);
+        drop(HostRelay::start(
+            path.clone(),
+            provenant_records::Limits::CONFIG,
+            |_, _, _| Ok(Value::Null),
+        )?);
+        std::fs::DirBuilder::new().mode(0o755).create(&parent)?;
+        assert!(
+            HostRelay::start(
+                path.clone(),
+                provenant_records::Limits::CONFIG,
+                |_, _, _| Ok(Value::Null)
+            )
+            .is_err()
+        );
+        std::fs::remove_dir(&parent)?;
+        std::os::unix::fs::symlink(temp.path(), &parent)?;
+        assert!(
+            HostRelay::start(path, provenant_records::Limits::CONFIG, |_, _, _| Ok(
+                Value::Null
+            ))
+            .is_err()
+        );
+        Ok(())
     }
 
     #[test]

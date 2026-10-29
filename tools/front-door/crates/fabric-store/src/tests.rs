@@ -112,6 +112,27 @@ fn live_read_only_observations_refresh_wal_and_refuse_mutations() {
     assert!(reader.db.execute_batch("DELETE FROM messages").is_err());
     assert!(f.open().live_read_only().is_err());
 }
+#[test]
+#[allow(clippy::disallowed_methods)] // Native read-only WAL open deadline.
+fn persisted_wal_survives_last_writer_in_unwritable_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let writer = f.open();
+    writer.send(&message(&f, 5), &f.request()).unwrap();
+    drop(writer);
+    let dir = f.path().parent().unwrap().to_path_buf();
+    for suffix in ["-wal", "-shm"] {
+        assert!(PathBuf::from(format!("{}{suffix}", f.path().display())).exists());
+    }
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let result = provenant_sqlite::open_read_only_connection(&f.path()).and_then(|db| {
+        db.query_row("SELECT count(*) FROM messages", [], |row| {
+            row.get::<_, i64>(0)
+        })
+    });
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(result.unwrap(), 1);
+}
 fn message(f: &Fixture, n: u8) -> Message {
     Message {
         extra: Default::default(),
