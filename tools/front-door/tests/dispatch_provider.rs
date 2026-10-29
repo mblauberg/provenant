@@ -106,7 +106,7 @@ fn fixture() -> Result {
             format!(
                 "{}\n{}\n{}\n",
                 json!({"type":"session_meta","payload":{"id":recorded_session}}),
-                json!({"type":"turn_context","payload":{"model": if prompt.contains("fixture policy result") { policy_model.unwrap_or("gpt-6-luna") } else if prompt.contains("fixture pool result") { "gpt-6.1-sol" } else { "gpt-6-luna" },"effort":"low"}}),
+                json!({"type":"turn_context","payload":{"model": if prompt.contains("fixture policy result") || prompt.contains("fixture policy continuation") { policy_model.unwrap_or("gpt-6-luna") } else if prompt.contains("fixture pool result") { "gpt-6.1-sol" } else { "gpt-6-luna" },"effort":"low"}}),
                 json!({"type":"response_item","payload":{"content":"must not be retained"}})
             ),
         )?;
@@ -124,7 +124,13 @@ fn fixture() -> Result {
         )?;
         return Ok(());
     }
-    let answer = if prompt.contains("fixture policy result") && policy_model == Some("gpt-6-luna") {
+    let answer = if prompt.contains("fixture policy continuation") {
+        if args.iter().any(|arg| arg == "resume") {
+            "Completed.\nStatus: complete".into()
+        } else {
+            "More work remains.\nStatus: incomplete".into()
+        }
+    } else if prompt.contains("fixture policy result") && policy_model == Some("gpt-6-luna") {
         String::new()
     } else if prompt.contains("Review commit ") {
         let lens = prompt
@@ -149,12 +155,8 @@ fn fixture() -> Result {
     }
     Ok(())
 }
-fn policy_empty_result_falls_back_without_a_chair_turn() -> Result {
-    if !graph_fixture_available()? {
-        return Ok(());
-    }
+fn policy_codex_fixture() -> Result<TestRig> {
     let mut rig = TestRig::new()?;
-    let cleanup = rig.process_cleanup();
     for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
         fs::create_dir_all(rig.home.join(path))?;
     }
@@ -171,6 +173,14 @@ fn policy_empty_result_falls_back_without_a_chair_turn() -> Result {
         "PATH".into(),
         format!("{}:/usr/bin:/bin", bin.display()).into(),
     ));
+    Ok(rig)
+}
+fn policy_empty_result_falls_back_without_a_chair_turn() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
     fs::create_dir_all(&rig.state)?;
     fs::set_permissions(&rig.state, fs::Permissions::from_mode(0o700))?;
     fs::write(
@@ -212,6 +222,58 @@ fn policy_empty_result_falls_back_without_a_chair_turn() -> Result {
     assert_eq!(second["state"], "succeeded", "{lanes}");
     assert_eq!(second["applied_route"]["model"], "codex/gpt-6.1-terra");
     assert_eq!(second["continuation"], "policy_fallback");
+    cleanup.disarm();
+    Ok(())
+}
+fn policy_incomplete_result_continues_the_retained_session() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let prompt = rig.root.join("prompt.txt");
+    fs::write(&prompt, "fixture policy continuation")?;
+    let output = rig.command(&[
+        "run",
+        "--model",
+        "codex/gpt-6.1-terra",
+        "--effort",
+        "low",
+        "--operation-id",
+        "policy-continuation",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt path")?,
+        "--wait",
+        "30s",
+        "--json",
+    ])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let run_id = output["data"]["run_id"].as_str().ok_or("run ID")?;
+    let lanes = rig.command(&["lanes", "--id", run_id, "--all", "--json"])?;
+    let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    let rows = lanes["data"]["lanes"].as_array().ok_or("lane rows")?;
+    assert_eq!(rows.len(), 2, "{lanes}");
+    let first = rows
+        .iter()
+        .find(|row| row["attempt_number"] == 1)
+        .ok_or("first attempt")?;
+    let second = rows
+        .iter()
+        .find(|row| row["attempt_number"] == 2)
+        .ok_or("continuation attempt")?;
+    assert_eq!(first["state"], "failed", "{lanes}");
+    assert_eq!(second["state"], "succeeded", "{lanes}");
+    assert_eq!(second["continuation"], "policy_continuation");
+    assert_eq!(second["applied_route"]["model"], "codex/gpt-6.1-terra");
+    assert_eq!(
+        first["transcript"]["session"]
+            .as_str()
+            .ok_or("first session")?,
+        second["transcript"]["session"]
+            .as_str()
+            .ok_or("continued session")?
+    );
     cleanup.disarm();
     Ok(())
 }
@@ -2511,6 +2573,7 @@ fn main() -> ExitCode {
                 "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation",
                 "codex_dispatch_observes_rollout",
                 "policy_empty_result_falls_back_without_a_chair_turn",
+                "policy_incomplete_result_continues_the_retained_session",
                 "review_fans_out_and_collects_fake_provider",
                 "opencode_dispatch_observes_v2_wal_session",
                 "opus_writer_dispatch_advises_a_cheaper_route",
@@ -2544,6 +2607,7 @@ fn main() -> ExitCode {
                     }
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
                     "policy_empty_result_falls_back_without_a_chair_turn" => policy_empty_result_falls_back_without_a_chair_turn(),
+                    "policy_incomplete_result_continues_the_retained_session" => policy_incomplete_result_continues_the_retained_session(),
                     "review_fans_out_and_collects_fake_provider" => review_fans_out_and_collects_fake_provider(),
                     "opencode_dispatch_observes_v2_wal_session" => {
                         opencode_dispatch_observes_v2_wal_session()

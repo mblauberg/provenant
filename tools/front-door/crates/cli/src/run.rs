@@ -405,7 +405,10 @@ fn assess_model_result(
         });
     }
     if policy.lane.stop_early_ok == Some(false)
-        && decoded.outcome == run::Outcome::Succeeded
+        && matches!(
+            decoded.outcome,
+            run::Outcome::Succeeded | run::Outcome::Uncommitted
+        )
         && decoded.complete
         && decoded
             .result
@@ -6024,6 +6027,13 @@ mod tests {
                 .ok_or("missing continuation")?;
         assert!(continuation.resume);
         assert_eq!(continuation.max_attempts, 3);
+        decoded.outcome = run::Outcome::Uncommitted;
+        assert!(
+            assess_model_result(&terra, task, &record, &decoded, 1)?
+                .retry
+                .is_some()
+        );
+        decoded.outcome = run::Outcome::Succeeded;
         record.attempt_number = 3;
         let decision = assess_model_result(&terra, task, &record, &decoded, record.attempt_number)?;
         assert!(decision.refusal.is_some() && decision.retry.is_none());
