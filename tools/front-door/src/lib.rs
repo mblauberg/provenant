@@ -1201,7 +1201,13 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                         | roots::RootError::SessionProjectMismatch { .. } => Outcome::Refused,
                         _ => Outcome::Error,
                     };
-                    fail(&inv.leaf, outcome, "ROOT", &error.to_string(), globals)
+                    fail(
+                        &inv.leaf,
+                        outcome,
+                        error.code(),
+                        &error.to_string(),
+                        globals,
+                    )
                 }
             }
         }
