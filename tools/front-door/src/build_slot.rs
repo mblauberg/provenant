@@ -16,7 +16,7 @@
 //! live under the host state directory shared by every project, so
 //! `max_concurrent_builds` bounds builds across the host, not per project.
 use provenant_core::CancelToken;
-use provenant_os::build_slots::{BuildSlots, SlotError, Wait, wait_for_cargo_lock};
+use provenant_os::build_slots::{BuildSlots, SlotError, Wait, WaitKind, wait_for_cargo_lock};
 use provenant_supervisor::census::{ProcessObservation, ProcessObserver, SystemProcessObserver};
 use std::{
     ffi::{OsStr, OsString},
@@ -38,12 +38,18 @@ pub(crate) const STATE_ENV: &str = "PROVENANT_BUILD_SLOT_STATE";
 pub(crate) const SLOTS_ENV: &str = "PROVENANT_BUILD_SLOTS";
 /// Seconds a build waits for a slot or a Cargo lock before giving up.
 pub(crate) const WAIT_ENV: &str = "PROVENANT_BUILD_WAIT_SECS";
+/// Prefix of the file where a waiting build says so, in the lane's scratch
+/// directory; the build adds `.pid`.
+pub(crate) const MARKER_ENV: &str = "PROVENANT_BUILD_WAIT_MARKER";
 
 /// What the host's shim script supplies, read from the environment.
 pub(crate) struct Settings {
     pub state: PathBuf,
     pub slots: u64,
     pub wait: Duration,
+    /// Where to publish a wait for the host's `lanes` and `status`; none means
+    /// the wait shows on stderr only.
+    pub marker: Option<PathBuf>,
 }
 impl Settings {
     /// None when the host did not configure slots; the build then runs
@@ -60,6 +66,9 @@ impl Settings {
             state: state.is_absolute().then_some(state)?,
             slots: number(SLOTS_ENV).filter(|n| (1..=64).contains(n))?,
             wait: Duration::from_secs(number(WAIT_ENV).filter(|n| *n >= 1)?),
+            marker: get(MARKER_ENV)
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute()),
         })
     }
 }
@@ -202,16 +211,13 @@ pub(crate) fn run(gate: Gate<'_>) -> i32 {
         // One deadline covers the Cargo-lock wait and the slot wait.
         #[allow(clippy::disallowed_methods)]
         let began = Instant::now();
-        if let Err(message) = wait_for_lock(&env, settings) {
+        let locked = wait_for_lock(&env, settings);
+        unmark(settings);
+        if let Err(message) = locked {
             return report(&message);
         }
         match BuildSlots::open(&settings.state) {
-            Ok(slots) => match slots.acquire(
-                settings.slots,
-                Wait::new(settings.wait.saturating_sub(began.elapsed())),
-                &CancelToken::new(),
-                &mut |busy, waited| waiting(busy, settings.slots, waited),
-            ) {
+            Ok(slots) => match acquire(&slots, settings, began) {
                 Ok(slot) => held = Some(slot),
                 Err(SlotError::Timeout { held, .. }) => {
                     return report(&format!(
@@ -240,6 +246,25 @@ pub(crate) fn run(gate: Gate<'_>) -> i32 {
     code
 }
 
+/// Wait for a slot, telling the host while it does.
+fn acquire(
+    slots: &BuildSlots,
+    settings: &Settings,
+    began: Instant,
+) -> Result<provenant_os::build_slots::SlotGuard, SlotError> {
+    let acquired = slots.acquire(
+        settings.slots,
+        Wait::new(settings.wait.saturating_sub(began.elapsed())),
+        &CancelToken::new(),
+        &mut |busy, waited| {
+            mark(settings, WaitKind::Slot);
+            waiting(busy, settings.slots, waited);
+        },
+    );
+    unmark(settings);
+    acquired
+}
+
 /// Cargo queues a second build behind the first one's `.cargo-lock`. Waiting
 /// for that lock before taking a slot keeps the slot free for a build that
 /// can use it. The wait is bounded and reported like the slot wait.
@@ -252,6 +277,7 @@ fn wait_for_lock(env: &[(OsString, OsString)], settings: &Settings) -> Result<()
         return Ok(());
     };
     wait_for_cargo_lock(target, Wait::new(settings.wait), &mut |waited| {
+        mark(settings, WaitKind::CargoLock);
         say(&format!(
             "waiting for another cargo build to release its lock{}",
             since(waited)
@@ -262,6 +288,33 @@ fn wait_for_lock(env: &[(OsString, OsString)], settings: &Settings) -> Result<()
             "gave up after {error}. Run `provenant lanes` to find the lane building in the same target directory, or raise domains.fabric.lanes.build_wait_minutes"
         )
     })
+}
+
+/// Tell the host this build waits, now. Best effort: the wait shows on
+/// stderr whatever happens here.
+#[allow(clippy::disallowed_methods)]
+fn mark(settings: &Settings, kind: WaitKind) {
+    let Some(marker) = &settings.marker else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let _ = std::fs::write(own_marker(marker), kind.marker(now));
+}
+
+/// One marker per command, so a sibling that gets a slot cannot remove the
+/// wait of one that still waits.
+fn own_marker(base: &std::path::Path) -> PathBuf {
+    let mut name = base.as_os_str().to_owned();
+    name.push(format!(".{}", std::process::id()));
+    name.into()
+}
+
+fn unmark(settings: &Settings) {
+    if let Some(marker) = &settings.marker {
+        let _ = std::fs::remove_file(own_marker(marker));
+    }
 }
 
 fn since(waited: Duration) -> String {

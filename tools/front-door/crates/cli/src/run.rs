@@ -6699,6 +6699,7 @@ fn stats_inner(
         &edge.roots.state,
         context.project_id,
     )?;
+    let partial = partial_signal_counts(&selected, store.as_ref(), &call)?;
     let cache_kpis = cache_kpi_rows(
         &selected,
         &config.domains,
@@ -6877,6 +6878,18 @@ fn stats_inner(
     }
     data["plan_value"] = json!(plan_value);
     data["graph_quality"] = json!(graph_quality);
+    // Every grouping reports partial finishes, not only graph groups.
+    if !partial.is_empty() {
+        human.push_str(&format!(
+            "partial signals: {}\n",
+            partial
+                .iter()
+                .map(|(name, count)| format!("{name}={count}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+    }
+    data["partial_signals"] = json!(partial);
     if by == Some(crate::StatsBy::Pr) {
         data["pr_attribution"] = json!({
             "merged_prs_read": merged_pr_count,
@@ -6957,20 +6970,17 @@ fn graph_quality_rows(
                 *verdicts.entry(verdict.to_ascii_lowercase()).or_default() += 1;
             }
         }
-        let mut partial = BTreeMap::<String, u64>::new();
-        if let Some(store) = store {
-            for fact in facts.iter().filter(|fact| {
+        let in_graph: Vec<_> = facts
+            .iter()
+            .copied()
+            .filter(|fact| {
                 fact.context
                     .as_ref()
                     .and_then(|context| context.graph_id.as_deref())
                     == Some(graph_id.as_str())
-            }) {
-                let record = store.record(fact.attempt_id, call)?;
-                for signal in record.partial_signals {
-                    *partial.entry(signal.as_str().to_owned()).or_default() += 1;
-                }
-            }
-        }
+            })
+            .collect();
+        let partial = partial_signal_counts(&in_graph, store, call)?;
         rows.push(json!({
             "graph_id": graph_id,
             "checkpoint": "read",
@@ -6984,6 +6994,23 @@ fn graph_quality_rows(
         }));
     }
     Ok(rows)
+}
+
+/// Advisory partial-finish signals by name over the given attempts.
+fn partial_signal_counts(
+    facts: &[&provenant_records::AttemptFact],
+    store: Option<&run::RunStore>,
+    call: &run::Request<'_>,
+) -> Result<BTreeMap<String, u64>, Fail> {
+    let mut partial = BTreeMap::new();
+    if let Some(store) = store {
+        for fact in facts {
+            for signal in store.record(fact.attempt_id, call)?.partial_signals {
+                *partial.entry(signal.as_str().to_owned()).or_default() += 1;
+            }
+        }
+    }
+    Ok(partial)
 }
 
 fn graph_quality_counts(

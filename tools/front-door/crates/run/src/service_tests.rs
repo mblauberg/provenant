@@ -643,3 +643,61 @@ fn each_refusal_has_its_own_stable_code() {
     codes.dedup();
     assert_eq!(codes.len(), listed, "every code is distinct");
 }
+
+#[test]
+fn work_context_never_widens_authority() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let service = Service::new(&store);
+    let plain = service.dispatch(submission("same"), temp.path(), &call)?;
+    let mut labelled = submission("same");
+    labelled.operation_id = OperationId::parse("service-dispatch-labelled")?;
+    // Every label, including ones that read like grants, is descriptive only.
+    labelled.tasks[0].context = Some(provenant_records::run::WorkContext {
+        work_item: Some("#1".into()),
+        graph_id: Some("graph".into()),
+        node_id: Some("node".into()),
+        preset: Some("deliver".into()),
+        pattern: Some("deliver".into()),
+        role: Some("writer".into()),
+        role_digest: Some("write-everything".into()),
+        experiment_arm: Some("network=all".into()),
+        selection_source: Some("delivery=merge".into()),
+        ..Default::default()
+    });
+    let labelled = service.dispatch(labelled, temp.path(), &call)?;
+    let (plain, labelled) = (
+        store.request(plain.run_id, &call)?.tasks.remove(0),
+        store.request(labelled.run_id, &call)?.tasks.remove(0),
+    );
+    assert!(plain.context.is_none() && labelled.context.is_some());
+    assert_eq!(plain.authority_digest, labelled.authority_digest);
+    let strip = |mut task: TaskRequest| {
+        task.context = None;
+        task
+    };
+    // Access, write scope, source and delivery are untouched.
+    assert_eq!(strip(plain), strip(labelled));
+    Ok(())
+}
+
+#[test]
+fn unknown_work_context_fields_are_refused_at_the_request_edge() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut request = submission("unknown");
+    let mut unknown = provenant_records::run::WorkContext::default();
+    unknown
+        .extra
+        .insert("write_roots".into(), serde_json::json!(["/"]));
+    request.tasks[0].context = Some(unknown);
+    assert!(matches!(
+        Service::new(&store).dispatch(request, temp.path(), &call),
+        Err(RunError::Validation("work context"))
+    ));
+    Ok(())
+}

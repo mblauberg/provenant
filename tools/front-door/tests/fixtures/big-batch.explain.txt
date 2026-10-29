@@ -1,0 +1,154 @@
+Graph <id>
+Preset selection: big-batch (override)
+Review shape: standard (default)
+Requires configuration: "writer worktree"
+scout  role=- tier=- family=any kind=composite access=read_only worktree=-
+  scouts  role=- tier=- family=any kind=composite access=read_only worktree=-
+    scout-1  role=scout.codebase tier=junior family=any kind=- access=read_only worktree=-
+      reference: skill:scope/references/scout-areas.md <digest>
+      read_roots: ["<root>/skills"]
+    scout-2  role=scout.codebase tier=junior family=any kind=- access=read_only worktree=-
+      reference: skill:scope/references/scout-areas.md <digest>
+      read_roots: ["<root>/skills"]
+    scout-3  role=scout.codebase tier=junior family=any kind=- access=read_only worktree=-
+      reference: skill:scope/references/scout-areas.md <digest>
+      read_roots: ["<root>/skills"]
+    scout-4  role=scout.codebase tier=junior family=any kind=- access=read_only worktree=-
+      reference: skill:scope/references/scout-areas.md <digest>
+      read_roots: ["<root>/skills"]
+    external  role=scout.external tier=junior family=any kind=- access=read_only worktree=-
+      reference: skill:scope/references/researcher.md <digest>
+      read_roots: ["<root>/skills"]
+    exports: [{"node":"scout-1","outputs":["result","findings"]},{"node":"scout-2","outputs":["result","findings"]},{"node":"scout-3","outputs":["result","findings"]},{"node":"scout-4","outputs":["result","findings"]},{"node":"external","outputs":["result","findings"]}]
+  synthesis  role=plan.research tier=senior family=any kind=synthesise access=read_only worktree=-
+    inputs: [{"node":"scouts","outputs":["result"]}]
+  exports: [{"node":"synthesis","outputs":["result","findings"]}]
+lanes  role=- tier=- family=any kind=composite access=read_only worktree=-
+  inputs: [{"node":"scout","outputs":["result"]}]
+  lane-one  role=- tier=- family=any kind=composite access=read_only worktree=-
+    implement  role=write.implement tier=senior family=any kind=- access=worktree_write worktree=-
+      write_scope: ["."]
+      source: {"commit":"<commit>","type":"commit"}
+      acceptance_checks: ["Run targeted tests and required static checks","Commit the completed slice"]
+    lens  role=- tier=- family=any kind=composite access=read_only worktree=-
+      source: {"node":"implement","type":"node"}
+      inputs: [{"node":"implement","outputs":["result"]}]
+      lens-correctness-spec  role=lens.correctness-spec tier=junior family=distinct_from_writer kind=- access=read_only worktree=-
+        reference: skill:code-review/references/reviewer-context.md <digest>
+        reference: skill:code-review/references/lenses/correctness-spec.md <digest>
+        read_roots: ["<root>/skills"]
+      lens-simplicity  role=lens.simplicity tier=junior family=any kind=- access=read_only worktree=-
+        reference: skill:code-review/references/reviewer-context.md <digest>
+        reference: skill:code-review/references/lenses/simplicity.md <digest>
+        read_roots: ["<root>/skills"]
+      exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-simplicity","outputs":["result","findings"]}]
+    evaluate  role=review.evaluator tier=senior family=any kind=synthesise access=read_only worktree=-
+      source: {"node":"implement","type":"node"}
+      inputs: [{"node":"lens","outputs":["result"]}]
+    exports: [{"node":"implement","outputs":["branch","commit"]},{"node":"evaluate","outputs":["result","findings","verdict"]}]
+  lane-two  role=- tier=- family=any kind=composite access=read_only worktree=-
+    implement  role=write.implement tier=senior family=any kind=- access=worktree_write worktree=-
+      write_scope: ["."]
+      source: {"commit":"<commit>","type":"commit"}
+      acceptance_checks: ["Run targeted tests and required static checks","Commit the completed slice"]
+    lens  role=- tier=- family=any kind=composite access=read_only worktree=-
+      source: {"node":"implement","type":"node"}
+      inputs: [{"node":"implement","outputs":["result"]}]
+      lens-correctness-spec  role=lens.correctness-spec tier=junior family=distinct_from_writer kind=- access=read_only worktree=-
+        reference: skill:code-review/references/reviewer-context.md <digest>
+        reference: skill:code-review/references/lenses/correctness-spec.md <digest>
+        read_roots: ["<root>/skills"]
+      lens-simplicity  role=lens.simplicity tier=junior family=any kind=- access=read_only worktree=-
+        reference: skill:code-review/references/reviewer-context.md <digest>
+        reference: skill:code-review/references/lenses/simplicity.md <digest>
+        read_roots: ["<root>/skills"]
+      exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-simplicity","outputs":["result","findings"]}]
+    evaluate  role=review.evaluator tier=senior family=any kind=synthesise access=read_only worktree=-
+      source: {"node":"implement","type":"node"}
+      inputs: [{"node":"lens","outputs":["result"]}]
+    exports: [{"node":"implement","outputs":["branch","commit"]},{"node":"evaluate","outputs":["result","findings","verdict"]}]
+  exports: [{"node":"lane-one","outputs":["result","findings"]},{"node":"lane-two","outputs":["result","findings"]}]
+council  role=- tier=- family=any kind=composite access=read_only worktree=-
+  inputs: [{"node":"lanes","outputs":["result"]}]
+  subject  role=plan.review tier=senior family=any kind=- access=read_only worktree=-
+    read_roots: ["<project>"]
+    source: {"type":"integration"}
+  lenses  role=- tier=- family=any kind=composite access=read_only worktree=-
+    source: {"node":"subject","type":"node"}
+    inputs: [{"node":"subject","outputs":["result"]}]
+    lens-correctness-spec  role=lens.correctness-spec tier=junior family=distinct_from_writer kind=- access=read_only worktree=-
+      reference: skill:code-review/references/reviewer-context.md <digest>
+      reference: skill:code-review/references/lenses/correctness-spec.md <digest>
+      read_roots: ["<project>","<root>/skills"]
+    lens-design-fit-reuse  role=lens.design-fit-reuse tier=junior family=any kind=- access=read_only worktree=-
+      reference: skill:code-review/references/reviewer-context.md <digest>
+      reference: skill:code-review/references/lenses/design-fit-reuse.md <digest>
+      read_roots: ["<project>","<root>/skills"]
+    exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-design-fit-reuse","outputs":["result","findings"]}]
+  verify  role=review.verify tier=senior family=cross_preferred kind=- access=read_only worktree=-
+    read_roots: ["<project>"]
+    source: {"node":"subject","type":"node"}
+    inputs: [{"node":"lenses","outputs":["result"]}]
+  synthesis  role=review.synthesis tier=senior family=any kind=synthesise access=read_only worktree=-
+    read_roots: ["<project>"]
+    source: {"node":"subject","type":"node"}
+    inputs: [{"node":"verify","outputs":["result"]}]
+  exports: [{"node":"synthesis","outputs":["result","findings","verdict","commit"]}]
+refactor  role=refactor-principal tier=principal family=any kind=- access=worktree_write worktree=.
+  write_scope: ["."]
+  source: {"node":"council","type":"node"}
+  inputs: [{"node":"council","outputs":["result","findings","commit"]}]
+  acceptance_checks: ["Preserve externally observable behaviour","Run targeted checks and commit"]
+repair  role=- tier=- family=any kind=loop access=read_only worktree=-
+  inputs: [{"node":"refactor","outputs":["result"]}]
+  max_rounds: 2
+  fix  role=repairer tier=senior family=any kind=- access=worktree_write worktree=.
+    write_scope: ["."]
+    inputs: [{"node":"previous.review","outputs":["result","findings"]}]
+    acceptance_checks: ["Resolve accepted findings","Run targeted checks and commit"]
+  review  role=- tier=- family=any kind=composite access=read_only worktree=-
+    inputs: [{"node":"fix","outputs":["result"]}]
+    subject  role=plan.review tier=senior family=any kind=- access=read_only worktree=-
+      read_roots: ["<project>"]
+      source: {"node":"fix","type":"node"}
+    lenses  role=- tier=- family=any kind=composite access=read_only worktree=-
+      source: {"node":"subject","type":"node"}
+      inputs: [{"node":"subject","outputs":["result"]}]
+      lens-correctness-spec  role=lens.correctness-spec tier=junior family=distinct_from_writer kind=- access=read_only worktree=-
+        reference: skill:code-review/references/reviewer-context.md <digest>
+        reference: skill:code-review/references/lenses/correctness-spec.md <digest>
+        read_roots: ["<project>","<root>/skills"]
+      lens-design-fit-reuse  role=lens.design-fit-reuse tier=junior family=any kind=- access=read_only worktree=-
+        reference: skill:code-review/references/reviewer-context.md <digest>
+        reference: skill:code-review/references/lenses/design-fit-reuse.md <digest>
+        read_roots: ["<project>","<root>/skills"]
+      exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-design-fit-reuse","outputs":["result","findings"]}]
+    verify  role=review.verify tier=senior family=cross_preferred kind=- access=read_only worktree=-
+      read_roots: ["<project>"]
+      source: {"node":"subject","type":"node"}
+      inputs: [{"node":"lenses","outputs":["result"]}]
+    synthesis  role=review.synthesis tier=senior family=any kind=synthesise access=read_only worktree=-
+      read_roots: ["<project>"]
+      source: {"node":"subject","type":"node"}
+      inputs: [{"node":"verify","outputs":["result"]}]
+    exports: [{"node":"synthesis","outputs":["result","findings","verdict","commit"]}]
+  accept  role=- tier=- family=any kind=gate access=read_only worktree=-
+    inputs: [{"node":"review","outputs":["verdict"]}]
+Roles:
+  lens.correctness-spec  origin=bundled digest=<digest>
+  lens.design-fit-reuse  origin=bundled digest=<digest>
+  lens.simplicity  origin=bundled digest=<digest>
+  plan.research  origin=bundled digest=<digest>
+  plan.review  origin=bundled digest=<digest>
+  refactor-principal  origin=preset digest=<digest>
+  repairer  origin=preset digest=<digest>
+  review.evaluator  origin=bundled digest=<digest>
+  review.synthesis  origin=bundled digest=<digest>
+  review.verify  origin=bundled digest=<digest>
+  scout.codebase  origin=bundled digest=<digest>
+  scout.external  origin=bundled digest=<digest>
+  write.implement  origin=bundled digest=<digest>
+Substituted external: web -> junior (route web is not defined in the routing configuration)
+Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
+Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
+

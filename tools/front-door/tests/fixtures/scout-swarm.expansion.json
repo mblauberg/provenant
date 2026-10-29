@@ -1,0 +1,250 @@
+{
+  "context": {
+    "pattern": "scout-swarm",
+    "preset": "scout-swarm"
+  },
+  "graph_id": "preset-23ad544fb6e2e870c95b2f8ac9bd4c67",
+  "nodes": [
+    {
+      "access": "read_only",
+      "composite": {
+        "exports": [
+          {
+            "node": "scout-1",
+            "outputs": [
+              "result",
+              "findings"
+            ]
+          },
+          {
+            "node": "scout-2",
+            "outputs": [
+              "result",
+              "findings"
+            ]
+          },
+          {
+            "node": "scout-3",
+            "outputs": [
+              "result",
+              "findings"
+            ]
+          },
+          {
+            "node": "scout-4",
+            "outputs": [
+              "result",
+              "findings"
+            ]
+          },
+          {
+            "node": "external",
+            "outputs": [
+              "result",
+              "findings"
+            ]
+          }
+        ],
+        "nodes": [
+          {
+            "access": "read_only",
+            "depends_on": [],
+            "id": "scout-1",
+            "prompt": "You are a codebase scout. Read, map and cite; never edit.\n\nScout assignment 1. Research read-only: brief\nUse judgement to choose a distinct useful scope. Map call sites, constraints,\nrisks and tests. Cite files and evidence, state uncertainties, and preserve your\nfindings for the senior synthesis. Do not edit files or take Git writer locks.\n\n\n# Scout areas\n\nUse when a scoping stage splits codebase reconnaissance across scouts.\n\nGive each scout one area: a directory, a crate, a subsystem or a question\n(\"where is X decided?\"). Areas do not overlap, together cover the change, and\nname their read roots. A scout reads, never edits.\n\nEach scout returns, in under 300 words:\n- Files and symbols that matter, as `path:line` with a one-line reason.\n- Existing helpers and patterns the change should reuse.\n- Constraints found in code, tests or docs that the spec must respect.\n- What the scout could not determine, stated plainly.\n\nStop at the area boundary. Report an adjacent finding as a pointer for another\nscout rather than following it.\n",
+            "read_roots": [],
+            "references": [
+              {
+                "digest": "sha256:043afc79230de1752625fb2253537c323b87fff102099239b70c1abeae9543d2",
+                "ref": "skill:scope/references/scout-areas.md",
+                "when": "before choosing your area"
+              }
+            ],
+            "role": "scout.codebase",
+            "role_digest": "sha256:1d112884b416bd5c34c54431480fae607cf592b0936fb0ec18f161d6c219a7a7",
+            "route": {
+              "alias": "junior"
+            },
+            "title": "Scout 1"
+          },
+          {
+            "access": "read_only",
+            "depends_on": [],
+            "id": "scout-2",
+            "prompt": "You are a codebase scout. Read, map and cite; never edit.\n\nScout assignment 2. Research read-only: brief\nUse judgement to choose a distinct useful scope. Map call sites, constraints,\nrisks and tests. Cite files and evidence, state uncertainties, and preserve your\nfindings for the senior synthesis. Do not edit files or take Git writer locks.\n\n\n# Scout areas\n\nUse when a scoping stage splits codebase reconnaissance across scouts.\n\nGive each scout one area: a directory, a crate, a subsystem or a question\n(\"where is X decided?\"). Areas do not overlap, together cover the change, and\nname their read roots. A scout reads, never edits.\n\nEach scout returns, in under 300 words:\n- Files and symbols that matter, as `path:line` with a one-line reason.\n- Existing helpers and patterns the change should reuse.\n- Constraints found in code, tests or docs that the spec must respect.\n- What the scout could not determine, stated plainly.\n\nStop at the area boundary. Report an adjacent finding as a pointer for another\nscout rather than following it.\n",
+            "read_roots": [],
+            "references": [
+              {
+                "digest": "sha256:043afc79230de1752625fb2253537c323b87fff102099239b70c1abeae9543d2",
+                "ref": "skill:scope/references/scout-areas.md",
+                "when": "before choosing your area"
+              }
+            ],
+            "role": "scout.codebase",
+            "role_digest": "sha256:1d112884b416bd5c34c54431480fae607cf592b0936fb0ec18f161d6c219a7a7",
+            "route": {
+              "alias": "junior"
+            },
+            "title": "Scout 2"
+          },
+          {
+            "access": "read_only",
+            "depends_on": [],
+            "id": "scout-3",
+            "prompt": "You are a codebase scout. Read, map and cite; never edit.\n\nScout assignment 3. Research read-only: brief\nUse judgement to choose a distinct useful scope. Map call sites, constraints,\nrisks and tests. Cite files and evidence, state uncertainties, and preserve your\nfindings for the senior synthesis. Do not edit files or take Git writer locks.\n\n\n# Scout areas\n\nUse when a scoping stage splits codebase reconnaissance across scouts.\n\nGive each scout one area: a directory, a crate, a subsystem or a question\n(\"where is X decided?\"). Areas do not overlap, together cover the change, and\nname their read roots. A scout reads, never edits.\n\nEach scout returns, in under 300 words:\n- Files and symbols that matter, as `path:line` with a one-line reason.\n- Existing helpers and patterns the change should reuse.\n- Constraints found in code, tests or docs that the spec must respect.\n- What the scout could not determine, stated plainly.\n\nStop at the area boundary. Report an adjacent finding as a pointer for another\nscout rather than following it.\n",
+            "read_roots": [],
+            "references": [
+              {
+                "digest": "sha256:043afc79230de1752625fb2253537c323b87fff102099239b70c1abeae9543d2",
+                "ref": "skill:scope/references/scout-areas.md",
+                "when": "before choosing your area"
+              }
+            ],
+            "role": "scout.codebase",
+            "role_digest": "sha256:1d112884b416bd5c34c54431480fae607cf592b0936fb0ec18f161d6c219a7a7",
+            "route": {
+              "alias": "junior"
+            },
+            "title": "Scout 3"
+          },
+          {
+            "access": "read_only",
+            "depends_on": [],
+            "id": "scout-4",
+            "prompt": "You are a codebase scout. Read, map and cite; never edit.\n\nScout assignment 4. Research read-only: brief\nUse judgement to choose a distinct useful scope. Map call sites, constraints,\nrisks and tests. Cite files and evidence, state uncertainties, and preserve your\nfindings for the senior synthesis. Do not edit files or take Git writer locks.\n\n\n# Scout areas\n\nUse when a scoping stage splits codebase reconnaissance across scouts.\n\nGive each scout one area: a directory, a crate, a subsystem or a question\n(\"where is X decided?\"). Areas do not overlap, together cover the change, and\nname their read roots. A scout reads, never edits.\n\nEach scout returns, in under 300 words:\n- Files and symbols that matter, as `path:line` with a one-line reason.\n- Existing helpers and patterns the change should reuse.\n- Constraints found in code, tests or docs that the spec must respect.\n- What the scout could not determine, stated plainly.\n\nStop at the area boundary. Report an adjacent finding as a pointer for another\nscout rather than following it.\n",
+            "read_roots": [],
+            "references": [
+              {
+                "digest": "sha256:043afc79230de1752625fb2253537c323b87fff102099239b70c1abeae9543d2",
+                "ref": "skill:scope/references/scout-areas.md",
+                "when": "before choosing your area"
+              }
+            ],
+            "role": "scout.codebase",
+            "role_digest": "sha256:1d112884b416bd5c34c54431480fae607cf592b0936fb0ec18f161d6c219a7a7",
+            "route": {
+              "alias": "junior"
+            },
+            "title": "Scout 4"
+          },
+          {
+            "access": "read_only",
+            "depends_on": [],
+            "id": "external",
+            "prompt": "You are an external scout. Look outward first: documentation, upstream source, standards, competitors and prior art. Cite each source with its URL and date.\n\nExternal scout 1. Research outward for: brief\nPrefer primary sources and current documentation over memory, even when\nconfident. Report each finding with its source URL and publication or\nretrieval date, mark vendor-reported figures, and state where sources\ndisagree. Do not edit files.\n\n\n# Researcher\n\nUse when a scope depends on facts outside the repository: standards, vendor\nbehaviour, prior art, competing tools or published evidence.\n\nLook outward first. Search current documentation, upstream source and credible\nwrite-ups before relying on memory, even when confident.\n\nReturn for each finding:\n- The claim in one sentence.\n- The source URL and its publication or retrieval date.\n- Whether the source is primary (specification, source code, vendor\n  documentation) or secondary, and whether any figure is vendor-reported.\n- How the claim bears on the decision in front of the chair.\n\nSeparate established fact from inference. State disagreement between sources\nrather than resolving it silently. Cite no source you did not read.\n",
+            "references": [
+              {
+                "digest": "sha256:34f67a52a0144687511c67303fff9acedaa139033493971d4c9fe293c5ce5b52",
+                "ref": "skill:scope/references/researcher.md",
+                "when": "always"
+              }
+            ],
+            "role": "scout.external",
+            "role_digest": "sha256:d9dec80ff69bd9a92722961ea0774e4c2832066a23fca609218aa16f87e2fe1a",
+            "route": {
+              "alias": "web"
+            },
+            "title": "External scout 1"
+          }
+        ]
+      },
+      "depends_on": [],
+      "id": "scouts",
+      "kind": "composite"
+    },
+    {
+      "access": "read_only",
+      "depends_on": [
+        "scouts"
+      ],
+      "id": "synthesis",
+      "inputs": [
+        {
+          "node": "scouts",
+          "outputs": [
+            "result"
+          ]
+        }
+      ],
+      "kind": "synthesise",
+      "prompt": "You reconcile research evidence into next steps.\n\nReconcile the scouts' evidence for: brief\nPreserve useful scope partitions, file references, dated external sources and\nunresolved uncertainty. Choose next implementation steps using judgement;\nretain every child's evidence.\n",
+      "role": "plan.research",
+      "role_digest": "sha256:0543c1d98c7aeabd6c1276c548ca2ac741d4f095e31397c74fb82c3323966a84",
+      "route": {
+        "alias": "senior"
+      },
+      "title": "plan.research"
+    }
+  ],
+  "provenance": {
+    "origins": {
+      "exports": "bundled",
+      "parameters.external.default": "bundled",
+      "parameters.external.doc": "bundled",
+      "parameters.external.max": "bundled",
+      "parameters.external.min": "bundled",
+      "parameters.external.type": "bundled",
+      "parameters.read_roots.default": "bundled",
+      "parameters.read_roots.doc": "bundled",
+      "parameters.read_roots.type": "bundled",
+      "parameters.width.default": "bundled",
+      "parameters.width.doc": "bundled",
+      "parameters.width.max": "bundled",
+      "parameters.width.min": "bundled",
+      "parameters.width.type": "bundled",
+      "pattern.citations": "bundled",
+      "pattern.cost": "bundled",
+      "pattern.level": "bundled",
+      "pattern.select_when": "bundled",
+      "pattern.summary": "bundled",
+      "pattern.tags": "bundled",
+      "roles.plan.research": "bundled",
+      "roles.scout.codebase": "bundled",
+      "roles.scout.external": "bundled",
+      "stages": "bundled"
+    },
+    "preset": "scout-swarm",
+    "roles": {
+      "plan.research": {
+        "digest": "sha256:0543c1d98c7aeabd6c1276c548ca2ac741d4f095e31397c74fb82c3323966a84",
+        "extends": [
+          "plan.research",
+          "plan"
+        ],
+        "origin": "bundled",
+        "references": []
+      },
+      "scout.codebase": {
+        "digest": "sha256:1d112884b416bd5c34c54431480fae607cf592b0936fb0ec18f161d6c219a7a7",
+        "extends": [
+          "scout.codebase",
+          "scout"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:043afc79230de1752625fb2253537c323b87fff102099239b70c1abeae9543d2",
+            "ref": "skill:scope/references/scout-areas.md",
+            "when": "before choosing your area"
+          }
+        ]
+      },
+      "scout.external": {
+        "digest": "sha256:d9dec80ff69bd9a92722961ea0774e4c2832066a23fca609218aa16f87e2fe1a",
+        "extends": [
+          "scout.external",
+          "scout"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:34f67a52a0144687511c67303fff9acedaa139033493971d4c9fe293c5ce5b52",
+            "ref": "skill:scope/references/researcher.md",
+            "when": "always"
+          }
+        ]
+      }
+    },
+    "substitutions": []
+  },
+  "schema_version": 1
+}

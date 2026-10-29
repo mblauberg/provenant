@@ -104,10 +104,11 @@ impl crate::LaunchSpec {
         }
         let bin = scratch.join("bin");
         let script = format!(
-            "#!/bin/sh\nPROVENANT_BUILD_SLOT_STATE={} PROVENANT_BUILD_SLOTS={} PROVENANT_BUILD_WAIT_SECS={}\nexport PROVENANT_BUILD_SLOT_STATE PROVENANT_BUILD_SLOTS PROVENANT_BUILD_WAIT_SECS\nexec {} internal build-slot -- {} \"$@\"\n",
+            "#!/bin/sh\nPROVENANT_BUILD_SLOT_STATE={} PROVENANT_BUILD_SLOTS={} PROVENANT_BUILD_WAIT_SECS={} PROVENANT_BUILD_WAIT_MARKER={}\nexport PROVENANT_BUILD_SLOT_STATE PROVENANT_BUILD_SLOTS PROVENANT_BUILD_WAIT_SECS PROVENANT_BUILD_WAIT_MARKER\nexec {} internal build-slot -- {} \"$@\"\n",
             text(gate.state)?,
             gate.slots,
             gate.wait_seconds,
+            text(gate.wait_marker)?,
             text(gate.provenant)?,
             text(gate.cargo)?,
         );
@@ -289,6 +290,9 @@ pub struct BuildSlotGate<'a> {
     pub wait_seconds: u64,
     /// The real `cargo` the shim runs once it holds a slot.
     pub cargo: &'a Path,
+    /// File in the lane's private temporary directory where a waiting build
+    /// says so, for the host's `lanes` and `status`.
+    pub wait_marker: &'a Path,
 }
 
 /// Canonical runtime paths supplied by the composition edge.
@@ -860,6 +864,7 @@ mod tests {
             slots: 3,
             wait_seconds: 1800,
             cargo: Path::new("/home/.cargo/bin/cargo"),
+            wait_marker: Path::new("/tmp/lane/build-slot-wait"),
         };
         spec.configure_build_slots(&scratch, &gate).unwrap();
         let (_, path) = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
@@ -951,6 +956,7 @@ mod tests {
             slots: 2,
             wait_seconds: 60,
             cargo: Path::new("/home/.cargo/bin/cargo"),
+            wait_marker: Path::new("/tmp/lane/build-slot-wait"),
         };
         spec.configure_build_slots(&base.join("scratch"), &gate)
             .unwrap();
@@ -989,6 +995,7 @@ mod tests {
                 slots,
                 wait_seconds: wait,
                 cargo: Path::new("/c"),
+                wait_marker: Path::new("/t/build-slot-wait"),
             };
             assert!(
                 spec.configure_build_slots(Path::new("/scratch"), &gate)

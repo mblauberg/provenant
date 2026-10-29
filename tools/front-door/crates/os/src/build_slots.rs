@@ -30,6 +30,45 @@ pub const DEFAULT_WAIT: Duration = Duration::from_secs(30 * 60);
 /// How often a waiting build repeats its progress message.
 pub const PROGRESS_EVERY: Duration = Duration::from_secs(60);
 
+/// Prefix of the file (`build-slot-wait.PID`, one per command) a gated build
+/// writes in the lane's writable scratch directory while it waits, so the host can show the wait. It holds a kind and the host's
+/// wall-clock seconds and is refreshed about every `PROGRESS_EVERY`, so a
+/// build that died while waiting stops showing once the file goes stale.
+pub const WAIT_MARKER: &str = "build-slot-wait";
+/// How long after its last refresh a wait marker still counts.
+pub const WAIT_MARKER_FRESH: Duration = Duration::from_secs(150);
+
+/// What a gated build is waiting for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitKind {
+    Slot,
+    CargoLock,
+}
+impl WaitKind {
+    /// The marker body for a wait observed at `now_secs`.
+    pub fn marker(self, now_secs: u64) -> String {
+        let name = match self {
+            Self::Slot => "slot",
+            Self::CargoLock => "lock",
+        };
+        format!("{name} {now_secs}")
+    }
+    /// The wait a marker body names, if it is well formed and fresh at
+    /// `now_secs`. A lane writes this text, so anything else is ignored.
+    pub fn from_marker(text: &str, now_secs: u64) -> Option<Self> {
+        let (name, at) = text.trim().split_once(' ')?;
+        let at: u64 = at.parse().ok()?;
+        if now_secs.saturating_sub(at) > WAIT_MARKER_FRESH.as_secs() {
+            return None;
+        }
+        match name {
+            "slot" => Some(Self::Slot),
+            "lock" => Some(Self::CargoLock),
+            _ => None,
+        }
+    }
+}
+
 fn directory(state: &Path) -> PathBuf {
     DIRECTORY.iter().fold(state.to_owned(), |p, n| p.join(n))
 }
@@ -645,6 +684,6 @@ mod tests {
         let _serial = serial();
         let state = state();
         assert!(BuildSlots::open(state.path()).is_err());
-        assert!(!state.path().join("fabric").exists());
+        assert!(!state.path().join(DIRECTORY.join("/")).exists());
     }
 }

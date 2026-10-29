@@ -20,6 +20,9 @@ struct Rig {
     state: PathBuf,
     cargo: PathBuf,
     log: PathBuf,
+    /// Prefix of where a waiting build tells the host it waits; each command
+    /// adds its pid.
+    marker: PathBuf,
 }
 impl Rig {
     fn new() -> Result<Self> {
@@ -53,6 +56,7 @@ impl Rig {
         )?;
         fs::set_permissions(&cargo, fs::Permissions::from_mode(0o700))?;
         Ok(Self {
+            marker: root.join("build-slot-wait"),
             _temp: temp,
             state,
             cargo,
@@ -75,6 +79,7 @@ impl Rig {
             .env("PROVENANT_BUILD_SLOT_STATE", &self.state)
             .env("PROVENANT_BUILD_SLOTS", slots.to_string())
             .env("PROVENANT_BUILD_WAIT_SECS", wait_secs.to_string())
+            .env("PROVENANT_BUILD_WAIT_MARKER", &self.marker)
             .env_remove("PROVENANT_BUILD_SLOT")
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -90,6 +95,27 @@ impl Rig {
             .lines()
             .map(str::to_owned)
             .collect())
+    }
+
+    /// Wait markers now present, one per waiting command.
+    fn markers(&self) -> Vec<PathBuf> {
+        let dir = self.marker.parent().map(PathBuf::from).unwrap_or_default();
+        let prefix = self
+            .marker
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(&format!("{prefix}.")))
+            })
+            .collect()
     }
 
     fn started(&self, word: &str) -> bool {
@@ -188,6 +214,29 @@ fn two_slots_allow_two_builds_at_once_and_no_more() -> Result {
     Ok(())
 }
 
+/// Two commands wait at once. Each has its own marker, so one that gets a slot
+/// and removes its marker cannot hide the wait of the other.
+#[test]
+fn waiting_commands_keep_separate_markers() -> Result {
+    let rig = Rig::new()?;
+    rig.provision(1)?;
+    let mut holder = rig.shim(1, &["check"])?;
+    assert!(until(Duration::from_secs(20), || rig.started("hung")));
+    let mut first = rig.shim(1, &["build"])?;
+    let mut second = rig.shim(1, &["build"])?;
+    assert!(until(Duration::from_secs(20), || rig.markers().len() == 2));
+    holder.kill()?;
+    holder.wait()?;
+    // The first to finish removes only its own marker.
+    assert!(until(Duration::from_secs(30), || {
+        rig.started("start") && rig.markers().len() == 1
+    }));
+    assert!(finish(&mut first, Duration::from_secs(30))?);
+    assert!(finish(&mut second, Duration::from_secs(30))?);
+    assert!(rig.markers().is_empty());
+    Ok(())
+}
+
 #[test]
 fn a_killed_build_releases_its_slot_and_the_wait_is_reported() -> Result {
     let rig = Rig::new()?;
@@ -202,6 +251,12 @@ fn a_killed_build_releases_its_slot_and_the_wait_is_reported() -> Result {
         !rig.started("start"),
         "the second build waits while the first holds the slot"
     );
+    // The host reads this to show the lane as waiting in `lanes` and `status`.
+    assert!(until(Duration::from_secs(20), || {
+        rig.markers()
+            .iter()
+            .any(|path| fs::read_to_string(path).is_ok_and(|text| text.starts_with("slot ")))
+    }));
     // SIGKILL leaves no chance to release anything: the kernel does.
     holder.kill()?;
     holder.wait()?;
@@ -209,6 +264,10 @@ fn a_killed_build_releases_its_slot_and_the_wait_is_reported() -> Result {
     // descriptor is close-on-exec, so only the dead shim held it.
     assert!(finish(&mut waiter, Duration::from_secs(30))?);
     assert!(rig.started("end"));
+    assert!(
+        rig.markers().is_empty(),
+        "the marker goes once the wait ends"
+    );
     let stderr = stderr_of(&mut waiter)?;
     assert!(
         stderr.contains("waiting for a build slot (1 of 1 in use)"),
@@ -481,8 +540,8 @@ fn read_only_slot_files_cannot_be_unlinked_or_created_by_the_build() -> Result {
 fn an_unusable_slot_directory_does_not_stop_the_build() -> Result {
     let rig = Rig::new()?;
     // A regular file where the slot directory belongs.
-    let fabric = rig.state.join("fabric");
-    fs::write(&fabric, b"not a directory")?;
+    let slots = rig.state.join(DIRECTORY.join("/"));
+    fs::write(&slots, b"not a directory")?;
     let mut child = rig.shim(1, &["build"])?;
     assert!(finish(&mut child, Duration::from_secs(10))?);
     assert!(rig.started("end"));

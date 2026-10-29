@@ -417,7 +417,7 @@ impl ValidateInput for SubmitInput {
                     if task
                         .context
                         .as_ref()
-                        .is_some_and(|context| !context.valid())
+                        .is_some_and(|context| !context.accepted())
                     {
                         return Err(field(&format!("{path}.context")));
                     }
