@@ -348,34 +348,26 @@ printf 'custom interpreter ran; credentials and writes denied\n'
     let submitted = dispatch(&rig, "no-runtime", 10)?;
     let lane = settled(&rig, attempt_id(&submitted)?)?;
     assert_eq!(lane["state"], "failed", "{lane}");
-    for name in ["granted"] {
-        let submitted = dispatch(&rig, name, 10)?;
-        let id = attempt_id(&submitted)?;
-        let lane = settled(&rig, id)?;
-        let diag = String::from_utf8_lossy(
-            &rig.command(&["output", id, "--part", "transcript", "--json"])?
-                .stdout
-                .bytes,
-        )
-        .to_string();
-        assert_eq!(lane["state"], "succeeded", "{lane}");
-        // Command lanes never get open network.
-        assert_ne!(lane["network"], "open", "{lane}");
-        let run = submitted["data"]["run_id"].as_str().ok_or("run id")?;
-        let result = fs::read_to_string(
-            rig.state
-                .join("runs")
-                .join(run)
-                .join("attempts")
-                .join(id)
-                .join("result.md"),
-        )?;
-        assert!(
-            result.contains("custom interpreter ran; credentials and writes denied"),
-            "{result}"
-        );
-        assert!(result.contains("VERDICT: PASS"), "{result}");
-    }
+    let submitted = dispatch(&rig, "granted", 10)?;
+    let id = attempt_id(&submitted)?;
+    let lane = settled(&rig, id)?;
+    assert_eq!(lane["state"], "succeeded", "{lane}");
+    // Command lanes never get open network.
+    assert_ne!(lane["network"], "open", "{lane}");
+    let run = submitted["data"]["run_id"].as_str().ok_or("run id")?;
+    let result = fs::read_to_string(
+        rig.state
+            .join("runs")
+            .join(run)
+            .join("attempts")
+            .join(id)
+            .join("result.md"),
+    )?;
+    assert!(
+        result.contains("custom interpreter ran; credentials and writes denied"),
+        "{result}"
+    );
+    assert!(result.contains("VERDICT: PASS"), "{result}");
     assert!(!rig.project.join("forbidden").exists());
     assert!(!runtime.with_file_name("new-file").exists());
     cleanup.disarm();
