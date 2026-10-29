@@ -29,12 +29,8 @@ pub(super) fn read(
         }
         found => found?,
     };
-    let mut stores: VecDeque<_> = VecDeque::from([(
-        roots.state.clone(),
-        0u64,
-        None::<(ProjectId, AttemptId)>,
-        false,
-    )]);
+    let mut stores: VecDeque<_> =
+        VecDeque::from([(roots.state.clone(), 0u64, None::<(ProjectId, AttemptId)>)]);
     let mut nodes = Vec::new();
     #[allow(clippy::type_complexity)]
     let mut seen: BTreeMap<
@@ -62,7 +58,7 @@ pub(super) fn read(
     .into_iter()
     .map(|key| (key, (0, 0)))
     .collect();
-    while let Some((state, depth, owner, expected)) = stores.pop_front() {
+    while let Some((state, depth, owner)) = stores.pop_front() {
         let call = provenant_run::Request {
             clock: &clock,
             budget: WaitBudget::cli(clock.mono_now(), 5).map_err(|_| Error::Encode)?,
@@ -165,10 +161,9 @@ pub(super) fn read(
                     .join(attempt.attempt_id.to_string());
                 let mut inputs = RootInputs::new("/".into(), "/__provenant_tree_excluded__".into());
                 inputs.state_dir = Some(child_path.clone());
-                let expected = !lane.run.children.is_empty();
                 match std::fs::symlink_metadata(&child_path) {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        if expected {
+                        if !lane.run.children.is_empty() {
                             unfetched.push(json!({"project_id":attempt.project_id,"parent_attempt":attempt.attempt_id,"reason":"missing_store"}));
                         } else { children_absent += 1; }
                     }
@@ -179,7 +174,7 @@ pub(super) fn read(
                     }
                     Ok(_) => match inputs.resolve(&provenant_os::fs::SystemPathResolver) {
                         Ok(child) if child.state.as_path() == child_path => {
-                            stores.push_back((child.state, depth + 1, Some((attempt.project_id, attempt.attempt_id)), expected))
+                            stores.push_back((child.state, depth + 1, Some((attempt.project_id, attempt.attempt_id))))
                         }
                         _ => unfetched.push(
                             json!({"project_id":attempt.project_id,"parent_attempt":attempt.attempt_id,"reason":"unavailable"}),
@@ -521,14 +516,18 @@ mod tests {
                 .iter()
                 .any(|entry| entry["detail"] == "duplicate observation child store not traversed")
         );
-        std::fs::create_dir_all(
-            roots
-                .state
-                .as_path()
-                .join("children")
-                .join(AttemptId::from_bytes([1; 16]).to_string())
-                .join("children")
-                .join(AttemptId::from_bytes([2; 16]).to_string()),
+        let store_less = roots
+            .state
+            .as_path()
+            .join("children")
+            .join(AttemptId::from_bytes([1; 16]).to_string())
+            .join("children")
+            .join(AttemptId::from_bytes([2; 16]).to_string());
+        std::fs::create_dir_all(&store_less)?;
+        // A private directory with no store is a gap; a non-private one is unavailable.
+        std::fs::set_permissions(
+            &store_less,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
         )?;
         let empty_child = read(&roots, None, 3, 100, false)?;
         assert!(
@@ -538,7 +537,7 @@ mod tests {
                 .iter()
                 .any(|entry| entry["reason"] == "missing_store"
                     && entry["project_id"] == json!(project)
-                    && entry["parent_attempt"] == json!(AttemptId::from_bytes([1; 16])))
+                    && entry["parent_attempt"] == json!(AttemptId::from_bytes([2; 16])))
         );
         let db = rusqlite::Connection::open(child4_path.join("run.sqlite3"))?;
         let raw: Vec<u8> = db.query_row(
