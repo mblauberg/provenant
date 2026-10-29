@@ -187,7 +187,7 @@ impl Drop for PreparedStart {
 
 fn output_prompt(directory: &std::path::Path, prompt: &str) -> String {
     format!(
-        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). Put your report and evidence in your final answer; the harness writes these files. Files in $TMPDIR are discarded when the attempt ends. Provider history and handoff progress are retained. Files left in $TMPDIR are not deliverables.\n\n{handoff}\n\n{prompt}",
+        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Files in $TMPDIR are discarded when the attempt ends. Provider history and handoff progress are kept. Files left in $TMPDIR are not deliverables.\n\n{handoff}\n\n{prompt}",
         handoff = crate::completion::guidance(),
         result = directory.join("result.md").display(),
         exit = directory.join("process-exit.json").display(),
