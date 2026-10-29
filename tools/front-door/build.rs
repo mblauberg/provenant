@@ -11,9 +11,7 @@ use std::process::Command;
 use toml_edit::{DocumentMut, Item};
 
 #[cfg(test)]
-#[path = "crates/os/src/fixture_git.rs"]
-#[allow(dead_code)]
-mod fixture_git;
+use provenant_os::fixture as fixture_git;
 
 #[cfg(test)]
 fn inventory_git() -> Command {

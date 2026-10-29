@@ -307,8 +307,15 @@ fn check_fixture_git_sources(path: &Path, pattern: &regex::Regex) -> Result<(), 
             }
         }
     } else if path.extension().is_some_and(|extension| extension == "rs") {
-        let source = fs::read_to_string(path)?;
+        let mut source = fs::read_to_string(path)?;
         let name = path.to_string_lossy();
+        // The build script has a production Git command between test items.
+        if name.ends_with("/build.rs") {
+            source = source.replace(
+                "#[cfg(not(test))]\n#[allow(clippy::disallowed_methods)]\nfn inventory_git() -> Command {\n    Command::new(\"git\")\n}",
+                "",
+            );
+        }
         let test_file = name.contains("/tests/") || name.ends_with("_tests.rs");
         if fixture_git_violation(&source, test_file, pattern) {
             return Err(format!("{} spawns Git without the fixture helper", path.display()).into());
