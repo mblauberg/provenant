@@ -1554,10 +1554,34 @@ pub(crate) fn bind_run_context(
         Ok(())
     })?;
     expansion.document["graph_id"] = json!("");
-    let digest = provenant_records::CanonicalV1::file_digest(
-        &serde_json::to_vec(&expansion.document).map_err(|e| e.to_string())?,
-    )
-    .to_string();
+    // An integration source resolves at run time, so fold the current head into
+    // the identity: a moved branch must never reuse a completed graph.
+    let mut identity = serde_json::to_vec(&expansion.document).map_err(|e| e.to_string())?;
+    let mut integration = false;
+    visit_nodes(
+        expansion.document["nodes"]
+            .as_array_mut()
+            .ok_or("missing graph nodes")?,
+        &mut |node| {
+            integration |=
+                node.pointer("/source/type").and_then(Value::as_str) == Some("integration");
+            Ok(())
+        },
+    )?;
+    if integration && let Some(branch) = expansion.document["integration_branch"].as_str() {
+        let reference = match branch.strip_prefix("origin/") {
+            Some(branch) => format!("refs/remotes/origin/{branch}"),
+            None => format!("refs/heads/{branch}"),
+        };
+        let git =
+            provenant_os::git::git_executable().ok_or("Git unavailable for source binding")?;
+        // An absent branch has no head to fold in; the graph owner refuses it later.
+        let head = provenant_run::resolve_git_base(&git, directory, &reference)
+            .map(|oid| oid.to_string())
+            .unwrap_or_else(|_| "absent".into());
+        identity.extend_from_slice(format!("\nintegration-head:{head}").as_bytes());
+    }
+    let digest = provenant_records::CanonicalV1::file_digest(&identity).to_string();
     expansion.document["graph_id"] = json!(format!("preset-{}", &digest[7..39]));
     Ok(())
 }

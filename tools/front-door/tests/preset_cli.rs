@@ -374,3 +374,73 @@ fn run_refuses_a_read_root_outside_the_project() -> Result<(), Box<dyn std::erro
     assert!(text.contains("allowed_read_roots"), "{text}");
     Ok(())
 }
+
+#[test]
+fn integration_sourced_graph_identity_follows_the_integration_head()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    let git = |args: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
+        let output = Command::new("git")
+            .current_dir(&project)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=f@example.invalid",
+            ])
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    };
+    git(&["init", "-q"])?;
+    git(&["commit", "--allow-empty", "-qm", "seed"])?;
+    git(&["branch", "batch"])?;
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("integrated.toml"),
+        "integration_branch = 'batch'\n\
+         stages = [{ id = 'review', role = 'reviewer' }]\n\
+         [roles.reviewer]\ntier = 'senior'\nsource = { type = 'integration' }\nprompt = '${prompt}'\n",
+    )?;
+    let prompt = project.join("brief");
+    std::fs::write(&prompt, "review the batch")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let run = || -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(temp.path().join("state"))
+            .args(["run", "--preset", "integrated", "--prompt-file"])
+            .arg(&prompt)
+            .arg("--explain")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        Ok(serde_json::from_slice(&output.stdout)?)
+    };
+    let first = run()?;
+    assert_eq!(
+        first["data"]["graph"]["graph_id"],
+        run()?["data"]["graph"]["graph_id"]
+    );
+    git(&["checkout", "-q", "batch"])?;
+    git(&["commit", "--allow-empty", "-qm", "lane delivered"])?;
+    assert_ne!(
+        first["data"]["graph"]["graph_id"],
+        run()?["data"]["graph"]["graph_id"]
+    );
+    Ok(())
+}

@@ -447,6 +447,10 @@ pub struct GraphCheckpoint {
     pub delivered: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request: Option<String>,
+    /// Integration head pinned when the first integration source was resolved.
+    /// Synthesis and writers that start from that commit stop if it moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_pin: Option<String>,
     /// Durable admission fence. Resume observes the same attempt keys.
     #[serde(default)]
     pub cancelled: bool,
@@ -1459,6 +1463,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 pull_request: None,
                 schema_version: 1,
                 cancelled: false,
+                integration_pin: None,
                 pause_reason: None,
                 unknown_usage: Vec::new(),
                 usage_events: Vec::new(),
@@ -1974,8 +1979,29 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             journal.save(&checkpoint).map_err(GraphError::Journal)?;
                             break;
                         }
-                        progress.source_commit = commit;
+                        if matches!(node.source, Some(SourceBinding::Integration))
+                            && checkpoint.integration_pin.is_none()
+                        {
+                            checkpoint.integration_pin = commit.clone();
+                        }
+                        checkpoint.nodes[node_index].source_commit = commit;
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                    }
+                    if (node.kind == Some(NodeKind::Synthesise) || plans::writer(node))
+                        && let Some(pin) = checkpoint.integration_pin.clone()
+                        && checkpoint.nodes[node_index].source_commit.as_ref() == Some(&pin)
+                        && checkpoint.nodes[node_index].attempts.is_empty()
+                        && let Some(head) = owner.integration_head().map_err(GraphError::Run)?
+                        && head != pin
+                    {
+                        let progress = &mut checkpoint.nodes[node_index];
+                        progress.state = NodeState::Failed;
+                        progress.advance_error = Some(format!(
+                            "node {}: the integration branch moved from the pinned {pin} to {head} after the review subject was pinned; rerun the graph to review the new head",
+                            node.id
+                        ));
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        break;
                     }
                     checkpoint.nodes[node_index].attempts.push(GraphAttempt {
                         key: key.clone(),
@@ -3698,6 +3724,40 @@ mod tests {
             schema_version: 1,
             graph_id: "g-test".to_owned(),
             nodes,
+        }
+    }
+
+    #[test]
+    fn synthesis_stops_when_the_pinned_integration_head_moves() {
+        let pin = "1".repeat(40);
+        for (second, expected) in [(pin.clone(), true), ("2".repeat(40), false)] {
+            let mut synthesis = node("synthesis", route("first"));
+            synthesis.kind = Some(NodeKind::Synthesise);
+            synthesis.source = Some(SourceBinding::Integration);
+            synthesis.depends_on = vec!["lens".into()];
+            synthesis.inputs = vec![GraphInput {
+                node: "lens".into(),
+                outputs: vec![OutputKind::Result],
+            }];
+            let mut document = graph(vec![node("lens", route("first")), synthesis]);
+            document.integration_branch = Some("batch".into());
+            let mut owner = FakeOwner {
+                integration_heads: [pin.clone(), second].into(),
+                observations: [
+                    terminal(AttemptOutcome::Succeeded),
+                    terminal(AttemptOutcome::Succeeded),
+                ]
+                .into(),
+                ..Default::default()
+            };
+            let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+            assert_eq!(run.checkpoint.successful(), expected);
+            assert_eq!(run.checkpoint.integration_pin, Some(pin.clone()));
+            if !expected {
+                let reason = run.checkpoint.nodes[1].advance_error.as_deref().unwrap();
+                assert!(reason.contains("moved"), "{reason}");
+                assert_eq!(owner.calls.len(), 1);
+            }
         }
     }
 
