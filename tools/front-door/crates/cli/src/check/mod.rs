@@ -530,8 +530,9 @@ pub fn install_page(
                 "shared setting was edited locally ({}); run `provenant accounts sync --adopt <account>` to keep it or `--force-settings` to overwrite it",
                 finding.detail.as_deref().unwrap_or("unknown")
             ),
-            ("stale_shared_instructions", _) => "shared instructions link names an older release; run `provenant install` to refresh it".into(),
-            ("unmanaged_shared_instructions", _) => "shared instructions file is not managed (`~/.agents/AGENTS.md`); run `provenant install --adopt-existing` to adopt it or move it aside and rerun install".into(),
+            ("missing_shared_instructions", _) => "shared instructions are missing; run `provenant install --source <SOURCE>` to restore them".into(),
+            ("stale_shared_instructions", _) => "shared instructions link names an older release; run `provenant install --source <SOURCE>` to refresh it".into(),
+            ("unmanaged_shared_instructions", _) => "shared instructions file is not managed (`~/.agents/AGENTS.md`); run `provenant install --source <SOURCE> --adopt-existing` to adopt it or move it aside and rerun install".into(),
             (_, Some(account)) => format!(
                 "account {} ({}): managed installation differs from its recorded identity",
                 account.label,

@@ -163,6 +163,7 @@ pub struct Targets {
     pub roots: Roots,
     pub home: PathBuf,
     pub bin_dir: PathBuf,
+    pub shared_instruction: PathBuf,
     pub harnesses: Vec<HarnessTarget>,
     pub adopt_existing: bool,
     pub hooks: bool,
@@ -243,6 +244,7 @@ impl Targets {
             roots,
             home: home.to_path_buf(),
             bin_dir: home.join(".local/bin"),
+            shared_instruction: home.join(".agents/AGENTS.md"),
             harnesses: targets,
             adopt_existing: false,
             hooks: false,
@@ -292,7 +294,7 @@ impl Targets {
             target.hook_file = target.hook_file.as_deref().map(destination).transpose()?;
             target.instruction = target.instruction.as_deref().map(destination).transpose()?;
         }
-        let global = destination(&self.home.join(".agents/AGENTS.md"))?;
+        let global = destination(&self.shared_instruction)?;
         if self
             .protected_roots
             .iter()
@@ -300,6 +302,7 @@ impl Targets {
         {
             return Err(InstallError::Conflict(global));
         }
+        self.shared_instruction = global;
         self.validate()
     }
 
@@ -367,7 +370,8 @@ impl Targets {
         }
         for path in file_paths.iter().chain(skills_paths.iter()).chain([
             &self.bin_dir.join("provenant"),
-            &self.home.join(".agents/AGENTS.md"),
+            &self.shared_instruction,
+            &self.shared_instruction.with_file_name("HARNESS.md"),
         ]) {
             if path.starts_with(self.roots.state.as_path())
                 || self
@@ -750,18 +754,21 @@ fn desired(
             }
         }
     }
-    // The shared global instructions file gets the same release link the
-    // harness instruction files do, so install and upgrade refresh it.
-    if release
-        .files
-        .contains_key(Path::new("instructions/AGENTS.md"))
-    {
-        insert(
-            targets.home.join(".agents/AGENTS.md"),
-            Value::Link(root.join("instructions/AGENTS.md")),
-            None,
-            "shared-instruction".into(),
-        )?;
+    for (destination, asset) in [
+        (targets.shared_instruction.clone(), "instructions/AGENTS.md"),
+        (
+            targets.shared_instruction.with_file_name("HARNESS.md"),
+            "instructions/HARNESS.md",
+        ),
+    ] {
+        if release.files.contains_key(Path::new(asset)) {
+            insert(
+                destination,
+                Value::Link(root.join(asset)),
+                None,
+                "shared-instruction".into(),
+            )?;
+        }
     }
     let paths: Vec<_> = result.keys().collect();
     for pair in paths.windows(2) {
@@ -926,12 +933,21 @@ pub fn plan_install(
                 // user content only an explicit adoption may replace.
                 let adopt_shared = want.selector == "shared-instruction"
                     && match &current.value {
-                        Value::Link(target) => shared_instructions_link(target),
+                        Value::Link(target) => {
+                            targets.adopt_existing || shared_instructions_link(target)
+                        }
                         Value::File { bytes, .. } => {
                             targets.adopt_existing
                                 || release
                                     .files
-                                    .get(Path::new("instructions/AGENTS.md"))
+                                    .get(match &want.value {
+                                        Value::Link(target)
+                                            if target.ends_with("instructions/HARNESS.md") =>
+                                        {
+                                            Path::new("instructions/HARNESS.md")
+                                        }
+                                        _ => Path::new("instructions/AGENTS.md"),
+                                    })
                                     .is_some_and(|(wanted, _)| bytes == wanted)
                         }
                         _ => false,
@@ -1958,12 +1974,12 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
             return Err(InstallError::Manifest("duplicate receipt path"));
         }
         let shared = entry.selector == "shared-instruction";
-        let permitted = permitted_entry(entry, &receipt, state_root, &targets.home)?;
+        let permitted = permitted_entry(entry, &receipt, state_root, &targets.shared_instruction)?;
         if !permitted
             && !shared
             && !moved
                 .as_deref()
-                .map(|root| permitted_entry(entry, &receipt, root, &targets.home))
+                .map(|root| permitted_entry(entry, &receipt, root, &targets.shared_instruction))
                 .transpose()?
                 .unwrap_or(false)
         {
@@ -2043,20 +2059,26 @@ fn permitted_entry(
     entry: &OwnedEntry,
     receipt: &InstallReceipt,
     state_root: &Path,
-    home: &Path,
+    shared: &Path,
 ) -> Result<bool, InstallError> {
     let path = entry.path.to_path_buf()?;
     normal_absolute(&path)?;
     if entry.harness.is_none() {
         if entry.selector == "shared-instruction" {
-            return Ok(path == home.join(".agents/AGENTS.md")
-                && matches!(
-                    &entry.expected,
-                    OwnedValue::Link { target, .. }
-                        if target.to_path_buf().is_ok_and(|link| {
-                            asset_target(&link, state_root, Path::new("instructions/AGENTS.md"))
-                        })
-                ));
+            let asset = if path == shared {
+                "instructions/AGENTS.md"
+            } else if path == shared.with_file_name("HARNESS.md") {
+                "instructions/HARNESS.md"
+            } else {
+                return Ok(false);
+            };
+            return Ok(matches!(
+                &entry.expected,
+                OwnedValue::Link { target, .. }
+                    if target.to_path_buf().is_ok_and(|link| {
+                        asset_target(&link, state_root, Path::new(asset))
+                    })
+            ));
         }
         if matches!(
             entry.selector.as_str(),
@@ -2300,12 +2322,12 @@ fn check_install_inspected(
     let shared = release
         .as_ref()
         .filter(|release| release.files.contains_key(asset))
-        .map(|_| targets.home.join(".agents/AGENTS.md"));
+        .map(|_| targets.shared_instruction.clone());
     findings.extend(owned_entry_drift(
         &receipt,
         state_root,
         evidence,
-        &targets.home,
+        &targets.shared_instruction,
         shared.as_deref(),
     )?);
     if let Some(source) = source {
@@ -2336,12 +2358,12 @@ fn owned_entry_drift(
     receipt: &InstallReceipt,
     state_root: &Path,
     evidence: &mut InspectionEvidence,
-    home: &Path,
+    shared_path: &Path,
     shared: Option<&Path>,
 ) -> Result<Vec<InstallFinding>, InstallError> {
     let mut findings = Vec::new();
     for entry in &receipt.entries {
-        if !permitted_entry(entry, receipt, state_root, home)? {
+        if !permitted_entry(entry, receipt, state_root, shared_path)? {
             return Err(InstallError::Conflict(entry.path.to_path_buf()?));
         }
         let path = entry.path.to_path_buf()?;
@@ -2375,7 +2397,8 @@ fn shared_instructions_link(target: &Path) -> bool {
     let Some(releases_directory) = digest_directory.parent() else {
         return false;
     };
-    target.ends_with(Path::new("instructions/AGENTS.md"))
+    (target.ends_with(Path::new("instructions/AGENTS.md"))
+        || target.ends_with(Path::new("instructions/HARNESS.md")))
         && releases_directory.file_name() == Some(OsStr::new("releases"))
         && digest_directory
             .file_name()
@@ -2394,10 +2417,14 @@ fn shared_instruction_findings(
     let Some((bytes, _)) = release.files.get(asset) else {
         return Ok(Vec::new());
     };
-    let path = targets.home.join(".agents/AGENTS.md");
+    let path = targets.shared_instruction.clone();
     let current = snapshot_scoped_inspected(&path, targets.roots.state.as_path(), Some(evidence))?;
     let Some(current) = current else {
-        return Ok(Vec::new());
+        return Ok(vec![InstallFinding {
+            rule: "missing_shared_instructions".into(),
+            detail: None,
+            path: AbsolutePath::new(&path)?,
+        }]);
     };
     let state_root = targets.roots.state.as_path();
     let wanted = release_root(state_root, release.manifest.source_digest).join(asset);
@@ -2448,7 +2475,7 @@ pub fn inspect_accounts(targets: &Targets) -> Result<Vec<AccountStatus>, Install
                 &decoded.receipt,
                 state_root,
                 &mut evidence,
-                &targets.home,
+                &targets.shared_instruction,
                 None,
             )?;
             findings.extend(crate::account_sync::findings(
@@ -2609,7 +2636,7 @@ pub fn uninstall(
         if !removed(entry, owner) {
             continue;
         }
-        if !permitted_entry(entry, &receipt, state_root, &targets.home)? {
+        if !permitted_entry(entry, &receipt, state_root, &targets.shared_instruction)? {
             return Err(InstallError::Conflict(entry.path.to_path_buf()?));
         }
         let path = entry.path.to_path_buf()?;

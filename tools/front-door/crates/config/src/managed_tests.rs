@@ -2139,6 +2139,7 @@ fn shared_release(base: &Path, name: &str, instructions: &[u8]) -> Release {
     .unwrap();
     fs::create_dir_all(source.join("instructions")).unwrap();
     fs::write(source.join("instructions/AGENTS.md"), instructions).unwrap();
+    fs::write(source.join("instructions/HARNESS.md"), b"harness guide").unwrap();
     let digest = source_digest(&[SourceInput {
         name: "src/lib.rs",
         bytes: name.as_bytes(),
@@ -2167,6 +2168,10 @@ fn install_links_the_shared_instructions_and_upgrades_refresh_them() {
     let old_target =
         release_root(&state, old.manifest.source_digest).join("instructions/AGENTS.md");
     assert_eq!(fs::read_link(&shared).unwrap(), old_target);
+    assert_eq!(
+        fs::read_link(shared.with_file_name("HARNESS.md")).unwrap(),
+        release_root(&state, old.manifest.source_digest).join("instructions/HARNESS.md")
+    );
     let receipt = read_receipt(&f.targets).unwrap().unwrap();
     assert!(
         receipt
@@ -2194,6 +2199,10 @@ fn install_links_the_shared_instructions_and_upgrades_refresh_them() {
     let new_target =
         release_root(&state, new.manifest.source_digest).join("instructions/AGENTS.md");
     assert_eq!(fs::read_link(&shared).unwrap(), new_target);
+    assert_eq!(
+        fs::read_link(shared.with_file_name("HARNESS.md")).unwrap(),
+        release_root(&state, new.manifest.source_digest).join("instructions/HARNESS.md")
+    );
     assert!(f.plan_for(new.clone()).actions().is_empty());
 
     uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
@@ -2306,8 +2315,15 @@ fn check_install_reports_unmanaged_and_stale_shared_instructions() {
     };
     ok(&f, &cancel);
 
-    // A plain copy of older instructions is unmanaged, not missing.
     fs::remove_file(&shared).unwrap();
+    let inspection = inspect_install(&f.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
+    assert!(
+        inspection
+            .findings
+            .iter()
+            .any(|finding| finding.rule == "missing_shared_instructions")
+    );
+    // A plain copy of older instructions is unmanaged, not missing.
     fs::write(&shared, b"older user copy").unwrap();
     let inspection = inspect_install(&f.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(
@@ -4384,4 +4400,58 @@ fn linux_tick_units_are_receipted_reinstalled_idempotently_and_removed() {
     assert!(reporter.0.iter().any(|s| s == "tick-agent"));
     assert!(reporter.0.iter().any(|s| s == "tick-service"));
     assert!(!timer.exists() && !service.exists());
+}
+
+#[test]
+fn shared_instruction_adopts_foreign_link_and_resolves_parent() {
+    let f = Fixture::new();
+    let external = f.home.join("dotfiles");
+    fs::create_dir_all(&external).unwrap();
+    symlink(&external, f.home.join(".agents")).unwrap();
+    let shared = external.join("AGENTS.md");
+    symlink(f.home.join("personal.md"), &shared).unwrap();
+    let release = shared_release(&f.base, "shared-symlink", b"instructions");
+    let mut targets = f.targets.clone();
+    targets
+        .resolve_destinations(&provenant_os::fs::SystemPathResolver)
+        .unwrap();
+    let snapshots = Snapshots::capture(&release, &targets).unwrap();
+    assert!(matches!(
+        plan_install(release.clone(), targets.clone(), snapshots),
+        Err(InstallError::Conflict(_))
+    ));
+    targets.adopt_existing = true;
+    let snapshots = Snapshots::capture(&release, &targets).unwrap();
+    let plan = plan_install(release, targets.clone(), snapshots).unwrap();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &plan,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert!(
+        fs::read_link(&shared)
+            .unwrap()
+            .ends_with("instructions/AGENTS.md")
+    );
+    assert!(
+        fs::read_link(external.join("HARNESS.md"))
+            .unwrap()
+            .ends_with("instructions/HARNESS.md")
+    );
+    let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
+    assert!(
+        inspection.error.is_none() && inspection.findings.is_empty(),
+        "{inspection:?}"
+    );
+    uninstall(
+        &targets,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+    )
+    .unwrap();
 }
