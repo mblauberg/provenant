@@ -1,3 +1,0 @@
-## Breaking changes
-### Accounts, quota and routing
-Routing policy rules and pacing overrides now keep their timing fields under `schedule`, with `starts`, `expires`, optional `tz` and `windows`. A record that still carries `starts_unix_seconds`, `expires_unix_seconds` or a top-level `windows` is not converted: it is dropped with a located warning naming the replacement (`moved_to_schedule.starts`, `.expires` or `.windows`), and the rest of the configuration loads. A policy rule that enforces a lane restriction refuses the configuration instead. Move each value under `schedule`. Domain configuration warnings now include the validator's code, such as `(domain: policy)`.
