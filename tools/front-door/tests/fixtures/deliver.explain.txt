@@ -1,0 +1,58 @@
+Graph <id>
+Preset selection: deliver (override)
+Review shape: standard (default)
+write  role=write.implement tier=senior family=any kind=- access=worktree_write worktree=.
+  write_scope: ["."]
+  source: {"commit":"<commit>","type":"commit"}
+  acceptance_checks: ["Run targeted tests and required static checks","Commit the completed slice"]
+ci  role=- tier=- family=any kind=composite access=read_only worktree=-
+  inputs: []
+  check  role=- tier=- family=any kind=gate access=read_only worktree=-
+  repair  role=- tier=- family=any kind=loop access=read_only worktree=-
+    inputs: [{"node":"check","outputs":["findings"]}]
+    max_rounds: 3
+    fix  role=repairer tier=senior family=any kind=- access=worktree_write worktree=.
+      write_scope: ["."]
+      inputs: [{"node":"previous.check","outputs":["findings"]},{"node":"previous.fix","outputs":["result","remaining"]},{"node":"write","outputs":["result","remaining"]}]
+      acceptance_checks: ["Fix the failing checks named in the inputs","Run the failing checks locally where practical","Commit on the existing branch"]
+    check  role=- tier=- family=any kind=gate access=read_only worktree=-
+  exports: [{"node":"repair","outputs":["result","findings"]}]
+review  role=- tier=- family=any kind=composite access=read_only worktree=-
+  inputs: [{"node":"write","outputs":["result"]}]
+  subject  role=plan.review tier=senior family=any kind=- access=read_only worktree=-
+    read_roots: ["<project>"]
+    source: {"node":"write","type":"head"}
+  lenses  role=- tier=- family=any kind=composite access=read_only worktree=-
+    source: {"node":"subject","type":"node"}
+    inputs: [{"node":"subject","outputs":["result"]}]
+    lens-correctness-spec  role=lens.correctness-spec tier=junior family=distinct_from_writer kind=- access=read_only worktree=-
+      reference: skill:code-review/references/reviewer-context.md <digest>
+      reference: skill:code-review/references/lenses/correctness-spec.md <digest>
+      read_roots: ["<project>","<root>/skills"]
+    lens-design-fit-reuse  role=lens.design-fit-reuse tier=junior family=any kind=- access=read_only worktree=-
+      reference: skill:code-review/references/reviewer-context.md <digest>
+      reference: skill:code-review/references/lenses/design-fit-reuse.md <digest>
+      read_roots: ["<project>","<root>/skills"]
+    exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-design-fit-reuse","outputs":["result","findings"]}]
+  verify  role=review.verify tier=senior family=cross_preferred kind=- access=read_only worktree=-
+    read_roots: ["<project>"]
+    source: {"node":"subject","type":"node"}
+    inputs: [{"node":"lenses","outputs":["result"]}]
+  synthesis  role=review.synthesis tier=senior family=any kind=synthesise access=read_only worktree=-
+    read_roots: ["<project>"]
+    source: {"node":"subject","type":"node"}
+    inputs: [{"node":"verify","outputs":["result"]}]
+  exports: [{"node":"synthesis","outputs":["result","findings","verdict","commit"]}]
+accept  role=- tier=- family=any kind=gate access=read_only worktree=-
+  inputs: [{"node":"review","outputs":["verdict"]}]
+land  role=- tier=- family=any kind=land access=read_only worktree=-
+Roles:
+  lens.correctness-spec  origin=bundled digest=<digest>
+  lens.design-fit-reuse  origin=bundled digest=<digest>
+  plan.review  origin=bundled digest=<digest>
+  repairer  origin=preset digest=<digest>
+  review.synthesis  origin=bundled digest=<digest>
+  review.verify  origin=bundled digest=<digest>
+  write.implement  origin=bundled digest=<digest>
+Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
+

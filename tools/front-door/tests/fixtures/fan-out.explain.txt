@@ -1,0 +1,5 @@
+Graph <id>
+Preset selection: fan-out (override)
+branch-1  role=- tier=senior family=any kind=- access=read_only worktree=-
+branch-2  role=- tier=senior family=any kind=- access=read_only worktree=-
+

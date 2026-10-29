@@ -1,0 +1,7 @@
+Graph <id>
+Preset selection: fan-out-synthesise (override)
+branch-1  role=- tier=senior family=any kind=- access=read_only worktree=-
+branch-2  role=- tier=senior family=any kind=- access=read_only worktree=-
+synthesis  role=- tier=senior family=any kind=synthesise access=read_only worktree=-
+  inputs: [{"node":"branch-1","outputs":["result"]},{"node":"branch-2","outputs":["result"]}]
+

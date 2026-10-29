@@ -1,0 +1,63 @@
+Graph <id>
+Preset selection: scope-then-run (override)
+Review shape: standard (default)
+scout  role=- tier=- family=any kind=composite access=read_only worktree=-
+  scouts  role=- tier=- family=any kind=composite access=read_only worktree=-
+    scout-1  role=scout.codebase tier=junior family=any kind=- access=read_only worktree=-
+      reference: skill:scope/references/scout-areas.md <digest>
+      read_roots: ["<root>/skills"]
+    scout-2  role=scout.codebase tier=junior family=any kind=- access=read_only worktree=-
+      reference: skill:scope/references/scout-areas.md <digest>
+      read_roots: ["<root>/skills"]
+    scout-3  role=scout.codebase tier=junior family=any kind=- access=read_only worktree=-
+      reference: skill:scope/references/scout-areas.md <digest>
+      read_roots: ["<root>/skills"]
+    external  role=scout.external tier=junior family=any kind=- access=read_only worktree=-
+      reference: skill:scope/references/researcher.md <digest>
+      read_roots: ["<root>/skills"]
+    exports: [{"node":"scout-1","outputs":["result","findings"]},{"node":"scout-2","outputs":["result","findings"]},{"node":"scout-3","outputs":["result","findings"]},{"node":"external","outputs":["result","findings"]}]
+  synthesis  role=plan.research tier=senior family=any kind=synthesise access=read_only worktree=-
+    inputs: [{"node":"scouts","outputs":["result"]}]
+  exports: [{"node":"synthesis","outputs":["result","findings"]}]
+scope  role=plan.scope tier=senior family=any kind=- access=read_only worktree=-
+  reference: skill:scope/references/architect.md <digest>
+  reference: skill:scope/references/acceptance-writer.md <digest>
+  reference: skill:scope/references/critic.md <digest>
+  read_roots: ["<root>/skills"]
+  inputs: [{"node":"scout","outputs":["result"]}]
+ready  role=- tier=- family=any kind=gate access=read_only worktree=-
+  inputs: [{"node":"scope","outputs":["verdict"]}]
+run  role=- tier=- family=any kind=composite access=read_only worktree=-
+  inputs: [{"node":"scope","outputs":["result"]}]
+  implement  role=write.implement tier=senior family=any kind=- access=worktree_write worktree=.
+    write_scope: ["."]
+    source: {"commit":"<commit>","type":"commit"}
+    acceptance_checks: ["Run targeted tests and required static checks","Commit the completed slice"]
+  lens  role=- tier=- family=any kind=composite access=read_only worktree=-
+    source: {"node":"implement","type":"node"}
+    inputs: [{"node":"implement","outputs":["result"]}]
+    lens-correctness-spec  role=lens.correctness-spec tier=junior family=distinct_from_writer kind=- access=read_only worktree=-
+      reference: skill:code-review/references/reviewer-context.md <digest>
+      reference: skill:code-review/references/lenses/correctness-spec.md <digest>
+      read_roots: ["<project>","<root>/skills"]
+    lens-simplicity  role=lens.simplicity tier=junior family=any kind=- access=read_only worktree=-
+      reference: skill:code-review/references/reviewer-context.md <digest>
+      reference: skill:code-review/references/lenses/simplicity.md <digest>
+      read_roots: ["<project>","<root>/skills"]
+    exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-simplicity","outputs":["result","findings"]}]
+  evaluate  role=review.evaluator tier=senior family=any kind=synthesise access=read_only worktree=-
+    read_roots: ["<project>"]
+    source: {"node":"implement","type":"node"}
+    inputs: [{"node":"lens","outputs":["result"]}]
+  exports: [{"node":"implement","outputs":["branch","commit"]},{"node":"evaluate","outputs":["result","findings","verdict"]}]
+Roles:
+  lens.correctness-spec  origin=bundled digest=<digest>
+  lens.simplicity  origin=bundled digest=<digest>
+  plan.research  origin=bundled digest=<digest>
+  plan.scope  origin=bundled digest=<digest>
+  review.evaluator  origin=bundled digest=<digest>
+  scout.codebase  origin=bundled digest=<digest>
+  scout.external  origin=bundled digest=<digest>
+  write.implement  origin=bundled digest=<digest>
+Substituted external: web -> junior (route web is not defined in the routing configuration)
+
