@@ -68,7 +68,7 @@ overrule it.
 
 ## Practical limits
 
-- Free OpenCode models sit last in the pools and require explicit free opt-in.
+- Free OpenCode models are ordinary pool members.
   They do not rotate automatically. If a typed failure permits rerouting, the
   chair chooses and records the next exact model.
 - The Rust Fabric task schema has no `confidential` field. For a CLI

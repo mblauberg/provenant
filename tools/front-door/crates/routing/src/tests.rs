@@ -6,29 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[test]
-fn default_free_routes_sit_only_in_the_junior_pool() -> Result<(), Box<dyn std::error::Error>> {
-    let catalogue = Catalogue::bundled()?;
-    let config = RoutingConfig::default();
-    let context = context(&catalogue, &config, now()?);
-    let listed = list(&RouteListQuery::default(), &context)?;
-    for (pool, members) in &listed.pools {
-        if pool != "junior" {
-            assert!(
-                members.iter().all(|member| !member.free),
-                "{pool} holds a free route"
-            );
-        }
-    }
-    assert!(
-        listed
-            .pools
-            .get("junior")
-            .is_some_and(|members| members.iter().any(|member| member.free))
-    );
-    Ok(())
-}
-
-#[test]
 fn model_policy_config_accepts_layered_rules() -> Result<(), Box<dyn std::error::Error>> {
     let config = serde_json::from_value::<RoutingConfig>(serde_json::json!({
         "model_policy": {"rules": [{"model": "codex/gpt-6.1-terra", "account": "work",
@@ -245,7 +222,6 @@ fn read_heavy_routing_records_cache_preference_without_forcing_edit_work()
             choice: RouteChoice::NamedRoute(RouteName::parse("cachetest")?),
             effort: None,
             confidential: false,
-            allow_free: false,
             fallback: Fallback::None,
         };
         let route = resolve_with_seed(&request, &context, "cache-test", 0)?;
@@ -292,7 +268,6 @@ fn request(model: &str) -> Result<RouteRequest, RoutingError> {
         choice: RouteChoice::Model(ModelId::parse(model)?),
         effort: None,
         confidential: false,
-        allow_free: false,
         fallback: Fallback::None,
     })
 }
@@ -496,7 +471,7 @@ fn model_selector_keeps_the_entire_provider_path() -> Result<(), RoutingError> {
 }
 #[test]
 fn route_names_validate_at_the_string_boundary() -> Result<(), Box<dyn std::error::Error>> {
-    let wire = r#"{"intent":{"workload":"general","writes":false},"choice":{"kind":"named_route","value":"review.v1-_2"},"effort":null,"confidential":false,"allow_free":false,"fallback":{"kind":"none"}}"#;
+    let wire = r#"{"intent":{"workload":"general","writes":false},"choice":{"kind":"named_route","value":"review.v1-_2"},"effort":null,"confidential":false,"fallback":{"kind":"none"}}"#;
     let query: RouteRequest = serde_json::from_str(wire)?;
     assert_eq!(serde_json::to_string(&query)?, wire);
     assert_eq!(
@@ -681,7 +656,6 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
         choice: RouteChoice::NamedRoute(RouteName::parse("review")?),
         effort: None,
         confidential: false,
-        allow_free: false,
         fallback: Fallback::None,
     };
     assert_eq!(resolve(&query, &context)?.effort.as_deref(), Some("low"));
@@ -1219,8 +1193,7 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
 }
 
 #[test]
-fn free_pool_members_require_opt_in_and_confidential_models_are_excluded()
--> Result<(), Box<dyn std::error::Error>> {
+fn confidential_pool_excludes_training_models() -> Result<(), Box<dyn std::error::Error>> {
     let mut catalogue = Catalogue::bundled()?;
     catalogue.pools.insert(
         "free-check".into(),
@@ -1252,27 +1225,18 @@ fn free_pool_members_require_opt_in_and_confidential_models_are_excluded()
     let mut query = request("codex/gpt-6-luna")?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("free-check")?);
     query.confidential = true;
-    match resolve(&query, &ctx).unwrap_err() {
-        RoutingError::NoEligiblePoolMember { exclusions } => {
-            assert!(
-                exclusions
-                    .iter()
-                    .any(|reason| reason == "confidential model")
-            );
-            assert!(
-                exclusions
-                    .iter()
-                    .any(|reason| reason == "free model disabled")
-            );
-        }
-        error => panic!("unexpected pool error: {error}"),
-    }
-    // Opting in passes the free gate; availability is still required. Free
-    // routes stay out of confidential work, so this check is not confidential.
-    query.allow_free = true;
-    query.confidential = false;
     let resolved = resolve(&query, &ctx)?;
     let receipt = resolved.pool_selection.as_ref().ok_or("pool receipt")?;
+    assert_eq!(
+        receipt
+            .candidates
+            .iter()
+            .find(|candidate| candidate.model == "codex/gpt-6-luna")
+            .ok_or("training candidate")?
+            .exclusion
+            .as_deref(),
+        Some("confidential")
+    );
     let free = receipt
         .candidates
         .iter()
@@ -1320,7 +1284,7 @@ fn picked_model(route: &ResolvedRoute) -> Result<ModelId, RoutingError> {
 }
 
 #[test]
-fn junior_free_routes_are_excluded_without_allow_free() -> Result<(), Box<dyn std::error::Error>> {
+fn junior_free_routes_are_selected_without_opt_in() -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
     let records = opencode_accounts();
@@ -1330,30 +1294,6 @@ fn junior_free_routes_are_excluded_without_allow_free() -> Result<(), Box<dyn st
     ctx.access = &access;
     let mut query = request("codex/gpt-6-luna")?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("junior")?);
-    for route in junior_draws(&query, &ctx)? {
-        assert!(!catalogue.is_free_model(&picked_model(&route)?));
-        let receipt = route.pool_selection.ok_or("pool receipt")?;
-        for candidate in &receipt.candidates {
-            if catalogue.is_free_model(&ModelId::parse(&candidate.model)?) {
-                assert_eq!(candidate.exclusion.as_deref(), Some("free"));
-            }
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn junior_free_routes_are_selected_when_allowed() -> Result<(), Box<dyn std::error::Error>> {
-    let catalogue = Catalogue::bundled()?;
-    let config = RoutingConfig::default();
-    let records = opencode_accounts();
-    let access = opencode_access();
-    let mut ctx = context(&catalogue, &config, now()?);
-    ctx.availability = &records;
-    ctx.access = &access;
-    let mut query = request("codex/gpt-6-luna")?;
-    query.choice = RouteChoice::NamedRoute(RouteName::parse("junior")?);
-    query.allow_free = true;
     let mut free_picks = 0;
     for route in junior_draws(&query, &ctx)? {
         if catalogue.is_free_model(&picked_model(&route)?) {
@@ -1367,8 +1307,7 @@ fn junior_free_routes_are_selected_when_allowed() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn confidential_junior_requests_never_select_free_routes() -> Result<(), Box<dyn std::error::Error>>
-{
+fn confidential_junior_requests_accept_free_routes() -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
     let records = opencode_accounts();
@@ -1378,29 +1317,19 @@ fn confidential_junior_requests_never_select_free_routes() -> Result<(), Box<dyn
     ctx.access = &access;
     let mut query = request("codex/gpt-6-luna")?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("junior")?);
-    query.allow_free = true;
     query.confidential = true;
-    for route in junior_draws(&query, &ctx)? {
-        assert!(!catalogue.is_free_model(&picked_model(&route)?));
-        let receipt = route.pool_selection.ok_or("pool receipt")?;
-        for candidate in &receipt.candidates {
-            if catalogue.is_free_model(&ModelId::parse(&candidate.model)?) {
-                assert_eq!(candidate.exclusion.as_deref(), Some("confidential"));
-            } else if candidate.model == "opencode/opencode-go/deepseek-v4.1-flash" {
-                // Paid Go routes train on nothing, so confidential work keeps them.
-                assert_eq!(candidate.exclusion, None);
-            }
-        }
-    }
-    // Naming a free route directly is refused for confidential input as well.
-    let mut direct = query.clone();
-    direct.choice = RouteChoice::Model(ModelId::parse(
+    assert!(
+        junior_draws(&query, &ctx)?
+            .iter()
+            .any(|route| catalogue.is_free_model(&picked_model(route).unwrap()))
+    );
+    for model in [
         "opencode/opencode/deepseek-v4.1-flash-free",
-    )?);
-    assert!(matches!(
-        resolve(&direct, &ctx),
-        Err(RoutingError::ConfidentialModel)
-    ));
+        "opencode/opencode/glm-5.3-flash-free",
+    ] {
+        query.choice = RouteChoice::Model(ModelId::parse(model)?);
+        assert!(resolve(&query, &ctx).is_ok());
+    }
     Ok(())
 }
 
@@ -1428,7 +1357,6 @@ fn cooling_free_route_falls_back_to_another_junior_member() -> Result<(), Box<dy
     ctx.capacity_cooldowns = &cooldowns;
     let mut query = request("codex/gpt-6-luna")?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("junior")?);
-    query.allow_free = true;
     let cooling = "opencode/opencode/deepseek-v4.1-flash-free";
     for route in junior_draws(&query, &ctx)? {
         assert_ne!(picked_model(&route)?.as_str(), cooling);
@@ -2170,7 +2098,6 @@ fn rolling_window_limits_go_despite_monthly_headroom() -> Result<(), Box<dyn std
     ctx.quota = &observations;
     let mut query = request(model)?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
-    query.allow_free = true;
     let route = resolve_with_seed(&query, &ctx, "rolling", 0)?;
     let receipt = serde_json::to_value(route)?;
     assert_eq!(
@@ -2881,7 +2808,6 @@ fn profile_preview_with_status(
     ctx.quota = &references;
     let mut query = request(model)?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("profile-test")?);
-    query.allow_free = true;
     Ok(resolve(&query, &ctx)?)
 }
 
@@ -3640,7 +3566,6 @@ fn opencode_zen_pool_does_not_inherit_go_pacing_quota() -> Result<(), Box<dyn st
     ctx.quota = &quota;
     let mut query = request(free)?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("zen-trial")?);
-    query.allow_free = true;
     let route = resolve(&query, &ctx)?;
     assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
     assert_eq!(route.account_key.as_deref(), Some("zen"));

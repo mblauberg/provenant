@@ -182,10 +182,9 @@ in the [calibration runbook](../runbooks/configuration.md#opencode-go-quota-cali
 ### Confidentiality
 
 A confidential request admits only models whose catalogue row says they do
-not train on prompts; the test is training, not price. Free-tier models need
-`--allow-free`. Fast or priority service is never enabled.
+neither train on nor retain prompts; price does not affect eligibility. Fast or priority service is never enabled.
 - Why: prompts carry private code; cost is not a privacy signal.
-- Test: `crates/routing/src/tests.rs::free_pool_members_require_opt_in_and_confidential_models_are_excluded`
+- Test: `crates/routing/src/tests.rs::confidential_pool_excludes_training_models`
 - Owner: `crates/routing/src/`
 
 ### Families come from evidence

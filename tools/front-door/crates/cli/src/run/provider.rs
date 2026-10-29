@@ -1445,7 +1445,6 @@ fn continuation_request(
         effort: applied.effort.clone(),
         fallback: Fallback::None,
         confidential: false,
-        allow_free: false,
     })
 }
 
@@ -2895,7 +2894,6 @@ mod tests {
                 choice: RouteChoice::Model(model.clone()),
                 effort: None,
                 confidential: false,
-                allow_free: false,
                 fallback: Fallback::None,
             },
             &RoutingContext {
