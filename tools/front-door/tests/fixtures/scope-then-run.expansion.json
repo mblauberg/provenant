@@ -3,7 +3,7 @@
     "pattern": "scope-then-run",
     "preset": "scope-then-run"
   },
-  "graph_id": "preset-7fb05eeec6804162a48261dcc225650c",
+  "graph_id": "preset-6d169e0591ab3f747d761837c91ba482",
   "nodes": [
     {
       "access": "read_only",
@@ -180,7 +180,7 @@
           ]
         }
       ],
-      "prompt": "You turn evidence into one approved slice with testable acceptance.\n\nTurn the scouts' evidence into one approved slice for: brief\nState the acceptance criteria, the literal write scope, the checks that prove\ncompletion and the authority the implementer holds. Decide engineering\nquestions yourself: pick the reversible option, state it as an assumption and\nrecord it under DECISIONS. Raise NEEDS-USER only for an owner decision or a\nneed to expand authority, and finish with VERDICT: FAIL; otherwise finish with\nVERDICT: PASS.\n\n\n# Architect\n\nUse when a scope needs a design the implementer can follow without asking.\n\nPropose the smallest design that meets the acceptance criteria. Reuse existing\nmodules before adding new ones. Name:\n- The change in each touched module and why it belongs there.\n- Interfaces and data shapes that cross a boundary, pinned exactly.\n- Seams left for coming work, without building it.\n- Two or three alternatives, the recommendation and what would change it.\n- Risks, one-way doors and anything that needs an owner decision.\n\nPrefer configuration and composition over new rigid rules. Add no guard,\nlimit or refusal unless it protects a real boundary.\n\n\n# Acceptance writer\n\nUse when a scope needs testable acceptance criteria.\n\nWrite two to five observable criteria for a small item, more only when the\nwork is large. Each criterion:\n- States behaviour a reviewer can check, not an activity.\n- Names its evidence type: test, golden, command output, document, review.\n- Names the check that proves it, runnable locally and fast where possible.\n\nAdd what must not change, the non-goals, and the objective checks required\nbefore landing. Do not restate the design. If a criterion cannot be checked,\nrewrite it until it can or move it to a parked decision.\n\n\n# Critic\n\nUse when a draft scope, spec or design needs an adversarial read before\napproval.\n\nRead the draft cold. Find, in order of severity:\n- Requirements that cannot be tested or contradict each other.\n- Missing authority bounds, hidden external effects or one-way doors.\n- Simpler designs the draft ignored.\n- Assumptions stated as facts, and facts with no source.\n- Scope that is larger than the goal needs.\n\nFor each finding give the location, why it matters and a concrete fix. Do not\nrewrite the draft. End with `VERDICT: PASS` when the draft can be approved\nas written or after the listed small fixes, otherwise `VERDICT: FAIL`.\n",
+      "prompt": "You turn evidence into one approved slice with testable acceptance.\n\nTurn the scouts' evidence into one approved slice for: brief\nState the acceptance criteria, the literal write scope, the checks that prove\ncompletion and the authority the implementer holds. Decide engineering\nquestions yourself: pick the reversible option, state it as an assumption and\nrecord it under DECISIONS. Raise NEEDS-USER only for an owner decision or a\nneed to expand authority, and finish with VERDICT: FAIL; otherwise finish with\nVERDICT: PASS.\n\n\n# Architect\n\nUse when a scope needs a design the implementer can follow without asking.\n\nPropose the smallest design that meets the acceptance criteria. Reuse existing\nmodules before adding new ones. Name:\n- The change in each touched module and why it belongs there.\n- Interfaces and data shapes that cross a boundary, pinned exactly.\n- Seams left for coming work, without building it.\n- Two or three alternatives, the recommendation and what would change it.\n- Risks, one-way doors and anything that needs an owner decision.\n\nPrefer configuration and composition over new rigid rules. Add no guard,\nlimit or refusal unless it protects a real boundary.\n\n\n# Acceptance writer\n\nUse when a scope needs testable acceptance criteria.\n\nWrite 2 to 5 observable criteria for a task and about 10 for a feature; more means\nan epic. Each criterion:\n- is one statement of behaviour a reviewer can check, `When <event>, <behaviour>`;\n- names its evidence type: `[test]`, `[command]`, `[capture]` or `[review]`;\n- names the check that proves it, runnable locally and fast where possible.\n\nAdd must-not-change behaviour, non-goals and the verify command. Do not restate the\ndesign. If a criterion cannot be checked, rewrite it until it can, or park it as a\ndecision. The criteria are the contract: the implementer may not weaken or delete\none, and a risky item keeps one held-back check outside the writer's context.\n\n\n# Critic\n\nUse when a draft scope, spec or design needs an adversarial read before approval.\n\nRead the draft cold. Find, in order of severity:\n- requirements that cannot be tested or contradict each other;\n- missing authority bounds, hidden external effects or one-way doors;\n- simpler designs the draft ignored;\n- assumptions stated as facts, and facts with no source;\n- scope larger than the goal needs, including more criteria than the class warrants.\n\nFor each finding give the location, why it matters and a concrete fix. Do not\nrewrite the draft. End with `VERDICT: PASS` when the draft can be approved as\nwritten or after the listed small fixes, otherwise `VERDICT: FAIL`.\n",
       "references": [
         {
           "digest": "sha256:9da5c1614b8726ac1db33a94eee9b6f4ca99460eaaa5b3136c0935052cc93159",
@@ -188,18 +188,18 @@
           "when": "when the design is not obvious"
         },
         {
-          "digest": "sha256:fc3cad4443c5814f681eb264b0fd1a8238ca508119c90c862aae1aa844e8f748",
+          "digest": "sha256:9d68ce5e8281a847cb2fbff63396a1ca8fb7c95a662236b599d8b77a4a9e21e0",
           "ref": "skill:scope/references/acceptance-writer.md",
           "when": "when writing acceptance criteria"
         },
         {
-          "digest": "sha256:965133f5af2704a7c1a7ed238e2f804a058be0ba2ac76adbc321b230de532fe4",
+          "digest": "sha256:4fd4a5004080dbfb06bb88ed207c76ecdc969edf13e136096d6cec40b7898560",
           "ref": "skill:scope/references/critic.md",
           "when": "before declaring the scope ready"
         }
       ],
       "role": "plan.scope",
-      "role_digest": "sha256:f7c427a94649fdb1e9647d90f3f3b156437d4552200a7ae2245fd8697cab551b",
+      "role_digest": "sha256:b4b2b073b47bde0b081cf10176d7b3abb9fa51faf0e40304f2a73c753088c9ad",
       "route": {
         "alias": "senior"
       },
@@ -299,7 +299,7 @@
                   "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n",
                   "references": [
                     {
-                      "digest": "sha256:b8829331283679da44d32d5b60cfd98cd05ab822fbbf6b6a1d1cc235a0f7aa09",
+                      "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
                       "ref": "skill:code-review/references/reviewer-context.md",
                       "when": "always"
                     },
@@ -310,7 +310,7 @@
                     }
                   ],
                   "role": "lens.correctness-spec",
-                  "role_digest": "sha256:a1829521a08a5a21b156e710d1dd7e51018974f7d213e66146212489c15a9f8d",
+                  "role_digest": "sha256:0389100b682b6cca0df2a4896784fc41c1af37e9043ab7eadcab2923ad9814fb",
                   "route": {
                     "alias": "senior"
                   },
@@ -323,7 +323,7 @@
                   "prompt": "Lens simplicity. Look for unnecessary machinery and simpler designs.\n\nLens: simplicity. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: simplicity\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\" (simplicity, YAGNI, the 1,000-line cap).\n\n- What can be deleted while keeping behaviour? Name the lines.\n- Flag speculative or rigid abstraction, thin wrappers that only move\n  complexity, options nothing uses, and layers with one caller.\n- Prefer a reframe that removes concepts, branches or synchronisation points,\n  but only one local enough to validate. Do not demand redesign beyond the\n  dependency cone.\n",
                   "references": [
                     {
-                      "digest": "sha256:b8829331283679da44d32d5b60cfd98cd05ab822fbbf6b6a1d1cc235a0f7aa09",
+                      "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
                       "ref": "skill:code-review/references/reviewer-context.md",
                       "when": "always"
                     },
@@ -334,7 +334,7 @@
                     }
                   ],
                   "role": "lens.simplicity",
-                  "role_digest": "sha256:2657943e2a3702bab961dc56ff450bf0dbf90fdaae865e5cd849bd37eb3fc41c",
+                  "role_digest": "sha256:a5a65ce4bd99ff3d3bee2f7120f1ce492fc17bdc84f1a197ac71cd4fc7da72d3",
                   "route": {
                     "alias": "senior"
                   },
@@ -538,7 +538,7 @@
     "preset": "scope-then-run",
     "roles": {
       "lens.correctness-spec": {
-        "digest": "sha256:a1829521a08a5a21b156e710d1dd7e51018974f7d213e66146212489c15a9f8d",
+        "digest": "sha256:0389100b682b6cca0df2a4896784fc41c1af37e9043ab7eadcab2923ad9814fb",
         "extends": [
           "lens.correctness-spec",
           "lens"
@@ -546,7 +546,7 @@
         "origin": "bundled",
         "references": [
           {
-            "digest": "sha256:b8829331283679da44d32d5b60cfd98cd05ab822fbbf6b6a1d1cc235a0f7aa09",
+            "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
             "ref": "skill:code-review/references/reviewer-context.md",
             "when": "always"
           },
@@ -558,7 +558,7 @@
         ]
       },
       "lens.simplicity": {
-        "digest": "sha256:2657943e2a3702bab961dc56ff450bf0dbf90fdaae865e5cd849bd37eb3fc41c",
+        "digest": "sha256:a5a65ce4bd99ff3d3bee2f7120f1ce492fc17bdc84f1a197ac71cd4fc7da72d3",
         "extends": [
           "lens.simplicity",
           "lens"
@@ -566,7 +566,7 @@
         "origin": "bundled",
         "references": [
           {
-            "digest": "sha256:b8829331283679da44d32d5b60cfd98cd05ab822fbbf6b6a1d1cc235a0f7aa09",
+            "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
             "ref": "skill:code-review/references/reviewer-context.md",
             "when": "always"
           },
@@ -587,7 +587,7 @@
         "references": []
       },
       "plan.scope": {
-        "digest": "sha256:f7c427a94649fdb1e9647d90f3f3b156437d4552200a7ae2245fd8697cab551b",
+        "digest": "sha256:b4b2b073b47bde0b081cf10176d7b3abb9fa51faf0e40304f2a73c753088c9ad",
         "extends": [
           "plan.scope",
           "plan"
@@ -600,12 +600,12 @@
             "when": "when the design is not obvious"
           },
           {
-            "digest": "sha256:fc3cad4443c5814f681eb264b0fd1a8238ca508119c90c862aae1aa844e8f748",
+            "digest": "sha256:9d68ce5e8281a847cb2fbff63396a1ca8fb7c95a662236b599d8b77a4a9e21e0",
             "ref": "skill:scope/references/acceptance-writer.md",
             "when": "when writing acceptance criteria"
           },
           {
-            "digest": "sha256:965133f5af2704a7c1a7ed238e2f804a058be0ba2ac76adbc321b230de532fe4",
+            "digest": "sha256:4fd4a5004080dbfb06bb88ed207c76ecdc969edf13e136096d6cec40b7898560",
             "ref": "skill:scope/references/critic.md",
             "when": "before declaring the scope ready"
           }
