@@ -24,7 +24,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 
 | Key | Default | Effect |
 |---|---|---|
-| `history_max_bytes` | 4194304 (4 MiB) | Disk cap for each account's quota history under quota/history/. Readings go to a current file that rotates to one predecessor at half the cap, so the pair never exceeds it and the newest reading is always kept. (65536 to 1073741824 bytes). |
+| `history_max_bytes` | 4194304 (4 MiB) | Disk cap for each account's quota history under quota/history/. Readings go to a current file that rotates to one predecessor at half the cap, so the pair never exceeds it and the newest reading is always kept. (65536 to 134217728 bytes). |
 
 ### Account plan prices
 

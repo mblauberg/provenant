@@ -17,8 +17,9 @@ use std::{
 pub(crate) const DIRECTORY: &str = "history";
 const CURRENT: &str = "jsonl";
 const ROTATED: &str = "jsonl.1";
-/// A single history file is never read past this many bytes.
-const READ_LIMIT: u64 = 64 * 1024 * 1024;
+/// Each file rotates at half the cap, so reading this much always reaches
+/// the tail that the torn-line and dedupe checks inspect.
+const READ_LIMIT: u64 = provenant_quota::MAX_HISTORY_MAX_BYTES / 2;
 
 fn file_name(snapshot: &QuotaSnapshot, suffix: &str) -> OsString {
     format!(

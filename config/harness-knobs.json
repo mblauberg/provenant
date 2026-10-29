@@ -24,7 +24,7 @@
   "quota_history": {
     "path": "domains.quota",
     "settings": {
-      "history_max_bytes": {"type": "int", "allowed": "65536 to 1073741824 bytes", "default": "4194304 (4 MiB)", "effect": "Disk cap for each account's quota history under quota/history/. Readings go to a current file that rotates to one predecessor at half the cap, so the pair never exceeds it and the newest reading is always kept."}
+      "history_max_bytes": {"type": "int", "allowed": "65536 to 134217728 bytes", "default": "4194304 (4 MiB)", "effect": "Disk cap for each account's quota history under quota/history/. Readings go to a current file that rotates to one predecessor at half the cap, so the pair never exceeds it and the newest reading is always kept."}
     },
     "directories": {
       "path": "domains.accounts.entries.<id>.directories",

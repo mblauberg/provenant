@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 pub const HISTORY_SCHEMA_VERSION: u64 = 1;
 pub const DEFAULT_HISTORY_MAX_BYTES: u64 = 4 * 1024 * 1024;
 pub const MIN_HISTORY_MAX_BYTES: u64 = 64 * 1024;
-pub const MAX_HISTORY_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+pub const MAX_HISTORY_MAX_BYTES: u64 = 128 * 1024 * 1024;
 /// Largest plan price table kept per account.
 pub const MAX_PLAN_PRICES: usize = 64;
 
