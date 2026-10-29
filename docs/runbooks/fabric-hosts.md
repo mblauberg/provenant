@@ -249,11 +249,13 @@ with this structured note instead of its completion verdict:
 
 ````text
 ```handoff
-{"schema_version":1,"status":"stopped_early","note":"First half committed. Finish the second half, then run the acceptance checks."}
+{"schema_version":2,"status":"stopped_early","note":"First half committed.","remaining":["Finish the second half","Run acceptance checks"],"decisions":[],"verify":["First-half targeted checks passed"]}
 ```
 ````
 
-Use a note of at most 4096 bytes. The continuation keeps the checkout and
+Use the shared [handoff bounds](../specs/run.md#a-partial-finish-is-flagged-not-failed)
+and keep the same JSON current in the lane's supplied progress path.
+The continuation keeps the checkout and
 completion contract; consumers wait for it and read its selected outputs.
 Use integrate delivery or no delivery for these writers. Graph checkouts are
 retained for later work and explicit cleanup. Plain prose and failed provider

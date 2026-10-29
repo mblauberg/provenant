@@ -228,7 +228,7 @@ fn node_bound(
         bytes += plans::STORED_BLOCK_BYTES;
     }
     if plans::writer(node) {
-        bytes += plans::STORED_NOTE_BYTES;
+        bytes += plans::STORED_HANDOFF_BYTES;
     }
     if let Some(spec) = &node.loop_body {
         bytes += MAX_ADVANCE_ERROR_BYTES + LOOP_PAUSE_TEXT_BYTES + 3 * node.id.len();

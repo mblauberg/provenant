@@ -26,7 +26,30 @@ fn fixture_owner(results: &[&str]) -> FakeOwner {
     FakeOwner { observations: results.iter().map(|text| terminal_with_result(AttemptOutcome::Succeeded, text)).collect(), ..Default::default() }
 }
 
-const STOP: &str = "```handoff\n{\"schema_version\":1,\"status\":\"stopped_early\",\"note\":\"First half committed; finish the second half and run checks.\"}\n```";
+const STOP: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"First half committed; finish the second half and run checks.\"}\n```";
+
+#[test]
+fn fenced_handoff_examples_do_not_control_continuations() {
+    for fence in ["````", "~~~~"] {
+        for padding in [0, 28_000] {
+            let example = format!("{fence}markdown\n{}\n{STOP}\n{fence}", "x".repeat(padding));
+            for genuine in [false, true] {
+                let output = if genuine {
+                    format!("{example}\n{STOP}")
+                } else {
+                    example.clone()
+                };
+                let mut doc = writer_graph();
+                doc.nodes[0].required_verdict = None;
+                let mut owner = fixture_owner(&[&output, "VERDICT: PASS", "checked"]);
+                let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+                assert_eq!(run.status, GraphStatus::Complete);
+                assert_eq!(run.checkpoint.expansions.len(), usize::from(genuine));
+                assert_eq!(run.checkpoint.nodes[0].handoff.is_some(), genuine);
+            }
+        }
+    }
+}
 
 #[test]
 fn refused_planner_fragment_retries_after_file_journal_reopen() {
@@ -71,7 +94,7 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
 
 #[test]
 fn malformed_optional_handoff_warns_and_still_delivers() {
-    for output in ["```handoff\n{}\n```".to_owned(), format!("{STOP}\n{STOP}"), STOP.replace("stopped_early", "done"), STOP.trim_end_matches("\n```").to_owned(), format!("```handoff\n{}\n```", json!({"schema_version":1,"status":"stopped_early","note":"x".repeat(4097)}))] {
+    for output in ["```handoff\n{}\n```".to_owned(), format!("{STOP}\n{STOP}"), STOP.replace("stopped_early", "invalid"), STOP.trim_end_matches("\n```").to_owned(), format!("```handoff\n{}\n```", json!({"schema_version":1,"status":"stopped_early","note":"x".repeat(4097)}))] {
         let mut doc = writer_graph();
         doc.nodes[0].required_verdict = None;
         doc.delivery = Some(provenant_records::run::DeliveryMode::Pr);

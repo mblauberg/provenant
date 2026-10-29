@@ -195,7 +195,7 @@ impl ModelPolicy {
             lines.push(format!("Finish or hand off within {turns} turns."));
         }
         if self.lane.stop_early_ok == Some(false) {
-            lines.push("Carry the task to completion. If work remains, end with the exact line `Status: incomplete` and explain the next step; otherwise end with `Status: complete`.".into());
+            lines.push("Carry the task to completion. Keep the schema v2 handoff current and repeat it as the final fenced handoff block. Use status done when finished, stopped_early when work remains, or blocked when a decision or external change is needed.".into());
         }
         if let Some(sections) = &self.result.sections {
             lines.push(format!(

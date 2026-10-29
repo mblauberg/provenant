@@ -606,16 +606,35 @@ transcript except Codex's post-exit identity projection.
 An attempt that settles `succeeded`, `review_required` or `uncommitted` carries
 `partial_signals` when there is structured evidence that part of the brief is
 undone: `declared_stop` (its final answer ends with a single, valid `handoff`
-block with status `stopped_early`, the contract graph writers already use, and
-nothing after it), `provider_stop` (the provider reported a stop reason other
+schema v2 block with status `stopped_early` or `blocked`, and nothing after it),
+`provider_stop` (the provider reported a stop reason other
 than a finished turn, such as Claude's `stop_reason` `max_tokens` or a
 `terminal_reason` other than `completed`) and `uncommitted_work`. Prose is never
 read, and a quoted, repeated or trailing-text block is no flag. The outcome is
 not changed, so delivery and fallback behave as before; the reason carries a
 `partial finish (...)` note, and `lanes` shows `(partial)` beside the state,
 the signals, and a `provenant resume` hint. A failed lane carries no flag. Every
-launch prompt asks the lane to end with the `handoff` block when it stops with
-work left. The chair decides whether to resume.
+launch prompt asks for the same final `handoff` block on every finish. Its JSON
+has `schema_version: 2`, `status` (`done`, `stopped_early`, `blocked`), `note`,
+`remaining[]`, `decisions[]` and `verify[]`. Unknown fields are retained. The
+JSON is bounded to 12288 bytes, the note and each list entry to 4096 bytes,
+and each list to 64 non-empty strings.
+
+The lane atomically updates `handoff.json` in its granted private provider
+state as it works. This path is outside the worktree and commit set. At
+settlement the host saves the valid final fence as the attempt's immutable
+`handoff.json`. If the provider dies without a final fence, the host reads
+progress only from the exact private-state grant of the applied candidate.
+A completed malformed answer never falls back to stale progress; an interrupted
+final fence uses the last valid progress snapshot. Missing, oversized,
+linked or malformed progress files supply no handoff and do not block
+settlement. Known secret shapes are redacted from every snapshot field,
+including forward fields, before retention or reuse; composed retry prompts pass the disclosure
+scan. The host snapshot survives provider-state and temporary cleanup.
+Recovery and fresh manual continuation carry this bounded snapshot with the
+original brief and worktree state, rather than a result transcript. Policy
+continuations use `stopped_early`; `blocked` needs a decision or external change.
+The `Status:` line protocol is removed.
 - Why: a lane that did part of its brief must not read as one that did all of it.
 - Test: `crates/run/src/dispatch_tests.rs::a_terra_style_early_stop_settles_succeeded_but_flagged_partial`;
   `::a_complete_finish_and_prose_about_remaining_work_are_not_flagged`;
