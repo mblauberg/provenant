@@ -827,7 +827,7 @@ pub fn expand_with(
     .to_string();
     let id = format!("preset-{}", &digest[7..39]);
     check_expansion(&nodes, "", 0)?;
-    let mut document = json!({"schema_version":1,"graph_id":id,"nodes":nodes});
+    let mut document = json!({"schema_version":1,"graph_id":id,"context":{"preset":name,"pattern":name},"nodes":nodes});
     let parameters = flatten_parameters(
         name,
         config.get("parameters").unwrap_or(&json!({})),
@@ -2127,10 +2127,10 @@ pub(crate) fn bind_run_context(
         }
         Ok(())
     })?;
-    expansion.document["work_context"] = json!({
-        "preset": expansion.document["provenance"]["preset"],
-        "selection_source": selection_source,
-    });
+    // The graph context is the single carrier of run labels; the scheduler
+    // adds graph and node identity to each submitted task.
+    expansion.document["context"]["preset"] = expansion.document["provenance"]["preset"].clone();
+    expansion.document["context"]["selection_source"] = json!(selection_source);
     expansion.document["graph_id"] = json!("");
     // An integration source resolves at run time, so fold the current head into
     // the identity: a moved branch must never reuse a completed graph.
@@ -2162,7 +2162,6 @@ pub(crate) fn bind_run_context(
     let digest = provenant_records::CanonicalV1::file_digest(&identity).to_string();
     let graph_id = format!("preset-{}", &digest[7..39]);
     expansion.document["graph_id"] = json!(graph_id);
-    expansion.document["work_context"]["graph_id"] = json!(graph_id);
     Ok(())
 }
 
@@ -2270,7 +2269,7 @@ fn explain(expansion: Expansion, globals: &provenant_cli::Globals) -> u8 {
         "Graph {}\nLimits: {}\nExecution: {}\n",
         expansion.document["graph_id"], limits, metrics
     );
-    if let Some(context) = expansion.document.get("work_context") {
+    if let Some(context) = expansion.document.get("context") {
         human.push_str(&format!(
             "Preset selection: {} ({})\n",
             context["preset"].as_str().unwrap_or("-"),

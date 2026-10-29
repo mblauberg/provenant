@@ -20,10 +20,10 @@ pub struct AttemptTarget {
 /// the service's authenticated identity rather than request supplied paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubmittedTask {
-    #[serde(flatten)]
-    pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<provenant_records::run::WorkContext>,
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub build_heavy: bool,
     #[serde(default)]

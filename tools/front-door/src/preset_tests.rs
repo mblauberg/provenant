@@ -66,6 +66,13 @@ prompt = "Implement ${prompt}"
 }
 
 #[test]
+fn expanded_preset_retains_pattern_attribution() {
+    let expansion = expand(&Layers::empty(), "fan-out", "brief", &[]).unwrap();
+    assert_eq!(expansion.document["context"]["preset"], "fan-out");
+    assert_eq!(expansion.document["context"]["pattern"], "fan-out");
+}
+
+#[test]
 fn stages_keep_nested_presets_and_heterogeneous_parallel_entries_grouped() {
     let mut layers = Layers::empty();
     layers
@@ -255,7 +262,7 @@ struct PresetOwner {
     launched: Vec<String>,
     /// The brief each launched node received, inputs included.
     prompts: Vec<(String, String)>,
-    contexts: Vec<Option<provenant_records::run::WorkContext>>,
+    contexts: Vec<provenant_records::run::WorkContext>,
     integration_pins: usize,
 }
 
@@ -284,7 +291,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
         self.launched.push(key.node_id.clone());
         self.prompts
             .push((key.node_id.clone(), node.prompt.to_owned()));
-        self.contexts.push(node.work_context.cloned());
+        self.contexts.push(node.context.clone());
         let mut result =
             provenant_records::result_capture::ResultCapture::new(node.required_verdict);
         result.push(if self.failing.contains(&key.node_id) {
@@ -318,14 +325,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
 fn graph_attempt_input_carries_preset_selection_context() {
     use provenant_fabric_runtime::graph::advance_with_budget;
     let mut document = bundled_fixture("single");
-    document.extra.insert(
-        "work_context".into(),
-        serde_json::json!({
-            "preset": "single",
-            "selection_source": "readiness",
-            "graph_id": document.graph_id,
-        }),
-    );
+    document.context = Some(provenant_records::run::WorkContext {
+        preset: Some("single".into()),
+        selection_source: Some("readiness".into()),
+        ..Default::default()
+    });
     let config = provenant_fabric_runtime::config::GraphConfig::default();
     let mut owner = PresetOwner::default();
     let mut journal = PresetJournal::default();
@@ -337,13 +341,14 @@ fn graph_attempt_input_carries_preset_selection_context() {
         &config.budget,
     )
     .unwrap();
-    let context = owner.contexts[0].as_ref().unwrap();
+    let context = &owner.contexts[0];
     assert_eq!(context.preset.as_deref(), Some("single"));
     assert_eq!(context.selection_source.as_deref(), Some("readiness"));
     assert_eq!(
         context.graph_id.as_deref(),
         Some(document.graph_id.as_str())
     );
+    assert_eq!(context.node_id.as_deref(), Some(owner.launched[0].as_str()));
 }
 
 #[test]
