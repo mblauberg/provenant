@@ -28,7 +28,8 @@ criteria, a feature about 10. Anything larger is an epic: a `Done when` plus
 backlog lines, not a mega-spec. Over-specifying a small change is a defect.
 
 State what and why, plus one-way-door constraints. Leave design to the implementer
-unless a decision has a rejected alternative, which becomes an ADR.
+unless a decision has a rejected alternative. An architectural one becomes an
+ADR; record any other settled decision in the durable doc that owns the area.
 
 Write each criterion as one observable statement, `When <event>, <behaviour>`,
 tagged with how it is verified: `[test]`, `[command]`, `[capture]` or `[review]`.
@@ -79,5 +80,6 @@ acceptance-writer, critic) are loaded by those presets. Do not rename them.
 
 ## Land
 
-The spec lives in the issue body and dies with the delivering PR; tracker owns the
-template. Cite `path#Symbol`, never scratch files.
+The spec lives where the repository's process says: by default the issue body,
+which dies with the delivering PR (tracker owns the template); a repository with
+project docs or no tracker names its own spec home. Cite `path#Symbol`, never scratch files.

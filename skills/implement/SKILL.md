@@ -23,14 +23,16 @@ from the repo's own `AGENTS.md`, `CONTRIBUTING` and runbooks. Look there first.
 ```sh
 provenant run --preset deliver --prompt-file ISSUE.md \
   --set 'parameters.worktree="WT"' --set 'parameters.risk_tier="substantial"' \
-  --set 'parameters.spec="#N"' --explain
+  --set 'parameters.land_tier="substantial"' --set 'parameters.spec="#N"' --explain
 ```
 
 Check the explanation, then submit the same command without `--explain` (add
 `--wait 2h` when no one is watching). Nodes run in order: `write`, `ci` (a
 repair loop bounded by `max_iterations`), `review` (`review-council`), `accept`
-and `land`. `land_tier` lands routine and substantial work automatically;
-crucial and terminal work asks the `decision_session`. Follow a run with
+and `land`. `risk_tier` picks the review shape and `land_tier` (default `substantial`) the
+landing gate, so set both to the approved tier. Routine and substantial work
+lands automatically; crucial and terminal work asks the `decision_session`,
+which must then be set. Follow a run with
 `provenant status` and `provenant fabric graph status ID`; take over a stalled
 landing with `provenant land N --head SHA --wait`.
 
