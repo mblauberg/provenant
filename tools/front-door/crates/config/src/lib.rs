@@ -7,6 +7,7 @@
 
 mod account_sync;
 mod domains;
+pub mod experiment;
 mod gc;
 mod github_policy;
 pub use gc::{

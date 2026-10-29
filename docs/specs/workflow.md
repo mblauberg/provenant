@@ -430,6 +430,21 @@ authority.
 - Merging, syncing or conflict-free replication of checkpoint revisions; the
   history is one writer's bounded chain.
 
+## Pipeline experiments
+
+Projects may opt into named experiments at
+`domains.fabric.pipelines.experiment.NAME`. Each experiment names a control,
+candidate preset arms and a `hash` or `epsilon` assignment strategy. Assignment
+uses the stable work-item ID, is skipped for terminal-tier work, and stops at
+expiry or the configured spend budget. An explicit preset selection bypasses
+experiments. Graph context retains the experiment ID, assignment seed, arm and
+shadow flag. The arm label enters ordinary work-context telemetry.
+
+Shadow mode records the selected arm but expands and runs the control graph,
+so candidate work cannot gate acceptance. `telemetry experiments show ID`
+uses the offline pipeline outcomes and ranking inputs; arm comparisons remain
+advisory and are stratified by risk tier and task kind.
+
 ## Lane delivery evidence
 
 Lane delivery modes and later `lane deliver` pickup use the run owner's sealed

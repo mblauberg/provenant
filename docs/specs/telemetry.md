@@ -292,6 +292,14 @@ read-event source for that measurement.
 - Owner: `crates/telemetry/src/outcome.rs`, `crates/telemetry/src/suggest.rs`,
   `crates/cli/src/run.rs`
 
+Experiment assignments add `experiment_arm` to retained work context. Their
+pattern label is `experiment:ID:ARM`, so `telemetry experiments show ID` uses
+the same mature outcomes, cost coverage, CI and risk-tier/task-kind strata as
+the pipeline ranking report. Shadow graphs carry the selected arm label while
+executing the control shape. Comparisons are advisory and do not change preset
+defaults. Assignment stops on expiry or when observed experiment spend reaches
+`budget_usd`; absent spend evidence is not treated as zero by the report.
+
 ## Demand counters are lossy and private
 
 `usage.jsonl` records are appended best-effort under an existing root, never

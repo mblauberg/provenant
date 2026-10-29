@@ -2277,6 +2277,7 @@ pub(crate) fn bind_run_context(
     directory: &Path,
     policy: &ReadRoots,
     selection_source: &str,
+    experiment: Option<&crate::experiment::Assignment>,
 ) -> Result<(), String> {
     if let Some(concurrency) = request.concurrency {
         if expansion.document.get("limits").is_none() {
@@ -2367,6 +2368,19 @@ pub(crate) fn bind_run_context(
     // adds graph and node identity to each submitted task.
     expansion.document["context"]["preset"] = expansion.document["provenance"]["preset"].clone();
     expansion.document["context"]["selection_source"] = json!(selection_source);
+    if let Some(work_item) = request.task_id.as_ref() {
+        expansion.document["context"]["work_item"] = json!(work_item.to_string());
+    }
+    if let Some(experiment) = experiment {
+        expansion.document["context"]["pattern"] = json!(format!(
+            "experiment:{}:{}",
+            experiment.experiment, experiment.arm
+        ));
+        expansion.document["context"]["experiment_id"] = json!(experiment.experiment);
+        expansion.document["context"]["experiment_seed"] = json!(experiment.seed);
+        expansion.document["context"]["experiment_arm"] = json!(experiment.arm);
+        expansion.document["context"]["experiment_shadow"] = json!(experiment.shadow);
+    }
     expansion.document["graph_id"] = json!("");
     // An integration source resolves at run time, so fold the current head into
     // the identity: a moved branch must never reuse a completed graph.
@@ -2725,7 +2739,7 @@ pub fn run(
             _ => "large",
         };
         let ready = prompt_ready(prompt);
-        let selection = crate::preset_select::select(
+        let mut selection = crate::preset_select::select(
             Some(&rules_path),
             &crate::preset_select::SelectionContext {
                 risk: request.risk_tier.clone(),
@@ -2736,6 +2750,106 @@ pub fn run(
             },
             request.preset.as_deref(),
         )?;
+        let roots = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::Project,
+            crate::roots::Product::Optional,
+        )
+        .map_err(|e| e.to_string())?;
+        let config =
+            provenant_config::read_with_domains(&roots.roots, &provenant_cli::domains::SECTIONS)
+                .map_err(|e| e.to_string())?;
+        let experiment_settings: provenant_config::experiment::FabricExperiments =
+            provenant_config::read_domain(roots.roots.state.as_path(), "fabric")
+                .map_err(|error| format!("cannot read experiment configuration: {error}"))?;
+        let experiment = if request.preset.is_none() {
+            if let Some(work_item) = request.task_id.as_ref() {
+                use provenant_core::Clock;
+                let now = provenant_os::clock::SystemClock::new()
+                    .wall_now()
+                    .map_err(|error| error.to_string())?
+                    .as_timestamp();
+                let mut selected = None;
+                for (experiment_id, experiment_config) in &experiment_settings.pipelines.experiment
+                {
+                    let spent = if experiment_config.budget_usd.is_some() {
+                        let stats = provenant_cli::Stats {
+                            outcomes: true,
+                            suggest: false,
+                            pipeline: provenant_cli::PipelineOptions {
+                                main_ref: "main".into(),
+                                ci_file: None,
+                                outcome_days: 14,
+                                min_samples: 1,
+                                expiry_days: 14,
+                            },
+                            claude_subagents: None,
+                            usage: false,
+                            since: None,
+                            until: None,
+                            run_id: None,
+                            by: None,
+                            detail: false,
+                        };
+                        let report = provenant_cli::run::stats(
+                            stats,
+                            &provenant_cli::run::Edge {
+                                roots: &roots.roots,
+                                home: &roots.home,
+                                assets: &roots.assets,
+                                cwd: &directory,
+                            },
+                        );
+                        let rows = report
+                            .result
+                            .data
+                            .pointer("/pipeline/outcomes/rows")
+                            .and_then(serde_json::Value::as_array);
+                        let mut total = Some(0u64);
+                        if let Some(rows) = rows {
+                            let prefix = format!("experiment:{experiment_id}:");
+                            for row in rows.iter().filter(|row| {
+                                row.pointer("/evidence/pattern")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some_and(|pattern| pattern.starts_with(&prefix))
+                            }) {
+                                let amount = row
+                                    .pointer("/evidence/cost_microdollars")
+                                    .and_then(serde_json::Value::as_u64);
+                                total = total.and_then(|sum| {
+                                    amount.and_then(|amount| sum.checked_add(amount))
+                                });
+                            }
+                        } else {
+                            total = None;
+                        }
+                        total
+                            .map(|amount| amount as f64 / 1_000_000.0)
+                            .unwrap_or(f64::MAX)
+                    } else {
+                        0.0
+                    };
+                    if let Some(assignment) = crate::experiment::assign(
+                        experiment_id,
+                        experiment_config,
+                        &work_item.to_string(),
+                        request.risk_tier.as_deref(),
+                        spent,
+                        now,
+                    )? {
+                        selection.choice.preset = assignment.preset.clone();
+                        selection.source = crate::preset_select::PresetSelectionSource::Experiment;
+                        selected = Some(assignment);
+                        break;
+                    }
+                }
+                selected
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let name = selection.choice.preset.as_str();
         let mut params = selection.choice.parameters.into_iter().collect::<Vec<_>>();
         match &request.preset_params_file {
@@ -2750,15 +2864,6 @@ pub fn run(
                 params.push((key, value));
             }
         });
-        let roots = crate::roots::resolve(
-            globals,
-            crate::roots::Workspace::Project,
-            crate::roots::Product::Optional,
-        )
-        .map_err(|e| e.to_string())?;
-        let config =
-            provenant_config::read_with_domains(&roots.roots, &provenant_cli::domains::SECTIONS)
-                .map_err(|e| e.to_string())?;
         let mut layers = configured(globals)?;
         layers.known_routes = Some(config.domains.routing.routes.keys().cloned().collect());
         let review = config.domains.routing.review.clone();
@@ -2813,6 +2918,7 @@ pub fn run(
             &directory,
             &policy,
             selection.source.as_str(),
+            experiment.as_ref(),
         )?;
         Ok(expansion)
     })();

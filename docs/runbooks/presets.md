@@ -59,6 +59,33 @@ source, and the choice is recorded in each graph attempt's work context.
 On `run`, provide `--risk-tier`, `--task-kind` and repeatable `--path`
 values for those selectors; prompt size is measured from the prompt input.
 
+## Experiment with preset arms
+
+Experiments are opt-in and live in project configuration under
+`[domains.fabric.pipelines.experiment.NAME]`. A work item with `--task-id`
+receives a stable hash assignment when no explicit `--preset` is given.
+Terminal-tier work is excluded. Expired or budget-exhausted assignments fall
+back to the ordinary preset rules. `shadow = true` records the selected arm
+while executing the control preset, so the arm cannot decide graph acceptance.
+The graph context retains the experiment ID, seed, arm and shadow setting;
+`experiment_arm` is also a work-context telemetry label.
+
+```toml
+[domains.fabric.pipelines.experiment.review-shape]
+control = "single"
+arms = { council = "review-council", chain = "chain" }
+assign = "hash"
+shadow = false
+tiers = ["routine", "substantial"]
+budget_usd = 25.0
+max_cost_ratio = 1.5
+expires = "2027-01-01T00:00:00Z"
+```
+
+Use `provenant telemetry experiments show review-shape` to compare mature,
+measured outcomes within risk-tier and task-kind strata. It uses offline
+pipeline outcome and ranking inputs; comparisons remain advisory.
+
 Inspect the resolved defaults and explain the exact graph before a run:
 
 ```sh

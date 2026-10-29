@@ -2718,6 +2718,51 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant telemetry experiments`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant telemetry experiments show`
+
+| Argument | Contract |
+|---|---|
+| `id` | `{"name": "id", "positional": true, "required": true}` |
+| `--main-ref` | `{"defaults": ["main"], "name": "main_ref"}` |
+| `--ci-file` | `{"name": "ci_file"}` |
+| `--outcome-days` | `{"defaults": ["14"], "name": "outcome_days"}` |
+| `--min-samples` | `{"defaults": ["20"], "name": "min_samples"}` |
+| `--expiry-days` | `{"defaults": ["14"], "name": "expiry_days"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [],
+      "multiple": true,
+      "name": "ExperimentShow",
+      "required": false
+    },
+    {
+      "arguments": [
+        "main_ref",
+        "ci_file",
+        "outcome_days",
+        "min_samples",
+        "expiry_days"
+      ],
+      "multiple": true,
+      "name": "PipelineOptions",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant quota`
 
 | Argument | Contract |
