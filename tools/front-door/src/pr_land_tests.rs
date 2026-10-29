@@ -730,6 +730,7 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
                 "headRepositoryOwner",
                 "isCrossRepository",
                 "isDraft",
+                "mergeCommit",
                 "mergeStateStatus",
                 "mergeable",
                 "mergedAt",
