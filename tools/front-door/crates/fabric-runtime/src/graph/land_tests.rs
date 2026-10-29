@@ -37,6 +37,8 @@ struct Owner {
     reply: Option<String>,
     asked: usize,
     writer_branch: Option<String>,
+    /// The newest commit a writer delivered, which CI reports as the head.
+    head: Option<String>,
 }
 impl CiStatus for Owner {
     fn host_stamp(&self) -> Option<CiHostStamp> {
@@ -51,7 +53,7 @@ impl CiStatus for Owner {
             extra: Default::default(),
             state: CiState::Passed,
             summary: "checks passed".into(),
-            head_sha: None,
+            head_sha: self.head.clone(),
             failed_checks: Vec::new(),
             check_names: Vec::new(),
             truncated: false,
@@ -117,6 +119,9 @@ impl AttemptOwner for Owner {
                 (Some(capture.finish()), None, None)
             }
         };
+        if let Some(commit) = commit {
+            self.head = Some(commit.into());
+        }
         Ok(AttemptObservation::Terminal {
             attempt_ref: None,
             outcome: AttemptOutcome::Succeeded,
@@ -248,6 +253,10 @@ fn an_auto_tier_lands_the_newest_delivered_head_through_the_host() {
             LandAuthority::Policy
         )]
     );
+    // The gate bound the writer's head; the repair is newer, so the host's
+    // own land path checks CI again at the pinned head.
+    let ci = node(&checkpoint, "ci").ci.as_ref().unwrap();
+    assert_eq!(ci.head_sha.as_deref(), Some(WRITE_HEAD));
     let land = node(&checkpoint, "land");
     assert_eq!(land.state, NodeState::Succeeded);
     let record = land.land.as_ref().unwrap();
