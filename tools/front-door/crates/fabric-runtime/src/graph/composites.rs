@@ -117,6 +117,12 @@ fn children(
             *source = reference(prefix, source, &locals, incoming)
                 .unwrap_or_else(|| scoped(prefix, source));
         }
+        if let Some(SourceBinding::Head { node: writer }) = &mut node.source {
+            *writer = visible_names
+                .get(writer)
+                .cloned()
+                .unwrap_or_else(|| writer.clone());
+        }
         if let Some(GateCondition::Ci {
             target: CiTarget::Node { node: target, .. },
             ..
@@ -134,7 +140,11 @@ fn children(
             .iter_mut()
             .chain(node.land.as_mut().map(|spec| &mut spec.node))
         {
+            // Outer writers resolve through every enclosing scope, so a loop
+            // body or nested composite can continue or land a writer that is
+            // not one of its direct dependencies.
             *writer = reference(prefix, writer, &locals, incoming)
+                .or_else(|| visible_names.get(writer.as_str()).cloned())
                 .unwrap_or_else(|| scoped(prefix, writer));
         }
         if original

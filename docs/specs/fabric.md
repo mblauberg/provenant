@@ -372,16 +372,31 @@ declare `loop = { stages = [...], until = "accept", max_rounds = 2 }` to reuse
 roles and presets inside bounded repair. Existing `loop.body` configuration
 also remains available. Planner fragments do not resolve named presets.
 
-Bundled `scout-swarm`, `generator-evaluator`, `review-council`, `big-batch`
-and `scope-then-run` express scouting, implementation with evaluating lenses,
-combined review, a full batch, and scouting and scoping before a run
-respectively. Scouts use junior tiers and remain read-only;
+Bundled `scout-swarm`, `generator-evaluator`, `review-council`, `big-batch`,
+`scope-then-run` and `deliver` express scouting, implementation with
+evaluating lenses, combined review, a full batch, scouting and scoping before
+a run, and delivery through CI to land respectively. Scouts use junior tiers and remain read-only;
 implementation uses senior tiers; the end-of-batch refactor uses principal.
 The implementation lens challenges redundancy, test quality, cleanup and
 rigid over-engineering. Junior reviews on senior or principal work are
 advisory. Counted acceptance reviews must meet the author's tier under
 `HARNESS.md`; add principal coverage for high-risk areas and principal-authored
 refactors. Synthesis reconciles evidence rather than taking a majority vote.
+
+`deliver` runs a `write.implement` writer with `delivery = "pr"`, then a
+composite `ci` holding a CI gate bound to the writer's pushed head and a
+repair loop the gate routes to on failure. Each loop round runs a fresh
+`repairer` that `continues` the writer's branch, whose inputs are the failed
+gate's findings (check names with log excerpts) and the previous agent's
+result, never a transcript, followed by the CI gate again. The composite
+succeeds on either path. A `review-council` then reviews a `head` source
+binding to the writer, so it judges the newest repaired head; a verdict gate
+and a `land` node merge that head under the host's tier policy. No model runs
+while a gate is pending. `max_iterations` bounds the rounds; exhaustion raises
+the loop ask when `decision_session` is set and otherwise pauses the graph.
+Preset leaves may set `continues`, `land` and `kind = "land"`. A preset's
+top-level `decision_session` sets the graph's decision session; an empty
+value, here and on a loop, leaves it unset.
 
 Preset TOML files are named `NAME.toml` under
 `$XDG_CONFIG_HOME/provenant/presets/` (or `~/.config/provenant/presets/`)
@@ -437,6 +452,9 @@ apply.
   settlement, writer exclusion and delivery.
 - Test: `src/preset_tests.rs::bundled_expansions_match_golden_graphs`,
   `::layering_composition_and_refusals`, `::named_presets_inherit_and_cycles_are_refused`,
+  `src/preset_deliver_tests.rs::a_red_gate_repairs_from_the_failure_excerpt_and_the_repaired_head_is_reviewed_and_landed`,
+  `::an_exhausted_repair_loop_asks_the_decision_session_or_pauses`,
+  `::pending_ci_runs_no_model_and_status_shows_the_waiting_gate`,
   `crates/cli/src/lib.rs::tests::preset_runs_accept_graph_controls_without_dispatch_writer_mode`.
 - Owner: `src/preset.rs`, `src/fabric.rs`
 
@@ -478,6 +496,7 @@ An optional `source` pins a node's subject before its first attempt:
 {"type":"commit","commit":"0123456789abcdef0123456789abcdef01234567"}
 {"type":"node","node":"implementation"}
 {"type":"integration"}
+{"type":"head","node":"write"}
 ```
 
 The explicit commit must be a full object ID. A node binding selects the
@@ -492,6 +511,15 @@ node, or a writer whose source is that pinned commit, that has not yet
 attempted fails if the integration branch has moved, and a rerun starts a new
 graph. A retry writer whose pin is an ancestor of its HEAD continues; a
 diverged HEAD is refused.
+
+A head binding names an upstream writer that delivers `pr` or `push` and does
+not itself continue another writer. When the node becomes ready it pins the
+newest commit delivered by that writer or by any upstream writer that
+`continues` it, such as the repair rounds of a CI loop. It is the single-chain
+counterpart of an integration binding: a review that follows a variable number
+of repairs reviews the head the land node will merge, which `acceptance_error`
+checks. Inside a composite or loop body the writer name resolves through the
+enclosing scopes. Validation refuses a head binding to any other node.
 
 A node may set `distinct_from = "writer"` or `"dependencies"`. For `writer` the
 runtime walks the source chain to the nearest writer node; for `dependencies`
@@ -527,6 +555,9 @@ namespace rules.
 
 - Why: scouting can share read access while combined review and repair retain
   one immutable Git subject.
+- Test: `crates/fabric-runtime/src/graph/land_tests.rs::a_head_source_reviews_the_newest_continuation_and_lands_it`;
+  `::a_head_source_inside_a_composite_names_an_outer_writer`;
+  `::a_head_source_must_name_an_upstream_writer`.
 - Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`,
   `crates/confinement/src/worktrees.rs`
 

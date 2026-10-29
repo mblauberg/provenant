@@ -202,6 +202,7 @@ fn bundled_role_presets_have_bounded_nested_graphs() {
         "review-council",
         "big-batch",
         "scope-then-run",
+        "deliver",
     ] {
         let document = bundled_fixture(name);
         let config = provenant_fabric_runtime::config::GraphConfig::default();
@@ -221,7 +222,7 @@ fn bundled_role_presets_have_bounded_nested_graphs() {
 fn bundled_fixture(name: &str) -> provenant_fabric_runtime::graph::GraphDocument {
     let overrides = match name {
         "generator-evaluator" | "review-council" => vec!["parameters.worktree='/repo/lane'".into()],
-        "scope-then-run" => vec!["parameters.worktree='/repo/lane'".into()],
+        "scope-then-run" | "deliver" => vec!["parameters.worktree='/repo/lane'".into()],
         "big-batch" => vec![
             "parameters.lanes=[{name='one',worktree='/repo/one',scope=['.'],spec=''},{name='two',worktree='/repo/two',scope=['.'],spec=''}]".into(),
             "parameters.batch_worktree='/repo/batch'".into(),

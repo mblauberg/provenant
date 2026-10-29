@@ -90,6 +90,7 @@ impl Layers {
                 "scope-then-run",
                 include_str!("../assets/presets/scope-then-run.toml"),
             ),
+            ("deliver", include_str!("../assets/presets/deliver.toml")),
         ] {
             layers
                 .insert("bundled", name, text)
@@ -834,9 +835,18 @@ pub fn expand_with(
         "",
         &origins,
     )?;
-    for key in ["limits", "integration_branch", "delivery"] {
+    for key in [
+        "limits",
+        "integration_branch",
+        "delivery",
+        "decision_session",
+    ] {
         if let Some(value) = config.get(key) {
-            document[key] = interpolate(value, &parameters, prompt, 1)?;
+            let value = interpolate(value, &parameters, prompt, 1)?;
+            // An empty knob, such as an unset decision session, means unset.
+            if value != "" {
+                document[key] = value;
+            }
         }
     }
     let roles: BTreeMap<String, Value> = layers.used_roles.take().into_iter().collect();
@@ -1075,6 +1085,8 @@ fn lower_leaf(
             "fallback_tier",
             "purpose",
             "dispositions",
+            "continues",
+            "land",
         ]
         .contains(&key.as_str())
         {
@@ -1294,7 +1306,7 @@ fn lower_leaf(
     }
     let control = matches!(
         map.get("kind").and_then(Value::as_str),
-        Some("gate" | "loop" | "composite")
+        Some("gate" | "loop" | "composite" | "land")
     );
     if !control {
         map.entry("prompt").or_insert_with(|| json!(prompt));
@@ -1410,6 +1422,7 @@ fn build_stages(
                 "limits",
                 "integration_branch",
                 "delivery",
+                "decision_session",
                 "pattern",
             ]
             .contains(&key.as_str())
@@ -1645,6 +1658,14 @@ impl StageBuilder<'_> {
                     self.prompt,
                     index as usize,
                 )?;
+                if spec
+                    .get("decision_session")
+                    .is_some_and(|session| session == "")
+                {
+                    spec.as_object_mut()
+                        .ok_or("loop must be a table")?
+                        .remove("decision_session");
+                }
                 spec["body"] = json!(children);
                 let mut node = json!({"id":id,"kind":"loop","access":"read_only","depends_on":deps,"loop":spec});
                 if !deps.is_empty() {
@@ -2060,7 +2081,7 @@ pub(crate) fn bind_run_context(
         .ok_or("missing graph nodes")?;
     visit_nodes(nodes, &mut |node| {
         let container = node.get("composite").is_some() || node.get("loop").is_some();
-        if !container && node["kind"] != "gate" {
+        if !container && !matches!(node["kind"].as_str(), Some("gate" | "land" | "decide")) {
             let writer = node["access"] == "worktree_write";
             if writer
                 && node

@@ -5545,7 +5545,7 @@ pub(crate) fn publish_preset_graph(
     Ok(scratch.join("graphs").join(filename))
 }
 
-fn graph_human(run: &provenant_fabric_runtime::graph::GraphRun) -> String {
+pub(crate) fn graph_human(run: &provenant_fabric_runtime::graph::GraphRun) -> String {
     let members: std::collections::BTreeSet<_> = run
         .checkpoint
         .nodes

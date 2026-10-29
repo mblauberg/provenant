@@ -342,8 +342,17 @@ pub enum NodeKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SourceBinding {
-    Commit { commit: String },
-    Node { node: String },
+    Commit {
+        commit: String,
+    },
+    Node {
+        node: String,
+    },
+    /// The newest head delivered by an upstream writer and the writers that
+    /// continue it, among this node's own upstream nodes.
+    Head {
+        node: String,
+    },
     Integration,
 }
 
@@ -2316,6 +2325,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 .get(source)
                                 .and_then(|index| checkpoint.nodes[*index].outputs.as_ref())
                                 .and_then(|outputs| outputs.commit.clone()),
+                            Some(SourceBinding::Head { node: writer }) => {
+                                land::chain_head(&plan, &checkpoint, &positions, &node.id, writer)
+                            }
                             Some(SourceBinding::Integration) => {
                                 owner.integration_head().map_err(GraphError::Run)?
                             }
@@ -2427,7 +2439,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     distinct_attempts.dedup();
                 } else if node.distinct_from == Some(DistinctFrom::Writer) {
                     let mut current = node;
-                    while let Some(SourceBinding::Node { node: source }) = &current.source {
+                    while let Some(
+                        SourceBinding::Node { node: source } | SourceBinding::Head { node: source },
+                    ) = &current.source
+                    {
                         let Some(index) = positions.get(source) else {
                             break;
                         };

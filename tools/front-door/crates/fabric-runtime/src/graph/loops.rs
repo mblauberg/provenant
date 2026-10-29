@@ -303,6 +303,13 @@ fn expand_loops(
                 }
             }
             child.inputs.retain(|i| !i.node.starts_with("previous."));
+            // A head source naming a writer outside the body is checked
+            // against the expanded graph, as an external CI subject is.
+            if let Some(SourceBinding::Head { node: writer }) = &child.source
+                && !spec.body.iter().any(|node| &node.id == writer)
+            {
+                child.source = None;
+            }
             // External CI subjects are checked against the expanded graph.
             // The isolated body check below has only the local namespace.
             if let Some(GateCondition::Ci { target, .. }) = &mut child.condition
@@ -392,6 +399,11 @@ fn expand_loops(
                     if !child.depends_on.contains(source) {
                         child.depends_on.push(source.clone());
                     }
+                }
+                if let Some(SourceBinding::Head { node: writer }) = &mut child.source
+                    && spec.body.iter().any(|node| &node.id == writer)
+                {
+                    *writer = id(&node.id, round, writer);
                 }
                 if let Some(GateCondition::Ci {
                     target: CiTarget::Node { node: target, .. },

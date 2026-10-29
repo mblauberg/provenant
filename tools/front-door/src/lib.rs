@@ -29,6 +29,13 @@ mod pr;
 #[cfg(test)]
 mod pr_land_tests;
 mod preset;
+#[cfg(test)]
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the custom worktree test driver includes this library without the test harness"
+)]
+mod preset_deliver_tests;
 mod preset_roles;
 mod preset_select;
 #[cfg(test)]
