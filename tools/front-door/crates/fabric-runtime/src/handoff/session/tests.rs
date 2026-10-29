@@ -40,6 +40,7 @@ fn delivery(dir: &Path, launch: bool) -> Delivery<'static> {
         prompt: "# Session hand-off\n\nBriefing.",
         source_label: "laptop".into(),
         worktrees: vec![HandoffWorktree {
+            extra: Default::default(),
             branch: "feat/x".into(),
             path: Some("/Users/me/Repos/project/.worktrees/feat-x".into()),
             head: Some("b".repeat(40)),
@@ -292,9 +293,11 @@ fn receive_refuses_until_the_host_opts_in() {
 
 fn delivered(branch: &str, path: &str) -> HandoffReceipt {
     HandoffReceipt::Delivered {
+        extra: Default::default(),
         prompt_path: "/state/prompt.md".into(),
         project: "/repo".into(),
         worktrees: vec![HandoffWorktree {
+            extra: Default::default(),
             branch: branch.into(),
             path: Some(path.into()),
             head: None,
@@ -311,21 +314,30 @@ fn delivered(branch: &str, path: &str) -> HandoffReceipt {
 #[test]
 fn receipt_text_is_plain_and_bounded() {
     let requested = vec!["feat/x".to_owned()];
+    let future = serde_json::json!({"revision": 2});
+    let mut stored = serde_json::to_value(delivered("feat/x", "/w\x1b]0;owned\x07")).unwrap();
+    stored["future"] = future.clone();
+    stored["worktrees"][0]["future"] = future.clone();
+    let receipt = serde_json::from_value(stored).unwrap();
     let HandoffReceipt::Delivered {
+        extra,
         worktrees,
         script_path,
         launch_error,
         ..
-    } = vet_receipt(delivered("feat/x", "/w\x1b]0;owned\x07"), &requested).unwrap()
+    } = vet_receipt(receipt, &requested).unwrap()
     else {
         panic!("expected a delivery");
     };
+    assert_eq!(extra["future"], future);
+    assert_eq!(worktrees[0].extra["future"], future);
     assert_eq!(worktrees[0].path.as_deref(), Some("/w]0;owned"));
     assert_eq!(worktrees[0].error.as_deref(), Some("warn[2J"));
     assert_eq!(script_path.as_deref(), Some("/state/launch.command"));
     assert_eq!(launch_error.unwrap().chars().count(), RECEIPT_TEXT);
     let HandoffReceipt::Refused { message, .. } = vet_receipt(
         HandoffReceipt::Refused {
+            extra: Default::default(),
             code: "c\x1b".into(),
             message: "m\x1b[31m".into(),
             accounts: vec!["a\n".into()],

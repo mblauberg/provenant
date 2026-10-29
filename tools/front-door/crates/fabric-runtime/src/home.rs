@@ -90,11 +90,11 @@ impl<'a> CoordinationService<'a> {
                 };
                 Ok(
                     match remote.call(input, Some(id.clone()), budget, cancel)? {
-                        CoordinationResult::Mail(v) => MutationResult::Mail(v),
-                        CoordinationResult::Task(v) => MutationResult::Task(v),
-                        CoordinationResult::Events(v) => MutationResult::Events(v),
-                        CoordinationResult::Claim(v) => MutationResult::Claim(v),
-                        CoordinationResult::Landing(v) => MutationResult::Landing(v),
+                        CoordinationResult::Mail { result: v, .. } => MutationResult::Mail(v),
+                        CoordinationResult::Task { result: v, .. } => MutationResult::Task(v),
+                        CoordinationResult::Events { result: v, .. } => MutationResult::Events(v),
+                        CoordinationResult::Claim { result: v, .. } => MutationResult::Claim(v),
+                        CoordinationResult::Landing { result: v, .. } => MutationResult::Landing(v),
                     },
                 )
             }
@@ -163,7 +163,7 @@ impl RemoteCoordination<'_> {
                                 operation_id: id.clone(),
                             },
                         })?;
-                    if !matches!(response.result, PeerResult::Coordination(_)) {
+                    if !matches!(response.result, PeerResult::Coordination { .. }) {
                         return Err(PeerError::Unknown { operation_id: id }.into());
                     }
                     self.journal.peer_phase(
@@ -192,10 +192,15 @@ impl RemoteCoordination<'_> {
                     {
                         Ok(response) => {
                             if let PeerResult::Error {
-                                error:
-                                    facade::FacadeError::LaunchUnknown {
-                                        operation_id: response_id,
+                                data:
+                                    crate::hosts::PeerResultError {
+                                        error:
+                                            facade::FacadeError::LaunchUnknown {
+                                                operation_id: response_id,
+                                            },
+                                        ..
                                     },
+                                ..
                             } = &response.result
                                 && response_id != &id
                             {
@@ -209,8 +214,11 @@ impl RemoteCoordination<'_> {
                                 return Err(PeerError::Frame.into());
                             }
                             let commit = match &response.result {
-                                PeerResult::Coordination(_) => true,
-                                PeerResult::Error { error } if is_retryable_refusal(error) => {
+                                PeerResult::Coordination { .. } => true,
+                                PeerResult::Error {
+                                    data: crate::hosts::PeerResultError { error, .. },
+                                    ..
+                                } if is_retryable_refusal(error) => {
                                     // Resending is safe here: the owner records a receipt per
                                     // operation id, so a late-applied mutation replays, not repeats.
                                     self.journal
@@ -220,7 +228,10 @@ impl RemoteCoordination<'_> {
                                         })?;
                                     false
                                 }
-                                PeerResult::Error { error } if is_definitive_refusal(error) => true,
+                                PeerResult::Error {
+                                    data: crate::hosts::PeerResultError { error, .. },
+                                    ..
+                                } if is_definitive_refusal(error) => true,
                                 _ => {
                                     let _ = self.journal.peer_phase(
                                         self.project,
@@ -278,15 +289,23 @@ impl RemoteCoordination<'_> {
                 .exchange(&self.peer, &request, budget, cancel)?
         };
         match response.result {
-            PeerResult::Coordination(value) => Ok(value),
+            PeerResult::Coordination { data: value, .. } => Ok(value),
             PeerResult::Error {
-                error: facade::FacadeError::LaunchUnknown { .. },
+                data:
+                    crate::hosts::PeerResultError {
+                        error: facade::FacadeError::LaunchUnknown { .. },
+                        ..
+                    },
+                ..
             } => {
                 // Uncertain mutations returned above with their locally frozen
                 // ID. A read cannot have an uncertain launch.
                 Err(PeerError::Frame.into())
             }
-            PeerResult::Error { error } => Err(PeerError::Refused { error }.into()),
+            PeerResult::Error {
+                data: crate::hosts::PeerResultError { error, .. },
+                ..
+            } => Err(PeerError::Refused { error }.into()),
             _ => Err(PeerError::Frame.into()),
         }
     }
@@ -348,7 +367,7 @@ macro_rules! route {
                         budget,
                         cancel,
                     )? {
-                        CoordinationResult::$variant(value) => Ok(value),
+                        CoordinationResult::$variant { result: value, .. } => Ok(value),
                         _ => Err(PeerError::Frame.into()),
                     }
                 }
@@ -514,13 +533,21 @@ mod tests {
             }
             assert!(matches!(&request.action, PeerAction::Receipt { .. }));
             Ok(PeerResponse {
+                extra: Default::default(),
                 version: request.version,
                 protocol: PROTOCOL,
                 host: request.target_host,
                 project: request.project.key.clone(),
-                result: PeerResult::Coordination(CoordinationResult::Events(EventsResult::Noted {
-                    seq: 73,
-                })),
+                result: PeerResult::Coordination {
+                    data: CoordinationResult::Events {
+                        result: EventsResult::Noted {
+                            extra: Default::default(),
+                            seq: 73,
+                        },
+                        extra: Default::default(),
+                    },
+                    extra: Default::default(),
+                },
             })
         }
     }
@@ -553,12 +580,17 @@ mod tests {
                     }
                 ));
                 return Ok(PeerResponse {
+                    extra: Default::default(),
                     version: request.version,
                     protocol: PROTOCOL,
                     host: request.target_host,
                     project: request.project.key.clone(),
                     result: PeerResult::Error {
-                        error: self.error.clone(),
+                        data: crate::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: self.error.clone(),
+                        },
+                        extra: Default::default(),
                     },
                 });
             }
@@ -575,13 +607,21 @@ mod tests {
                 }
             ));
             Ok(PeerResponse {
+                extra: Default::default(),
                 version: request.version,
                 protocol: PROTOCOL,
                 host: request.target_host,
                 project: request.project.key.clone(),
-                result: PeerResult::Coordination(CoordinationResult::Events(EventsResult::Noted {
-                    seq: 73,
-                })),
+                result: PeerResult::Coordination {
+                    data: CoordinationResult::Events {
+                        result: EventsResult::Noted {
+                            extra: Default::default(),
+                            seq: 73,
+                        },
+                        extra: Default::default(),
+                    },
+                    extra: Default::default(),
+                },
             })
         }
     }
@@ -690,7 +730,10 @@ mod tests {
 
     fn noted(result: CoordinationResult) -> i64 {
         match result {
-            CoordinationResult::Events(EventsResult::Noted { seq }) => seq,
+            CoordinationResult::Events {
+                result: EventsResult::Noted { seq, .. },
+                ..
+            } => seq,
             _ => panic!("expected a noted event receipt"),
         }
     }
@@ -787,12 +830,17 @@ mod tests {
             ) -> Result<PeerResponse, PeerError> {
                 assert!(request.operation().is_none());
                 Ok(PeerResponse {
+                    extra: Default::default(),
                     version: request.version,
                     protocol: PROTOCOL,
                     host: request.target_host,
                     project: request.project.key.clone(),
                     result: PeerResult::Error {
-                        error: self.error.clone(),
+                        data: crate::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: self.error.clone(),
+                        },
+                        extra: Default::default(),
                     },
                 })
             }
@@ -844,12 +892,17 @@ mod tests {
                 _cancel: &CancelToken,
             ) -> Result<PeerResponse, PeerError> {
                 Ok(PeerResponse {
+                    extra: Default::default(),
                     version: request.version,
                     protocol: PROTOCOL,
                     host: request.target_host,
                     project: request.project.key.clone(),
                     result: PeerResult::Error {
-                        error: self.0.clone(),
+                        data: crate::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: self.0.clone(),
+                        },
+                        extra: Default::default(),
                     },
                 })
             }

@@ -24,6 +24,8 @@ pub enum EventKind {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventRecord {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub header: RecordHeader,
     pub project: ProjectId,
     pub actor: Option<ActorId>,
@@ -34,6 +36,8 @@ pub struct EventRecord {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Event {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub seq: i64,
     pub record: EventRecord,
 }
@@ -77,6 +81,7 @@ pub(crate) fn event(
     at: WallTime,
 ) -> EventRecord {
     EventRecord {
+        extra: Default::default(),
         header: RecordHeader::V1,
         project,
         actor,
@@ -128,11 +133,12 @@ impl Store {
                     break;
                 }
                 output.push(Event {
+        extra: Default::default(),
                     seq: row.get(0)?,
                     record: decode(&bytes)?,
                 });
             }
-            Ok(Page { items: output, truncated })
+            Ok(Page { extra: Default::default(),  items: output, truncated })
         })
     }
     pub fn event_cursor(

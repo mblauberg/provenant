@@ -704,7 +704,7 @@ pub(super) fn prepare_decision_extension(
     let expanded =
         plans::expand(document, &extensions, &checkpoint.expansions).map_err(str::to_owned)?;
     let (plan, _) = validate_flat_plan(&expanded, limits).map_err(str::to_owned)?;
-    if let Some(reason) = structural_limit_reason(&expanded, &plan, limits, &extensions) {
+    if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
         return Err(reason);
     }
     Ok(())

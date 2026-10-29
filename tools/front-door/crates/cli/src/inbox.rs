@@ -509,12 +509,14 @@ fn execute(
             &provenant_core::CancelToken::new(),
         );
         return match reply {
-            Ok(provenant_fabric_runtime::hosts::PeerResult::Inbox(
-                provenant_fabric_runtime::inbox::InboxReply::Ok { result },
-            )) => Ok(*result),
-            Ok(provenant_fabric_runtime::hosts::PeerResult::Inbox(
-                provenant_fabric_runtime::inbox::InboxReply::Error { code, message },
-            )) => Err(remote_error(code, message, operation_id.clone())),
+            Ok(provenant_fabric_runtime::hosts::PeerResult::Inbox {
+                data: provenant_fabric_runtime::inbox::InboxReply::Ok { result, .. },
+                ..
+            }) => Ok(*result),
+            Ok(provenant_fabric_runtime::hosts::PeerResult::Inbox {
+                data: provenant_fabric_runtime::inbox::InboxReply::Error { code, message, .. },
+                ..
+            }) => Err(remote_error(code, message, operation_id.clone())),
             Ok(_) => Err(Error::Remote {
                 code: "unsupported_owner".into(),
                 message: "peer does not support inbox operations".into(),

@@ -42,6 +42,8 @@ pub(crate) const MAX_PAGE_BYTES: usize = 1_048_576;
 /// Bounded reads expose byte-cap truncation; resume after the last item's cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Page<T> {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub items: Vec<T>,
     pub truncated: bool,
 }

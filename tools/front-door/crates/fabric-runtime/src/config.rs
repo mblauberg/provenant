@@ -22,9 +22,30 @@ pub struct FabricConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[allow(clippy::manual_non_exhaustive)] // Consumes a retired config key without retaining its value.
 pub struct GraphConfig {
     pub limits: GraphLimits,
     pub budget: GraphBudget,
+    #[serde(
+        rename = "limit_ceiling",
+        skip_serializing,
+        deserialize_with = "ignore_limit_ceiling"
+    )]
+    _limit_ceiling: (),
+}
+
+const LIMIT_CEILING_WARNING: &str = "warning: domains.fabric.graph.limit_ceiling is deprecated and ignored; host graph limits apply";
+
+#[allow(clippy::print_stderr)]
+fn ignore_limit_ceiling<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::de::IgnoredAny::deserialize(deserializer)?;
+    // Validation and loading can deserialize the same configuration section.
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| eprintln!("{LIMIT_CEILING_WARNING}"));
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -533,6 +554,29 @@ mod tests {
     }
 
     #[test]
+    fn retired_graph_ceiling_is_ignored_but_other_config_keys_remain_strict() {
+        let mut value = serde_json::to_value(config()).unwrap();
+        value["graph"]["limit_ceiling"] = serde_json::json!({"nodes": 1, "future": true});
+        let loaded: FabricConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(loaded.graph, GraphConfig::default());
+        assert!(
+            serde_json::to_value(&loaded).unwrap()["graph"]
+                .get("limit_ceiling")
+                .is_none()
+        );
+        assert_eq!(LIMIT_CEILING_WARNING.lines().count(), 1);
+        assert!(LIMIT_CEILING_WARNING.contains("deprecated and ignored"));
+
+        for pointer in ["graph", "limits", "peers"] {
+            let mut unknown = value.clone();
+            unknown[pointer]["unexpected"] = serde_json::json!({"nodes": 1});
+            assert!(serde_json::from_value::<FabricConfig>(unknown).is_err());
+        }
+        value["graph"]["limits"]["unexpected"] = true.into();
+        assert!(serde_json::from_value::<FabricConfig>(value).is_err());
+    }
+
+    #[test]
     fn graph_policy_defaults_and_validation() {
         let mut config = config();
         assert_eq!(config.graph.limits.nodes, 512);
@@ -572,7 +616,7 @@ mod tests {
         inputs.state_dir = Some("/fixture/state".into());
         let roots = inputs.resolve(&Resolver).unwrap();
         let sections = provenant_config::DomainSections::<Domains>::new(&[SECTION]);
-        let text = b"schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 10\nedges = 20\n";
+        let text = b"schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 10\nedges = 20\n[domains.fabric.graph.limit_ceiling]\nnodes = 1\n";
         let config =
             provenant_config::load_with_domains(&roots, Some(&text[..]), &sections).unwrap();
         assert_eq!(config.domains.fabric.graph.limits.nodes, 10);

@@ -37,6 +37,7 @@ impl ChairIndex {
         call: &Request<'_>,
     ) -> Result<(), Error> {
         let value = RunChair {
+            extra: Default::default(),
             request_digest: proposal.digest()?,
             chair: proposal.chair.clone(),
         };
@@ -68,6 +69,7 @@ impl ChairIndex {
             project,
             run,
             &RunChair {
+                extra: Default::default(),
                 request_digest: proposal.digest()?,
                 chair,
             },

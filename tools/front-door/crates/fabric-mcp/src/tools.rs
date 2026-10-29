@@ -815,6 +815,7 @@ impl ToolCall {
                         break response(
                             tool_name,
                             provenant_fabric_runtime::coordination::EventsResult::Read {
+                                extra: Default::default(),
                                 page,
                                 cursor,
                                 timed_out,

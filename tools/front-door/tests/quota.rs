@@ -688,6 +688,7 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
         }
         let mut record = AccountRecord::empty(known[0].clone());
         record.refusals.push(Refusal {
+            extra: Default::default(),
             account: known[0].clone(),
             model: "fixture-model".into(),
             pool: None,

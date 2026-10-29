@@ -586,9 +586,7 @@ pub(super) fn settle(
             }
         }
         let (plan, positions) = validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
-        if let Some(reason) =
-            structural_limit_reason(&preview, &plan, limits, &checkpoint.extensions)
-        {
+        if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
             return Err(reason);
         }
         Ok((addition, plan, positions, preview))

@@ -167,6 +167,7 @@ impl Store {
             after,
         ])?;
         let mut batch = Page {
+            extra: Default::default(),
             items: Vec::new(),
             truncated: false,
         };
@@ -227,6 +228,7 @@ impl Store {
                 batch.truncated = true;
                 if tolerate_invalid {
                     let single = Page {
+                        extra: Default::default(),
                         items: vec![candidate],
                         truncated: false,
                     };

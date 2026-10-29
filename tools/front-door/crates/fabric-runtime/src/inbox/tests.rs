@@ -143,7 +143,7 @@ fn offer_until_ack_repeats_after_restart_stops_after_ack_and_preserves_overflow(
     assert_eq!(again.items[0].delivery.attempts, 2);
     assert_eq!(again.items[0].answer, first.items[0].answer);
     for saved in &pending {
-        let InboxResult::Item { item } = f.call(show(saved.request_id)).unwrap() else {
+        let InboxResult::Item { item, .. } = f.call(show(saved.request_id)).unwrap() else {
             panic!("item")
         };
         if item.answer.as_ref().unwrap().id != first.items[0].answer.id {
@@ -228,7 +228,7 @@ fn offer_until_ack_rejects_unregistered_and_wrong_targets_without_mutation() {
         "conflict"
     );
     f.identity = original;
-    let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(item.delivery.unwrap().state, AnswerDeliveryState::Queued);
@@ -260,7 +260,7 @@ fn offer_until_ack_byte_budget_counts_serialised_envelope_and_leaves_answer_queu
     let tiny = offer(&f, "session-a", 50, 128).unwrap();
     assert!(tiny.items.is_empty());
     assert!(tiny.truncated);
-    let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(item.delivery.unwrap().state, AnswerDeliveryState::Queued);
@@ -368,7 +368,7 @@ fn offer_until_ack_rebind_never_transfers_old_answers() {
             .code(),
         "conflict"
     );
-    let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(item.delivery.unwrap().state, AnswerDeliveryState::Queued);
@@ -493,7 +493,7 @@ fn inbox_request_and_answer_replay_survive_restart() {
         receipt(f.call(answer(created.request_id, "resolve")).unwrap()),
         resolved
     );
-    let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(item.history.len(), 2);
@@ -558,7 +558,7 @@ fn inbox_all_kinds_preserve_text_and_reject_stale_or_invalid_answers() {
             *operation_id = op(&format!("stale-{action:?}"));
         }
         assert_eq!(f.call(input).unwrap_err().code(), "conflict");
-        let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+        let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
             panic!("item")
         };
         assert_eq!(
@@ -676,7 +676,7 @@ fn inbox_fabric_mail_is_correlated_and_read_cursor_does_not_acknowledge() {
             &request,
         )
         .unwrap();
-    let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(item.delivery.unwrap().state, AnswerDeliveryState::Queued);
@@ -731,7 +731,7 @@ fn inbox_concurrent_answers_have_one_winner_and_one_mail() {
             .len(),
         1
     );
-    let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(item.history.len(), 2);
@@ -753,7 +753,7 @@ fn inbox_close_preserves_the_answer_and_history_and_replays() {
     let closed = receipt(f.call(input.clone()).unwrap());
     assert_eq!(closed.state, RequestState::Superseded);
     assert_eq!(receipt(f.call(input).unwrap()), closed);
-    let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(item.history.len(), 3);
@@ -905,7 +905,7 @@ fn request_correlation_saves_exact_coverage_once_and_requires_host_lookup() {
             continue;
         }
         let saved = receipt(result.unwrap());
-        let InboxResult::Item { item } = f.call(show(saved.request_id)).unwrap() else {
+        let InboxResult::Item { item, .. } = f.call(show(saved.request_id)).unwrap() else {
             panic!("item")
         };
         assert_eq!(saved.work_coverage, Some(coverage));
@@ -963,7 +963,7 @@ fn request_correlation_v2_survives_answer_close_and_acknowledgement() {
             .unwrap(),
     );
     let check = |history_len| {
-        let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+        let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
             panic!("item")
         };
         assert_eq!(item.history.len(), history_len);
@@ -1074,7 +1074,7 @@ fn request_correlation_lookup_never_holds_fabric_write_lock() {
 fn request_correlation_legacy_records_keep_v1_wire_shape_and_answer() {
     let f = Fixture::new();
     let saved = receipt(f.call(ask(RequestKind::Decision, "legacy")).unwrap());
-    let InboxResult::Item { item } = f.call(show(saved.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(saved.request_id)).unwrap() else {
         panic!("item")
     };
     let mut old = serde_json::to_value(&item.request).unwrap();
@@ -1086,7 +1086,7 @@ fn request_correlation_legacy_records_keep_v1_wire_shape_and_answer() {
         db.execute(&format!("UPDATE {table} SET record=?1"), [&bytes])
             .unwrap();
     }
-    let InboxResult::Item { item } = f.call(show(saved.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(saved.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(serde_json::to_value(&item.request).unwrap(), old);
@@ -1098,7 +1098,7 @@ fn request_correlation_legacy_records_keep_v1_wire_shape_and_answer() {
     };
     assert_eq!(items, vec![item.request]);
     f.call(answer(saved.request_id, "legacy-answer")).unwrap();
-    let InboxResult::Item { item } = f.call(show(saved.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(saved.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(item.request.schema_version, 1);
@@ -1148,7 +1148,7 @@ fn replacement(id: HumanRequestId, revision: u64, operation: &str) -> InboxInput
 }
 fn item(f: &Fixture, id: HumanRequestId) -> InboxItem {
     match f.call(show(id)).unwrap() {
-        InboxResult::Item { item } => *item,
+        InboxResult::Item { item, .. } => *item,
         _ => panic!("item"),
     }
 }

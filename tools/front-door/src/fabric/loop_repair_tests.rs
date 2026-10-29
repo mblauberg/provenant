@@ -301,7 +301,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
     )?;
     assert_eq!(owner.loop_decision(scope)?, Some(LoopDecision::Accept));
     owner.close_loop_ask(scope)?;
-    let InboxResult::Item { item } = service.execute(
+    let InboxResult::Item { item, .. } = service.execute(
         InboxInput::List {extra: Default::default(),
             id: Some(ask.id),
             session: None,

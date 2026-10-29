@@ -718,6 +718,7 @@ pub enum JournalError {
 /// Safe, atomic checkpoint file journal. The held owner lock fences concurrent
 /// graph writers; all filesystem access after open is descriptor-relative.
 pub struct FileJournal {
+    /// Envelope extensions sit outside the checkpoint digest.
     extra: provenant_records::ExtraFields,
     graph_id: String,
     directory: Directory,
@@ -1106,6 +1107,7 @@ fn load_checkpoint(
 
 #[derive(Serialize, Deserialize)]
 struct StoredCheckpoint {
+    /// Envelope extensions sit outside the checkpoint digest.
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     schema_version: u64,
@@ -1366,7 +1368,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
     let mut effective_budget = budget.clone();
-    let effective_limits = limits.clone();
     for (extension, replay) in
         checkpoint
             .extensions
@@ -1425,12 +1426,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 .map_err(GraphError::Invalid)?;
             let (preview_plan, _) =
                 validate_flat_plan(&preview, &unbounded).map_err(GraphError::Invalid)?;
-            if let Some(reason) = structural_limit_reason(
-                &preview,
-                &preview_plan,
-                &effective_limits,
-                &prospective.extensions,
-            ) {
+            if let Some(reason) = structural_limit_reason(&preview, &preview_plan, limits) {
                 for extension in extensions.iter().filter(|e| e.starts_with("loop.")) {
                     let name = extension
                         .strip_prefix("loop.")
@@ -1481,7 +1477,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     }
 
     'schedule: loop {
-        plans::remaining(&mut checkpoint, &expanded, &effective_limits);
+        plans::remaining(&mut checkpoint, &expanded, limits);
         for node in &plan.nodes {
             if (!checkpoint.cancelled || resume)
                 && checkpoint
@@ -1489,7 +1485,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .iter()
                     .any(|n| n.id == node.id && (n.handoff.is_some() || n.fragment.is_some()))
                 && let Some((next_expanded, next_plan, next_positions)) =
-                    plans::settle(node, &expanded, &mut checkpoint, None, &effective_limits)
+                    plans::settle(node, &expanded, &mut checkpoint, None, limits)
             {
                 validate_expanded_rows(&checkpoint, &next_plan)?;
                 owner
@@ -1511,7 +1507,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         let structural_pause = if checkpoint.nodes.iter().all(|node| node.state.settled()) {
             None
         } else {
-            structural_limit_reason(&expanded, &plan, &effective_limits, &checkpoint.extensions)
+            structural_limit_reason(&expanded, &plan, limits)
         };
         if let Some(reason) = &structural_pause {
             checkpoint.pause_reason = Some(reason.clone());
@@ -1563,12 +1559,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         journal,
                     )?
                 {
-                    if let Err(reason) = loops::prepare_decision_extension(
-                        document,
-                        &checkpoint,
-                        &extension,
-                        &effective_limits,
-                    ) {
+                    if let Err(reason) =
+                        loops::prepare_decision_extension(document, &checkpoint, &extension, limits)
+                    {
                         for ask in &mut checkpoint.nodes[node_index].loop_asks {
                             ask.resolved = true;
                         }
@@ -1740,7 +1733,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .last()
                     .is_none_or(|last| last.state == AttemptState::Terminal);
                 if needs_record {
-                    let cap = effective_limits.node_prompt_bytes;
+                    let cap = limits.node_prompt_bytes;
                     if node.access == AccessMode::WorktreeWrite
                         && checkpoint.nodes.iter().enumerate().any(|(index, other)| {
                             index != node_index
@@ -1752,7 +1745,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     {
                         break;
                     }
-                    if effective_limits.concurrency.is_some_and(|cap| {
+                    if limits.concurrency.is_some_and(|cap| {
                         checkpoint
                             .nodes
                             .iter()
@@ -1827,7 +1820,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .attempts
                     .last()
                     .and_then(|attempt| attempt.input_cap)
-                    .unwrap_or(effective_limits.node_prompt_bytes);
+                    .unwrap_or(limits.node_prompt_bytes);
                 let prompt = render_input(node, &checkpoint, &positions, input_cap).0;
                 let observation = owner
                     .observe_or_start(
@@ -1981,7 +1974,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         &expanded,
                         &mut checkpoint,
                         settled_result.as_ref(),
-                        &effective_limits,
+                        limits,
                     )
                 } else {
                     None
@@ -2176,7 +2169,6 @@ fn structural_limit_reason(
     document: &GraphDocument,
     plan: &PlannedGraph,
     limits: &crate::config::GraphLimits,
-    _extensions: &[String],
 ) -> Option<String> {
     let check = |key: &str, actual: usize, max: usize| {
         let source = "domains.fabric.graph.limits";

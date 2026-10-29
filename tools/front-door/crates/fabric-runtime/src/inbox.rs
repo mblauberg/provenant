@@ -177,6 +177,8 @@ impl From<InboxCursor> for String {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InboxReceipt {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub operation_id: OperationId,
     pub request_id: HumanRequestId,
     pub revision: u64,
@@ -195,9 +197,13 @@ pub enum InboxResult {
         receipt: InboxReceipt,
     },
     Item {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         item: Box<InboxItem>,
     },
     Listed {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         items: Vec<HumanRequest>,
         next_cursor: Option<InboxCursor>,
         truncated: bool,
@@ -209,8 +215,17 @@ pub enum InboxResult {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum InboxReply {
-    Ok { result: Box<InboxResult> },
-    Error { code: String, message: String },
+    Ok {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        result: Box<InboxResult>,
+    },
+    Error {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        code: String,
+        message: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -732,6 +747,7 @@ impl<'a> InboxService<'a> {
     ) -> Result<InboxResult, InboxError> {
         if let Some(id) = id {
             return Ok(InboxResult::Item {
+                extra: Default::default(),
                 item: Box::new(self.store.human_item(self.identity.project, id, request)?),
             });
         }
@@ -781,6 +797,7 @@ impl<'a> InboxService<'a> {
             None
         };
         Ok(InboxResult::Listed {
+            extra: Default::default(),
             items: page.items,
             next_cursor,
             truncated: page.truncated,
@@ -898,6 +915,7 @@ impl<'a> InboxService<'a> {
                 offered.attempts = u64::MAX;
                 offered.last_attempt_at = Some(timestamp);
                 let page = provenant_fabric_store::Page {
+                    extra: Default::default(),
                     items: vec![AnswerOffer {
                         extra: Default::default(),
                         answer: answer.clone(),
@@ -915,6 +933,7 @@ impl<'a> InboxService<'a> {
                 }
                 let body=serde_json::to_string(&serde_json::json!({"schema_version":1,"kind":"human_answer","request_id":id,"target_host":value.owner_host,"target_session":value.chair_session_id,"target_actor":value.chair_actor,"answer":answer,"authority":"This answer is scoped to its request; it is not a review receipt or new authority. Acknowledge this answer ID after consuming it once."})).map_err(CoordinationError::ResponseEncoding)?;
                 let message = provenant_fabric_store::Message {
+                    extra: Default::default(),
                     header: RecordHeader::V1,
                     project: self.identity.project,
                     id: delivery.message_id,
@@ -983,6 +1002,7 @@ impl<'a> InboxService<'a> {
         };
         Ok(InboxResult::Saved {
             receipt: InboxReceipt {
+                extra: Default::default(),
                 operation_id: operation.clone(),
                 request_id: value.id,
                 revision: value.revision,

@@ -191,41 +191,102 @@ impl CoordinationInput {
             ));
         }
         match self {
-            Self::Mail { input: v, .. } => service
-                .mail(v.clone(), budget, cancel)
-                .map(CoordinationResult::Mail),
-            Self::Task { input: v, .. } => service
-                .task(v.clone(), budget, cancel)
-                .map(CoordinationResult::Task),
-            Self::Events { input: v, .. } => service
-                .events(v.clone(), budget, cancel)
-                .map(CoordinationResult::Events),
-            Self::Claim { input: v, .. } => service
-                .claim(v.clone(), budget, cancel)
-                .map(CoordinationResult::Claim),
-            Self::Landing { input: v, .. } => service
-                .landing(v.clone(), budget, cancel)
-                .map(CoordinationResult::Landing),
+            Self::Mail { input: v, .. } => {
+                service
+                    .mail(v.clone(), budget, cancel)
+                    .map(|data| CoordinationResult::Mail {
+                        result: data,
+                        extra: Default::default(),
+                    })
+            }
+            Self::Task { input: v, .. } => {
+                service
+                    .task(v.clone(), budget, cancel)
+                    .map(|data| CoordinationResult::Task {
+                        result: data,
+                        extra: Default::default(),
+                    })
+            }
+            Self::Events { input: v, .. } => {
+                service
+                    .events(v.clone(), budget, cancel)
+                    .map(|data| CoordinationResult::Events {
+                        result: data,
+                        extra: Default::default(),
+                    })
+            }
+            Self::Claim { input: v, .. } => {
+                service
+                    .claim(v.clone(), budget, cancel)
+                    .map(|data| CoordinationResult::Claim {
+                        result: data,
+                        extra: Default::default(),
+                    })
+            }
+            Self::Landing { input: v, .. } => {
+                service
+                    .landing(v.clone(), budget, cancel)
+                    .map(|data| CoordinationResult::Landing {
+                        result: data,
+                        extra: Default::default(),
+                    })
+            }
         }
     }
 }
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "domain", content = "result", rename_all = "snake_case")]
+// Struct variants retain extensions without changing the domain/result wire shape.
+#[serde(tag = "domain", rename_all = "snake_case")]
 pub enum CoordinationResult {
-    Mail(MailResult),
-    Task(TaskResult),
-    Events(EventsResult),
-    Claim(ClaimResult),
-    Landing(LandingResult),
+    Mail {
+        result: MailResult,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    Task {
+        result: TaskResult,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    Events {
+        result: EventsResult,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    Claim {
+        result: ClaimResult,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    Landing {
+        result: LandingResult,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
 }
 impl From<MutationResult> for CoordinationResult {
     fn from(value: MutationResult) -> Self {
         match value {
-            MutationResult::Mail(v) => Self::Mail(v),
-            MutationResult::Task(v) => Self::Task(v),
-            MutationResult::Events(v) => Self::Events(v),
-            MutationResult::Claim(v) => Self::Claim(v),
-            MutationResult::Landing(v) => Self::Landing(v),
+            MutationResult::Mail(v) => Self::Mail {
+                result: v,
+                extra: Default::default(),
+            },
+            MutationResult::Task(v) => Self::Task {
+                result: v,
+                extra: Default::default(),
+            },
+            MutationResult::Events(v) => Self::Events {
+                result: v,
+                extra: Default::default(),
+            },
+            MutationResult::Claim(v) => Self::Claim {
+                result: v,
+                extra: Default::default(),
+            },
+            MutationResult::Landing(v) => Self::Landing {
+                result: v,
+                extra: Default::default(),
+            },
         }
     }
 }
@@ -444,34 +505,97 @@ pub struct HostHealth {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerHealth {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub host: HostId,
     pub available: bool,
     /// Readiness requires the run owner; config presence alone proves nothing.
     pub execution: Option<bool>,
 }
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "result", content = "data", rename_all = "snake_case")]
+// Internally tagged struct variants keep the existing result/data wire shape
+// while retaining extensions on the result envelope as well as its payload.
+#[serde(tag = "result", rename_all = "snake_case")]
 pub enum PeerResult {
-    Inbox(crate::inbox::InboxReply),
-    Run(Box<crate::runs::RunResult>),
-    RunStatuses(
-        #[serde(with = "crate::runs::attempts_wire")] Vec<provenant_records::run::AttemptRecord>,
-    ),
-    LaneWaits(Vec<provenant_records::run::LaneWait>),
-    Submitted(crate::runs::SubmissionReceipt),
-    Output(crate::coordination::facade::OutputResult),
-    RunEvents(crate::runs::RunEventsPage),
-    Push(provenant_fabric_store::PushOperation),
-    Health(PeerHealth),
-    Console(serde_json::Value),
-    Coordination(CoordinationResult),
-    SessionHandoff(crate::handoff::HandoffReceipt),
+    Inbox {
+        data: crate::inbox::InboxReply,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    Run {
+        data: Box<crate::runs::RunResult>,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    RunStatuses {
+        #[serde(with = "crate::runs::attempts_wire")]
+        data: Vec<provenant_records::run::AttemptRecord>,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    LaneWaits {
+        data: Vec<provenant_records::run::LaneWait>,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    Submitted {
+        data: crate::runs::SubmissionReceipt,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    Output {
+        data: crate::coordination::facade::OutputResult,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    RunEvents {
+        data: crate::runs::RunEventsPage,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    Push {
+        data: provenant_fabric_store::PushOperation,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    Health {
+        data: PeerHealth,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    Console {
+        data: serde_json::Value,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    Coordination {
+        data: CoordinationResult,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    SessionHandoff {
+        data: crate::handoff::HandoffReceipt,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    // Error keeps its data wrapper, including extensions inside it.
     Error {
-        error: facade::FacadeError,
+        data: PeerResultError,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
     },
 }
 #[derive(Debug, Serialize, Deserialize)]
+pub struct PeerResultError {
+    pub error: facade::FacadeError,
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PeerResponse<R = PeerResult> {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub version: u64,
     #[serde(default = "baseline_protocol")]
     pub protocol: u64,
@@ -499,12 +623,17 @@ pub fn protocol_refusal(bytes: &[u8]) -> Result<Option<PeerResponse>, PeerError>
         PROTOCOL
     };
     Ok((request.protocol != expected).then_some(PeerResponse {
+        extra: Default::default(),
         version: 1,
         protocol: expected,
         host: request.target_host,
         project: request.project.key,
         result: PeerResult::Error {
-            error: facade::FacadeError::PeerVersion,
+            data: crate::hosts::PeerResultError {
+                extra: Default::default(),
+                error: facade::FacadeError::PeerVersion,
+            },
+            extra: Default::default(),
         },
     }))
 }
@@ -834,12 +963,13 @@ impl SshTransport<'_> {
         }
         let result = serde_json::from_value(response.result)
             .map_err(|_| uncertain("peer reply is not a valid frame".to_owned()))?;
-        if let PeerResult::Health(health) = &result
+        if let PeerResult::Health { data: health, .. } = &result
             && health.host != peer.host
         {
             return Err(PeerError::Version);
         }
         Ok(PeerResponse {
+            extra: response.extra,
             version: response.version,
             protocol: response.protocol,
             host: response.host,
@@ -882,13 +1012,17 @@ mod tests {
             operation_id: OperationId::parse("typed-error-operation").unwrap(),
         };
         let value = serde_json::to_value(PeerResult::Error {
-            error: error.clone(),
+            data: crate::hosts::PeerResultError {
+                extra: Default::default(),
+                error: error.clone(),
+            },
+            extra: Default::default(),
         })
         .unwrap();
         assert_eq!(value["data"]["error"]["code"], "launch_unknown");
         assert!(matches!(
             serde_json::from_value::<PeerResult>(value).unwrap(),
-            PeerResult::Error { error: actual, .. } if actual == error
+            PeerResult::Error { data: crate::hosts::PeerResultError { error: actual, .. }, .. } if actual == error
         ));
         for error in [
             serde_json::json!({"code": "unknown_error"}),
@@ -901,6 +1035,7 @@ mod tests {
     #[test]
     fn recorded_peer_responses_refuse_retired_protocols() {
         let response = PeerResponse {
+            extra: Default::default(),
             version: 1,
             protocol: PROTOCOL - 1,
             host: HostId::from_bytes([3; 16]),
@@ -945,7 +1080,11 @@ mod tests {
         assert!(matches!(
             response.result,
             PeerResult::Error {
-                error: facade::FacadeError::PeerVersion
+                data: crate::hosts::PeerResultError {
+                    error: facade::FacadeError::PeerVersion,
+                    ..
+                },
+                ..
             }
         ));
     }
@@ -1098,15 +1237,20 @@ mod tests {
             }
             let request = decode_request(options.stdin.unwrap()).unwrap();
             let response = PeerResponse {
+                extra: Default::default(),
                 version: 1,
                 protocol: PROTOCOL,
                 host: request.target_host,
                 project: request.project.key.clone(),
-                result: PeerResult::Health(PeerHealth {
-                    host: request.target_host,
-                    available: true,
-                    execution: None,
-                }),
+                result: PeerResult::Health {
+                    data: PeerHealth {
+                        extra: Default::default(),
+                        host: request.target_host,
+                        available: true,
+                        execution: None,
+                    },
+                    extra: Default::default(),
+                },
             };
             let lose_reply =
                 self.lose_reply && !matches!(request.action, PeerAction::Health { .. });
@@ -1573,6 +1717,7 @@ mod tests {
     #[test]
     fn peer_health_wire_data_omits_local_diagnostics() {
         let health = PeerHealth {
+            extra: Default::default(),
             host: HostId::from_bytes([2; 16]),
             available: true,
             execution: Some(true),
@@ -1586,7 +1731,7 @@ mod tests {
             "data": value,
         }))
         .unwrap();
-        assert!(matches!(result, PeerResult::Health(_)));
+        assert!(matches!(result, PeerResult::Health { .. }));
     }
 
     #[test]
@@ -1622,6 +1767,7 @@ mod tests {
         ] {
             for remote in [1, PROTOCOL + 1] {
                 let response = PeerResponse {
+                    extra: Default::default(),
                     version: 1,
                     protocol: remote,
                     host,

@@ -37,6 +37,8 @@ pub struct LandingRequest {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Landing {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub header: RecordHeader,
     pub project: ProjectId,
     pub id: ClaimId,
@@ -299,6 +301,12 @@ impl Store {
                 token: claim.token,
             };
             let value = Landing {
+                extra: previous
+                    .as_ref()
+                    .filter(|row| !row.bytes.is_empty())
+                    .map(|row| decode::<Landing>(&row.bytes).map(|value| value.extra))
+                    .transpose()?
+                    .unwrap_or_default(),
                 header: RecordHeader::V1,
                 project: claim.project,
                 id,

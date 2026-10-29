@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 /// idempotency key; targets identify the attempts accepted by the owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubmissionReceipt {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub operation_id: OperationId,
     pub targets: Vec<AttemptTarget>,
     /// The writer worktree a peer created for this submission.
@@ -19,6 +21,8 @@ pub struct SubmissionReceipt {
 /// Where a peer writer's commits stay when nothing delivers them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerWorktree {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub path: String,
     pub branch: String,
 }
@@ -26,6 +30,8 @@ pub struct PeerWorktree {
 /// A compact listing row. Full execution evidence is available through status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptSummary {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub attempt_id: provenant_core::AttemptId,
     pub run_id: provenant_core::RunId,
     pub task_id: provenant_core::TaskId,
@@ -41,6 +47,7 @@ pub struct AttemptSummary {
 impl From<AttemptRecord> for AttemptSummary {
     fn from(record: AttemptRecord) -> Self {
         Self {
+            extra: record.extra,
             attempt_id: record.attempt_id,
             run_id: record.run_id,
             task_id: record.task_id,
@@ -64,6 +71,8 @@ impl From<AttemptRecord> for AttemptSummary {
 /// only when a caller can continue the same ordered selection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptPage {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub items: Vec<AttemptSummary>,
     pub next_after: Option<AttemptTarget>,
     pub truncated: bool,
@@ -74,13 +83,19 @@ pub struct AttemptPage {
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum RunResult {
     List {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         page: AttemptPage,
     },
     Status {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         #[serde(with = "attempt_wire")]
         attempt: AttemptRecord,
     },
     Wait {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         condition: WaitCondition,
         #[serde(with = "attempts_wire")]
         attempts: Vec<AttemptRecord>,
@@ -88,10 +103,14 @@ pub enum RunResult {
         timed_out: bool,
     },
     Cancel {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         #[serde(with = "attempt_wire")]
         attempt: AttemptRecord,
     },
     Resume {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         #[serde(with = "attempt_wire")]
         attempt: AttemptRecord,
     },
@@ -186,6 +205,8 @@ pub(crate) mod attempts_wire {
 /// a caller should pass as `after` on the next read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunEventsPage {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub items: Vec<RunEvent>,
     pub cursor: u64,
     pub truncated: bool,

@@ -589,6 +589,7 @@ mod zen_tests {
         assert_eq!(derived.with_derived_accounts().entries.len(), 2);
         let mut previous = AccountRecord::empty(zen.clone());
         previous.refusals.push(Refusal {
+            extra: Default::default(),
             account: zen.clone(),
             model: "opencode/beam-free".into(),
             pool: Some("opencode-free".into()),

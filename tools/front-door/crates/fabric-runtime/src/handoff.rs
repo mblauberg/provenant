@@ -49,6 +49,8 @@ pub struct Attachment {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum HandoffReceipt {
     Delivered {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         /// Absolute path of the stored prompt on the target.
         prompt_path: String,
         project: String,
@@ -60,6 +62,8 @@ pub enum HandoffReceipt {
         launch_error: Option<String>,
     },
     Refused {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         code: String,
         message: String,
         /// Registered Claude accounts on the target, for an account refusal.
@@ -68,6 +72,8 @@ pub enum HandoffReceipt {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandoffWorktree {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub branch: String,
     pub path: Option<String>,
     pub head: Option<String>,

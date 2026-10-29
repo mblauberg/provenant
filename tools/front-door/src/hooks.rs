@@ -325,6 +325,7 @@ fn fit_answers(
     commands: &CommandPrefix,
 ) -> Page<AnswerOffer> {
     let mut output = Page {
+        extra: Default::default(),
         items: Vec::new(),
         truncated: page.truncated,
     };
@@ -394,6 +395,7 @@ fn select_answers(
         }
     }
     Ok(Page {
+        extra: Default::default(),
         items: vec![],
         truncated,
     })
@@ -889,6 +891,7 @@ mod answer_delivery_tests {
             .map(|size| offer(&"\"".repeat(size), 1))
             .find(|item| {
                 let page = Page {
+                    extra: Default::default(),
                     items: vec![item.clone()],
                     truncated: false,
                 };
@@ -914,6 +917,7 @@ mod answer_delivery_tests {
         let bytes = answer_output(
             &fit_answers(
                 Page {
+                    extra: Default::default(),
                     items: vec![large, small.clone()],
                     truncated: false,
                 },
@@ -944,6 +948,7 @@ mod answer_delivery_tests {
         assert!(
             answer_output(
                 &Page {
+                    extra: Default::default(),
                     items: vec![],
                     truncated: false
                 },
@@ -956,6 +961,7 @@ mod answer_delivery_tests {
     #[test]
     fn acknowledgement_uses_the_hook_store_or_withholds_unsafe_commands() {
         let page = Page {
+            extra: Default::default(),
             items: vec![offer("Reply", 1)],
             truncated: false,
         };
@@ -1358,6 +1364,7 @@ mod answer_delivery_tests {
             .map(|size| offer(&"\"".repeat(size), 3))
             .find(|item| {
                 let singleton = Page {
+                    extra: Default::default(),
                     items: vec![item.clone()],
                     truncated: false,
                 };
@@ -1496,6 +1503,7 @@ mod answer_delivery_tests {
                     &worker_root,
                     &worker_target,
                     Page {
+                        extra: Default::default(),
                         items: vec![item],
                         truncated: false,
                     },

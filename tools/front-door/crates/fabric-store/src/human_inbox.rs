@@ -113,6 +113,7 @@ impl Store {
             rusqlite::TransactionBehavior::Immediate,
         )?;
         let mut offered = Page {
+            extra: Default::default(),
             items: Vec::new(),
             truncated: candidates.truncated,
         };
@@ -289,6 +290,7 @@ impl Store {
                 MAX_HUMAN_REQUESTS + 1
             ])?;
             let mut batch = Page {
+                extra: Default::default(),
                 items: Vec::new(),
                 truncated: false,
             };
@@ -421,7 +423,7 @@ impl Store {
                 bytes += record.len();
                 items.push(view(value, at));
             }
-            Ok(Page { items, truncated })
+            Ok(Page { extra: Default::default(),  items, truncated })
         })
     }
 

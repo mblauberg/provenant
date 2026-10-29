@@ -116,6 +116,8 @@ impl std::fmt::Debug for ClaimFence {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkClaim {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub header: RecordHeader,
     pub project: ProjectId,
     pub id: ClaimId,
@@ -358,6 +360,12 @@ impl Store {
                 token: claim.token,
             };
             let record = WorkClaim {
+                extra: previous
+                    .as_ref()
+                    .filter(|row| !row.bytes.is_empty())
+                    .map(|row| decode::<WorkClaim>(&row.bytes).map(|value| value.extra))
+                    .transpose()?
+                    .unwrap_or_default(),
                 header: RecordHeader::V1,
                 project: claim.project,
                 id,
@@ -496,7 +504,7 @@ impl Store {
             let mut rows=stmt.query(params![project.to_string(),after.map(|id|id.to_string()),limit,MAX_RECORD_READ_BYTES])?;
             let mut items=Vec::new(); let mut total=0; let mut truncated=false;
             while let Some(row)=rows.next()? { let bytes:Vec<u8>=row.get(0)?; total+=bytes.len(); if total>MAX_PAGE_BYTES {truncated=true;break;} items.push(decode(&bytes)?); }
-            Ok(Page {items,truncated})
+            Ok(Page { extra: Default::default(), items,truncated})
         })
     }
 }

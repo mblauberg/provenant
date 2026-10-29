@@ -5,6 +5,8 @@ use provenant_records::run::ChairBinding;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunChair {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub request_digest: Digest,
     pub chair: Option<ChairBinding>,
 }

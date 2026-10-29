@@ -58,6 +58,87 @@ fn landing(who: u8) -> LandingRequest {
         lease: DurationMicros::from_seconds(1).unwrap(),
     }
 }
+
+#[test]
+fn work_claim_unknown_fields_survive_load_update_and_save() {
+    let mut f = Fixture::new();
+    let store = f.open();
+    let input = work(&f, 3);
+    let fence = store.acquire_claim(&input, &f.request()).unwrap();
+    add_future_member(&store, "claims");
+    assert_future_member(&store.verify_claim(project(), &fence, &f.request()).unwrap());
+    store
+        .renew_claim(
+            project(),
+            &fence,
+            DurationMicros::from_seconds(2).unwrap(),
+            &f.request(),
+        )
+        .unwrap();
+    drop(store);
+    let store = f.open();
+    let saved = store.verify_claim(project(), &fence, &f.request()).unwrap();
+    assert_eq!(
+        saved.expires_at,
+        Some(
+            f.now()
+                .checked_add(DurationMicros::from_seconds(2).unwrap())
+                .unwrap()
+        )
+    );
+    assert_future_member(&saved);
+    // A takeover reconstructs the stored record and must also retain extras.
+    f.clock
+        .advance(DurationMicros::from_seconds(2).unwrap())
+        .unwrap();
+    let next = store.acquire_claim(&work(&f, 4), &f.request()).unwrap();
+    assert_future_member(&store.verify_claim(project(), &next, &f.request()).unwrap());
+}
+
+#[test]
+fn landing_unknown_fields_survive_load_update_and_save() {
+    let mut f = Fixture::new();
+    let store = f.open();
+    let input = landing(3);
+    let guard = store
+        .lock_landing(project(), &input.reference, &f.request())
+        .unwrap();
+    let fence = store.acquire_landing(&guard, &input, &f.request()).unwrap();
+    add_future_member(&store, "claims");
+    assert_future_member(&store.verify_landing(&guard, &fence, &f.request()).unwrap());
+    store
+        .renew_landing(
+            &guard,
+            &fence,
+            DurationMicros::from_seconds(2).unwrap(),
+            &f.request(),
+        )
+        .unwrap();
+    drop(guard);
+    drop(store);
+    let store = f.open();
+    let guard = store
+        .lock_landing(project(), &input.reference, &f.request())
+        .unwrap();
+    let saved = store.verify_landing(&guard, &fence, &f.request()).unwrap();
+    assert_eq!(
+        saved.expires_at,
+        Some(
+            f.now()
+                .checked_add(DurationMicros::from_seconds(2).unwrap())
+                .unwrap()
+        )
+    );
+    assert_future_member(&saved);
+    f.clock
+        .advance(DurationMicros::from_seconds(2).unwrap())
+        .unwrap();
+    let next = store
+        .acquire_landing(&guard, &landing(4), &f.request())
+        .unwrap();
+    assert_future_member(&store.verify_landing(&guard, &next, &f.request()).unwrap());
+}
+
 #[test]
 fn pushing_survives_expiry_and_unknown_until_reconciliation() {
     let mut f = Fixture::new();

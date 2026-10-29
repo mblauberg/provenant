@@ -3087,6 +3087,7 @@ fn capacity_cooldowns_apply_only_to_draws_and_expire() -> Result<(), Box<dyn std
         confinement_ref: "grant",
     }];
     let cooldown = provenant_quota::CapacityCooldown {
+        extra: Default::default(),
         account: provenant_quota::AccountScope {
             adapter: "codex".into(),
             account_key: "opaque-account".into(),
@@ -3141,6 +3142,7 @@ fn capacity_cooldowns_apply_only_to_draws_and_expire() -> Result<(), Box<dyn std
     let both = [
         cooldown,
         provenant_quota::CapacityCooldown {
+            extra: Default::default(),
             account: provenant_quota::AccountScope {
                 adapter: "codex".into(),
                 account_key: "opaque-account".into(),
@@ -3190,6 +3192,7 @@ fn cooling_ready_candidate_beats_unavailable_candidate() -> Result<(), Box<dyn s
         confinement_ref: "grant",
     }];
     let cooldowns = [provenant_quota::CapacityCooldown {
+        extra: Default::default(),
         account: provenant_quota::AccountScope {
             adapter: "codex".into(),
             account_key: "opaque-account".into(),

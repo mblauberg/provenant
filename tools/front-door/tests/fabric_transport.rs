@@ -215,7 +215,7 @@ fn hosts_probe_only_the_requested_page() -> Result {
 }
 
 #[test]
-fn home_events_read_reports_upgrade_refused_for_legacy_import_data() -> Result {
+fn home_events_read_upgrades_after_dropping_legacy_import_data() -> Result {
     let mut rig = TestRig::new()?;
     let identity = federated_identity(&mut rig)?;
     let seeded = rig.command(&[
@@ -230,7 +230,10 @@ fn home_events_read_reports_upgrade_refused_for_legacy_import_data() -> Result {
     assert_eq!(code(&seeded), 0);
     let db = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
     db.execute_batch(
-        "CREATE TABLE imports(source TEXT PRIMARY KEY, project TEXT NOT NULL, \
+        "DROP TABLE viewer_requests; DROP TABLE viewer_summaries; \
+         DROP TABLE run_chairs; DROP TABLE human_answer_outbox; \
+         DROP TABLE human_answers; DROP TABLE human_request_history; DROP TABLE human_requests; \
+         CREATE TABLE imports(source TEXT PRIMARY KEY, project TEXT NOT NULL, \
          legacy_project TEXT NOT NULL, imported_at INTEGER NOT NULL, \
          tasks INTEGER NOT NULL, messages INTEGER NOT NULL, \
          skipped_rows BLOB NOT NULL DEFAULT X'7B7D') STRICT; \
@@ -273,10 +276,10 @@ fn home_events_read_reports_upgrade_refused_for_legacy_import_data() -> Result {
         String::from_utf8_lossy(&output.stderr.bytes)
     );
     let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(
-        response["result"],
-        json!({"result":"error","data":{"error":{"code":"upgrade_refused"}}})
-    );
+    assert_eq!(response["result"]["result"], "coordination", "{response}");
+    let events = &response["result"]["data"]["result"];
+    assert_eq!(events["result"], "read");
+    assert_eq!(events["page"]["items"][0]["record"]["detail"], "seed store");
     rig.assert_legacy_unchanged()
 }
 
@@ -669,7 +672,11 @@ fn peer_frames_a_local_run_event_failure() -> Result {
     assert!(matches!(
         response.result,
         provenant_fabric_runtime::hosts::PeerResult::Error {
-            error: provenant_fabric_runtime::coordination::facade::FacadeError::Io { .. }
+            data: provenant_fabric_runtime::hosts::PeerResultError {
+                error: provenant_fabric_runtime::coordination::facade::FacadeError::Io { .. },
+                ..
+            },
+            ..
         }
     ));
     rig.assert_legacy_unchanged()
@@ -1371,6 +1378,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     let mut status_record = records[0].clone();
     status_record.provider_ms = Some(1234);
     let wire_status = provenant_fabric_runtime::runs::RunResult::Status {
+        extra: Default::default(),
         attempt: status_record.clone(),
     };
     let wire = serde_json::to_value(&wire_status)?;
@@ -1385,11 +1393,15 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     assert!(serde_json::from_value::<provenant_fabric_runtime::runs::RunResult>(retired).is_err());
     assert_eq!(serde_json::to_value(&status_record)?["provider_ms"], 1234);
     let mut response = provenant_fabric_runtime::hosts::PeerResponse {
+        extra: Default::default(),
         version: 1,
         protocol: provenant_fabric_runtime::hosts::PROTOCOL,
         host: remote_host,
         project: project_key,
-        result: provenant_fabric_runtime::hosts::PeerResult::RunStatuses(records),
+        result: provenant_fabric_runtime::hosts::PeerResult::RunStatuses {
+            data: records,
+            extra: Default::default(),
+        },
     };
     let response_path = rig.root.join("ssh-response.json");
     let requests_path = rig.root.join("ssh-requests.jsonl");
@@ -1449,11 +1461,13 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
             .is_some_and(|targets| targets.len() == 2)
     }));
 
-    response.result = provenant_fabric_runtime::hosts::PeerResult::Run(Box::new(
-        provenant_fabric_runtime::runs::RunResult::Status {
+    response.result = provenant_fabric_runtime::hosts::PeerResult::Run {
+        data: Box::new(provenant_fabric_runtime::runs::RunResult::Status {
+            extra: Default::default(),
             attempt: status_record.clone(),
-        },
-    ));
+        }),
+        extra: Default::default(),
+    };
     std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
     let replies = mcp(&rig, &attempts[..2].iter().enumerate().map(|(index, attempt)| json!({
         "jsonrpc":"2.0","id":index+1,"method":"tools/call","params":{
@@ -1473,9 +1487,13 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         ("unrelated", "state_corrupt"),
     ] {
         response.result = provenant_fabric_runtime::hosts::PeerResult::Error {
-            error: provenant_fabric_runtime::coordination::facade::FacadeError::LaunchUnknown {
-                operation_id: OperationId::parse(returned)?,
+            data: provenant_fabric_runtime::hosts::PeerResultError {
+                extra: Default::default(),
+                error: provenant_fabric_runtime::coordination::facade::FacadeError::LaunchUnknown {
+                    operation_id: OperationId::parse(returned)?,
+                },
             },
+            extra: Default::default(),
         };
         std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
         let replies = mcp(
@@ -1501,6 +1519,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         (
             "cancel",
             RunResult::Cancel {
+                extra: Default::default(),
                 attempt: other_attempt,
             },
             Some("state_corrupt"),
@@ -1508,6 +1527,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         (
             "cancel",
             RunResult::Status {
+                extra: Default::default(),
                 attempt: status_record.clone(),
             },
             Some("state_corrupt"),
@@ -1515,6 +1535,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         (
             "cancel",
             RunResult::Cancel {
+                extra: Default::default(),
                 attempt: status_record.clone(),
             },
             None,
@@ -1522,6 +1543,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         (
             "resume",
             RunResult::Status {
+                extra: Default::default(),
                 attempt: resumed.clone(),
             },
             Some("state_corrupt"),
@@ -1529,13 +1551,24 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         (
             "resume",
             RunResult::Resume {
+                extra: Default::default(),
                 attempt: status_record.clone(),
             },
             Some("state_corrupt"),
         ),
-        ("resume", RunResult::Resume { attempt: resumed }, None),
+        (
+            "resume",
+            RunResult::Resume {
+                extra: Default::default(),
+                attempt: resumed,
+            },
+            None,
+        ),
     ] {
-        response.result = PeerResult::Run(Box::new(result));
+        response.result = PeerResult::Run {
+            data: Box::new(result),
+            extra: Default::default(),
+        };
         std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
         let mut arguments = json!({"op":op,"operation_id":format!("local-{op}"),"target":{"host":remote_host.to_string(),"attempt":attempt.to_string()}});
         if op == "resume" {
@@ -1564,6 +1597,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         runs::{PeerWorktree, SubmissionReceipt},
     };
     let receipt = SubmissionReceipt {
+        extra: Default::default(),
         operation_id: OperationId::parse("verified-submit")?,
         targets: vec![AttemptTarget {
             extra: Default::default(),
@@ -1576,6 +1610,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     wrong_id.operation_id = OperationId::parse("unrelated")?;
     let mut unexpected_writer = receipt.clone();
     unexpected_writer.worktree = Some(PeerWorktree {
+        extra: Default::default(),
         path: "peer/worktree".into(),
         branch: "peer/writer".into(),
     });
@@ -1587,7 +1622,10 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         (empty, true),
         (receipt, false),
     ] {
-        response.result = PeerResult::Submitted(returned);
+        response.result = PeerResult::Submitted {
+            data: returned,
+            extra: Default::default(),
+        };
         std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
         let replies = mcp(
             &rig,
@@ -1623,7 +1661,13 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
             "submit: spawn peer",
         ),
     ] {
-        response.result = PeerResult::Error { error };
+        response.result = PeerResult::Error {
+            data: provenant_fabric_runtime::hosts::PeerResultError {
+                error,
+                extra: Default::default(),
+            },
+            extra: Default::default(),
+        };
         std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
         let replies = mcp(
             &rig,
@@ -1659,7 +1703,10 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     // Return valid status records after admission, so a wrong-branch receipt
     // cannot pass this test by failing an unrelated later status request.
     let status_path = rig.root.join("ssh-status.json");
-    response.result = PeerResult::RunStatuses(vec![status_record.clone()]);
+    response.result = PeerResult::RunStatuses {
+        data: vec![status_record.clone()],
+        extra: Default::default(),
+    };
     std::fs::write(&status_path, serde_json::to_vec(&response)?)?;
     std::fs::write(
         &ssh,
@@ -1675,18 +1722,23 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         ("peer/unrelated", Some("STATE_CORRUPT")),
         ("peer/expected", None),
     ] {
-        response.result = PeerResult::Submitted(SubmissionReceipt {
-            operation_id: OperationId::parse("verified-dispatch")?,
-            targets: vec![AttemptTarget {
+        response.result = PeerResult::Submitted {
+            data: SubmissionReceipt {
                 extra: Default::default(),
-                host: Some(remote_host),
-                attempt,
-            }],
-            worktree: Some(PeerWorktree {
-                path: "peer/worktree".into(),
-                branch: branch.into(),
-            }),
-        });
+                operation_id: OperationId::parse("verified-dispatch")?,
+                targets: vec![AttemptTarget {
+                    extra: Default::default(),
+                    host: Some(remote_host),
+                    attempt,
+                }],
+                worktree: Some(PeerWorktree {
+                    extra: Default::default(),
+                    path: "peer/worktree".into(),
+                    branch: branch.into(),
+                }),
+            },
+            extra: Default::default(),
+        };
         std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
         let (status, result) = json_command(
             &rig,
@@ -1794,33 +1846,63 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     let mut wrong_push = push.clone();
     wrong_push.id = OperationId::parse("unrelated")?;
     let replies = [
-        (PeerResult::Push(push), None),
-        (PeerResult::Push(wrong_push), Some("state_corrupt")),
         (
-            PeerResult::Error {
-                error: provenant_fabric_runtime::coordination::facade::FacadeError::Busy,
+            PeerResult::Push {
+                data: push,
+                extra: Default::default(),
             },
-            Some("QUEUE_FULL"),
+            None,
         ),
         (
-            PeerResult::Error {
-                error: provenant_fabric_runtime::coordination::facade::FacadeError::StaleFence,
-            },
-            Some("landing_refused"),
-        ),
-        (
-            PeerResult::Error {
-                error: provenant_fabric_runtime::coordination::facade::FacadeError::LaunchUnknown {
-                    operation_id: OperationId::parse("unrelated")?,
-                },
+            PeerResult::Push {
+                data: wrong_push,
+                extra: Default::default(),
             },
             Some("state_corrupt"),
         ),
         (
             PeerResult::Error {
-                error: provenant_fabric_runtime::coordination::facade::FacadeError::LaunchUnknown {
-                    operation_id: OperationId::parse("landing-local")?,
+                data: provenant_fabric_runtime::hosts::PeerResultError {
+                    extra: Default::default(),
+                    error: provenant_fabric_runtime::coordination::facade::FacadeError::Busy,
                 },
+                extra: Default::default(),
+            },
+            Some("QUEUE_FULL"),
+        ),
+        (
+            PeerResult::Error {
+                data: provenant_fabric_runtime::hosts::PeerResultError {
+                    extra: Default::default(),
+                    error: provenant_fabric_runtime::coordination::facade::FacadeError::StaleFence,
+                },
+                extra: Default::default(),
+            },
+            Some("landing_refused"),
+        ),
+        (
+            PeerResult::Error {
+                data: provenant_fabric_runtime::hosts::PeerResultError {
+                    extra: Default::default(),
+                    error:
+                        provenant_fabric_runtime::coordination::facade::FacadeError::LaunchUnknown {
+                            operation_id: OperationId::parse("unrelated")?,
+                        },
+                },
+                extra: Default::default(),
+            },
+            Some("state_corrupt"),
+        ),
+        (
+            PeerResult::Error {
+                data: provenant_fabric_runtime::hosts::PeerResultError {
+                    extra: Default::default(),
+                    error:
+                        provenant_fabric_runtime::coordination::facade::FacadeError::LaunchUnknown {
+                            operation_id: OperationId::parse("landing-local")?,
+                        },
+                },
+                extra: Default::default(),
             },
             Some("launch_unknown"),
         ),

@@ -825,6 +825,7 @@ mod tests {
         let account = account();
         let mut record = AccountRecord::empty(account.clone());
         record.capacity_cooldowns.push(CapacityCooldown {
+            extra: Default::default(),
             account,
             model: "model".into(),
             observed_unix_seconds: 100,
@@ -1505,6 +1506,7 @@ mod zen_tests {
             .collect();
         let mut records: Vec<_> = accounts.iter().cloned().map(AccountRecord::empty).collect();
         records[1].refusals.push(crate::Refusal {
+            extra: Default::default(),
             account: accounts[1].clone(),
             model: "opencode/beam-free".into(),
             pool: Some("opencode-free".into()),

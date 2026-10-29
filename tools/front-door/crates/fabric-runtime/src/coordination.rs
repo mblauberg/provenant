@@ -144,9 +144,22 @@ bounded_input! {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum MailResult {
-    Sent { id: MessageId },
-    Read { page: Page<Delivery>, cursor: i64 },
-    MarkedRead { cursor: i64 },
+    Sent {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        id: MessageId,
+    },
+    Read {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        page: Page<Delivery>,
+        cursor: i64,
+    },
+    MarkedRead {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        cursor: i64,
+    },
 }
 
 bounded_input! {
@@ -171,12 +184,36 @@ bounded_input! {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum TaskResult {
-    Created { task: Task },
-    Listed { page: Page<Task> },
-    Claimed { proof: TaskProof },
-    Updated { task: Task },
-    Finished { task: Task },
-    Released { task: Task },
+    Created {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        task: Task,
+    },
+    Listed {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        page: Page<Task>,
+    },
+    Claimed {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        proof: TaskProof,
+    },
+    Updated {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        task: Task,
+    },
+    Finished {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        task: Task,
+    },
+    Released {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        task: Task,
+    },
 }
 
 bounded_input! {
@@ -194,6 +231,8 @@ bounded_input! {
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum EventsResult {
     Read {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         page: Page<Event>,
         cursor: i64,
         timed_out: bool,
@@ -203,6 +242,8 @@ pub enum EventsResult {
         run_events_pending: bool,
     },
     Noted {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         seq: i64,
     },
 }
@@ -210,7 +251,9 @@ pub enum EventsResult {
 impl EventsResult {
     pub fn empty_timeout(after: Option<i64>) -> Self {
         Self::Read {
+            extra: Default::default(),
             page: Page {
+                extra: Default::default(),
                 items: vec![],
                 truncated: false,
             },
@@ -229,6 +272,7 @@ fn bounded_page<T: Serialize>(
     truncated: bool,
 ) -> Result<Page<T>, CoordinationError> {
     let mut page = Page {
+        extra: Default::default(),
         items: Vec::with_capacity(items.len()),
         truncated,
     };
@@ -268,11 +312,32 @@ bounded_input! {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum ClaimResult {
-    Acquired { proof: ClaimProof, claim: WorkClaim },
-    Renewed { claim: WorkClaim },
-    Verified { claim: WorkClaim },
-    Released { id: ClaimId },
-    Listed { page: Page<WorkClaim> },
+    Acquired {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        proof: ClaimProof,
+        claim: WorkClaim,
+    },
+    Renewed {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        claim: WorkClaim,
+    },
+    Verified {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        claim: WorkClaim,
+    },
+    Released {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        id: ClaimId,
+    },
+    Listed {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        page: Page<WorkClaim>,
+    },
 }
 
 bounded_input! {
@@ -299,20 +364,30 @@ bounded_input! {
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum LandingResult {
     Acquired {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         proof: LandingProof,
         landing: Landing,
     },
     Renewed {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         landing: Landing,
     },
     Verified {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         landing: Landing,
     },
     Released {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         id: ClaimId,
         reference: String,
     },
     Waited {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         landing: Option<Landing>,
         timed_out: bool,
     },
@@ -556,6 +631,7 @@ impl CoordinationApi for LocalCoordination<'_> {
             } => {
                 let id = MessageId::from_bytes(Self::new_id_bytes()?);
                 let message = Message {
+                    extra: Default::default(),
                     header: RecordHeader::V1,
                     project: self.project,
                     id,
@@ -570,7 +646,10 @@ impl CoordinationApi for LocalCoordination<'_> {
                     created_at: self.clock.wall_now()?,
                 };
                 self.store.send(&message, &request)?;
-                Ok(MailResult::Sent { id })
+                Ok(MailResult::Sent {
+                    extra: Default::default(),
+                    id,
+                })
             }
             MailInput::Read { after, limit, .. } => {
                 let prior_cursor = self.store.mail_cursor(self.project, self.actor, &request)?;
@@ -583,13 +662,20 @@ impl CoordinationApi for LocalCoordination<'_> {
                     .last()
                     .map(|delivery| delivery.seq)
                     .unwrap_or_else(|| after.unwrap_or(prior_cursor));
-                Ok(MailResult::Read { page, cursor })
+                Ok(MailResult::Read {
+                    extra: Default::default(),
+                    page,
+                    cursor,
+                })
             }
             MailInput::MarkRead { through, .. } => {
                 self.store
                     .mark_mail_read(self.project, self.actor, through, &request)?;
                 let cursor = self.store.mail_cursor(self.project, self.actor, &request)?;
-                Ok(MailResult::MarkedRead { cursor })
+                Ok(MailResult::MarkedRead {
+                    extra: Default::default(),
+                    cursor,
+                })
             }
         }
     }
@@ -609,6 +695,7 @@ impl CoordinationApi for LocalCoordination<'_> {
             } => {
                 let now = self.clock.wall_now()?;
                 let task = Task {
+                    extra: Default::default(),
                     header: RecordHeader::V1,
                     project: self.project,
                     id: TaskId::from_bytes(Self::new_id_bytes()?),
@@ -622,7 +709,10 @@ impl CoordinationApi for LocalCoordination<'_> {
                     updated_at: now,
                 };
                 self.store.create_task(&task, &request)?;
-                Ok(TaskResult::Created { task })
+                Ok(TaskResult::Created {
+                    extra: Default::default(),
+                    task,
+                })
             }
             TaskInput::List {
                 state,
@@ -634,6 +724,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                     .store
                     .tasks(self.project, state, after, limit, &request)?;
                 Ok(TaskResult::Listed {
+                    extra: Default::default(),
                     page: bounded_page(page.items, page.truncated)?,
                 })
             }
@@ -651,6 +742,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                     &request,
                 )?;
                 Ok(TaskResult::Claimed {
+                    extra: Default::default(),
                     proof: TaskProof {
                         extra: Default::default(),
                         task: fence.task,
@@ -674,20 +766,29 @@ impl CoordinationApi for LocalCoordination<'_> {
                     &request,
                 )?;
                 let task = self.store.task(self.project, proof.task, &request)?;
-                Ok(TaskResult::Updated { task })
+                Ok(TaskResult::Updated {
+                    extra: Default::default(),
+                    task,
+                })
             }
             TaskInput::Finish { proof, state, .. } => {
                 let fence = self.task_fence(&proof);
                 self.store
                     .finish_task(self.project, &fence, state, &request)?;
                 let task = self.store.task(self.project, proof.task, &request)?;
-                Ok(TaskResult::Finished { task })
+                Ok(TaskResult::Finished {
+                    extra: Default::default(),
+                    task,
+                })
             }
             TaskInput::Release { proof, .. } => {
                 let fence = self.task_fence(&proof);
                 self.store.release_task(self.project, &fence, &request)?;
                 let task = self.store.task(self.project, proof.task, &request)?;
-                Ok(TaskResult::Released { task })
+                Ok(TaskResult::Released {
+                    extra: Default::default(),
+                    task,
+                })
             }
         }
     }
@@ -709,7 +810,9 @@ impl CoordinationApi for LocalCoordination<'_> {
                         ..
                     },
                 ) => Ok(EventsResult::Read {
+                    extra: Default::default(),
                     page: Page {
+                        extra: Default::default(),
                         items: Vec::new(),
                         truncated: false,
                     },
@@ -756,6 +859,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                 let page = bounded_page(page.items, page.truncated)?;
                 let cursor = page.items.last().map(|event| event.seq).unwrap_or(start);
                 Ok(EventsResult::Read {
+                    extra: Default::default(),
                     page,
                     cursor,
                     timed_out,
@@ -767,6 +871,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                 note, dedup_key, ..
             } => {
                 let record = EventRecord {
+                    extra: Default::default(),
                     header: RecordHeader::V1,
                     project: self.project,
                     actor: Some(self.actor),
@@ -776,7 +881,10 @@ impl CoordinationApi for LocalCoordination<'_> {
                     at: self.clock.wall_now()?,
                 };
                 let seq = self.store.note(&record, dedup_key.as_deref(), &request)?;
-                Ok(EventsResult::Noted { seq })
+                Ok(EventsResult::Noted {
+                    extra: Default::default(),
+                    seq,
+                })
             }
         }
     }
@@ -810,6 +918,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                 )?;
                 let claim = self.store.verify_claim(self.project, &fence, &request)?;
                 Ok(ClaimResult::Acquired {
+                    extra: Default::default(),
                     proof: self.claim_proof(fence),
                     claim,
                 })
@@ -827,24 +936,36 @@ impl CoordinationApi for LocalCoordination<'_> {
                     &request,
                 )?;
                 let claim = self.store.verify_claim(self.project, &fence, &request)?;
-                Ok(ClaimResult::Renewed { claim })
+                Ok(ClaimResult::Renewed {
+                    extra: Default::default(),
+                    claim,
+                })
             }
             ClaimInput::Verify { proof, .. } => {
                 let claim =
                     self.store
                         .verify_claim(self.project, &self.claim_fence(&proof), &request)?;
-                Ok(ClaimResult::Verified { claim })
+                Ok(ClaimResult::Verified {
+                    extra: Default::default(),
+                    claim,
+                })
             }
             ClaimInput::Release { proof, .. } => {
                 let id = proof.id;
                 self.store
                     .release_claim(self.project, &self.claim_fence(&proof), &request)?;
-                Ok(ClaimResult::Released { id })
+                Ok(ClaimResult::Released {
+                    extra: Default::default(),
+                    id,
+                })
             }
             ClaimInput::List { after, limit, .. } => {
                 let page = self.store.claims(self.project, after, limit, &request)?;
                 let page = bounded_page(page.items, page.truncated)?;
-                Ok(ClaimResult::Listed { page })
+                Ok(ClaimResult::Listed {
+                    extra: Default::default(),
+                    page,
+                })
             }
         }
     }
@@ -860,6 +981,7 @@ impl CoordinationApi for LocalCoordination<'_> {
             return match (&error, &input) {
                 (CoordinationError::Timeout, LandingInput::Wait { .. }) => {
                     Ok(LandingResult::Waited {
+                        extra: Default::default(),
                         landing: None,
                         timed_out: true,
                     })
@@ -884,6 +1006,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                     }
                     if poll_budget.remaining(self.clock.mono_now()).as_micros() == 0 {
                         return Ok(LandingResult::Waited {
+                            extra: Default::default(),
                             landing: current,
                             timed_out: true,
                         });
@@ -901,6 +1024,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                     });
                     if changed {
                         return Ok(LandingResult::Waited {
+                            extra: Default::default(),
                             landing: current,
                             timed_out: false,
                         });
@@ -949,6 +1073,7 @@ impl LocalCoordination<'_> {
                 )?;
                 let landing = self.store.verify_landing(guard, &fence, request)?;
                 Ok(LandingResult::Acquired {
+                    extra: Default::default(),
                     proof: self.landing_proof(reference, fence),
                     landing,
                 })
@@ -966,19 +1091,26 @@ impl LocalCoordination<'_> {
                     request,
                 )?;
                 let landing = self.store.verify_landing(guard, &fence, request)?;
-                Ok(LandingResult::Renewed { landing })
+                Ok(LandingResult::Renewed {
+                    extra: Default::default(),
+                    landing,
+                })
             }
             LandingInput::Verify { proof, .. } => {
                 let landing =
                     self.store
                         .verify_landing(guard, &self.landing_fence(&proof), request)?;
-                Ok(LandingResult::Verified { landing })
+                Ok(LandingResult::Verified {
+                    extra: Default::default(),
+                    landing,
+                })
             }
             LandingInput::Release { proof, .. } => {
                 let id = proof.id;
                 self.store
                     .release_landing(guard, &self.landing_fence(&proof), request)?;
                 Ok(LandingResult::Released {
+                    extra: Default::default(),
                     id,
                     reference: proof.reference,
                 })
@@ -1078,6 +1210,7 @@ pub enum Mutation {
     Claim(ClaimInput),
     Landing(LandingInput),
 }
+// Untagged wrappers add no object layer; their inner result retains extensions.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum MutationResult {
@@ -1290,7 +1423,7 @@ mod tests {
         )
         .expect("open service");
 
-        let TaskResult::Created { task } = service
+        let TaskResult::Created { task, .. } = service
             .task(
                 TaskInput::Create {
                     extra: Default::default(),
@@ -1353,7 +1486,7 @@ mod tests {
         let fixture = Fixture::new();
         let service = fixture.service();
         let cancel = CancelToken::new();
-        let MailResult::Sent { id } = service
+        let MailResult::Sent { id, .. } = service
             .mail(
                 MailInput::Send {
                     extra: Default::default(),
@@ -1371,7 +1504,7 @@ mod tests {
         else {
             panic!("send result")
         };
-        let MailResult::Read { page, cursor } = service
+        let MailResult::Read { page, cursor, .. } = service
             .mail(
                 MailInput::Read {
                     extra: Default::default(),
@@ -1391,7 +1524,7 @@ mod tests {
         assert_eq!(page.items[0].message.sender, fixture.actor);
         assert!(cursor > 0);
 
-        let EventsResult::Noted { seq } = service
+        let EventsResult::Noted { seq, .. } = service
             .events(
                 EventsInput::Note {
                     extra: Default::default(),
@@ -1472,7 +1605,7 @@ mod tests {
         let fixture = Fixture::new();
         let service = fixture.service();
         let cancel = CancelToken::new();
-        let TaskResult::Created { task } = service
+        let TaskResult::Created { task, .. } = service
             .task(
                 TaskInput::Create {
                     extra: Default::default(),
@@ -1486,7 +1619,7 @@ mod tests {
         else {
             panic!("create result")
         };
-        let TaskResult::Claimed { proof } = service
+        let TaskResult::Claimed { proof, .. } = service
             .task(
                 TaskInput::Claim {
                     extra: Default::default(),
@@ -1500,7 +1633,7 @@ mod tests {
         else {
             panic!("claim result")
         };
-        let TaskResult::Updated { task: updated } = service
+        let TaskResult::Updated { task: updated, .. } = service
             .task(
                 TaskInput::Update {
                     extra: Default::default(),
@@ -1552,7 +1685,7 @@ mod tests {
         let fixture = Fixture::new();
         let service = fixture.service();
         let cancel = CancelToken::new();
-        let ClaimResult::Acquired { proof, claim } = service
+        let ClaimResult::Acquired { proof, claim, .. } = service
             .claim(
                 ClaimInput::Acquire {
                     extra: Default::default(),
@@ -1593,7 +1726,7 @@ mod tests {
             Ok(ClaimResult::Released { .. })
         ));
 
-        let LandingResult::Acquired { proof, landing } = service
+        let LandingResult::Acquired { proof, landing, .. } = service
             .landing(
                 LandingInput::Acquire {
                     extra: Default::default(),
@@ -1625,7 +1758,8 @@ mod tests {
             ),
             Ok(LandingResult::Waited {
                 landing: Some(_),
-                timed_out: false
+                timed_out: false,
+                ..
             })
         ));
         assert!(matches!(
@@ -1690,6 +1824,7 @@ mod tests {
             Ok(LandingResult::Waited {
                 landing: Some(_),
                 timed_out: false,
+                ..
             })
         ));
     }

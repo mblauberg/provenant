@@ -314,7 +314,10 @@ impl Context {
             .map_err(|error| peer_failure(&peer.destination, &error))?
             .result
         {
-            PeerResult::Error { error } => {
+            PeerResult::Error {
+                data: provenant_fabric_runtime::hosts::PeerResultError { error, .. },
+                ..
+            } => {
                 // An uncertain launch must name this locally frozen request.
                 if let FacadeError::LaunchUnknown {
                     operation_id: returned,

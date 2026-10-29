@@ -66,8 +66,9 @@ pub(super) struct Batch {
 
 /// Where a run lives. The peer owns everything else about it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct Placement {
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
     schema_version: u64,
     host: HostId,
     project: CrossHostProjectKey,
@@ -76,8 +77,9 @@ pub(super) struct Placement {
     attempts: Vec<Placed>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Placed {
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
     task_id: TaskId,
     attempt_id: AttemptId,
 }
@@ -187,6 +189,7 @@ fn read(directory: &Directory, name: &str, run: RunId) -> Result<Placement, Fail
 fn save(roots: &Roots, placement: &Placement) -> Result<(), Fail> {
     let directory = directory(roots)?;
     let name = format!("{}.json", placement.run_id);
+    let mut placement = placement.clone();
     if directory.metadata_at(OsStr::new(&name), false).is_ok() {
         let existing = read(&directory, &name, placement.run_id)?;
         if (existing.host, &existing.project, &existing.operation_id)
@@ -198,8 +201,23 @@ fn save(roots: &Roots, placement: &Placement) -> Result<(), Fail> {
                 "another placement already names this run",
             ));
         }
+        for (key, value) in existing.extra {
+            placement.extra.entry(key).or_insert(value);
+        }
+        for placed in &mut placement.attempts {
+            if let Some(previous) = existing.attempts.iter().find(|previous| {
+                previous.task_id == placed.task_id && previous.attempt_id == placed.attempt_id
+            }) {
+                for (key, value) in &previous.extra {
+                    placed
+                        .extra
+                        .entry(key.clone())
+                        .or_insert_with(|| value.clone());
+                }
+            }
+        }
     }
-    let bytes = serde_json::to_vec(placement).map_err(io_fail)?;
+    let bytes = serde_json::to_vec(&placement).map_err(io_fail)?;
     directory
         .atomic_write(
             OsStr::new(&name),
@@ -469,7 +487,10 @@ fn read_records(
                     host: Some(host),
                 })
                 .collect();
-            let PeerResult::RunStatuses(page) = call(
+            let PeerResult::RunStatuses {
+                data: page,
+                extra: _,
+            } = call(
                 host,
                 PeerAction::RunStatuses {
                     extra: Default::default(),
@@ -506,7 +527,10 @@ fn read_newest(
     keep: &dyn Fn(&run::AttemptRecord) -> bool,
     call: &mut Call<'_>,
 ) -> Result<Vec<run::AttemptRecord>, Fail> {
-    let PeerResult::RunStatuses(records) = call(
+    let PeerResult::RunStatuses {
+        data: records,
+        extra: _,
+    } = call(
         host,
         PeerAction::Lanes {
             extra: Default::default(),
@@ -566,7 +590,10 @@ fn fetch_waits(
                     host: Some(host),
                 })
                 .collect();
-            if let Ok(PeerResult::LaneWaits(found)) = call(
+            if let Ok(PeerResult::LaneWaits {
+                data: found,
+                extra: _,
+            }) = call(
                 host,
                 PeerAction::LaneWaits {
                     extra: Default::default(),
@@ -818,7 +845,10 @@ pub(super) fn dispatch(
         knobs: batch.knobs,
         host: None,
     };
-    let PeerResult::Submitted(receipt) = peer.call(
+    let PeerResult::Submitted {
+        data: receipt,
+        extra: _,
+    } = peer.call(
         host,
         PeerAction::Submit {
             extra: Default::default(),
@@ -846,6 +876,7 @@ pub(super) fn dispatch(
     save(
         edge.roots,
         &Placement {
+            extra: Default::default(),
             schema_version: 1,
             host,
             project,
@@ -854,6 +885,7 @@ pub(super) fn dispatch(
             attempts: lanes
                 .iter()
                 .map(|lane| Placed {
+                    extra: Default::default(),
                     task_id: lane.task_id,
                     attempt_id: lane.attempt_id,
                 })
@@ -1096,7 +1128,10 @@ pub(super) fn host_lanes(
         };
         return armed(command, scope, fetch, &|_| id, edge, json, emit);
     }
-    let PeerResult::RunStatuses(records) = peer.call(
+    let PeerResult::RunStatuses {
+        data: records,
+        extra: _,
+    } = peer.call(
         id,
         PeerAction::Lanes {
             extra: Default::default(),
@@ -1160,7 +1195,10 @@ pub(super) fn resolve_prefix(
     let selection = target.selection.as_deref().ok_or_else(corrupt)?;
     let peer = Peer::open(edge)?;
     peer.project()?;
-    let PeerResult::RunStatuses(records) = peer.call(
+    let PeerResult::RunStatuses {
+        data: records,
+        extra: _,
+    } = peer.call(
         host,
         PeerAction::Lanes {
             extra: Default::default(),
@@ -1240,7 +1278,10 @@ fn read_output(
         offset: command.offset,
         max_bytes: command.max_bytes,
     };
-    let PeerResult::Output(chunk) = peer.call(
+    let PeerResult::Output {
+        data: chunk,
+        extra: _,
+    } = peer.call(
         host,
         PeerAction::Output {
             extra: Default::default(),
@@ -1342,8 +1383,13 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
                         input,
                     },
                 ) {
-                    Ok(PeerResult::Run(result)) => match *result {
-                        RunResult::Cancel { attempt: record } if record.attempt_id == *attempt => {
+                    Ok(PeerResult::Run {
+                        data: result,
+                        extra: _,
+                    }) => match *result {
+                        RunResult::Cancel {
+                            attempt: record, ..
+                        } if record.attempt_id == *attempt => {
                             let state = state_name(&record.state);
                             // A live attempt has a stop request, not an exit.
                             let tag = if super::settled(&record.state).0 {
@@ -1445,7 +1491,10 @@ fn collect(
             limit: PEER_LANES,
         };
         match call(*host, action) {
-            Ok(PeerResult::RunStatuses(records)) if records.len() <= usize::from(PEER_LANES) => {
+            Ok(PeerResult::RunStatuses {
+                data: records,
+                extra: _,
+            }) if records.len() <= usize::from(PEER_LANES) => {
                 let before = facts.len();
                 facts.extend(
                     records
@@ -1581,17 +1630,20 @@ mod tests {
                 return Err(corrupt());
             };
             asked.push((host, targets.iter().map(|t| t.attempt).collect::<Vec<_>>()));
-            Ok(PeerResult::LaneWaits(vec![
-                wait(&queued, "launch: not yet handed to a guardian"),
-                wait(&starting, "read-only startup spacing: 1.2 s left of 2.0 s"),
-                // Not asked about, so not believed.
-                run::LaneWait {
-                    extra: Default::default(),
-                    attempt_id: AttemptId::from_bytes([77; 16]),
-                    lane_class: run::LaneClass::Writer,
-                    waiting_for: "stray".into(),
-                },
-            ]))
+            Ok(PeerResult::LaneWaits {
+                data: vec![
+                    wait(&queued, "launch: not yet handed to a guardian"),
+                    wait(&starting, "read-only startup spacing: 1.2 s left of 2.0 s"),
+                    // Not asked about, so not believed.
+                    run::LaneWait {
+                        extra: Default::default(),
+                        attempt_id: AttemptId::from_bytes([77; 16]),
+                        lane_class: run::LaneClass::Writer,
+                        waiting_for: "stray".into(),
+                    },
+                ],
+                extra: Default::default(),
+            })
         });
         assert_eq!(
             asked,
@@ -1725,6 +1777,7 @@ mod tests {
         let attempt = AttemptId::from_bytes([3; 16]);
         let host = HostId::from_bytes([7; 16]);
         let chunk = OutputResult::Chunk {
+            extra: Default::default(),
             target: AttemptTarget {
                 extra: Default::default(),
                 attempt,
@@ -1768,6 +1821,7 @@ mod tests {
     }
     fn placement(operation: &str) -> Result<Placement> {
         Ok(Placement {
+            extra: Default::default(),
             schema_version: 1,
             host: HostId::from_bytes([7; 16]),
             project: serde_json::from_value(json!("project-key"))?,
@@ -1775,10 +1829,12 @@ mod tests {
             run_id: RunId::from_bytes([1; 16]),
             attempts: vec![
                 Placed {
+                    extra: Default::default(),
                     task_id: TaskId::from_bytes([2; 16]),
                     attempt_id: AttemptId::from_bytes([3; 16]),
                 },
                 Placed {
+                    extra: Default::default(),
                     task_id: TaskId::from_bytes([4; 16]),
                     attempt_id: AttemptId::from_bytes([5; 16]),
                 },
@@ -1797,6 +1853,23 @@ mod tests {
         assert_eq!(find(&roots, run).map_err(|f| f.message)?, Some(first));
         let other = save(&roots, &placement("other")?).err().ok_or("conflict")?;
         assert_eq!(other.kind.code(), "CONFLICT");
+        Ok(())
+    }
+
+    #[test]
+    fn placement_refresh_preserves_unknown_envelope_and_attempt_fields() -> Result {
+        let (_scratch, roots) = roots()?;
+        let original = placement("place")?;
+        let mut newer = serde_json::to_value(&original)?;
+        newer["future"] = json!({"nested": [null, true, u64::MAX]});
+        newer["attempts"][0]["future_attempt"] = json!(["keep"]);
+        let decoded: Placement = serde_json::from_value(newer.clone())?;
+        save(&roots, &decoded).map_err(|f| f.message)?;
+        save(&roots, &original).map_err(|f| f.message)?;
+        let refreshed = find(&roots, original.run_id)
+            .map_err(|f| f.message)?
+            .ok_or("missing placement")?;
+        assert_eq!(serde_json::to_value(refreshed)?, newer);
         Ok(())
     }
 
@@ -2061,13 +2134,16 @@ mod tests {
     #[allow(clippy::disallowed_methods)]
     fn answer(action: PeerAction, delay: Duration) -> std::result::Result<PeerResult, Fail> {
         std::thread::sleep(delay);
-        Ok(PeerResult::RunStatuses(match action {
-            PeerAction::RunStatuses { targets, .. } => targets
-                .iter()
-                .map(|target| running(target.attempt.as_bytes()[0]))
-                .collect(),
-            _ => Vec::new(),
-        }))
+        Ok(PeerResult::RunStatuses {
+            data: match action {
+                PeerAction::RunStatuses { targets, .. } => targets
+                    .iter()
+                    .map(|target| running(target.attempt.as_bytes()[0]))
+                    .collect(),
+                _ => Vec::new(),
+            },
+            extra: Default::default(),
+        })
     }
 
     #[test]
@@ -2203,10 +2279,18 @@ mod tests {
             };
             asked.push((host, all, limit));
             match names[&host].as_str() {
-                "alpha" => Ok(PeerResult::RunStatuses(Vec::new())),
+                "alpha" => Ok(PeerResult::RunStatuses {
+                    data: Vec::new(),
+                    extra: Default::default(),
+                }),
                 "beta" => Err(unavailable("beta: ssh timed out")),
                 _ => Ok(PeerResult::Error {
-                    error: provenant_fabric_runtime::coordination::facade::FacadeError::Conflict,
+                    extra: Default::default(),
+                    data: provenant_fabric_runtime::hosts::PeerResultError {
+                        extra: Default::default(),
+                        error:
+                            provenant_fabric_runtime::coordination::facade::FacadeError::Conflict,
+                    },
                 }),
             }
         });

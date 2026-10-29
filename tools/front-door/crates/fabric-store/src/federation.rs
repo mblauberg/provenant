@@ -41,6 +41,8 @@ impl PeerPhase {
 /// decoded reply, never the bytes received.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerOperation {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub project: ProjectId,
     pub actor: ActorId,
     pub id: OperationId,
@@ -112,6 +114,7 @@ fn load_peer(
         return Err(Error::Invalid("stored peer response phase"));
     }
     Ok(Some(PeerOperation {
+        extra: Default::default(),
         project,
         actor,
         id: id.clone(),
@@ -154,6 +157,7 @@ impl Store {
                 ],
             )?;
             Ok(PeerOperation {
+                extra: Default::default(),
                 project,
                 actor,
                 id: id.clone(),

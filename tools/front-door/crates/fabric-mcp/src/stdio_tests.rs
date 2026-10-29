@@ -1118,6 +1118,7 @@ impl F3Facade for FakeFacade {
             return Err(FacadeError::NotFound);
         };
         Ok(OutputResult::Artifact {
+            extra: Default::default(),
             target,
             artifact,
             digest: provenant_core::Digest::from_bytes([1; 32]),

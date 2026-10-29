@@ -315,13 +315,12 @@ existing branch. The `until` gate must follow the entire body. Body delivery,
 negative `until` verdict starts the next round.
 
 Configure host limits for the full expansion before running. This example
-requires seven nodes and a dependency depth of six. The default host depth and
-limit is four, so this example needs explicit host configuration before it
-runs. To run two rounds and permit an extension to four, set:
+requires seven nodes and a dependency depth of six. The default host depth
+limit is four, so start with six for two rounds:
 
 ```toml
 [domains.fabric.graph.limits]
-expansion_depth = 12
+expansion_depth = 6
 ```
 
 All allowed rounds count
@@ -335,8 +334,8 @@ node includes `round` metadata and its typed outputs. Passing the gate skips
 future rounds and lets dependants of `repair-review` continue. After two
 negative rounds the graph reports `paused` with an exhaustion reason.
 
-To allow two more rounds, keep the graph document unchanged and set the total
-allowance to four:
+To allow two more rounds, first raise the host's `expansion_depth` to 12.
+Keep the graph document unchanged and set the total allowance to four:
 
 ```sh
 provenant fabric graph resume --document graph.json \
@@ -447,7 +446,6 @@ Graph policy is configured separately from peer transport limits. For example:
 [domains.fabric.graph.limits]
 nodes = 512
 edges = 4096
-
 
 [domains.fabric.graph.budget]
 unknown_usage = "warn" # or "pause"
@@ -814,6 +812,14 @@ provenant workflow session handoff --to workshop --account work \
 
 Drop `--dry-run` once the plan looks right. Follow the peer's lanes from here
 with `provenant lanes --host workshop`.
+
+## Legacy import data
+
+Migration 007 deliberately deletes records from the removed legacy import,
+including legacy tasks and messages with `scope: legacy`, rather than refusing
+the upgrade or leaving unreadable rows. Archive a store with the previous
+release before upgrading if you still need its imported history. Records
+written after migration retain unknown fields, including retired member names.
 
 ## Verify targeted changes
 

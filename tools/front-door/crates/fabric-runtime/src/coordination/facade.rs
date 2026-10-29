@@ -601,6 +601,8 @@ impl OutputBytes {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OutputResult {
     Chunk {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         target: AttemptTarget,
         part: OutputPart,
         /// The attempt's state name, so a reader can tell a clean success
@@ -615,6 +617,8 @@ pub enum OutputResult {
         bytes: OutputBytes,
     },
     Artifact {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         target: AttemptTarget,
         artifact: ArtifactRef,
         digest: Digest,

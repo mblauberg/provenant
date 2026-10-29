@@ -31,6 +31,7 @@ impl LocalReader<'_> {
         deadline: Instant,
     ) -> Result<Page<AnswerOffer>, Error> {
         let empty = Page {
+            extra: Default::default(),
             items: Vec::new(),
             truncated: false,
         };

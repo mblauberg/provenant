@@ -6866,6 +6866,7 @@ mod tests {
         };
         let mut record = provenant_quota::AccountRecord::empty(account.clone());
         record.capacity_cooldowns = vec![provenant_quota::CapacityCooldown {
+            extra: Default::default(),
             account,
             model: "model".into(),
             observed_unix_seconds: 100,
