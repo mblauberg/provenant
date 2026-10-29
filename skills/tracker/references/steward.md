@@ -1,19 +1,21 @@
-# Steward mode
+# Steward and closing
 
-The coordinator delegates bounded tracker work through Fabric tasks, with the
-repository, issue/PR links, authorised actions and a stop condition. The worker
-uses the repository's declared tracker command for writes and follows
-[filing](filing.md), [linking and board](linking-and-board.md) and
-[hygiene](hygiene.md).
+## Sweep checks
 
-Before retrying any authorised write, reconcile current issues, PRs and Fabric
-tasks with `gh` reads. A local outcome record cannot prove that a remote write
-happened exactly once. If the remote outcome remains uncertain, report the
-blocker before another write.
+- **Stale:** a referenced PR merged, a dependency closed or cited evidence moved.
+  Re-verify against current state, then correct or close with the reason.
+- **Orphaned:** the parent closed or the sub-issue link no longer resolves. Re-parent
+  or make it standalone.
+- **Mis-closed:** closed with no merge evidence or stated reason. Reopen, or add the
+  missing evidence.
+- **Superseded:** close as duplicate-of or not planned, but only after comparing its
+  acceptance to the merged code.
+- **Thin:** a body a stranger cannot act on, or one citing scratch paths. Fix or flag.
 
-Return at most 15 lines with completed actions, links, no-ops and decisions
-still needed. Full detail stays in the tracker and Fabric task.
+## Delegation
 
-Create, edit, link, close and set Status inside the repo's rules. Never
-delete an issue, transfer it, change priority or horizon except by the repo's
-logged promotion rule, close a Decision, or write code.
+The chair gives each steward the repository, issue and PR links, the authorised
+actions and a stop condition. Before retrying any write, read current issues, PRs
+and Fabric tasks with `gh`: a local record cannot prove a remote write happened
+exactly once. If the outcome stays uncertain, report it before writing again. A
+steward returns at most 15 lines: actions taken, links, no-ops, decisions needed.

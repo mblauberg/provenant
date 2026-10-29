@@ -18,7 +18,7 @@
     {
       "id": "q911",
       "relation": "positive",
-      "prompt": "Sweep the backlog for stale, orphaned or mis-closed issues and update the board to match what actually landed.",
+      "prompt": "Sweep the backlog for stale, orphaned or mis-closed issues and close what actually landed, with evidence.",
       "tags": [
         "direct",
         "hygiene"
@@ -31,10 +31,10 @@
     {
       "id": "q912",
       "relation": "positive",
-      "prompt": "Load the tracker skill in steward mode and reconcile the assigned Fabric tasks and current issues, then send back a short digest of what you filed and closed.",
+      "prompt": "Decide whether this should be an epic, a feature or a task, and file it under the right parent.",
       "tags": [
         "direct",
-        "steward"
+        "placement"
       ],
       "expected": {
         "primary_skill": "tracker",
@@ -46,7 +46,8 @@
       "relation": "negative",
       "prompt": "The accepted issue is ready; implement it through verification and open the pull request.",
       "tags": [
-        "adjacent"
+        "adjacent",
+        "near-miss"
       ],
       "expected": {
         "primary_skill": "implement",
@@ -58,7 +59,8 @@
       "relation": "negative",
       "prompt": "Scaffold this new repository's labels, ruleset, issue forms and board from scratch.",
       "tags": [
-        "adjacent"
+        "adjacent",
+        "near-miss"
       ],
       "expected": {
         "primary_skill": "setup-repo",
@@ -68,7 +70,7 @@
     {
       "id": "q915",
       "relation": "negative",
-      "prompt": "Keep four implementation lanes running from the board's ready column, refilling as each finishes.",
+      "prompt": "Keep four implementation lanes running from the ready column, refilling as each finishes.",
       "tags": [
         "adjacent"
       ],
@@ -80,7 +82,7 @@
     {
       "id": "q916",
       "relation": "boundary",
-      "prompt": "As the coordinator, dispatch a background subagent to load the tracker skill in steward mode while the implementation lanes keep running.",
+      "prompt": "Dispatch a background steward sweep of the tracker while the implementation lanes keep running.",
       "tags": [
         "composition"
       ],
@@ -94,7 +96,7 @@
     {
       "id": "q917",
       "relation": "boundary",
-      "prompt": "Before merging, add one Closes line per issue this pull request resolves and set each issue's board Status to match.",
+      "prompt": "Before merging, add one Closes line per issue this pull request resolves and update each issue.",
       "tags": [
         "composition",
         "adjacent"
@@ -109,7 +111,7 @@
     {
       "id": "q918",
       "relation": "boundary",
-      "prompt": "File a follow-up issue for this deferred edge case under the right epic, or standalone if it doesn't belong to one.",
+      "prompt": "Write the acceptance criteria for this issue, then place it under the right epic.",
       "tags": [
         "composition",
         "adjacent"
@@ -122,22 +124,9 @@
       }
     },
     {
-      "id": "q17620",
-      "relation": "negative",
-      "prompt": "Implement the approved UI change that displays source:agent and the Filed-by trailer on issue cards.",
-      "tags": [
-        "adjacent",
-        "near-miss"
-      ],
-      "expected": {
-        "primary_skill": "implement",
-        "companion_skills": []
-      }
-    },
-    {
       "id": "q17621",
       "relation": "negative",
-      "prompt": "Lease and dispatch the next Ready task to a writer lane and manage its run; leave the issue and board unchanged.",
+      "prompt": "Lease and dispatch the next ready task to a writer lane and manage its run; leave the issue and board unchanged.",
       "tags": [
         "adjacent",
         "near-miss"
