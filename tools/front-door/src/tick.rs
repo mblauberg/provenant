@@ -347,6 +347,7 @@ pub(crate) fn run(globals: &Globals, workers: &'static dyn WorkerObserver) -> u8
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)] // The worktree driver includes this module without libtest.
     use super::*;
 
     #[test]

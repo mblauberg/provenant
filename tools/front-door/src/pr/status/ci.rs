@@ -365,6 +365,7 @@ fn parse_evidence(
 }
 
 #[cfg(test)]
+#[allow(unused_imports, dead_code)] // The worktree driver includes this module without libtest.
 mod tests {
     use super::*;
     use serde_json::json;

@@ -116,6 +116,7 @@ pub(crate) fn observe_ci(
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // The worktree driver includes this module without libtest.
 fn observe_ci_with(
     names: &[String],
     resolve: impl FnOnce() -> Option<Vec<String>>,
