@@ -623,7 +623,8 @@ impl RunStore {
             .ok_or(RunError::Validation("terminal task missing from request"))?;
         // A stop at the runtime deadline is a typed timeout, whatever partial
         // output the provider left, and the lane stays resumable.
-        if decoded.outcome == Outcome::TimedOut && exit.stop_reason == Some(StopReason::WallDeadline)
+        if decoded.outcome == Outcome::TimedOut
+            && exit.stop_reason == Some(StopReason::WallDeadline)
         {
             let limit = format!(
                 "runtime deadline exceeded: provider stopped after {}s",

@@ -55,14 +55,26 @@ mod tests {
 
     #[test]
     fn prose_quotes_repeats_and_malformed_blocks_are_no_flag() {
-        assert_eq!(declared_stop("Work remains: the renderer is not done."), None);
+        assert_eq!(
+            declared_stop("Work remains: the renderer is not done."),
+            None
+        );
         assert_eq!(declared_stop(&format!("{STOP}\nThen I carried on.")), None);
         assert_eq!(declared_stop(&format!("{STOP}\n{STOP}")), None);
         assert_eq!(declared_stop(&STOP.replace("stopped_early", "done")), None);
-        assert_eq!(declared_stop(&STOP.replace("\"note\":", "\"extra\":1,\"note\":")), None);
-        assert_eq!(declared_stop(&STOP.replace("First half committed; finish the rest.", " ")), None);
+        assert_eq!(
+            declared_stop(&STOP.replace("\"note\":", "\"extra\":1,\"note\":")),
+            None
+        );
+        assert_eq!(
+            declared_stop(&STOP.replace("First half committed; finish the rest.", " ")),
+            None
+        );
         assert_eq!(declared_stop(STOP.trim_end_matches("\n```")), None);
-        let long = STOP.replace("First half committed; finish the rest.", &"x".repeat(NOTE_BYTES + 1));
+        let long = STOP.replace(
+            "First half committed; finish the rest.",
+            &"x".repeat(NOTE_BYTES + 1),
+        );
         assert_eq!(declared_stop(&long), None);
     }
 }

@@ -64,12 +64,26 @@ fn chair_observations_survive_rotation_and_respect_window_bounds() -> Result {
     let roots = roots(&base)?;
     std::fs::create_dir(roots.state.as_path())?;
     let project = ProjectId::from_bytes([1; 16]);
-    record_chair(&roots, CLOCK, "work", "session", Some(project), Some(".claude-work"));
+    record_chair(
+        &roots,
+        CLOCK,
+        "work",
+        "session",
+        Some(project),
+        Some(".claude-work"),
+    );
     std::fs::rename(
         roots.state.as_path().join(LOG),
         roots.state.as_path().join(BACKUP),
     )?;
-    record_chair(&roots, CLOCK, "spare", "another-session", Some(project), None);
+    record_chair(
+        &roots,
+        CLOCK,
+        "spare",
+        "another-session",
+        Some(project),
+        None,
+    );
     let since = CLOCK.wall_now()?.as_timestamp();
     let until = "2026-10-27T00:00:00Z".parse()?;
     let chairs = chair_sessions(&roots, since, until)?;

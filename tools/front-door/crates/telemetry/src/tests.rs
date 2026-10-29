@@ -779,19 +779,11 @@ fn cache_read_share_is_reported_per_model_account_provider_and_source() {
         // Reports no cache split: counted as missing, not as a miss.
         cached(5, 1_000_000, None, None),
     ];
-    let report = stats_with_chair(
-        facts,
-        [chair],
-        &prices(Some(1)),
-        Window::default(),
-    )
-    .unwrap();
+    let report = stats_with_chair(facts, [chair], &prices(Some(1)), Window::default()).unwrap();
     let find = |rows: &[CacheGroup], source: &str, model: Option<&str>, account: Option<&str>| {
         rows.iter()
             .find(|g| {
-                g.source == source
-                    && g.model.as_deref() == model
-                    && g.account.as_deref() == account
+                g.source == source && g.model.as_deref() == model && g.account.as_deref() == account
             })
             .map(|g| g.cache.clone())
             .unwrap()

@@ -186,7 +186,7 @@ impl Drop for PreparedStart {
 
 fn output_prompt(directory: &std::path::Path, prompt: &str) -> String {
     format!(
-        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Files in $TMPDIR are discarded when the attempt ends. Provider history is kept. Files left in $TMPDIR are not deliverables.\n\n{prompt}",
+        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Files in $TMPDIR are discarded when the attempt ends. Provider history is kept. Files left in $TMPDIR are not deliverables. If you stop with any part of the brief undone, end your final answer with this block, and nothing after it, so the harness records a partial finish (put what remains in the note):\n```handoff\n{{\"schema_version\":1,\"status\":\"stopped_early\",\"note\":\"what remains\"}}\n```\n\n{prompt}",
         result = directory.join("result.md").display(),
         exit = directory.join("process-exit.json").display(),
         stdout = directory.join("stdout.log").display(),

@@ -448,7 +448,9 @@ impl Registry<'_> {
             match event {
                 ProviderEvent::Text(text) => decoded.result.push_str(text),
                 ProviderEvent::EarlyStop { reason } => {
-                    decoded.partial_signals.push(run::PartialSignal::ProviderStop);
+                    decoded
+                        .partial_signals
+                        .push(run::PartialSignal::ProviderStop);
                     early_stop = Some(reason.clone());
                 }
                 ProviderEvent::Usage {
@@ -5411,8 +5413,12 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     // Chair sessions span projects, so the host's whole window is read. They are
     // best effort: an unreadable usage log must not hide the lane figures.
     let chair_window = (
-        window.since.map_or(jiff::Timestamp::MIN, |t| t.as_timestamp()),
-        window.until.map_or(jiff::Timestamp::MAX, |t| t.as_timestamp()),
+        window
+            .since
+            .map_or(jiff::Timestamp::MIN, |t| t.as_timestamp()),
+        window
+            .until
+            .map_or(jiff::Timestamp::MAX, |t| t.as_timestamp()),
     );
     let (chairs, chair_error) = match crate::quota::chair_sessions_with_usage(
         edge.roots,

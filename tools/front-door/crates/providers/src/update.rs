@@ -69,7 +69,11 @@ fn worker_directory(state: &Path) -> Result<Directory, String> {
 
 pub fn worker(state: &Path) -> Option<WorkerRecord> {
     let dir = Directory::open_anchor(&state.join("provider-updates")).ok()?;
-    serde_json::from_slice(&dir.read_stable(std::ffi::OsStr::new(WORKER_RECORD), 4096).ok()?).ok()
+    serde_json::from_slice(
+        &dir.read_stable(std::ffi::OsStr::new(WORKER_RECORD), 4096)
+            .ok()?,
+    )
+    .ok()
 }
 
 /// Claim the right to launch the detached worker. False inside the backoff, or
@@ -365,7 +369,10 @@ mod tests {
     fn worker_launches_back_off_after_any_outcome() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         assert!(reserve_worker(temp.path(), 1000));
-        assert!(!reserve_worker(temp.path(), 1000 + WORKER_BACKOFF_SECONDS - 1));
+        assert!(!reserve_worker(
+            temp.path(),
+            1000 + WORKER_BACKOFF_SECONDS - 1
+        ));
         finish_worker(temp.path(), 1005, Some("project must be a Git checkout"));
         let record = worker(temp.path()).ok_or("missing worker record")?;
         assert_eq!(record.started_unix_seconds, 1000);
@@ -373,7 +380,10 @@ mod tests {
             record.failure.as_deref(),
             Some("project must be a Git checkout")
         );
-        assert!(!reserve_worker(temp.path(), 1000 + WORKER_BACKOFF_SECONDS - 1));
+        assert!(!reserve_worker(
+            temp.path(),
+            1000 + WORKER_BACKOFF_SECONDS - 1
+        ));
         assert!(reserve_worker(temp.path(), 1000 + WORKER_BACKOFF_SECONDS));
         assert_eq!(worker(temp.path()).ok_or("missing")?.failure, None);
         Ok(())

@@ -235,7 +235,8 @@ mod reboot_tests {
             )?;
             let claimed = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
             let started = claimed.started_at.ok_or("no start")?;
-            let expected = started.checked_add(provenant_core::DurationMicros::from_seconds(seconds)?)?;
+            let expected =
+                started.checked_add(provenant_core::DurationMicros::from_seconds(seconds)?)?;
             assert_eq!(claimed.runtime_deadline, Some(expected));
         }
         Ok(())
@@ -267,7 +268,10 @@ mod reboot_tests {
         let overdue = |clock: &provenant_core::TestClock, record: &AttemptRecord| {
             past_runtime_deadline(record, &crate::tests::call(clock, &cancel))
         };
-        assert!(!overdue(&clock, &record), "at the deadline the guardian acts");
+        assert!(
+            !overdue(&clock, &record),
+            "at the deadline the guardian acts"
+        );
         clock.advance(provenant_core::DurationMicros::from_seconds(
             DEADLINE_GRACE_SECONDS - 1,
         )?)?;

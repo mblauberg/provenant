@@ -718,7 +718,17 @@ fn host_remembers_child_task_after_attempt_row_deletion() -> TestResult {
     // Make the replacement fully launchable, including its prompt and ticket.
     let directory = store.attempt_dir(nested.run_id, replacement.attempt_id, true)?;
     artifacts::seal(&directory, "prompt.txt", b"exact prompt", RECORD_LIMIT)?;
-    store.queue_ticket(&store.db, &replacement, LaneClass::ReadOnly, 1, 0, 0, 1)?;
+    store.queue_ticket(
+        &store.db,
+        &replacement,
+        LaneClass::ReadOnly,
+        1,
+        crate::admission::Allowance {
+            queue_seconds: 0,
+            runtime_seconds: 0,
+        },
+        1,
+    )?;
     let revalidated = store.validate_child(
         nested.run_id,
         parent,
@@ -2762,7 +2772,9 @@ impl Providers for Fake {
                 .answer
                 .clone()
                 .unwrap_or_else(|| String::from_utf8_lossy(stdout).into_owned()),
-            complete: self.outcome.is_none_or(|outcome| outcome == Outcome::Succeeded),
+            complete: self
+                .outcome
+                .is_none_or(|outcome| outcome == Outcome::Succeeded),
             observed_route: self.observed.clone(),
             usage: UsageRecord::default(),
             session: None,
@@ -2874,7 +2886,10 @@ fn a_terra_style_early_stop_settles_succeeded_but_flagged_partial() -> TestResul
     assert_eq!(*outcome, Outcome::Succeeded);
     assert_eq!(record.partial_signals, [PartialSignal::DeclaredStop]);
     let reason = reason.as_deref().ok_or("no reason")?;
-    assert!(reason.contains("partial finish (declared_stop)"), "{reason}");
+    assert!(
+        reason.contains("partial finish (declared_stop)"),
+        "{reason}"
+    );
     assert!(reason.contains("renderer and tests remain"), "{reason}");
     Ok(())
 }

@@ -815,12 +815,10 @@ impl Driver<'_> {
             tick.observed_exit = exit;
             // The monotonic clock stops while the host sleeps; the wall
             // deadline must not. A wall clock set backwards only adds nothing.
-            tick.wall_ms = wall_started
-                .zip(wall_now())
-                .map_or(0, |(began, current)| {
-                    u64::try_from(current.as_micros().saturating_sub(began.as_micros()) / 1000)
-                        .unwrap_or(0)
-                });
+            tick.wall_ms = wall_started.zip(wall_now()).map_or(0, |(began, current)| {
+                u64::try_from(current.as_micros().saturating_sub(began.as_micros()) / 1000)
+                    .unwrap_or(0)
+            });
             let (next, effects) = machine::step(state, event, tick);
             state = next;
             for effect in effects {

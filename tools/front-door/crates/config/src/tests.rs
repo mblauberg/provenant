@@ -52,7 +52,10 @@ fn provider_update_settings_defaults_opt_out_commands_and_validation() {
     assert_eq!(defaults.providers["claude"].runtime_deadline_seconds, None);
     let capped = "schema_version=1\n[providers.codex]\nruntime_deadline_seconds=7200";
     let capped = load(&roots(), Some(capped.as_bytes())).unwrap();
-    assert_eq!(capped.providers["codex"].runtime_deadline_seconds, Some(7200));
+    assert_eq!(
+        capped.providers["codex"].runtime_deadline_seconds,
+        Some(7200)
+    );
     assert_eq!(config.providers["opencode"], ProviderSettings::default());
     test_support::assert_leaf_origins(&config);
     for (section, setting, rule) in [

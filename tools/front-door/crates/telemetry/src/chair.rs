@@ -136,7 +136,10 @@ impl Tally {
                 *slot = Some(slot.unwrap_or(0).saturating_add(n));
             };
             add(&mut usage.uncached_input, raw.input_tokens.unwrap_or(0));
-            add(&mut usage.cache_read, raw.cache_read_input_tokens.unwrap_or(0));
+            add(
+                &mut usage.cache_read,
+                raw.cache_read_input_tokens.unwrap_or(0),
+            );
             add(
                 &mut usage.cache_write,
                 raw.cache_creation_input_tokens.unwrap_or(0),
@@ -233,7 +236,9 @@ fn read_file(path: &Path, tally: &mut Tally, budget: &mut u64) -> Result<(), Unr
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    let file = options.open(path).map_err(|_| Unread::TranscriptUnreadable)?;
+    let file = options
+        .open(path)
+        .map_err(|_| Unread::TranscriptUnreadable)?;
     let meta = file.metadata().map_err(|_| Unread::TranscriptUnreadable)?;
     if !meta.is_file() {
         return Err(Unread::TranscriptUnreadable);
@@ -280,7 +285,11 @@ fn read_file(path: &Path, tally: &mut Tally, budget: &mut u64) -> Result<(), Unr
 }
 
 /// Token counts of one session, summed over its transcript and its sub-agents'.
-fn session_usage(config: &Path, session: &str, budget: &mut u64) -> Result<Vec<ChairModelUsage>, Unread> {
+fn session_usage(
+    config: &Path,
+    session: &str,
+    budget: &mut u64,
+) -> Result<Vec<ChairModelUsage>, Unread> {
     if !valid_session(session) {
         return Err(Unread::TranscriptNotFound);
     }
@@ -294,9 +303,13 @@ fn session_usage(config: &Path, session: &str, budget: &mut u64) -> Result<Vec<C
 /// Fill each session's token counts. `config_dir` names the Claude config
 /// directory a session ran under, or `None` when that is unknown. A session
 /// that cannot be read keeps its reason instead of being dropped.
-pub fn attach_usage(sessions: &mut [ChairSession], config_dir: impl Fn(&ChairSession) -> Option<PathBuf>) {
+pub fn attach_usage(
+    sessions: &mut [ChairSession],
+    config_dir: impl Fn(&ChairSession) -> Option<PathBuf>,
+) {
     let mut budget = MAX_TOTAL_BYTES;
-    let mut done = BTreeMap::<(String, String, Option<PathBuf>), Result<Vec<ChairModelUsage>, Unread>>::new();
+    let mut done =
+        BTreeMap::<(String, String, Option<PathBuf>), Result<Vec<ChairModelUsage>, Unread>>::new();
     for chair in sessions.iter_mut() {
         let config = config_dir(chair);
         let key = (chair.account.clone(), chair.session.clone(), config.clone());

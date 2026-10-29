@@ -104,6 +104,13 @@ impl Resources for SystemResources {
     }
 }
 
+/// How long a lane may wait to start, and then run.
+#[derive(Clone, Copy)]
+pub(crate) struct Allowance {
+    pub queue_seconds: u64,
+    pub runtime_seconds: u64,
+}
+
 impl RunStore {
     pub fn set_admission_policy(&mut self, policy: AdmissionPolicy) {
         self.policy = policy;
@@ -114,8 +121,7 @@ impl RunStore {
         attempt: &AttemptRecord,
         class: LaneClass,
         concurrency: u64,
-        queue_seconds: u64,
-        runtime_seconds: u64,
+        allowance: Allowance,
         disk_floor_bytes: u64,
     ) -> Result<()> {
         let sequence: i64 = tx.query_row(
@@ -140,9 +146,11 @@ impl RunStore {
             quota_permit: None,
             admission_deadline: deadline(
                 attempt.queued_at,
-                self.policy.admission_seconds.saturating_add(queue_seconds),
+                self.policy
+                    .admission_seconds
+                    .saturating_add(allowance.queue_seconds),
             )?,
-            runtime_seconds,
+            runtime_seconds: allowance.runtime_seconds,
         };
         tx.execute(
             "INSERT INTO admission(attempt,project,run,active,record) VALUES (?1,?2,?3,0,?4)",

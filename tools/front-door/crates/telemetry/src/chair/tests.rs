@@ -58,7 +58,11 @@ fn transcript_totals_merge_streamed_messages_and_split_cache_writes() -> Result 
                 "claude-haiku-5-5",
                 r#"{"input_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":2}"#,
             ),
-            assistant("m4", "<synthetic>", r#"{"input_tokens":9,"output_tokens":9}"#),
+            assistant(
+                "m4",
+                "<synthetic>",
+                r#"{"input_tokens":9,"output_tokens":9}"#,
+            ),
             "not json".into(),
         ],
     )?;
@@ -99,7 +103,10 @@ fn unreadable_sessions_keep_their_reason() -> Result {
     let config = temp.path();
     std::fs::create_dir_all(config.join("projects/-work"))?;
     let outside = temp.path().join("outside.jsonl");
-    write(&outside, &[assistant("x", "claude-opus-5-5", r#"{"input_tokens":1}"#)])?;
+    write(
+        &outside,
+        &[assistant("x", "claude-opus-5-5", r#"{"input_tokens":1}"#)],
+    )?;
     std::os::unix::fs::symlink(&outside, config.join("projects/-work/linked.jsonl"))?;
     let mut chairs = vec![
         chair("work", "missing"),
@@ -152,7 +159,11 @@ fn oversized_lines_are_skipped_without_losing_the_next_record() -> Result {
         &config.join("projects/-p/s2.jsonl"),
         &[
             format!(r#"{{"type":"user","message":{{"content":"{filler}"}}}}"#),
-            assistant("m", "claude-sonnet-5-5", r#"{"input_tokens":7,"output_tokens":1}"#),
+            assistant(
+                "m",
+                "claude-sonnet-5-5",
+                r#"{"input_tokens":7,"output_tokens":1}"#,
+            ),
         ],
     )?;
     let mut chairs = vec![chair("a", "s2")];

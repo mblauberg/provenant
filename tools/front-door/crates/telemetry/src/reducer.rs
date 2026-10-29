@@ -99,10 +99,13 @@ pub fn quota_usage(
             account_label: None,
         });
         let key = (route.provider, route.account_label, Some(fact.project_id));
-        rows.entry(key)
-            .or_default()
-            .lane
-            .record_usage(&fact.usage, Some(fact.terminal_state), 0, false, false)?;
+        rows.entry(key).or_default().lane.record_usage(
+            &fact.usage,
+            Some(fact.terminal_state),
+            0,
+            false,
+            false,
+        )?;
         if rows.len() as u64 > MAX_GROUPS {
             return Err(TelemetryError::TooLarge("10,000 groups"));
         }
@@ -112,11 +115,7 @@ pub fn quota_usage(
         if window.project.is_some_and(|p| Some(p) != chair.project) {
             continue;
         }
-        let key = (
-            Some(chair.adapter),
-            Some(chair.account),
-            chair.project,
-        );
+        let key = (Some(chair.adapter), Some(chair.account), chair.project);
         if sessions.insert((key.clone(), chair.session)) {
             let row = rows.entry(key).or_default();
             add(&mut row.sessions, 1)?;
@@ -413,9 +412,7 @@ fn priced(
     model: Option<&str>,
     prices: &PriceTable,
 ) -> Result<Priced, TelemetryError> {
-    let price = provider
-        .zip(model)
-        .and_then(|(p, m)| prices.get(p, m));
+    let price = provider.zip(model).and_then(|(p, m)| prices.get(p, m));
     let subscription = price.is_some_and(|(_, billing)| *billing == BillingKind::Subscription);
     let rates = price.map(|(rates, _)| rates.clone()).unwrap_or_default();
     let verified_free = rates.values() == [Some(0); 4];
@@ -426,7 +423,11 @@ fn priced(
         subscription,
         absent: [false; 5],
     };
-    for (index, (count, rate)) in counts(usage).into_iter().zip(rates.usage_rates()).enumerate() {
+    for (index, (count, rate)) in counts(usage)
+        .into_iter()
+        .zip(rates.usage_rates())
+        .enumerate()
+    {
         match (count, rate) {
             (None, _) => {
                 out.absent[index] = true;
@@ -562,7 +563,11 @@ pub fn stats_with_chair(
             key.model.as_deref(),
             prices,
         )?;
-        for (missing, absent) in coverage.missing_categories.values_mut().into_iter().zip(cost.absent)
+        for (missing, absent) in coverage
+            .missing_categories
+            .values_mut()
+            .into_iter()
+            .zip(cost.absent)
         {
             add(missing, u64::from(absent))?;
         }
@@ -790,7 +795,10 @@ fn cache_report(
         let keep = |value: Option<&String>| value.cloned();
         for (map, key) in [
             (&mut by_model, (source, keep(provider), keep(model), None)),
-            (&mut by_account, (source, keep(provider), None, keep(account))),
+            (
+                &mut by_account,
+                (source, keep(provider), None, keep(account)),
+            ),
             (&mut by_provider, (source, keep(provider), None, None)),
             (&mut by_source, (source, None, None, None)),
         ] {
