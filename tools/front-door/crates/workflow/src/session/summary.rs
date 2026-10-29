@@ -23,7 +23,7 @@ pub struct SummaryError;
 
 /// Fields omitted from a patch retain their existing values. Revision zero
 /// creates a summary on an existing checkpoint.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SummaryPatch {
     pub now: Option<String>,
@@ -142,14 +142,22 @@ impl super::SessionStore {
     }
     /// Update only as the explicitly bound chair; discovery identity is checked
     /// again under the checkpoint lock before the summary is read or changed.
+    ///
+    /// The operation id makes the update retryable. Under the checkpoint lock
+    /// the full publication plan and its receipt are journaled before any
+    /// file changes. Every checkpoint writer first replays a pending journal
+    /// (`recover_pending`), so a crash at any step completes with the same
+    /// revision, history and receipt. The same id with the same request
+    /// replays the receipt; the same id with a different one is refused.
     pub fn update_summary(
         &self,
         patch: SummaryPatch,
         expected: u64,
+        operation_id: &provenant_core::OperationId,
         budget: provenant_core::WaitBudget,
         cancel: &provenant_core::CancelToken,
         clock: &dyn provenant_core::Clock,
-    ) -> Result<(Summary, super::Saved), super::SessionError> {
+    ) -> Result<SummaryOutcome, super::SessionError> {
         if self.chair.is_none() {
             return Err(super::SessionError::ChairIdentityRequired);
         }
@@ -160,55 +168,237 @@ impl super::SessionStore {
         {
             return Err(SummaryError.into());
         }
-        let mut result = None;
-        let saved = self
-            .update(
-                false,
-                |current| {
-                    let text = current.ok_or_else(|| super::SessionError::MissingCheckpoint {
-                        session: self.session.as_str().into(),
-                    })?;
-                    let mut summary = parse_summary(text)?.unwrap_or(Summary {
-                        schema_version: 1,
-                        revision: 0,
-                        updated_at: String::new(),
-                        now: String::new(),
-                        next: String::new(),
-                        needs_you: Vec::new(),
-                        risk: String::new(),
-                    });
-                    if summary.revision != expected {
-                        return Err(super::SessionError::SummaryStale {
-                            current_revision: summary.revision,
-                        });
-                    }
-                    summary.revision = summary.revision.checked_add(1).ok_or(SummaryError)?;
-                    summary.updated_at = clock.wall_now()?.to_string();
-                    if let Some(value) = patch.now {
-                        summary.now = value;
-                    }
-                    if let Some(value) = patch.next {
-                        summary.next = value;
-                    }
-                    if let Some(value) = patch.needs_you {
-                        summary.needs_you = value;
-                    }
-                    if let Some(value) = patch.risk {
-                        summary.risk = value;
-                    }
-                    let next = replace_summary(text, &summary)?;
-                    result = Some(summary);
-                    Ok(Some(next))
-                },
-                budget,
-                cancel,
-                clock,
-            )?
-            .ok_or_else(|| super::SessionError::MissingCheckpoint {
-                session: self.session.as_str().into(),
-            })?;
-        Ok((result.ok_or(SummaryError)?, saved))
+        let dir = self.directory(false).map_err(|error| {
+            if error.is_not_found() {
+                super::SessionError::MissingCheckpoint {
+                    session: self.session.as_str().into(),
+                }
+            } else {
+                error.into()
+            }
+        })?;
+        let _lock = dir.lock(
+            std::ffi::OsStr::new("checkpoint.lock"),
+            super::LockMode::Exclusive,
+            budget,
+            cancel,
+            clock,
+        )?;
+        self.recover_pending(&dir)?;
+        match self.begin_update(&dir, patch, expected, operation_id, budget, cancel, clock)? {
+            Begun::Replayed(outcome) => Ok(outcome),
+            Begun::Pending(pending) => self
+                .finish_pending(&dir, *pending)
+                .map(|receipt| receipt.outcome(false)),
+        }
     }
+
+    /// Check the request and journal its plan. The journal write is the
+    /// commit point: from then on recovery finishes the update.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn begin_update(
+        &self,
+        dir: &super::Directory,
+        patch: SummaryPatch,
+        expected: u64,
+        operation_id: &provenant_core::OperationId,
+        budget: provenant_core::WaitBudget,
+        cancel: &provenant_core::CancelToken,
+        clock: &dyn provenant_core::Clock,
+    ) -> Result<Begun, super::SessionError> {
+        let digest = provenant_records::CanonicalV1::file_digest(
+            &serde_json::to_vec(&(&patch, expected)).map_err(|_| SummaryError)?,
+        );
+        if let Some(receipt) = read_receipts(dir)?
+            .entries
+            .into_iter()
+            .find(|r| &r.operation_id == operation_id)
+        {
+            if receipt.digest != digest {
+                return Err(super::SessionError::OperationConflict);
+            }
+            return Ok(Begun::Replayed(receipt.outcome(true)));
+        }
+        self.check_discovery_identity(self.load_discovery(dir)?.as_ref())?;
+        let text = match dir.open_read(std::ffi::OsStr::new("checkpoint.md")) {
+            Ok(mut file) => String::from_utf8(file.read_bounded(super::CHECKPOINT_LIMIT)?)
+                .map_err(|e| e.utf8_error())?,
+            Err(error) if error.is_not_found() => {
+                return Err(super::SessionError::MissingCheckpoint {
+                    session: self.session.as_str().into(),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut summary = parse_summary(&text)?.unwrap_or(Summary {
+            schema_version: 1,
+            revision: 0,
+            updated_at: String::new(),
+            now: String::new(),
+            next: String::new(),
+            needs_you: Vec::new(),
+            risk: String::new(),
+        });
+        if summary.revision != expected {
+            return Err(super::SessionError::SummaryStale {
+                current_revision: summary.revision,
+            });
+        }
+        let now = clock.wall_now()?;
+        summary.revision = summary.revision.checked_add(1).ok_or(SummaryError)?;
+        summary.updated_at = now.to_string();
+        if let Some(value) = patch.now {
+            summary.now = value;
+        }
+        if let Some(value) = patch.next {
+            summary.next = value;
+        }
+        if let Some(value) = patch.needs_you {
+            summary.needs_you = value;
+        }
+        if let Some(value) = patch.risk {
+            summary.risk = value;
+        }
+        let next = replace_summary(&text, &summary)?;
+        let plan = self.plan_publication(dir, next.as_bytes(), now)?;
+        let current = plan.chain.last().ok_or(super::SessionError::History)?;
+        let receipt = SummaryReceipt {
+            operation_id: operation_id.clone(),
+            digest,
+            summary,
+            saved: super::Saved {
+                revision: current.revision,
+                parent: current.parent,
+                unchanged: plan.unchanged,
+                retained: plan
+                    .chain
+                    .len()
+                    .min(usize::try_from(plan.keep).unwrap_or(usize::MAX)),
+                warnings: Vec::new(),
+            },
+        };
+        super::check_wait(budget, cancel, clock).map_err(|stop| match stop {
+            super::WaitStop::Cancelled => super::SessionError::from(super::FsError::Cancelled {
+                path: self.root.as_path().into(),
+            }),
+            super::WaitStop::Deadline => super::SessionError::Deadline,
+        })?;
+        // Past this point the update is committed: recovery finishes it.
+        let pending = Pending { plan, receipt };
+        super::publish(
+            dir,
+            PENDING,
+            &serde_json::to_vec(&pending).map_err(|_| super::SessionError::Journal)?,
+        )?;
+        Ok(Begun::Pending(Box::new(pending)))
+    }
+
+    /// Complete a journaled summary update, if one is pending. Called under
+    /// the checkpoint lock by every writer before it touches the checkpoint.
+    pub(super) fn recover_pending(
+        &self,
+        dir: &super::Directory,
+    ) -> Result<(), super::SessionError> {
+        let bytes = match dir.read_bounded(std::ffi::OsStr::new(PENDING), PENDING_LIMIT) {
+            Ok(bytes) => bytes,
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let pending: Pending =
+            serde_json::from_slice(&bytes).map_err(|_| super::SessionError::Journal)?;
+        self.finish_pending(dir, pending).map(|_| ())
+    }
+
+    pub(super) fn finish_pending(
+        &self,
+        dir: &super::Directory,
+        pending: Pending,
+    ) -> Result<SummaryReceipt, super::SessionError> {
+        let Pending { plan, mut receipt } = pending;
+        let saved = self.execute_plan(dir, &plan, true, |dir, record| {
+            self.publish_discovery(dir, record)
+        })?;
+        receipt.saved.warnings = saved.warnings;
+        let mut receipts = read_receipts(dir)?;
+        receipts
+            .entries
+            .retain(|r| r.operation_id != receipt.operation_id);
+        receipts.entries.push(receipt.clone());
+        let excess = receipts.entries.len().saturating_sub(RECEIPTS_KEPT);
+        receipts.entries.drain(..excess);
+        super::publish(
+            dir,
+            RECEIPTS,
+            &serde_json::to_vec(&receipts).map_err(|_| super::SessionError::Journal)?,
+        )?;
+        match dir.unlink(std::ffi::OsStr::new(PENDING)) {
+            Ok(()) => {}
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(receipt)
+    }
+}
+
+const PENDING: &str = "summary-pending.json";
+/// Worst case for a journal: two checkpoint texts (the replaced and the new)
+/// as JSON strings, where one control character escapes to six bytes, plus the
+/// revision chain, discovery record and receipt.
+const PENDING_LIMIT: u64 = 2 * super::CHECKPOINT_LIMIT * 6 + 1024 * 1024;
+/// Receipts hold a summary (at most an 8 KiB header, escaped) each.
+const RECEIPTS_LIMIT: u64 = RECEIPTS_KEPT as u64 * (8192 * 6 + 16 * 1024);
+const RECEIPTS: &str = "summary-receipts.json";
+/// Receipts kept per session; the oldest are forgotten first.
+const RECEIPTS_KEPT: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SummaryReceipt {
+    operation_id: provenant_core::OperationId,
+    digest: provenant_records::FileDigest,
+    summary: Summary,
+    saved: super::Saved,
+}
+impl SummaryReceipt {
+    fn outcome(self, replayed: bool) -> SummaryOutcome {
+        SummaryOutcome {
+            summary: self.summary,
+            saved: self.saved,
+            replayed,
+        }
+    }
+}
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Receipts {
+    entries: Vec<SummaryReceipt>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Pending {
+    pub(super) plan: super::PublishPlan,
+    receipt: SummaryReceipt,
+}
+fn read_receipts(dir: &super::Directory) -> Result<Receipts, super::SessionError> {
+    match dir.read_bounded(std::ffi::OsStr::new(RECEIPTS), RECEIPTS_LIMIT) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| super::SessionError::Journal),
+        Err(error) if error.is_not_found() => Ok(Receipts::default()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(super) enum Begun {
+    Replayed(SummaryOutcome),
+    Pending(Box<Pending>),
+}
+
+/// The result of a summary update, original or replayed from its receipt.
+#[derive(Debug, Serialize)]
+pub struct SummaryOutcome {
+    pub summary: Summary,
+    pub saved: super::Saved,
+    /// The operation id had already been applied; nothing was written.
+    pub replayed: bool,
 }
 
 const HEADER_LIMIT: usize = 8192;

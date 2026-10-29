@@ -1471,7 +1471,7 @@ mod tests {
         let invocation = valid(&[
             "run",
             "--preset",
-            "implement-with-lens",
+            "generator-evaluator",
             "--prompt-file",
             "brief",
             "--worktree",

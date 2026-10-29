@@ -823,6 +823,57 @@ fn agy_individual_quota_is_quota_limited_until_its_stated_reset() -> Result<(), 
     Ok(())
 }
 #[test]
+fn agy_overload_is_typed_capacity_not_a_generic_failure() -> Result<(), ProviderError> {
+    let exit = ExitObservation {
+        code: Some(1),
+        ..EXIT
+    };
+    let result = |error: &str| {
+        serde_json::json!({"event":"result","result":{
+            "conversation_id":"c","status":"ERROR","response":"","error":error,
+            "usage":{"input_tokens":0,"output_tokens":0}}})
+        .to_string()
+            + "\n"
+    };
+    for message in [
+        "The model is overloaded. Please try again later.",
+        "503: The model is overloaded. Please try again later.",
+        "503 Service Unavailable: The model is overloaded.",
+        "UNAVAILABLE: model is overloaded",
+    ] {
+        let (events, outcome) = replay(&agy::Agy, &result(message), exit)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Refused, "{message}");
+        assert!(
+            events.contains(&ProviderEvent::ModelOverloaded {
+                message: message.into()
+            }),
+            "{message}"
+        );
+    }
+    for message in [
+        "503",
+        "upstream error",
+        r#"Invalid prompt: "The model is overloaded""#,
+    ] {
+        let (events, outcome) = replay(&agy::Agy, &result(message), exit)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Failed, "{message}");
+        assert!(events.contains(&ProviderEvent::Error), "{message}");
+    }
+    Ok(())
+}
+#[test]
+fn codex_usage_limit_is_quota_limited() -> Result<(), ProviderError> {
+    let raw = r#"{"type":"turn.failed","error":{"message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}}"#;
+    let (events, outcome) = replay(&codex::Codex, &format!("{raw}\n"), EXIT)?;
+    assert_eq!(outcome.status(), OutcomeStatus::Refused);
+    assert!(events.contains(&ProviderEvent::QuotaLimited {
+        message: "You've hit your usage limit.".into(),
+        pool: None,
+        resets_in_seconds: None,
+    }));
+    Ok(())
+}
+#[test]
 fn terminal_answer_and_nonzero_exit_remain_separate_facts() -> Result<(), Box<dyn std::error::Error>>
 {
     let exit = ExitObservation {
@@ -2155,16 +2206,16 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 index..index,
                 [
                     "npm_config_cache",
-                    "PNPM_HOME",
-                    "npm_config_store_dir",
-                    "pnpm_config_store_dir",
                     "npm_config_cache_dir",
                     "pnpm_config_cache_dir",
                     "COREPACK_HOME",
+                    "pnpm_config_verify_deps_before_run",
                     "npm_config_manage_package_manager_versions",
                     "pnpm_config_manage_package_manager_versions",
                     "npm_config_package_manager_strict",
                     "pnpm_config_package_manager_strict",
+                    "COREPACK_ENABLE_PROJECT_SPEC",
+                    "COREPACK_ENABLE_DOWNLOAD",
                 ],
             );
         }
@@ -2702,6 +2753,62 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
             }
         }
     }
+    Ok(())
+}
+
+#[test]
+fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
+-> Result<(), Box<dyn std::error::Error>> {
+    let prompt = Prompt::new("fixture prompt".into());
+    let route = route("opencode", "configured/model");
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
+    let prepare = |home: &Path, plan: &_| {
+        opencode::OpenCode.prepare(PrepareInput {
+            home,
+            ..fixture_input(&route, plan, &prompt, Path::new("/fixture/repo"), None)
+        })
+    };
+    // Without Rust installed the lane keeps only the system tools.
+    let spec = prepare(&home, &plan)?;
+    assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));
+    std::fs::create_dir_all(home.join(".cargo/bin"))?;
+    std::fs::create_dir_all(home.join(".rustup/toolchains"))?;
+    let cache = Path::new("/fixture/home/Library/Caches/provenant-lane-cargo/fixture");
+    let spec = prepare(&home, &plan)?;
+    let env = |key: &str| {
+        spec.env
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| Path::new(value).to_path_buf())
+    };
+    let path = env("PATH").expect("PATH");
+    assert!(
+        std::env::split_paths(&path).any(|dir| dir == home.join(".cargo/bin")),
+        "{path:?}"
+    );
+    let cache = env("CARGO_TARGET_DIR")
+        .and_then(|target| target.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| cache.to_path_buf());
+    assert_eq!(env("CARGO_HOME"), Some(cache.join("cargo-home")));
+    assert_eq!(env("CARGO_TARGET_DIR"), Some(cache.join("target")));
+    assert!(cache.ends_with("fixture"), "{cache:?}");
+    for root in [
+        crate::launch::subtree(&cache),
+        crate::launch::subtree(home.join(".cargo/bin")),
+        crate::launch::subtree(home.join(".rustup/toolchains")),
+    ] {
+        assert!(
+            spec.profile.spec.tool_exec_roots.contains(&root),
+            "{root:?}"
+        );
+    }
+    // Read-only lanes deny bash, so they get no toolchain.
+    let plan = fixture_access_plan(Access::ReadOnly, None, false);
+    let spec = prepare(&home, &plan)?;
+    assert!(spec.profile.spec.tool_exec_roots.is_empty());
+    assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));
     Ok(())
 }
 
@@ -3996,18 +4103,23 @@ fn no_lane_can_write_shared_toolchain_stores() -> Result<(), ProviderError> {
                 _ => "/fixture/home/Library/Caches/provenant-lane-cargo/fixture".into(),
             };
             assert_eq!(env("CARGO_HOME"), Some(cache.join("cargo-home")));
-            // Node variables appear only where a Homebrew Node exists.
+            // Node variables appear only where a Homebrew Node exists. The
+            // store stays at the host setting, so a native install's recorded
+            // configuration matches; only the caches move into the lane.
             for (key, leaf) in [
                 ("npm_config_cache", "npm"),
-                ("PNPM_HOME", "pnpm-home"),
-                ("npm_config_store_dir", "pnpm-store"),
-                ("pnpm_config_store_dir", "pnpm-store"),
                 ("npm_config_cache_dir", "pnpm-cache"),
                 ("pnpm_config_cache_dir", "pnpm-cache"),
             ] {
                 if let Some(value) = env(key) {
                     assert_eq!(value, cache.join(leaf), "{id} {access:?} {key}");
                 }
+            }
+            for key in ["PNPM_HOME", "npm_config_store_dir", "pnpm_config_store_dir"] {
+                assert!(
+                    launch.env.iter().all(|(k, _)| k != key),
+                    "{id} {access:?} {key}"
+                );
             }
         }
     }
@@ -4049,6 +4161,93 @@ fn lanes_run_the_installed_pnpm_instead_of_downloading_a_pinned_one() -> Result<
                 "{access:?} {key}"
             );
         }
+        // A Corepack shim must not follow a pinned `packageManager` either.
+        for key in ["COREPACK_ENABLE_PROJECT_SPEC", "COREPACK_ENABLE_DOWNLOAD"] {
+            assert!(
+                launch.env.iter().any(|(k, v)| k == key && v == "0"),
+                "{access:?} {key}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// pnpm records the store directory in `node_modules/.modules.yaml`. A lane
+/// override made a worktree the chair had installed natively look stale, and
+/// the lane then tried to reinstall into a store it cannot write. Lanes keep the
+/// host's store setting and skip the pre-run dependency check, so `pnpm run`
+/// uses the native install as it is.
+#[test]
+fn lanes_run_a_natively_installed_worktree_without_reinstalling() -> Result<(), ProviderError> {
+    if !["/opt/homebrew", "/usr/local"]
+        .iter()
+        .any(|prefix| Path::new(prefix).join("bin/node").exists())
+    {
+        return Ok(());
+    }
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture prompt".into());
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let plan = fixture_access_plan(access, Some("login"), false);
+        let launch = crate::codex::Codex.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            None,
+        ))?;
+        for key in ["PNPM_HOME", "npm_config_store_dir", "pnpm_config_store_dir"] {
+            assert!(launch.env.iter().all(|(k, _)| k != key), "{access:?} {key}");
+        }
+        assert!(
+            launch
+                .env
+                .iter()
+                .any(|(k, v)| k == "pnpm_config_verify_deps_before_run" && v == "false"),
+            "{access:?}"
+        );
+    }
+    Ok(())
+}
+
+/// The host store stays readable so pnpm can resolve the recorded store, and
+/// stays outside every write grant: the host later runs what it holds.
+#[test]
+fn lanes_read_the_host_pnpm_store_but_cannot_write_it() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::permissions::PathScope;
+    if !["/opt/homebrew", "/usr/local"]
+        .iter()
+        .any(|prefix| Path::new(prefix).join("bin/node").exists())
+    {
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    let mut reads = Vec::new();
+    let mut exec = Vec::new();
+    let mut env = Vec::new();
+    for store in ["Library/pnpm", ".local/share/pnpm"] {
+        std::fs::create_dir_all(home.join(store))?;
+    }
+    crate::launch::node_tools(
+        &home,
+        Access::ReadOnly,
+        &temp.path().join("cache"),
+        &mut reads,
+        &mut exec,
+        &mut env,
+    );
+    for store in ["Library/pnpm", ".local/share/pnpm"] {
+        assert!(
+            reads.iter().any(|grant| {
+                grant.path == home.join(store) && grant.scope == PathScope::Subtree
+            }),
+            "{store}"
+        );
+    }
+    for key in ["PNPM_HOME", "npm_config_store_dir", "pnpm_config_store_dir"] {
+        assert!(env.iter().all(|(name, _)| name != key), "{key}");
     }
     Ok(())
 }

@@ -79,6 +79,78 @@ fn account_policy_filters_accounts_before_selecting_a_writer()
 }
 
 #[test]
+fn spent_account_is_skipped_for_an_available_one_even_when_its_reading_is_stale()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = [
+        AvailabilityRecord {
+            account_key: Some("work".into()),
+            ..availability()
+        },
+        AvailabilityRecord {
+            account_key: Some("review".into()),
+            ..availability()
+        },
+    ];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "fixture",
+        confinement_ref: "fixture",
+    }];
+    let spent = |expires: i64, reset: i64| -> Result<QuotaObservation, RoutingError> {
+        let mut reading = quota(
+            "codex/gpt-6-luna",
+            "review",
+            QuotaStatus::Exhausted,
+            1,
+            50,
+            expires,
+        )?;
+        reading.snapshot.windows = vec![QuotaWindow {
+            pool: "secondary".into(),
+            window_seconds: Some(604_800),
+            used_basis_points: 10_000,
+            resets_unix_seconds: Some(reset),
+        }];
+        Ok(reading)
+    };
+    let selected = |quota: &[QuotaObservation], availability: &[AvailabilityRecord]| {
+        let context = RoutingContext {
+            availability,
+            access: &access,
+            quota,
+            ..context(&catalogue, &config, now()?)
+        };
+        let route = resolve(&request("codex/gpt-6-luna")?, &context)?;
+        let ready = matches!(route.readiness, RouteReadiness::Ready { .. });
+        Ok::<_, Box<dyn std::error::Error>>((route.account_key, ready))
+    };
+    // With no evidence the tie goes to `review`, so each skip below is the rule.
+    assert_eq!(selected(&[], &records)?, (Some("review".into()), true));
+    // Fresh or stale, a spent reading loses to an account with no such evidence.
+    for reading in [spent(120, 10_000)?, spent(60, 10_000)?] {
+        assert_eq!(selected(&[reading], &records)?, (Some("work".into()), true));
+    }
+    // Once the spent window has reset, the reading no longer counts.
+    assert_eq!(
+        selected(&[spent(60, 90)?], &records)?,
+        (Some("review".into()), true)
+    );
+    // Stale evidence never refuses the only account; fresh evidence does.
+    assert_eq!(
+        selected(&[spent(60, 10_000)?], &records[1..])?,
+        (Some("review".into()), true)
+    );
+    assert_eq!(
+        selected(&[spent(120, 10_000)?], &records[1..])?,
+        (Some("review".into()), false)
+    );
+    Ok(())
+}
+
+#[test]
 fn valid_list_contains_only_resolvable_recorded_pairs() -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
@@ -3572,5 +3644,72 @@ fn agy_exhaustion_follows_the_models_serving_windows() -> Result<(), Box<dyn std
     ];
     assert!(ready(claude, QuotaStatus::Exhausted, lapsed.clone())?);
     assert!(!ready(gemini, QuotaStatus::Exhausted, lapsed)?);
+    Ok(())
+}
+#[test]
+fn unsupported_pool_effort_is_dropped_with_a_warning() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pools": {"trial": [
+            {"model": "codex/gpt-6-luna", "effort": "retired", "efforts": ["low", "retired"]}
+        ]}
+    }))?;
+    assert!(config.validate().is_empty());
+    let context = context(&catalogue, &config, now()?);
+    let listed = list(
+        &RouteListQuery {
+            pool: Some("trial".into()),
+            ..RouteListQuery::default()
+        },
+        &context,
+    )?;
+    let member = &listed.pools["trial"][0];
+    assert_eq!(member.efforts, ["low"]);
+    assert_eq!(member.effort, None);
+    let warnings = config.pool_effort_warnings(&catalogue);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("domains.routing.pools.trial[0].efforts"));
+    assert!(warnings[0].contains("retired"));
+    Ok(())
+}
+#[test]
+fn supported_default_effort_survives_reconciliation() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pools": {"trial": [
+            {"model": "codex/gpt-6-luna", "effort": "low", "efforts": ["low", "retired"]}
+        ]}
+    }))?;
+    let context = context(&catalogue, &config, now()?);
+    let listed = list(&RouteListQuery::default(), &context)?;
+    let member = &listed.pools["trial"][0];
+    assert_eq!(member.effort.as_deref(), Some("low"));
+    assert_eq!(member.efforts, ["low"]);
+    Ok(())
+}
+#[test]
+fn malformed_duplicate_or_excess_pool_efforts_still_fail() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fails = |member: serde_json::Value| -> Result<bool, serde_json::Error> {
+        let config: RoutingConfig =
+            serde_json::from_value(serde_json::json!({"pools": {"trial": [member]}}))?;
+        Ok(config
+            .validate()
+            .iter()
+            .any(|error| error.code == "unsupported_effort"))
+    };
+    assert!(fails(
+        serde_json::json!({"model": "codex/gpt-6-luna", "efforts": ["bad effort"]})
+    )?);
+    assert!(fails(
+        serde_json::json!({"model": "codex/gpt-6-luna", "efforts": ["low", "low"]})
+    )?);
+    assert!(fails(
+        serde_json::json!({"model": "codex/gpt-6-luna", "effort": "bad effort"})
+    )?);
+    let many: Vec<String> = (0..17).map(|n| format!("e{n}")).collect();
+    assert!(fails(
+        serde_json::json!({"model": "codex/gpt-6-luna", "efforts": many})
+    )?);
     Ok(())
 }

@@ -469,3 +469,15 @@ fn cli_error_detail_carries_data_once() {
     assert_eq!(detail["code"], "cli_failed");
     assert_eq!(detail["data"], "text");
 }
+
+#[test]
+fn summary_update_carries_a_validated_operation_id() {
+    let value = json!({"op":"summary_update","session":"s","expect_revision":0,
+        "patch":{"now":"x"},"operation_id":"retry-1"});
+    let call = ToolCall::parse("fabric_chair", value).unwrap();
+    assert_eq!(call.operation_id().unwrap().as_str(), "retry-1");
+    let value = json!({"op":"summary_update","session":"s","expect_revision":0,
+        "patch":{"now":"x"},"operation_id":"bad id!"});
+    let call = ToolCall::parse("fabric_chair", value);
+    assert!(call.is_err() || call.unwrap().operation_id().is_none());
+}

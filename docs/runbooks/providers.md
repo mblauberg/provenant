@@ -81,6 +81,18 @@ and build offline (`CARGO_NET_OFFLINE=true`) without Cargo's automatic cache
 clean-up. Pinning the build directory overrides inherited Cargo configuration.
 `provenant worktree remove` and `provenant gc` prune writer caches.
 
+Node lanes run the host's installed pnpm. Lanes redirect the npm and pnpm
+caches and the Corepack home into the lane cache, but leave `PNPM_HOME` and the
+pnpm store unset: pnpm records the store directory in
+`node_modules/.modules.yaml`, so a lane override makes a worktree the chair
+installed natively look stale. The default store (`~/Library/pnpm` on macOS,
+`~/.local/share/pnpm` on Linux) is readable, never writable, and
+`verify-deps-before-run` is off, so `pnpm run <script>` uses the native install
+without reinstalling. Corepack neither follows a project's `packageManager`
+field nor downloads a version, so a pinned pnpm cannot arrive as a
+non-executable `@pnpm/exe` placeholder. Install dependencies on the host before
+dispatch; a lane cannot install into the shared store.
+
 Read-only lanes with a verified Git checkout use a private scratch object
 directory, with the host's common object store as a read-only alternate. The
 shell Git wrapper selects it only for the bound repository and its linked

@@ -281,6 +281,14 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                     pool: None,
                     resets_in_seconds: resets_in(message),
                 });
+            } else if let Some(message) = result
+                .error
+                .as_deref()
+                .filter(|message| model_overloaded(message))
+            {
+                events.push(E::ModelOverloaded {
+                    message: message.to_owned(),
+                });
             } else if let Some(denied) = result.denied_actions.as_array().and_then(|a| a.first()) {
                 if !result.response.is_empty() {
                     events.push(E::Text(result.response.clone()));
@@ -340,6 +348,36 @@ fn quota_reached(message: &str) -> bool {
         .strip_prefix("429")
         .filter(|rest| rest.starts_with([':', ' ']))
         .map_or(message, |rest| rest.trim_start_matches([':', ' ']));
+    message
+        .get(..REFUSAL.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(REFUSAL))
+}
+/// The model's capacity refusal, `The model is overloaded. Please try again
+/// later.`, possibly behind its 503 or 529 status. As with [`quota_reached`],
+/// the error must open with it.
+fn model_overloaded(message: &str) -> bool {
+    let mut message = message.trim_start();
+    for status in ["503", "529"] {
+        if let Some(rest) = message
+            .strip_prefix(status)
+            .filter(|rest| rest.starts_with([':', ' ']))
+        {
+            message = rest.trim_start_matches([':', ' ']);
+        }
+    }
+    for lead in ["service unavailable", "unavailable"] {
+        if message
+            .get(..lead.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(lead))
+        {
+            message = message[lead.len()..].trim_start_matches([':', ' ', '-']);
+        }
+    }
+    let message = message
+        .strip_prefix("The ")
+        .or_else(|| message.strip_prefix("the "))
+        .unwrap_or(message);
+    const REFUSAL: &str = "model is overloaded";
     message
         .get(..REFUSAL.len())
         .is_some_and(|head| head.eq_ignore_ascii_case(REFUSAL))

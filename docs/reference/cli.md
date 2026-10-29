@@ -1829,6 +1829,29 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant preset explain`
+
+| Argument | Contract |
+|---|---|
+| `name` | `{"name": "name", "positional": true, "required": true}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "name"
+      ],
+      "multiple": true,
+      "name": "Explain",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant run`
 
 | Argument | Contract |
@@ -2918,6 +2941,7 @@ Accepted by every command, before or after the subcommand.
 | `session` | `{"name": "session", "positional": true, "required": true}` |
 | `--file` | `{"name": "file", "required": true}` |
 | `--expect-revision` | `{"name": "expect_revision", "required": true}` |
+| `--operation-id` | `{"name": "operation_id"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2928,7 +2952,8 @@ Accepted by every command, before or after the subcommand.
       "arguments": [
         "session",
         "file",
-        "expect_revision"
+        "expect_revision",
+        "operation_id"
       ],
       "multiple": true,
       "name": "Update",

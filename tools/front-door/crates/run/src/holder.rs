@@ -1008,8 +1008,14 @@ impl RunStore {
                 decoded.outcome = Outcome::Failed;
                 decoded.reason = Some(reason);
             }
-            if let Some(retry) = assessment.retry {
-                self.stage_policy_retry(&record, &retry, call)?;
+            if let Some(retry) = assessment.retry
+                && self.stage_policy_retry(&record, &retry, call)?
+                && let Some(note) = assessment.note
+            {
+                decoded.reason = Some(match decoded.reason.take() {
+                    Some(reason) => format!("{reason}; {note}"),
+                    None => note,
+                });
             }
         }
         // A finish that settled well can still be a partial one. Flag it for

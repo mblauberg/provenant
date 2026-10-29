@@ -188,6 +188,16 @@ pub struct RoutingConfig {
     /// Silence the advisory for Opus implementation lanes.
     pub suppress_opus_writer_warning: bool,
     pub capacity_cooldown_seconds: u64,
+    /// Further attempts after a capacity or quota settlement, on the same
+    /// session where it resumes or a fresh draw where it cannot. Zero retries
+    /// none; at most [`MAX_SETTLEMENT_RETRIES`].
+    pub settlement_retries: u8,
+    /// Wait before a capacity retry, multiplied by the retry's number.
+    pub capacity_retry_seconds: u64,
+    /// Cap on one capacity retry's wait, jitter included.
+    pub capacity_retry_max_seconds: u64,
+    /// Ceiling on any settlement retry's sealed wait, whatever its cause.
+    pub retry_delay_ceiling_seconds: u64,
     pub review: crate::ReviewConfig,
     pub routes: BTreeMap<String, NamedRoute>,
     pub pools: BTreeMap<String, Vec<RoutePoolMember>>,
@@ -197,12 +207,22 @@ pub struct RoutingConfig {
     pub opencode_go: OpenCodeGoSettings,
 }
 
+/// Settlement retries a lane may take; the run store seals at most this many
+/// policy successors in one run.
+pub const MAX_SETTLEMENT_RETRIES: u8 = 32;
+/// Longest configurable settlement retry wait: one week.
+pub const MAX_RETRY_WAIT_SECONDS: u64 = 7 * 24 * 3_600;
+
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
             model_policy: crate::ModelPolicies::default(),
             suppress_opus_writer_warning: false,
             capacity_cooldown_seconds: 600,
+            settlement_retries: 2,
+            capacity_retry_seconds: 30,
+            capacity_retry_max_seconds: 600,
+            retry_delay_ceiling_seconds: 3_600,
             review: crate::ReviewConfig::default(),
             routes: BTreeMap::new(),
             pools: BTreeMap::new(),
@@ -242,6 +262,24 @@ impl Default for PacingReserve {
     }
 }
 impl RoutingConfig {
+    /// One warning per configured pool member whose efforts the catalogue no
+    /// longer lists. The efforts are dropped at resolution; this only reports.
+    pub fn pool_effort_warnings(&self, catalogue: &Catalogue) -> Vec<String> {
+        let mut warnings = Vec::new();
+        for (name, members) in &self.pools {
+            for (index, member) in members.iter().enumerate() {
+                let (_, dropped) = member.reconciled(catalogue.model(&member.model));
+                if !dropped.is_empty() {
+                    warnings.push(format!(
+                        "warning: domains.routing.pools.{name}[{index}].efforts: {} does not list {}; dropped",
+                        member.model.as_str(),
+                        dropped.join(", ")
+                    ));
+                }
+            }
+        }
+        warnings
+    }
     /// Suggest a cheaper route in the applied tier. Exact models and custom
     /// pools use the model's highest bundled implementation tier.
     pub fn opus_writer_advisory(
@@ -309,6 +347,32 @@ impl DomainConfig for RoutingConfig {
     fn validate(&self) -> Vec<SectionError> {
         let mut errors = Vec::new();
         self.model_policy.validate(&mut errors);
+        if self.settlement_retries > MAX_SETTLEMENT_RETRIES {
+            errors.push(SectionError {
+                field: "settlement_retries".into(),
+                code: "limit",
+            });
+        }
+        // Waits are bounded only so a typo in seconds cannot park a lane for
+        // months; within a week every value is the operator's choice.
+        for (field, seconds) in [
+            ("capacity_retry_seconds", self.capacity_retry_seconds),
+            (
+                "capacity_retry_max_seconds",
+                self.capacity_retry_max_seconds,
+            ),
+            (
+                "retry_delay_ceiling_seconds",
+                self.retry_delay_ceiling_seconds,
+            ),
+        ] {
+            if seconds > MAX_RETRY_WAIT_SECONDS {
+                errors.push(SectionError {
+                    field: field.into(),
+                    code: "limit",
+                });
+            }
+        }
         if self.routes.len() > 128 {
             errors.push(SectionError {
                 field: "routes".into(),
@@ -399,24 +463,21 @@ impl DomainConfig for RoutingConfig {
                         code: "unknown_provider",
                     });
                 }
+                // An effort the catalogue does not list is not an error here: it
+                // is dropped at resolution (see `RoutePoolMember::reconciled`).
                 let mut seen_efforts = BTreeSet::new();
                 if member.efforts.len() > 16
-                    || member.efforts.iter().any(|effort| {
-                        !effort_valid(effort)
-                            || !seen_efforts.insert(effort)
-                            || model.is_some_and(|entry| {
-                                !entry.efforts.iter().any(|supported| supported == effort)
-                            })
-                    })
+                    || member
+                        .efforts
+                        .iter()
+                        .any(|effort| !effort_valid(effort) || !seen_efforts.insert(effort))
                 {
                     errors.push(SectionError {
                         field: format!("{prefix}.efforts"),
                         code: "unsupported_effort",
                     });
                 }
-                if member.effort.as_deref().is_some_and(|effort| {
-                    !effort_valid(effort) || !member.efforts.iter().any(|allowed| allowed == effort)
-                }) {
+                if member.effort.as_deref().is_some_and(|e| !effort_valid(e)) {
                     errors.push(SectionError {
                         field: format!("{prefix}.effort"),
                         code: "unsupported_effort",
@@ -735,6 +796,32 @@ pub struct RoutePoolMember {
     pub efforts: Vec<String>,
     #[serde(default)]
     pub free: bool,
+}
+impl RoutePoolMember {
+    /// The single place a pool member is reconciled with the catalogue: efforts
+    /// the model does not list are dropped, and a default effort that is no
+    /// longer allowed falls back to none. Returns the member and the dropped
+    /// efforts (the default is reported once, as `effort`).
+    pub(crate) fn reconciled(&self, entry: Option<&ModelEntry>) -> (Self, Vec<String>) {
+        let mut member = self.clone();
+        let Some(entry) = entry else {
+            return (member, Vec::new());
+        };
+        let (kept, mut dropped): (Vec<_>, Vec<_>) = self
+            .efforts
+            .iter()
+            .cloned()
+            .partition(|effort| entry.efforts.contains(effort));
+        member.efforts = kept;
+        if let Some(effort) = member.effort.take() {
+            if member.efforts.contains(&effort) {
+                member.effort = Some(effort);
+            } else if !dropped.contains(&effort) {
+                dropped.push(effort);
+            }
+        }
+        (member, dropped)
+    }
 }
 fn default_weight() -> u8 {
     1

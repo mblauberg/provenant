@@ -501,7 +501,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     );
     let calls_after = fs::read_to_string(landing.rig.project.join("gh-calls"))?;
     for number in [1669, 1670] {
-        let expected = format!("pr view {number} --repo owner/repo --json state");
+        let expected = format!("pr view {number} --repo owner/repo --json state,mergedAt,closedAt");
         assert_eq!(
             calls_after[calls_before.len()..]
                 .lines()
@@ -714,6 +714,60 @@ fn contribution_terminal(
 /// The fake `gh` the driver re-enters as: a passing, unchanged pull request.
 pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
     let call = args.join(" ");
+    // Real gh rejects JSON fields it does not have; so does this fake.
+    if let Some(at) = args.iter().position(|arg| arg == "--json") {
+        let known: &[&str] = match (
+            args.first().map(String::as_str),
+            args.get(1).map(String::as_str),
+        ) {
+            (Some("pr"), Some("view" | "list")) => &[
+                "baseRefName",
+                "baseRefOid",
+                "closedAt",
+                "headRefName",
+                "headRefOid",
+                "headRepository",
+                "headRepositoryOwner",
+                "isCrossRepository",
+                "isDraft",
+                "mergeStateStatus",
+                "mergeable",
+                "mergedAt",
+                "number",
+                "reviewDecision",
+                "state",
+                "statusCheckRollup",
+                "title",
+                "url",
+            ],
+            (Some("pr"), Some("checks")) => &[
+                "bucket",
+                "completedAt",
+                "description",
+                "event",
+                "link",
+                "name",
+                "startedAt",
+                "state",
+                "workflow",
+            ],
+            (Some("repo"), Some("view")) => {
+                &["defaultBranchRef", "name", "nameWithOwner", "owner", "url"]
+            }
+            _ => &[],
+        };
+        for field in args
+            .get(at + 1)
+            .map(String::as_str)
+            .unwrap_or("")
+            .split(',')
+        {
+            if !known.is_empty() && !known.contains(&field) {
+                let _ = writeln!(io::stderr(), "Unknown JSON field: {field:?}");
+                return Ok(1);
+            }
+        }
+    }
     let dir = std::env::var_os("FIXTURE_GH_DIR")
         .map(PathBuf::from)
         .unwrap_or_default();
@@ -744,6 +798,17 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
             let state = fs::read_to_string(dir.join(format!("state-{number}")))?;
             io::stdout().write_all(&serde_json::to_vec(&serde_json::json!({"state":state}))?)?;
         }
+        // The stale-binding sweep also reads the end time; the fixture has none.
+        value
+            if value.starts_with("pr view ")
+                && value.ends_with(" --json state,mergedAt,closedAt") =>
+        {
+            let number = args.get(2).ok_or("PR number")?;
+            let state = fs::read_to_string(dir.join(format!("state-{number}")))?;
+            io::stdout().write_all(&serde_json::to_vec(
+                &serde_json::json!({"state":state,"mergedAt":null,"closedAt":null}),
+            )?)?;
+        }
         value if value.starts_with("pr view ") && value.ends_with(" --json headRefOid") => {
             io::stdout().write_all(&fs::read(dir.join("head.json"))?)?;
         }
@@ -759,8 +824,10 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
         "pr checks 1668 --watch" => {
             fs::write(dir.join("watched"), "")?;
         }
-        "pr view 1668 --json baseRefName,baseRepository,baseRepositoryOwner" => {
-            io::stdout().write_all(br#"{"baseRefName":"main","baseRepository":{"name":"repo"},"baseRepositoryOwner":{"login":"owner"}}"#)?;
+        "pr view 1668 --json baseRefName,url" => {
+            io::stdout().write_all(
+                br#"{"baseRefName":"main","url":"https://github.com/owner/repo/pull/1668"}"#,
+            )?;
         }
         "api repos/owner/repo/branches/main" => {
             io::stdout().write_all(br#"{"protected":false}"#)?;
@@ -1591,9 +1658,12 @@ pub(crate) fn pr_land_out_of_tree_with_separate_git_directory() -> Result {
 }
 
 pub(crate) fn pr_land_refuses_each_unsafe_step_and_reports_the_rest() -> Result {
-    // A checkout of the base with local changes is not fast-forwarded.
+    // A checkout of the base with a tracked modification is not fast-forwarded.
     let landing = landing()?;
-    fs::write(landing.rig.project.join("stray.txt"), "mine\n")?;
+    let ignore = landing.rig.project.join(".gitignore");
+    let mut contents = fs::read_to_string(&ignore)?;
+    contents.push_str("mine\n");
+    fs::write(&ignore, &contents)?;
     let output = command(
         &landing.rig,
         &["land", NUMBER, "--head", &landing.head, "--json"],
@@ -1609,7 +1679,30 @@ pub(crate) fn pr_land_refuses_each_unsafe_step_and_reports_the_rest() -> Result 
         landing.stale,
         "a dirty checkout keeps its base"
     );
+    assert_eq!(fs::read_to_string(&ignore)?, contents);
+
+    // Untracked files in the base checkout, such as Provenant's own scratch,
+    // do not stop the fast-forward and are left in place.
+    let landing = self::landing()?;
+    fs::create_dir_all(landing.rig.project.join(".provenant/scratch"))?;
+    fs::write(
+        landing.rig.project.join(".provenant/scratch/note"),
+        "mine\n",
+    )?;
+    fs::write(landing.rig.project.join("stray.txt"), "mine\n")?;
+    let output = command(
+        &landing.rig,
+        &["land", NUMBER, "--head", &landing.head, "--json"],
+    )?;
+    let value = json(&output)?;
+    assert_eq!(status(&value, "fast_forward")?, "done", "{value}");
+    assert_ne!(
+        git(&landing.rig, &["rev-parse", "main"])?,
+        landing.stale,
+        "{value}"
+    );
     assert!(landing.rig.project.join("stray.txt").exists());
+    assert!(landing.rig.project.join(".provenant/scratch/note").exists());
 
     // A worktree with uncommitted work is kept, and so is its branch.
     let mut landing = self::landing()?;

@@ -298,15 +298,21 @@ fn effective_pool_names(context: &RoutingContext<'_>) -> BTreeSet<String> {
         .cloned()
         .collect()
 }
-fn effective_pool<'a>(
-    context: &'a RoutingContext<'_>,
-    name: &str,
-) -> Option<&'a Vec<RoutePoolMember>> {
+fn raw_pool<'a>(context: &'a RoutingContext<'_>, name: &str) -> Option<&'a Vec<RoutePoolMember>> {
     context
         .config
         .pools
         .get(name)
         .or_else(|| context.catalogue.pools.get(name))
+}
+fn effective_pool(context: &RoutingContext<'_>, name: &str) -> Option<Vec<RoutePoolMember>> {
+    let members = raw_pool(context, name)?;
+    Some(
+        members
+            .iter()
+            .map(|member| member.reconciled(context.catalogue.model(&member.model)).0)
+            .collect(),
+    )
 }
 /// Providers named by the primary route or pool and its explicit fallbacks.
 /// Discovery must not run commands for unrelated installed providers.
@@ -992,39 +998,16 @@ fn account_reason<'q>(
     }
     // Explicit exact IDs use the executable/account preflight too. The provider
     // owns model availability; named routes and pools require catalogue entries.
-    let quota = context
-        .quota
-        .iter()
-        .filter(|q| {
-            q.model == *model
-                && q.snapshot.schema_version == 1
-                && q.snapshot.account.adapter == model.adapter()
-                && Some(&q.snapshot.account.account_key) == availability.account_key.as_ref()
-                && q.snapshot.observed_unix_seconds <= context.now_seconds()
-                && q.snapshot.observed_unix_seconds < q.expires_unix_seconds
-                && context.now_seconds() < q.expires_unix_seconds
-        })
-        .max_by_key(|q| (q.snapshot.observed_unix_seconds, q.snapshot.revision));
+    let quota = latest_reading(model, availability, context, true);
     if reason.is_none()
         && let Some(q) = quota
     {
-        reason = match q.snapshot.status {
-            QuotaStatus::Exhausted
-                if !exhaustion_lapsed(
-                    &q.snapshot,
-                    context.now_seconds(),
-                    context.catalogue.quota_pool(model),
-                ) =>
-            {
-                Some(RouteExclusionReason::Exhausted)
-            }
-            QuotaStatus::AuthRequired => Some(RouteExclusionReason::AuthRequired),
-            QuotaStatus::Available | QuotaStatus::CreditOnly
-                if model_pool_exhausted(&q.snapshot, model, context) =>
-            {
-                Some(RouteExclusionReason::Exhausted)
-            }
-            _ => None,
+        reason = if reading_exhausted(&q.snapshot, model, context) {
+            Some(RouteExclusionReason::Exhausted)
+        } else if q.snapshot.status == QuotaStatus::AuthRequired {
+            Some(RouteExclusionReason::AuthRequired)
+        } else {
+            None
         };
     }
     let (policy, profile, _, _) =
@@ -1058,20 +1041,74 @@ fn account_reason<'q>(
     }
     (reason, quota)
 }
+/// The account's latest reading for this model, only a fresh one when
+/// `fresh`. Only a fresh reading may refuse the route; a stale one still ranks
+/// the account.
+fn latest_reading<'q>(
+    model: &ModelId,
+    availability: &AvailabilityRecord,
+    context: &'q RoutingContext<'_>,
+    fresh: bool,
+) -> Option<&'q QuotaObservation> {
+    let now = context.now_seconds();
+    context
+        .quota
+        .iter()
+        .filter(|q| {
+            q.model == *model
+                && q.snapshot.schema_version == 1
+                && q.snapshot.account.adapter == model.adapter()
+                && Some(&q.snapshot.account.account_key) == availability.account_key.as_ref()
+                && q.snapshot.observed_unix_seconds <= now
+                && (!fresh
+                    || (q.snapshot.observed_unix_seconds < q.expires_unix_seconds
+                        && now < q.expires_unix_seconds))
+        })
+        .max_by_key(|q| (q.snapshot.observed_unix_seconds, q.snapshot.revision))
+}
+fn reading_exhausted(
+    snapshot: &provenant_quota::QuotaSnapshot,
+    model: &ModelId,
+    context: &RoutingContext<'_>,
+) -> bool {
+    quota_reading_spent(
+        snapshot,
+        model,
+        context.catalogue.quota_pool(model),
+        context.now_seconds(),
+    )
+}
+/// The one rule for a spent account, whatever its pacing policy: an exhausted
+/// snapshot whose full windows serving `model` have not all reset, or a
+/// grouped pool serving it at its limit. `model_pool` is the catalogue's quota
+/// pool for the model. Freshness is the caller's concern.
+pub fn quota_reading_spent(
+    snapshot: &provenant_quota::QuotaSnapshot,
+    model: &ModelId,
+    model_pool: Option<&str>,
+    now_seconds: i64,
+) -> bool {
+    match snapshot.status {
+        QuotaStatus::Exhausted => !exhaustion_lapsed(snapshot, now_seconds, model_pool),
+        QuotaStatus::Available | QuotaStatus::CreditOnly => {
+            model_pool_exhausted(snapshot, model, model_pool, now_seconds)
+        }
+        _ => false,
+    }
+}
 /// A grouped adapter's snapshot stays available while another group has
 /// capacity; the windows serving this model (its pool, ungrouped windows, or
 /// every window when it has no pool) may still be spent.
 fn model_pool_exhausted(
     snapshot: &provenant_quota::QuotaSnapshot,
     model: &ModelId,
-    context: &RoutingContext<'_>,
+    pool: Option<&str>,
+    now: i64,
 ) -> bool {
     if !provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|s| s.grouped_quota_pools)
     {
         return false;
     }
-    let pool = context.catalogue.quota_pool(model);
-    let now = context.now_seconds();
     snapshot
         .windows
         .iter()
@@ -1183,7 +1220,8 @@ fn candidate(
     let access = context.access.iter().find(|a| a.adapter == model.adapter());
     // Several registered accounts may serve one adapter: take a ready one with
     // the most pacing headroom, so exhausted accounts are skipped rather than
-    // chosen by registration order.
+    // chosen by registration order. A stale reading that showed the account
+    // spent cannot refuse it, but it ranks the account behind every other.
     let mut policy_refused = false;
     let evaluated: Vec<_> = context
         .availability
@@ -1215,10 +1253,13 @@ fn candidate(
             let (policy, _, _, _) = effective_profile(context, model, a.account_key.as_deref());
             let (headroom, _, standby) =
                 pacing_factor_basis_points(policy, model, a.account_key.as_deref(), context);
+            let spent = latest_reading(model, a, context, false)
+                .is_some_and(|q| reading_exhausted(&q.snapshot, model, context));
             (
                 a,
                 reason,
                 (
+                    !spent,
                     !avoid_cooling || !cooling(model, a.account_key.as_deref(), context),
                     !standby,
                     headroom,
@@ -1340,7 +1381,7 @@ pub fn resolve_for_account_with_seed_excluding(
             RouteChoice::Model(model) => [model.adapter()].into_iter().collect(),
             RouteChoice::NamedRoute(name) => {
                 let name = name.as_str();
-                if let Some(pool) = effective_pool(context, name) {
+                if let Some(pool) = raw_pool(context, name) {
                     pool.iter().map(|member| member.model.adapter()).collect()
                 } else {
                     [context
@@ -1422,7 +1463,7 @@ fn resolve_inner(
         RouteChoice::NamedRoute(name) => {
             let name = name.as_str();
             if let Some(pool) = effective_pool(context, name) {
-                let selected = select_pool(name, pool, request, context, seed, excluded_members)?;
+                let selected = select_pool(name, &pool, request, context, seed, excluded_members)?;
                 (selected.route, Some(selected.receipt))
             } else {
                 let named = context

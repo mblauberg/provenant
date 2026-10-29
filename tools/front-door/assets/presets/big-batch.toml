@@ -2,13 +2,13 @@ integration_branch = "${integration_branch}"
 stages = [
   { id = "scout", preset = "scout-swarm", parameters = { width = "${width}", read_roots = "${read_roots}" } },
   { id = "lanes", parallel = [
-    { id = "lane", for_each = "${lanes}", preset = "implement-with-lens", parameters = { worktree = "${item.worktree}", scope = "${item.scope}", spec = "${item.spec}", base = "${base}", delivery = "integrate:${integration_branch}" } },
+    { id = "lane", for_each = "${lanes}", preset = "generator-evaluator", parameters = { worktree = "${item.worktree}", scope = "${item.scope}", spec = "${item.spec}", base = "${base}", delivery = "integrate:${integration_branch}" } },
   ] },
-  { id = "council", preset = "review-council", parameters = { subject = { type = "integration" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", risk = "${risk}", review_shape = "${review_shape}", risk_tags = "${risk_tags}" } },
+  { id = "council", preset = "review-council", parameters = { subject = { type = "integration" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", risk_tags = "${risk_tags}" } },
   { id = "refactor", role = "refactor-principal" },
   { id = "repair", loop = { max_rounds = 2, until = "accept", stages = [
     { id = "fix", role = "repairer" },
-    { id = "review", preset = "review-council", parameters = { subject = { type = "node", node = "fix" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", risk = "${risk}", review_shape = "${review_shape}", risk_tags = "${risk_tags}" } },
+    { id = "review", preset = "review-council", parameters = { subject = { type = "node", node = "fix" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", risk_tags = "${risk_tags}" } },
     { id = "accept", kind = "gate", condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
   ] } },
 ]
@@ -16,16 +16,24 @@ stages = [
 [limits]
 expansion_depth = 64
 
+[pattern]
+level = "recommended"
+summary = "Scout, parallel writer lanes with lenses, a combined council, a principal refactor and bounded repair."
+citations = []
+cost = "scouts + lanes x (1 writer + lenses) + council + refactor + up to 2 repair rounds"
+select_when = "Several partitioned slices of one approved spec land together on a batch branch."
+tags = ["write", "review", "batch"]
+
 [parameters]
-width = 4
-read_roots = []
-integration_branch = "batch/graph"
-batch_worktree = ""
-base = ""
-spec = ""
-risk = ""
-review_shape = ""
-risk_tags = []
+width = { type = "integer", default = 4, min = 1, max = 32, doc = "Scouts in the opening swarm." }
+read_roots = { type = "list", default = [], doc = "Extra read roots for the scouts." }
+integration_branch = { type = "string", default = "batch/graph", doc = "Branch that lane heads integrate into." }
+batch_worktree = { type = "string", default = "", doc = "Registered worktree for the serial refactor and repair." }
+base = { type = "string", default = "", doc = "Diff reference the batch is measured from." }
+spec = { type = "string", default = "", doc = "Issue number or file the batch answers." }
+risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
+review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
+risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
 # One entry per lane: name, worktree, scope and spec. Supply with --params-file.
 lanes = [
   { name = "one", worktree = "", scope = ["."], spec = "" },
