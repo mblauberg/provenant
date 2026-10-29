@@ -5472,18 +5472,24 @@ fn stats_summary(report: &provenant_telemetry::StatsReport) -> String {
             "no terminal attempts recorded for project {project}; run from its checkout to see its lanes\n"
         ));
     }
+    // Only figures that exist: a source with no cache split adds no line, and
+    // the JSON carries the counts of what was not reported.
     let mut share = |label: &str, rows: &[provenant_telemetry::CacheGroup]| {
-        for row in rows {
+        for row in rows.iter().filter(|row| row.cache.reporting > 0) {
             let name = [&row.provider, &row.model, &row.account]
                 .into_iter()
                 .flatten()
                 .map(String::as_str)
                 .collect::<Vec<_>>()
                 .join(" ");
+            let name = if name.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", plain_text(&name, usize::MAX))
+            };
             text.push_str(&format!(
-                "cache read {label} {} {}: {}\n",
+                "cache read {label} [{}]{name}: {}\n",
                 row.source,
-                plain_text(&name, usize::MAX),
                 crate::quota::cache_share(&row.cache)
             ));
         }
@@ -5902,6 +5908,68 @@ mod tests {
             cost_summary(&totals),
             "3 attempts, est. API-equivalent $2.000000\n"
         );
+    }
+
+    #[test]
+    fn stats_text_lists_cache_share_only_where_a_provider_reported_it() {
+        use provenant_telemetry::{ChairModelUsage, ConfiguredPrices, usage::ChairSession};
+        let prices = provenant_telemetry::validate_prices(&ConfiguredPrices {
+            schema_version: 1,
+            id: "empty".into(),
+            reviewed_at: "2026-10-29".into(),
+            units: "usd_microdollars_per_million_tokens".into(),
+            models: Vec::new(),
+        })
+        .unwrap();
+        let chair = |usage| ChairSession {
+            adapter: "claude".into(),
+            account: "work".into(),
+            session: "s".into(),
+            project: None,
+            config: None,
+            usage,
+            unread: None,
+        };
+        let usage = |read| {
+            vec![ChairModelUsage {
+                model: "claude-opus-5-5".into(),
+                usage: provenant_records::Usage {
+                    uncached_input: Some(10),
+                    cache_read: read,
+                    cache_write: Some(0),
+                    cache_write_1h: None,
+                    output_excluding_reasoning: Some(1),
+                    reasoning: None,
+                },
+            }]
+        };
+        let report = |usage| {
+            let report = provenant_telemetry::stats_with_chair(
+                [],
+                [chair(usage)],
+                &prices,
+                Default::default(),
+            )
+            .unwrap();
+            stats_summary(&report)
+        };
+        let text = report(usage(Some(90)));
+        assert!(
+            text.contains(
+                "cache read by source [chair]: 90.0% of 100 input tokens (1 records reported, 0 did not)\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("cache read by model [chair] claude claude/claude-opus-5-5: 90.0%"),
+            "{text}"
+        );
+        assert!(
+            text.contains("chair: 1 sessions on this host (0 unread)"),
+            "{text}"
+        );
+        let text = report(usage(None));
+        assert!(!text.contains("cache read"), "{text}");
     }
 
     #[test]
