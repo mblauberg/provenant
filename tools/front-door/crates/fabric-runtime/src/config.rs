@@ -28,6 +28,9 @@ pub struct GraphConfig {
     pub limits: GraphLimits,
     pub limit_ceiling: GraphLimits,
     pub budget: GraphBudget,
+    /// Absolute host directories graph nodes may read besides the project's own
+    /// registered worktrees. Empty confines read roots to the project.
+    pub allowed_read_roots: Vec<String>,
 }
 
 impl Default for GraphConfig {
@@ -39,6 +42,7 @@ impl Default for GraphConfig {
                 ..Default::default()
             },
             budget: GraphBudget::default(),
+            allowed_read_roots: Vec::new(),
         }
     }
 }
@@ -53,6 +57,7 @@ impl<'de> Deserialize<'de> for GraphConfig {
             limits: GraphLimits,
             limit_ceiling: crate::graph::GraphLimitOverrides,
             budget: GraphBudget,
+            allowed_read_roots: Vec<String>,
         }
         let raw = RawGraphConfig::deserialize(deserializer)?;
         let mut ceiling = raw.limits.clone();
@@ -87,6 +92,7 @@ impl<'de> Deserialize<'de> for GraphConfig {
             limits: raw.limits,
             limit_ceiling: ceiling,
             budget: raw.budget,
+            allowed_read_roots: raw.allowed_read_roots,
         })
     }
 }
@@ -345,6 +351,14 @@ impl DomainConfig for FabricConfig {
         }
         if l.graph_timeout_seconds == 0 || l.graph_timeout_seconds > 14_400 {
             reject("limits.graph_timeout_seconds".into());
+        }
+        if self
+            .graph
+            .allowed_read_roots
+            .iter()
+            .any(|root| !std::path::Path::new(root).is_absolute())
+        {
+            reject("graph.allowed_read_roots".into());
         }
         let limits = &self.graph.limits;
         let ceiling = &self.graph.limit_ceiling;

@@ -275,7 +275,10 @@ fn explain_applies_writer_read_root_and_concurrency_bindings_without_state()
         graph["nodes"][0]["worktree"],
         writer.to_str().ok_or("writer path")?
     );
-    assert_eq!(graph["nodes"][0]["read_roots"], serde_json::json!([source]));
+    assert_eq!(
+        graph["nodes"][0]["read_roots"],
+        serde_json::json!([std::fs::canonicalize(&source)?])
+    );
     assert_eq!(graph["nodes"][0]["write_scope"], serde_json::json!(["src"]));
     assert!(!state.exists());
     Ok(())
@@ -343,5 +346,31 @@ fn oversized_expansions_fail_before_graph_state_for_run_and_explain()
         assert!(String::from_utf8_lossy(&output.stdout).contains("8 MiB"));
         assert!(!state.exists());
     }
+    Ok(())
+}
+
+#[test]
+fn run_refuses_a_read_root_outside_the_project() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "Read elsewhere")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+        .current_dir(temp.path())
+        .env("PROVENANT_ROOT", root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(temp.path().join("state"))
+        .args(["run", "--preset", "single", "--prompt-file"])
+        .arg(&prompt)
+        .arg("--read-root")
+        .arg(outside.path())
+        .arg("--explain")
+        .output()?;
+    assert!(!output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    assert!(text.contains("allowed_read_roots"), "{text}");
     Ok(())
 }

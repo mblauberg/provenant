@@ -1,4 +1,4 @@
-use super::preset::{Layers, expand};
+use super::preset::{Layers, ReadRoots, expand};
 use serde_json::json;
 
 fn nodes(name: &str) -> serde_json::Value {
@@ -819,5 +819,36 @@ fn repository_notice_deduplicates_nested_presets() -> Result<(), Box<dyn std::er
         expand(&layers, "chain", "brief", &[])?.repo_files,
         ["chain", "single"].map(|name| repo.join(format!("{name}.toml")).display().to_string())
     );
+    Ok(())
+}
+
+#[test]
+fn read_roots_are_confined_to_the_project_or_the_host_allow_list()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let base = std::fs::canonicalize(temp.path())?;
+    let project = base.join("project");
+    let sibling = base.join("sibling");
+    let shared = base.join("shared");
+    for dir in [&project, &sibling, &shared, &project.join("src")] {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::os::unix::fs::symlink(&sibling, project.join("escape"))?;
+    let strict = ReadRoots::new(vec![project.clone()], &[]);
+    assert_eq!(strict.confine(&project.join("src"))?, project.join("src"));
+    for outside in [
+        sibling.clone(),
+        project.join("../sibling"),
+        project.join("escape"),
+    ] {
+        let error = strict.confine(&outside).unwrap_err();
+        assert!(error.contains("allowed_read_roots"), "{error}");
+    }
+    let allowed = ReadRoots::new(
+        vec![project.clone()],
+        &[shared.to_string_lossy().into_owned()],
+    );
+    assert_eq!(allowed.confine(&shared)?, shared);
+    assert!(allowed.confine(&sibling).is_err());
     Ok(())
 }
