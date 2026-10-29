@@ -258,7 +258,7 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.99.1 --profile minimal
+        run: rustup toolchain install 1.99.1 --profile minimal --component clippy
       - name: Cache Rust build artefacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -270,6 +270,9 @@ jobs:
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest@0.9.149
+      - name: Lint Rust workspace
+        working-directory: tools/front-door
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Build macOS test archive
         working-directory: tools/front-door
         run: >-
@@ -331,7 +334,7 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.99.1 --profile minimal --component clippy
+        run: rustup toolchain install 1.99.1 --profile minimal
       # Use a separate uncached target: install builds from a clean target, and cached
       # proc-macro dylibs would hide the failure this job exists to catch.
       - name: Build release front door
@@ -372,19 +375,8 @@ jobs:
               exit 1
             fi
           fi
-      # Lint and the menu bar tests live here, not in the macOS test job, to
-      # balance the two macOS jobs. Clippy uses its own cached target, apart
-      # from the uncached release target above.
-      - name: Cache Rust lint artefacts
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          workspaces: tools/front-door
-          shared-key: front-door-ci-macos-lint
-          add-job-id-key: false
-          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
-      - name: Lint Rust workspace
-        working-directory: tools/front-door
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      # Clippy lives in the macOS test job, which compiles and caches the
+      # workspace; only the menu bar tests stay here, to balance the two jobs.
       - name: Run menu bar tests
         working-directory: apps/quota-menubar
         run: swift test
