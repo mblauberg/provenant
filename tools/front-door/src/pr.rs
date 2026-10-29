@@ -19,6 +19,12 @@ mod wait;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// An external command exceeded its time limit. Reads may retry this; a
+/// mutation must first re-read the state it meant to change.
+#[derive(Debug, thiserror::Error)]
+#[error("external command timed out")]
+pub(crate) struct TimedOut;
+
 fn execute(project: &Path, argv: &[&str], watch: bool) -> Result<ExecOutcome> {
     execute_for(
         project,
@@ -62,8 +68,10 @@ fn execute_with(
             }
             error => error.to_string(),
         })?;
-    if output.timed_out
-        || output.cancelled
+    if output.timed_out {
+        return Err(Box::new(TimedOut));
+    }
+    if output.cancelled
         || output.drain_truncated
         || output.stdout.truncated
         || output.stdout.read_failed

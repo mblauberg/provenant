@@ -2,7 +2,7 @@
 //! follow-up. No step forces: each one refuses and says why.
 use super::git::{Git, plain_ref};
 use super::{Result, head, merge, successful};
-use crate::{emit, roots, worktrees};
+use crate::{emit_summarised, roots, worktrees};
 use provenant_confinement::worktrees::{ObservedProcess, WorkerObserver};
 use provenant_core::GitOid;
 use provenant_records::{CommandError, CommandResult, Outcome};
@@ -57,6 +57,24 @@ pub(super) struct Pull {
     /// The head branch lives in another repository, such as a fork.
     #[serde(rename = "isCrossRepository")]
     pub(super) cross_repository: bool,
+}
+/// The pull request's state after a merge attempt, retrying transient reads.
+// This CLI edge owns the real deadline.
+#[allow(clippy::disallowed_methods)]
+fn reread(project: &Path, number: &str) -> Result<Pull> {
+    let reader = super::wait::Reader {
+        project,
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+    };
+    let bytes = successful(reader.read(&[
+        "gh",
+        "pr",
+        "view",
+        number,
+        "--json",
+        "state,baseRefName,headRefName,isCrossRepository",
+    ])?)?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
 pub(super) fn pull(project: &Path, number: &str) -> Result<Pull> {
     let bytes = successful(super::execute(
@@ -685,6 +703,7 @@ pub(crate) fn run(
         project: globals.project.clone(),
     };
     let mut merged = false;
+    let mut merge_note: Option<String> = None;
     let mut state = String::new();
     let mut steps = Vec::new();
     let mut failure_code = "PR_UNAVAILABLE";
@@ -727,9 +746,30 @@ pub(crate) fn run(
             failure_code = "CI_UNAVAILABLE";
             super::wait::checks(&project, number, current, wait, globals.json)?;
             failure_code = "MERGE_FAILED";
-            merge(&project, &text, current)?;
-            failure_code = "PR_UNAVAILABLE";
-            pull(&project, &text)?
+            // A merge that errors or times out may still have taken effect, so
+            // the PR's own state decides the outcome, never the command's.
+            let merge_error = merge(&project, &text, current).err();
+            match reread(&project, &text) {
+                Ok(view) if view.state == "MERGED" => {
+                    merge_note = merge_error.map(|error| error.to_string());
+                    view
+                }
+                Ok(view) => match merge_error {
+                    Some(error) => return Err(error),
+                    None => view,
+                },
+                Err(error) => {
+                    // The merge may or may not have happened; rerunning land
+                    // is safe because a merged PR only retries cleanup.
+                    if merge_error.is_none() {
+                        failure_code = "MERGE_STATE_UNKNOWN";
+                    }
+                    return Err(format!(
+                        "cannot confirm the pull request state after merging: {error}"
+                    )
+                    .into());
+                }
+            }
         } else {
             view
         };
@@ -768,8 +808,11 @@ pub(crate) fn run(
         failure_code = error.code;
     }
     let cleanup_pending = merged && (result.is_err() || !refused.is_empty());
-    let outcome = if merged || result.is_ok() {
+    let pending = !merged && result.is_ok();
+    let outcome = if merged {
         Outcome::Ok
+    } else if pending {
+        Outcome::Pending
     } else if failure_code == "CI_TIMEOUT" {
         Outcome::Timeout
     } else if matches!(
@@ -786,9 +829,10 @@ pub(crate) fn run(
         json!({
             "number": number,
             "head": expected,
-            "result": if merged || result.is_ok() { "pass" } else { "fail" },
+            "result": if merged { "pass" } else if pending { "pending" } else { "fail" },
             "merged": merged,
-            "reason": if cleanup_pending { "cleanup_pending" } else if merged { "landed" } else if result.is_ok() { "merge_pending" } else { failure_code },
+            "reason": if cleanup_pending { "cleanup_pending" } else if merged { "landed" } else if pending { "merge_pending" } else { failure_code },
+            "merge_note": merge_note,
             "cleanup_pending": cleanup_pending,
             "cleanup_error": if merged { result.as_ref().err().map(ToString::to_string) } else { None },
             "cleanup_refused": refused,
@@ -807,6 +851,10 @@ pub(crate) fn run(
                 "CI_PENDING" | "CI_TIMEOUT" => {
                     format!("provenant land {number} --head {expected} --wait")
                 }
+                // Landing again only retries cleanup if the merge did happen.
+                "MERGE_FAILED" | "MERGE_STATE_UNKNOWN" => {
+                    format!("provenant land {number} --head {expected}")
+                }
                 "CI_FAILED" => format!("gh pr checks {number}"),
                 "HEAD_MOVED" => format!("provenant pr status {number} --full"),
                 _ => "provenant help land".into(),
@@ -815,11 +863,16 @@ pub(crate) fn run(
     }
     let mut text = if merged {
         format!("merged #{number} {expected}\n")
-    } else if result.is_ok() {
+    } else if pending {
         format!("pending #{number} {expected} ({state})\n")
     } else {
         format!("fail #{number} {expected}\n")
     };
+    if let Some(note) = &merge_note {
+        text.push_str(&format!(
+            "merge reported an error but the PR is merged: {note}\n"
+        ));
+    }
     if cleanup_pending {
         text.push_str(&format!("cleanup pending: {}\n", refused.join(", ")));
         if let Err(error) = &result {
@@ -834,14 +887,25 @@ pub(crate) fn run(
             step.detail
         ));
     }
-    text.push_str(&if cleanup_pending {
-        format!("next: provenant land {number} --full\n")
+    let next = if cleanup_pending {
+        format!("provenant land {number} --full")
     } else if !merged {
-        format!("next: provenant pr status {number} --wait\n")
+        format!("provenant pr status {number} --wait")
     } else {
-        "next: provenant status\n".into()
-    });
-    emit(&report, &output_globals, &text, false)
+        "provenant status".into()
+    };
+    // Compact shows the headline, any merge or cleanup note, then the steps
+    // that did not simply pass; --full shows every step.
+    let mut rows: Vec<String> = text.lines().skip(1).map(str::to_owned).collect();
+    if merged && !cleanup_pending {
+        rows.retain(|row| !row.starts_with("  "));
+    }
+    let summary = provenant_cli::Summary::new(
+        text.lines().next().unwrap_or_default().to_owned(),
+        rows,
+        Some(next),
+    );
+    emit_summarised(&report, &output_globals, &text, false, Some(&summary))
 }
 
 /// Test seam: the cleanup check for `feat` merged at `merged` into `main`, then

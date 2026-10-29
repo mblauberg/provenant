@@ -30,7 +30,12 @@ pub fn review(command: crate::Review, edge: &Edge<'_>) -> Reply {
             repair: None,
         });
     }
-    Reply { result, human }
+    Reply {
+        result,
+        human,
+        summary: None,
+        read_only: false,
+    }
 }
 
 #[allow(clippy::disallowed_methods)]

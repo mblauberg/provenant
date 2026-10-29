@@ -115,14 +115,199 @@ fn land_refuses_head_changes_before_and_after_checks() -> Result {
     Ok(())
 }
 
-fn land_reports_pending_merge_in_text() -> Result {
+fn land_reports_a_queued_merge_as_pending_with_its_own_exit_code() -> Result {
     let rig = self::rig()?;
+    fs::write(rig.project.join("merge-queue"), "")?;
     let output = rig.command(&["land", "1668", "--head", HEAD])?;
-    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(code(&output), 5, "{output:?}");
     assert_eq!(
         String::from_utf8(output.stdout.bytes)?,
         format!("pending #1668 {HEAD} (OPEN)\nnext: provenant pr status 1668 --wait\n")
     );
+    let json = rig.command(&["land", "1668", "--head", HEAD, "--json"])?;
+    assert_eq!(code(&json), 5);
+    let report: serde_json::Value = serde_json::from_slice(&json.stdout.bytes)?;
+    assert_eq!(report["status"], "pending", "{report}");
+    assert_eq!(report["data"]["result"], "pending");
+    assert_eq!(report["data"]["merged"], false);
+    Ok(())
+}
+
+fn land_reports_landed_when_the_merge_call_errors_after_taking_effect() -> Result {
+    // The merge call times out (a 502 here, not a real 60 s wait) after GitHub merged.
+    let rig = self::rig()?;
+    fs::write(rig.project.join("merge-timeout"), "")?;
+    let output = merge(&rig)?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(report["data"]["merged"], true, "{report}");
+    assert_eq!(report["data"]["result"], "pass");
+    assert!(report["data"]["merge_note"].is_string(), "{report}");
+    assert_ne!(report["error"]["code"], "MERGE_FAILED");
+    // The same error with no effect is still a failure.
+    let rig = self::rig()?;
+    fs::write(rig.project.join("merge-fail"), "")?;
+    let report: serde_json::Value = serde_json::from_slice(&merge(&rig)?.stdout.bytes)?;
+    assert_eq!(report["error"]["code"], "MERGE_FAILED", "{report}");
+    Ok(())
+}
+
+fn land_refuses_when_the_head_moves_after_checks_were_pending() -> Result {
+    // Second wait read sees B; the A-B-A script returns to A afterwards and
+    // must not be treated as a head that never moved.
+    for script in [
+        "1111111111111111111111111111111111111111\n1111111111111111111111111111111111111111\n2222222222222222222222222222222222222222",
+        "1111111111111111111111111111111111111111\n1111111111111111111111111111111111111111\n2222222222222222222222222222222222222222\n1111111111111111111111111111111111111111",
+    ] {
+        let rig = self::rig()?;
+        fs::write(rig.project.join("head-seq"), script)?;
+        fs::write(
+            rig.project.join("checks.json"),
+            r#"[{"name":"build","bucket":"pending"}]"#,
+        )?;
+        let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=20s", "--json"])?;
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(report["error"]["code"], "HEAD_MOVED", "{report}");
+        no_merge(&rig)?;
+    }
+    Ok(())
+}
+
+fn land_refuses_a_failing_legacy_status_and_unreadable_ci_pages() -> Result {
+    let run = |name: &str, conclusion: &str| serde_json::json!({"name":name,"head_sha":HEAD,"status":"completed","conclusion":conclusion,"started_at":"2020-01-01T00:00:00Z"});
+    // A legacy commit status that fails blocks landing even when every check run passes.
+    let rig = self::rig()?;
+    fs::write(
+        rig.project.join("statuses.json"),
+        r#"[[{"context":"external","state":"failure","created_at":"2020-01-01T00:00:00Z"}]]"#,
+    )?;
+    let report: serde_json::Value = serde_json::from_slice(&merge(&rig)?.stdout.bytes)?;
+    assert_eq!(report["error"]["code"], "CI_FAILED", "{report}");
+    no_merge(&rig)?;
+    // A failure on the second page is seen.
+    let rig = self::rig()?;
+    fs::write(
+        rig.project.join("checks.json"),
+        serde_json::to_vec(&serde_json::json!([
+            {"total_count":2,"check_runs":[run("a","success")]},
+            {"total_count":2,"check_runs":[run("b","failure")]},
+        ]))?,
+    )?;
+    let report: serde_json::Value = serde_json::from_slice(&merge(&rig)?.stdout.bytes)?;
+    assert_eq!(report["error"]["code"], "CI_FAILED", "{report}");
+    no_merge(&rig)?;
+    // A lost page is not a pass.
+    let rig = self::rig()?;
+    fs::write(
+        rig.project.join("checks.json"),
+        serde_json::to_vec(&serde_json::json!([
+            {"total_count":3,"check_runs":[run("a","success"),run("b","success")]},
+        ]))?,
+    )?;
+    assert_ne!(code(&merge(&rig)?), 0);
+    no_merge(&rig)?;
+    // Both pages passing lands.
+    let rig = self::rig()?;
+    fs::write(
+        rig.project.join("checks.json"),
+        serde_json::to_vec(&serde_json::json!([
+            {"total_count":2,"check_runs":[run("a","success")]},
+            {"total_count":2,"check_runs":[run("b","success")]},
+        ]))?,
+    )?;
+    assert_eq!(code(&merge(&rig)?), 0);
+    assert!(rig.project.join("merge-args").exists());
+    Ok(())
+}
+
+fn land_fails_closed_when_protection_and_rulesets_are_unreadable() -> Result {
+    // A 404 that is not "Branch not protected" is not an absence of policy.
+    let rig = self::rig()?;
+    fs::write(rig.project.join("ruleset-only"), "")?;
+    fs::write(rig.project.join("protection-404"), "")?;
+    fs::write(rig.project.join("rules-fail"), "")?;
+    let report: serde_json::Value = serde_json::from_slice(&merge(&rig)?.stdout.bytes)?;
+    assert_eq!(report["error"]["code"], "CI_POLICY_UNAVAILABLE", "{report}");
+    no_merge(&rig)
+}
+
+fn land_treats_a_skipped_required_check_as_unavailable() -> Result {
+    let rig = self::rig()?;
+    fs::write(rig.project.join("ruleset-only"), "")?;
+    fs::write(
+        rig.project.join("required.json"),
+        r#"[[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build"}]}}]]"#,
+    )?;
+    fs::write(
+        rig.project.join("checks.json"),
+        r#"[{"name":"build","bucket":"skipping"},{"name":"lint","bucket":"pass"}]"#,
+    )?;
+    let report: serde_json::Value = serde_json::from_slice(&merge(&rig)?.stdout.bytes)?;
+    assert_eq!(report["error"]["code"], "CI_UNAVAILABLE", "{report}");
+    no_merge(&rig)
+}
+
+fn land_matches_a_required_check_on_its_integration() -> Result {
+    let required = |app: u64| {
+        format!(
+            r#"[[{{"type":"required_status_checks","parameters":{{"required_status_checks":[{{"context":"build","integration_id":{app}}}]}}}}]]"#
+        )
+    };
+    // The name is reported, but by another app: it does not satisfy the pin.
+    let rig = self::rig()?;
+    fs::write(rig.project.join("ruleset-only"), "")?;
+    fs::write(rig.project.join("required.json"), required(15368))?;
+    fs::write(
+        rig.project.join("checks.json"),
+        r#"[{"name":"build","bucket":"pass","app":999}]"#,
+    )?;
+    let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=1s", "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(report["error"]["code"], "CI_TIMEOUT", "{report}");
+    no_merge(&rig)?;
+    // Reported by the pinned app, it lands.
+    let rig = self::rig()?;
+    fs::write(rig.project.join("ruleset-only"), "")?;
+    fs::write(rig.project.join("required.json"), required(15368))?;
+    fs::write(
+        rig.project.join("checks.json"),
+        r#"[{"name":"build","bucket":"pass","app":15368}]"#,
+    )?;
+    assert_eq!(code(&merge(&rig)?), 0);
+    assert!(rig.project.join("merge-args").exists());
+    Ok(())
+}
+
+fn land_retries_transient_gh_reads_inside_the_wait() -> Result {
+    let rig = self::rig()?;
+    fs::write(rig.project.join("flaky"), "")?;
+    let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=30s", "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert!(rig.project.join("merge-args").exists());
+    assert!(
+        !rig.project.join("flaky").exists(),
+        "the failure was served"
+    );
+    Ok(())
+}
+
+fn land_waits_for_new_checks_to_stop_registering_when_no_check_is_required() -> Result {
+    let rig = self::rig()?;
+    fs::write(rig.project.join("fresh-checks"), "")?;
+    // A single green check that has only just registered is not enough.
+    let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=1s", "--json"])?;
+    assert_eq!(code(&output), 124, "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(report["error"]["code"], "CI_TIMEOUT", "{report}");
+    no_merge(&rig)?;
+    let output = rig.command(&["land", "1668", "--head", HEAD, "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(report["error"]["code"], "CI_PENDING", "{report}");
+    no_merge(&rig)?;
+    // Once the newest registration is old enough, it lands.
+    fs::remove_file(rig.project.join("fresh-checks"))?;
+    assert_eq!(code(&merge(&rig)?), 0);
+    assert!(rig.project.join("merge-args").exists());
     Ok(())
 }
 
@@ -141,8 +326,8 @@ fn land_guards_head_and_uses_optional_git_email() -> Result {
         let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
         assert_eq!(report["data"]["head"], HEAD);
         assert_eq!(report["data"]["result"], "pass");
-        assert_eq!(report["data"]["merged"], false);
-        assert_eq!(report["data"]["state"], "OPEN");
+        assert_eq!(report["data"]["merged"], true);
+        assert_eq!(report["data"]["state"], "MERGED");
         let mut expected = format!("pr\nmerge\n1668\n--merge\n--match-head-commit\n{HEAD}\n");
         if let Some(email) = email {
             expected.push_str(&format!("--author-email\n{email}\n"));
@@ -206,11 +391,22 @@ fn pr_status_prints_one_compact_line_per_pull_request() -> Result {
     )?;
     let output = rig.command(&["pr", "status", "1668", "1669"])?;
     assert_eq!(code(&output), 0, "{output:?}");
+    // Counts first, the PR that needs action next, then one typed command.
+    assert_eq!(
+        String::from_utf8(output.stdout.bytes)?,
+        format!(
+            "2 PRs: 1 failing, 1 ready (1 need nothing)\n\
+             #1669 OPEN {OTHER} checks=2/4 fail=1 pending=1 merge=blocked review=none draft\n\
+             next: gh pr checks 1669\n"
+        )
+    );
+    let output = rig.command(&["pr", "status", "1668", "1669", "--full"])?;
     assert_eq!(
         String::from_utf8(output.stdout.bytes)?,
         format!(
             "#1668 OPEN {HEAD} checks=2/2 merge=clean review=approved\n\
-             #1669 OPEN {OTHER} checks=2/4 fail=1 pending=1 merge=blocked review=none draft\nnext: provenant status\n"
+             #1669 OPEN {OTHER} checks=2/4 fail=1 pending=1 merge=blocked review=none draft\n\
+             next: gh pr checks 1669\n"
         )
     );
     // Empty check data is unavailable, rather than a passing result.
@@ -322,7 +518,17 @@ fn fake_gh(args: &[String]) -> Result<u8> {
     )?;
     match call.as_str() {
         "pr view 1668 --json headRefOid" => {
-            if Path::new("head-read").exists() && Path::new("move-head").exists() {
+            if Path::new("head-seq").exists() {
+                // One head per read, the last one repeating: scripted head movement.
+                let seq = fs::read_to_string("head-seq")?;
+                let mut lines = seq.lines();
+                let next = lines.next().unwrap_or(HEAD).to_owned();
+                let rest: Vec<&str> = lines.collect();
+                if !rest.is_empty() {
+                    fs::write("head-seq", rest.join("\n"))?;
+                }
+                write!(io::stdout(), "{{\"headRefOid\":\"{next}\"}}")?;
+            } else if Path::new("head-read").exists() && Path::new("move-head").exists() {
                 write!(io::stdout(), "{{\"headRefOid\":\"{OTHER}\"}}")?;
             } else {
                 io::stdout().write_all(&fs::read("head.json")?)?;
@@ -330,7 +536,8 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             fs::write("head-read", "")?;
         }
         "pr view 1668 --json state,baseRefName,headRefName,isCrossRepository" => {
-            io::stdout().write_all(br#"{"state":"OPEN","baseRefName":"main","headRefName":"feature","isCrossRepository":false}"#)?;
+            let state = if Path::new("merged").exists() { "MERGED" } else { "OPEN" };
+            write!(io::stdout(), r#"{{"state":"{state}","baseRefName":"main","headRefName":"feature","isCrossRepository":false}}"#)?;
         }
         "pr checks 1668 --watch" => {
             fs::write("watched", "")?;
@@ -346,24 +553,41 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             else { io::stdout().write_all(br#"{"protected":false}"#)?; }
         }
         "api repos/owner/repo/branches/main/protection" => {
-            io::stdout().write_all(br#"{"message":"Branch not protected","status":"404"}"#)?;
+            if Path::new("protection-404").exists() {
+                io::stdout().write_all(br#"{"message":"Not Found","status":"404"}"#)?;
+            } else {
+                io::stdout().write_all(br#"{"message":"Branch not protected","status":"404"}"#)?;
+            }
             return Ok(1);
         }
         "api --paginate --slurp repos/owner/repo/rules/branches/main?per_page=100" => {
+            if Path::new("rules-fail").exists() { return Ok(1); }
             if Path::new("required.json").exists() { io::stdout().write_all(&fs::read("required.json")?)?; }
             else { io::stdout().write_all(b"[[]]")?; }
         }
         value if value.starts_with("api --paginate --slurp repos/owner/repo/commits/")
             && value.ends_with("/statuses?per_page=100") => {
             assert!(value.contains(HEAD));
-            io::stdout().write_all(b"[[]]")?;
+            if Path::new("statuses.json").exists() {
+                io::stdout().write_all(&fs::read("statuses.json")?)?;
+            } else {
+                io::stdout().write_all(b"[[]]")?;
+            }
         }
         value if value.starts_with("api --paginate --slurp repos/owner/repo/commits/")
             && value.ends_with("/check-runs?per_page=100&filter=latest") => {
             assert!(value.contains(HEAD));
             if Path::new("checks-fail").exists() { return Ok(1); }
+            if Path::new("flaky").exists() {
+                fs::remove_file("flaky")?;
+                writeln!(io::stderr(), "gh: HTTP 502: Bad Gateway")?;
+                return Ok(1);
+            }
             let raw = fs::read("checks.json")?;
-            let Ok(checks) = serde_json::from_slice::<Vec<serde_json::Value>>(&raw) else {
+            let Some(checks) = serde_json::from_slice::<Vec<serde_json::Value>>(&raw)
+                .ok()
+                .filter(|checks| checks.iter().all(|check| check.get("check_runs").is_none()))
+            else {
                 io::stdout().write_all(&raw)?;
                 return Ok(0);
             };
@@ -374,7 +598,11 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                     "cancel" => ("completed", "cancelled"), _ => ("unknown", ""),
                 };
                 let name = check["name"].as_str().map(str::to_owned).unwrap_or_else(|| format!("check-{index}"));
-                serde_json::json!({"name":name,"head_sha":HEAD,"status":status,"conclusion":conclusion})
+                // A far-future registration is a check that has only just appeared.
+                let started = if Path::new("fresh-checks").exists() { "2999-01-01T00:00:00Z" } else { "2020-01-01T00:00:00Z" };
+                let mut run = serde_json::json!({"name":name,"head_sha":HEAD,"status":status,"conclusion":conclusion,"started_at":started});
+                if let Some(app) = check["app"].as_u64() { run["app"] = serde_json::json!({"id":app}); }
+                run
             }).collect();
             io::stdout().write_all(&serde_json::to_vec(&serde_json::json!([{"check_runs":runs}]))?)?;
             if Path::new("checks-next.json").exists() { fs::rename("checks-next.json", "checks.json")?; }
@@ -428,6 +656,15 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             if Path::new("merge-fail").exists() {
                 return Ok(1);
             }
+            // A queued merge has not happened yet; anything else has.
+            if !Path::new("merge-queue").exists() {
+                fs::write("merged", "")?;
+            }
+            if Path::new("merge-timeout").exists() {
+                // The merge took effect, but the reply was lost.
+                writeln!(io::stderr(), "gh: HTTP 502: Bad Gateway")?;
+                return Ok(1);
+            }
         }
         _ => return Err(format!("unexpected gh arguments: {call}").into()),
     }
@@ -473,8 +710,40 @@ fn main() -> ExitCode {
                 land_refuses_head_changes_before_and_after_checks,
             ),
             (
-                "land_reports_pending_merge_in_text",
-                land_reports_pending_merge_in_text,
+                "land_reports_a_queued_merge_as_pending_with_its_own_exit_code",
+                land_reports_a_queued_merge_as_pending_with_its_own_exit_code,
+            ),
+            (
+                "land_reports_landed_when_the_merge_call_errors_after_taking_effect",
+                land_reports_landed_when_the_merge_call_errors_after_taking_effect,
+            ),
+            (
+                "land_refuses_when_the_head_moves_after_checks_were_pending",
+                land_refuses_when_the_head_moves_after_checks_were_pending,
+            ),
+            (
+                "land_refuses_a_failing_legacy_status_and_unreadable_ci_pages",
+                land_refuses_a_failing_legacy_status_and_unreadable_ci_pages,
+            ),
+            (
+                "land_fails_closed_when_protection_and_rulesets_are_unreadable",
+                land_fails_closed_when_protection_and_rulesets_are_unreadable,
+            ),
+            (
+                "land_treats_a_skipped_required_check_as_unavailable",
+                land_treats_a_skipped_required_check_as_unavailable,
+            ),
+            (
+                "land_matches_a_required_check_on_its_integration",
+                land_matches_a_required_check_on_its_integration,
+            ),
+            (
+                "land_retries_transient_gh_reads_inside_the_wait",
+                land_retries_transient_gh_reads_inside_the_wait,
+            ),
+            (
+                "land_waits_for_new_checks_to_stop_registering_when_no_check_is_required",
+                land_waits_for_new_checks_to_stop_registering_when_no_check_is_required,
             ),
             (
                 "land_guards_head_and_uses_optional_git_email",

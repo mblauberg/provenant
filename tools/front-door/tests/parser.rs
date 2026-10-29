@@ -85,16 +85,24 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     let human = rig.command(&["status"])?;
     let text = String::from_utf8(human.stdout.bytes)?;
     assert!(text.len() <= 2048, "{text}");
-    assert!(text.starts_with(&attempts[24][..8]), "{text}");
+    assert!(text.starts_with("20 lanes"), "{text}");
+    assert!(text.contains(&attempts[24][..8]), "{text}");
     assert!(
         text.contains(&format!("next: provenant output {}", attempts[24])),
         "{text}"
     );
     let full = rig.command(&["status", "--full"])?;
     let full = String::from_utf8(full.stdout.bytes)?;
+    // --full is complete detail, not --all: the older lanes stay out.
     assert!(
-        full.contains(&attempts[0]) && full.contains(&attempts[24]),
+        full.contains(&attempts[24]) && !full.contains(&attempts[0]),
         "{full}"
+    );
+    let everything = rig.command(&["status", "--all", "--full"])?;
+    let everything = String::from_utf8(everything.stdout.bytes)?;
+    assert!(
+        everything.contains(&attempts[0]) && everything.contains(&attempts[24]),
+        "{everything}"
     );
     let all = rig.command(&["status", "--all", "--json"])?;
     let all: serde_json::Value = serde_json::from_slice(&all.stdout.bytes)?;
@@ -380,7 +388,7 @@ fn lanes_watch_and_session_selection_report_an_empty_store() -> Result {
     assert_eq!(code(&watch), 0);
     assert_eq!(
         String::from_utf8(watch.stdout.bytes)?,
-        "end settled lanes=0\nnext: provenant lanes --full\n"
+        "end settled lanes=0\n"
     );
     let json = rig.command(&["lanes", "--watch", "--json"])?;
     assert_eq!(code(&json), 0);
@@ -889,7 +897,10 @@ fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result
     let compact = rig.execute(&executable, &["root"], None)?;
     assert_eq!(code(&compact), 0);
     let text = String::from_utf8_lossy(&compact.stdout.bytes);
-    assert!(text.contains("next: provenant root --full"), "{text}");
+    assert!(
+        !text.contains("next:"),
+        "no owner next, no invented one: {text}"
+    );
     assert!(compact.stdout.bytes.len() <= 2048);
     let human = rig.execute(&executable, &["root", "--full"], None)?;
     assert_eq!(code(&human), 0);

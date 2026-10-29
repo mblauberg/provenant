@@ -471,7 +471,7 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
 #[test]
 fn route_list_human_output_omits_dispatch_only_fields() -> Result {
     let rig = rig()?;
-    let out = rig.command(&["route", "list", "--pool", "junior"])?;
+    let out = rig.command(&["route", "list", "--pool", "junior", "--full"])?;
     assert_eq!(code(&out), 0);
     let stdout = String::from_utf8(out.stdout.bytes)?;
     assert!(stdout.contains("weight="));
@@ -696,7 +696,10 @@ fn unresolved_names_list_close_matches_and_examples() -> Result {
     assert!(none.contains("provenant route resolve "), "{none}");
     // No argument at all is a usage error that shows examples, before any state.
     let missing = message(&["route", "resolve"])?;
-    assert!(missing.contains("route resolve utility"), "{missing}");
+    assert!(
+        missing.contains("provenant route resolve senior"),
+        "{missing}"
+    );
     assert!(!rig.state.exists());
     Ok(())
 }

@@ -599,6 +599,7 @@ pub fn run(
             result.data,
             Some(InboxResult::Item { .. } | InboxResult::Listed { .. })
         ),
+        None,
     );
     match crate::render_or_publish(
         &result,

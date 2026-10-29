@@ -51,8 +51,7 @@ pub fn run(globals: &Globals) -> u8 {
     };
     render(
         &result,
-        globals.json,
-        globals.full,
+        globals,
         &human,
         &mut io::stdout().lock(),
         &mut io::stderr().lock(),
@@ -63,25 +62,13 @@ pub fn run(globals: &Globals) -> u8 {
 // state and is forbidden for this command, even on its failure paths.
 fn render(
     result: &CommandResult<Option<DiskReport>>,
-    json: bool,
-    full: bool,
+    globals: &provenant_cli::Globals,
     human: &str,
     stdout: &mut impl io::Write,
     stderr: &mut impl io::Write,
 ) -> u8 {
-    let mode = if json {
-        RenderMode::Json
-    } else if full {
-        RenderMode::Human {
-            text: human,
-            read_only: true,
-        }
-    } else {
-        RenderMode::Compact {
-            text: human,
-            read_only: true,
-        }
-    };
+    let json = globals.json;
+    let mode = globals.render_mode(human, true, None);
     let rendered = if !json && result.error.is_some() {
         provenant_cli::render(result, mode, stderr)
     } else {
@@ -114,6 +101,7 @@ fn render(
                     RenderMode::Human {
                         text: "",
                         read_only: true,
+                        summary: None,
                     },
                     stderr,
                 );
@@ -419,7 +407,17 @@ mod tests {
         let envelope = CommandResult::new("disk report", Outcome::Ok, Some(report));
         let mut output = Vec::new();
         assert_eq!(
-            render(&envelope, true, true, "", &mut output, &mut Vec::new()),
+            render(
+                &envelope,
+                &provenant_cli::Globals {
+                    json: true,
+                    full: true,
+                    ..Default::default()
+                },
+                "",
+                &mut output,
+                &mut Vec::new()
+            ),
             0
         );
         let json: serde_json::Value = serde_json::from_slice(&output)?;
@@ -570,7 +568,17 @@ mod tests {
             let mut output = Vec::new();
             let mut errors = Vec::new();
             assert_eq!(
-                render(&result, json, true, &human, &mut output, &mut errors),
+                render(
+                    &result,
+                    &provenant_cli::Globals {
+                        json,
+                        full: true,
+                        ..Default::default()
+                    },
+                    &human,
+                    &mut output,
+                    &mut errors
+                ),
                 0
             );
             assert!(errors.is_empty());
@@ -587,7 +595,17 @@ mod tests {
         let result = CommandResult::new("disk report", Outcome::Ok, Some(report));
         let mut output = Vec::new();
         assert_eq!(
-            render(&result, true, true, "", &mut output, &mut Vec::new()),
+            render(
+                &result,
+                &provenant_cli::Globals {
+                    json: true,
+                    full: true,
+                    ..Default::default()
+                },
+                "",
+                &mut output,
+                &mut Vec::new()
+            ),
             3
         );
         let value: serde_json::Value = serde_json::from_slice(&output)?;

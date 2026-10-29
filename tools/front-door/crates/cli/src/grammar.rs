@@ -819,9 +819,6 @@ pub struct Output {
     /// Read the last N lines instead of an offset (above 500 is clamped to 500)
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub tail: Option<u64>,
-    /// Settlement, changed-file evidence and the final result paragraph (bounded)
-    #[arg(long, conflicts_with_all = ["tail", "offset", "trace", "part"])]
-    pub summary: bool,
     /// Maximum bytes to return
     #[arg(long, default_value = "65536", value_parser = clap::value_parser!(u64).range(1..=65536))]
     pub max_bytes: u64,

@@ -112,13 +112,24 @@ fn emit<T: Serialize>(
     human: &str,
     read_only: bool,
 ) -> u8 {
+    emit_summarised(result, globals, human, read_only, None)
+}
+/// `emit` for an owner that supplies its own compact view.
+fn emit_summarised<T: Serialize>(
+    result: &CommandResult<T>,
+    globals: &provenant_cli::Globals,
+    human: &str,
+    read_only: bool,
+    summary: Option<&provenant_cli::Summary>,
+) -> u8 {
     let mode = if !globals.json && matches!(result.command.as_str(), "help" | "version") {
         RenderMode::Human {
             text: human,
             read_only,
+            summary: None,
         }
     } else {
-        globals.render_mode(human, read_only)
+        globals.render_mode(human, read_only, summary)
     };
     let rendered = provenant_cli::render_or_publish(
         result,
@@ -141,6 +152,37 @@ fn emit<T: Serialize>(
             3
         }
     }
+}
+/// Accounts by adapter, then the registered rows; none needs action.
+fn accounts_summary(settings: &provenant_providers::accounts::Settings) -> provenant_cli::Summary {
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for entry in settings.entries.values() {
+        *counts.entry(entry.adapter.as_str()).or_default() += 1;
+    }
+    let total = settings.entries.len();
+    let headline = if total == 0 {
+        "no accounts registered".to_owned()
+    } else {
+        format!(
+            "{total} account{}: {}",
+            if total == 1 { "" } else { "s" },
+            provenant_cli::Summary::tally(&counts.into_iter().collect::<Vec<_>>())
+        )
+    };
+    let rows = settings
+        .entries
+        .values()
+        .map(|entry| {
+            format!(
+                "{} {} {}{}",
+                entry.adapter,
+                entry.label,
+                entry.key,
+                if entry.hidden { " hidden" } else { "" }
+            )
+        })
+        .collect();
+    provenant_cli::Summary::new(headline, rows, None)
 }
 fn fail(
     command: &str,
@@ -217,11 +259,12 @@ fn run_edge_workspace(
             if let Some(error) = &mut reply.result.error {
                 apply_repair(leaf, error, globals.json);
             }
-            emit(
+            emit_summarised(
                 &reply.result,
                 globals,
                 &reply.human,
-                matches!(leaf, "status" | "output" | "lanes" | "telemetry stats"),
+                reply.read_only,
+                reply.summary.as_ref(),
             )
         }
         Err(error) => {
@@ -391,14 +434,23 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 &inv.leaf,
                 globals,
                 |edge| match provenant_cli::accounts::execute(&command, edge.roots, edge.home) {
-                    Ok(data) => provenant_cli::run::Reply {
-                        human: data
-                            .entries
-                            .values()
-                            .map(|e| format!("{} {} {}\n", e.adapter, e.label, e.key))
-                            .collect(),
-                        result: CommandResult::new(&inv.leaf, Outcome::Ok, serde_json::json!(data)),
-                    },
+                    Ok(data) => {
+                        let listing = matches!(command, provenant_cli::accounts::Accounts::List);
+                        provenant_cli::run::Reply {
+                            human: data
+                                .entries
+                                .values()
+                                .map(|e| format!("{} {} {}\n", e.adapter, e.label, e.key))
+                                .collect(),
+                            summary: listing.then(|| accounts_summary(&data)),
+                            read_only: listing,
+                            result: CommandResult::new(
+                                &inv.leaf,
+                                Outcome::Ok,
+                                serde_json::json!(data),
+                            ),
+                        }
+                    }
                     Err(message) => {
                         let mut result = CommandResult::new(
                             &inv.leaf,
@@ -414,6 +466,8 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                         provenant_cli::run::Reply {
                             result,
                             human: String::new(),
+                            summary: None,
+                            read_only: false,
                         }
                     }
                 },
@@ -620,8 +674,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Review(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::review(cmd, edge)
         }),
-        Command::Status(mut cmd) => run_edge(&inv.leaf, globals, |edge| {
-            cmd.all |= globals.full && !globals.json;
+        Command::Status(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::status(cmd, globals.json, edge)
         }),
         Command::Land { number, head, wait } => {
@@ -651,16 +704,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Lanes(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::lanes(cmd, edge)
         }),
-        Command::Output(mut cmd) => run_edge(&inv.leaf, globals, |edge| {
-            if !globals.full
-                && !globals.json
-                && matches!(cmd.part, provenant_cli::Part::Result)
-                && !cmd.trace
-                && cmd.tail.is_none()
-                && cmd.offset == 0
-            {
-                cmd.summary = true;
-            }
+        Command::Output(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::output(cmd, edge)
         }),
         Command::Cancel(cmd) => run_edge(&inv.leaf, globals, |edge| {

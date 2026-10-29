@@ -140,8 +140,7 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
     };
     render(
         &result,
-        globals.json,
-        globals.full,
+        globals,
         &human,
         &mut io::stdout().lock(),
         &mut io::stderr().lock(),
@@ -260,25 +259,13 @@ where
 // Never publish an overflow artefact, including when rendering errors.
 fn render(
     result: &CommandResult<Option<serde_json::Value>>,
-    json: bool,
-    full: bool,
+    globals: &provenant_cli::Globals,
     human: &str,
     stdout: &mut impl io::Write,
     stderr: &mut impl io::Write,
 ) -> u8 {
-    let mode = if json {
-        RenderMode::Json
-    } else if full {
-        RenderMode::Human {
-            text: human,
-            read_only: true,
-        }
-    } else {
-        RenderMode::Compact {
-            text: human,
-            read_only: true,
-        }
-    };
+    let json = globals.json;
+    let mode = globals.render_mode(human, true, None);
     let rendered = if !json && result.error.is_some() {
         provenant_cli::render(result, mode, stderr)
     } else {
@@ -315,6 +302,7 @@ fn render(
                     RenderMode::Human {
                         text: "",
                         read_only: true,
+                        summary: None,
                     },
                     stderr,
                 );
@@ -380,7 +368,17 @@ mod tests {
         );
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         assert_eq!(
-            super::render(&result, true, true, "", &mut stdout, &mut stderr),
+            super::render(
+                &result,
+                &provenant_cli::Globals {
+                    json: true,
+                    full: true,
+                    ..Default::default()
+                },
+                "",
+                &mut stdout,
+                &mut stderr
+            ),
             3
         );
         let failure: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
@@ -404,7 +402,17 @@ mod tests {
         );
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         assert_eq!(
-            super::render(&result, false, true, &human, &mut stdout, &mut stderr),
+            super::render(
+                &result,
+                &provenant_cli::Globals {
+                    json: false,
+                    full: true,
+                    ..Default::default()
+                },
+                &human,
+                &mut stdout,
+                &mut stderr
+            ),
             3
         );
         assert!(stdout.is_empty());

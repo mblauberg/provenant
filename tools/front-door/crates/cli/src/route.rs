@@ -1458,9 +1458,37 @@ pub fn run(
             None => String::new(),
         }
     };
+    let summary = match &result.data {
+        Some(Data::List(list)) => {
+            let counts = [
+                ("models", list.models.len()),
+                ("routes", list.named_routes.len()),
+                ("pools", list.pools.len()),
+                ("pacing entries", list.account_pacing.len()),
+                ("overrides", list.active_overrides.len()),
+            ];
+            let rows = list
+                .named_routes
+                .iter()
+                .map(|(name, r)| format!("route {name} = {}", r.model.as_str()))
+                .chain(list.pools.keys().map(|name| format!("pool {name}")))
+                .collect();
+            Some(crate::Summary::new(
+                format!(
+                    "catalogue {}: {}",
+                    list.catalogue_revision,
+                    crate::Summary::tally(&counts)
+                ),
+                rows,
+                Some("provenant route resolve MODEL".to_owned()),
+            ))
+        }
+        _ => None,
+    };
     let mode = globals.render_mode(
         &human,
         matches!(command, Route::List(_) | Route::Resolve(_)),
+        summary.as_ref(),
     );
     let outcome = crate::render_or_publish(
         &result,

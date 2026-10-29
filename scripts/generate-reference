@@ -16,6 +16,7 @@ WORKSPACE = Path("tools/front-door")
 ALL_SCHEMAS = WORKSPACE / "crates/fabric-mcp/tests/fixtures/all-tool-schemas.json"
 KNOBS = Path("config/harness-knobs.json")
 DEFAULT_TOOLS = {"fabric_context", "fabric_mail", "fabric_run", "fabric_output", "fabric_discover"}
+GLOBAL_OPTIONS = ("json", "full", "state_dir", "project")
 SNAPSHOTS = WORKSPACE / "crates/providers/tests/snapshots/seatbelt"
 
 
@@ -68,14 +69,33 @@ def cli_reference(data):
         "In argument contracts, omitted booleans are false, lists are empty and\n"
         "bounds are null. Positional arguments have no long flag.\n\n"
     )
+    # Global options apply to every command: document them once, not as a row
+    # on each of the commands.
+    globals_ = {}
+    for command in data["commands"]:
+        for argument in command["arguments"]:
+            if argument.get("name") in GLOBAL_OPTIONS:
+                globals_.setdefault(argument["name"], argument)
+    if globals_:
+        text += "## Global options\n\nAccepted by every command, before or after the subcommand.\n\n"
+        text += "| Argument | Contract |\n|---|---|\n"
+        for name in GLOBAL_OPTIONS:
+            argument = globals_.get(name)
+            if argument:
+                contract = {key: value for key, value in argument.items()
+                            if key != "long" and value not in (None, False, [])}
+                text += f"| `--{argument.get('long') or name}` | {cell(contract)} |\n"
+        text += "\n"
     for command in data["commands"]:
         text += f"## `{command['command']}`\n\n"
         if command["command"] == "provenant pr contributions":
             text += ("Response fields, nullability, coverage values and capture roles: "
                      "[PR contributions JSON reference](../specs/run.md#pr-contributions-json-reference).\n\n")
-        if command["arguments"]:
+        own = [argument for argument in command["arguments"]
+               if argument.get("name") not in GLOBAL_OPTIONS]
+        if own:
             text += "| Argument | Contract |\n|---|---|\n"
-            for argument in command["arguments"]:
+            for argument in own:
                 label = "--" + argument["long"] if argument.get("long") else argument["name"]
                 contract = {key: value for key, value in argument.items()
                             if key != "long" and value not in (None, False, [])}

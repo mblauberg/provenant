@@ -1714,10 +1714,7 @@ fn receipt_output_resolves_run_task_and_attempt() -> Result {
         let compact = rig.command(&["output", target, "--part", "receipt"])?;
         assert_eq!(code(&compact), 0);
         assert!(compact.stdout.bytes.len() <= 2048);
-        assert_eq!(
-            String::from_utf8(compact.stdout.bytes)?,
-            format!("{expected}next: provenant help output\n")
-        );
+        assert_eq!(String::from_utf8(compact.stdout.bytes)?, expected);
         let output = rig.command(&["output", target, "--part", "receipt", "--json"])?;
         assert_eq!(
             code(&output),

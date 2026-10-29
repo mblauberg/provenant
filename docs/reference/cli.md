@@ -8,7 +8,9 @@ Only commands and arguments exposed by the help catalogue appear here.
 In argument contracts, omitted booleans are false, lists are empty and
 bounds are null. Positional arguments have no long flag.
 
-## `provenant`
+## Global options
+
+Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
@@ -16,6 +18,11 @@ bounds are null. Positional arguments have no long flag.
 | `--full` | `{"name": "full", "values": ["true", "false"]}` |
 | `--state-dir` | `{"name": "state_dir"}` |
 | `--project` | `{"name": "project"}` |
+
+## `provenant`
+
+| Argument | Contract |
+|---|---|
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -49,10 +56,6 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `command` | `{"name": "command", "positional": true, "repeatable": true}` |
 | `--all` | `{"defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -76,10 +79,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -90,10 +89,6 @@ bounds are null. Positional arguments have no long flag.
 | `--file` | `{"name": "file", "required": true}` |
 | `--session` | `{"name": "session", "required": true}` |
 | `--operation-id` | `{"name": "operation_id"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -124,10 +119,6 @@ bounds are null. Positional arguments have no long flag.
 | `--host` | `{"name": "host"}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
 | `--cursor` | `{"name": "cursor"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -161,10 +152,6 @@ bounds are null. Positional arguments have no long flag.
 | `--reason` | `{"bounds": [0, 256], "name": "reason", "required": true}` |
 | `--expect-revision` | `{"name": "expect_revision", "required": true}` |
 | `--operation-id` | `{"name": "operation_id"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -197,10 +184,6 @@ bounds are null. Positional arguments have no long flag.
 | `--answer` | `{"name": "answer", "required": true}` |
 | `--session` | `{"name": "session", "required": true}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -236,10 +219,6 @@ bounds are null. Positional arguments have no long flag.
 | `--expect-revision` | `{"name": "expect_revision", "required": true}` |
 | `--channel` | `{"name": "channel", "required": true, "values": ["chat", "console", "phone_remote", "cli", "unknown"]}` |
 | `--operation-id` | `{"name": "operation_id"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -270,10 +249,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -281,10 +256,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -298,10 +269,6 @@ bounds are null. Positional arguments have no long flag.
 | `--plan` | `{"name": "plan"}` |
 | `--priority` | `{"name": "priority"}` |
 | `--billing-anchor` | `{"name": "billing_anchor"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -334,10 +301,6 @@ bounds are null. Positional arguments have no long flag.
 | `--hidden` | `{"name": "hidden", "values": ["true", "false"]}` |
 | `--order` | `{"name": "order"}` |
 | `--headline` | `{"name": "headline", "values": ["auto", "5h", "weekly", "default"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -364,10 +327,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -389,10 +348,6 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `host` | `{"name": "host", "positional": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -415,10 +370,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -426,10 +377,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -439,10 +386,6 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `name` | `{"name": "name", "positional": true, "required": true}` |
 | `value` | `{"name": "value", "positional": true, "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -467,10 +410,6 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `name` | `{"name": "name", "positional": true, "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -493,10 +432,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -505,10 +440,6 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `--client` | `{"name": "client", "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -531,10 +462,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -542,10 +469,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -554,10 +477,6 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `--document` | `{"name": "document", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -581,10 +500,6 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -608,10 +523,6 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -636,10 +547,6 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `--document` | `{"name": "document", "required": true}` |
 | `--extend` | `{"name": "extend", "repeatable": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -663,10 +570,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -680,10 +583,6 @@ bounds are null. Positional arguments have no long flag.
 | `--reply-to` | `{"name": "reply_to"}` |
 | `--task` | `{"name": "task"}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -714,10 +613,6 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `--after` | `{"name": "after"}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["100"], "name": "limit"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -743,10 +638,6 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `through` | `{"name": "through", "positional": true, "required": true}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -775,10 +666,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -789,10 +676,6 @@ bounds are null. Positional arguments have no long flag.
 | `--objective` | `{"name": "objective", "required": true}` |
 | `--note` | `{"name": "note"}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -824,10 +707,6 @@ bounds are null. Positional arguments have no long flag.
 | `--state` | `{"name": "state", "values": ["open", "done", "cancelled"]}` |
 | `--after` | `{"name": "after"}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["100"], "name": "limit"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -855,10 +734,6 @@ bounds are null. Positional arguments have no long flag.
 | `id` | `{"name": "id", "positional": true, "required": true}` |
 | `--lease-seconds` | `{"defaults": ["300"], "name": "lease_seconds"}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -901,10 +776,6 @@ bounds are null. Positional arguments have no long flag.
 | `--objective` | `{"name": "objective", "required": true}` |
 | `--note` | `{"name": "note"}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -953,10 +824,6 @@ bounds are null. Positional arguments have no long flag.
 | `--token` | `{"name": "token", "required": true}` |
 | `--state` | `{"defaults": ["done"], "name": "state", "values": ["done", "cancelled"]}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1004,10 +871,6 @@ bounds are null. Positional arguments have no long flag.
 | `--generation` | `{"name": "generation", "required": true}` |
 | `--token` | `{"name": "token", "required": true}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1051,10 +914,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1065,10 +924,6 @@ bounds are null. Positional arguments have no long flag.
 | `--after` | `{"name": "after"}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["100"], "name": "limit"}` |
 | `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1100,10 +955,6 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `--note` | `{"name": "note", "required": true}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1132,10 +983,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1148,10 +995,6 @@ bounds are null. Positional arguments have no long flag.
 | `--worktree` | `{"name": "worktree"}` |
 | `--lease-seconds` | `{"defaults": ["300"], "name": "lease_seconds"}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1203,10 +1046,6 @@ bounds are null. Positional arguments have no long flag.
 | `--token` | `{"name": "token", "required": true}` |
 | `--lease-seconds` | `{"defaults": ["300"], "name": "lease_seconds"}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1261,10 +1100,6 @@ bounds are null. Positional arguments have no long flag.
 | `id` | `{"name": "id", "positional": true, "required": true}` |
 | `--generation` | `{"name": "generation", "required": true}` |
 | `--token` | `{"name": "token", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1298,10 +1133,6 @@ bounds are null. Positional arguments have no long flag.
 | `--generation` | `{"name": "generation", "required": true}` |
 | `--token` | `{"name": "token", "required": true}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1347,10 +1178,6 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `--after` | `{"name": "after"}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["100"], "name": "limit"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1374,10 +1201,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1389,10 +1212,6 @@ bounds are null. Positional arguments have no long flag.
 | `--id` | `{"name": "id", "required": true}` |
 | `--generation` | `{"name": "generation", "required": true}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1435,10 +1254,6 @@ bounds are null. Positional arguments have no long flag.
 | `--id` | `{"bounds": [0, 100], "name": "id", "required": true}` |
 | `--generation` | `{"name": "generation", "required": true}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1482,10 +1297,6 @@ bounds are null. Positional arguments have no long flag.
 | `--candidate` | `{"name": "candidate", "required": true}` |
 | `--lease-seconds` | `{"defaults": ["300"], "name": "lease_seconds"}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1527,10 +1338,6 @@ bounds are null. Positional arguments have no long flag.
 | `--generation` | `{"name": "generation", "required": true}` |
 | `--lease-seconds` | `{"defaults": ["300"], "name": "lease_seconds"}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1580,10 +1387,6 @@ bounds are null. Positional arguments have no long flag.
 | `--reference` | `{"name": "reference", "required": true}` |
 | `--id` | `{"name": "id", "required": true}` |
 | `--generation` | `{"name": "generation", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1612,10 +1415,6 @@ bounds are null. Positional arguments have no long flag.
 | `--id` | `{"name": "id", "required": true}` |
 | `--generation` | `{"name": "generation", "required": true}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1657,10 +1456,6 @@ bounds are null. Positional arguments have no long flag.
 | `--reference` | `{"name": "reference", "required": true}` |
 | `--generation` | `{"name": "generation", "required": true}` |
 | `--wait` | `{"bounds": [1, 14400], "name": "wait", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1691,10 +1486,6 @@ bounds are null. Positional arguments have no long flag.
 | `--hooks` | `{"name": "hooks", "values": ["on", "off"]}` |
 | `--adopt-existing` | `{"defaults": ["false"], "name": "adopt_existing", "values": ["true", "false"]}` |
 | `--dry-run` | `{"defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1724,10 +1515,6 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `--from-source` | `{"name": "from_source"}` |
 | `--hosts` | `{"defaults": ["all"], "name": "hosts", "values": ["all"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1752,10 +1539,6 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `--harness` | `{"name": "harness", "repeatable": true, "required": true, "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1778,10 +1561,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1791,10 +1570,6 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `--adapter` | `{"name": "adapter"}` |
 | `--pool` | `{"name": "pool"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1825,10 +1600,6 @@ bounds are null. Positional arguments have no long flag.
 | `--confidential` | `{"defaults": ["false"], "name": "confidential", "values": ["true", "false"]}` |
 | `--allow-free` | `{"defaults": ["false"], "name": "allow_free", "values": ["true", "false"]}` |
 | `--fallback` | `{"bounds": [0, 2], "name": "fallback"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1881,10 +1652,6 @@ bounds are null. Positional arguments have no long flag.
 | `--weight` | `{"name": "weight"}` |
 | `--effort` | `{"name": "effort"}` |
 | `--efforts` | `{"name": "efforts"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1913,10 +1680,6 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `pool` | `{"name": "pool", "positional": true, "required": true}` |
 | `model` | `{"name": "model", "positional": true, "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1941,10 +1704,6 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `pool` | `{"name": "pool", "positional": true, "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1974,10 +1733,6 @@ bounds are null. Positional arguments have no long flag.
 | `--all` | `{"conflicts": ["account", "provider"], "defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
 | `--policy` | `{"name": "policy", "values": ["pace", "spend", "max", "off"]}` |
 | `--until` | `{"name": "until"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2006,10 +1761,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2017,10 +1768,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2029,10 +1776,6 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `name` | `{"name": "name", "positional": true, "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2087,10 +1830,6 @@ bounds are null. Positional arguments have no long flag.
 | `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "name": "worktree_branch"}` |
 | `--head` | `{"name": "head"}` |
 | `--base` | `{"name": "base"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--model` | `{"conflicts": ["route"], "name": "model"}` |
 | `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "network", "capability", "provider_timeout"], "name": "manifest"}` |
 | `--worktree` | `{"name": "worktree"}` |
@@ -2178,10 +1917,6 @@ bounds are null. Positional arguments have no long flag.
 | `--kind` | `{"name": "kind"}` |
 | `--range` | `{"name": "range"}` |
 | `--wait` | `{"bounds": [1, 14400], "defaults": ["3600"], "name": "wait"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2214,10 +1949,6 @@ bounds are null. Positional arguments have no long flag.
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
 | `--cursor` | `{"name": "cursor"}` |
 | `--all` | `{"defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2246,10 +1977,6 @@ bounds are null. Positional arguments have no long flag.
 | `number` | `{"name": "number", "positional": true, "required": true}` |
 | `--head` | `{"name": "head"}` |
 | `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2314,10 +2041,6 @@ bounds are null. Positional arguments have no long flag.
 | `--head` | `{"name": "head"}` |
 | `--base` | `{"name": "base"}` |
 | `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--model` | `{"conflicts": ["route"], "name": "model"}` |
 | `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "network", "capability", "provider_timeout"], "name": "manifest"}` |
 | `--help` | `{"name": "help"}` |
@@ -2406,10 +2129,6 @@ bounds are null. Positional arguments have no long flag.
 | `--watch` | `{"conflicts": ["all", "states", "cursor"], "name": "watch"}` |
 | `--state` | `{"conflicts": ["wait", "watch"], "name": "states", "repeatable": true, "values": ["queued", "starting", "running", "settling", "succeeded", "review_required", "failed", "rejected", "timed_out", "rate_limited", "quota_limited", "auth_required", "model_unavailable", "permission_denied", "quarantined", "lost", "uncommitted", "cancelled", "input_required"]}` |
 | `--since` | `{"name": "since"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2447,13 +2166,8 @@ bounds are null. Positional arguments have no long flag.
 | `--part` | `{"defaults": ["result"], "name": "part", "values": ["result", "prompt", "stderr", "events", "receipt", "transcript"]}` |
 | `--offset` | `{"conflicts": ["tail"], "defaults": ["0"], "name": "offset"}` |
 | `--tail` | `{"name": "tail"}` |
-| `--summary` | `{"conflicts": ["tail", "offset", "trace", "part"], "defaults": ["false"], "name": "summary", "values": ["true", "false"]}` |
 | `--max-bytes` | `{"bounds": [1, 65536], "defaults": ["65536"], "name": "max_bytes"}` |
 | `--trace` | `{"conflicts": ["part", "offset", "tail", "max_bytes"], "defaults": ["false"], "name": "trace", "values": ["true", "false"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2462,7 +2176,7 @@ bounds are null. Positional arguments have no long flag.
   "constraints": [
     "target is an ATTEMPT ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT",
     "tail above 500 lines is clamped to 500",
-    "summary retains eight changed paths and a 768-byte final paragraph; missing evidence is null",
+    "a result shows whole up to 12 KiB, then its head and tail; at most 8 changed paths of 120 bytes are named; missing evidence is null",
     "peer tail scans share a 30-second deadline and reject changing artifacts"
   ],
   "groups": [
@@ -2473,7 +2187,6 @@ bounds are null. Positional arguments have no long flag.
         "part",
         "offset",
         "tail",
-        "summary",
         "max_bytes",
         "trace"
       ],
@@ -2493,10 +2206,6 @@ bounds are null. Positional arguments have no long flag.
 | `--operation-id` | `{"defaults": [""], "name": "operation_id"}` |
 | `--reason` | `{"bounds": [0, 256], "name": "reason"}` |
 | `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2528,10 +2237,6 @@ bounds are null. Positional arguments have no long flag.
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
 | `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2566,10 +2271,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2580,10 +2281,6 @@ bounds are null. Positional arguments have no long flag.
 | `attempt` | `{"name": "attempt", "positional": true, "required": true}` |
 | `--deliver` | `{"name": "deliver"}` |
 | `--accept-review` | `{"defaults": ["false"], "name": "accept_review", "values": ["true", "false"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2609,10 +2306,6 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `--id` | `{"bounds": [0, 100], "name": "id", "repeatable": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2635,10 +2328,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2652,10 +2341,6 @@ bounds are null. Positional arguments have no long flag.
 | `--until` | `{"name": "until"}` |
 | `--run-id` | `{"name": "run_id"}` |
 | `--detail` | `{"conflicts": ["usage"], "defaults": ["false"], "name": "detail", "values": ["true", "false"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2691,10 +2376,6 @@ bounds are null. Positional arguments have no long flag.
 | `--since` | `{"name": "since"}` |
 | `--run` | `{"name": "run"}` |
 | `--peers` | `{"defaults": ["false"], "name": "peers", "values": ["true", "false"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2720,10 +2401,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2745,10 +2422,6 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `--adapter` | `{"name": "adapter"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2773,10 +2446,6 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `--adapter` | `{"name": "adapter"}` |
 | `--days` | `{"defaults": ["7"], "name": "days"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2807,10 +2476,6 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `--headline` | `{"name": "headline", "values": ["auto", "5h", "weekly"]}` |
 | `--icon` | `{"name": "icon"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2837,10 +2502,6 @@ bounds are null. Positional arguments have no long flag.
 | `--adapter` | `{"name": "adapter"}` |
 | `--trigger` | `{"defaults": ["manual"], "name": "trigger", "values": ["timer", "panel", "manual", "wake", "power"]}` |
 | `--power` | `{"defaults": ["ac"], "name": "power", "values": ["ac", "battery", "low"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2869,10 +2530,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2884,10 +2541,6 @@ bounds are null. Positional arguments have no long flag.
 | `--max-nodes` | `{"defaults": ["100"], "name": "max_nodes"}` |
 | `--detail` | `{"defaults": ["false"], "name": "detail", "values": ["true", "false"]}` |
 | `--hosts` | `{"name": "hosts"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2917,10 +2570,6 @@ bounds are null. Positional arguments have no long flag.
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
 | `--cursor` | `{"name": "cursor"}` |
 | `--hosts` | `{"name": "hosts"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2946,10 +2595,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2957,10 +2602,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2971,10 +2612,6 @@ bounds are null. Positional arguments have no long flag.
 | `session` | `{"name": "session", "positional": true}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
 | `--cursor` | `{"name": "cursor"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2999,10 +2636,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3010,10 +2643,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3023,10 +2652,6 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
 | `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3055,10 +2680,6 @@ bounds are null. Positional arguments have no long flag.
 | `--seen-revision` | `{"name": "seen_revision"}` |
 | `--snoozed-until` | `{"name": "snoozed_until"}` |
 | `--dismissed` | `{"defaults": ["false"], "name": "dismissed", "values": ["true", "false"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3088,10 +2709,6 @@ bounds are null. Positional arguments have no long flag.
 | `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
 | `session` | `{"name": "session", "positional": true, "required": true}` |
 | `--to` | `{"name": "to"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3119,10 +2736,6 @@ bounds are null. Positional arguments have no long flag.
 | `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
 | `session` | `{"name": "session", "positional": true, "required": true}` |
 | `--revision` | `{"name": "revision", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3149,10 +2762,6 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
 | `session` | `{"name": "session", "positional": true, "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3176,10 +2785,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3188,10 +2793,6 @@ bounds are null. Positional arguments have no long flag.
 | Argument | Contract |
 |---|---|
 | `session` | `{"name": "session", "positional": true, "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3217,10 +2818,6 @@ bounds are null. Positional arguments have no long flag.
 | `session` | `{"name": "session", "positional": true, "required": true}` |
 | `--from` | `{"name": "from", "required": true}` |
 | `--to` | `{"name": "to"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3248,10 +2845,6 @@ bounds are null. Positional arguments have no long flag.
 | `session` | `{"name": "session", "positional": true, "required": true}` |
 | `--file` | `{"name": "file", "required": true}` |
 | `--expect-revision` | `{"name": "expect_revision", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3276,10 +2869,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3291,10 +2880,6 @@ bounds are null. Positional arguments have no long flag.
 | `--file` | `{"name": "file", "required": true}` |
 | `--operation-id` | `{"name": "operation_id", "requires": ["issued_at"]}` |
 | `--issued-at` | `{"name": "issued_at", "requires": ["operation_id"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3326,10 +2911,6 @@ bounds are null. Positional arguments have no long flag.
 | `--session` | `{"name": "session", "required": true}` |
 | `--after` | `{"name": "after"}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3357,10 +2938,6 @@ bounds are null. Positional arguments have no long flag.
 | `--to` | `{"name": "to"}` |
 | `--dry-run` | `{"defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
 | `--session-id` | `{"name": "session_id"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3385,10 +2962,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3396,10 +2969,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3409,10 +2978,6 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `path` | `{"name": "path", "positional": true, "required": true}` |
 | `--owner` | `{"defaults": ["manual"], "name": "owner"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3438,10 +3003,6 @@ bounds are null. Positional arguments have no long flag.
 |---|---|
 | `branch` | `{"name": "branch", "positional": true, "required": true}` |
 | `--base` | `{"name": "base"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3465,10 +3026,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3482,10 +3039,6 @@ bounds are null. Positional arguments have no long flag.
 | `--integration` | `{"name": "integration"}` |
 | `--branch` | `{"bounds": [0, 100], "conflicts": ["since"], "name": "branch", "repeatable": true, "requires": ["merged"]}` |
 | `--since` | `{"name": "since", "requires": ["merged"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3522,10 +3075,6 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3537,10 +3086,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 |---|---|
 | `number` | `{"name": "number", "positional": true, "required": true}` |
 | `--bind` | `{"defaults": ["false"], "name": "bind", "values": ["true", "false"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3565,10 +3110,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | Argument | Contract |
 |---|---|
 | `number` | `{"name": "number", "positional": true, "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3599,10 +3140,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | `--base` | `{"name": "base"}` |
 | `--draft` | `{"defaults": ["false"], "name": "draft", "values": ["true", "false"]}` |
 | `--dry-run` | `{"defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3634,10 +3171,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 |---|---|
 | `numbers` | `{"name": "numbers", "positional": true, "repeatable": true}` |
 | `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3671,10 +3204,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | `--dry-run` | `{"conflicts": ["apply"], "defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
 | `--apply` | `{"defaults": ["false"], "name": "apply", "values": ["true", "false"]}` |
 | `--idle-days` | `{"defaults": ["7"], "name": "idle_days"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3702,10 +3231,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3713,10 +3238,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3724,10 +3245,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3736,10 +3253,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | Argument | Contract |
 |---|---|
 | `--limit` | `{"bounds": [1, 100], "name": "limit"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3763,10 +3276,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | Argument | Contract |
 |---|---|
 | `task` | `{"name": "task", "positional": true, "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3792,10 +3301,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | `--route` | `{"name": "route", "required": true}` |
 | `--split` | `{"defaults": ["acceptance"], "name": "split", "values": ["search", "acceptance", "held-out"]}` |
 | `--limit` | `{"bounds": [1, 100], "name": "limit"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3820,10 +3325,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3832,10 +3333,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | Argument | Contract |
 |---|---|
 | `--request` | `{"name": "request", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3858,10 +3355,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3870,10 +3363,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | Argument | Contract |
 |---|---|
 | `delivery_id` | `{"name": "delivery_id", "positional": true, "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3899,10 +3388,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | `delivery_id` | `{"name": "delivery_id", "positional": true, "required": true}` |
 | `--expected-revision` | `{"name": "expected_revision", "required": true}` |
 | `--request` | `{"name": "request", "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3931,10 +3416,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3946,10 +3427,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | `--file` | `{"name": "file", "required": true}` |
 | `--client` | `{"name": "client", "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
 | `--rebind` | `{"defaults": ["false"], "name": "rebind", "values": ["true", "false"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3978,10 +3455,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | `session_id` | `{"name": "session_id", "positional": true, "required": true}` |
 | `--rev` | `{"name": "rev"}` |
 | `--revisions` | `{"conflicts": ["rev"], "defaults": ["false"], "name": "revisions", "values": ["true", "false"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4008,10 +3481,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 |---|---|
 | `session_id` | `{"name": "session_id", "positional": true, "required": true}` |
 | `rev` | `{"name": "rev", "positional": true, "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4049,10 +3518,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | `--no-launch` | `{"defaults": ["false"], "name": "no_launch", "values": ["true", "false"]}` |
 | `--session-id` | `{"name": "session_id"}` |
 | `--client` | `{"name": "client", "values": ["claude", "codex", "cursor", "agy", "opencode"]}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4088,10 +3553,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4101,10 +3562,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 |---|---|
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
 | `--cursor` | `{"name": "cursor"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4131,10 +3588,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | `--source` | `{"name": "source"}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
 | `--cursor` | `{"name": "cursor"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4168,10 +3621,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | `--head` | `{"name": "head", "requires": ["base"]}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
 | `--cursor` | `{"name": "cursor"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4205,10 +3654,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | `--rules` | `{"defaults": ["general"], "name": "rules", "values": ["general", "academic", "legal"]}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
 | `--cursor` | `{"name": "cursor"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4238,10 +3683,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4257,10 +3698,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4268,10 +3705,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4279,10 +3712,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4290,10 +3719,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4301,10 +3726,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4312,10 +3733,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4323,10 +3740,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4334,10 +3747,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4345,10 +3754,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4356,10 +3761,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4367,10 +3768,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -4380,10 +3777,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 |---|---|
 | `remote` | `{"name": "remote", "positional": true, "required": true}` |
 | `location` | `{"name": "location", "positional": true, "required": true}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--full` | `{"name": "full", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 

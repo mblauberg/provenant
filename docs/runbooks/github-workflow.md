@@ -298,6 +298,10 @@ verifies required check names have registered and checks the head before and
 after each sample. Failed checks or head movement
 stop the wait. Progress uses at most eight stderr lines; JSON stdout remains
 one machine envelope. CI timeout exits 124 without attempting a merge.
+A merge that is queued or left to auto-merge exits 5 (`pending`); if a merge
+call errors but the PR is merged, the report is landed. With no required
+check, landing also waits 60 seconds after the newest check registers. If
+`land` reports `CI_PENDING`, rerun it with `--wait`.
 
 Nothing after the merge changes what merged, and no step forces. A refusal is
 reported in `data.steps` with `cleanup_pending: true` and reason

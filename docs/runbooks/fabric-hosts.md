@@ -613,9 +613,9 @@ keep running after the SSH call returns. Fabric MCP `fabric_run`
 To read a peer's own attempt without a local placement record, use
 `provenant output ATTEMPT --host workshop`, or `output HOST/ATTEMPT` with
 the host ID. Output also accepts `RUN/ATTEMPT`. The default human result is a
-bounded settlement summary and final paragraph; `--full` reads the full byte
-window and `--json` retains the machine envelope. Explicit `--summary` also
-works with JSON. Changed files use the recorded base and final head where
+settlement line and the whole final result up to 12 KiB (head and tail above
+that, naming the omitted bytes); `--full` reads the full byte window and
+`--json` retains the machine envelope. Changed files use the recorded base and final head where
 their objects remain readable; peer summaries report this evidence as
 unavailable rather than guessing a diff.
 

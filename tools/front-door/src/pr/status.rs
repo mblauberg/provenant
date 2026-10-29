@@ -1,6 +1,6 @@
 //! `pr status`: one compact line per pull request.
 use super::{Result, execute, successful};
-use crate::{emit, fail, roots};
+use crate::{emit_summarised, fail, roots};
 use provenant_cli::Globals;
 use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,31 @@ struct Line {
     error: Option<String>,
 }
 impl Line {
+    /// The state an operator acts on, most urgent first.
+    fn class(&self) -> &'static str {
+        if self.error.is_some() {
+            "unavailable"
+        } else if self.state != "OPEN" {
+            if self.state == "MERGED" {
+                "merged"
+            } else {
+                "closed"
+            }
+        } else if self.checks_failed.unwrap_or(0) > 0 {
+            "failing"
+        } else if matches!(
+            self.review.as_str(),
+            "REVIEW_REQUIRED" | "CHANGES_REQUESTED"
+        ) {
+            "review_required"
+        } else if self.checks_pending.unwrap_or(0) > 0 || self.checks_total.is_none() {
+            "pending"
+        } else if self.draft {
+            "draft"
+        } else {
+            "ready"
+        }
+    }
     fn text(&self) -> String {
         if let Some(error) = &self.error {
             return format!("#{} unavailable: {error}", self.number);
@@ -118,34 +143,36 @@ fn observe_ci_with(
 // Both classic protection and rulesets may apply. Only trust the resolved
 // policy when both sources are readable.
 pub(super) fn required_checks(project: &Path, target: &str) -> Option<Vec<String>> {
-    required_policy(project, target, None)
-        .map(|policy| policy.checks)
-        .filter(|names| !names.is_empty())
+    required_policy(target, &|argv| {
+        super::execute_for(project, argv, std::time::Duration::from_secs(60), false).ok()
+    })
+    .map(|policy| policy.checks.into_iter().map(|check| check.name).collect())
+    .filter(|names: &Vec<String>| !names.is_empty())
 }
 
+/// A required check, optionally pinned to the GitHub App that must report it.
+/// Without the pin, any app (or a legacy status) of that name would satisfy it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct Required {
+    pub name: String,
+    pub app: Option<u64>,
+}
+impl Required {
+    pub fn matches(&self, name: &str, app: Option<u64>) -> bool {
+        self.name == name && self.app.is_none_or(|wanted| Some(wanted) == app)
+    }
+}
 pub(super) struct Policy {
     pub repository: String,
-    pub checks: Vec<String>,
+    pub checks: Vec<Required>,
 }
 
-// A known empty policy is distinct from an unavailable policy. Landing still
-// requires at least one passing reported check when no names are required.
-#[allow(clippy::disallowed_methods)]
+// A known empty policy is distinct from an unavailable policy. Landing then
+// waits for every reported check to settle instead of trusting the first.
 pub(super) fn required_policy(
-    project: &Path,
     target: &str,
-    deadline: Option<std::time::Instant>,
+    read: &dyn Fn(&[&str]) -> Option<provenant_os::exec::ExecOutcome>,
 ) -> Option<Policy> {
-    let read = |argv: &[&str]| {
-        let timeout = deadline.map_or(std::time::Duration::from_secs(60), |end| {
-            end.saturating_duration_since(std::time::Instant::now())
-                .min(std::time::Duration::from_secs(60))
-        });
-        if timeout.is_zero() {
-            return None;
-        }
-        super::execute_for(project, argv, timeout, false).ok()
-    };
     #[derive(Deserialize)]
     struct Repo {
         name: String,
@@ -239,13 +266,35 @@ fn classic_protection(success: bool, bytes: &[u8]) -> Option<Option<serde_json::
 fn parse_required_checks(
     protection: Option<&serde_json::Value>,
     pages: &[Vec<serde_json::Value>],
-) -> Option<Vec<String>> {
-    let mut names = Vec::new();
+) -> Option<Vec<Required>> {
+    // An absent pin is any app; a present one must be a number (classic
+    // protection uses null or -1 for "any").
+    let pin = |value: Option<&serde_json::Value>| -> Option<Option<u64>> {
+        match value {
+            None | Some(serde_json::Value::Null) => Some(None),
+            Some(value) => match value.as_i64()? {
+                -1 => Some(None),
+                id => Some(Some(u64::try_from(id).ok()?)),
+            },
+        }
+    };
+    let mut needs = Vec::new();
     if let Some(protection) = protection {
         let checks = protection.get("required_status_checks")?;
         if !checks.is_null() {
+            if let Some(listed) = checks.get("checks") {
+                for check in listed.as_array()? {
+                    needs.push(Required {
+                        name: check.get("context")?.as_str()?.to_owned(),
+                        app: pin(check.get("app_id"))?,
+                    });
+                }
+            }
             for name in checks.get("contexts")?.as_array()? {
-                names.push(name.as_str()?.to_owned());
+                needs.push(Required {
+                    name: name.as_str()?.to_owned(),
+                    app: None,
+                });
             }
         }
     }
@@ -256,13 +305,24 @@ fn parse_required_checks(
                 .get("required_status_checks")?
                 .as_array()?
             {
-                names.push(check.get("context")?.as_str()?.to_owned());
+                needs.push(Required {
+                    name: check.get("context")?.as_str()?.to_owned(),
+                    app: pin(check.get("integration_id"))?,
+                });
             }
         }
     }
-    names.sort();
-    names.dedup();
-    Some(names)
+    needs.sort();
+    needs.dedup();
+    // Classic `contexts` repeats each pinned check without its app. Drop the
+    // unpinned twin so the pin is not widened.
+    let pinned: Vec<_> = needs
+        .iter()
+        .filter(|need| need.app.is_some())
+        .map(|need| need.name.clone())
+        .collect();
+    needs.retain(|need| need.app.is_some() || !pinned.contains(&need.name));
+    Some(needs)
 }
 
 fn summarise_ci(
@@ -439,6 +499,28 @@ fn rollup_checks(values: &[serde_json::Value]) -> Option<Vec<Check>> {
         .collect()
 }
 
+/// A change is a row that was readable both times and differs. An error row
+/// says nothing about the pull request.
+fn changed(before: &[Line], after: &[Line]) -> bool {
+    before.len() != after.len()
+        || before
+            .iter()
+            .zip(after)
+            .any(|(was, now)| was.error.is_none() && now.error.is_none() && was != now)
+}
+/// Replace each error row by the last good row for that pull request.
+fn keep_good(previous: &[Line], current: Vec<Line>) -> Vec<Line> {
+    current
+        .into_iter()
+        .map(
+            |line| match previous.iter().find(|old| old.number == line.number) {
+                Some(old) if line.error.is_some() && old.error.is_none() => old.clone(),
+                _ => line,
+            },
+        )
+        .collect()
+}
+
 #[allow(clippy::disallowed_methods)]
 fn snapshot(project: &Path, numbers: &[u64], deadline: Option<std::time::Instant>) -> Vec<Line> {
     numbers
@@ -493,22 +575,29 @@ pub(super) fn run(numbers: Vec<u64>, wait: Option<u64>, globals: &Globals) -> u8
         if initial.is_empty() || initial.iter().all(|line| line.error.is_some()) {
             return Ok((initial, false));
         }
+        // The latest good row of each PR; a transient read failure neither
+        // replaces it nor counts as a change.
+        let mut latest = initial.clone();
+        let mut baseline = initial;
         loop {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
-                return Ok((initial, true));
+                return Ok((latest, true));
             }
             std::thread::sleep(left.min(std::time::Duration::from_secs(5)));
             if std::time::Instant::now() >= deadline {
-                return Ok((initial, true));
+                return Ok((latest, true));
             }
             let current = snapshot(&project, &numbers, Some(deadline));
+            latest = keep_good(&latest, current.clone());
             if std::time::Instant::now() >= deadline {
-                return Ok((initial, true));
+                return Ok((latest, true));
             }
-            if current != initial {
-                return Ok((current, false));
+            if changed(&baseline, &current) {
+                return Ok((latest, false));
             }
+            // Rows that recovered become the new baseline for later comparison.
+            baseline = keep_good(&baseline, current);
         }
     })();
     match result {
@@ -532,10 +621,7 @@ pub(super) fn run(numbers: Vec<u64>, wait: Option<u64>, globals: &Globals) -> u8
             if timed_out {
                 text.push_str("snapshot unchanged within wait limit\n");
             }
-            text.push_str(&match lines.as_slice() {
-                [line] => format!("next: provenant land {} --wait\n", line.number),
-                _ => "next: provenant status\n".into(),
-            });
+            let summary = summarise(&lines, timed_out);
             let outcome = if timed_out {
                 Outcome::Timeout
             } else if !lines.is_empty() && lines.iter().all(|line| line.error.is_some()) {
@@ -543,19 +629,124 @@ pub(super) fn run(numbers: Vec<u64>, wait: Option<u64>, globals: &Globals) -> u8
             } else {
                 Outcome::Ok
             };
-            emit(
+            emit_summarised(
                 &CommandResult::new(LEAF, outcome, lines),
                 globals,
                 &text,
                 true,
+                Some(&summary),
             )
         }
         Err(error) => fail(LEAF, Outcome::Error, "PR", &error.to_string(), globals),
     }
 }
 
+/// Counts by state, action rows first (failing, review, pending,
+/// unavailable), then one typed next command.
+fn summarise(lines: &[Line], timed_out: bool) -> provenant_cli::Summary {
+    let order = ["failing", "review_required", "pending", "unavailable"];
+    let counts: Vec<(&str, usize)> = [
+        "failing",
+        "review_required",
+        "pending",
+        "unavailable",
+        "draft",
+        "ready",
+        "merged",
+        "closed",
+    ]
+    .into_iter()
+    .map(|class| {
+        (
+            class,
+            lines.iter().filter(|line| line.class() == class).count(),
+        )
+    })
+    .collect();
+    let mut action: Vec<&Line> = lines
+        .iter()
+        .filter(|line| order.contains(&line.class()))
+        .collect();
+    action.sort_by_key(|line| order.iter().position(|class| *class == line.class()));
+    let mut rows: Vec<String> = action.iter().map(|line| line.text()).collect();
+    let quiet = lines.len() - action.len();
+    if timed_out {
+        rows.push("snapshot unchanged within wait limit".into());
+    }
+    let next = match action.first() {
+        Some(line) if line.class() == "failing" => Some(format!("gh pr checks {}", line.number)),
+        Some(line) if line.class() == "pending" => {
+            Some(format!("provenant pr status {} --wait", line.number))
+        }
+        Some(line) => Some(format!("provenant pr status {} --full", line.number)),
+        None => lines
+            .iter()
+            .find(|line| line.class() == "ready")
+            .map(|line| format!("provenant land {} --wait", line.number))
+            .or_else(|| Some("provenant status".to_owned())),
+    };
+    let mut headline = format!(
+        "{} PRs: {}",
+        lines.len(),
+        provenant_cli::Summary::tally(&counts)
+    );
+    if quiet > 0 && !action.is_empty() {
+        headline.push_str(&format!(" ({quiet} need nothing)"));
+    }
+    provenant_cli::Summary::new(headline, rows, next)
+}
+
 #[cfg(test)]
 mod tests {
+    #[allow(dead_code)] // Also compiled, unrun, by the harness-less worktrees driver.
+    fn row(number: u64, head: &str, error: Option<&str>) -> super::Line {
+        super::Line {
+            number,
+            state: "OPEN".into(),
+            head: head.into(),
+            draft: false,
+            checks_passed: Some(1),
+            checks_total: Some(1),
+            checks_failed: Some(0),
+            checks_pending: Some(0),
+            merge: "clean".into(),
+            review: "approved".into(),
+            error: error.map(str::to_owned),
+        }
+    }
+    #[test]
+    fn a_transient_error_row_is_not_a_change_and_never_replaces_a_good_row() {
+        use super::{changed, keep_good};
+        let good = vec![row(1, "a", None), row(2, "b", None)];
+        let flaky = vec![row(1, "a", Some("HTTP 502")), row(2, "b", None)];
+        assert!(!changed(&good, &flaky));
+        assert!(!changed(&flaky, &good));
+        let kept = keep_good(&good, flaky.clone());
+        assert_eq!(kept, good);
+        // A first-time error stays visible; a real difference is a change.
+        assert_eq!(keep_good(&[], flaky.clone()), flaky);
+        assert!(changed(&good, &[row(1, "c", None), row(2, "b", None)]));
+        assert!(changed(&good, &good[..1]));
+    }
+    #[test]
+    fn the_summary_counts_states_and_puts_action_rows_first() {
+        let mut failing = row(3, "c", None);
+        failing.checks_failed = Some(1);
+        let lines = vec![row(1, "a", None), failing, row(2, "b", Some("HTTP 502"))];
+        let summary = super::summarise(&lines, true);
+        assert_eq!(
+            summary.lines[0],
+            "3 PRs: 1 failing, 1 unavailable, 1 ready (1 need nothing)"
+        );
+        assert!(summary.lines[1].starts_with("#3 "), "{:?}", summary.lines);
+        assert!(summary.lines[2].starts_with("#2 unavailable"));
+        assert_eq!(
+            summary.lines.last().map(String::as_str),
+            Some("snapshot unchanged within wait limit")
+        );
+        assert_eq!(summary.next.as_deref(), Some("gh pr checks 3"));
+    }
+
     #[test]
     fn ruleset_only_protection_is_distinct_from_a_failed_policy_lookup() {
         assert_eq!(
@@ -642,6 +833,7 @@ mod tests {
             ],
         ];
         let names = parse_required_checks(Some(&protection), &pages).unwrap();
+        let names: Vec<String> = names.into_iter().map(|required| required.name).collect();
         assert_eq!(names, ["build", "deploy", "integration", "lint"]);
         let checks = ["build", "deploy", "integration", "lint"]
             .into_iter()
@@ -687,7 +879,10 @@ mod tests {
         ]];
         assert_eq!(
             parse_required_checks(Some(&no_protection), &rules),
-            Some(vec!["build".into()])
+            Some(vec![Required {
+                name: "build".into(),
+                app: None
+            }])
         );
     }
 

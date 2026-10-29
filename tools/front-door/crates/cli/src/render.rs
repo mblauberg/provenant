@@ -1,24 +1,103 @@
 //! Encode completely before delivery; never clip a result or repeat an owner call.
+use crate::limits;
+pub use crate::limits::MAX_RESULT_BYTES;
 use provenant_records::{CommandResult, Outcome};
 use serde::Serialize;
 use std::io::{self, Write};
 use thiserror::Error;
-pub const MAX_RESULT_BYTES: usize = 1024 * 1024;
+
+/// The compact view an owner supplies for the default human output: a headline
+/// of counts, then the rows that need action first, and the one typed next
+/// command. The generic truncator is only a fallback for owners without one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Summary {
+    pub lines: Vec<String>,
+    pub next: Option<String>,
+    /// Rows the owner held back; the renderer says so and names `--full`.
+    pub omitted: usize,
+}
+impl Summary {
+    /// A headline, then `rows` in the owner's priority order, bounded by the
+    /// shared row limits. Rows past the limit are counted, not dropped silently.
+    pub fn new(headline: impl Into<String>, rows: Vec<String>, next: Option<String>) -> Self {
+        let omitted = rows.len().saturating_sub(limits::SUMMARY_ROWS);
+        let lines = std::iter::once(headline.into())
+            .chain(
+                rows.iter()
+                    .take(limits::SUMMARY_ROWS)
+                    .map(|row| bounded_text(row, limits::SUMMARY_ROW_BYTES)),
+            )
+            .collect();
+        Self {
+            lines,
+            next,
+            omitted,
+        }
+    }
+    /// Text the owner has already bounded; shown as it is.
+    pub fn verbatim(text: &str, next: Option<String>) -> Self {
+        Self {
+            lines: text.lines().map(str::to_owned).collect(),
+            next,
+            omitted: 0,
+        }
+    }
+    /// Only a next command; the body falls back to the generic truncator.
+    pub fn next_only(next: Option<String>) -> Self {
+        Self {
+            next,
+            ..Self::default()
+        }
+    }
+    /// `3 running, 1 failed` in the order given, skipping zero counts.
+    pub fn tally(counts: &[(&str, usize)]) -> String {
+        counts
+            .iter()
+            .filter(|(_, count)| *count > 0)
+            .map(|(name, count)| format!("{count} {name}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum RenderMode<'a> {
     Json,
-    Human { text: &'a str, read_only: bool },
-    Compact { text: &'a str, read_only: bool },
+    /// Complete detail from the owner's own human text.
+    Human {
+        text: &'a str,
+        read_only: bool,
+        summary: Option<&'a Summary>,
+    },
+    /// The owner's summary, or the bounded fallback over its text.
+    Compact {
+        text: &'a str,
+        read_only: bool,
+        summary: Option<&'a Summary>,
+    },
 }
 impl crate::Globals {
     /// JSON is an independent transport; --full only affects human output.
-    pub fn render_mode<'a>(&self, text: &'a str, read_only: bool) -> RenderMode<'a> {
+    pub fn render_mode<'a>(
+        &self,
+        text: &'a str,
+        read_only: bool,
+        summary: Option<&'a Summary>,
+    ) -> RenderMode<'a> {
         if self.json {
             RenderMode::Json
         } else if self.full {
-            RenderMode::Human { text, read_only }
+            RenderMode::Human {
+                text,
+                read_only,
+                summary,
+            }
         } else {
-            RenderMode::Compact { text, read_only }
+            RenderMode::Compact {
+                text,
+                read_only,
+                summary,
+            }
         }
     }
 }
@@ -34,68 +113,92 @@ pub fn bounded_text(text: &str, max: usize) -> String {
     }
     format!("{}...", &text[..end])
 }
+/// Whole text up to `max` bytes; above it, the head and the tail with a marker
+/// that names how many bytes were left out and how to read them.
+pub fn head_and_tail(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.into();
+    }
+    let half = max / 2;
+    let mut head = half.min(text.len());
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = text.len().saturating_sub(half);
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    // Prefer whole lines at the cut when one is near.
+    if let Some(cut) = text[..head].rfind('\n') {
+        head = cut + 1;
+    }
+    if let Some(cut) = text[tail..].find('\n') {
+        tail += cut + 1;
+    }
+    let tail = tail.min(text.len());
+    format!(
+        "{}[... {} bytes omitted; use --full for all of it ...]\n{}",
+        &text[..head],
+        tail - head,
+        &text[tail..]
+    )
+}
 
-/// Shared human envelope: at most eight rows, 2 KiB including the next step.
-/// Owners retain their complete data and human text for --json and --full.
-fn compact_text(command: &str, text: &str, read_only: bool) -> String {
+/// The generic fallback for an owner with no summary: small text is shown
+/// whole; larger text keeps its first rows and says how much was left out.
+fn fallback_text(command: &str, text: &str) -> String {
     let lines: Vec<_> = text
         .lines()
         .filter(|line| !line.trim().is_empty())
         .collect();
-    let next = ["next: ", "keep waiting: ", "more: "]
-        .into_iter()
-        .find_map(|prefix| {
-            lines.iter().rev().find_map(|line| {
-                line.trim()
-                    .strip_prefix(prefix)
-                    .filter(|next| next.len() <= 384)
-            })
-        });
-    let mut out = String::new();
-    let row_bytes = if text.len() <= 1536 { 1536 } else { 200 };
-    for line in lines.iter().take(6) {
-        if !line.trim().starts_with("next: ") {
-            out.push_str(&bounded_text(line, row_bytes));
-            out.push('\n');
+    if lines.is_empty() {
+        return format!("{command}: done\n");
+    }
+    if text.len() <= limits::FALLBACK_BYTES {
+        let mut whole = text.to_owned();
+        if !whole.ends_with('\n') {
+            whole.push('\n');
         }
+        return whole;
     }
-    if lines.len() > 6 || lines.iter().any(|line| line.len() > row_bytes) {
-        out.push_str(&format!(
-            "({} lines; use --full for all detail)\n",
-            lines.len()
-        ));
+    let mut out = String::new();
+    let mut clipped = 0;
+    for line in lines.iter().take(limits::FALLBACK_LINES) {
+        if line.len() > limits::FALLBACK_ROW_BYTES {
+            clipped += 1;
+        }
+        out.push_str(&bounded_text(line, limits::FALLBACK_ROW_BYTES));
+        out.push('\n');
     }
-    if out.is_empty() {
-        out.push_str(&format!("{command}: done\n"));
-    }
-    out.push_str("next: ");
-    if let Some(next) = next {
-        out.push_str(next);
-    } else {
-        out.push_str(&detail_command(command, read_only));
-    }
-    out.push('\n');
+    let shown = lines.len().min(limits::FALLBACK_LINES);
+    out.push_str(&format!(
+        "({} of {} lines shown, {clipped} clipped to {} bytes; {} lines omitted; use --full for all detail)\n",
+        shown,
+        lines.len(),
+        limits::FALLBACK_ROW_BYTES,
+        lines.len() - shown,
+    ));
     out
 }
-fn detail_command(command: &str, read_only: bool) -> String {
-    let model = crate::command_model();
-    let selected = command
-        .split_whitespace()
-        .try_fold(&model, |parent, name| parent.find_subcommand(name));
-    if read_only
-        && selected.is_some_and(|leaf| {
-            !leaf.is_subcommand_required_set()
-                && !leaf.get_arguments().any(|arg| arg.is_required_set())
-                && !leaf.get_groups().any(|group| group.is_required_set())
-        })
-    {
-        format!("provenant {command} --full")
-    } else {
-        format!(
-            "provenant help {}",
-            if command == "parse" { "--all" } else { command }
-        )
+fn compact_text(command: &str, text: &str, summary: Option<&Summary>) -> String {
+    let mut out = match summary.filter(|summary| !summary.lines.is_empty()) {
+        Some(summary) => {
+            let mut body = summary.lines.join("\n");
+            body.push('\n');
+            if summary.omitted > 0 {
+                body.push_str(&format!(
+                    "({} more not shown; use --full for all detail)\n",
+                    summary.omitted
+                ));
+            }
+            body
+        }
+        None => fallback_text(command, text),
+    };
+    if let Some(next) = summary.and_then(|summary| summary.next.as_deref()) {
+        out.push_str(&format!("next: {next}\n"));
     }
+    out
 }
 #[derive(Debug, Error)]
 pub enum RenderError {
@@ -113,6 +216,7 @@ pub fn exit_status(outcome: &Outcome) -> u8 {
         Outcome::Invalid => 2,
         Outcome::Error => 3,
         Outcome::Unavailable => 4,
+        Outcome::Pending => 5,
         Outcome::Timeout => 124,
         Outcome::Cancelled => 130,
     }
@@ -165,29 +269,30 @@ pub fn render<T: Serialize>(
         RenderMode::Json => serde_json::to_writer(&mut buffer, &result)
             .map_err(RenderError::Encode)
             .and_then(|()| buffer.write_all(b"\n").map_err(RenderError::Write)),
-        RenderMode::Human { text, .. } | RenderMode::Compact { text, .. } => {
-            let error_text = result.error.as_ref().map(|error| {
-                format!(
+        RenderMode::Human { .. } | RenderMode::Compact { .. } => {
+            let text = match &result.error {
+                Some(error) => format!(
                     "provenant: {}: {}\nnext: {}\n",
                     error.code,
                     error.message,
                     error.repair.as_deref().unwrap_or_default()
-                )
-            });
-            let text = error_text.as_deref().unwrap_or(text);
-            let compacted;
-            let text = if matches!(mode, RenderMode::Compact { .. }) {
-                let read_only = matches!(
-                    mode,
-                    RenderMode::Compact {
-                        read_only: true,
-                        ..
+                ),
+                None => match mode {
+                    RenderMode::Compact { text, summary, .. } => {
+                        compact_text(&result.command, text, summary)
                     }
-                );
-                compacted = compact_text(&result.command, text, read_only);
-                compacted.as_str()
-            } else {
-                text
+                    RenderMode::Human { text, summary, .. } => {
+                        let mut full = text.to_owned();
+                        if let Some(next) = summary.and_then(|summary| summary.next.as_deref()) {
+                            if !full.is_empty() && !full.ends_with('\n') {
+                                full.push('\n');
+                            }
+                            full.push_str(&format!("next: {next}\n"));
+                        }
+                        full
+                    }
+                    RenderMode::Json => String::new(),
+                },
             };
             buffer
                 .write_all(text.as_bytes())
@@ -328,20 +433,57 @@ pub fn terse(value: &serde_json::Value) -> String {
 mod tests {
     use super::*;
     #[test]
-    fn compact_run_preserves_the_wait_command_after_omitted_rows() {
-        let text = format!(
-            "{}keep waiting: provenant lanes --id 11111111 --wait 4m\nmore: provenant output 11111111\n",
-            "detail\n".repeat(100)
+    fn compact_uses_the_owner_summary_and_one_typed_next() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let text = "detail\n".repeat(500);
+        let summary = Summary::new(
+            "3 lanes: 1 failed, 2 running",
+            vec!["aaaa failed".into(), "bbbb running".into()],
+            Some("provenant output aaaa".into()),
         );
-        let compact = compact_text("run", &text, false);
-        assert!(
-            compact.ends_with("next: provenant lanes --id 11111111 --wait 4m\n"),
-            "{compact}"
+        let result = CommandResult::new("lanes", Outcome::Ok, ());
+        let mut bytes = Vec::new();
+        render(
+            &result,
+            RenderMode::Compact {
+                text: &text,
+                read_only: true,
+                summary: Some(&summary),
+            },
+            &mut bytes,
+        )?;
+        assert_eq!(
+            String::from_utf8(bytes)?,
+            "3 lanes: 1 failed, 2 running\naaaa failed\nbbbb running\nnext: provenant output aaaa\n"
         );
-        assert!(compact.len() <= 2048);
+        Ok(())
     }
     #[test]
-    fn compact_results_are_bounded_and_always_give_a_next_command()
+    fn summary_rows_past_the_limit_are_counted() -> Result<(), Box<dyn std::error::Error>> {
+        let rows = (0..limits::SUMMARY_ROWS + 5)
+            .map(|n| format!("row {n}"))
+            .collect();
+        let summary = Summary::new("head", rows, None);
+        assert_eq!(summary.omitted, 5);
+        let result = CommandResult::new("lanes", Outcome::Ok, ());
+        let mut bytes = Vec::new();
+        render(
+            &result,
+            RenderMode::Compact {
+                text: "",
+                read_only: true,
+                summary: Some(&summary),
+            },
+            &mut bytes,
+        )?;
+        let text = String::from_utf8(bytes)?;
+        assert!(text.contains("5 more not shown"), "{text}");
+        assert!(text.contains("--full"), "{text}");
+        assert!(!text.contains("next:"), "{text}");
+        Ok(())
+    }
+    #[test]
+    fn fallback_says_how_much_it_omitted_and_never_invents_a_next()
     -> Result<(), Box<dyn std::error::Error>> {
         let text = (0..100)
             .map(|n| format!("row {n} {}\n", "界".repeat(1000)))
@@ -353,24 +495,55 @@ mod tests {
             RenderMode::Compact {
                 text: &text,
                 read_only: true,
+                summary: None,
             },
             &mut bytes,
         )?;
-        assert!(bytes.len() <= 2048, "{} bytes", bytes.len());
         let compact = String::from_utf8(bytes)?;
         assert!(compact.contains("row 0"));
         assert!(compact.contains("--full"));
-        assert!(compact.contains("next: provenant route list --full"));
+        assert!(compact.contains("of 100 lines"), "{compact}");
+        assert!(!compact.contains("next:"), "{compact}");
         let mut full = Vec::new();
         render(
             &result,
             RenderMode::Human {
                 text: &text,
                 read_only: true,
+                summary: None,
             },
             &mut full,
         )?;
         assert_eq!(full, text.as_bytes());
+        Ok(())
+    }
+    #[test]
+    fn head_and_tail_keeps_both_ends_and_names_the_omission() {
+        let text = format!("{}{}", "a".repeat(100), "z".repeat(100));
+        let bounded = head_and_tail(&text, 60);
+        assert!(bounded.starts_with("aaa"));
+        assert!(bounded.ends_with("zzz"));
+        assert!(bounded.contains("bytes omitted; use --full"), "{bounded}");
+        assert_eq!(head_and_tail("short", 60), "short");
+    }
+    #[test]
+    fn full_shows_the_owner_text_then_the_typed_next() -> Result<(), Box<dyn std::error::Error>> {
+        let summary = Summary::next_only(Some("provenant output aaaa".into()));
+        let result = CommandResult::new("lanes", Outcome::Ok, ());
+        let mut bytes = Vec::new();
+        render(
+            &result,
+            RenderMode::Human {
+                text: "body\n",
+                read_only: true,
+                summary: Some(&summary),
+            },
+            &mut bytes,
+        )?;
+        assert_eq!(
+            String::from_utf8(bytes)?,
+            "body\nnext: provenant output aaaa\n"
+        );
         Ok(())
     }
     #[test]
@@ -453,7 +626,8 @@ mod tests {
                 &result,
                 RenderMode::Human {
                     text: &text,
-                    read_only: true
+                    read_only: true,
+                    summary: None
                 },
                 &mut out
             )
@@ -466,7 +640,8 @@ mod tests {
                 &result,
                 RenderMode::Human {
                     text: &format!("{text}\n"),
-                    read_only: true
+                    read_only: true,
+                    summary: None
                 },
                 &mut out
             ),
@@ -484,6 +659,7 @@ mod tests {
             (Outcome::Invalid, 2),
             (Outcome::Error, 3),
             (Outcome::Unavailable, 4),
+            (Outcome::Pending, 5),
             (Outcome::Timeout, 124),
             (Outcome::Cancelled, 130),
         ] {
@@ -526,7 +702,8 @@ mod tests {
                 &result,
                 RenderMode::Human {
                     text: "lanes",
-                    read_only: true
+                    read_only: true,
+                    summary: None
                 },
                 &mut Broken
             )
@@ -541,7 +718,8 @@ mod tests {
                 &result,
                 RenderMode::Human {
                     text: "accepted",
-                    read_only: false
+                    read_only: false,
+                    summary: None
                 },
                 &mut Broken
             ),
@@ -605,6 +783,7 @@ pub fn render_or_publish<T: Serialize>(
                 RenderMode::Human { .. } | RenderMode::Compact { .. } => RenderMode::Human {
                     text: &human,
                     read_only: false,
+                    summary: None,
                 },
             };
             if matches!(fallback_mode, RenderMode::Json) {

@@ -12,19 +12,32 @@ lists every leaf, flag and bound. Paths are relative to `tools/front-door/`.
 
 ## Agent output
 
-Ordinary human results default to a summary of at most 2 KiB and a next
-command. Global `--full` restores complete human detail within the owner's
-page bounds. `--json` keeps the machine envelope and takes precedence over
-human presentation flags. Explicit help and protocol transports retain their
-complete output. Streaming commands keep their bounded state-change output.
+Ordinary human results default to a compact summary. The command's owner
+supplies it as typed data: a headline with counts by state, then action rows
+first (failed, review required, uncommitted, running) with IDs and states, at
+most 12 rows of 200 bytes, a count of rows held back, and one typed `next`
+command. `status`, `lanes`, `route list`, `quota show`, `pr status`,
+`accounts list` and `fabric graph status` do this. A command without an owner
+summary falls back to a generic truncator that shows text of up to 2 KiB whole
+and otherwise says how many lines it omitted. `next` is the only source of the
+next command: when a command has none, none is printed. Errors keep their
+repair command and are never compacted.
 
-`output` defaults to settlement and the final result paragraph. Explicit
-`--summary` also works with `--json` and peers. Changed-file evidence uses a
-local writer's recorded base and final head when readable; missing evidence,
-including peer diffs, is null. The summary retains at most eight paths, 96
-bytes each, and a 768-byte final paragraph. `--tail N` retains at most 500
-lines within `--max-bytes`, locally or over the existing peer paging protocol.
-Peer tail scans share a 30-second budget and reject changed artifact digests.
+Global `--full` means complete detail for the command and nothing else; it
+does not widen `status` to `--all`. `--json` keeps the machine envelope and
+takes precedence over human presentation flags. Explicit help and protocol
+transports retain their complete output. Streaming commands keep their
+bounded state-change output. Every bound lives in one module
+(`crates/cli/src/limits.rs`); help constraints and this page quote it.
+
+`output` shows the whole final result up to 12 KiB. Above that it keeps the
+head and tail and names the omitted bytes and `--full`. It adds a settlement
+line and the changed files from a local writer's recorded base and final head
+when readable (at most eight paths of 120 bytes); missing evidence, including
+peer diffs, is null. `--tail N` retains at most 500 lines within `--max-bytes`,
+locally or over the existing peer paging protocol. Peer tail scans share a
+30-second budget and reject changed artifact digests. The JSON envelope keeps
+`bytes`.
 
 The core verbs remain `run`, `status`, `land` and `quota`. `dispatch` is the
 advanced submission-only operation; `run` adds waiting and a result summary.
@@ -485,11 +498,26 @@ incomplete evidence.
 `land NUMBER` checks CI once; `--wait` waits up to one hour and
 `--wait=30m` selects a bounded limit up to four hours. Landing verifies
 required-check registration using check runs and legacy statuses addressed by
-the pinned commit SHA, checks the exact head around each sample and
-uses a matching-head merge guard. Progress is capped at eight stderr lines.
+the pinned commit SHA, reading every page, and checks the exact head around
+each sample. A required check matches by name and, when the ruleset or
+protection names an app, by that app too. A skipped required check is
+unavailable, not passing. When no check is required, landing needs every
+reported check run and status to be complete and passing and waits a 60-second
+settle interval after the newest registration with nothing new registering.
+Transient `gh` failures (5xx, rate limit, network) are retried with backoff
+until the wait deadline; other failures fail closed. Progress is capped at
+eight stderr lines.
+
+After any merge error or timeout, and after a failed post-merge read, landing
+re-reads the PR. If it is merged, the report is landed (with a `merge_note`),
+never `MERGE_FAILED`. A merge that is accepted but not yet effective (merge
+queue or auto-merge) is outcome `pending`, `result: pending` and exit code 5.
+A merge with cleanup pending exits 0 and says so in the compact output.
+
 `pr status` reads head and checks from one snapshot per PR; `--wait` blocks
-until that snapshot changes and exits 124 if unchanged at the limit. A failed
-lookup preserves other PR rows.
+until that snapshot changes and exits 124 if unchanged at the limit, returning
+the latest good snapshot. A transient error row is neither a change nor a
+replacement for a good row. A failed lookup preserves other PR rows.
 
 After the guarded merge, landing follows up locally: fetch the base, fast-forward the
 local base only in a checkout with no changes, delete declared build output

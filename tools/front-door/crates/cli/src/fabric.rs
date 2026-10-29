@@ -949,7 +949,7 @@ pub fn run(
     } else {
         String::new()
     };
-    let mode = globals.render_mode(&human, read_only);
+    let mode = globals.render_mode(&human, read_only, None);
     // Runtime pages/mutation receipts are bounded well below the ordinary cap.
     match crate::render_or_publish(
         &result,

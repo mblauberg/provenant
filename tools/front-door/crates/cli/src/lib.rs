@@ -18,6 +18,7 @@ pub use workflow::Workflow;
 mod grammar;
 pub mod inbox;
 pub mod install;
+pub mod limits;
 pub mod pr_body;
 pub mod provider_updates;
 mod render;
@@ -262,34 +263,7 @@ fn usage_suggestion(error: &clap::Error, argv: &[OsString]) -> Option<String> {
         return None;
     }
     let model = expanded_model();
-    let mut selected = &model;
-    let mut path = String::from("provenant");
-    let mut words = argv.iter().skip(1);
-    while let Some(word) = words.next() {
-        let word = word.to_str()?;
-        if word == rejected || word == "--" {
-            break;
-        }
-        if let Some(option) = word.strip_prefix("--") {
-            let (name, joined) = option
-                .split_once('=')
-                .map_or((option, false), |(name, _)| (name, true));
-            if !joined
-                && selected.get_arguments().any(|arg| {
-                    arg.get_long() == Some(name)
-                        && arg
-                            .get_num_args()
-                            .is_some_and(|range| range.min_values() > 0)
-                })
-            {
-                words.next();
-            }
-        } else if let Some(child) = selected.find_subcommand(word) {
-            selected = child;
-            path.push(' ');
-            path.push_str(child.get_name());
-        }
-    }
+    let (selected, path) = walk_subcommands(&model, argv, Some(&rejected))?;
     let candidates: Vec<_> = if flag.is_some() {
         selected
             .get_arguments()
@@ -313,6 +287,44 @@ fn usage_suggestion(error: &clap::Error, argv: &[OsString]) -> Option<String> {
         format!("{path} {}", candidate.1)
     })
 }
+/// Follow the subcommand words in `argv` (skipping option values) down the
+/// command model, stopping at `stop` when given. Returns the deepest command
+/// reached and its spelled path, such as `provenant pr land`.
+fn walk_subcommands<'a>(
+    model: &'a clap::Command,
+    argv: &[OsString],
+    stop: Option<&str>,
+) -> Option<(&'a clap::Command, String)> {
+    let mut selected = model;
+    let mut path = String::from("provenant");
+    let mut words = argv.iter().skip(1);
+    while let Some(word) = words.next() {
+        let word = word.to_str()?;
+        if stop == Some(word) || word == "--" {
+            break;
+        }
+        if let Some(option) = word.strip_prefix("--") {
+            let (name, joined) = option
+                .split_once('=')
+                .map_or((option, false), |(name, _)| (name, true));
+            if !joined
+                && selected.get_arguments().any(|arg| {
+                    arg.get_long() == Some(name)
+                        && arg
+                            .get_num_args()
+                            .is_some_and(|range| range.min_values() > 0)
+                })
+            {
+                words.next();
+            }
+        } else if let Some(child) = selected.find_subcommand(word) {
+            selected = child;
+            path.push(' ');
+            path.push_str(child.get_name());
+        }
+    }
+    Some((selected, path))
+}
 fn edit_distance(left: &str, right: &str) -> usize {
     let mut row: Vec<_> = (0..=right.len()).collect();
     for (i, a) in left.bytes().enumerate() {
@@ -328,18 +340,51 @@ fn edit_distance(left: &str, right: &str) -> usize {
     }
     row[right.len()]
 }
-fn usage_example(argv: &[OsString]) -> Option<&'static str> {
-    let has = |word: &str| argv.iter().any(|arg| arg == word);
-    if has("pr") && has("land") {
-        Some("provenant land 2199 --wait")
-    } else if has("route") && has("resolve") {
-        Some("provenant route resolve --model ADAPTER/ID (or provenant route resolve senior)")
-    } else if has("output") {
-        Some("provenant output ATTEMPT --host HOST --summary")
-    } else if (has("dispatch") || has("run")) && has("--account") {
-        Some("provenant run --prompt-file brief.md --route senior --account ACCOUNT")
-    } else {
-        None
+/// An example for the command the caller was invoking, chosen by the parsed
+/// subcommand path rather than by words anywhere in argv.
+fn usage_example(argv: &[OsString]) -> Option<String> {
+    let model = expanded_model();
+    let (_, mut path) = walk_subcommands(&model, argv, None)?;
+    // `pr land` is retired; the walk stops at `pr`, so look at the word after it.
+    let retired_pr_land = path == "provenant pr"
+        && argv
+            .iter()
+            .skip_while(|arg| *arg != "pr")
+            .nth(1)
+            .is_some_and(|arg| arg == "land");
+    if retired_pr_land {
+        path = "provenant land".into();
+    }
+    let lands = matches!(path.as_str(), "provenant land" | "provenant pr land");
+    if lands || path == "provenant pr status" {
+        // `--wait` takes its duration only as `--wait=5m`; a spaced one is
+        // read as a positional, so name the joined spelling.
+        let spaced = argv
+            .windows(2)
+            .filter(|pair| pair[0] == "--wait")
+            .filter_map(|pair| pair[1].to_str())
+            .find(|value| {
+                !value.starts_with('-')
+                    && value.len() <= 8
+                    && value.bytes().all(|b| b.is_ascii_alphanumeric())
+                    && value.bytes().next().is_some_and(|b| b.is_ascii_digit())
+            });
+        if let Some(value) = spaced {
+            let target = if lands { "land 2199" } else { "pr status 2199" };
+            return Some(format!("provenant {target} --wait={value}"));
+        }
+    }
+    let has_account = argv.iter().any(|arg| arg == "--account");
+    match path.as_str() {
+        "provenant land" | "provenant pr land" => Some("provenant land 2199 --wait".into()),
+        "provenant route resolve" => Some(
+            "provenant route resolve --model ADAPTER/ID (or provenant route resolve senior)".into(),
+        ),
+        "provenant output" => Some("provenant output ATTEMPT --host HOST".into()),
+        "provenant dispatch" | "provenant run" if has_account => {
+            Some("provenant run --prompt-file brief.md --route senior --account ACCOUNT".into())
+        }
+        _ => None,
     }
 }
 fn parsed_globals(matches: &clap::ArgMatches, json: bool) -> (Globals, Option<CliError>) {
@@ -830,6 +875,19 @@ pub fn usage_verbs() -> Vec<String> {
     verbs
 }
 fn constraints(path: &str) -> Vec<String> {
+    if path == "provenant output" {
+        return vec![
+            "target is an ATTEMPT ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT".into(),
+            format!("tail above {0} lines is clamped to {0}", limits::TAIL_LINES),
+            format!(
+                "a result shows whole up to {} KiB, then its head and tail; at most {} changed paths of {} bytes are named; missing evidence is null",
+                limits::OUTPUT_BYTES / 1024,
+                limits::OUTPUT_PATHS,
+                limits::PATH_BYTES
+            ),
+            "peer tail scans share a 30-second deadline and reject changing artifacts".into(),
+        ];
+    }
     let values: &[&str] = match path {
         "provenant dispatch" | "provenant run" => &[
             "single prompt requires exactly one of model or route",
@@ -855,12 +913,6 @@ fn constraints(path: &str) -> Vec<String> {
         ],
         "provenant chair log append" => &[
             "operation-id and issued-at are generated when omitted; supply both for planned retries",
-        ],
-        "provenant output" => &[
-            "target is an ATTEMPT ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT",
-            "tail above 500 lines is clamped to 500",
-            "summary retains eight changed paths and a 768-byte final paragraph; missing evidence is null",
-            "peer tail scans share a 30-second deadline and reject changing artifacts",
         ],
         "provenant land" => &[
             "checks once by default; wait without a value means one hour; use --wait=30m for a duration",
@@ -1078,15 +1130,8 @@ mod tests {
         invalid(&["land", "2199", "--wait=0"]);
         invalid(&["land", "2199", "--wait=5h"]);
         let attempt = "11".repeat(16);
-        valid(&[
-            "output",
-            "--host",
-            "workshop",
-            &attempt,
-            "--summary",
-            "--json",
-        ]);
-        invalid(&["output", &attempt, "--summary", "--tail", "10"]);
+        valid(&["output", "--host", "workshop", &attempt, "--json"]);
+        invalid(&["output", &attempt, "--summary"]);
     }
     #[test]
     fn common_usage_errors_name_the_correct_invocation() {
@@ -1098,6 +1143,10 @@ mod tests {
             (
                 vec!["output", "--host"],
                 "provenant output ATTEMPT --host HOST",
+            ),
+            (
+                vec!["land", "2199", "--wait", "5m"],
+                "provenant land 2199 --wait=5m",
             ),
             (
                 vec!["dispatch", "--account"],

@@ -1486,8 +1486,10 @@ pub fn landing(
         })();
     match result {
         Ok(data) => {
-            let human = provenant_cli::terse(&serde_json::to_value(&data).unwrap_or_default());
-            crate::emit(
+            let value = serde_json::to_value(&data).unwrap_or_default();
+            let human = provenant_cli::terse(&value);
+            let summary = graph_summary(&value);
+            crate::emit_summarised(
                 &provenant_records::CommandResult::new(
                     command,
                     provenant_records::Outcome::Ok,
@@ -1495,7 +1497,8 @@ pub fn landing(
                 ),
                 globals,
                 &human,
-                false,
+                matches!(command, "fabric graph status"),
+                Some(&summary),
             )
         }
         Err(error)
@@ -4627,6 +4630,82 @@ pub(crate) fn publish_preset_graph(
     Ok(scratch.join("graphs").join(filename))
 }
 
+/// Counts of nodes by state, then the nodes that need attention (failed,
+/// paused, running), then the command that shows the rest.
+fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
+    let text = |value: &serde_json::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let checkpoint = run.get("checkpoint").unwrap_or(&serde_json::Value::Null);
+    let id = text(checkpoint, "graph_id").unwrap_or_else(|| "unknown".into());
+    let nodes: Vec<(String, String, Option<String>)> = checkpoint
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .map(|nodes| {
+            nodes
+                .iter()
+                .map(|node| {
+                    (
+                        text(node, "id").unwrap_or_default(),
+                        text(node, "state").unwrap_or_else(|| "unknown".into()),
+                        text(node, "advance_error"),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let rank = |state: &str| match state {
+        "failed" | "refused" | "cancelled" => 0,
+        "paused" | "blocked" | "input_required" => 1,
+        "running" | "launched" | "pending" => 2,
+        _ => 3,
+    };
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for (_, state, _) in &nodes {
+        match counts.iter_mut().find(|(name, _)| name == state) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((state.clone(), 1)),
+        }
+    }
+    counts.sort_by_key(|(state, _)| rank(state));
+    let tally = provenant_cli::Summary::tally(
+        &counts
+            .iter()
+            .map(|(state, n)| (state.as_str(), *n))
+            .collect::<Vec<_>>(),
+    );
+    let status = text(run, "status").unwrap_or_else(|| "unknown".into());
+    let mut action: Vec<&(String, String, Option<String>)> = nodes
+        .iter()
+        .filter(|(_, state, _)| rank(state) < 3)
+        .collect();
+    action.sort_by_key(|(_, state, _)| rank(state));
+    let mut rows: Vec<String> = Vec::new();
+    if let Some(reason) = text(checkpoint, "pause_reason") {
+        rows.push(format!("paused: {reason}"));
+    }
+    if let Some(error) = text(run, "advance_error") {
+        rows.push(format!("advance error: {error}"));
+    }
+    rows.extend(action.iter().map(|(node, state, error)| match error {
+        Some(error) => format!("{node} {state}: {error}"),
+        None => format!("{node} {state}"),
+    }));
+    let next = match status.as_str() {
+        "complete" | "cancelled" => None,
+        "paused" => Some("provenant fabric graph resume --document DOCUMENT".to_owned()),
+        _ => Some(format!("provenant fabric graph status {id}")),
+    };
+    provenant_cli::Summary::new(
+        format!("graph {id} {status}: {} nodes ({tally})", nodes.len()),
+        rows,
+        next,
+    )
+}
+
 pub fn graph(
     input: provenant_cli::fabric::Graph,
     globals: &provenant_cli::Globals,
@@ -6888,6 +6967,8 @@ mod peer_tests {
                 serde_json::json!({"attempt_id":"unused", "deliver":"none"}),
             ),
             human: "delivery disabled\n".into(),
+            summary: None,
+            read_only: false,
         };
         super::settle_delivered_attempt(&edge, &mut reply, &NoWorkers)?;
         assert_eq!(reply.human, "delivery disabled\n");
