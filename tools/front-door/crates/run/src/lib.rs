@@ -66,6 +66,7 @@ pub use writer::{
 
 pub use db::{ExecutionContext, Request, RunStore};
 pub use provenant_records::run::*;
+pub use provenant_supervisor::custody::AdmissionError;
 pub use reader::{
     ArtifactPart, AttemptFilter, AttemptReader, Attempts, ByteRange, LanePage, LaneQuery,
     LaneTarget, OutputChunk, fact,
@@ -274,27 +275,8 @@ pub enum RunError {
     ArtifactMismatch,
     #[error("terminal publication is already sealed; recover its original facts and result")]
     TerminalRecoveryRequired,
-    #[error(
-        "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes; run `provenant gc --apply`"
-    )]
-    DiskFloor { free: u64, floor: u64 },
-    #[error("memory pressure is {level}; wait for host memory pressure to fall")]
-    MemoryPressure { level: String },
-    #[error(
-        "writer lane cap reached: {active} of {limit} {scope} writer lanes are active; wait for a writer to finish or raise domains.fabric.lanes.{key}",
-        key = if *scope == "project" { "max_project_writer_lanes" } else { "max_writer_lanes" }
-    )]
-    LaneCap {
-        active: u64,
-        limit: u64,
-        scope: &'static str,
-    },
-    #[error(
-        "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds, cargo_build_jobs and cargo_debug"
-    )]
-    BuildSettings,
-    #[error("guardian process identity unavailable; retry when process observation is available")]
-    GuardianIdentityUnavailable,
+    #[error(transparent)]
+    Admission(#[from] AdmissionError),
     #[error("operation refused by the execution context")]
     Refused,
     #[error("nested lane depth {depth} exceeds configured maximum {max_depth}")]
@@ -303,10 +285,6 @@ pub enum RunError {
     DepthOverflow,
     #[error("host queue is full")]
     Capacity,
-    #[error(
-        "startup spacing cannot be judged: the host monotonic clock or boot identity cannot be read"
-    )]
-    HostClock,
     #[error("run store stayed contended past its busy timeout")]
     Contention,
     #[error("run-store call was cancelled")]

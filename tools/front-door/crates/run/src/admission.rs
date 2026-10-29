@@ -509,7 +509,7 @@ impl RunStore {
                 .as_ref()
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::InvalidInput)
             {
-                return Err(RunError::BuildSettings);
+                return Err(RunError::Admission(AdmissionError::BuildSettings));
             }
             let fits = match (
                 resources.memory(),
@@ -531,10 +531,15 @@ impl RunStore {
                         below_floor = below_floor.saturating_add(1);
                     }
                     refusal = if disk < floor {
-                        Some(RunError::DiskFloor { free: disk, floor })
+                        Some(RunError::Admission(AdmissionError::Disk {
+                            free: disk,
+                            floor,
+                        }))
                     } else {
-                        pressure.map(|level| RunError::MemoryPressure {
-                            level: format!("{level:?}"),
+                        pressure.map(|level| {
+                            RunError::Admission(AdmissionError::MemoryPressure {
+                                level: format!("{level:?}"),
+                            })
                         })
                     };
                     pressure.is_none()
@@ -558,15 +563,15 @@ impl RunStore {
                         if ticket.lane_class == LaneClass::Writer
                             && let Some(hit) = self.writer_cap_hit(&ticket, &call)
                         {
-                            refusal = Some(RunError::LaneCap {
+                            refusal = Some(RunError::Admission(AdmissionError::LaneCap {
                                 active: hit.active,
                                 limit: hit.limit,
                                 scope: hit.scope,
-                            });
+                            }));
                         }
                     }
-                    Err(RunError::GuardianIdentityUnavailable) => {
-                        refusal = Some(RunError::GuardianIdentityUnavailable);
+                    Err(RunError::Admission(AdmissionError::GuardianIdentity)) => {
+                        refusal = Some(RunError::Admission(AdmissionError::GuardianIdentity));
                     }
                     Err(RunError::Contention) => {}
                     Err(error) => return Err(error),

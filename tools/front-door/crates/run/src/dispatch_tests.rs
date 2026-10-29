@@ -2475,7 +2475,7 @@ fn memory_pressure_threshold_controls_admission_and_waits() -> TestResult {
             );
         } else {
             assert!(
-                matches!(result, Err(RunError::MemoryPressure { level: actual }) if actual == format!("{level:?}"))
+                matches!(result, Err(RunError::Admission(AdmissionError::MemoryPressure { level: actual })) if actual == format!("{level:?}"))
             );
         }
     }
@@ -2627,7 +2627,10 @@ fn guardian_identity_unknown_retries_and_names_expiry() -> TestResult {
                 }
             );
         } else {
-            assert!(matches!(result, Err(RunError::GuardianIdentityUnavailable)));
+            assert!(matches!(
+                result,
+                Err(RunError::Admission(AdmissionError::GuardianIdentity))
+            ));
         }
     }
     Ok(())
@@ -2742,11 +2745,11 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
         }
         match last.ok_or("a fourth writer")? {
             Err(
-                error @ RunError::LaneCap {
+                error @ RunError::Admission(AdmissionError::LaneCap {
                     limit: 3,
                     scope: refused,
                     ..
-                },
+                }),
             ) => {
                 assert_eq!(error.code(), "LANE_CAP");
                 assert_eq!(refused, scope);
@@ -3839,7 +3842,10 @@ fn an_unreadable_host_clock_or_boot_identity_refuses_the_claim() -> TestResult {
     ] {
         readable.set(false);
         assert!(
-            matches!(store.claim(lane_id, &host, &call), Err(RunError::HostClock)),
+            matches!(
+                store.claim(lane_id, &host, &call),
+                Err(RunError::Admission(AdmissionError::Clock))
+            ),
             "an unreadable {name} refuses, with no wall-clock fallback"
         );
         let admitted = store.admit(lane_id, &attempt, &Host { available: 100 }, &host, &cancel);
@@ -4102,7 +4108,7 @@ fn a_version_1_upgrade_refuses_when_the_host_clock_cannot_be_read() -> TestResul
     host.boot_readable.set(false);
     assert!(matches!(
         store.claim(writer, &host, &call),
-        Err(RunError::HostClock)
+        Err(RunError::Admission(AdmissionError::Clock))
     ));
     let raw = rusqlite::Connection::open(store.writer_registry.join("admission.sqlite3"))?;
     let version: i64 = raw.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -7745,10 +7751,10 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
             let error = result.err().ok_or("admitted below floor")?;
             assert!(matches!(
                 error,
-                RunError::DiskFloor {
+                RunError::Admission(AdmissionError::Disk {
                     free: 99,
                     floor: 100
-                }
+                })
             ));
             assert_eq!(error.code(), "DISK_FLOOR");
             // The message names the floor's key and the repair command.
@@ -7821,10 +7827,10 @@ fn admission_below_the_floor_reclaims_build_output_and_then_admits() -> TestResu
         } else {
             assert!(matches!(
                 result,
-                Err(RunError::DiskFloor {
+                Err(RunError::Admission(AdmissionError::Disk {
                     free: 40,
                     floor: 100
-                })
+                }))
             ));
         }
     }
@@ -7867,7 +7873,7 @@ fn admission_missing_configuration_uses_the_default_host_floor() -> TestResult {
         let result = store.admit(id, &attempt, &Disk(free), &clock, &cancel);
         if below {
             assert!(
-                matches!(result, Err(RunError::DiskFloor { free: f, floor: p }) if f == free && p == floor)
+                matches!(result, Err(RunError::Admission(AdmissionError::Disk { free: f, floor: p })) if f == free && p == floor)
             );
         } else {
             assert_eq!(

@@ -1,5 +1,5 @@
 //! Import lane objects through Git's quarantined receive path.
-use crate::{Result, RunError};
+use crate::{AdmissionError, Result, RunError};
 use provenant_confinement::repo::VerifiedRepo;
 use provenant_core::{CancelToken, Clock, GitOid};
 use provenant_os::{
@@ -539,7 +539,7 @@ fn stale_tree(directory: &Directory, cutoff: i128, depth: usize) -> Result<bool>
 fn sweep_stale(repo: &VerifiedRepo) -> Result<()> {
     let now = provenant_os::clock::SystemClock::new()
         .wall_now()
-        .map_err(|_| RunError::HostClock)?
+        .map_err(|_| RunError::Admission(AdmissionError::Clock))?
         .as_micros();
     let cutoff = i128::from(now) * 1000
         - i128::try_from(STALE_IMPORT_AGE.as_nanos()).map_err(|_| invalid())?;

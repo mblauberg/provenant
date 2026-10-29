@@ -1198,7 +1198,7 @@ impl provenant_supervisor::Holder for RefusingHolder {
         _attempt: &Directory,
     ) -> std::result::Result<(), CustodyError> {
         Err(if self.clock {
-            CustodyError::AdmissionClock
+            CustodyError::Admission(AdmissionError::Clock)
         } else {
             CustodyError::Io(io::Error::other("/private/state/admission.sqlite3"))
         })

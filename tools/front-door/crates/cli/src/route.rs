@@ -1432,19 +1432,15 @@ fn set_pacing(roots: &Roots, request: &RoutePacing) -> Result<String, EdgeError>
     Ok(format!("provider {} pacing {policy}", request.provider))
 }
 
-/// An RFC 3339 timestamp, or a positive duration (s, m, h or d) from `now`.
+/// An RFC 3339 timestamp, or a positive duration (s, m, h, d or w) from `now`.
 fn instant(value: &str, now: i64) -> Option<i64> {
     if let Ok(timestamp) = value.parse::<jiff::Timestamp>() {
         return Some(timestamp.as_second());
     }
-    let (digits, multiplier) = match value.as_bytes().last()? {
-        b's' => (&value[..value.len() - 1], 1),
-        b'm' => (&value[..value.len() - 1], 60),
-        b'h' => (&value[..value.len() - 1], 3600),
-        b'd' => (&value[..value.len() - 1], 86_400),
-        _ => return None,
-    };
-    let seconds = digits.parse::<i64>().ok()?.checked_mul(multiplier)?;
+    let seconds = i64::try_from(provenant_providers::duration::suffix_seconds(
+        value.strip_prefix('+').unwrap_or(value),
+    )?)
+    .ok()?;
     (seconds > 0).then(|| now.checked_add(seconds)).flatten()
 }
 
@@ -2126,7 +2122,12 @@ mod route_tests {
         use super::{instant, parse_window};
 
         assert_eq!(instant("1s", 99), Some(100));
+        assert_eq!(instant("+5m", 99), Some(399));
+        assert_eq!(instant("+0m", 99), None);
+        assert_eq!(instant("++5m", 99), None);
         assert_eq!(instant("2h", 0), Some(7200));
+        assert_eq!(instant("1w", 0), Some(604_800));
+        assert_eq!(instant("1h30m", 0), Some(5_400));
         assert_eq!(instant("0h", 0), None);
         assert_eq!(instant("1970-01-01T00:01:00Z", 0), Some(60)); // timebomb: allow parse-only fixture with an injected instant
         let weekdays = parse_window("mon-wed,fri,6@23-2").expect("window");
