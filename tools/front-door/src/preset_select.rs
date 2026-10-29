@@ -153,6 +153,7 @@ fn merge(rules: &mut Select<PresetChoice>, overrides: RuleOverrides) {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)] // The worktree driver includes this module without libtest.
     use super::{PresetSelectionSource, SelectionContext, select};
 
     #[test]

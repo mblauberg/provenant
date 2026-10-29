@@ -2447,24 +2447,6 @@ fn prompt_ready(prompt: &str) -> bool {
             .any(|marker| lower.contains(marker))
 }
 
-#[cfg(test)]
-mod readiness_tests {
-    use super::prompt_ready;
-
-    #[test]
-    fn readiness_requires_acceptance_risk_verification_and_design_markers() {
-        let ready = "Acceptance criteria are explicit. Surface: the run command. Risk tier: low. Verification uses cargo test. Design decision is settled.";
-        assert!(prompt_ready(ready));
-        assert!(!prompt_ready("Improve the run command when possible."));
-        assert!(!prompt_ready(
-            "Acceptance criteria and tests are present in src/run.rs. Risk tier: low. Verification uses cargo test, but the design remains open."
-        ));
-        assert!(!prompt_ready(
-            "Acceptance criteria in src/run.rs. Risk tier: TBD. Verification uses cargo test. Design decision is settled."
-        ));
-    }
-}
-
 pub fn run(
     request: provenant_cli::Dispatch,
     globals: &provenant_cli::Globals,
@@ -2626,5 +2608,24 @@ pub fn run(
                 ),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    #[allow(unused_imports)] // The worktree driver includes this module without libtest.
+    use super::prompt_ready;
+
+    #[test]
+    fn readiness_requires_acceptance_risk_verification_and_design_markers() {
+        let ready = "Acceptance criteria are explicit. Surface: the run command. Risk tier: low. Verification uses cargo test. Design decision is settled.";
+        assert!(prompt_ready(ready));
+        assert!(!prompt_ready("Improve the run command when possible."));
+        assert!(!prompt_ready(
+            "Acceptance criteria and tests are present in src/run.rs. Risk tier: low. Verification uses cargo test, but the design remains open."
+        ));
+        assert!(!prompt_ready(
+            "Acceptance criteria in src/run.rs. Risk tier: TBD. Verification uses cargo test. Design decision is settled."
+        ));
     }
 }
