@@ -157,8 +157,12 @@ other failed attempts. Interruption can leave a partially replaced installation;
 the next attempt uses the same native updater to repair it. Update failures
 are recorded once per interval, with updater output discarded. An independent
 attempt record preserves backoff if publishing the result record fails.
-Worker failures surface through the activity note and update records only;
-the quota tick does not report them. Activity records the old and new versions.
+The worker starts in the quota event's working directory, which need not be a
+Git checkout, and quota events launch it at most once every 15 minutes whatever
+its outcome. `<state>/provider-updates/worker.json` holds the last launch time
+and, if that run failed, its one cause. Worker failures surface through the
+activity note, that record and the update records only; the quota tick does not
+report them. Activity records the old and new versions.
 Each lane's `availability.json`
 also includes its observed version and the latest update result.
 
