@@ -191,23 +191,6 @@ fn parse_end(bytes: &[u8]) -> Result<(String, Option<WallTime>)> {
     Ok((view.state, ended_at))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parse_end;
-    #[test]
-    fn end_time_prefers_merge_and_tolerates_nulls() {
-        let (state, at) = parse_end(br#"{"state":"MERGED","mergedAt":"2026-01-02T03:04:05Z","closedAt":"2026-01-02T03:04:06Z"}"#).unwrap();
-        assert_eq!(state, "MERGED");
-        assert_eq!(at.unwrap().as_micros(), 1_767_323_045_000_000);
-        let (_, at) =
-            parse_end(br#"{"state":"CLOSED","mergedAt":null,"closedAt":"2026-01-02T03:04:06Z"}"#)
-                .unwrap();
-        assert_eq!(at.unwrap().as_micros(), 1_767_323_046_000_000);
-        let (_, at) = parse_end(br#"{"state":"CLOSED","mergedAt":null,"closedAt":null}"#).unwrap();
-        assert!(at.is_none());
-    }
-}
-
 /// Workflow success must not depend on optional attribution storage.
 pub(super) fn warn(number: Option<u64>, error: &dyn std::fmt::Display) {
     use std::io::Write;
@@ -381,5 +364,23 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
             &error.to_string(),
             globals,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn end_time_prefers_merge_and_tolerates_nulls() {
+        let (state, at) = super::parse_end(br#"{"state":"MERGED","mergedAt":"2026-01-02T03:04:05Z","closedAt":"2026-01-02T03:04:06Z"}"#).unwrap();
+        assert_eq!(state, "MERGED");
+        assert_eq!(at.unwrap().as_micros(), 1_767_323_045_000_000);
+        let (_, at) = super::parse_end(
+            br#"{"state":"CLOSED","mergedAt":null,"closedAt":"2026-01-02T03:04:06Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(at.unwrap().as_micros(), 1_767_323_046_000_000);
+        let (_, at) =
+            super::parse_end(br#"{"state":"CLOSED","mergedAt":null,"closedAt":null}"#).unwrap();
+        assert!(at.is_none());
     }
 }
