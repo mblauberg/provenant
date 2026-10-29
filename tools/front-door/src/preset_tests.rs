@@ -202,6 +202,7 @@ fn bundled_role_presets_have_bounded_nested_graphs() {
         "review-council",
         "big-batch",
         "scope-then-run",
+        "deliver",
     ] {
         let document = bundled_fixture(name);
         let config = provenant_fabric_runtime::config::GraphConfig::default();
@@ -221,7 +222,7 @@ fn bundled_role_presets_have_bounded_nested_graphs() {
 fn bundled_fixture(name: &str) -> provenant_fabric_runtime::graph::GraphDocument {
     let overrides = match name {
         "generator-evaluator" | "review-council" => vec!["parameters.worktree='/repo/lane'".into()],
-        "scope-then-run" => vec!["parameters.worktree='/repo/lane'".into()],
+        "scope-then-run" | "deliver" => vec!["parameters.worktree='/repo/lane'".into()],
         "big-batch" => vec![
             "parameters.lanes=[{name='one',worktree='/repo/one',scope=['.'],spec=''},{name='two',worktree='/repo/two',scope=['.'],spec=''}]".into(),
             "parameters.batch_worktree='/repo/batch'".into(),
@@ -262,6 +263,7 @@ struct PresetOwner {
     launched: Vec<String>,
     /// The brief each launched node received, inputs included.
     prompts: Vec<(String, String)>,
+    contexts: Vec<provenant_records::run::WorkContext>,
     integration_pins: usize,
 }
 
@@ -290,13 +292,17 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
         self.launched.push(key.node_id.clone());
         self.prompts
             .push((key.node_id.clone(), node.prompt.to_owned()));
+        self.contexts.push(node.context.clone());
         let mut result =
             provenant_records::result_capture::ResultCapture::new(node.required_verdict);
         result.push(if self.failing.contains(&key.node_id) {
             b"Blocked on the user.\nVERDICT: FAIL\n".as_slice()
         } else {
-            format!("Evidence checked for {}.\nVERDICT: PASS\n", key.node_id)
-                .leak()
+            format!(
+                "Evidence checked for {}.\n```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\nVERDICT: PASS\n",
+                key.node_id
+            )
+            .leak()
                 .as_bytes()
         });
         Ok(AttemptObservation::Terminal {
@@ -314,6 +320,36 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
             },
         })
     }
+}
+
+#[test]
+fn graph_attempt_input_carries_preset_selection_context() {
+    use provenant_fabric_runtime::graph::advance_with_budget;
+    let mut document = bundled_fixture("single");
+    document.context = Some(provenant_records::run::WorkContext {
+        preset: Some("single".into()),
+        selection_source: Some("readiness".into()),
+        ..Default::default()
+    });
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner::default();
+    let mut journal = PresetJournal::default();
+    advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &config.limits,
+        &config.budget,
+    )
+    .unwrap();
+    let context = &owner.contexts[0];
+    assert_eq!(context.preset.as_deref(), Some("single"));
+    assert_eq!(context.selection_source.as_deref(), Some("readiness"));
+    assert_eq!(
+        context.graph_id.as_deref(),
+        Some(document.graph_id.as_str())
+    );
+    assert_eq!(context.node_id.as_deref(), Some(owner.launched[0].as_str()));
 }
 
 #[test]
@@ -1303,7 +1339,7 @@ fn review_council_verifies_between_the_lenses_and_the_synthesis() {
         .collect();
     assert_eq!(ids, ["subject", "lenses", "verify", "synthesis"]);
     let verify = node(&expanded.document, "verify");
-    assert_eq!(verify["family"], "cross_preferred");
+    assert_eq!(verify["distinct_from"], "dependencies");
     assert_eq!(verify["source"], json!({"type": "node", "node": "subject"}));
     assert_eq!(verify["route"]["alias"], "verifier");
     assert_eq!(verify["depends_on"], json!(["lenses", "subject"]));
@@ -1793,7 +1829,7 @@ fn bundled_presets_fit_the_default_host_depth_limit() {
 }
 
 #[test]
-fn cross_family_is_recorded_as_a_preference_not_an_enforced_constraint() {
+fn cross_family_prefers_by_default_and_a_project_may_require_it() {
     let expanded = expand(
         &Layers::empty(),
         "review-council",
@@ -1802,8 +1838,23 @@ fn cross_family_is_recorded_as_a_preference_not_an_enforced_constraint() {
     )
     .unwrap();
     let verify = node(&expanded.document, "verify");
-    assert_eq!(verify["family"], "cross_preferred");
-    assert!(verify.get("distinct_from").is_none());
+    assert_eq!(verify["distinct_from"], "dependencies");
+    assert!(verify.get("distinct_strength").is_none());
+    assert!(verify.get("family").is_none());
+    let required =
+        council_with_roles("[roles.\"review.verify\"]\nfamily = 'cross_required'\n").unwrap();
+    let verify = node(&required.document, "verify");
+    assert_eq!(verify["distinct_from"], "dependencies");
+    assert_eq!(verify["distinct_strength"], "require");
+    let strict =
+        council_with_roles("[roles.\"review.verify\"]\nfamily_strength = 'require'\n").unwrap();
+    assert_eq!(
+        node(&strict.document, "verify")["distinct_strength"],
+        "require"
+    );
+    let error =
+        council_with_roles("[roles.\"review.verify\"]\nfamily_strength = 'maybe'\n").unwrap_err();
+    assert!(error.contains("family_strength"), "{error}");
 }
 
 #[test]

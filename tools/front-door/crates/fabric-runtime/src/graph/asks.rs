@@ -23,6 +23,7 @@ pub enum AskKind {
     Loop,
     Decide,
     Pause,
+    Land,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,7 +126,7 @@ pub struct DecideSpec {
     pub session: Option<String>,
 }
 
-fn option(id: &str, label: &str, description: &str) -> AskOption {
+pub(super) fn option(id: &str, label: &str, description: &str) -> AskOption {
     AskOption {
         extra: Default::default(),
         id: id.into(),
@@ -134,7 +135,13 @@ fn option(id: &str, label: &str, description: &str) -> AskOption {
     }
 }
 
-fn ask(ask_id: String, kind: AskKind, session: &str, title: String, body: String) -> NodeAsk {
+pub(super) fn ask(
+    ask_id: String,
+    kind: AskKind,
+    session: &str,
+    title: String,
+    body: String,
+) -> NodeAsk {
     NodeAsk {
         extra: Default::default(),
         ask_id,
@@ -363,12 +370,26 @@ pub(super) fn identity<R: AttemptOwner, J: Error + 'static>(
 }
 
 pub(super) fn refresh_wake(checkpoint: &mut GraphCheckpoint) {
-    checkpoint.wake_at = checkpoint
+    checkpoint.wake_at = next_wake(checkpoint);
+}
+
+fn next_wake(checkpoint: &GraphCheckpoint) -> Option<WallTime> {
+    checkpoint
         .asks
         .iter()
         .filter(|ask| !ask.resolved)
         .filter_map(|ask| ask.wake_at)
-        .min();
+        .chain(
+            checkpoint
+                .nodes
+                .iter()
+                .filter(|node| node.state == NodeState::Running)
+                .filter_map(|node| {
+                    let ci = node.ci.as_ref().and_then(|ci| ci.wake_at);
+                    ci.or_else(|| node.land.as_ref().and_then(|land| land.wake_at))
+                }),
+        )
+        .min()
 }
 
 /// Read an answer. An inbox failure is kept on the ask and returned.
@@ -574,6 +595,7 @@ fn decision_outputs(ask_id: &str, option: &str, answer: &AskAnswer) -> NodeOutpu
         branch: None,
         commit: None,
         warnings: Vec::new(),
+        remaining: None,
     }
 }
 
@@ -752,7 +774,7 @@ pub fn close_resolved_asks<R: AttemptOwner, J: GraphJournal>(
                         || ask.rounds.unwrap_or(0)
                             < loop_rounds(checkpoint, ask.node.as_deref().unwrap_or_default())
                 }
-                AskKind::Decide => settled,
+                AskKind::Decide | AskKind::Land => settled,
                 AskKind::Pause => checkpoint.pause_reason.as_deref().is_none_or(loop_pause),
             };
         if gone {
@@ -813,13 +835,7 @@ pub fn close_resolved_asks<R: AttemptOwner, J: GraphJournal>(
 
 /// Checkpoint-level ask invariants. Node-level state is checked beside each kind.
 pub(super) fn validate(checkpoint: &GraphCheckpoint, plan: &PlannedGraph) -> Result<(), ()> {
-    let open_wake = checkpoint
-        .asks
-        .iter()
-        .filter(|ask| !ask.resolved)
-        .filter_map(|ask| ask.wake_at)
-        .min();
-    if checkpoint.wake_at != open_wake {
+    if checkpoint.wake_at != next_wake(checkpoint) {
         return Err(());
     }
     if checkpoint.asks.is_empty() {
@@ -858,6 +874,13 @@ pub(super) fn validate(checkpoint: &GraphCheckpoint, plan: &PlannedGraph) -> Res
                         })
                 }
                 (AskKind::Pause, None) => plan.decision_session.as_deref() == session,
+                (AskKind::Land, Some(node)) => {
+                    land::sequence(ask, &node.id).is_some()
+                        && node
+                            .land
+                            .as_ref()
+                            .is_some_and(|spec| land::session(spec, plan) == session)
+                }
                 _ => false,
             };
         if !valid {

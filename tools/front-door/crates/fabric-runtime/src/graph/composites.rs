@@ -19,6 +19,7 @@ pub(super) fn expand(
     expanded.nodes = children(
         &document.nodes,
         "",
+        &BTreeMap::new(),
         &[],
         &[],
         None,
@@ -68,6 +69,7 @@ fn reference(
 fn children(
     nodes: &[GraphNode],
     prefix: &str,
+    inherited_names: &BTreeMap<String, String>,
     incoming: &[String],
     inputs: &[GraphInput],
     source: Option<&SourceBinding>,
@@ -83,6 +85,12 @@ fn children(
     if locals.len() != nodes.len() {
         return Err("node id".into());
     }
+    let mut visible_names = inherited_names.clone();
+    visible_names.extend(
+        nodes
+            .iter()
+            .map(|node| (node.id.clone(), scoped(prefix, &node.id))),
+    );
     let composite_bound = depth > 0 || nodes.iter().any(|node| node.composite.is_some());
     let mut expanded = Vec::new();
     for original in nodes {
@@ -96,7 +104,15 @@ fn children(
         }
         for input in &mut node.inputs {
             if !input.node.starts_with("previous.") {
+                // A loop body may select an outer node's outputs in every
+                // round, which resolves through the enclosing scopes.
                 input.node = reference(prefix, &input.node, &locals, incoming)
+                    .or_else(|| {
+                        prefix
+                            .is_empty()
+                            .then(|| visible_names.get(&input.node).cloned())
+                            .flatten()
+                    })
                     .unwrap_or_else(|| scoped(prefix, &input.node));
             }
         }
@@ -108,6 +124,36 @@ fn children(
         {
             *source = reference(prefix, source, &locals, incoming)
                 .unwrap_or_else(|| scoped(prefix, source));
+        }
+        if let Some(SourceBinding::Head { node: writer }) = &mut node.source {
+            *writer = visible_names
+                .get(writer)
+                .cloned()
+                .unwrap_or_else(|| writer.clone());
+        }
+        if let Some(GateCondition::Ci {
+            target: CiTarget::Node { node: target, .. },
+            ..
+        }) = &mut node.condition
+            && !target.starts_with("previous.")
+        {
+            *target = visible_names
+                .get(target)
+                .cloned()
+                .unwrap_or_else(|| target.clone());
+        }
+        // A continued or landed writer may sit inside or outside the composite.
+        for writer in node
+            .continues
+            .iter_mut()
+            .chain(node.land.as_mut().map(|spec| &mut spec.node))
+        {
+            // Outer writers resolve through every enclosing scope, so a loop
+            // body or nested composite can continue or land a writer that is
+            // not one of its direct dependencies.
+            *writer = reference(prefix, writer, &locals, incoming)
+                .or_else(|| visible_names.get(writer.as_str()).cloned())
+                .unwrap_or_else(|| scoped(prefix, writer));
         }
         if original
             .depends_on
@@ -160,6 +206,7 @@ fn children(
             spec.body = children(
                 &spec.body,
                 "",
+                &visible_names,
                 &[],
                 &[],
                 None,
@@ -209,7 +256,10 @@ fn children(
                     kinds.push(*kind);
                     if matches!(
                         kind,
-                        OutputKind::Verdict | OutputKind::Branch | OutputKind::Commit
+                        OutputKind::Verdict
+                            | OutputKind::Branch
+                            | OutputKind::Commit
+                            | OutputKind::Remaining
                     ) {
                         if scalar.contains(kind) {
                             return Err("composite scalar output has multiple sources".into());
@@ -221,6 +271,7 @@ fn children(
             let body = children(
                 &spec.nodes,
                 &node.id,
+                &visible_names,
                 &node.depends_on,
                 &node.inputs,
                 node.source.as_ref(),
@@ -274,6 +325,7 @@ fn outputs(
         branch: None,
         commit: None,
         warnings: Vec::new(),
+        remaining: None,
     };
     let mut results = Vec::new();
     for export in &spec.exports {
@@ -294,6 +346,7 @@ fn outputs(
                 OutputKind::Findings => selected.findings.extend(source.findings.clone()),
                 OutputKind::Branch => selected.branch = source.branch.clone(),
                 OutputKind::Commit => selected.commit = source.commit.clone(),
+                OutputKind::Remaining => selected.remaining = source.remaining.clone(),
             }
         }
     }

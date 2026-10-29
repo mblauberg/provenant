@@ -501,7 +501,11 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
         if matches!(path.as_str(), "provenant dispatch" | "provenant run") {
             command = command
                 .mut_arg("model", |arg| {
-                    arg.required_unless_present_any(["route", "manifest", "preset"])
+                    if path == "provenant dispatch" {
+                        arg.required_unless_present_any(["route", "manifest", "preset"])
+                    } else {
+                        arg.required(false)
+                    }
                 })
                 .mut_arg("manifest", |arg| {
                     arg.conflicts_with_all([
@@ -686,11 +690,16 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
         }
         Command::Dispatch(dispatch) | Command::Run(dispatch) => {
             if dispatch.preset.is_none()
-                && (!dispatch.preset_set.is_empty()
-                    || dispatch.preset_params_file.is_some()
-                    || dispatch.explain)
+                && (!dispatch.preset_set.is_empty() || dispatch.preset_params_file.is_some())
             {
-                return invalid("--set, --params-file and --explain require --preset");
+                return invalid("--set and --params-file require --preset");
+            }
+            if matches!(inv.command, Command::Dispatch(_))
+                && dispatch.input.manifest.is_none()
+                && dispatch.route.model.is_none()
+                && dispatch.route.route.is_none()
+            {
+                return invalid("dispatch needs a model, route or manifest");
             }
             if matches!(inv.command, Command::Dispatch(_)) && dispatch.preset.is_some() {
                 return invalid("--preset is supported by run, not dispatch");
@@ -912,7 +921,7 @@ fn constraints(path: &str) -> Vec<String> {
             "prompt and manifest inputs are at most 1 MiB",
         ],
         "provenant run" => &[
-            "single prompt requires exactly one of model or route, or a named preset",
+            "single prompt selects a preset by rules when model, route and preset are omitted",
             "operation-id is generated when omitted; supply it for planned retries",
             "manifest conflicts with per-task route, access and metadata",
             "concurrency requires manifest or preset",
@@ -1405,8 +1414,31 @@ mod tests {
         ]);
         valid(&["preset", "list"]);
         valid(&["preset", "show", "single"]);
+        valid(&["preset", "explain"]);
+        valid(&[
+            "preset",
+            "explain",
+            "--risk",
+            "critical",
+            "--kind",
+            "code",
+            "--path",
+            "src/lib.rs",
+            "--underspecified",
+        ]);
+        valid(&[
+            "run",
+            "--prompt-file",
+            "brief",
+            "--risk-tier",
+            "critical",
+            "--task-kind",
+            "code",
+            "--path",
+            "src/lib.rs",
+        ]);
         invalid(&["run", "--preset", "single"]);
-        invalid(&["run", "--prompt-file", "brief", "--explain"]);
+        valid(&["run", "--prompt-file", "brief", "--explain"]);
         invalid(&[
             "run",
             "--preset",
@@ -1443,7 +1475,6 @@ mod tests {
             vec!["--deliver-branch", "branch"],
             vec!["--open-pr"],
             vec!["--write-root", "dir"],
-            vec!["--network", "off"],
             vec!["--capability", "postgres"],
             vec!["--knob", "x=y"],
             vec!["--task-id", "0123456789abcdef0123456789abcdef"],
@@ -1463,6 +1494,26 @@ mod tests {
                 matches!(parsed(&args), ParseOutcome::Invalid { .. }),
                 "accepted {flag:?}"
             );
+        }
+    }
+    #[test]
+    fn preset_runs_keep_an_explicit_network_restriction() {
+        for args in [
+            &[
+                "run",
+                "--preset",
+                "single",
+                "--prompt-file",
+                "brief",
+                "--network",
+                "off",
+            ][..],
+            &["run", "--prompt-file", "brief", "--network", "off"][..],
+        ] {
+            let Command::Run(request) = valid(args).command else {
+                panic!("run");
+            };
+            assert!(matches!(request.access.network, Some(Switch::Off)));
         }
     }
     #[test]

@@ -8,11 +8,56 @@ bounded slice with evaluating lenses. Roles choose routing tiers, and the chair
 chooses assignments, scopes, worktrees and acceptance evidence. A junior scout
 swarm remains read-only; it can share read roots without Git writer contention.
 
-Nine presets are bundled: `single`, `chain`, `fan-out`,
+Ten presets are bundled: `single`, `chain`, `fan-out`,
 `fan-out-synthesise`, `scout-swarm`, `generator-evaluator`, `review-council`,
-`big-batch` and `scope-then-run`. All lower through the same stage path.
+`big-batch`, `scope-then-run` and `deliver`. All lower through the same stage path.
 `preset list` shows each one's level, summary and cost, and
 `preset explain NAME` shows when to use it, its cost and its typed parameters.
+
+## Select a preset by rules
+
+When `run` has a prompt but no `--preset`, `--model` or `--route`, the bundled
+rules select `single` by default. Readiness is checked against the prompt; a
+prompt missing acceptance criteria, a risk tier, a verification route, a
+settled design decision or a named surface selects `scope-then-run`. Explicit
+`--preset NAME` remains the selection override. The bundled default remains
+`single`; configure size-based choices in repository rules when their
+parameters, such as writer worktrees, are available.
+
+Repository rules live in `.provenant/preset-rules.toml`. They extend the
+bundled defaults; maps merge by key and repository entries replace matching
+keys. Rule values contain a preset and optional typed parameters:
+
+```toml
+[select]
+default = { preset = "single" }
+
+[select.by_risk]
+critical = { preset = "review-council", parameters = { risk_tags = ["security"] } }
+
+[select.by_kind]
+docs = { preset = "chain" }
+
+[select.by_paths]
+"src/security/**" = { preset = "review-council" }
+
+[select.by_size]
+large = { preset = "big-batch" }
+
+[select.by_readiness]
+underspecified = { preset = "scope-then-run" }
+```
+
+Selection precedence is explicit preset override, readiness, most-specific
+matching path, risk tier, task kind, size, then default. `*` and `?` match
+within one path component; `**` can cross directories. The built-in size
+bands are `small` (up to 16 KiB), `medium` (up to 64 KiB) and `large`.
+Inspect a rule result and its source with `provenant preset explain`; supply
+`--risk`, `--kind`, `--path`, `--size`, `--ready` or `--underspecified` to
+explain a particular context. `run --explain` prints the selected preset and
+source, and the choice is recorded in each graph attempt's work context.
+On `run`, provide `--risk-tier`, `--task-kind` and repeatable `--path`
+values for those selectors; prompt size is measured from the prompt input.
 
 Inspect the resolved defaults and explain the exact graph before a run:
 
@@ -50,6 +95,7 @@ all role briefs and defaults.
 | `review-council` | `subject.commit = "HEAD"`, `worktree`, `base`, `spec`, `lenses`, `verifiers = 1`, `verifier_tier = "verifier"`, `risk_tier`, `review_shape`, `risk_tags` | One `lens.NAME` role per lens, a verifier, preferably from another model family, that tries to falsify the findings, then senior synthesis with a disposition per finding |
 | `scope-then-run` | `width = 3`, `worktree`, `write_scope = ["."]`, `base`, `spec`, `delivery = "none"` | Scouts, a senior scoping stage, a verdict gate (a blocked scope launches no writer), then `generator-evaluator` |
 | `big-batch` | `lanes`, `batch_worktree`, `base`, `spec`, `integration_branch = "batch/graph"`, `width = 4`, `read_roots = []` | Scout, one writer lane per `lanes` entry, council, principal refactor, two-round repair and review |
+| `deliver` | `worktree`, `scope = ["."]`, `subject.commit = "HEAD"`, `delivery = "pr"`, `base`, `spec`, `checks = []`, `ci_timeout_seconds = 7200`, `max_iterations = 3`, `repair_tier = "senior"`, `decision_session`, `risk_tier`, `review_shape`, `risk_tags`, `land = 1`, `land_tier = "substantial"` | Senior writer opening a pull request, a CI gate on its head, up to `max_iterations` fresh repairs each followed by the gate, `review-council` on the newest head, then land; see [Deliver through CI to land](#deliver-through-ci-to-land) |
 
 Write list parameters in a TOML file and pass `--params-file lanes.toml`. The
 file holds top-level `name = value` pairs, one per preset parameter. `--set`
@@ -110,10 +156,16 @@ root; it acquires no Git writer lock.
 
 Two role fields shape review. `prompt_file` appends a bundled prompt, such as
 `code-review/lenses/tests`, to the role prompt; it takes one name or a list and
-refuses unknown names. `distinct_from = "writer"` requires the node's model
-family to differ from the family that wrote the node's source. Route selection
-excludes the writer's family and refuses a route that cannot satisfy it. When
-the source chain has no writer the constraint has no effect.
+refuses unknown names. `distinct_from = "writer"` routes the node away from
+the model family that wrote its source; `distinct_from = "dependencies"` routes
+it away from the families of every upstream attempt (the bundled verifier uses
+it). Strength is `distinct_strength = "prefer"` (default) or `"require"`. Under
+prefer, when no route outside those families is ready the router substitutes
+one and the node records the separation as `unavailable`; under require the
+attempt fails instead. Each node settles with a `separation` record (strength,
+excluded families, applied family, `separated`, `unavailable` or
+`unconstrained`), shown by `graph status`. With no known upstream family the
+constraint has no effect.
 
 An entry can fan out over a list parameter with `for_each = "${lenses}"`. Each
 item needs a `name` of lowercase letters, digits and dashes. The node ID is
@@ -163,10 +215,11 @@ A dotted name is a variant, so an undefined `lens.house` uses `lens`.
 | --- | --- |
 | `card` | Short text placed first in the brief |
 | `references` | `{ ref = "skill:SKILL/PATH", when = "HINT", inline = false }`. The compiler resolves the reference against the release `skills/` directory, records its content digest in the graph and lists it in the brief with its `when` hint. `inline = true` puts the text in the brief. An unknown reference, a `..` part or a link leaving `skills/` is refused. |
-| `family` | `any`, `distinct_from_writer` (see below) or `cross_preferred`, which records on the node that its route should serve another model family (a preference; the scheduler does not enforce it). |
+| `family` | `any`, `distinct_from_writer`, `cross_preferred` (`distinct_from = "dependencies"`, prefer) or `cross_required` (the same, require). A project makes the verifier strict with `[roles."review.verify"] family = "cross_required"` in `.provenant/roles.toml`. |
+| `family_strength` | `prefer` or `require`; sets `distinct_strength` for `distinct_from_writer` or a cross-family role. |
 | `fallback_tier` | Used, and recorded as a substitution, when `tier` names a route the routing configuration does not define. |
 
-Provenance (origins, roles with digests and substituted routes) is kept in the graph document's `provenance` field. A role's `dispositions` list declares the values a synthesis must give each finding (`disposition` and `reason` in its findings block). Each node carries `role` and `role_digest` (a hash of the whole effective role and its reference digests), and `run --explain` lists every
+Provenance (origins, roles with digests and substituted routes) is kept in the graph document's `provenance` field. A role's `dispositions` list declares the values a synthesis must give each finding (`disposition` and `reason` in its findings block). Settlement enforces it: a findings block that is missing, or a finding whose `disposition` is outside the list or whose `reason` is empty, settles the node as failed and `advance_error` names the finding. Each node carries `role` and `role_digest` (a hash of the whole effective role and its reference digests), and `run --explain` lists every
 reference with its digest, so editing a reference changes the digest. A node
 that uses references may read the release `skills/` directory, read-only. A
 role grants no authority: access, write scope and routing come from the stage.
@@ -216,6 +269,8 @@ source = { type = "commit", commit = "0123456789abcdef0123456789abcdef01234567" 
 source = { type = "node", node = "implementation" }
 # Or, when integration_branch is configured:
 source = { type = "integration" }
+# Or, the newest head of a writer and the repairs that continue it:
+source = { type = "head", node = "write" }
 ```
 
 These are alternatives, each declared once on the relevant role or entry.
@@ -230,6 +285,62 @@ holding writer exclusion. Dirty, diverged, reserved and live contexts are
 refused. Ignored output is retained, including refusal if the source would
 overwrite it. The runtime never resets a worktree. A repair's follow-up review
 selects the repair's commit rather than reusing the earlier review head.
+
+## Deliver through CI to land
+
+`deliver` takes an approved slice from implementation to a merged pull
+request without a chair watching CI:
+
+```sh
+provenant run --preset deliver --prompt-file slice.md \
+  --worktree /absolute/path/to/writer \
+  --set 'parameters.scope=["src"]' --set 'parameters.spec="#2222"' \
+  --set 'parameters.decision_session="SESSION"' --wait 2h
+```
+
+The graph is `write`, then `ci` (a CI gate and its repair loop), `review`
+(`review-council`), `accept` (a verdict gate) and `land`:
+
+1. The `write.implement` writer commits in the registered worktree and the
+   host pushes its branch and opens the pull request.
+2. The CI gate observes the checks on the pushed head. While they are pending
+   the node shows as running with `CI waiting elapsed=Ns checks=NAMES head=SHA`
+   in `provenant fabric graph status ID` and the composite rows, and no model
+   runs. A green gate skips the repair loop.
+3. A red gate routes to the repair loop. Each round starts a fresh
+   `repairer` agent on the same worktree and branch (`continues = "write"`).
+   Its brief holds the failed checks with their log excerpts, the writer's
+   final report and the previous repair's, never an earlier transcript. Each
+   report the 4 KiB excerpt cuts short also carries its closing `remaining`
+   window, so work handed off at the end of a long report reaches every
+   round. The host pushes the repair to the same pull request
+   and the CI gate runs again on the new head.
+4. After `max_iterations` red rounds the loop stops. With
+   `decision_session` set, the session receives a loop ask offering stop,
+   extend or accept; without it the graph pauses, and
+   `--extend loop.ci--repair.rounds=N` or
+   `--extend loop.ci--repair.decision=stop|accept` resumes it.
+5. `review-council` reviews a `head` source on the writer, the newest head the
+   chain delivered, so a repaired head is the one reviewed. Its lenses that
+   route away from the writer also route away from every repair author. A
+   failed review stops the graph before land.
+6. `land` merges that exact head under the host's land policy for
+   `land_tier`. By default `routine` and `substantial` land automatically, and
+   `crucial` and `terminal` ask the decision session first. The session is
+   bound to the land node itself, so it still applies when `deliver` runs
+   inside another preset. Without a `decision_session`, a tier that asks fails
+   the land node, which names the branch and head to land by hand with
+   `provenant land`; it does not pause. The land node refuses a head other
+   than the one the passing verdict reviewed, including a council pinned to an
+   earlier head, and needs the CI gate green.
+
+Knobs: `checks` names the required checks (empty uses the branch's required
+checks), `ci_timeout_seconds` bounds each gate, `repair_tier` routes the
+repairers, `risk_tier`, `review_shape` and `risk_tags` shape the council, and
+`land = 0` stops after review and leaves the pull request open. Override the
+repairer brief with a repository `[roles.repairer]` table in a same-name
+`deliver.toml`. Pull requests open ready for review; draft pull requests are
+not yet supported.
 
 ## Prepare a batch
 

@@ -728,3 +728,100 @@ fn preset_show_roles_lists_the_library_with_origins() -> Result<(), Box<dyn std:
     );
     Ok(())
 }
+
+/// A route-less ready prompt selects a preset by rules. An explicit network
+/// restriction reaches every graph lane it submits, and single-lane flags the
+/// graph cannot apply are refused before selection.
+#[test]
+fn automatic_preset_selection_submits_network_off_and_refuses_lane_only_flags()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "seed",
+        ],
+    ] {
+        let output = Command::new("git")
+            .current_dir(&project)
+            .args(args)
+            .output()?;
+        assert!(output.status.success());
+    }
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        project.join(".provenant/preset-rules.toml"),
+        "[select]\ndefault = { preset = 'probe' }\n",
+    )?;
+    std::fs::write(
+        presets.join("probe.toml"),
+        "stages = [{ id = 'task', tier = { adapter = 'fixture', model = 'fixture/model' } }]\n",
+    )?;
+    let prompt = project.join("ready.md");
+    std::fs::write(
+        &prompt,
+        "Acceptance criteria are explicit. Surface: the run command. Risk tier: low. \
+         Verification uses cargo test. Design decision is settled.\n",
+    )?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let state = temp.path().join("state");
+    let run = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_provenant"))
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(&state)
+            .args(["run", "--prompt-file"])
+            .arg(&prompt)
+            .args(extra)
+            .output()
+    };
+    let refused = run(&["--account", "fixture", "--effort", "high"])?;
+    assert!(!refused.status.success());
+    let refused: serde_json::Value = serde_json::from_slice(&refused.stdout)?;
+    assert_eq!(refused["status"], "invalid", "{refused}");
+    assert_eq!(refused["error"]["code"], "preset", "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("--account, --effort")),
+        "{refused}"
+    );
+    assert!(
+        refused["error"]["repair"]
+            .as_str()
+            .is_some_and(|repair| repair.contains("--model or --route")),
+        "{refused}"
+    );
+    assert!(!state.join("runs").exists());
+
+    let output = run(&["--network", "off", "--wait", "5s"])?;
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let document = result["data"]["document"]
+        .as_str()
+        .ok_or_else(|| format!("retained document: {result}"))?;
+    let document: serde_json::Value = serde_json::from_slice(&std::fs::read(document)?)?;
+    assert_eq!(document["network"], "off");
+    let mut submitted = Vec::new();
+    for run in std::fs::read_dir(state.join("runs"))? {
+        let request: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(run?.path().join("request.json"))?)?;
+        for task in request["tasks"].as_array().ok_or("tasks")? {
+            submitted.push(task["access"]["network"].clone());
+        }
+    }
+    // `--network off` keeps only the provider's own endpoints.
+    assert_eq!(submitted, [serde_json::json!("provider")], "{result}");
+    Ok(())
+}

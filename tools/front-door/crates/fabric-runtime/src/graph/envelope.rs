@@ -153,6 +153,25 @@ pub(super) fn checkpoint_bound(
         .fold(0usize, usize::saturating_add)
 }
 
+fn land_skeleton(tier: provenant_records::workflow::RiskTier) -> LandRecord {
+    LandRecord {
+        extra: Default::default(),
+        tier,
+        policy: crate::config::LandPolicy::Auto,
+        policy_source: crate::config::LandSource::Project,
+        branch: String::new(),
+        head: String::new(),
+        authorised_by: Some(LandAuthority::Ask {
+            ask_id: String::new(),
+            actor: String::new(),
+        }),
+        pull_request: Some(u64::MAX),
+        note: Some(String::new()),
+        wake_at: Some(latest()),
+        pending_observations: u64::MAX,
+    }
+}
+
 fn node_bound(
     plan: &PlannedGraph,
     node: &PlannedNode,
@@ -178,7 +197,16 @@ fn node_bound(
             reason: Some(String::new()),
             on_fail: node.on_fail.clone(),
         }),
+        separation: node.distinct_from.map(|_| FamilySeparation {
+            extra: Default::default(),
+            strength: FamilyStrength::Require,
+            excluded: Vec::new(),
+            applied: Some(String::new()),
+            outcome: SeparationOutcome::Unconstrained,
+        }),
         ci: ci.then(|| CiEvidence {
+            wake_at: Some(latest()),
+            pending_observations: u64::MAX,
             extra: Default::default(),
             first_observed_stamp: Some(CiHostStamp {
                 extra: Default::default(),
@@ -189,7 +217,13 @@ fn node_bound(
             clock_reanchor_reason: Some(String::new()),
             state: CiState::Unavailable,
             summary: String::new(),
+            head_sha: Some(String::new()),
+            failed_checks: Vec::new(),
+            check_names: Vec::new(),
+            truncated: true,
+            elapsed_seconds: u64::MAX,
         }),
+        land: node.land.as_ref().map(|spec| land_skeleton(spec.tier)),
         title: Some(node.title.clone().unwrap_or_else(|| node.id.clone())),
         worktree: node.worktree.clone(),
         id: node.id.clone(),
@@ -214,6 +248,7 @@ fn node_bound(
                 branch: Some(String::new()),
                 commit: Some(String::new()),
                 warnings: Vec::new(),
+                remaining: Some(String::new()),
             }
         }),
         attempts: Vec::new(),
@@ -251,11 +286,48 @@ fn node_bound(
         );
         bytes += ask_bound(ask, MAX_ADVANCE_ERROR_BYTES);
     }
+    if let Some(spec) = &node.land {
+        // branch, head, ask ID, actor and note; one ask, replaced on rejection.
+        bytes +=
+            2 * OUTPUT_FIELD_BYTES + node.id.len() + 32 + HOST_ID_BYTES + MAX_ADVANCE_ERROR_BYTES;
+        let session = land::session(spec, plan).unwrap_or("");
+        let ask = land::land_ask(
+            &plan.graph_id,
+            node,
+            &land_skeleton(spec.tier),
+            session,
+            u64::MAX,
+            Some(""),
+        );
+        bytes += ask_bound(ask, 2 * OUTPUT_FIELD_BYTES + MAX_ADVANCE_ERROR_BYTES);
+    }
     if gate {
         bytes += OUTPUT_FIELD_BYTES; // gate reason
     }
+    if node.distinct_from.is_some() {
+        // excluded families and the applied family
+        bytes += (SEPARATION_FAMILIES + 1) * (FAMILY_BYTES + 3);
+    }
     if ci {
         bytes += HOST_ID_BYTES + 64 + OUTPUT_FIELD_BYTES;
+        if let Some(GateCondition::Ci {
+            failed_checks_max_bytes,
+            max_failed_checks,
+            ..
+        }) = &node.condition
+        {
+            // Evidence array and its findings projection, including per-finding keys.
+            // A failed-check object costs at least 32 bytes, even with no text.
+            let max_bytes =
+                failed_checks_max_bytes.unwrap_or_else(ci::default_failed_checks_max_bytes);
+            let count = max_failed_checks
+                .unwrap_or_else(ci::default_max_failed_checks)
+                .min(max_bytes / 32);
+            bytes = bytes
+                .saturating_add(max_bytes.saturating_mul(2))
+                .saturating_add(count.saturating_mul(256))
+                .saturating_add(OUTPUT_FIELD_BYTES + 512);
+        }
     }
     if !boundary {
         let excerpt = if node.composite.is_some() {
@@ -263,9 +335,11 @@ fn node_bound(
         } else {
             RESULT_EXCERPT_BYTES
         };
-        // digest, excerpt, path, verdict, verdict error, findings, branch, commit, warnings
+        // digest, excerpt, path, verdict, verdict error, findings, branch,
+        // commit, warnings, remaining
         bytes += 80
             + excerpt
+            + REMAINING_BYTES
             + OUTPUT_FIELD_BYTES
             + OUTPUT_FIELD_BYTES
             + 64

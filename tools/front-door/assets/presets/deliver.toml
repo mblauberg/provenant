@@ -1,0 +1,75 @@
+decision_session = "${decision_session}"
+stages = [
+  { id = "write", role = "write.implement" },
+  # The CI gate waits on the writer's pushed head with no model running. A red
+  # gate routes to the repair loop; each round continues the same branch and
+  # gates the new head again. Exhaustion pauses the loop and asks.
+  # Every round sees the writer's report and its closing `remaining` window,
+  # so work handed off at the end of a long report survives every round.
+  { id = "ci", inputs = [], stages = [
+    { id = "check", kind = "gate", on_fail = "repair", condition = { type = "ci", target = { node = "write" }, checks = "${checks}", timeout_seconds = "${ci_timeout_seconds}" } },
+    { id = "repair", depends_on = ["write"], inputs = [{ node = "check", outputs = ["findings"] }], loop = { max_rounds = "${max_iterations}", until = "check", decision_session = "${decision_session}", stages = [
+      { id = "fix", role = "repairer" },
+      { id = "check", kind = "gate", condition = { type = "ci", target = { node = "write" }, checks = "${checks}", timeout_seconds = "${ci_timeout_seconds}" } },
+    ] } },
+  ] },
+  # Reviewers pin the newest head of the writer's chain, so a repaired head is
+  # the one reviewed and the one landed.
+  { id = "review", preset = "review-council", depends_on = ["write"], inputs = [{ node = "write", outputs = ["result"] }], parameters = { subject = { type = "head", node = "write" }, worktree = "${worktree}", base = "${base}", spec = "${spec}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", risk_tags = "${risk_tags}" } },
+  { id = "accept", kind = "gate", condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
+  { id = "land", kind = "land", count = "${land}", land = { node = "write", tier = "${land_tier}", session = "${decision_session}" } },
+]
+exports = [
+  { node = "write", outputs = ["branch"] },
+  { node = "review", outputs = ["result", "findings", "verdict"] },
+]
+
+[pattern]
+level = "recommended"
+summary = "A writer opens a pull request; a CI gate waits on its pushed head with no model running; fresh repair agents fix failing checks on the same branch until CI is green; a review council judges that head; land merges it under the host's tier policy."
+citations = ["GitHub Copilot coding agent and Cursor background agents, CI-fix on the pull request branch (vendor-reported)"]
+cost = "1 writer + up to max_iterations repairs + review-council; no model runs while CI is pending"
+select_when = "An approved slice should go from implementation to a merged pull request without a chair watching CI."
+tags = ["write", "review", "deliver"]
+
+[parameters]
+worktree = { type = "string", default = "", doc = "Registered writer worktree; repairs continue its branch." }
+scope = { type = "list", default = ["."], doc = "Literal relative paths the writer and repairers may change." }
+subject = { type = "table", default = { type = "commit", commit = "HEAD" }, doc = "Source the writer starts from." }
+delivery = { type = "string", default = "pr", enum = ["pr", "push"], doc = "Writer delivery. Land needs pr; push suits land = 0." }
+base = { type = "string", default = "", doc = "Diff reference the slice is measured from." }
+spec = { type = "string", default = "", doc = "Issue number or file holding the acceptance criteria." }
+checks = { type = "list", default = [], doc = "Check names the CI gates require; empty uses the branch's required checks." }
+ci_timeout_seconds = { type = "integer", default = 7200, min = 1, max = 604800, doc = "How long each CI gate waits for checks on one head." }
+max_iterations = { type = "integer", default = 3, min = 1, max = 32, doc = "Repair rounds before the loop pauses and asks to stop, extend or accept." }
+repair_tier = { type = "string", default = "senior", doc = "Routing tier for each repair agent." }
+decision_session = { type = "string", default = "", doc = "Inbox session for the exhaustion and land asks. Empty pauses an exhausted loop for graph resume, and fails a land whose tier asks." }
+risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
+review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
+risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
+land = { type = "integer", default = 1, min = 0, max = 1, doc = "1 lands the reviewed head; 0 stops after review and leaves the pull request open." }
+land_tier = { type = "string", default = "substantial", enum = ["routine", "substantial", "crucial", "terminal"], doc = "Risk tier the host's land policy reads: by default routine and substantial land, crucial and terminal ask." }
+
+[roles.repairer]
+tier = "${repair_tier}"
+access = "worktree_write"
+worktree = "${worktree}"
+continues = "write"
+write_scope = "${scope}"
+inputs = [
+  { node = "previous.check", outputs = ["findings"] },
+  { node = "previous.fix", outputs = ["result", "remaining"] },
+  { node = "write", outputs = ["result", "remaining"] },
+]
+card = "You repair failing CI checks on an open pull request branch. You are a fresh agent with no earlier transcript."
+acceptance_checks = ["Fix the failing checks named in the inputs", "Run the failing checks locally where practical", "Commit on the existing branch"]
+prompt = """
+Repair the failing CI checks on the pull request for: ${prompt}
+Spec (acceptance criteria): ${spec}
+The inputs carry the failing check names with log excerpts, the writer's final
+report and the previous repair's report. A report cut short also carries its
+closing `remaining` window, where remaining work is handed off. Work from those
+and the worktree. Fix the cause rather than the symptom, keep within the write
+scope and commit on the current branch; the host pushes it to the same pull
+request and CI runs again on the new head.
+"""

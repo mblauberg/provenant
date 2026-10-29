@@ -281,6 +281,11 @@ fn expand_loops(
             {
                 return Err("loop body cannot nest loops or deliver or route on_fail");
             }
+            if child.land.is_some() {
+                return Err("loop body cannot land");
+            }
+            // A continued writer is outside the body; the expanded plan checks it.
+            child.continues = None;
             if child.access == AccessMode::WorktreeWrite {
                 if writer
                     .as_ref()
@@ -297,7 +302,28 @@ fn expand_loops(
                     return Err("unknown previous round input");
                 }
             }
-            child.inputs.retain(|i| !i.node.starts_with("previous."));
+            // Prior-round and outer inputs are checked against the expanded
+            // graph; the isolated body check has only the local namespace.
+            child
+                .inputs
+                .retain(|i| spec.body.iter().any(|node| node.id == i.node));
+            // A head source naming a writer outside the body is checked
+            // against the expanded graph, as an external CI subject is.
+            if let Some(SourceBinding::Head { node: writer }) = &child.source
+                && !spec.body.iter().any(|node| &node.id == writer)
+            {
+                child.source = None;
+            }
+            // External CI subjects are checked against the expanded graph.
+            // The isolated body check below has only the local namespace.
+            if let Some(GateCondition::Ci { target, .. }) = &mut child.condition
+                && let CiTarget::Node {
+                    node: target_node, ..
+                } = target
+                && !spec.body.iter().any(|node| &node.id == target_node)
+            {
+                *target = CiTarget::Ref(target_node.clone());
+            }
         }
         let body_document = GraphDocument {
             nodes: body,
@@ -378,6 +404,27 @@ fn expand_loops(
                         child.depends_on.push(source.clone());
                     }
                 }
+                if let Some(SourceBinding::Head { node: writer }) = &mut child.source
+                    && spec.body.iter().any(|node| &node.id == writer)
+                {
+                    *writer = id(&node.id, round, writer);
+                }
+                if let Some(GateCondition::Ci {
+                    target: CiTarget::Node { node: target, .. },
+                    ..
+                }) = &mut child.condition
+                {
+                    *target = if let Some(previous) = target.strip_prefix("previous.") {
+                        if round == 1 {
+                            return Err("previous CI target requires an initial node binding");
+                        }
+                        id(&node.id, round - 1, previous)
+                    } else if spec.body.iter().any(|node| &node.id == target) {
+                        id(&node.id, round, target)
+                    } else {
+                        target.clone()
+                    };
+                }
                 if child.depends_on.is_empty() {
                     if round == 1 {
                         child.depends_on.extend(node.depends_on.clone());
@@ -391,8 +438,12 @@ fn expand_loops(
                 for input in &mut child.inputs {
                     input.node = if let Some(previous) = input.node.strip_prefix("previous.") {
                         id(&node.id, round - 1, previous)
-                    } else {
+                    } else if spec.body.iter().any(|body| body.id == input.node) {
                         id(&node.id, round, &input.node)
+                    } else {
+                        // An outer node, such as the writer a repair continues,
+                        // is selected afresh in every round.
+                        input.node.clone()
                     };
                     if !child.depends_on.contains(&input.node) {
                         child.depends_on.push(input.node.clone());
@@ -405,7 +456,21 @@ fn expand_loops(
                         .find(|n| n.id == local)
                         .is_some_and(|n| n.depends_on.is_empty())
                 {
-                    child.inputs.extend(node.inputs.clone());
+                    // The loop's own inputs merge with a body selection of
+                    // the same outer node.
+                    for input in &node.inputs {
+                        if let Some(own) =
+                            child.inputs.iter_mut().find(|own| own.node == input.node)
+                        {
+                            for kind in &input.outputs {
+                                if !own.outputs.contains(kind) {
+                                    own.outputs.push(*kind);
+                                }
+                            }
+                        } else {
+                            child.inputs.push(input.clone());
+                        }
+                    }
                 }
                 expanded.nodes.push(child);
             }
@@ -474,7 +539,9 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 loop_pause: None,
                 round: n.round.clone(),
                 gate: None,
+                separation: None,
                 ci: None,
+                land: None,
                 title: Some(n.title.as_deref().unwrap_or(&n.id).into()),
                 worktree: n.worktree.clone(),
                 id: n.id.clone(),

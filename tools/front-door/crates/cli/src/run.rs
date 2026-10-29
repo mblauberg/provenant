@@ -4807,6 +4807,10 @@ pub struct AttemptFacts {
     pub exit_code: Option<i64>,
     /// `adapter/model@effort`, as the attempt ran.
     pub route: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
     pub head: Option<provenant_core::GitOid>,
     /// The branch the attempt's host delivery pushed.
     pub branch: Option<String>,
@@ -4855,6 +4859,37 @@ fn route_label(record: &run::AttemptRecord) -> String {
         None => model,
     }
 }
+/// Receipt facts shared by explicit PR opening and graph delivery. Workflow
+/// review receipts, when present, are added by the caller that owns that store.
+pub fn recorded_attempt_facts(record: &run::AttemptRecord) -> AttemptFacts {
+    let (state, _) = state_and_reason(&record.state);
+    let exit_code = match &record.state {
+        run::AttemptState::Terminal { exit_code, .. } => *exit_code,
+        _ => None,
+    };
+    AttemptFacts {
+        attempt_id: record.attempt_id,
+        run_id: record.run_id,
+        task_id: record.task_id,
+        state,
+        exit_code,
+        route: route_label(record),
+        role: record
+            .context
+            .as_ref()
+            .and_then(|context| context.role.clone()),
+        verdict: None,
+        head: record
+            .head
+            .or_else(|| record.delivery.as_ref().and_then(|d| d.head)),
+        branch: record.delivery.as_ref().map(|d| d.branch.clone()),
+        delivery_id: record.delivery_id,
+        receipt_path: format!("runs/{}/attempts/{}", record.run_id, record.attempt_id),
+        risk: None,
+        reviews: Vec::new(),
+    }
+}
+
 /// The recorded facts of local attempts, for the pull request body. An attempt
 /// that ran on a peer is refused: its record lives on that host.
 pub fn attempt_facts(
@@ -4884,11 +4919,6 @@ pub fn attempt_facts(
                     "attempt required",
                 ))?;
             let record = session.service().status(id, &call)?;
-            let (state, _) = state_and_reason(&record.state);
-            let exit_code = match &record.state {
-                run::AttemptState::Terminal { exit_code, .. } => *exit_code,
-                _ => None,
-            };
             let (risk, reviews) = match record.delivery_id {
                 Some(delivery) => {
                     let receipt = provenant_workflow::store::ReceiptStore::new(
@@ -4912,22 +4942,10 @@ pub fn attempt_facts(
                 }
                 None => (None, Vec::new()),
             };
-            Ok(AttemptFacts {
-                attempt_id: record.attempt_id,
-                run_id: record.run_id,
-                task_id: record.task_id,
-                state,
-                exit_code,
-                route: route_label(&record),
-                head: record
-                    .head
-                    .or_else(|| record.delivery.as_ref().and_then(|d| d.head)),
-                branch: record.delivery.as_ref().map(|d| d.branch.clone()),
-                delivery_id: record.delivery_id,
-                receipt_path: format!("runs/{}/attempts/{}", record.run_id, record.attempt_id),
-                risk,
-                reviews,
-            })
+            let mut facts = recorded_attempt_facts(&record);
+            facts.risk = risk;
+            facts.reviews = reviews;
+            Ok(facts)
         })
         .collect()
 }

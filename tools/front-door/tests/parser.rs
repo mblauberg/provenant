@@ -1217,6 +1217,46 @@ fn config_show_reads_typed_defaults_and_refuses_invalid_input_without_writes() -
 }
 
 #[test]
+fn config_check_and_doctor_report_pool_effort_warnings_as_advice() -> Result {
+    let rig = TestRig::new()?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.routing.pools]\ntrial=[{model='codex/gpt-6-luna',effort='retired',efforts=['low','retired']}]\n",
+    )?;
+
+    let checked = rig.command(&["check", "config", "--json"])?;
+    assert_eq!(
+        code(&checked),
+        0,
+        "{}",
+        String::from_utf8_lossy(&checked.stdout.bytes)
+    );
+    let checked: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
+    assert_eq!(checked["status"], "ok");
+    assert_eq!(checked["data"]["count"], 0);
+    let warning = checked["data"]["warnings"][0].as_str().ok_or("warning")?;
+    assert!(warning.contains("pool trial"), "{warning}");
+    assert!(warning.contains("effort retired"), "{warning}");
+    assert!(warning.contains("codex/gpt-6-luna"), "{warning}");
+    assert!(warning.contains("pool source: config.toml"), "{warning}");
+    assert!(warning.contains("model source: config.toml"), "{warning}");
+    assert!(warning.contains("effort source: config.toml"), "{warning}");
+    assert!(warning.contains("efforts source: config.toml"), "{warning}");
+
+    let doctor = rig.command(&["hosts", "doctor", "--json"])?;
+    assert_eq!(
+        code(&doctor),
+        0,
+        "{}",
+        String::from_utf8_lossy(&doctor.stdout.bytes)
+    );
+    let doctor: serde_json::Value = serde_json::from_slice(&doctor.stdout.bytes)?;
+    assert_eq!(doctor["status"], "ok");
+    assert_eq!(doctor["data"]["warnings"][0], warning);
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn hosts_doctor_uses_non_billing_status_and_preserves_identity_selection() -> Result {
     use std::{fs, os::unix::fs::PermissionsExt};
     let mut rig = TestRig::new()?.without_state()?;

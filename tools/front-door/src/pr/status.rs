@@ -6,6 +6,8 @@ use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+mod ci;
+
 #[derive(Deserialize)]
 struct View {
     state: String,
@@ -96,32 +98,25 @@ impl Line {
     }
 }
 
-/// Valid JSON is meaningful even when gh exits non-zero for pending or failed
-/// checks. Missing, malformed or interrupted output is unavailable, not zero.
-fn counts(project: &Path, number: &str) -> Option<Vec<Check>> {
-    let output = execute(
-        project,
-        &["gh", "pr", "checks", number, "--json", "name,bucket"],
-        false,
-    )
-    .ok()?;
-    serde_json::from_slice(&output.stdout.bytes).ok()
-}
-
-/// Graph gates use the same bounded check reader as `pr status`. gh returns
-/// non-zero for pending and failed checks, so valid JSON is authoritative.
+/// Graph gates read checks for an exact head and recheck the target afterwards.
 pub(crate) fn observe_ci(
     project: &Path,
     target: &str,
     names: &[String],
+    failed_checks_max_bytes: usize,
+    max_failed_checks: usize,
 ) -> provenant_fabric_runtime::graph::CiObservation {
-    observe_ci_with(
+    ci::observe(
+        project,
+        target,
         names,
-        || required_checks(project, target),
-        || counts(project, target),
+        failed_checks_max_bytes,
+        max_failed_checks,
     )
 }
 
+#[cfg(test)]
+#[allow(dead_code)] // The worktree driver includes this module without libtest.
 fn observe_ci_with(
     names: &[String],
     resolve: impl FnOnce() -> Option<Vec<String>>,
@@ -199,18 +194,6 @@ pub(super) fn required_policy(
     if owner.is_empty() || name.is_empty() {
         return None;
     }
-    let encode = |value: &str| -> String {
-        value
-            .bytes()
-            .map(|b| {
-                if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-                    (b as char).to_string()
-                } else {
-                    format!("%{b:02X}")
-                }
-            })
-            .collect()
-    };
     let repo = format!("repos/{}/{}", encode(owner), encode(name));
     let branch = encode(&base.branch);
     let get = |path: &str, paginate: bool| -> Option<Vec<u8>> {
@@ -242,6 +225,19 @@ pub(super) fn required_policy(
         repository: repo,
         checks: parse_required_checks(protection.as_ref(), &pages)?,
     })
+}
+
+fn encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
 }
 
 // A ruleset can mark a branch protected without classic branch protection.
@@ -331,6 +327,10 @@ fn summarise_ci(
             extra: Default::default(),
             state: CiState::Unavailable,
             summary: format!("policy={policy} checks unavailable"),
+            head_sha: None,
+            failed_checks: Vec::new(),
+            check_names: Vec::new(),
+            truncated: false,
         };
     };
     let selected: Vec<&Check> = match required {
@@ -373,6 +373,10 @@ fn summarise_ci(
         summary: format!(
             "policy={policy}{selection} checks={passed}/{total} fail={failed} pending={pending} skipped={skipped} missing={missing}"
         ),
+        head_sha: None,
+        failed_checks: Vec::new(),
+        check_names: selected.iter().map(|check| check.name.clone()).collect(),
+        truncated: false,
     }
 }
 fn open_numbers(project: &Path) -> Result<Vec<u64>> {

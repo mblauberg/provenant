@@ -27,12 +27,6 @@ enum EdgeError {
     Peer(provenant_fabric_runtime::peer_agent::AgentError),
 }
 fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
-    prepare_agents_with(targets, true)
-}
-
-/// `strict` false (uninstall) ignores a configuration defect, which only the
-/// optional scheduled-gc agent reads.
-fn prepare_agents_with(targets: &mut Targets, strict: bool) -> Result<(), EdgeError> {
     let state = targets.roots.state.as_path();
     if provenant_fabric_runtime::peer_agent::eligible(state, &targets.home) {
         let program = targets.bin_dir.join("provenant");
@@ -50,17 +44,19 @@ fn prepare_agents_with(targets: &mut Targets, strict: bool) -> Result<(), EdgeEr
         targets.peer_agent_previous =
             provenant_fabric_runtime::peer_agent::previous_plist(&previous, state, &targets.home)
                 .map_err(EdgeError::Peer)?;
-        let config =
-            match provenant_config::read_with_domains(&targets.roots, &cli::domains::SECTIONS) {
-                Ok(config) => config,
-                Err(_) if !strict => return Ok(()),
-                Err(error) => return Err(EdgeError::Install(InstallError::Config(error))),
-            };
-        if config.gc.schedule {
-            targets.gc_agent = Some(
-                super::gc_agent::render(&program, state, &config.gc).map_err(EdgeError::Peer)?,
-            );
-        }
+        targets.tick_agent = Some(
+            super::tick_agent::render(
+                &program,
+                state,
+                &provenant_fabric_runtime::peer_agent::scheduler_path(
+                    &program,
+                    &targets.roots,
+                    peer_agent_registry_name,
+                )
+                .map_err(EdgeError::Peer)?,
+            )
+            .map_err(EdgeError::Peer)?,
+        );
     }
     Ok(())
 }
@@ -255,16 +251,19 @@ impl PreviewReporter {
         action: &Action,
         stop: impl FnOnce(&Path) -> io::Result<()>,
     ) -> io::Result<()> {
-        if matches!(action.selector.as_str(), "peer-agent" | "gc-agent") {
+        if matches!(
+            action.selector.as_str(),
+            "peer-agent" | "tick-agent" | "gc-agent"
+        ) {
             let home = self
                 .home
                 .as_deref()
                 .ok_or_else(|| io::Error::other("missing agent home"))?;
             let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
-            let expected = if action.selector == "gc-agent" {
-                super::gc_agent::plist(&home)
-            } else {
-                provenant_fabric_runtime::peer_agent::plist(&home)
+            let expected = match action.selector.as_str() {
+                "tick-agent" => super::tick_agent::plist(&home),
+                "gc-agent" => home.join("Library/LaunchAgents/dev.provenant.gc.plist"),
+                _ => provenant_fabric_runtime::peer_agent::plist(&home),
             };
             if action.before.is_some() && action.path.to_path_buf().ok().as_ref() != Some(&expected)
             {
@@ -277,12 +276,10 @@ impl PreviewReporter {
 }
 impl InstallReporter for PreviewReporter {
     fn before_remove(&mut self, action: &Action) -> io::Result<()> {
-        self.before_remove_with(action, |home| {
-            if action.selector == "gc-agent" {
-                super::gc_agent::stop(home).map_err(io::Error::other)
-            } else {
-                provenant_fabric_runtime::peer_agent::stop(home).map_err(io::Error::other)
-            }
+        self.before_remove_with(action, |home| match action.selector.as_str() {
+            "tick-agent" => super::tick_agent::stop(home).map_err(io::Error::other),
+            "gc-agent" => super::tick_agent::retire_gc(home).map_err(io::Error::other),
+            _ => provenant_fabric_runtime::peer_agent::stop(home).map_err(io::Error::other),
         })
     }
     fn preview(&mut self, _: &[Action]) -> io::Result<()> {
@@ -306,7 +303,7 @@ struct InstallData {
     #[serde(skip_serializing_if = "Option::is_none")]
     peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    gc_agent: Option<super::gc_agent::Installed>,
+    tick_agent: Option<super::tick_agent::Installed>,
 }
 impl InstallData {
     fn empty() -> Self {
@@ -315,7 +312,7 @@ impl InstallData {
             completed: Vec::new(),
             remaining: Vec::new(),
             peer_agent: None,
-            gc_agent: None,
+            tick_agent: None,
         }
     }
     fn success(outcome: InstallOutcome) -> Self {
@@ -324,7 +321,7 @@ impl InstallData {
             completed: Vec::new(),
             remaining: Vec::new(),
             peer_agent: None,
-            gc_agent: None,
+            tick_agent: None,
         }
     }
     fn failure(error: &InstallError) -> Self {
@@ -338,7 +335,7 @@ impl InstallData {
                 completed: completed.clone(),
                 remaining: remaining.clone(),
                 peer_agent: None,
-                gc_agent: None,
+                tick_agent: None,
             },
             _ => Self::empty(),
         }
@@ -434,11 +431,11 @@ fn output_install(
     summaries: &[HarnessTarget],
     result: Result<InstallOutcome, InstallError>,
     peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
-    gc_agent: Option<super::gc_agent::Installed>,
+    tick_agent: Option<super::tick_agent::Installed>,
     globals: &cli::Globals,
 ) -> u8 {
     output_install_noted(
-        "", command, summaries, result, peer_agent, gc_agent, globals,
+        "", command, summaries, result, peer_agent, tick_agent, globals,
     )
 }
 /// `notes` lead the human output, for steps that ran before the install.
@@ -448,7 +445,7 @@ fn output_install_noted(
     summaries: &[HarnessTarget],
     result: Result<InstallOutcome, InstallError>,
     peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
-    gc_agent: Option<super::gc_agent::Installed>,
+    tick_agent: Option<super::tick_agent::Installed>,
     globals: &cli::Globals,
 ) -> u8 {
     match result {
@@ -546,13 +543,13 @@ fn output_install_noted(
             {
                 human.push_str(&format!("peer agent: failed: {message}\n"));
             }
-            if let Some(super::gc_agent::Installed::Failed { message }) = &gc_agent {
-                human.push_str(&format!("scheduled gc: failed: {message}\n"));
+            if let Some(super::tick_agent::Installed::Failed { message }) = &tick_agent {
+                human.push_str(&format!("host tick: failed: {message}\n"));
             }
             let read_only = outcome.dry_run;
             let mut data = InstallData::success(outcome);
             data.peer_agent = peer_agent;
-            data.gc_agent = gc_agent;
+            data.tick_agent = tick_agent;
             super::emit(
                 &CommandResult::new(command, Outcome::Ok, data),
                 globals,
@@ -812,7 +809,7 @@ struct Applied {
     result: Result<InstallOutcome, InstallError>,
     summaries: Vec<HarnessTarget>,
     peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
-    gc_agent: Option<super::gc_agent::Installed>,
+    tick_agent: Option<super::tick_agent::Installed>,
 }
 
 /// What a sync does beyond reapplying the release.
@@ -829,7 +826,7 @@ pub(super) fn run_install(args: cli::Install, globals: &cli::Globals) -> u8 {
             &applied.summaries,
             applied.result,
             applied.peer_agent,
-            applied.gc_agent,
+            applied.tick_agent,
             globals,
         ),
         Err(refused) => refused.emit("install", globals),
@@ -897,7 +894,7 @@ fn apply_install(
     let state = targets.roots.state.as_path().to_path_buf();
     let home = targets.home.clone();
     prepare_agents(&mut targets)?;
-    let gc_enabled = targets.gc_agent.is_some();
+    let tick_enabled = targets.tick_agent.is_some();
     let mut reporter = PreviewReporter {
         home: Some(home.clone()),
     };
@@ -948,6 +945,8 @@ fn apply_install(
         if agents && !args.dry_run && provenant_fabric_runtime::peer_agent::eligible(&state, &home)
         {
             retire_disk_guard(&home)
+                .map_err(|error| InstallError::AgentRetirement(error.to_string()))?;
+            super::tick_agent::retire_gc(&home)
                 .map_err(|error| InstallError::AgentRetirement(error.to_string()))?;
         }
         for batch in batches {
@@ -1019,15 +1018,15 @@ fn apply_install(
         }
         _ => None,
     };
-    let gc_agent = match &result {
-        Ok(outcome) if agents && !outcome.dry_run => Some(super::gc_agent::install(
+    let tick_agent = match &result {
+        Ok(outcome) if agents && !outcome.dry_run => Some(super::tick_agent::install(
             &state,
             &home,
             outcome
                 .actions
                 .iter()
-                .any(|action| action.selector == "gc-agent"),
-            gc_enabled,
+                .any(|action| action.selector == "tick-agent"),
+            tick_enabled,
         )),
         _ => None,
     };
@@ -1035,7 +1034,7 @@ fn apply_install(
         result,
         summaries,
         peer_agent,
-        gc_agent,
+        tick_agent,
     })
 }
 
@@ -1552,7 +1551,7 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
         Ok(value) => value,
         Err(error) => return edge_error("uninstall", error, globals),
     };
-    if let Err(error) = prepare_agents_with(&mut targets, false) {
+    if let Err(error) = prepare_agents(&mut targets) {
         return edge_error("uninstall", error, globals);
     }
     let clock = SystemClock::new();

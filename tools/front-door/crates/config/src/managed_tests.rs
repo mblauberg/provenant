@@ -3725,7 +3725,51 @@ fn json_rewrite_retries_are_bounded_and_other_drift_still_refuses() {
 }
 
 #[test]
-fn missing_gc_agent_is_stopped_only_when_the_last_harness_is_removed() {
+fn reinstall_migrates_the_receipted_gc_agent_to_tick() {
+    let mut f = Fixture::new();
+    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+        .resolve(&Resolver)
+        .unwrap();
+    f.targets.tick_agent = Some(b"rendered tick plist\n".to_vec());
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let tick = tick_agent_plist(f.targets.roots.state.as_path()).unwrap();
+    let gc = tick.with_file_name("dev.provenant.gc.plist");
+    fs::rename(&tick, &gc).unwrap();
+    let receipt_path = f.targets.roots.state.as_path().join("install/receipt.json");
+    let text = fs::read_to_string(&receipt_path).unwrap();
+    fs::write(
+        &receipt_path,
+        text.replace("tick-agent", "gc-agent")
+            .replace("dev.provenant.tick.plist", "dev.provenant.gc.plist"),
+    )
+    .unwrap();
+    let plan = f.plan();
+    assert!(plan.actions().iter().any(|action| {
+        action.selector == "gc-agent" && action.disposition == Disposition::Remove
+    }));
+    assert!(
+        plan.actions()
+            .iter()
+            .any(|action| action.selector == "tick-agent")
+    );
+    install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    assert!(!gc.exists());
+    assert!(tick.exists());
+    assert!(
+        !read_receipt(&f.targets)
+            .unwrap()
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.selector == "gc-agent")
+    );
+}
+
+#[test]
+fn missing_tick_agent_is_stopped_only_when_the_last_harness_is_removed() {
     let mut f = Fixture::new();
     f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
         .resolve(&Resolver)
@@ -3736,19 +3780,19 @@ fn missing_gc_agent_is_stopped_only_when_the_last_harness_is_removed() {
         &[Harness::Claude, Harness::Codex],
     )
     .harnesses;
-    f.targets.gc_agent = Some(b"rendered plist\n".to_vec());
+    f.targets.tick_agent = Some(b"rendered plist\n".to_vec());
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let ctx = context(&clock, &cancel);
     install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    fs::remove_file(gc_agent_plist(f.targets.roots.state.as_path()).unwrap()).unwrap();
+    fs::remove_file(tick_agent_plist(f.targets.roots.state.as_path()).unwrap()).unwrap();
     struct StopReporter(usize);
     impl InstallReporter for StopReporter {
         fn preview(&mut self, _: &[Action]) -> io::Result<()> {
             Ok(())
         }
         fn before_remove(&mut self, action: &Action) -> io::Result<()> {
-            if action.selector == "gc-agent" {
+            if action.selector == "tick-agent" {
                 self.0 += 1;
             }
             Ok(())
@@ -3764,7 +3808,7 @@ fn missing_gc_agent_is_stopped_only_when_the_last_harness_is_removed() {
             .unwrap()
             .entries
             .iter()
-            .any(|entry| entry.selector == "gc-agent")
+            .any(|entry| entry.selector == "tick-agent")
     );
     f.targets.harnesses = vec![codex];
     uninstall(&f.targets, &ctx, &mut reporter).unwrap();
@@ -3775,25 +3819,25 @@ fn missing_gc_agent_is_stopped_only_when_the_last_harness_is_removed() {
             .unwrap()
             .entries
             .iter()
-            .any(|entry| entry.selector == "gc-agent")
+            .any(|entry| entry.selector == "tick-agent")
     );
 }
 
 #[test]
-fn gc_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
+fn tick_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
     for state in ["unchanged", "modified", "missing"] {
         let modified = state == "modified";
         let mut f = Fixture::new();
         f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
             .resolve(&Resolver)
             .unwrap();
-        f.targets.gc_agent = Some(b"rendered plist\n".to_vec());
-        let plist = gc_agent_plist(f.targets.roots.state.as_path()).unwrap();
+        f.targets.tick_agent = Some(b"rendered plist\n".to_vec());
+        let plist = tick_agent_plist(f.targets.roots.state.as_path()).unwrap();
         let plan = f.plan();
         assert!(
             plan.actions()
                 .iter()
-                .any(|action| action.selector == "gc-agent"
+                .any(|action| action.selector == "tick-agent"
                     && action.path.to_path_buf().unwrap() == plist)
         );
         assert!(!plist.exists());
@@ -3811,7 +3855,7 @@ fn gc_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
             receipt
                 .entries
                 .iter()
-                .any(|entry| entry.selector == "gc-agent")
+                .any(|entry| entry.selector == "tick-agent")
         );
         if modified {
             fs::write(&plist, b"user edited plist\n").unwrap();
@@ -3831,7 +3875,7 @@ fn gc_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
                 Ok(())
             }
             fn before_remove(&mut self, action: &Action) -> io::Result<()> {
-                if action.selector == "gc-agent" {
+                if action.selector == "tick-agent" {
                     self.0 += 1;
                 }
                 Ok(())
@@ -3844,7 +3888,7 @@ fn gc_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
             result
                 .actions
                 .iter()
-                .filter(|action| action.selector == "gc-agent")
+                .filter(|action| action.selector == "tick-agent")
                 .count(),
             usize::from(!modified)
         );
@@ -3861,30 +3905,30 @@ fn gc_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
 }
 
 #[test]
-fn disabling_gc_agent_reinstall_stops_exact_or_missing_owned_plists() {
+fn disabling_tick_agent_reinstall_stops_exact_or_missing_owned_plists() {
     for state in ["unchanged", "modified", "missing"] {
         let mut f = Fixture::new();
         f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
             .resolve(&Resolver)
             .unwrap();
-        f.targets.gc_agent = Some(b"rendered plist\n".to_vec());
+        f.targets.tick_agent = Some(b"rendered plist\n".to_vec());
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let ctx = context(&clock, &cancel);
         install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-        let plist = gc_agent_plist(f.targets.roots.state.as_path()).unwrap();
+        let plist = tick_agent_plist(f.targets.roots.state.as_path()).unwrap();
         match state {
             "modified" => fs::write(&plist, b"user edited plist\n").unwrap(),
             "missing" => fs::remove_file(&plist).unwrap(),
             _ => {}
         }
-        f.targets.gc_agent = None;
+        f.targets.tick_agent = None;
         let plan = f.plan();
         let removable = state != "modified";
         assert_eq!(
             plan.actions()
                 .iter()
-                .any(|action| action.selector == "gc-agent"),
+                .any(|action| action.selector == "tick-agent"),
             removable
         );
         struct StopReporter(usize);
@@ -3893,7 +3937,7 @@ fn disabling_gc_agent_reinstall_stops_exact_or_missing_owned_plists() {
                 Ok(())
             }
             fn before_remove(&mut self, action: &Action) -> io::Result<()> {
-                if action.selector == "gc-agent" {
+                if action.selector == "tick-agent" {
                     self.0 += 1;
                 }
                 Ok(())
@@ -3919,7 +3963,7 @@ fn disabling_gc_agent_reinstall_stops_exact_or_missing_owned_plists() {
                 .unwrap()
                 .entries
                 .iter()
-                .any(|entry| entry.selector == "gc-agent")
+                .any(|entry| entry.selector == "tick-agent")
         );
     }
 }

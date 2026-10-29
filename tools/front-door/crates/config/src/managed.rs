@@ -169,8 +169,8 @@ pub struct Targets {
     pub remove_hooks: bool,
     /// Rendered per-user LaunchAgent, supplied only by the process edge.
     pub peer_agent: Option<Vec<u8>>,
-    /// Rendered scheduled cache collector, supplied only by the process edge.
-    pub gc_agent: Option<Vec<u8>>,
+    /// Rendered host tick scheduler, supplied only by the process edge.
+    pub tick_agent: Option<Vec<u8>>,
     /// Exact recognised historical rendering, for migration from pre-receipt agents.
     pub peer_agent_previous: Option<Vec<u8>>,
     pub hook_specs: Vec<HookRegistration>,
@@ -245,7 +245,7 @@ impl Targets {
             hooks: false,
             remove_hooks: false,
             peer_agent: None,
-            gc_agent: None,
+            tick_agent: None,
             peer_agent_previous: None,
             hook_specs: Vec::new(),
             accounts: Vec::new(),
@@ -520,7 +520,7 @@ impl Snapshots {
         if let Some(previous) = &receipt {
             for entry in &previous.entries {
                 if entry.selector == "binary"
-                    || entry.selector == "gc-agent"
+                    || matches!(entry.selector.as_str(), "tick-agent" | "gc-agent")
                     || entry_owner(entry, previous, targets.roots.state.as_path())?
                         .is_some_and(|owner| selected.contains(&owner))
                 {
@@ -666,13 +666,13 @@ fn desired(
             "peer-agent".into(),
         )?;
     }
-    if let Some(bytes) = &targets.gc_agent {
-        let path = gc_agent_plist(targets.roots.state.as_path()).ok_or(
-            InstallError::InvalidConfig("gc agent requires the default state root"),
+    if let Some(bytes) = &targets.tick_agent {
+        let path = tick_agent_plist(targets.roots.state.as_path()).ok_or(
+            InstallError::InvalidConfig("tick agent requires the default state root"),
         )?;
         let home =
             provenant_os::fs::canonicalize(&targets.home).unwrap_or_else(|_| targets.home.clone());
-        if path != home.join("Library/LaunchAgents/dev.provenant.gc.plist") {
+        if path != home.join("Library/LaunchAgents/dev.provenant.tick.plist") {
             return Err(InstallError::Conflict(path));
         }
         insert(
@@ -682,7 +682,7 @@ fn desired(
                 mode: 0o600,
             },
             None,
-            "gc-agent".into(),
+            "tick-agent".into(),
         )?;
     }
     for target in &targets.harnesses {
@@ -754,9 +754,9 @@ pub fn peer_agent_plist(state: &Path) -> Option<PathBuf> {
         .then(|| home.join("Library/LaunchAgents/dev.provenant.peer.plist"))
 }
 
-/// The scheduled collector shares the per-user default-state ownership scope.
-pub fn gc_agent_plist(state: &Path) -> Option<PathBuf> {
-    peer_agent_plist(state).map(|path| path.with_file_name("dev.provenant.gc.plist"))
+/// The host tick shares the per-user default-state ownership scope.
+pub fn tick_agent_plist(state: &Path) -> Option<PathBuf> {
+    peer_agent_plist(state).map(|path| path.with_file_name("dev.provenant.tick.plist"))
 }
 
 fn validate_removal(
@@ -963,7 +963,10 @@ pub fn plan_install(
                 entries.push(entry.clone());
                 continue;
             }
-            if !matches!(entry.selector.as_str(), "binary" | "gc-agent") {
+            if !matches!(
+                entry.selector.as_str(),
+                "binary" | "tick-agent" | "gc-agent"
+            ) {
                 let Some(owner) = owner else {
                     continue;
                 };
@@ -980,7 +983,8 @@ pub fn plan_install(
             if current
                 .as_ref()
                 .is_some_and(|before| matches_owned(&before.value, &entry.expected))
-                || (current.is_none() && entry.selector == "gc-agent")
+                || (current.is_none()
+                    && matches!(entry.selector.as_str(), "tick-agent" | "gc-agent"))
             {
                 actions.push(Action {
                     path: entry.path.clone(),
@@ -991,7 +995,7 @@ pub fn plan_install(
                     identity: identity(current),
                     edits: Vec::new(),
                 });
-            } else if entry.selector == "gc-agent" {
+            } else if matches!(entry.selector.as_str(), "tick-agent" | "gc-agent") {
                 snapshots.harness.findings.push(InstallFinding {
                     rule: "relinquished_modified_entry".into(),
                     detail: None,
@@ -1948,10 +1952,16 @@ fn permitted_entry(
     let path = entry.path.to_path_buf()?;
     normal_absolute(&path)?;
     if entry.harness.is_none() {
-        if matches!(entry.selector.as_str(), "peer-agent" | "gc-agent") {
+        if matches!(
+            entry.selector.as_str(),
+            "peer-agent" | "tick-agent" | "gc-agent"
+        ) {
             let expected_path = match entry.selector.as_str() {
                 "peer-agent" => peer_agent_plist(state_root),
-                _ => gc_agent_plist(state_root),
+                "tick-agent" => tick_agent_plist(state_root),
+                // Only migration/removal reads this former install receipt entry.
+                _ => peer_agent_plist(state_root)
+                    .map(|path| path.with_file_name("dev.provenant.gc.plist")),
             };
             return Ok(expected_path.as_ref() == Some(&path)
                 && matches!(
@@ -2394,8 +2404,10 @@ pub fn uninstall(
     }
     let removed = |entry: &OwnedEntry, owner: &Option<TargetId>| {
         owner.as_ref().is_some_and(|id| selected.contains(id))
-            || (matches!(entry.selector.as_str(), "peer-agent" | "gc-agent")
-                && selected == registered)
+            || (matches!(
+                entry.selector.as_str(),
+                "peer-agent" | "tick-agent" | "gc-agent"
+            ) && selected == registered)
     };
 
     let mut removals = Vec::new();
@@ -2447,7 +2459,7 @@ pub fn uninstall(
         // A deleted plist can still have a loaded service. Keep its stop in the
         // same locked, retryable removal path as an unchanged recorded plist.
         if before.is_none()
-            && entry.selector != "gc-agent"
+            && !matches!(entry.selector.as_str(), "tick-agent" | "gc-agent")
             && (entry.selector != "peer-agent" || !recorded_peer_agent)
         {
             continue;

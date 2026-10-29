@@ -60,6 +60,8 @@ fn findings() -> Vec<Finding> {
         line: None,
         summary,
         status: "open".into(),
+        disposition: None,
+        reason: None,
     };
     let mut findings = vec![finding(String::new()); MAX_FINDINGS];
     let spare = FINDINGS_BYTES - canonical_len(&findings);
@@ -124,6 +126,16 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
                 (1..=rounds).map(|round| filled_ask(asks::loop_ask(&plan.graph_id, &node.id, usize::MAX - round, session))),
             );
         }
+        if let Some(spec) = &node.land {
+            asks.push(filled_ask(land::land_ask(
+                &plan.graph_id,
+                node,
+                &filled_land(spec.tier),
+                land::session(spec, plan).unwrap(),
+                u64::MAX,
+                Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
+            )));
+        }
         if let Some(spec) = &node.decide {
             let session = asks::decide_session(spec, plan.decision_session.as_deref()).unwrap();
             asks.push(filled_ask(asks::decide_ask(
@@ -149,6 +161,25 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
         }));
     }
     asks
+}
+
+fn filled_land(tier: provenant_records::workflow::RiskTier) -> LandRecord {
+    LandRecord {
+        extra: Default::default(),
+        tier,
+        policy: crate::config::LandPolicy::Ask,
+        policy_source: crate::config::LandSource::Project,
+        branch: worst(OUTPUT_FIELD_BYTES),
+        head: worst(OUTPUT_FIELD_BYTES),
+        authorised_by: Some(LandAuthority::Ask {
+            ask_id: format!("{}.ask-{}", "l".repeat(64), u64::MAX),
+            actor: worst(HOST_ID_BYTES),
+        }),
+        pull_request: Some(u64::MAX),
+        note: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
+        wake_at: Some(envelope::latest()),
+        pending_observations: u64::MAX,
+    }
 }
 
 fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphCheckpoint {
@@ -180,7 +211,16 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                     reason: Some(worst(OUTPUT_FIELD_BYTES)),
                     on_fail: node.on_fail.clone(),
                 }),
+                separation: node.distinct_from.map(|_| FamilySeparation {
+                    extra: Default::default(),
+                    strength: FamilyStrength::Require,
+                    excluded: vec![worst(FAMILY_BYTES); SEPARATION_FAMILIES],
+                    applied: Some(worst(FAMILY_BYTES)),
+                    outcome: SeparationOutcome::Unavailable,
+                }),
                 ci: matches!(node.condition, Some(GateCondition::Ci { .. })).then(|| CiEvidence {
+                    wake_at: Some(envelope::latest()),
+                    pending_observations: u64::MAX,
                     extra: Default::default(),
                     first_observed_stamp: Some(CiHostStamp {
                         extra: Default::default(),
@@ -191,7 +231,13 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                     clock_reanchor_reason: Some("previous checkpoint lacked a host stamp".into()),
                     state: CiState::Unavailable,
                     summary: worst(OUTPUT_FIELD_BYTES),
+                    head_sha: Some("a".repeat(64)),
+                    failed_checks: Vec::new(),
+                    check_names: vec![worst(OUTPUT_FIELD_BYTES - 3)],
+                    truncated: true,
+                    elapsed_seconds: u64::MAX,
                 }),
+                land: node.land.as_ref().map(|spec| filled_land(spec.tier)),
                 title: Some(node.title.clone().unwrap_or_else(|| node.id.clone())),
                 worktree: node.worktree.clone(),
                 id: node.id.clone(),
@@ -284,7 +330,34 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
 
 #[test]
 fn worst_case_checkpoint_fits_its_bound() {
-    let document = mixed();
+    assert_fits(mixed());
+}
+
+#[test]
+fn worst_case_land_checkpoint_fits_its_bound() {
+    assert_fits(
+        serde_json::from_value(json!({
+            "schema_version":1, "graph_id":"envelope-land", "decision_session":"chair", "nodes":[
+                {"id":"write", "access":"worktree_write", "worktree":"/fixture/writer", "delivery":"pr",
+                 "prompt":"write", "routes":routes(2)},
+                {"id":"review", "access":"read_only", "prompt":"Review", "depends_on":["write"],
+                 "route":{"alias":"senior"}},
+                {"id":"ci", "kind":"gate", "access":"read_only", "depends_on":["write"],
+                 "condition":{"type":"ci", "target":"feature/example"}},
+                {"id":"repair", "access":"worktree_write", "worktree":"/fixture/writer",
+                 "continues":"write", "prompt":"repair", "depends_on":["ci"], "route":{"alias":"senior"}},
+                {"id":"accepted", "kind":"gate", "access":"read_only", "depends_on":["review", "repair"],
+                 "inputs":[{"node":"review","outputs":["verdict"]}],
+                 "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}},
+                {"id":"land", "kind":"land", "access":"read_only", "depends_on":["accepted", "ci"],
+                 "land":{"node":"write", "tier":"crucial", "session":"chair"}}
+            ]
+        }))
+        .unwrap(),
+    );
+}
+
+fn assert_fits(document: GraphDocument) {
     let plan = planned(&document);
     let checkpoint = filled_checkpoint(&document, &plan);
     let execution = GraphExecution {
@@ -560,4 +633,35 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
     assert_eq!(run.status, GraphStatus::Complete);
     assert_eq!((run.checkpoint.nodes[0].attempts[0].settled, run.checkpoint.settlements), (3, 3));
     assert!(run.checkpoint.unknown_usage.last().unwrap().starts_with("node one "));
+}
+
+#[test]
+fn ci_failed_checks_and_findings_fit_the_configured_envelope() {
+    for cap in [0, 150, 16384, 65536] {
+        for count in [0,1,20,100] {
+            let mut document=mixed();
+            let Some(GateCondition::Ci { failed_checks_max_bytes,max_failed_checks,.. })=&mut document.nodes[3].condition else {unreachable!()};
+            *failed_checks_max_bytes=Some(cap);
+            *max_failed_checks=Some(count);
+            let plan=planned(&document);
+            let mut checkpoint=filled_checkpoint(&document,&plan);
+            for node in &mut checkpoint.nodes {
+                if let Some(ci)=&mut node.ci {
+                    let mut observation=CiObservation {
+                        extra:Default::default(),state:CiState::Failed,summary:worst(OUTPUT_FIELD_BYTES),
+                        head_sha:Some("a".repeat(40)),check_names:Vec::new(),truncated:false,
+                        failed_checks:vec![CiFailedCheck {extra:Default::default(),name:"build".into(),url:Some("https://ci/1".into()),excerpt:worst(cap)};count.saturating_add(1)],
+                    };
+                    observation.bound_failed_checks(cap,count);
+                    ci.failed_checks=observation.failed_checks;
+                    ci.truncated=observation.truncated;
+                    node.outputs=Some(ci::outputs(false,Some(ci)));
+                }
+            }
+            let execution=GraphExecution {extra:Default::default(),integration_base:Some("1".repeat(40).parse().unwrap()),directory:"/fixture".into(),document:document.clone()};
+            let stored=StoredCheckpoint {extra:Default::default(),schema_version:1,digest:"sha256:".to_owned()+&"f".repeat(64),checkpoint,execution};
+            let bound=envelope::checkpoint_bound(&document,&[],&stored.checkpoint.extensions,&plan);
+            assert!(canonical_len(&stored)<=bound,"cap={cap} count={count}");
+        }
+    }
 }

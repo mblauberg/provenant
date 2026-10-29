@@ -848,6 +848,19 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
     Ok(())
 }
 
+/// Status refreshes the live CI wait time, so snapshots compare without it.
+fn without_elapsed(checkpoint: &Value) -> Value {
+    let mut checkpoint = checkpoint.clone();
+    if let Some(nodes) = checkpoint["nodes"].as_array_mut() {
+        for node in nodes {
+            if let Some(ci) = node["ci"].as_object_mut() {
+                ci.remove("elapsed_seconds");
+            }
+        }
+    }
+    checkpoint
+}
+
 #[test]
 fn pending_ci_graph_status_is_a_snapshot() -> Result {
     let mut rig = TestRig::new()?;
@@ -855,11 +868,19 @@ fn pending_ci_graph_status_is_a_snapshot() -> Result {
     let gh = rig.root.join("gh");
     let calls = rig.root.join("gh-calls");
     let response = rig.root.join("gh-response");
-    std::fs::write(&response, r#"[{"name":"build","bucket":"pending"}]"#)?;
+    // The host pins the PR head, then reads that head's check runs and
+    // statuses, so the fake answers each read the way GitHub would.
+    let head = "a".repeat(40);
+    let check_runs = |status: &str, conclusion: Option<&str>| {
+        json!([{"check_runs":[{"name":"build","head_sha":head,"status":status,"conclusion":conclusion}]}])
+            .to_string()
+    };
+    std::fs::write(&response, check_runs("in_progress", None))?;
+    let pull = json!({"headRefOid":head,"headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"owner"}});
     std::fs::write(
         &gh,
         format!(
-            "#!/bin/sh\nprintf 'call\\n' >> '{}'\ncat '{}'\n",
+            "#!/bin/sh\nprintf 'call\\n' >> '{}'\ncase \"$*\" in\n*'pr view'*) printf '%s' '{pull}' ;;\n*check-runs*) cat '{}' ;;\n*statuses*) printf '[[]]' ;;\n*) exit 1 ;;\nesac\n",
             calls.display(),
             response.display()
         ),
@@ -908,11 +929,14 @@ fn pending_ci_graph_status_is_a_snapshot() -> Result {
         .join("graph-pending-ci.advance-error");
     std::fs::write(&marker, "journal lock timed out")?;
     // If status queried CI, the new response could release the downstream node.
-    std::fs::write(&response, r#"[{"name":"build","bucket":"pass"}]"#)?;
+    std::fs::write(&response, check_runs("completed", Some("success")))?;
     let status = rig.command(&["fabric", "graph", "status", "pending-ci", "--json"])?;
     assert_eq!(code(&status), 0);
     let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
-    assert_eq!(status["data"]["checkpoint"], *checkpoint);
+    assert_eq!(
+        without_elapsed(&status["data"]["checkpoint"]),
+        without_elapsed(checkpoint)
+    );
     assert_eq!(status["data"]["advance_error"], "journal lock timed out");
     let frames = mcp(
         &rig,
@@ -925,7 +949,10 @@ fn pending_ci_graph_status_is_a_snapshot() -> Result {
         .find(|frame| frame["id"] == "status")
         .ok_or("graph status")?["result"];
     assert_ne!(result["isError"], true, "{result}");
-    assert_eq!(result["structuredContent"]["checkpoint"], *checkpoint);
+    assert_eq!(
+        without_elapsed(&result["structuredContent"]["checkpoint"]),
+        without_elapsed(checkpoint)
+    );
     assert_eq!(
         result["structuredContent"]["advance_error"],
         "journal lock timed out"
@@ -1970,6 +1997,56 @@ fn lane_graph_status_does_not_create_shared_graph_store() -> Result {
     let result = &replies.iter().find(|r| r["id"] == 1).ok_or("status")?["result"];
     assert_eq!(result["structuredContent"]["code"], "not_found", "{result}");
     assert!(!rig.state.join("fabric/graphs").exists());
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn sandboxed_lane_environment_refuses_mutating_provenant_before_coordination_access() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    assert_eq!(code(&identity), 0);
+    let parent = "11111111111111111111111111111111";
+    let child_state = rig.state.join("children").join(parent);
+    std::fs::create_dir_all(&child_state)?;
+    std::fs::set_permissions(
+        rig.state.join("children"),
+        std::fs::Permissions::from_mode(0o700),
+    )?;
+    std::fs::set_permissions(&child_state, std::fs::Permissions::from_mode(0o700))?;
+    for (key, value) in &mut rig.env {
+        if key == "PROVENANT_AGENT_LABEL" {
+            *value = format!("lane-{parent}").into();
+        }
+    }
+    rig.env.push((
+        provenant_core::RUN_STATE_DIRECTORY_ENV.into(),
+        child_state.clone().into(),
+    ));
+    rig.env
+        .push((provenant_run::PARENT_ATTEMPT_ENV.into(), parent.into()));
+    rig.env
+        .push((provenant_run::LANE_DEPTH_ENV.into(), "1".into()));
+
+    let refused = rig.command(&[
+        "fabric",
+        "graph",
+        "run",
+        "--document",
+        "missing.json",
+        "--json",
+    ])?;
+    assert_ne!(code(&refused), 0);
+    let result: Value = serde_json::from_slice(&refused.stdout.bytes)?;
+    assert_eq!(
+        result["error"]["code"], "lane_coordination_refused",
+        "{result}"
+    );
+    assert_eq!(
+        result["error"]["message"], "coordination mutations are not allowed inside a lane",
+        "{result}"
+    );
+    assert!(!rig.state.join("fabric/graphs").exists());
+    assert!(!child_state.join("fabric/graphs").exists());
     rig.assert_legacy_unchanged()
 }
 

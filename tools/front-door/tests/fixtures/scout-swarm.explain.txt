@@ -1,4 +1,5 @@
 Graph <id>
+Preset selection: scout-swarm (override)
 scouts  role=- tier=- family=any kind=composite access=read_only worktree=-
   scout-1  role=scout.codebase tier=junior family=any kind=- access=read_only worktree=-
     reference: skill:scope/references/scout-areas.md <digest>

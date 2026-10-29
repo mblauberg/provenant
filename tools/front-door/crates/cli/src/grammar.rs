@@ -139,6 +139,8 @@ pub enum Command {
     Pr(Pr),
     /// Collect lane caches, ignored output, merged worktrees and expired captures
     Gc(Gc),
+    /// Advance due graphs and run scheduled host tasks
+    Tick,
     /// Inspect disk use without changing files
     #[command(subcommand)]
     Disk(Disk),
@@ -170,7 +172,28 @@ pub enum Preset {
         roles: bool,
     },
     /// Explain when to use a preset, its cost, and its typed parameters
-    Explain { name: String },
+    Explain {
+        /// Explain one preset, or omit to explain the current rule selection
+        name: Option<String>,
+        /// Risk tier supplied to selection rules
+        #[arg(long)]
+        risk: Option<String>,
+        /// Task kind supplied to selection rules
+        #[arg(long)]
+        kind: Option<String>,
+        /// Changed or declared path supplied to selection rules (repeatable)
+        #[arg(long = "path")]
+        paths: Vec<String>,
+        /// Prompt size band supplied to selection rules
+        #[arg(long)]
+        size: Option<String>,
+        /// Mark the work as ready, bypassing the readiness route
+        #[arg(long)]
+        ready: bool,
+        /// Route underspecified work through the configured readiness rule
+        #[arg(long, conflicts_with = "ready")]
+        underspecified: bool,
+    },
 }
 #[derive(Debug, Args)]
 pub struct Review {
@@ -516,7 +539,7 @@ pub struct DispatchInput {
 #[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
 pub struct Dispatch {
     /// Expand and run a named pipeline preset
-    #[arg(long, requires = "prompt_file", conflicts_with_all = ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"])]
+    #[arg(long, requires = "prompt_file", conflicts_with_all = ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"])]
     pub preset: Option<String>,
     /// Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable
     #[arg(long = "set", requires = "preset")]
@@ -525,8 +548,17 @@ pub struct Dispatch {
     #[arg(long = "params-file", requires = "preset")]
     pub preset_params_file: Option<PathBuf>,
     /// Explain roles, limits and the expanded graph without running it
-    #[arg(long, requires = "preset")]
+    #[arg(long)]
     pub explain: bool,
+    /// Risk tier supplied to automatic preset selection
+    #[arg(long)]
+    pub risk_tier: Option<String>,
+    /// Task kind supplied to automatic preset selection
+    #[arg(long)]
+    pub task_kind: Option<String>,
+    /// Changed or declared path supplied to automatic preset selection (repeatable)
+    #[arg(long = "path")]
+    pub selection_paths: Vec<String>,
     /// Use the build-heavy scheduling priority
     #[arg(long)]
     pub build_heavy: bool,
@@ -1103,6 +1135,7 @@ pub enum Internal {
         request: String,
     },
     ProviderUpdates,
+    TickGc,
     /// Take a host build slot, then run the given cargo command (the lane's cargo shim). The slot directory, count and wait come from the host's environment (`PROVENANT_BUILD_SLOT_STATE`, `PROVENANT_BUILD_SLOTS`, `PROVENANT_BUILD_WAIT_SECS`), never from arguments.
     BuildSlot {
         /// The real cargo, then its arguments.
