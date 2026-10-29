@@ -613,9 +613,11 @@ impl From<&RunError> for ErrorKind {
             RunError::HostClock => Self::HostClock,
             RunError::WriterRefLocked(_) => Self::WriterRefLocked,
             RunError::ObjectImportLimit(_) => Self::ObjectImportLimit,
-            RunError::Validation(_) | RunError::InvalidBase(_) | RunError::TooLarge { .. } => {
-                Self::Invalid
-            }
+            RunError::Validation(_)
+            | RunError::WriterHeadNotLaneBranch
+            | RunError::ReviewAcceptanceRequired
+            | RunError::InvalidBase(_)
+            | RunError::TooLarge { .. } => Self::Invalid,
             RunError::OperationConflict => Self::OperationConflict,
             RunError::NotFound => Self::NotFound,
             RunError::Nonterminal => Self::Nonterminal,

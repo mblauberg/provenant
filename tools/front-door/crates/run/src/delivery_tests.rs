@@ -1962,7 +1962,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
         )
     };
     let refusal = deliver(false).expect_err("review requires explicit acceptance");
-    assert!(refusal.to_string().contains("--accept-review"));
+    assert!(matches!(refusal, RunError::ReviewAcceptanceRequired));
     fixture.commit(&fixture.writer.worktree, "moved after review")?;
     assert!(matches!(
         deliver(true),
@@ -2577,12 +2577,11 @@ fn terminal_names_a_writer_left_off_the_lane_branch()
             fixture.lane_git(&["checkout", "--detach"])?;
             fixture.commit(&fixture.writer.worktree, "Detached work")
         })
-        .expect_err("detached writer HEAD")
-        .to_string();
-    assert!(
-        error.contains("writer HEAD is not the lane branch"),
-        "{error}"
-    );
+        .expect_err("detached writer HEAD");
+    assert!(matches!(
+        error.downcast_ref::<RunError>(),
+        Some(RunError::WriterHeadNotLaneBranch)
+    ));
     Ok(())
 }
 

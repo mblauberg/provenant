@@ -197,6 +197,10 @@ pub enum RunError {
     Plan(#[from] provenant_confinement::PlanError),
     #[error("invalid run record: {0}")]
     Validation(&'static str),
+    #[error("invalid run record: writer HEAD is not the lane branch")]
+    WriterHeadNotLaneBranch,
+    #[error("invalid run record: review required; use lane deliver --accept-review ATTEMPT")]
+    ReviewAcceptanceRequired,
     #[error("lane object import refused: {0}")]
     ObjectImportLimit(&'static str),
     #[error("invalid Git base {0:?}: expected a resolvable commit reference")]

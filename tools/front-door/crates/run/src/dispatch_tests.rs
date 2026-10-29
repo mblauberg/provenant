@@ -6140,7 +6140,7 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
         } else {
             assert!(
                 matches!(found.as_slice(), [(attempt, Reconciled::Uncertain { reason })]
-                if *attempt == id && reason.to_string().contains("chair recovery required"))
+                if *attempt == id && matches!(reason, UncertainReason::WriterReservationRetained { .. }))
             );
             assert_eq!(store.writer_fences()?.len(), 1);
             assert_eq!(store.open_runs(10, &call)?, vec![run.run_id]);

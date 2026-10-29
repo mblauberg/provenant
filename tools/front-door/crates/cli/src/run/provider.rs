@@ -184,12 +184,13 @@ fn prepare_candidates(
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
         return prepare_command(registry, task, paths, resume, locate, provider, name);
     }
-    check_launch_prompt(prompt_text, paths, None)?;
+    check_launch_prompt(prompt_text, paths, None).map_err(|error| error.to_string())?;
     if task.fallback.is_empty()
         && let run::RequestedRoute::Model { model, .. } = &task.route
         && let Some((adapter, _)) = model.split_once('/')
     {
-        check_launch_prompt(prompt_text, paths, Some(adapter))?;
+        check_launch_prompt(prompt_text, paths, Some(adapter))
+            .map_err(|error| error.to_string())?;
     }
     // Only fixture builds may stand a supplied token in for host authority.
     #[cfg(not(feature = "fixture"))]
@@ -684,7 +685,7 @@ fn prepare_candidates(
         let prompt = match launch_prompt(&text, paths, state_root, adapter.id()) {
             Ok(prompt) => prompt,
             Err(error) => {
-                reasons.push(skip(&label, SkipKind::Refused, error));
+                reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
                 continue;
             }
         };
@@ -2079,16 +2080,37 @@ fn credential_authority(
     Ok(authority)
 }
 
+#[derive(Debug, thiserror::Error)]
+enum LaunchPromptError {
+    #[error(
+        "invalid input: launch prompt including the preamble exceeds 1 MiB; shorten the prompt"
+    )]
+    TooLarge,
+    #[error(
+        "invalid input: nested argv launch prompt including the preamble exceeds 64 KiB; route the child to a stdin adapter (claude, codex or opencode), or shorten the prompt"
+    )]
+    NestedArgvTooLarge,
+    #[error("{0}")]
+    Other(String),
+}
+impl From<String> for LaunchPromptError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+impl From<&str> for LaunchPromptError {
+    fn from(message: &str) -> Self {
+        Self::Other(message.into())
+    }
+}
+
 fn check_launch_prompt(
     text: &str,
     paths: &run::LaunchPaths,
     adapter: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), LaunchPromptError> {
     if text.len() as u64 > super::PROMPT_LIMIT {
-        return Err(
-            "invalid input: launch prompt including the preamble exceeds 1 MiB; shorten the prompt"
-                .into(),
-        );
+        return Err(LaunchPromptError::TooLarge);
     }
     if paths.lane_depth > 1
         && adapter
@@ -2096,7 +2118,7 @@ fn check_launch_prompt(
             .is_some_and(|spec| spec.argv_prompt)
         && Prompt::new(text.to_owned()).check_argv().is_err()
     {
-        return Err("invalid input: nested argv launch prompt including the preamble exceeds 64 KiB; route the child to a stdin adapter (claude, codex or opencode), or shorten the prompt".into());
+        return Err(LaunchPromptError::NestedArgvTooLarge);
     }
     Ok(())
 }
@@ -2106,7 +2128,7 @@ fn launch_prompt(
     paths: &run::LaunchPaths,
     state_root: &Path,
     adapter: &str,
-) -> Result<Prompt, String> {
+) -> Result<Prompt, LaunchPromptError> {
     check_launch_prompt(text, paths, Some(adapter))?;
     let prompt = Prompt::new(text.to_owned());
     if !AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt)
@@ -2149,7 +2171,7 @@ fn launch_prompt(
             .require_durable()
             .map_err(|error| error.to_string())?,
         Err(error) if error.is_exists() && matches(name)? => {}
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(error.to_string().into()),
     }
     let prompt = Prompt::from_file(attempt.join(name));
     prompt.check_argv().map_err(|error| error.to_string())?;
@@ -3066,7 +3088,10 @@ mod tests {
             let error = launch_prompt(&text, &paths, &attempt, adapter)
                 .err()
                 .ok_or("oversized launch accepted")?;
-            assert!(error.contains("1 MiB"), "{adapter}: {error}");
+            assert!(
+                matches!(error, LaunchPromptError::TooLarge),
+                "{adapter}: {error}"
+            );
         }
         assert!(!attempt.join("prompt.md").exists());
         Ok(())
@@ -3106,9 +3131,10 @@ mod tests {
             let error = launch_prompt(&text, &paths, &attempt, adapter)
                 .err()
                 .ok_or("nested argv spill accepted")?;
-            for expected in ["invalid input", "64 KiB", "stdin adapter", "shorten"] {
-                assert!(error.contains(expected), "{error}");
-            }
+            assert!(
+                matches!(error, LaunchPromptError::NestedArgvTooLarge),
+                "{error}"
+            );
             assert!(!attempt.join("prompt.md").exists());
 
             paths.lane_depth = 1;

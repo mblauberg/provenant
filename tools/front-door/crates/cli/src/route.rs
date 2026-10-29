@@ -410,8 +410,17 @@ pub(crate) enum EdgeError {
     Pacing(&'static str),
     #[error("{0}")]
     GoAllowance(String),
-    #[error("{0}")]
-    AccountProfile(String),
+    #[error("{message}")]
+    AccountProfile {
+        kind: AccountProfileError,
+        message: String,
+    },
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccountProfileError {
+    Unknown,
+    Ambiguous,
+    Duplicate,
 }
 impl From<provenant_config::ConfigError> for EdgeError {
     fn from(error: provenant_config::ConfigError) -> Self {
@@ -749,25 +758,31 @@ fn resolve_account_reference(
     }
     match matches.as_slice() {
         [(_, entry)] => Ok(format!("{}/{}", entry.adapter, entry.key)),
-        [] => Err(EdgeError::AccountProfile(format!(
-            "{field}: unknown account `{name}`; valid accounts: {}",
-            if valid.is_empty() {
-                "(none registered)"
-            } else {
-                &valid
-            }
-        ))),
-        _ => Err(EdgeError::AccountProfile(format!(
-            "{field}: account `{name}` is ambiguous: {}; use adapter/key or a unique label",
-            matches
-                .iter()
-                .map(|(id, entry)| format!(
-                    "{}/{} (label: {}, entry: {})",
-                    entry.adapter, entry.key, entry.label, id
-                ))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
+        [] => Err(EdgeError::AccountProfile {
+            kind: AccountProfileError::Unknown,
+            message: format!(
+                "{field}: unknown account `{name}`; valid accounts: {}",
+                if valid.is_empty() {
+                    "(none registered)"
+                } else {
+                    &valid
+                }
+            ),
+        }),
+        _ => Err(EdgeError::AccountProfile {
+            kind: AccountProfileError::Ambiguous,
+            message: format!(
+                "{field}: account `{name}` is ambiguous: {}; use adapter/key or a unique label",
+                matches
+                    .iter()
+                    .map(|(id, entry)| format!(
+                        "{}/{} (label: {}, entry: {})",
+                        entry.adapter, entry.key, entry.label, id
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }),
     }
 }
 
@@ -787,9 +802,10 @@ fn resolve_pacing_accounts(
             )?;
         }
         if accounts.insert(key.clone(), profile).is_some() {
-            return Err(EdgeError::AccountProfile(format!(
-                "multiple pacing profiles resolve to account key `{key}`"
-            )));
+            return Err(EdgeError::AccountProfile {
+                kind: AccountProfileError::Duplicate,
+                message: format!("multiple pacing profiles resolve to account key `{key}`"),
+            });
         }
     }
     config.pacing.accounts = accounts;
@@ -1810,9 +1826,12 @@ pub fn run(
                 EdgeError::Routing(_) | EdgeError::Unresolved { .. } | EdgeError::Pacing(_) => {
                     (Outcome::Invalid, "INVALID")
                 }
-                EdgeError::Config(_)
-                | EdgeError::PacingConfig(_)
-                | EdgeError::AccountProfile(_) => (Outcome::Invalid, "CONFIG"),
+                EdgeError::Config(_) | EdgeError::PacingConfig(_) => (Outcome::Invalid, "CONFIG"),
+                EdgeError::AccountProfile { kind, .. } => match kind {
+                    AccountProfileError::Unknown
+                    | AccountProfileError::Ambiguous
+                    | AccountProfileError::Duplicate => (Outcome::Invalid, "CONFIG"),
+                },
                 _ => (Outcome::Error, "IO"),
             };
             let mut result = CommandResult::new(name, status, None);
@@ -2182,16 +2201,16 @@ mod route_tests {
             serde_json::json!({"pacing":{"free":{"codex":{"deadline":{"reset_of":"shared"}}}}}),
         ] {
             let mut config: RoutingConfig = serde_json::from_value(config).unwrap();
-            let error = super::resolve_pacing_accounts(&mut config, &settings)
-                .unwrap_err()
-                .to_string();
-            for expected in [
-                "ambiguous",
-                "claude/shared",
-                "codex/other",
-                "agy/shared",
-                "adapter/key",
-            ] {
+            let error = super::resolve_pacing_accounts(&mut config, &settings).unwrap_err();
+            assert!(matches!(
+                error,
+                super::EdgeError::AccountProfile {
+                    kind: super::AccountProfileError::Ambiguous,
+                    ..
+                }
+            ));
+            let error = error.to_string();
+            for expected in ["claude/shared", "codex/other", "agy/shared", "adapter/key"] {
                 assert!(error.contains(expected), "{error}");
             }
         }
@@ -2223,12 +2242,13 @@ mod route_tests {
             super::resolve_account_reference("opencode/zen", "test", &settings).unwrap(),
             "opencode/zen"
         );
-        assert!(
-            super::resolve_account_reference("shared", "test", &settings)
-                .unwrap_err()
-                .to_string()
-                .contains("ambiguous")
-        );
+        assert!(matches!(
+            super::resolve_account_reference("shared", "test", &settings),
+            Err(super::EdgeError::AccountProfile {
+                kind: super::AccountProfileError::Ambiguous,
+                ..
+            })
+        ));
         for (input, expected) in [
             ("office", "claude/shared"),
             ("claude/shared", "claude/shared"),

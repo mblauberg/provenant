@@ -2035,9 +2035,7 @@ impl crate::RunStore {
                 outcome: crate::Outcome::ReviewRequired,
                 ..
             } => {
-                return Err(RunError::Validation(
-                    "review required; use lane deliver --accept-review ATTEMPT",
-                ));
+                return Err(RunError::ReviewAcceptanceRequired);
             }
             _ => {
                 return Err(RunError::Validation(
