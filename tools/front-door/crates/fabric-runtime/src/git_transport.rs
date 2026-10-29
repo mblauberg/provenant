@@ -762,20 +762,21 @@ impl<'a> GitTransport<'a> {
     fn ensure_repo_root(&self, repository: &Path, cancel: &CancelToken) -> Result<PathBuf> {
         let root = fs::canonicalize(repository)?;
         let _held = Directory::open_anchor(&root)?;
-        let args = strings(&["rev-parse", "--show-toplevel"]);
-        let output = self.require_success(
-            "repository root",
+        let git_root = provenant_os::git::repository_path_with_cancel(
+            self.executor,
+            &self.git_executable,
             &root,
-            &args,
-            None,
-            MAX_TEXT_BYTES,
-            cancel,
-        )?;
-        let value = one_line(&output.stdout.bytes, "repository root")?;
-        let text = std::str::from_utf8(value).map_err(|_| GitTransportError::InvalidOutput {
+            provenant_os::git::RepositoryPath::Toplevel,
+            Some(cancel),
+        )
+        .map_err(|_| GitTransportError::InvalidOutput {
             command: "repository root",
         })?;
-        let git_root = fs::canonicalize(Path::new(text))?;
+        if git_root.to_str().is_none() {
+            return Err(GitTransportError::InvalidOutput {
+                command: "repository root",
+            });
+        }
         if git_root != root {
             return Err(GitTransportError::Invalid("repository root binding"));
         }

@@ -106,23 +106,20 @@ impl TrackedFiles {
         repository: &Path,
         watched: &mut BTreeSet<PathBuf>,
     ) -> BuildResult<Self> {
-        let top_level = inventory_git()
-            .args(["rev-parse", "--show-toplevel"])
-            .current_dir(workspace)
-            .output()?;
-        if !top_level.status.success() {
-            return Err(invalid("source inventory requires a git checkout").into());
-        }
-        let top_level = top_level
-            .stdout
-            .strip_suffix(b"\n")
-            .ok_or_else(|| invalid("git did not return a repository root"))?;
-        let top_level = fs::canonicalize(std::str::from_utf8(top_level)?)?;
+        let top_level = provenant_os::git::repository_path(
+            workspace,
+            provenant_os::git::RepositoryPath::Toplevel,
+        )?;
         if top_level != repository {
             return Err(invalid("source workspace is outside its expected git checkout").into());
         }
 
         let index = inventory_git()
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_OBJECT_DIRECTORY")
             .args(["rev-parse", "--path-format=absolute", "--git-path", "index"])
             .current_dir(workspace)
             .output()?;
@@ -133,6 +130,11 @@ impl TrackedFiles {
         watch(watched, index)?;
 
         let output = inventory_git()
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_OBJECT_DIRECTORY")
             .args(["ls-files", "--full-name", "-z", "--", ":/"])
             .current_dir(workspace)
             .output()?;
