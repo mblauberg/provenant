@@ -57,15 +57,18 @@ refs intact. Inspect the failure and resolve it through the owning lane.
 Legacy `--deliver-remote`, `--deliver-branch` and `--open-pr` remain available
 as an alternative to `--deliver`.
 
-Writer lanes with open network can push and open pull requests using the host's
+Publishing from a writer lane is opt-in and off by default: enabling it gives the
+lane your GitHub credential, so a malicious lane can extract the token and act
+outside the wrapper. By default the chair publishes through host-side delivery.
+When enabled, writer lanes with open network can push and open pull requests using the host's
 read-only gh configuration and the pinned `gh auth git-credential` helper for
 HTTPS remotes; SSH remotes keep their own authentication. Custom gh configuration
 paths and keychain-only logins are not mirrored. Hosts without gh or
 `~/.config/gh` continue local work without publishing setup. Merge through `provenant land N --wait`, or hand the merge to the chair. Landing
 verifies green CI at the PR's current head; add `--head SHA` to pin a reviewed
-head. Publishing defaults on; disable it with
-`--knob lanes.publish=false`, Fabric `knobs: ["lanes.publish=false"]`, or host
-configuration `[knobs] "lanes.publish" = false`. Read-only lanes retain their
+head. Enable publishing with
+`--knob lanes.publish=true`, Fabric `knobs: ["lanes.publish=true"]`, or host
+configuration `[knobs] "lanes.publish" = true`. Read-only lanes retain their
 existing open-network gh read access.
 
 For a project, the host can configure an advisory GitHub CLI deny list in

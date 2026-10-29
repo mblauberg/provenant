@@ -167,16 +167,14 @@ fn prepare_candidates(
             .require_source(head.parse().map_err(|_| "invalid pinned writer source")?)
             .map_err(|error| error.to_string())?;
     }
-    // Publishing is optional. Missing gh tools or configuration leave the
+    // Publishing is opt-in (`lanes.publish`): it hands the lane the GitHub
+    // credential. Missing gh tools or configuration leave the
     // writer able to do local work without publishing credential access.
-    let publishing_gh = (writer.is_some()
-        && task.access.network(true) == NetworkAccess::Open
-        && task
-            .profile
-            .knobs
-            .get("lanes.publish")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true))
+    let publishing_gh = publishing_requested(
+        writer.is_some(),
+        task.access.network(true) == NetworkAccess::Open,
+        &task.profile.knobs,
+    )
     .then(|| publishing_executable(&home, &locate))
     .flatten();
     let git_context = task
@@ -2409,6 +2407,21 @@ fn read_only_plan(
     }
 }
 
+/// Publishing hands the lane the GitHub credential, so it needs the explicit
+/// `lanes.publish=true` opt-in as well as a networked writer.
+fn publishing_requested(
+    writer: bool,
+    open_network: bool,
+    knobs: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> bool {
+    writer
+        && open_network
+        && knobs
+            .get("lanes.publish")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+}
+
 fn publishing_executable(
     home: &Path,
     locate: &impl Fn(&str) -> Result<PathBuf, String>,
@@ -2743,6 +2756,16 @@ mod tests {
         Ok(())
     }
     use super::*;
+
+    #[test]
+    fn default_writer_launch_does_not_request_publishing() {
+        let mut knobs = std::collections::BTreeMap::new();
+        assert!(!publishing_requested(true, true, &knobs));
+        knobs.insert("lanes.publish".into(), serde_json::json!(true));
+        assert!(publishing_requested(true, true, &knobs));
+        assert!(!publishing_requested(false, true, &knobs));
+        assert!(!publishing_requested(true, false, &knobs));
+    }
 
     #[test]
     fn publishing_is_optional_without_gh_configuration() -> Result<(), Box<dyn std::error::Error>> {
@@ -3645,7 +3668,10 @@ mod tests {
             std::fs::DirBuilder::new().mode(0o700).create(path)?;
         }
         let mut publishing_task = task.clone();
-        publishing_task.profile.knobs.remove("lanes.publish");
+        publishing_task
+            .profile
+            .knobs
+            .insert("lanes.publish".into(), serde_json::json!(true));
         let _publishing = prepare_with(
             &registry,
             &publishing_task,
