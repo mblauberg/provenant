@@ -497,3 +497,33 @@ fn params_file_supplies_lists_and_set_wins_over_it() -> Result<(), Box<dyn std::
     );
     Ok(())
 }
+
+#[test]
+fn preset_explain_describes_the_pattern_and_creates_no_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let state = temp.path().join("state");
+    let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+        .current_dir(&root)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path())
+        .args(["--json", "--state-dir"])
+        .arg(&state)
+        .args(["preset", "explain", "review-council"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(result["data"]["pattern"]["level"], "default");
+    assert!(
+        result["data"]["parameters"]
+            .as_array()
+            .is_some_and(|parameters| parameters.iter().any(|p| p["name"] == "risk_tier"))
+    );
+    assert!(!state.exists());
+    Ok(())
+}

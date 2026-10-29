@@ -191,9 +191,10 @@ composite = { nodes = [{ id = "check", access = "read_only", prompt = "Check the
 fn bundled_role_presets_have_bounded_nested_graphs() {
     for name in [
         "scout-swarm",
-        "implement-with-lens",
+        "generator-evaluator",
         "review-council",
         "big-batch",
+        "scope-then-run",
     ] {
         let document = bundled_fixture(name);
         let config = provenant_fabric_runtime::config::GraphConfig::default();
@@ -212,7 +213,8 @@ fn bundled_role_presets_have_bounded_nested_graphs() {
 
 fn bundled_fixture(name: &str) -> provenant_fabric_runtime::graph::GraphDocument {
     let overrides = match name {
-        "implement-with-lens" | "review-council" => vec!["parameters.worktree='/repo/lane'".into()],
+        "generator-evaluator" | "review-council" => vec!["parameters.worktree='/repo/lane'".into()],
+        "scope-then-run" => vec!["parameters.worktree='/repo/lane'".into()],
         "big-batch" => vec![
             "parameters.lanes=[{name='one',worktree='/repo/one',scope=['.'],spec=''},{name='two',worktree='/repo/two',scope=['.'],spec=''}]".into(),
             "parameters.batch_worktree='/repo/batch'".into(),
@@ -300,9 +302,10 @@ fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
     use provenant_fabric_runtime::graph::{GraphStatus, NodeState, advance_with_budget};
     for name in [
         "scout-swarm",
-        "implement-with-lens",
+        "generator-evaluator",
         "review-council",
         "big-batch",
+        "scope-then-run",
     ] {
         let document = bundled_fixture(name);
         let config = provenant_fabric_runtime::config::GraphConfig::default();
@@ -402,7 +405,7 @@ fn pin_fixture_sources(value: &mut serde_json::Value) {
 fn read_only_worktree_bindings_lower_to_read_roots() {
     let expanded = expand(
         &Layers::empty(),
-        "implement-with-lens",
+        "generator-evaluator",
         "approved brief",
         &["parameters.worktree='/repo/writer'".into()],
     )
@@ -487,38 +490,45 @@ fn layering_composition_and_refusals() {
         .insert(
             "repo",
             "chain",
-            "[slots.first]\npreset = 'single'\n[slots.first.parameters]\nroute = 'utility'\n",
+            "stages = [{ id = 'first', preset = 'single', parameters = { route = 'utility' } }, { id = 'second' }]\n",
         )
         .unwrap();
     let result = expand(&layers, "chain", "brief", &[]).unwrap();
-    assert_eq!(result.document["nodes"][0]["id"], "first-task");
-    assert_eq!(result.document["nodes"][0]["route"]["alias"], "utility");
-    let result = expand(
-        &layers,
-        "chain",
-        "brief",
-        &["slots.first.parameters.route='fast'".into()],
-    )
-    .unwrap();
-    assert_eq!(result.document["nodes"][0]["route"]["alias"], "fast");
-    assert_eq!(result.origins["expanded.first.parameters.route"], "--set");
+    assert_eq!(result.document["nodes"][0]["id"], "first");
+    assert_eq!(
+        result.document["nodes"][0]["composite"]["nodes"][0]["route"]["alias"],
+        "utility"
+    );
+    let result = expand(&layers, "chain", "brief", &["first.route='fast'".into()]).unwrap();
+    assert_eq!(
+        result.document["nodes"][0]["composite"]["nodes"][0]["route"]["alias"],
+        "fast"
+    );
+    assert_eq!(result.origins["first.route"], "--set");
+    // A leaf stage takes its own fields by stage id.
+    let result = expand(&layers, "chain", "brief", &["second.tier='junior'".into()]).unwrap();
+    assert_eq!(result.document["nodes"][1]["route"]["alias"], "junior");
     assert!(
         expand(&layers, "single", "brief", &["parameters.nope=1".into()])
             .unwrap_err()
             .contains("unknown")
     );
     assert!(
-        expand(
-            &layers,
-            "chain",
-            "brief",
-            &["slots.nope.preset=\"single\"".into()]
-        )
-        .unwrap_err()
-        .contains("unknown")
+        expand(&layers, "chain", "brief", &["nope.route='fast'".into()])
+            .unwrap_err()
+            .contains("unknown")
+    );
+    assert!(
+        expand(&layers, "chain", "brief", &["first.nope=1".into()])
+            .unwrap_err()
+            .contains("unknown")
     );
     layers
-        .insert("repo", "single", "[slots.task]\npreset = 'single'\n")
+        .insert(
+            "repo",
+            "single",
+            "stages = [{ id = 'task', preset = 'single' }]\n",
+        )
         .unwrap();
     assert!(
         expand(&layers, "single", "brief", &[])
@@ -601,32 +611,27 @@ fn preset_limits_and_composition_wiring() {
         );
     }
     layers
-        .insert("repo", "chain", "[slots.first]\npreset = 'fan-out'\n")
-        .unwrap();
-    let graph = expand(&layers, "chain", "brief", &[]).unwrap().document;
-    assert_eq!(
-        graph["nodes"][2]["depends_on"],
-        json!(["first-branch-1", "first-branch-2"])
-    );
-    layers
         .insert(
             "repo",
-            "fan-out-synthesise",
-            "[slots.synthesis]\npreset = 'single'\n",
+            "chain",
+            "stages = [{ id = 'first', preset = 'fan-out' }, { id = 'second' }]\n",
         )
         .unwrap();
-    let synthesis = expand(&layers, "fan-out-synthesise", "brief", &[]).unwrap();
-    assert_eq!(synthesis.document["nodes"][2]["id"], "synthesis-task");
+    let graph = expand(&layers, "chain", "brief", &[]).unwrap().document;
+    assert_eq!(graph["nodes"][1]["depends_on"], json!(["first"]));
     assert_eq!(
-        synthesis.document["nodes"][2]["depends_on"],
-        json!(["branch-1", "branch-2"])
+        graph["nodes"][0]["composite"]["exports"],
+        json!([
+            {"node":"branch-1","outputs":["result","findings"]},
+            {"node":"branch-2","outputs":["result","findings"]}
+        ])
     );
     let mut large = Layers::empty();
     large
         .insert(
             "repo",
             "outer",
-            "extends='fan-out'\n[parameters]\nwidth=32\n[slots.branch]\npreset='inner'\n",
+            "extends='fan-out'\nstages=[{ id = 'branch', count = '${width}', preset = 'inner' }]\n[parameters]\nwidth=32\n",
         )
         .unwrap();
     large
@@ -642,35 +647,16 @@ fn preset_limits_and_composition_wiring() {
             .contains("512 nodes")
     );
     let mut deep = Layers::empty();
-    for i in 0..8 {
-        let slot = if i < 7 {
-            format!("[slots.branch]\npreset='p{}'\n", i + 1)
-        } else {
-            String::new()
-        };
-        deep.insert(
-            "repo",
-            &format!("p{i}"),
-            &format!("extends='fan-out'\n[parameters]\nwidth=1\n{slot}"),
-        )
-        .unwrap();
-    }
-    assert!(
-        expand(&deep, "p0", "brief", &[])
-            .unwrap_err()
-            .contains("64 bytes")
-    );
-    let mut deep = Layers::empty();
     for i in 0..9 {
-        let slot = if i < 8 {
-            format!("[slots.task]\npreset='p{}'\n", i + 1)
+        let stages = if i < 8 {
+            format!("stages = [{{ id = 'task', preset = 'p{}' }}]\n", i + 1)
         } else {
             String::new()
         };
         deep.insert(
             "repo",
             &format!("p{i}"),
-            &format!("extends='single'\n{slot}"),
+            &format!("extends='single'\n{stages}"),
         )
         .unwrap();
     }
@@ -697,7 +683,7 @@ fn invalid_paths_and_toml_values_offer_help() {
     let layers = Layers::empty();
     let error = expand(&layers, "single", "brief", &["parameters.unknown=1".into()]).unwrap_err();
     assert!(
-        error.contains("parameters.route") && error.contains("slots.task.preset"),
+        error.contains("parameters.route") && error.contains("task.FIELD"),
         "{error}"
     );
     let error = expand(
@@ -787,7 +773,7 @@ fn repository_notice_deduplicates_nested_presets() -> Result<(), Box<dyn std::er
     std::fs::create_dir(&repo)?;
     std::fs::write(
         repo.join("chain.toml"),
-        "[slots.first]\npreset = 'single'\n[slots.second]\npreset = 'single'\n",
+        "stages = [{ id = 'first', preset = 'single' }, { id = 'second', preset = 'single' }]\n",
     )?;
     std::fs::write(
         repo.join("single.toml"),
@@ -962,4 +948,222 @@ fn big_batch_fans_out_one_lane_per_list_entry() {
             "{lane}"
         );
     }
+}
+
+const CATALOGUE: [&str; 9] = [
+    "single",
+    "chain",
+    "fan-out",
+    "fan-out-synthesise",
+    "review-council",
+    "generator-evaluator",
+    "scout-swarm",
+    "big-batch",
+    "scope-then-run",
+];
+
+#[test]
+fn typed_parameters_validate_and_name_the_parameter_and_origin() {
+    let mut layers = Layers::empty();
+    for (set, expect) in [
+        ("parameters.width=0", "must be 1 to 32"),
+        ("parameters.width=33", "must be 1 to 32"),
+        ("parameters.width='two'", "must be integer"),
+    ] {
+        let error = expand(&layers, "fan-out", "brief", &[set.into()]).unwrap_err();
+        assert!(
+            error.contains("parameters.width") && error.contains("--set") && error.contains(expect),
+            "{error}"
+        );
+    }
+    layers
+        .insert(
+            "user",
+            "tight",
+            "extends = 'fan-out'\n[parameters.route]\nenum = ['senior', 'junior']\n[parameters]\nwidth = 3\n",
+        )
+        .unwrap();
+    assert_eq!(
+        expand(&layers, "tight", "brief", &[]).unwrap().document["nodes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    let error = expand(
+        &layers,
+        "tight",
+        "brief",
+        &["parameters.route='fast'".into()],
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("parameters.route") && error.contains("one of"),
+        "{error}"
+    );
+    let error = expand(&layers, "tight", "brief", &["parameters.width=40".into()]).unwrap_err();
+    assert!(error.contains("--set"), "{error}");
+    layers
+        .insert(
+            "user",
+            "bad",
+            "extends = 'single'\n[parameters.extra]\ntype = 'string'\n",
+        )
+        .unwrap();
+    assert!(
+        expand(&layers, "bad", "brief", &[])
+            .unwrap_err()
+            .contains("needs a default")
+    );
+}
+
+#[test]
+fn a_bundled_override_cannot_add_undeclared_parameters() {
+    let mut layers = Layers::empty();
+    layers
+        .insert("repo", "fan-out", "[parameters]\nwidth = 3\nsurprise = 1\n")
+        .unwrap();
+    let error = expand(&layers, "fan-out", "brief", &[]).unwrap_err();
+    assert!(
+        error.contains("parameters.surprise") && error.contains("(repo)"),
+        "{error}"
+    );
+}
+
+#[test]
+fn stage_ids_address_set_paths_on_leaves_and_presets() {
+    let layers = Layers::empty();
+    let result = expand(
+        &layers,
+        "fan-out-synthesise",
+        "brief",
+        &["synthesis.tier='principal'".into()],
+    )
+    .unwrap();
+    assert_eq!(result.document["nodes"][2]["route"]["alias"], "principal");
+    // Default ids address unnamed stages by position.
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "repo",
+            "pair",
+            "stages = [{ preset = 'single' }, { preset = 'single' }]\n",
+        )
+        .unwrap();
+    let result = expand(&layers, "pair", "brief", &["s2.route='fast'".into()]).unwrap();
+    assert_eq!(
+        result.document["nodes"][1]["composite"]["nodes"][0]["route"]["alias"],
+        "fast"
+    );
+    let error = expand(&layers, "pair", "brief", &["s1.id='x'".into()]).unwrap_err();
+    assert!(error.contains("cannot be overridden"), "{error}");
+    // Nested parameter paths reach into table values.
+    let result = expand(
+        &Layers::empty(),
+        "generator-evaluator",
+        "brief",
+        &["parameters.subject.commit='refs/heads/x'".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        result.document["nodes"][0]["source"]["commit"],
+        "refs/heads/x"
+    );
+}
+
+#[test]
+fn ambient_subject_and_risk_tier_flow_to_children_that_declare_them() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "repo",
+            "wrap",
+            "stages = [{ id = 'council', preset = 'review-council', parameters = { worktree = '/repo/lane' } }]\n[parameters]\nsubject = { type = 'integration' }\nrisk_tier = 'high'\n",
+        )
+        .unwrap();
+    let result = expand(&layers, "wrap", "brief", &[]).unwrap();
+    let subject = &result.document["nodes"][0]["composite"]["nodes"][0];
+    assert_eq!(subject["source"], json!({"type":"integration"}));
+    // An explicit entry value wins over the ambient one.
+    layers
+        .insert(
+            "repo",
+            "wrap",
+            "stages = [{ id = 'council', preset = 'review-council', parameters = { worktree = '/repo/lane', subject = { type = 'commit', commit = 'HEAD' } } }]\n",
+        )
+        .unwrap();
+    let result = expand(&layers, "wrap", "brief", &[]).unwrap();
+    assert_eq!(
+        result.document["nodes"][0]["composite"]["nodes"][0]["source"]["type"],
+        "commit"
+    );
+}
+
+#[test]
+fn every_catalogue_preset_has_a_pattern_and_an_explanation() {
+    let layers = Layers::empty();
+    for name in CATALOGUE {
+        let explained = layers
+            .explain(name)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let pattern = &explained["pattern"];
+        assert!(
+            ["default", "recommended", "experimental"]
+                .contains(&pattern["level"].as_str().unwrap_or_default()),
+            "{name}: {pattern}"
+        );
+        for key in ["summary", "cost", "select_when"] {
+            assert!(
+                pattern[key].as_str().is_some_and(|v| !v.is_empty()),
+                "{name}.{key}"
+            );
+        }
+        for parameter in explained["parameters"].as_array().unwrap() {
+            if name != "big-batch" && parameter["name"] != "lenses" {
+                assert!(parameter["doc"].is_string(), "{name}: {parameter}");
+            }
+        }
+        assert!(explained["next"].as_array().is_some_and(|n| !n.is_empty()));
+    }
+    let explained = layers.explain("fan-out").unwrap();
+    assert_eq!(
+        explained["parameters"],
+        json!([
+            {"name":"route","type":"string","default":"senior","doc":"Routing pool for every branch.","origin":"bundled"},
+            {"name":"width","type":"integer","default":2,"min":1,"max":32,"doc":"Number of parallel branches.","origin":"bundled"}
+        ])
+    );
+    assert_eq!(
+        explained["stages"],
+        json!([{"id":"branch","count":"${width}"}])
+    );
+    let listing = layers.listing();
+    let single = listing
+        .iter()
+        .find(|entry| entry["name"] == "single")
+        .unwrap();
+    assert_eq!(single["level"], "default");
+    assert!(layers.explain("nope").is_err());
+}
+
+#[test]
+fn unknown_pattern_fields_and_levels_are_refused() {
+    let mut layers = Layers::empty();
+    layers
+        .insert("repo", "single", "[pattern]\nlevel = 'famous'\n")
+        .unwrap();
+    assert!(
+        expand(&layers, "single", "brief", &[])
+            .unwrap_err()
+            .contains("pattern.level")
+    );
+    let mut layers = Layers::empty();
+    layers
+        .insert("repo", "single", "[pattern]\nweather = 'fine'\n")
+        .unwrap();
+    assert!(
+        expand(&layers, "single", "brief", &[])
+            .unwrap_err()
+            .contains("unknown field")
+    );
 }

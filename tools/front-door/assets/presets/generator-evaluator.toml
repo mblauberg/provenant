@@ -9,17 +9,24 @@ exports = [
   { node = "lens", outputs = ["result", "findings", "verdict"] },
 ]
 
+[pattern]
+level = "default"
+summary = "A senior writer implements one bounded slice; independent lenses evaluate the commit it wrote."
+citations = ["Anthropic, harness design for long-running applications (generator and evaluator roles)"]
+cost = "1 writer attempt + one attempt per lens"
+select_when = "An approved slice has a spec and a registered writer worktree."
+tags = ["write", "review"]
+
 [parameters]
-worktree = ""
-scope = ["."]
-subject = { type = "commit", commit = "HEAD" }
-delivery = "none"
-# The diff reference the slice is measured from, and the spec it answers.
-base = ""
-spec = ""
-risk = ""
-review_shape = ""
-risk_tags = []
+worktree = { type = "string", default = "", doc = "Registered writer worktree." }
+scope = { type = "list", default = ["."], doc = "Literal relative paths the writer may change." }
+subject = { type = "table", default = { type = "commit", commit = "HEAD" }, doc = "Source the writer starts from." }
+delivery = { type = "string", default = "none", doc = "Delivery mode for the writer commit." }
+base = { type = "string", default = "", doc = "Diff reference the slice is measured from." }
+spec = { type = "string", default = "", doc = "Issue number or file holding the acceptance criteria." }
+risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
+review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
+risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
 lenses = [
   { name = "correctness-spec", tier = "", prompt_file = "code-review/lenses/correctness-spec", distinct_from = "writer", when = "" },
   { name = "simplicity", tier = "", prompt_file = "code-review/lenses/simplicity", distinct_from = "", when = "" },

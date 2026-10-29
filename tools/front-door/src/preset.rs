@@ -58,7 +58,6 @@ fn prompt_file(name: &str) -> Result<&'static str, String> {
         })
 }
 
-const NAMES: [&str; 4] = ["single", "chain", "fan-out", "fan-out-synthesise"];
 const DEPTH: usize = 8;
 
 /// The review shape selected for this run. Review shapes are canonical for who
@@ -96,32 +95,21 @@ impl Layers {
     )]
     pub fn empty() -> Self {
         let mut layers = Self::default();
-        for name in NAMES {
-            let text = match name {
-                "single" => "structure = 'single'\n[parameters]\nroute = 'senior'\n[slots.task]\n",
-                "chain" => {
-                    "structure = 'chain'\n[parameters]\nroute = 'senior'\n[slots.first]\n[slots.second]\n"
-                }
-                "fan-out" => {
-                    "structure = 'fan-out'\n[parameters]\nroute = 'senior'\nwidth = 2\n[slots.branch]\n"
-                }
-                _ => {
-                    "structure = 'fan-out-synthesise'\n[parameters]\nroute = 'senior'\nwidth = 2\n[slots.branch]\n[slots.synthesis]\n"
-                }
-            };
-            // These literals are part of the binary and are checked by golden tests.
-            layers
-                .insert("bundled", name, text)
-                .expect("valid bundled preset");
-        }
         for (name, text) in [
+            ("single", include_str!("../assets/presets/single.toml")),
+            ("chain", include_str!("../assets/presets/chain.toml")),
+            ("fan-out", include_str!("../assets/presets/fan-out.toml")),
+            (
+                "fan-out-synthesise",
+                include_str!("../assets/presets/fan-out-synthesise.toml"),
+            ),
             (
                 "scout-swarm",
                 include_str!("../assets/presets/scout-swarm.toml"),
             ),
             (
-                "implement-with-lens",
-                include_str!("../assets/presets/implement-with-lens.toml"),
+                "generator-evaluator",
+                include_str!("../assets/presets/generator-evaluator.toml"),
             ),
             (
                 "review-council",
@@ -130,6 +118,10 @@ impl Layers {
             (
                 "big-batch",
                 include_str!("../assets/presets/big-batch.toml"),
+            ),
+            (
+                "scope-then-run",
+                include_str!("../assets/presets/scope-then-run.toml"),
             ),
         ] {
             layers
@@ -213,9 +205,95 @@ impl Layers {
                 {
                     errors.push(error);
                 }
-                json!({"name": name, "layers": layers, "errors": errors})
+                let pattern = self
+                    .resolve(name)
+                    .ok()
+                    .and_then(|(config, _)| config.get("pattern").cloned())
+                    .unwrap_or(Value::Null);
+                json!({
+                    "name": name,
+                    "level": pattern.get("level"),
+                    "summary": pattern.get("summary"),
+                    "cost": pattern.get("cost"),
+                    "layers": layers,
+                    "errors": errors
+                })
             })
             .collect()
+    }
+
+    /// The typed interface of a preset, rendered for a reader. Creates no state.
+    pub fn explain(&self, name: &str) -> Result<Value, String> {
+        expand(self, name, "", &[])?;
+        let (config, origins) = self.resolve(name)?;
+        let origin_of = |key: &str| {
+            let path = format!("parameters.{key}");
+            origins
+                .get(&path)
+                .or_else(|| {
+                    origins
+                        .iter()
+                        .find(|(origin, _)| origin.starts_with(&format!("{path}.")))
+                        .map(|(_, origin)| origin)
+                })
+                .cloned()
+        };
+        let parameters: Vec<Value> = config
+            .get("parameters")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .map(|(key, value)| {
+                let mut entry = if is_spec(value) {
+                    value.clone()
+                } else {
+                    json!({"default": value})
+                };
+                entry["name"] = json!(key);
+                entry["origin"] = json!(origin_of(key));
+                entry
+            })
+            .collect();
+        let stages: Vec<Value> = config
+            .get("stages")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(position, stage)| {
+                let mut entry = json!({"id": stage_id(stage, position)});
+                for key in ["preset", "role", "kind", "count", "for_each"] {
+                    if let Some(value) = stage.get(key) {
+                        entry[key] = value.clone();
+                    }
+                }
+                for key in ["parallel", "stages", "loop"] {
+                    if stage.get(key).is_some() {
+                        entry["group"] = json!(key);
+                    }
+                }
+                entry
+            })
+            .collect();
+        let roles: Vec<Value> = config
+            .get("roles")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .map(|(role, profile)| json!({"name": role, "tier": profile.get("tier")}))
+            .collect();
+        Ok(json!({
+            "name": name,
+            "pattern": config.get("pattern"),
+            "parameters": parameters,
+            "stages": stages,
+            "roles": roles,
+            "layers": self.entries.get(name).into_iter().flatten().map(|(origin, _)| origin).collect::<Vec<_>>(),
+            "next": [
+                format!("provenant run --preset {name} --prompt-file FILE --explain"),
+                format!("provenant run --preset {name} --prompt-file FILE --set STAGE.PARAMETER=VALUE")
+            ]
+        }))
     }
 
     pub fn resolve(&self, name: &str) -> Result<(Value, BTreeMap<String, String>), String> {
@@ -261,7 +339,22 @@ impl Layers {
                 .map_err(|error| format!("preset {name}: extends ({origin}): {error}"))?,
             None => (json!({}), BTreeMap::new()),
         };
+        let declared = entries
+            .first()
+            .filter(|(origin, _)| origin == "bundled")
+            .and_then(|(_, layer)| layer.get("parameters").and_then(Value::as_object));
         for (origin, layer) in entries {
+            if let Some(declared) = declared
+                && let Some(extra) = layer
+                    .get("parameters")
+                    .and_then(Value::as_object)
+                    .and_then(|map| map.keys().find(|key| !declared.contains_key(*key)))
+            {
+                return Err(format!(
+                    "preset {name}: parameters.{extra} ({origin}): unknown parameter; declared: {}",
+                    declared.keys().cloned().collect::<Vec<_>>().join(", ")
+                ));
+            }
             if self.repo_files.contains(origin) && !repo_files.contains(origin) {
                 repo_files.push(origin.clone());
             }
@@ -286,6 +379,27 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
 }
 
+const SPEC_KEYS: [&str; 6] = ["type", "default", "min", "max", "enum", "doc"];
+const TYPE_NAMES: [&str; 6] = ["string", "integer", "number", "boolean", "list", "table"];
+/// Parameters every parent hands to a child preset that declares them.
+const AMBIENT: [&str; 2] = ["risk_tier", "subject"];
+
+/// A table made only of typed-parameter keys. Other tables are plain values.
+fn is_fragment(value: &Value) -> bool {
+    value.as_object().is_some_and(|map| {
+        !map.is_empty()
+            && map.keys().all(|key| SPEC_KEYS.contains(&key.as_str()))
+            && map
+                .get("type")
+                .is_none_or(|kind| kind.as_str().is_some_and(|kind| TYPE_NAMES.contains(&kind)))
+    })
+}
+
+/// A typed parameter: `{ type, default, min, max, enum, doc }`.
+fn is_spec(value: &Value) -> bool {
+    is_fragment(value) && value.get("default").is_some()
+}
+
 fn merge(
     target: &mut Value,
     source: &Value,
@@ -293,6 +407,15 @@ fn merge(
     origin: &str,
     origins: &mut BTreeMap<String, String>,
 ) -> Result<(), String> {
+    if path.starts_with("parameters.")
+        && path.matches('.').count() == 1
+        && is_spec(target)
+        && !is_fragment(source)
+    {
+        target["default"] = source.clone();
+        origins.insert(path.into(), origin.into());
+        return Ok(());
+    }
     if let Some(map) = source.as_object() {
         if map.is_empty() && !path.is_empty() {
             origins.insert(path.into(), origin.into());
@@ -326,6 +449,80 @@ fn merge(
     Ok(())
 }
 
+/// The id of a top-level stage: its `id`, or `sN` by position.
+fn stage_id(entry: &Value, position: usize) -> String {
+    entry
+        .get("id")
+        .and_then(Value::as_str)
+        .map_or_else(|| format!("s{}", position + 1), str::to_owned)
+}
+
+fn set_nested(target: &mut Value, parts: &[&str], replacement: Value) -> Result<(), String> {
+    let (last, parents) = parts.split_last().ok_or("empty path")?;
+    let mut current = target;
+    for part in parents {
+        current = current
+            .as_object_mut()
+            .ok_or_else(|| format!("{part} is not a table"))?
+            .entry(*part)
+            .or_insert_with(|| json!({}));
+    }
+    let map = current
+        .as_object_mut()
+        .ok_or_else(|| format!("{last} is not in a table"))?;
+    match map.get_mut(*last) {
+        Some(existing) if is_spec(existing) && !is_fragment(&replacement) => {
+            existing["default"] = replacement;
+        }
+        _ => {
+            map.insert((*last).into(), replacement);
+        }
+    }
+    Ok(())
+}
+
+/// `STAGE.FIELD=value` sets a field of a top-level stage entry. On a stage that
+/// runs a preset, FIELD is one of that preset's parameters.
+fn override_stage(
+    value: &mut Value,
+    path: &str,
+    parts: &[&str],
+    replacement: &Value,
+    origins: &mut BTreeMap<String, String>,
+    origin: &str,
+) -> Result<bool, String> {
+    let Some(stages) = value.get_mut("stages").and_then(Value::as_array_mut) else {
+        return Ok(false);
+    };
+    let Some((_, entry)) = stages
+        .iter_mut()
+        .enumerate()
+        .find(|(position, entry)| stage_id(entry, *position) == parts[0])
+    else {
+        return Ok(false);
+    };
+    let field = match parts {
+        [_, "parameters", rest @ ..] if !rest.is_empty() => rest,
+        [_, rest @ ..] => rest,
+        _ => return Ok(false),
+    };
+    if field[0] == "id" || field[0] == "preset" {
+        return Err(format!("{path}: a stage {} cannot be overridden", field[0]));
+    }
+    if entry.get("preset").is_some() {
+        let target = entry
+            .as_object_mut()
+            .ok_or("stage entries must be tables")?
+            .entry("parameters")
+            .or_insert_with(|| json!({}));
+        set_nested(target, field, replacement.clone())?;
+    } else {
+        set_nested(entry, field, replacement.clone())?;
+    }
+    origins.insert(path.into(), origin.into());
+    Ok(true)
+}
+
 fn override_value(
     value: &mut Value,
     path: &str,
@@ -333,51 +530,39 @@ fn override_value(
     origins: &mut BTreeMap<String, String>,
     origin: &str,
 ) -> Result<(), String> {
-    if let Some(rest) = path.strip_prefix("slots.")
-        && let Some((slot, parameter)) = rest.split_once(".parameters.")
-        && !slot.contains('.')
-        && !parameter.contains('.')
-        && !parameter.is_empty()
+    let parts: Vec<_> = path.split('.').collect();
+    if parts.len() >= 2
+        && parts[0] != "parameters"
+        && parts[0] != "roles"
+        && override_stage(value, path, &parts, &replacement, origins, origin)?
     {
-        let slots = value
-            .get_mut("slots")
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| format!("unknown slot: {slot}"))?;
-        let entry = slots
-            .get_mut(slot)
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| format!("unknown slot: {slot}"))?;
-        if !entry.contains_key("preset") {
-            return Err(format!("slot {slot} parameters require a preset"));
-        }
-        let params = entry
-            .entry("parameters")
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-            .ok_or("slot parameters must be a table")?;
-        params.insert(parameter.into(), replacement);
-        origins.insert(path.into(), origin.into());
         return Ok(());
     }
     let mut current = value;
-    let parts: Vec<_> = path.split('.').collect();
     for (index, part) in parts.iter().enumerate() {
+        if is_spec(current) && !SPEC_KEYS.contains(part) {
+            current = current
+                .get_mut("default")
+                .ok_or_else(|| format!("unknown path: {path}"))?;
+        }
         let map = current
             .as_object_mut()
             .ok_or_else(|| format!("unknown path: {path}"))?;
         if index + 1 == parts.len() {
-            if !map.contains_key(*part)
-                && !(*part == "preset" && parts.len() == 3 && parts[0] == "slots")
-            {
-                return Err(format!("unknown parameter or slot: {path}"));
+            let existing = map
+                .get_mut(*part)
+                .ok_or_else(|| format!("unknown parameter, role or stage: {path}"))?;
+            if is_spec(existing) && !is_fragment(&replacement) {
+                existing["default"] = replacement;
+            } else {
+                *existing = replacement;
             }
-            map.insert((*part).into(), replacement);
             origins.insert(path.into(), origin.into());
             return Ok(());
         }
         current = map
             .get_mut(*part)
-            .ok_or_else(|| format!("unknown parameter or slot: {path}"))?;
+            .ok_or_else(|| format!("unknown parameter, role or stage: {path}"))?;
     }
     Err(format!("unknown path: {path}"))
 }
@@ -387,18 +572,18 @@ fn valid_paths(config: &Value, layers: &Layers) -> String {
     if let Some(params) = config.get("parameters").and_then(Value::as_object) {
         paths.extend(params.keys().map(|key| format!("parameters.{key}")));
     }
-    if let Some(slots) = config.get("slots").and_then(Value::as_object) {
-        for (name, slot) in slots {
-            paths.push(format!("slots.{name}.preset"));
-            if let Some(child) = slot.get("preset").and_then(Value::as_str)
-                && let Ok((child, _)) = layers.resolve(child)
-                && let Some(params) = child.get("parameters").and_then(Value::as_object)
-            {
-                paths.extend(
-                    params
-                        .keys()
-                        .map(|key| format!("slots.{name}.parameters.{key}")),
-                );
+    if let Some(stages) = config.get("stages").and_then(Value::as_array) {
+        for (position, stage) in stages.iter().enumerate() {
+            let id = stage_id(stage, position);
+            match stage.get("preset").and_then(Value::as_str) {
+                Some(child) => {
+                    if let Ok((child, _)) = layers.resolve(child)
+                        && let Some(params) = child.get("parameters").and_then(Value::as_object)
+                    {
+                        paths.extend(params.keys().map(|key| format!("{id}.{key}")));
+                    }
+                }
+                None => paths.push(format!("{id}.FIELD")),
             }
         }
     }
@@ -410,6 +595,94 @@ fn valid_paths(config: &Value, layers: &Layers) -> String {
         }
     }
     paths.join(", ")
+}
+
+fn scalar_text(value: &Value) -> String {
+    value.to_string()
+}
+
+/// Check each typed parameter against its schema and return plain values.
+/// Errors name the parameter and where its value came from.
+fn flatten_parameters(
+    name: &str,
+    parameters: &Value,
+    prefix: &str,
+    origins: &BTreeMap<String, String>,
+) -> Result<Value, String> {
+    let map = parameters
+        .as_object()
+        .ok_or_else(|| invalid_config(name, "parameters", "must be a table", prefix, origins))?;
+    let mut plain = serde_json::Map::new();
+    for (key, value) in map {
+        if !is_fragment(value) {
+            plain.insert(key.clone(), value.clone());
+            continue;
+        }
+        let fail = |message: String| {
+            invalid_config(
+                name,
+                &format!("parameters.{key}"),
+                &message,
+                prefix,
+                origins,
+            )
+        };
+        let default = value
+            .get("default")
+            .ok_or_else(|| fail("typed parameter needs a default".into()))?;
+        let fits = match value.get("type").and_then(Value::as_str) {
+            Some("string") => default.is_string(),
+            Some("integer") => default.is_i64() || default.is_u64(),
+            Some("number") => default.is_number(),
+            Some("boolean") => default.is_boolean(),
+            Some("list") => default.is_array(),
+            Some("table") => default.is_object(),
+            _ => true,
+        };
+        if !fits {
+            return Err(fail(format!(
+                "must be {}, received {}",
+                value["type"].as_str().unwrap_or_default(),
+                scalar_text(default)
+            )));
+        }
+        let size = match default {
+            Value::Number(number) => number.as_f64(),
+            Value::Array(list) => Some(list.len() as f64),
+            Value::String(text) => Some(text.chars().count() as f64),
+            _ => None,
+        };
+        let (min, max) = (
+            value.get("min").and_then(Value::as_f64),
+            value.get("max").and_then(Value::as_f64),
+        );
+        if let Some(size) = size {
+            let bound = |limit: f64| limit.to_string();
+            match (min, max) {
+                (Some(min), Some(max)) if size < min || size > max => {
+                    return Err(fail(format!("must be {} to {}", bound(min), bound(max))));
+                }
+                (Some(min), None) if size < min => {
+                    return Err(fail(format!("must be at least {}", bound(min))));
+                }
+                (None, Some(max)) if size > max => {
+                    return Err(fail(format!("must be at most {}", bound(max))));
+                }
+                _ => {}
+            }
+        }
+        if let Some(allowed) = value.get("enum").and_then(Value::as_array)
+            && !allowed.contains(default)
+        {
+            return Err(fail(format!(
+                "must be one of {}, received {}",
+                Value::Array(allowed.clone()),
+                scalar_text(default)
+            )));
+        }
+        plain.insert(key.clone(), default.clone());
+    }
+    Ok(Value::Object(plain))
 }
 
 fn invalid_config(
@@ -509,12 +782,14 @@ pub fn expand_with(
     let id = format!("preset-{}", &digest[7..39]);
     check_expansion(&nodes, "", 0)?;
     let mut document = json!({"schema_version":1,"graph_id":id,"nodes":nodes});
+    let parameters = flatten_parameters(
+        name,
+        config.get("parameters").unwrap_or(&json!({})),
+        "",
+        &origins,
+    )?;
     for key in ["limits", "integration_branch", "delivery"] {
         if let Some(value) = config.get(key) {
-            let parameters = config
-                .get("parameters")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
             document[key] = interpolate(value, &parameters, prompt, 1)?;
         }
     }
@@ -559,292 +834,21 @@ fn build(
         return Err(format!("preset expansion depth exceeds {DEPTH}"));
     }
     stack.push(name.into());
-    if config.get("stages").is_some() {
-        let result = build_stages(
+    let result = if config.get("stages").is_some() {
+        build_stages(
             layers, name, config, prompt, prefix, deps, stack, nodes, origins, repo_files,
-        );
-        stack.pop();
-        return result;
-    }
-    let params = config
-        .get("parameters")
-        .and_then(Value::as_object)
-        .ok_or_else(|| invalid_config(name, "parameters", "must be a table", prefix, origins))?;
-    let slots = config
-        .get("slots")
-        .and_then(Value::as_object)
-        .ok_or_else(|| invalid_config(name, "slots", "must be a table", prefix, origins))?;
-    let shape = config
-        .get("structure")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            invalid_config(
-                name,
-                "structure",
-                "missing structure; use extends",
-                prefix,
-                origins,
-            )
-        })?;
-    let allowed: &[&str] = match shape {
-        "single" => &["task"],
-        "chain" => &["first", "second"],
-        "fan-out" => &["branch"],
-        "fan-out-synthesise" => &["branch", "synthesis"],
-        _ => {
-            return Err(invalid_config(
-                name,
-                "structure",
-                &format!("unknown structure: {shape}"),
-                prefix,
-                origins,
-            ));
-        }
-    };
-    if let Some(key) = config.as_object().and_then(|m| {
-        m.keys().find(|k| {
-            ![
-                "structure",
-                "parameters",
-                "slots",
-                "roles",
-                "limits",
-                "integration_branch",
-                "delivery",
-                "exports",
-            ]
-            .contains(&k.as_str())
-        })
-    }) {
-        return Err(invalid_config(name, key, "unknown field", prefix, origins));
-    }
-    if let Some(key) = params
-        .keys()
-        .find(|k| *k != "route" && !(*k == "width" && shape.starts_with("fan-out")))
-    {
-        return Err(invalid_config(
-            name,
-            &format!("parameters.{key}"),
-            "unknown parameter",
-            prefix,
-            origins,
-        ));
-    }
-    if let Some(key) = slots.keys().find(|k| !allowed.contains(&k.as_str())) {
-        return Err(invalid_config(
-            name,
-            &format!("slots.{key}"),
-            "unknown slot",
-            prefix,
-            origins,
-        ));
-    }
-    let route = params
-        .get("route")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            invalid_config(
-                name,
-                "parameters.route",
-                "must be a nonempty string",
-                prefix,
-                origins,
-            )
-        })?;
-    let width = if shape.starts_with("fan-out") {
-        params
-            .get("width")
-            .and_then(Value::as_u64)
-            .filter(|n| (1..=32).contains(n))
-            .ok_or_else(|| {
-                invalid_config(name, "parameters.width", "must be 1 to 32", prefix, origins)
-            })?
+        )
     } else {
-        1
+        Err(invalid_config(
+            name,
+            "stages",
+            "missing stages; use extends",
+            prefix,
+            origins,
+        ))
     };
-    let mut ends = Vec::new();
-    let sequence: Vec<(String, &str, bool)> = match shape {
-        "single" => vec![("task".into(), "task", false)],
-        "chain" => vec![
-            ("first".into(), "first", false),
-            ("second".into(), "second", false),
-        ],
-        _ => (1..=width)
-            .map(|i| (format!("branch-{i}"), "branch", false))
-            .chain((shape == "fan-out-synthesise").then_some((
-                "synthesis".into(),
-                "synthesis",
-                true,
-            )))
-            .collect(),
-    };
-    for (local, slot, synthesis) in sequence {
-        let incoming = if (shape == "chain" && local == "second") || synthesis {
-            ends.clone()
-        } else {
-            deps.to_vec()
-        };
-        let id = format!("{prefix}{local}");
-        if id.len() > 64 {
-            return Err(format!("expanded node ID exceeds 64 bytes: {id}"));
-        }
-        let config_slot = slots.get(slot).and_then(Value::as_object).ok_or_else(|| {
-            invalid_config(
-                name,
-                &format!("slots.{slot}"),
-                "missing slot or slot is not a table",
-                prefix,
-                origins,
-            )
-        })?;
-        let outputs = if let Some(child) = config_slot.get("preset") {
-            if let Some(key) = config_slot
-                .keys()
-                .find(|key| *key != "preset" && *key != "parameters")
-            {
-                return Err(invalid_config(
-                    name,
-                    &format!("slots.{slot}.{key}"),
-                    "unknown preset slot field",
-                    prefix,
-                    origins,
-                ));
-            }
-            let child = child.as_str().ok_or_else(|| {
-                invalid_config(
-                    name,
-                    &format!("slots.{slot}.preset"),
-                    "must be a preset name",
-                    prefix,
-                    origins,
-                )
-            })?;
-            let (mut child_config, mut child_origins) =
-                layers.resolve_inner(child, &mut Vec::new(), repo_files)?;
-            if let Some(parameters) = config_slot.get("parameters") {
-                for (key, value) in parameters.as_object().ok_or_else(|| {
-                    invalid_config(
-                        name,
-                        &format!("slots.{slot}.parameters"),
-                        "must be a table",
-                        prefix,
-                        origins,
-                    )
-                })? {
-                    let context = if prefix.is_empty() {
-                        String::new()
-                    } else {
-                        format!("expanded.{}.", prefix.trim_end_matches('-'))
-                    };
-                    let origin = origins
-                        .get(&format!("{context}slots.{slot}.parameters.{key}"))
-                        .map(String::as_str)
-                        .unwrap_or("slot");
-                    let valid = valid_paths(&child_config, layers);
-                    override_value(
-                        &mut child_config,
-                        &format!("parameters.{key}"),
-                        value.clone(),
-                        &mut child_origins,
-                        origin,
-                    )
-                    .map_err(|error| {
-                        format!(
-                            "{}; valid parameter and slot paths: {valid}",
-                            invalid_config(
-                                name,
-                                &format!("slots.{slot}.parameters.{key}"),
-                                &error,
-                                prefix,
-                                origins
-                            )
-                        )
-                    })?;
-                }
-            }
-            for (key, origin) in child_origins {
-                origins.insert(format!("expanded.{id}.{key}"), origin);
-            }
-            if child_config.get("stages").is_some() {
-                let mut children = Vec::new();
-                let ends = build(
-                    layers,
-                    child,
-                    &child_config,
-                    prompt,
-                    "",
-                    &[],
-                    stack,
-                    &mut children,
-                    origins,
-                    repo_files,
-                )?;
-                let exports = child_config
-                    .get("exports")
-                    .cloned()
-                    .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
-                nodes.push(composite(
-                    &id,
-                    children,
-                    exports,
-                    &incoming,
-                    &json!(["result"]),
-                ));
-                vec![id]
-            } else {
-                build(
-                    layers,
-                    child,
-                    &child_config,
-                    prompt,
-                    &format!("{id}-"),
-                    &incoming,
-                    stack,
-                    nodes,
-                    origins,
-                    repo_files,
-                )?
-            }
-        } else {
-            if config_slot.contains_key("parameters") {
-                return Err(invalid_config(
-                    name,
-                    &format!("slots.{slot}.parameters"),
-                    "requires a preset",
-                    prefix,
-                    origins,
-                ));
-            }
-            let mut node = lower_leaf(
-                config_slot,
-                config.get("roles"),
-                &json!({"route":route}),
-                prompt,
-                1,
-                &id,
-                &incoming,
-            )?;
-            if synthesis {
-                node["kind"] = json!("synthesise");
-            }
-            nodes.push(node);
-            if prompt.len().saturating_mul(nodes.len()) > 8_388_608 {
-                return Err("expanded graph exceeds the 8 MiB graph document limit".into());
-            }
-            vec![id]
-        };
-        if shape == "chain" || synthesis || shape == "single" {
-            ends = outputs;
-        } else {
-            ends.extend(outputs);
-        }
-        if nodes.len() > 512 {
-            return Err("preset expands to more than 512 nodes".into());
-        }
-    }
     stack.pop();
-    Ok(ends)
+    result
 }
 
 fn interpolate(
@@ -1163,19 +1167,20 @@ fn build_stages(
                 "limits",
                 "integration_branch",
                 "delivery",
+                "pattern",
             ]
             .contains(&key.as_str())
         })
     }) {
         return Err(invalid_config(name, key, "unknown field", prefix, origins));
     }
-    let parameters = config
-        .get("parameters")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    if !parameters.is_object() {
-        return Err("parameters must be a table".into());
-    }
+    check_pattern(name, config.get("pattern"), prefix, origins)?;
+    let parameters = flatten_parameters(
+        name,
+        config.get("parameters").unwrap_or(&json!({})),
+        prefix,
+        origins,
+    )?;
     let mut builder = StageBuilder {
         layers,
         name,
@@ -1381,9 +1386,16 @@ impl StageBuilder<'_> {
                 let (mut config, child_origins) =
                     self.layers
                         .resolve_inner(child, &mut Vec::new(), self.repo_files)?;
+                let mut passed: Vec<String> = Vec::new();
                 if let Some(parameters) = object.remove("parameters") {
                     let parameters =
                         interpolate(&parameters, &self.parameters, self.prompt, index as usize)?;
+                    passed.extend(
+                        parameters
+                            .as_object()
+                            .into_iter()
+                            .flat_map(|map| map.keys().cloned()),
+                    );
                     for (key, value) in parameters
                         .as_object()
                         .ok_or("entry parameters must be a table")?
@@ -1394,6 +1406,20 @@ impl StageBuilder<'_> {
                             value.clone(),
                             &mut BTreeMap::new(),
                             "entry",
+                        )?;
+                    }
+                }
+                for key in AMBIENT {
+                    if let Some(value) = self.parameters.get(key)
+                        && config.pointer(&format!("/parameters/{key}")).is_some()
+                        && !passed.iter().any(|passed| passed == key)
+                    {
+                        override_value(
+                            &mut config,
+                            &format!("parameters.{key}"),
+                            value.clone(),
+                            &mut BTreeMap::new(),
+                            "ambient",
                         )?;
                     }
                 }
@@ -1505,6 +1531,41 @@ impl StageBuilder<'_> {
         }
         Ok(ends)
     }
+}
+
+const LEVELS: [&str; 3] = ["default", "recommended", "experimental"];
+
+fn check_pattern(
+    name: &str,
+    pattern: Option<&Value>,
+    prefix: &str,
+    origins: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let Some(pattern) = pattern else {
+        return Ok(());
+    };
+    let fail = |key: &str, message: &str| {
+        invalid_config(name, &format!("pattern.{key}"), message, prefix, origins)
+    };
+    let map = pattern
+        .as_object()
+        .ok_or_else(|| invalid_config(name, "pattern", "must be a table", prefix, origins))?;
+    for (key, value) in map {
+        match key.as_str() {
+            "level" if value.as_str().is_some_and(|level| LEVELS.contains(&level)) => {}
+            "level" => return Err(fail(key, "must be default, recommended or experimental")),
+            "summary" | "cost" | "select_when" if value.is_string() => {}
+            "citations" | "tags"
+                if value
+                    .as_array()
+                    .is_some_and(|list| list.iter().all(Value::is_string)) => {}
+            "summary" | "cost" | "select_when" | "citations" | "tags" => {
+                return Err(fail(key, "has the wrong type"));
+            }
+            _ => return Err(fail(key, "unknown field")),
+        }
+    }
+    Ok(())
 }
 
 fn composite(
@@ -1881,6 +1942,7 @@ pub fn command(command: provenant_cli::Preset, globals: &provenant_cli::Globals)
         let layers = configured(globals)?;
         match command {
             Preset::List => Ok(json!({"presets": layers.listing()})),
+            Preset::Explain { name } => layers.explain(&name),
             Preset::Show { name } => {
                 let expanded = expand(&layers, &name, "", &[])?;
                 let (values, origins) = layers.resolve(&name)?;
@@ -1967,7 +2029,7 @@ pub fn run(
                 .map_err(|e| e.to_string())?;
         let mut layers = configured(globals)?;
         let requested = |key: &str| requested_parameter(key, &params, &request.preset_set);
-        let (named, risk) = (requested("review_shape"), requested("risk"));
+        let (named, risk) = (requested("review_shape"), requested("risk_tier"));
         let selected = config.domains.routing.review.select_shape(
             named.as_deref(),
             risk.as_deref(),

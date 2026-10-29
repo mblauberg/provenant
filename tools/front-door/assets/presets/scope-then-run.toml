@@ -1,0 +1,34 @@
+stages = [
+  { id = "scout", preset = "scout-swarm", parameters = { width = "${width}", read_roots = "${read_roots}" } },
+  { id = "scope", role = "scoper" },
+  { id = "run", preset = "generator-evaluator", parameters = { worktree = "${worktree}", scope = "${write_scope}", base = "${base}", spec = "${spec}", delivery = "${delivery}", review_shape = "${review_shape}", risk_tags = "${risk_tags}" } },
+]
+exports = [{ node = "run", outputs = ["result", "findings"] }]
+
+[pattern]
+level = "recommended"
+summary = "Scout the problem, turn the evidence into acceptance criteria and a write scope, then implement and evaluate."
+citations = ["Anthropic, how we built our multi-agent research system"]
+cost = "scouts + 1 scoping attempt + generator-evaluator"
+select_when = "The brief is not yet an approved slice: scope is unclear or acceptance criteria are missing."
+tags = ["research", "write", "review"]
+
+[parameters]
+width = { type = "integer", default = 3, min = 1, max = 32, doc = "Number of parallel scouts." }
+read_roots = { type = "list", default = [], doc = "Extra read roots for the scouts." }
+worktree = { type = "string", default = "", doc = "Registered writer worktree for the run stage." }
+write_scope = { type = "list", default = ["."], doc = "Literal relative paths the writer may change." }
+base = { type = "string", default = "", doc = "Diff reference the slice is measured from." }
+spec = { type = "string", default = "", doc = "Issue number or file holding any existing acceptance criteria." }
+delivery = { type = "string", default = "none", doc = "Delivery mode for the writer commit." }
+review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
+risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
+
+[roles.scoper]
+tier = "senior"
+prompt = """
+Turn the scouts' evidence into one approved slice for: ${prompt}
+State the acceptance criteria, the literal write scope, the checks that prove
+completion and any open question the user must answer. If a question blocks
+the work, begin with NEEDS-USER and stop; otherwise begin with READY.
+"""

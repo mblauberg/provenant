@@ -163,6 +163,8 @@ pub enum Preset {
     List,
     /// Show effective preset values and their origins
     Show { name: String },
+    /// Explain when to use a preset, its cost, and its typed parameters
+    Explain { name: String },
 }
 #[derive(Debug, Args)]
 pub struct Review {

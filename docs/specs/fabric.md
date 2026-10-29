@@ -284,14 +284,14 @@ graph ID and a private, content-addressed document in project scratch, so
 retrying the same submission observes the existing graph. Change the prompt or
 parameters for a separate graph.
 
-The original structures remain `single`, `chain`, `fan-out` and
-`fan-out-synthesise`. Each uses read-only tasks, a `parameters.route` pool
-(default `senior`), and the supplied prompt; fan-out structures also accept
-`parameters.width` (1 to 32, default 2). A chain passes the first result to
-the second; synthesis receives each branch result. Slots can contain another
-preset, including the synthesis slot.
+Every preset is a list of `stages` lowered by one path. `single`, `chain`,
+`fan-out` and `fan-out-synthesise` are bundled stage presets with read-only
+tasks, a `parameters.route` pool (default `senior`) and the supplied prompt;
+the fan-out presets also accept `parameters.width` (1 to 32, default 2). A
+chain passes the first result to the second; synthesis receives each branch
+result. A stage can run any preset.
 
-New presets can declare ordered `stages`. A stage selects a role, another
+A preset declares ordered `stages`. A stage selects a role, another
 preset or heterogeneous `parallel` entries. `count` repeats an entry, from 1
 to 32. Role profiles supply node defaults, and an entry may override them:
 
@@ -342,9 +342,10 @@ declare `loop = { stages = [...], until = "accept", max_rounds = 2 }` to reuse
 roles and presets inside bounded repair. Existing `loop.body` configuration
 also remains available. Planner fragments do not resolve named presets.
 
-Bundled `scout-swarm`, `implement-with-lens`, `review-council` and `big-batch`
-express scouting, implementation with a simplicity lens, combined review and
-a full batch respectively. Scouts use junior tiers and remain read-only;
+Bundled `scout-swarm`, `generator-evaluator`, `review-council`, `big-batch`
+and `scope-then-run` express scouting, implementation with evaluating lenses,
+combined review, a full batch, and scouting and scoping before a run
+respectively. Scouts use junior tiers and remain read-only;
 implementation uses senior tiers; the end-of-batch refactor uses principal.
 The implementation lens challenges redundancy, test quality, cleanup and
 rigid over-engineering. Junior reviews on senior or principal work are
@@ -355,20 +356,36 @@ refactors. Synthesis reconciles evidence rather than taking a majority vote.
 Preset TOML files are named `NAME.toml` under
 `$XDG_CONFIG_HOME/provenant/presets/` (or `~/.config/provenant/presets/`)
 and `.provenant/presets/` in the selected project. Values merge in bundled,
-user, repository and `--set PATH=TOML_VALUE` order. `preset list` lists names;
-`preset show NAME` displays merged values and their origins. `extends` selects
+user, repository and `--set PATH=TOML_VALUE` order. `preset list` lists names
+with each pattern's level, summary and cost; `preset show NAME` displays merged
+values and their origins; `preset explain NAME` renders the pattern, typed
+parameters, stages and roles without creating state. `extends` selects
 another preset's defaults. A same-name override omits `extends` and supplies
 only its changes. For example:
 
 ```toml
 extends = "chain"
-[parameters]
-route = "senior"
-[slots.first]
-preset = "fan-out"
-[slots.first.parameters]
-width = 3
+stages = [
+  { id = "first", preset = "fan-out", parameters = { width = 3 } },
+  { id = "second" },
+]
 ```
+
+A parameter is either a bare value or a typed table with `type` (`string`,
+`integer`, `number`, `boolean`, `list` or `table`), `default`, `min`, `max`
+(numeric value, or list or text length), `enum` and `doc`. A bare value that
+overrides a typed parameter replaces its default and keeps the schema. A
+refused value names the parameter and the layer it came from. A same-name
+override of a bundled preset cannot add parameters the bundled preset does not
+declare. An optional `[pattern]` table holds `level` (`default`,
+`recommended` or `experimental`), `summary`, `citations`, `cost`,
+`select_when` and `tags`. Parents pass `risk_tier` and `subject` to a child
+that declares them unless the entry sets them; `prompt` is always available.
+
+`--set` addresses a top-level stage by id (`sN` by position when it has none):
+`--set first.width=3` sets a parameter of the preset that stage runs, and on a
+role stage `--set task.tier=junior` sets that entry field. Stage `id` and
+`preset` cannot be overridden.
 
 A preset run announces every repository preset file used in resolution order,
 including inherited files and files whose values are overridden. Each file is
