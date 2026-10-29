@@ -148,7 +148,7 @@ pub(crate) fn admit(
 
 /// Minimal environment: the user's identity, a fixed search path and TMPDIR
 /// under the attempt's private tmp directory. Repository-specific Git object
-/// routing belongs in the shell Git wrapper, never this lane-wide environment.
+/// configuration belongs to the private directory.
 /// Callers append provider keys.
 pub(crate) fn base_env(
     input: &PrepareInput<'_>,
@@ -169,73 +169,37 @@ pub(crate) fn base_env(
     env
 }
 
-/// Git writes objects and writer refs into attempt-owned scratch. Writers keep
-/// only the linked index shared, for host quarantine after verified settlement.
-/// Scope the overrides to shell Git operating on the bound common directory.
-/// The host verifies the alternate target at preparation only: the lane can
-/// rewrite alternates and shadow objects, so its Git output is not host evidence.
+/// Writer Git uses a complete private directory, including its index and all
+/// operation state. Shared metadata is read-only. The small publishing wrapper
+/// restores this environment only for providers which scrub it.
 pub(crate) fn private_git_objects(
     input: &PrepareInput<'_>,
     spec: &mut LaunchSpec,
 ) -> Result<(), ProviderError> {
-    let permissions = input.confined.permissions();
-    let writer = matches!(permissions.mode, AccessMode::WorktreeWrite(_));
-    let common = match &permissions.mode {
-        AccessMode::WorktreeWrite(authority) => authority
-            .common_git_dir()
-            .ok_or(ProviderError::InvalidPath)?,
-        AccessMode::ReadOnly => {
-            let Some(grants) = permissions.read_only.as_ref() else {
-                return Ok(());
-            };
-            grants
-                .git_read_paths()
-                .next()
-                .ok_or(ProviderError::InvalidPath)?
-        }
-    };
-    if writer {
-        spec.env.extend([
-            ("GIT_CONFIG_COUNT".into(), "2".into()),
-            ("GIT_CONFIG_KEY_0".into(), "gc.auto".into()),
-            ("GIT_CONFIG_VALUE_0".into(), "0".into()),
-            ("GIT_CONFIG_KEY_1".into(), "maintenance.auto".into()),
-            ("GIT_CONFIG_VALUE_1".into(), "false".into()),
-        ]);
+    if !matches!(
+        input.confined.permissions().mode,
+        AccessMode::WorktreeWrite(_)
+    ) {
+        return Ok(());
     }
-    let objects = input
-        .confined
-        .permissions()
-        .scratch
-        .path
-        .join("git-objects");
-    let info = objects.join("info");
-    let quoted = quote_alternate(&common.join("objects"));
-    spec.setup.extend([
-        SetupStep::CreateDir(info.clone()),
-        SetupStep::WriteFile {
-            path: info.join("alternates"),
-            bytes: quoted.into_bytes(),
-        },
+    let scratch = &input.confined.permissions().scratch.path;
+    let private = scratch.join("git-common");
+    spec.env.extend([
+        ("GIT_DIR".into(), private.clone().into()),
+        ("GIT_COMMON_DIR".into(), private.into()),
+        ("GIT_WORK_TREE".into(), input.cwd.into()),
+        (
+            "GIT_OBJECT_DIRECTORY".into(),
+            scratch.join("git-objects").into(),
+        ),
     ]);
-    let bin = input.confined.permissions().scratch.path.join("bin");
-    let wrapper = bin.join("git");
-    // Keep routing independent of setup steps so publishing cannot drop it.
-    spec.git_wrapper.scrub |= spec.setup.iter().any(|step| {
-        matches!(step,
-            SetupStep::WriteExecutable { path, .. } if path == &wrapper
-        )
-    });
-    spec.git_wrapper.routing = Some(scoped_git_routing(
-        input.provenant.git,
-        common,
-        &objects,
-        input.cwd,
-        writer,
-    ));
-    spec.write_git_wrapper(&bin, input.provenant.git)?;
-    // Like Claude's existing scrub wrapper, this is attempt-owned shell code.
-    spec.profile.spec.tool_exec_roots.push(subtree(bin));
+    // A single source generates every Git shim, including Claude's scrub shim.
+    spec.git_wrapper.scrub = true;
+    spec.write_git_wrapper(&scratch.join("bin"), input.provenant.git)?;
+    spec.profile
+        .spec
+        .tool_exec_roots
+        .push(subtree(scratch.join("bin")));
     spec.profile
         .spec
         .process_executables
@@ -248,170 +212,10 @@ pub(crate) fn private_git_objects(
     Ok(())
 }
 
-fn scoped_git_routing(
-    git: &Path,
-    common: &Path,
-    objects: &Path,
-    worktree: &Path,
-    writer: bool,
-) -> Vec<u8> {
-    let mut bytes = if writer {
-        b"lane_writer=1\n".to_vec()
-    } else {
-        b"lane_writer=0\n".to_vec()
-    };
-    let private_common = objects.with_file_name("git-common");
-    for (name, path) in [
-        ("lane_git", git),
-        ("lane_common", common),
-        ("lane_objects", objects),
-        ("lane_private_common", private_common.as_path()),
-        ("lane_worktree", worktree),
-    ] {
-        bytes.extend_from_slice(name.as_bytes());
-        bytes.extend_from_slice(b"=");
-        shell_quote_path(&mut bytes, path);
-        bytes.push(b'\n');
-    }
-    bytes.extend_from_slice(br#"unset GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
-lane_git_path() {
-    path_flag=$1; shift
-    remaining=$#
-    # Rotate recognised global options to the end, discarding the subcommand
-    # and its arguments. The outer invocation keeps its original argv intact.
-    while [ "$remaining" -gt 0 ]; do
-        option=$1; shift; remaining=$((remaining - 1))
-        case "$option" in
-            -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix)
-                [ "$remaining" -gt 0 ] || return 1
-                value=$1; shift; remaining=$((remaining - 1))
-                set -- "$@" "$option" "$value" ;;
-            --git-dir=*|--work-tree=*|--namespace=*|--config-env=*|--super-prefix=*|--bare|--no-replace-objects|--no-lazy-fetch|--no-optional-locks|--literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--no-advice|-p|--paginate|-P|--no-pager)
-                set -- "$@" "$option" ;;
-            -*) return 1 ;;
-            *)
-                # Shell aliases and external git-* commands may enter another
-                # repository through Git's own exec-path, bypassing this shim.
-                # Only the object-producing builtins need the override.
-                case "$option" in
-                    show|log|diff|merge-tree|hash-object) ;;
-                    add|am|apply|bisect|branch|cat-file|checkout|cherry-pick|clean|commit|commit-tree|describe|diff-files|diff-index|diff-tree|fetch|for-each-ref|format-patch|fsck|grep|index-pack|ls-files|ls-tree|merge|merge-base|mktag|mktree|multi-pack-index|notes|pack-objects|prune|prune-packed|push|read-tree|rebase|reflog|reset|restore|rev-list|rev-parse|revert|show-ref|stash|status|switch|tag|unpack-objects|update-index|update-ref|write-tree)
-                        [ "$lane_writer" = 1 ] || return 1 ;;
-                    *) return 1 ;;
-                esac
-                while [ "$remaining" -gt 0 ]; do
-                    shift; remaining=$((remaining - 1))
-                done
-                break ;;
-        esac
-    done
-    "$lane_git" "$@" rev-parse --path-format=absolute "$path_flag"
-}
-# Preserve even trailing newlines in native paths. rev-parse adds one newline.
-if found=$(lane_git_path --git-common-dir "$@" 2>/dev/null && printf '.'); then
-    found=${found%.}
-    if [ "$found" = "$lane_common
-" ]; then
-        if [ "$lane_writer" = 1 ]; then
-            # A linked GIT_DIR can still publish shared refs despite a private
-            # GIT_COMMON_DIR. Use a complete private Git directory instead.
-            private=$(lane_git_path --absolute-git-dir "$@" 2>/dev/null && printf '.') || exit 1
-            private=${private%.}
-            # Remove the one newline appended by rev-parse, preserving path bytes.
-            private=${private%'
-'}
-            GIT_INDEX_FILE=$private/index
-            GIT_DIR=$lane_private_common
-            GIT_COMMON_DIR=$lane_private_common
-            GIT_WORK_TREE=$lane_worktree
-            export GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE
-        fi
-        GIT_OBJECT_DIRECTORY=$lane_objects
-        export GIT_OBJECT_DIRECTORY
-    fi
-fi
-"#);
-    bytes
-}
-
-/// Shell quoting must preserve native path bytes, including non-UTF-8 roots.
-fn shell_quote_path(bytes: &mut Vec<u8>, path: &Path) {
-    bytes.push(b'\'');
-    for byte in path.as_os_str().as_encoded_bytes() {
-        if *byte == b'\'' {
-            bytes.extend_from_slice(b"'\\''");
-        } else {
-            bytes.push(*byte);
-        }
-    }
-    bytes.push(b'\'');
-}
-
-/// Git accepts C-quoted native paths in info/alternates.
-fn quote_alternate(alternate: &Path) -> String {
-    use std::os::unix::ffi::OsStrExt;
-    let mut quoted = String::from("\"");
-    for byte in alternate.as_os_str().as_bytes() {
-        match byte {
-            b'"' | b'\\' => {
-                quoted.push('\\');
-                quoted.push(char::from(*byte));
-            }
-            0x20..=0x7e => quoted.push(char::from(*byte)),
-            _ => quoted.push_str(&format!("\\{byte:03o}")),
-        }
-    }
-    quoted.push_str("\"\n");
-    quoted
-}
-
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod git_tests {
     use super::*;
-
-    #[test]
-    #[allow(clippy::disallowed_methods)]
-    fn git_reads_quoted_alternate_path() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path().join("repo café: space\"\\\n");
-        std::fs::create_dir(&repo).unwrap();
-        let run = |args: &[&str], objects: Option<&Path>| {
-            let mut command = std::process::Command::new("/usr/bin/git");
-            command.current_dir(&repo).args(args);
-            if let Some(objects) = objects {
-                command.env("GIT_OBJECT_DIRECTORY", objects);
-            }
-            let output = command.output().unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        };
-        run(&["init", "-q"], None);
-        run(
-            &[
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.test",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "fixture",
-            ],
-            None,
-        );
-        let objects = temp.path().join("objects");
-        std::fs::create_dir_all(objects.join("info")).unwrap();
-        std::fs::write(
-            objects.join("info/alternates"),
-            quote_alternate(&repo.join(".git/objects")),
-        )
-        .unwrap();
-        run(&["cat-file", "-e", "HEAD^{commit}"], Some(&objects));
-    }
 
     #[test]
     #[allow(clippy::disallowed_methods)]
