@@ -325,12 +325,14 @@ marker stops the push repeating.
 ### Disclosure and redaction
 
 A prompt snapshot is scanned for secret patterns before it is sealed and is
-refused on a match. One streaming redactor masks known secrets, credential URLs
-and token patterns across chunk boundaries before anything reaches disk; a
+refused on a match. The streaming redactor masks known secrets, credential URLs
+and token patterns across chunk boundaries. Guardian capture attaches independent
+known-shape filters before stdout or stderr reaches disk; a
 redactor failure discards that output. The inherited environment is never
 persisted.
 - Why: lane output is stored and shared with other models.
 - Test: `crates/confinement/src/redact.rs::known_secret_split_across_chunks_is_never_emitted`;
+  `src/compose_tests.rs::guardian_capture_masks_split_credentials_before_retention`;
   `crates/confinement/src/disclosure.rs::snapshot_refuses_known_secrets_without_returning_content`
 - Owner: `crates/confinement/src/redact.rs`, `crates/confinement/src/disclosure.rs`
 

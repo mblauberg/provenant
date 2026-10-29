@@ -17,6 +17,12 @@ again. `provenant status` shows active lanes and the twenty newest settled
 lanes, newest first. `--json` returns full records for the same selection.
 Use `--all` with `--limit N` and the returned `--cursor N` to page all history.
 
+New stdout/stderr captures and settled `result.md` files mask known credential
+shapes before storage. Result digests identify the stored bytes, and
+`redacted: true` means the filter was applied even when nothing matched.
+Unknown secret formats, earlier run files and provider-owned session state
+still need care when sharing. See [output redaction and identity](../specs/run.md#output-redaction-and-identity).
+
 On macOS, the host selects a nice value for the lane, and the guardian applies
 it to the provider process before confinement. Its descendants inherit that
 value.

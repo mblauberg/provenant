@@ -1107,6 +1107,12 @@ impl RunStore {
                 decoded.reason = Some("cancelled during delivery".into());
             }
         }
+        // Decoding can reveal credential markers hidden by JSON escapes in
+        // the already-filtered capture. Seal only the filtered rendering.
+        let result = provenant_confinement::redact::known_shapes(decoded.result.as_bytes())
+            .map_err(|_| RunError::Validation("result redaction failed"))?;
+        let result = std::str::from_utf8(&result)
+            .map_err(|_| RunError::Validation("redacted result is not UTF-8"))?;
         let publication = TerminalPublication {
             outcome: decoded.outcome,
             finished_at,
@@ -1116,9 +1122,9 @@ impl RunStore {
                     .ok()
             }),
             reason: decoded.reason,
-            result: &decoded.result,
+            result,
             complete: decoded.complete,
-            redacted: false,
+            redacted: true,
             resolved_route: record.resolved_route.clone(),
             applied_route: record.applied_route.clone(),
             observed_route: decoded.observed_route,

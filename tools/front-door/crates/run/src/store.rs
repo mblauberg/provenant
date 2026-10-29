@@ -67,6 +67,10 @@ impl RunStore {
             .map_err(|_| RunError::Validation("sealed result is not UTF-8"))?;
         let publication = TerminalPublication {
             result: text,
+            // The recomputed rendering is not the orphan's bytes. Preserve
+            // its identity without claiming unsafe bytes were redacted.
+            redacted: facts.redacted
+                && provenant_confinement::redact::known_shapes(&raw).is_ok_and(|safe| safe == raw),
             ..facts.clone()
         };
         self.publish_terminal(id, old.revision, &publication, exit, call)

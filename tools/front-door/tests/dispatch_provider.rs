@@ -223,6 +223,26 @@ fn fixture() -> Result {
         )?;
         return Ok(());
     }
+    if prompt.contains("fixture printed credential") {
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        write!(io::stderr(), "diagnostic {token}")?;
+        for frame in [
+            json!({"type":"thread.started","thread_id":session}),
+            json!({"type":"item.completed","item":{"type":"agent_message","text":format!("credential {token}")}}),
+            json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
+        ] {
+            let frame = frame.to_string();
+            // Escaping hides the marker from the byte-stream filter. The
+            // decoded answer must pass through redaction again at settlement.
+            let frame = if prompt.contains("escaped") {
+                frame.replace("ghp_", r"\u0067hp_")
+            } else {
+                frame
+            };
+            writeln!(io::stdout(), "{frame}")?;
+        }
+        return Ok(());
+    }
     let answer = if prompt.contains("fixture partial stop") {
         format!(
             "```handoff\n{}\n```",
@@ -1010,6 +1030,78 @@ fn opencode_dispatch_observes_v2_wal_session() -> Result {
         rig.assert_legacy_unchanged()?;
         cleanup.disarm();
     }
+    Ok(())
+}
+
+fn printed_credentials_leave_no_plaintext_in_run_files() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    for mode in ["plain", "escaped"] {
+        let prompt = rig.root.join("prompt.txt");
+        fs::write(&prompt, format!("fixture printed credential {mode}"))?;
+        let out = rig.command(&[
+            "run",
+            "--model",
+            "codex/gpt-6-luna",
+            "--effort",
+            "low",
+            "--operation-id",
+            mode,
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--wait",
+            "5s",
+            "--json",
+        ])?;
+        assert_eq!(code(&out), 0, "{out:?}");
+        let response: Value = serde_json::from_slice(&out.stdout.bytes)?;
+        let run = response["data"]["run_id"].as_str().ok_or("run")?;
+        let lanes = rig.command(&["lanes", "--id", run, "--json"])?;
+        assert_eq!(code(&lanes), 0, "{lanes:?}");
+        let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+        let lane = &lanes["data"]["lanes"][0];
+        assert_eq!(lane["state"], "succeeded", "{lane}");
+        let id = lane["attempt_id"].as_str().ok_or("attempt")?;
+        let run_dir = rig.state.join("runs").join(run);
+        let attempt = run_dir.join("attempts").join(id);
+        assert_eq!(
+            fs::read(attempt.join("result.md"))?,
+            b"credential [REDACTED]"
+        );
+        assert_eq!(
+            fs::read(attempt.join("stderr.log"))?,
+            b"diagnostic [REDACTED]"
+        );
+        let stdout = fs::read_to_string(attempt.join("stdout.log"))?;
+        assert!(stdout.contains(if mode == "plain" {
+            "[REDACTED]"
+        } else {
+            r"\u0067hp_"
+        }));
+        let mut pending = vec![run_dir];
+        while let Some(path) = pending.pop() {
+            for entry in fs::read_dir(path)? {
+                let entry = entry?;
+                let kind = entry.file_type()?;
+                if kind.is_dir() {
+                    pending.push(entry.path());
+                } else if kind.is_file() {
+                    let bytes = fs::read(entry.path())?;
+                    assert!(
+                        !bytes
+                            .windows(40)
+                            .any(|window| window == b"ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+                        "plaintext in {}",
+                        entry.path().display()
+                    );
+                }
+            }
+        }
+    }
+    cleanup.disarm();
     Ok(())
 }
 
@@ -3009,6 +3101,7 @@ fn main() -> ExitCode {
                 "receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts",
                 "owned_dispatch_retains_failed_attempt_and_replays",
                 "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation",
+                "printed_credentials_leave_no_plaintext_in_run_files",
                 "codex_dispatch_observes_rollout",
                 "policy_empty_result_falls_back_without_a_chair_turn",
                 "policy_incomplete_result_continues_the_retained_session",
@@ -3046,6 +3139,7 @@ fn main() -> ExitCode {
                     "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation" => {
                         owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation()
                     }
+                    "printed_credentials_leave_no_plaintext_in_run_files" => printed_credentials_leave_no_plaintext_in_run_files(),
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
                     "policy_empty_result_falls_back_without_a_chair_turn" => policy_empty_result_falls_back_without_a_chair_turn(),
                     "policy_incomplete_result_continues_the_retained_session" => policy_incomplete_result_continues_the_retained_session(),

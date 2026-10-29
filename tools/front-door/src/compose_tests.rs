@@ -7,6 +7,50 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[test]
+fn guardian_capture_masks_split_credentials_before_retention() {
+    struct Capture;
+    impl super::Process for Capture {
+        fn supervise(
+            &self,
+            _: &[std::ffi::OsString],
+            hooks: provenant_supervisor::GuardianHooks<'_>,
+        ) -> provenant_supervisor::custody::Result<()> {
+            use provenant_os::{capture::StreamCapture, exec::StreamPolicy};
+            let stdout = hooks
+                .stdout_filter
+                .ok_or_else(|| std::io::Error::other("stdout redaction"))?;
+            let stderr = hooks
+                .stderr_filter
+                .ok_or_else(|| std::io::Error::other("stderr redaction"))?;
+            let mut stdout =
+                StreamCapture::new(StreamPolicy::Capture { limit: 1024 }, None, Some(stdout))
+                    .map_err(std::io::Error::other)?;
+            let mut stderr =
+                StreamCapture::new(StreamPolicy::Capture { limit: 1024 }, None, Some(stderr))
+                    .map_err(std::io::Error::other)?;
+            // Interleave streams and split the token marker and body. EOF
+            // must flush safe trailing text without leaking pending bytes.
+            for bytes in [
+                b"credential gh".as_slice(),
+                b"p_abcdefghijklmnop",
+                b"qrstuvwxyz0123456789 end",
+            ] {
+                assert!(stdout.push(bytes).is_ok());
+                assert!(stderr.push(bytes).is_ok());
+            }
+            stdout.finish();
+            stderr.finish();
+            for capture in [&stdout, &stderr] {
+                assert_eq!(capture.outcome().bytes, b"credential [REDACTED] end");
+                assert!(!capture.outcome().filter_failed);
+            }
+            Ok(())
+        }
+    }
+    assert_eq!(super::supervise(&[], &Default::default(), &Capture), 0);
+}
+
 fn fixture() -> Result<TestRig> {
     let mut rig = repository()?;
     let seed = rig

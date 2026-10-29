@@ -882,8 +882,33 @@ refuses unsafe companion files beside the database, and caps (1 MiB record or pr
 
 ## Reads and waits
 
-`output` offsets count original bytes and reads are lossless; prompt reads
-need dispatch-equivalent authority. A terminal attempt with no requested
+### Output redaction and identity
+
+The guardian applies independent streaming known-shape redactors to stdout
+and stderr before retaining bytes or writing captures to disk. Split credential
+markers remain buffered across chunks. A filter failure discards that stream's
+remaining output. Provider lifecycle frames are decoded before filtering.
+At settlement, the holder filters the decoded result again before sealing
+`result.md`, including credential markers revealed by JSON escapes. A result
+redaction failure refuses publication rather than storing the raw answer.
+
+Result artifact `digest` and `bytes` identify the stored, redacted bytes;
+there is no raw result copy or raw-result digest. Newly sealed holder results set
+`redacted: true` to mean that redaction was applied, even when no credential
+matched. It is not a count of replacements or a guarantee against unknown
+secret formats. This does not rewrite earlier run files or provider-owned
+session state. Result-only orphan recovery preserves sealed bytes and their
+digest; it clears a proposed `redacted: true` if those bytes still contain a
+known credential shape or cannot be safely filtered.
+- Test: `src/compose_tests.rs::guardian_capture_masks_split_credentials_before_retention`;
+  `crates/run/src/dispatch_tests.rs::holder_seals_redacted_results_and_digests_the_stored_bytes`;
+  `crates/run/src/tests.rs::result_orphan_redaction_flag_describes_the_preserved_bytes`;
+  `tests/dispatch_provider.rs::printed_credentials_leave_no_plaintext_in_run_files`
+- Owner: `src/lib.rs`, `crates/run/src/holder.rs`, `crates/run/src/store.rs`
+
+`output` scans the whole artifact for known shapes before paging, including
+older artifacts. Its offsets and digest refer to those filtered bytes. Prompt
+reads are lossless and need dispatch-equivalent authority. A terminal attempt with no requested
 output is `NOT_FOUND`. `wait any` returns on the next unseen terminal or
 `input_required` lane, and `wait all` returns when all are terminal or any needs
 input. The set is fixed at entry and excludes the caller and its ancestors.

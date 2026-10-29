@@ -2943,6 +2943,63 @@ fn settle_with(
     Ok(store.finish(id, &dir, &observed, &fake, &call)?)
 }
 
+#[test]
+fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
+    for (answer, expected) in [
+        ("plain answer", "plain answer"),
+        (
+            "credential ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "credential [REDACTED]",
+        ),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let run = input();
+        let id = run.attempts[0].attempt_id;
+        store.create(&run, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let dir = store.attempt_dir(run.run_id, id, false)?;
+        artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+        let mut observed = exit();
+        observed.scope = RunStore::scope(&store.record(id, &call)?);
+        seal_exit(&store, &observed)?;
+        let fake = Fake {
+            observed: Some(route()),
+            answer: Some(answer.into()),
+            ..Fake::default()
+        };
+        let record = store.finish(id, &dir, &observed, &fake, &call)?;
+        let artifact = record.result.ok_or("result")?;
+        assert_eq!(
+            artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.as_deref(),
+            Some(expected.as_bytes())
+        );
+        assert!(
+            artifact.redacted,
+            "redacted means the filter was applied, including clean results"
+        );
+        assert_eq!(
+            artifact.digest,
+            CanonicalV1::file_digest(expected.as_bytes())
+        );
+        assert_eq!(artifact.bytes, expected.len() as u64);
+        let capture = store.stream_result(id, &call, None)?;
+        assert_eq!(capture.digest, artifact.digest.to_string());
+        assert_eq!(capture.tail, expected);
+    }
+    Ok(())
+}
+
 const STOPPED_EARLY: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"Parser done; renderer and tests remain.\"}\n```";
 
 #[test]
