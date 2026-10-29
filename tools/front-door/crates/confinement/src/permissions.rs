@@ -495,30 +495,12 @@ fn validate_writer_cache(
     Ok(())
 }
 
-/// A pathspec `git commit` holds its temporary index as
-/// `next-index-<pid>.lock` and unlinks it; the pid is not known in advance.
-const NEXT_INDEX_SAMPLE: &str = "next-index-0.lock";
-
-/// Held Git paths bound into writer authority. Most remain immutable; the
-/// renderer permits only the linked index outside the lane's scratch store.
+/// Host Git boundaries bound into writer authority. All remain read-only;
+/// the lane owns its complete Git directory under attempt scratch.
 pub(crate) struct WorktreeWriteGrants {
     worktree: PathGrant,
     private_git_dir: PathGrant,
     common_git_dir: PathGrant,
-    index: [PathGrant; 2],
-    /// Sample member of the pathspec-commit temporary index family
-    /// (`next-index-<digits>.lock`) in the private git directory.
-    next_index: PathGrant,
-    /// Git reads this shared exclude file during status and build fingerprinting.
-    common_exclude: PathGrant,
-    /// Host-side FETCH_HEAD path retained in the anchor binding; lane fetches
-    /// use their scratch Git directory.
-    fetch_heads: [PathGrant; 1],
-    /// Shared refs stay at the verified base until host settlement. Git takes
-    /// ref locks in the lane-private common directory under scratch instead.
-    packed_refs_lock: PathGrant,
-    head: [PathGrant; 14],
-    objects: PathGrant,
     branch: String,
 }
 
@@ -534,62 +516,25 @@ impl WorktreeWriteGrants {
     }
 
     fn from_paths(worktree: &Path, private: &Path, common: &Path, branch: &str) -> Self {
-        let exact = |path: PathBuf| PathGrant {
-            path,
-            scope: PathScope::Exact,
-        };
-        let subtree = |path: PathBuf| PathGrant {
-            path,
+        let subtree = |path: &Path| PathGrant {
+            path: path.to_owned(),
             scope: PathScope::Subtree,
         };
         Self {
-            worktree: subtree(worktree.to_owned()),
-            private_git_dir: subtree(private.to_owned()),
-            common_git_dir: subtree(common.to_owned()),
-            index: ["index", "index.lock"].map(|name| exact(private.join(name))),
-            next_index: exact(private.join(NEXT_INDEX_SAMPLE)),
-            common_exclude: exact(common.join("info/exclude")),
-            fetch_heads: [exact(private.join("FETCH_HEAD"))],
-            packed_refs_lock: exact(common.join("packed-refs.lock")),
-            // `git commit` writes its message buffer and clears AUTO_MERGE here;
-            // a local `git merge` records its state and ORIG_HEAD here too.
-            head: [
-                "HEAD",
-                "HEAD.lock",
-                "logs/HEAD",
-                "logs/HEAD.lock",
-                "COMMIT_EDITMSG",
-                "AUTO_MERGE",
-                "AUTO_MERGE.lock",
-                "MERGE_HEAD",
-                "MERGE_MSG",
-                "MERGE_MODE",
-                "ORIG_HEAD",
-                "ORIG_HEAD.lock",
-                // Rerere records conflicted paths here when <common>/rr-cache exists.
-                "MERGE_RR",
-                "MERGE_RR.lock",
-            ]
-            .map(|name| exact(private.join(name))),
-            objects: subtree(common.join("objects")),
+            worktree: subtree(worktree),
+            private_git_dir: subtree(private),
+            common_git_dir: subtree(common),
             branch: branch.to_owned(),
         }
     }
 
     fn iter(&self) -> impl Iterator<Item = &PathGrant> {
-        std::iter::once(&self.worktree)
-            .chain([&self.private_git_dir, &self.common_git_dir])
-            .chain(self.index.iter())
-            .chain(std::iter::once(&self.next_index))
-            .chain([&self.common_exclude, &self.packed_refs_lock])
-            .chain(self.fetch_heads.iter())
-            .chain(self.head.iter())
-            .chain(std::iter::once(&self.objects))
+        [&self.worktree, &self.private_git_dir, &self.common_git_dir].into_iter()
     }
 
     fn digest(&self, cache: &PathGrant) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"provenant-worktree-git-grants-v12\0");
+        digest.update(b"provenant-worktree-git-grants-v13\0");
         digest.update((self.branch.len() as u64).to_be_bytes());
         digest.update(self.branch.as_bytes());
         for grant in self.iter().chain([cache]) {
@@ -2149,37 +2094,17 @@ fn push_worktree_rule(
     let worktree = sbpl_path(&grants.worktree.path)?;
     let git_dir = sbpl_path(&grants.private_git_dir.path)?;
     let common_dir = sbpl_path(&grants.common_git_dir.path)?;
-    // Git in the lane reads its repository as read-only lanes do (#1061);
-    // writes stay limited to the exact grants below.
     source.push_str(&format!(
         "(allow file-read* (subpath \"{git_dir}\") (subpath \"{common_dir}\"))\n"
     ));
-    push_rule(
-        source,
-        "allow",
-        "file-read*",
-        &grants.common_exclude.path,
-        PathScope::Exact,
-    )?;
     source.push_str(&format!(
         "(allow file-write* (require-all (subpath \"{worktree}\") (require-not (subpath \"{git_dir}\")) (require-not (subpath \"{common_dir}\"))))\n"
     ));
-    // Freeze the repository even when a configured write root overlaps it.
-    // Only the linked index stays shared so host quarantine sees staged edits.
+    // Shared metadata stays immutable even when another write root overlaps it.
+    // Git writes its index, refs and operation state entirely under scratch.
     for grant in [&grants.common_git_dir, &grants.private_git_dir] {
         push_rule(source, "deny", "file-write*", &grant.path, grant.scope)?;
     }
-    for grant in &grants.index {
-        push_rule(source, "allow", "file-write*", &grant.path, grant.scope)?;
-    }
-    // An index spelling must never reopen an aliased shared object for writes.
-    push_rule(
-        source,
-        "deny",
-        "file-write*",
-        &grants.objects.path,
-        grants.objects.scope,
-    )?;
     Ok(())
 }
 
@@ -2972,27 +2897,12 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     fn worktree_grants_fixture() -> WorktreeWriteGrants {
-        let exact = |name: &str| PathGrant {
-            path: Path::new("/fixture/git").join(name),
-            scope: PathScope::Exact,
-        };
-        let subtree = |path: &str| PathGrant {
-            path: path.into(),
-            scope: PathScope::Subtree,
-        };
-        WorktreeWriteGrants {
-            worktree: subtree("/fixture/repo"),
-            private_git_dir: subtree("/fixture/git/private"),
-            common_git_dir: subtree("/fixture/git"),
-            index: [exact("index"), exact("index.lock")],
-            next_index: exact(NEXT_INDEX_SAMPLE),
-            common_exclude: exact("info/exclude"),
-            fetch_heads: [exact("private/FETCH_HEAD")],
-            packed_refs_lock: exact("packed-refs.lock"),
-            head: std::array::from_fn(|i| exact(&format!("head-{i}"))),
-            objects: subtree("/fixture/git/objects"),
-            branch: "fixture".to_owned(),
-        }
+        WorktreeWriteGrants::from_paths(
+            Path::new("/fixture/repo"),
+            Path::new("/fixture/git/private"),
+            Path::new("/fixture/git"),
+            "fixture",
+        )
     }
 
     #[cfg(target_os = "macos")]
@@ -4026,8 +3936,8 @@ mod tests {
             authority.git_grants_digest,
             grants.digest(&authority.cargo_cache)
         );
-        assert_eq!(grants.objects.path, common.join("objects"));
-        assert_eq!(grants.common_exclude.path, common.join("info/exclude"));
+        assert_eq!(grants.common_git_dir.path, common);
+        assert_eq!(grants.private_git_dir.path, private);
         assert!(!missing_parent.exists());
 
         let common_heads = common.join("refs/heads/s3");
@@ -4080,16 +3990,7 @@ mod tests {
             .lines()
             .filter(|line| line.starts_with("(allow file-write* (literal "))
             .collect();
-        let expected: Vec<_> = ["index", "index.lock"]
-            .into_iter()
-            .map(|name| {
-                format!(
-                    "(allow file-write* (literal \"{}\"))",
-                    private.join(name).display()
-                )
-            })
-            .collect();
-        assert_eq!(git_writes, expected);
+        assert!(git_writes.is_empty());
         for relative in [
             "config",
             "config.lock",
@@ -4120,33 +4021,6 @@ mod tests {
             verify_worktree_authority(&authority, &mismatched),
             Err(PermissionError::GitWriteAuthorityMissing)
         ));
-
-        let private_head_log = private_logs.join("HEAD");
-        let hardlink_alias = fixture._temp.path().join("hardlinked-private-log");
-        std::fs::write(&private_head_log, b"ref: refs/heads/s3/authority\n")?;
-        std::fs::hard_link(&private_head_log, &hardlink_alias)?;
-        assert!(matches!(
-            verify_worktree_authority(&authority, &anchors),
-            Err(PermissionError::AnchorMismatch)
-        ));
-        std::fs::remove_file(&hardlink_alias)?;
-        std::fs::remove_file(&private_head_log)?;
-
-        {
-            let directory = &private;
-            let fetch_head = directory.join("FETCH_HEAD");
-            std::fs::write(&fetch_head, b"fetch result\n")?;
-            std::fs::hard_link(&fetch_head, &hardlink_alias)?;
-            assert!(matches!(
-                verify_worktree_authority(&authority, &anchors),
-                Err(PermissionError::AnchorMismatch)
-            ));
-            std::fs::remove_file(&hardlink_alias)?;
-            std::fs::remove_file(&fetch_head)?;
-            std::os::unix::fs::symlink(common.join("config"), &fetch_head)?;
-            assert!(verify_worktree_authority(&authority, &anchors).is_err());
-            std::fs::remove_file(&fetch_head)?;
-        }
 
         let mut tampered = authority.clone();
         tampered.git_grants_digest[0] ^= 1;
@@ -4277,8 +4151,6 @@ mod tests {
             &authority,
             &provenant_os::fs::canonicalize(&fixture.home)?,
         )?;
-        let grants = WorktreeWriteGrants::derive(&linked, &selected_ref);
-
         let scratch = root.join("scratch");
         std::fs::create_dir(&scratch)?;
         #[cfg(unix)]
@@ -4395,7 +4267,7 @@ mod tests {
                     FixtureOutcome::Allowed,
                 ),
                 (FixtureOperation::WorktreeWrite, FixtureOutcome::Allowed),
-                (FixtureOperation::GitIndexWrite, FixtureOutcome::Allowed),
+                (FixtureOperation::GitIndexWrite, FixtureOutcome::Denied),
                 (FixtureOperation::GitHeadWrite, FixtureOutcome::Denied),
                 (FixtureOperation::GitObjectsWrite, FixtureOutcome::Denied),
                 (FixtureOperation::SelectedRefWrite, FixtureOutcome::Denied),
@@ -4443,7 +4315,7 @@ mod tests {
             private.clone(),
             common.clone(),
             common.join("info"),
-            grants.objects.path.clone(),
+            common.join("objects"),
             private_logs,
             common_heads,
             common_logs,
@@ -4674,6 +4546,8 @@ mod tests {
             String::from_utf8_lossy(&inside_outcome.stderr.bytes)
         );
         for name in [
+            "index",
+            "index.lock",
             "HEAD",
             "HEAD.lock",
             "FETCH_HEAD",
