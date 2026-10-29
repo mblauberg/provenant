@@ -28,7 +28,7 @@ Set these in `[domains.fabric.graph]` in the host configuration. Omit a key for 
 | Key | Default | Effect |
 |---|---|---|
 | `allowed_read_roots` | empty (read roots stay inside the project and its registered worktrees) | Absolute host directories that graph and preset `read_roots` may name besides the project's own registered worktrees. (absolute directory paths). |
-| `limits.expansion_depth` | 32 | Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 29. Graph documents cannot raise it. (1 or more). |
+| `limits.expansion_depth` | 64 | Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 33. Graph documents cannot raise it. (1 or more). |
 
 ## Host model policy settings
 
@@ -58,7 +58,7 @@ Set these in `[domains.routing.model_policy]` in the host configuration. Omit a 
 | `defaults.result.sections` | per model | Heading lines a result must contain. (exact section heading lines; empty clears). |
 | `defaults.result.fallback` | per model | Model for the one fallback attempt when the result check fails. (model id). |
 | `defaults.result.fallback_effort` | per model | Effort for the fallback attempt. (effort name). |
-| `rules` | empty | Layered overrides ordered by scope: global, adapter, model, account, model plus account; later rules win at equal scope. Inclusive start, exclusive expiry; an overnight window wraps midnight; inactive rules have no effect. (tables with adapter, model, account, starts_unix_seconds, expires_unix_seconds, windows (list of {start_hour, end_hour}, UTC) and policy (the same fields as defaults, under rules.policy)). |
+| `rules` | empty | Layered overrides ordered by scope: global, adapter, model, account, model plus account; later rules win at equal scope. Schedule start is inclusive, expiry and window end are exclusive; an overnight window wraps midnight; inactive rules have no effect. (tables with adapter, model, account, schedule {starts, expires, windows [{weekdays?, start_hour, end_hour}] in UTC} and policy (the same fields as defaults, under rules.policy); weekdays use Monday-based indexes, Monday 0 through Sunday 6). |
 
 ## Quota history and plan prices
 
@@ -169,6 +169,58 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
 | `status` | `"wired"` |
 | `trade_off` | `"Longer cooldowns reduce repeated capacity errors but keep affected models out of automatic draws for longer."` |
+| `type` | `"int"` |
+
+## `domains.routing.capacity_retry_max_seconds`
+
+| Field | Value |
+|---|---|
+| `default` | `600` |
+| `effect` | `"Cap one capacity retry's wait, jitter included, at this many seconds."` |
+| `max` | `604800` |
+| `min` | `0` |
+| `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"A higher cap lets later retries back off further from a provider that stays at capacity, at the cost of a longer stall."` |
+| `type` | `"int"` |
+
+## `domains.routing.capacity_retry_seconds`
+
+| Field | Value |
+|---|---|
+| `default` | `30` |
+| `effect` | `"Wait this long before a capacity retry, multiplied by the retry's number, plus up to a quarter of jitter, then capped by domains.routing.capacity_retry_max_seconds and domains.routing.retry_delay_ceiling_seconds. Quota retries do not wait."` |
+| `max` | `604800` |
+| `min` | `0` |
+| `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"A longer wait gives the provider time to recover but delays the lane."` |
+| `type` | `"int"` |
+
+## `domains.routing.retry_delay_ceiling_seconds`
+
+| Field | Value |
+|---|---|
+| `default` | `3600` |
+| `effect` | `"Ceiling on the wait any settlement retry seals before its successor may launch. The successor's admission window opens when the wait ends."` |
+| `max` | `604800` |
+| `min` | `0` |
+| `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"A higher ceiling allows long waits for a recovering provider but holds a queued successor for longer."` |
+| `type` | `"int"` |
+
+## `domains.routing.settlement_retries`
+
+| Field | Value |
+|---|---|
+| `default` | `2` |
+| `effect` | `"Retry a lane that settled for provider capacity or a spent account up to this many times. A capacity stop resumes its session where the adapter supports resume, or redraws the route when it has none. A quota stop retries the applied model at once when another unpinned, unspent account serves it, and admission skips the spent account. Zero disables these retries."` |
+| `max` | `32` |
+| `min` | `0` |
+| `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"More retries recover more lanes without a chair turn but spend more attempts when a provider stays at capacity."` |
 | `type` | `"int"` |
 
 ## `fabric.accept_handoff`

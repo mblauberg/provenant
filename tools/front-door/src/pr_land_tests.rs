@@ -1658,9 +1658,12 @@ pub(crate) fn pr_land_out_of_tree_with_separate_git_directory() -> Result {
 }
 
 pub(crate) fn pr_land_refuses_each_unsafe_step_and_reports_the_rest() -> Result {
-    // A checkout of the base with local changes is not fast-forwarded.
+    // A checkout of the base with a tracked modification is not fast-forwarded.
     let landing = landing()?;
-    fs::write(landing.rig.project.join("stray.txt"), "mine\n")?;
+    let ignore = landing.rig.project.join(".gitignore");
+    let mut contents = fs::read_to_string(&ignore)?;
+    contents.push_str("mine\n");
+    fs::write(&ignore, &contents)?;
     let output = command(
         &landing.rig,
         &["land", NUMBER, "--head", &landing.head, "--json"],
@@ -1676,7 +1679,30 @@ pub(crate) fn pr_land_refuses_each_unsafe_step_and_reports_the_rest() -> Result 
         landing.stale,
         "a dirty checkout keeps its base"
     );
+    assert_eq!(fs::read_to_string(&ignore)?, contents);
+
+    // Untracked files in the base checkout, such as Provenant's own scratch,
+    // do not stop the fast-forward and are left in place.
+    let landing = self::landing()?;
+    fs::create_dir_all(landing.rig.project.join(".provenant/scratch"))?;
+    fs::write(
+        landing.rig.project.join(".provenant/scratch/note"),
+        "mine\n",
+    )?;
+    fs::write(landing.rig.project.join("stray.txt"), "mine\n")?;
+    let output = command(
+        &landing.rig,
+        &["land", NUMBER, "--head", &landing.head, "--json"],
+    )?;
+    let value = json(&output)?;
+    assert_eq!(status(&value, "fast_forward")?, "done", "{value}");
+    assert_ne!(
+        git(&landing.rig, &["rev-parse", "main"])?,
+        landing.stale,
+        "{value}"
+    );
     assert!(landing.rig.project.join("stray.txt").exists());
+    assert!(landing.rig.project.join(".provenant/scratch/note").exists());
 
     // A worktree with uncommitted work is kept, and so is its branch.
     let mut landing = self::landing()?;

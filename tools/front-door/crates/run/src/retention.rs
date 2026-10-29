@@ -163,6 +163,13 @@ impl RunStore {
         if !(1..=3650).contains(&days) {
             return Err(RunError::Validation("provider_state_days_range"));
         }
+        if !dry_run {
+            // Finished reaction rows age out with the run's logs.
+            self.prune_reactions(
+                now.as_micros().div_euclid(1_000_000) - (logs_days as i64) * 86_400,
+                call,
+            )?;
+        }
         let rows: Vec<(String, String, String, Vec<u8>)> = call.retry(|| {
             let mut query = self.db.prepare(
                 "SELECT id,run,project,record FROM attempts WHERE terminal=1 ORDER BY sequence",

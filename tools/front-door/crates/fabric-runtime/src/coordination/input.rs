@@ -414,6 +414,13 @@ impl ValidateInput for SubmitInput {
                 }
                 for (index, task) in tasks.iter().enumerate() {
                     let path = format!("tasks[{index}]");
+                    if task
+                        .context
+                        .as_ref()
+                        .is_some_and(|context| !context.valid())
+                    {
+                        return Err(field(&format!("{path}.context")));
+                    }
                     // Peer dispatch uses the CLI launch limit; MCP retains its
                     // smaller tool input bound.
                     let prompt_limit = match transport {

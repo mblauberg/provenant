@@ -136,9 +136,10 @@
       "metric": "wall_time_seconds"
     }
   ],
+  "settlements": 4,
   "schema_version": 1,
   "graph_id": "planned",
-  "plan_digest": "sha256:1f77b019bcaafa14e3be7a463c8ffa665131411f334c8fbfe5cd96936c7c537b",
+  "plan_digest": "sha256:3f729f710d69923f965498ac78c35845b46e6838069a5e338f5c7bef165c6238",
   "nodes": [
     {
       "title": "plan",
@@ -175,7 +176,8 @@
           "state": "terminal",
           "attempt_ref": null,
           "outcome": "succeeded",
-          "launch_actor": ""
+          "launch_actor": "",
+          "settled": 1
         }
       ]
     },
@@ -214,7 +216,8 @@
           "state": "terminal",
           "attempt_ref": null,
           "outcome": "succeeded",
-          "launch_actor": ""
+          "launch_actor": "",
+          "settled": 2
         }
       ]
     },
@@ -253,7 +256,8 @@
           "state": "terminal",
           "attempt_ref": null,
           "outcome": "succeeded",
-          "launch_actor": ""
+          "launch_actor": "",
+          "settled": 3
         }
       ]
     },
@@ -292,7 +296,8 @@
           "state": "terminal",
           "attempt_ref": null,
           "outcome": "succeeded",
-          "launch_actor": ""
+          "launch_actor": "",
+          "settled": 4
         }
       ]
     }

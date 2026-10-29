@@ -39,6 +39,34 @@ pub struct HostLaunchContext {
     #[serde(default)]
     pub fixture_state_write: bool,
 }
+impl HostLaunchContext {
+    /// The inputs a host derives for itself when no guardian handed it any:
+    /// the caller's trusted roots and git, with search path and tool homes
+    /// from this process's environment and no pinned executables.
+    pub fn from_environment(
+        configuration_root: &std::path::Path,
+        cwd: &std::path::Path,
+        git: PathBuf,
+    ) -> Self {
+        Self {
+            configuration_root: configuration_root.into(),
+            cwd: cwd.into(),
+            executables: Default::default(),
+            executable_search_path: std::env::var_os("PATH")
+                .map(|path| {
+                    std::env::split_paths(&path)
+                        .filter(|path| path.is_absolute())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            git,
+            codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+            cargo_build_jobs: std::env::var("CARGO_BUILD_JOBS").ok(),
+            #[cfg(feature = "fixture")]
+            fixture_state_write: false,
+        }
+    }
+}
 /// Opaque to supervisor; travels on the handoff pipe only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HolderContext {
@@ -1008,8 +1036,14 @@ impl RunStore {
                 decoded.outcome = Outcome::Failed;
                 decoded.reason = Some(reason);
             }
-            if let Some(retry) = assessment.retry {
-                self.stage_policy_retry(&record, &retry, call)?;
+            if let Some(retry) = assessment.retry
+                && self.stage_policy_retry(&record, &retry, call)?
+                && let Some(note) = assessment.note
+            {
+                decoded.reason = Some(match decoded.reason.take() {
+                    Some(reason) => format!("{reason}; {note}"),
+                    None => note,
+                });
             }
         }
         // A finish that settled well can still be a partial one. Flag it for

@@ -1,29 +1,21 @@
 stages = [
-  { id = "scouts", parallel = [{ role = "scout", count = "${width}" }] },
-  { id = "synthesis", role = "synthesiser" },
+  { id = "scouts", parallel = [
+    { id = "scout", role = "scout.codebase", count = "${width}" },
+    { id = "external", role = "scout.external", count = "${external}" },
+  ] },
+  { id = "synthesis", role = "plan.research" },
 ]
 exports = [{ node = "synthesis", outputs = ["result", "findings"] }]
 
+[pattern]
+level = "recommended"
+summary = "Junior read-only scouts map the problem in parallel; a senior synthesis reconciles their evidence."
+citations = ["Anthropic, how we built our multi-agent research system"]
+cost = "width junior attempts + 1 senior synthesis"
+select_when = "The scope of a task is unclear and a wide read-only survey is cheaper than guessing."
+tags = ["research", "read-only"]
+
 [parameters]
-width = 4
-read_roots = []
-
-[roles.scout]
-tier = "junior"
-title = "Scout ${index}"
-read_roots = "${read_roots}"
-prompt = """
-Scout assignment ${index}. Research read-only: ${prompt}
-Use judgement to choose a distinct useful scope. Map call sites, constraints,
-risks and tests. Cite files and evidence, state uncertainties, and preserve your
-findings for the senior synthesis. Do not edit files or take Git writer locks.
-"""
-
-[roles.synthesiser]
-tier = "senior"
-kind = "synthesise"
-prompt = """
-Reconcile the scouts' evidence for: ${prompt}
-Preserve useful scope partitions, file references and unresolved uncertainty.
-Choose next implementation steps using judgement; retain every child's evidence.
-"""
+width = { type = "integer", default = 4, min = 1, max = 32, doc = "Number of parallel scouts." }
+external = { type = "integer", default = 1, min = 0, max = 8, doc = "External scouts that research outward; 0 opts out and is recorded as an explicit parameter." }
+read_roots = { type = "list", default = [], doc = "Extra read roots, for example another worktree." }

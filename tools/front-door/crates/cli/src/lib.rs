@@ -7,7 +7,7 @@ pub mod console;
 pub mod domains;
 pub mod fabric;
 pub mod quota;
-mod quota_history;
+pub(crate) mod quota_history;
 pub mod route;
 pub mod run;
 pub mod workflow;
@@ -1470,7 +1470,7 @@ mod tests {
         let invocation = valid(&[
             "run",
             "--preset",
-            "implement-with-lens",
+            "generator-evaluator",
             "--prompt-file",
             "brief",
             "--worktree",
@@ -1829,6 +1829,16 @@ mod tests {
             let mut args = vec!["telemetry", "stats", "--claude-subagents", "subagents"];
             args.extend(filter);
             invalid(&args);
+        }
+    }
+    #[test]
+    fn telemetry_stats_parses_every_grouping_dimension() {
+        for dimension in ["pr", "issue", "graph", "node", "pattern", "preset", "role"] {
+            let invocation = valid(&["telemetry", "stats", "--by", dimension]);
+            let Command::Telemetry(Telemetry::Stats(stats)) = invocation.command else {
+                panic!("telemetry stats");
+            };
+            assert!(stats.by.is_some(), "{dimension}");
         }
     }
     #[test]

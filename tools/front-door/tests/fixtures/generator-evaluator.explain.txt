@@ -1,0 +1,28 @@
+Graph <id>
+Review shape: standard (default)
+implement  role=write.implement tier=senior family=any kind=- access=worktree_write worktree=.
+  write_scope: ["."]
+  source: {"commit":"<commit>","type":"commit"}
+  acceptance_checks: ["Run targeted tests and required static checks","Commit the completed slice"]
+lens  role=- tier=- family=any kind=composite access=read_only worktree=-
+  source: {"node":"implement","type":"node"}
+  inputs: [{"node":"implement","outputs":["result"]}]
+  lens-correctness-spec  role=lens.correctness-spec tier=junior family=distinct_from_writer kind=- access=read_only worktree=-
+    reference: skill:code-review/references/reviewer-context.md <digest>
+    reference: skill:code-review/references/lenses/correctness-spec.md <digest>
+    read_roots: ["<project>","<root>/skills"]
+  lens-simplicity  role=lens.simplicity tier=junior family=any kind=- access=read_only worktree=-
+    reference: skill:code-review/references/reviewer-context.md <digest>
+    reference: skill:code-review/references/lenses/simplicity.md <digest>
+    read_roots: ["<project>","<root>/skills"]
+  exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-simplicity","outputs":["result","findings"]}]
+evaluate  role=review.evaluator tier=senior family=any kind=synthesise access=read_only worktree=-
+  read_roots: ["<project>"]
+  source: {"node":"implement","type":"node"}
+  inputs: [{"node":"lens","outputs":["result"]}]
+Roles:
+  lens.correctness-spec  origin=bundled digest=<digest>
+  lens.simplicity  origin=bundled digest=<digest>
+  review.evaluator  origin=bundled digest=<digest>
+  write.implement  origin=bundled digest=<digest>
+

@@ -237,17 +237,27 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             }]
         }
         Event::Failed { error } => {
-            let capacity = error.as_ref().and_then(|error| {
-                if error.get("codex_error_info")?.as_str()? == "server_overloaded" {
-                    error.get("message")?.as_str().map(str::to_owned)
-                } else {
-                    None
+            let typed = error.as_ref().and_then(|error| {
+                let message = || {
+                    error
+                        .get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                };
+                match error.get("codex_error_info")?.as_str()? {
+                    // Without the capacity message the failure stays generic.
+                    "server_overloaded" => message().map(|message| E::ModelOverloaded { message }),
+                    // The account's plan allowance is spent; another account
+                    // may still serve the lane.
+                    "usage_limit_exceeded" => Some(E::QuotaLimited {
+                        message: message().unwrap_or_else(|| "provider usage limit reached".into()),
+                        pool: None,
+                        resets_in_seconds: None,
+                    }),
+                    _ => None,
                 }
             });
-            capacity.map_or_else(
-                || vec![E::Error],
-                |message| vec![E::ModelOverloaded { message }],
-            )
+            vec![typed.unwrap_or(E::Error)]
         }
         _ => vec![],
     })

@@ -505,6 +505,24 @@ pub struct ResumeRequest {
     registry: std::path::PathBuf,
 }
 
+impl ResumeRequest {
+    pub fn parse(raw: &str) -> Result<Self> {
+        serde_json::from_str(raw).map_err(|_| RunError::Validation("settlement resume request"))
+    }
+    pub fn roots(&self) -> &crate::RootSeed {
+        &self.roots
+    }
+    pub fn project(&self) -> provenant_core::ProjectId {
+        self.project
+    }
+    pub fn actor(&self) -> provenant_core::ActorId {
+        self.actor
+    }
+    pub fn run(&self) -> provenant_core::RunId {
+        self.run
+    }
+}
+
 impl crate::RunStore {
     pub(crate) fn queue_reconcile(
         &self,
@@ -526,7 +544,8 @@ impl crate::RunStore {
         self.run(run, call)?;
         let attempts = self.pending_attempts(run, call)?;
         let now = now_ms()?;
-        let mut needs_worker = false;
+        // Owed reactions need a worker even when no attempt is live.
+        let mut needs_worker = !self.pending_reactions(run, call)?.is_empty();
         for attempt in &attempts {
             if matches!(
                 attempt.state,

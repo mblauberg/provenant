@@ -308,18 +308,23 @@ fn outputs(
                 truncated |= result.truncated;
             }
             let digest = CanonicalV1::file_digest(excerpt.as_bytes()).to_string();
-            truncated |= excerpt.len() > 65_536;
+            let bounded_excerpt = bounded(&excerpt, COMPOSITE_EXCERPT_BYTES);
+            truncated |= bounded_excerpt.len() < excerpt.len();
             Some(ResultOutput {
                 extra: Default::default(),
                 digest,
-                excerpt: bounded(&excerpt, 65_536),
+                excerpt: bounded_excerpt,
                 truncated,
                 path: None,
             })
         }
     };
-    if selected.findings.len() > MAX_FINDINGS {
-        selected.findings.truncate(MAX_FINDINGS);
+    let total = selected.findings.len();
+    selected.findings.truncate(MAX_FINDINGS);
+    while canonical_len(&selected.findings) > FINDINGS_BYTES {
+        selected.findings.pop();
+    }
+    if selected.findings.len() < total {
         selected
             .warnings
             .push("composite exported findings exceed cap".into());

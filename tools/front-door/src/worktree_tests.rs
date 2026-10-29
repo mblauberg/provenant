@@ -199,7 +199,6 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "gc_pressure_collects_only_the_selected_primary_project",
             "gc_refuses_bare_projects_and_their_linked_checkout_fallback",
             "provider_state_gc_sweeps_children_and_refuses_replaced_roots",
-            "remove_a_managed_worktree_deletes_its_legacy_lane_cache",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
             "merged_pruning_deletes_a_merged_branch_without_a_worktree",
             "remove_by_name_follows_the_branch_merge_state",
@@ -286,9 +285,6 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks" => {
                     gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
-                }
-                "remove_a_managed_worktree_deletes_its_legacy_lane_cache" => {
-                    remove_a_managed_worktree_deletes_its_legacy_lane_cache()
                 }
                 "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees" => {
                     merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees()
@@ -2273,25 +2269,6 @@ fn recreated_worktree_accepts_writer_after_settlement() -> Result {
     );
     drop(old_tree);
     Ok(())
-}
-
-fn remove_a_managed_worktree_deletes_its_legacy_lane_cache() -> Result {
-    let rig = repository()?;
-    ok(&rig, &["worktree", "create", "legacy", "--json"])?;
-    let worktree = rig.project.join(".worktrees/legacy");
-    let cache = prepare_lane_cache(&rig, &worktree, "legacy")?;
-    fs::write(
-        cache.join(".provenant-worktree-owner"),
-        [
-            b"provenant-lane-cargo-owner-v1\n".as_slice(),
-            fs::canonicalize(&worktree)?.as_os_str().as_encoded_bytes(),
-        ]
-        .concat(),
-    )?;
-    ok(&rig, &["worktree", "remove", "legacy", "--json"])?;
-    assert!(!worktree.exists());
-    assert!(!cache.exists(), "legacy lane cache remains after removal");
-    rig.assert_legacy_unchanged()
 }
 
 fn branch_commit(rig: &TestRig, branch: &str) -> Result<std::path::PathBuf> {

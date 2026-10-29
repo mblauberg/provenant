@@ -5,6 +5,7 @@ use crate::{
 use provenant_config::{DomainConfig, DomainSection, Profile, SectionError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -60,13 +61,62 @@ pub struct PacingProfile {
     pub after_deadline: AfterDeadline,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PacingOverride {
     pub account: Option<String>,
     pub provider: Option<String>,
     pub policy: PacingPolicy,
-    pub expires_unix_seconds: i64,
+    pub schedule: crate::Schedule,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PacingOverrideInput {
+    account: Option<String>,
+    provider: Option<String>,
+    policy: PacingPolicy,
+    schedule: Option<crate::Schedule>,
+    starts_unix_seconds: Option<i64>,
+    expires_unix_seconds: Option<i64>,
+    windows: Option<Vec<crate::ScheduleWindow>>,
+}
+fn deserialize_pacing_overrides<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<PacingOverride>, D::Error> {
+    let inputs = Vec::<PacingOverrideInput>::deserialize(deserializer)?;
+    let now = jiff::Timestamp::now().as_second();
+    let mut migrated = false;
+    let overrides = inputs
+        .into_iter()
+        .filter_map(|input| {
+            let legacy = input.starts_unix_seconds.is_some()
+                || input.expires_unix_seconds.is_some()
+                || input.windows.is_some();
+            migrated |= legacy;
+            let schedule = input.schedule.unwrap_or_else(|| crate::Schedule {
+                starts: input.starts_unix_seconds,
+                expires: input.expires_unix_seconds,
+                windows: input.windows.unwrap_or_default(),
+                ..Default::default()
+            });
+            if legacy && schedule.expires.is_some_and(|expiry| expiry <= now) {
+                return None;
+            }
+            Some(PacingOverride {
+                account: input.account,
+                provider: input.provider,
+                policy: input.policy,
+                schedule,
+            })
+        })
+        .collect();
+    if migrated {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "note: legacy routing schedules were converted; rewrite the configuration file"
+        );
+    }
+    Ok(overrides)
 }
 
 /// Fixed deadlines use host-local time. Reset references use fresh quota facts.
@@ -188,14 +238,31 @@ pub struct RoutingConfig {
     /// Silence the advisory for Opus implementation lanes.
     pub suppress_opus_writer_warning: bool,
     pub capacity_cooldown_seconds: u64,
+    /// Further attempts after a capacity or quota settlement, on the same
+    /// session where it resumes or a fresh draw where it cannot. Zero retries
+    /// none; at most [`MAX_SETTLEMENT_RETRIES`].
+    pub settlement_retries: u8,
+    /// Wait before a capacity retry, multiplied by the retry's number.
+    pub capacity_retry_seconds: u64,
+    /// Cap on one capacity retry's wait, jitter included.
+    pub capacity_retry_max_seconds: u64,
+    /// Ceiling on any settlement retry's sealed wait, whatever its cause.
+    pub retry_delay_ceiling_seconds: u64,
     pub review: crate::ReviewConfig,
     pub routes: BTreeMap<String, NamedRoute>,
     pub pools: BTreeMap<String, Vec<RoutePoolMember>>,
     pub pacing: PacingSettings,
     pub pacing_reserve: BTreeMap<String, PacingReserve>,
+    #[serde(deserialize_with = "deserialize_pacing_overrides")]
     pub pacing_overrides: Vec<PacingOverride>,
     pub opencode_go: OpenCodeGoSettings,
 }
+
+/// Settlement retries a lane may take; the run store seals at most this many
+/// policy successors in one run.
+pub const MAX_SETTLEMENT_RETRIES: u8 = 32;
+/// Longest configurable settlement retry wait: one week.
+pub const MAX_RETRY_WAIT_SECONDS: u64 = 7 * 24 * 3_600;
 
 impl Default for RoutingConfig {
     fn default() -> Self {
@@ -203,6 +270,10 @@ impl Default for RoutingConfig {
             model_policy: crate::ModelPolicies::default(),
             suppress_opus_writer_warning: false,
             capacity_cooldown_seconds: 600,
+            settlement_retries: 2,
+            capacity_retry_seconds: 30,
+            capacity_retry_max_seconds: 600,
+            retry_delay_ceiling_seconds: 3_600,
             review: crate::ReviewConfig::default(),
             routes: BTreeMap::new(),
             pools: BTreeMap::new(),
@@ -242,6 +313,57 @@ impl Default for PacingReserve {
     }
 }
 impl RoutingConfig {
+    /// One warning per configured pool member whose efforts the catalogue no
+    /// longer lists. The efforts are dropped at resolution; this only reports.
+    pub fn pool_effort_warnings(&self, catalogue: &Catalogue) -> Vec<String> {
+        let mut warnings = Vec::new();
+        for (name, members) in &self.pools {
+            for (index, member) in members.iter().enumerate() {
+                let (_, dropped) = member.reconciled(catalogue.model(&member.model));
+                if !dropped.is_empty() {
+                    warnings.push(format!(
+                        "warning: domains.routing.pools.{name}[{index}].efforts: {} does not list {}; dropped",
+                        member.model.as_str(),
+                        dropped.join(", ")
+                    ));
+                }
+            }
+        }
+        warnings
+    }
+    pub fn model_policy_fallback_warnings(&self, catalogue: &Catalogue) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let mut inspect = |policy: &crate::ModelPolicy, field: &str| {
+            if let Some(model) = policy.result.fallback.as_ref() {
+                let entry = catalogue.model(model);
+                let reason = if entry.is_none() {
+                    Some("unknown model")
+                } else if policy
+                    .result
+                    .fallback_effort
+                    .as_ref()
+                    .is_some_and(|effort| {
+                        !entry.is_some_and(|entry| entry.efforts.contains(effort))
+                    })
+                {
+                    Some("unsupported effort")
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
+                    warnings.push(format!(
+                        "warning: domains.routing.{field}.result.fallback: {} ({reason}); dropped",
+                        model.as_str()
+                    ));
+                }
+            }
+        };
+        inspect(&self.model_policy.defaults, "model_policy.defaults");
+        for (index, rule) in self.model_policy.rules.iter().enumerate() {
+            inspect(&rule.policy, &format!("model_policy.rules.{index}"));
+        }
+        warnings
+    }
     /// Suggest a cheaper route in the applied tier. Exact models and custom
     /// pools use the model's highest bundled implementation tier.
     pub fn opus_writer_advisory(
@@ -309,6 +431,32 @@ impl DomainConfig for RoutingConfig {
     fn validate(&self) -> Vec<SectionError> {
         let mut errors = Vec::new();
         self.model_policy.validate(&mut errors);
+        if self.settlement_retries > MAX_SETTLEMENT_RETRIES {
+            errors.push(SectionError {
+                field: "settlement_retries".into(),
+                code: "limit",
+            });
+        }
+        // Waits are bounded only so a typo in seconds cannot park a lane for
+        // months; within a week every value is the operator's choice.
+        for (field, seconds) in [
+            ("capacity_retry_seconds", self.capacity_retry_seconds),
+            (
+                "capacity_retry_max_seconds",
+                self.capacity_retry_max_seconds,
+            ),
+            (
+                "retry_delay_ceiling_seconds",
+                self.retry_delay_ceiling_seconds,
+            ),
+        ] {
+            if seconds > MAX_RETRY_WAIT_SECONDS {
+                errors.push(SectionError {
+                    field: field.into(),
+                    code: "limit",
+                });
+            }
+        }
         if self.routes.len() > 128 {
             errors.push(SectionError {
                 field: "routes".into(),
@@ -399,24 +547,21 @@ impl DomainConfig for RoutingConfig {
                         code: "unknown_provider",
                     });
                 }
+                // An effort the catalogue does not list is not an error here: it
+                // is dropped at resolution (see `RoutePoolMember::reconciled`).
                 let mut seen_efforts = BTreeSet::new();
                 if member.efforts.len() > 16
-                    || member.efforts.iter().any(|effort| {
-                        !effort_valid(effort)
-                            || !seen_efforts.insert(effort)
-                            || model.is_some_and(|entry| {
-                                !entry.efforts.iter().any(|supported| supported == effort)
-                            })
-                    })
+                    || member
+                        .efforts
+                        .iter()
+                        .any(|effort| !effort_valid(effort) || !seen_efforts.insert(effort))
                 {
                     errors.push(SectionError {
                         field: format!("{prefix}.efforts"),
                         code: "unsupported_effort",
                     });
                 }
-                if member.effort.as_deref().is_some_and(|effort| {
-                    !effort_valid(effort) || !member.efforts.iter().any(|allowed| allowed == effort)
-                }) {
+                if member.effort.as_deref().is_some_and(|e| !effort_valid(e)) {
                     errors.push(SectionError {
                         field: format!("{prefix}.effort"),
                         code: "unsupported_effort",
@@ -467,7 +612,30 @@ impl DomainConfig for RoutingConfig {
                         .iter()
                         .any(|r| r.adapter.id() == p)
                 })
-                || override_.expires_unix_seconds <= 0
+                || override_
+                    .schedule
+                    .expires
+                    .is_none_or(|expires| expires <= 0)
+                || override_
+                    .schedule
+                    .starts
+                    .zip(override_.schedule.expires)
+                    .is_some_and(|(starts, expires)| starts >= expires)
+                || override_.schedule.windows.len() > 16
+                || override_.schedule.windows.iter().any(|window| {
+                    window.start_hour >= 24
+                        || window.end_hour > 24
+                        || window.start_hour == window.end_hour
+                        || window.weekdays.len() > 7
+                        || window.weekdays.iter().any(|day| *day > 6)
+                        || window
+                            .weekdays
+                            .iter()
+                            .copied()
+                            .collect::<BTreeSet<_>>()
+                            .len()
+                            != window.weekdays.len()
+                })
             {
                 errors.push(SectionError {
                     field: format!("pacing_overrides[{index}]"),
@@ -736,6 +904,32 @@ pub struct RoutePoolMember {
     #[serde(default)]
     pub free: bool,
 }
+impl RoutePoolMember {
+    /// The single place a pool member is reconciled with the catalogue: efforts
+    /// the model does not list are dropped, and a default effort that is no
+    /// longer allowed falls back to none. Returns the member and the dropped
+    /// efforts (the default is reported once, as `effort`).
+    pub(crate) fn reconciled(&self, entry: Option<&ModelEntry>) -> (Self, Vec<String>) {
+        let mut member = self.clone();
+        let Some(entry) = entry else {
+            return (member, Vec::new());
+        };
+        let (kept, mut dropped): (Vec<_>, Vec<_>) = self
+            .efforts
+            .iter()
+            .cloned()
+            .partition(|effort| entry.efforts.contains(effort));
+        member.efforts = kept;
+        if let Some(effort) = member.effort.take() {
+            if member.efforts.contains(&effort) {
+                member.effort = Some(effort);
+            } else if !dropped.contains(&effort) {
+                dropped.push(effort);
+            }
+        }
+        (member, dropped)
+    }
+}
 fn default_weight() -> u8 {
     1
 }
@@ -939,6 +1133,58 @@ mod tests {
     use crate::{AccessContext, Fallback, RouteChoice, RouteRequest, RoutingContext, resolve};
     use provenant_providers::{AvailabilityRecord, REGISTRY};
     use provenant_records::{RouteEligibility, RouteReadiness};
+
+    #[test]
+    fn model_policy_fallbacks_are_warned_and_reconciled() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut config = RoutingConfig::default();
+        config.model_policy.defaults.result.fallback =
+            Some(ModelId::parse("codex/not-catalogued")?);
+        assert!(config.validate().is_empty());
+        assert!(
+            config
+                .model_policy_fallback_warnings(&Catalogue::bundled()?)
+                .len()
+                == 1
+        );
+        let effective =
+            config
+                .model_policy
+                .effective(&ModelId::parse("codex/gpt-6-luna")?, None, 1);
+        assert!(effective.policy.result.fallback.is_none());
+
+        config.model_policy.defaults.result.fallback = Some(ModelId::parse("codex/gpt-6-luna")?);
+        config.model_policy.defaults.result.fallback_effort = Some("unsupported".into());
+        assert!(config.validate().is_empty());
+        assert!(
+            config
+                .model_policy_fallback_warnings(&Catalogue::bundled()?)
+                .len()
+                == 1
+        );
+        config.model_policy.rules.push(crate::ModelPolicyRule {
+            schedule: crate::Schedule {
+                expires: Some(1),
+                ..Default::default()
+            },
+            policy: crate::ModelPolicy {
+                result: crate::ResultPolicy {
+                    fallback: Some(ModelId::parse("codex/not-catalogued")?),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert!(config.validate().is_empty());
+        assert_eq!(
+            config
+                .model_policy_fallback_warnings(&Catalogue::bundled()?)
+                .len(),
+            2
+        );
+        Ok(())
+    }
 
     #[test]
     fn bundled_go_models_resolve_and_only_flash_models_have_provisional_pool_weights()

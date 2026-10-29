@@ -24,7 +24,6 @@ pub enum MarkerKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HistoryMarker {
     pub kind: MarkerKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -36,7 +35,6 @@ pub struct HistoryMarker {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HistoryRecord {
     pub schema_version: u64,
     pub observed_unix_seconds: i64,
@@ -368,6 +366,17 @@ mod tests {
         bytes.push(b'\n');
         bytes.extend(encode_line(&record).unwrap());
         assert_eq!(decode_lines(&bytes).len(), 2);
+    }
+
+    #[test]
+    fn decode_keeps_records_with_newer_metadata() {
+        let record =
+            HistoryRecord::from_snapshot(&snapshot(1, None, vec![window("5h", 1, None)])).unwrap();
+        let mut value = serde_json::to_value(record).unwrap();
+        value["future_metadata"] = serde_json::json!({"source": "1.4.0"});
+        value["markers"] = serde_json::json!([{"kind": "reset", "future_marker": true}]);
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert_eq!(decode_lines(&bytes).len(), 1);
     }
 
     #[test]

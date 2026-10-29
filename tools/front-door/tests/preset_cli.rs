@@ -289,7 +289,10 @@ fn show_validates_and_list_reports_bad_files() -> Result<(), Box<dyn std::error:
     let temp = tempfile::tempdir()?;
     let presets = temp.path().join("provenant/presets");
     std::fs::create_dir_all(&presets)?;
-    std::fs::write(presets.join("single.toml"), "[parameters]\nunknown = 1\n")?;
+    std::fs::write(
+        presets.join("single.toml"),
+        "[parameters.extra]\ntype = 'string'\n",
+    )?;
     std::fs::write(presets.join("broken.toml"), "[invalid")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let run = |args: &[&str]| -> std::io::Result<std::process::Output> {
@@ -305,14 +308,14 @@ fn show_validates_and_list_reports_bad_files() -> Result<(), Box<dyn std::error:
     assert!(!shown.status.success());
     let error = String::from_utf8_lossy(&shown.stdout);
     assert!(
-        error.contains("parameters.unknown") && error.contains("single.toml"),
+        error.contains("parameters.extra") && error.contains("single.toml"),
         "{error}"
     );
     let listed = run(&["preset", "list"])?;
     assert!(listed.status.success());
     let output = String::from_utf8_lossy(&listed.stdout);
     assert!(
-        output.contains("broken.toml") && output.contains("parameters.unknown"),
+        output.contains("broken.toml") && output.contains("parameters.extra"),
         "{output}"
     );
     assert!(run(&["preset", "show", "chain"])?.status.success());
@@ -494,6 +497,234 @@ fn params_file_supplies_lists_and_set_wins_over_it() -> Result<(), Box<dyn std::
     assert!(
         text.contains("lane-c") && !text.contains("lane-a"),
         "{text}"
+    );
+    Ok(())
+}
+
+#[test]
+fn preset_explain_describes_the_pattern_and_creates_no_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let state = temp.path().join("state");
+    let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+        .current_dir(&root)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path())
+        .args(["--json", "--state-dir"])
+        .arg(&state)
+        .args(["preset", "explain", "review-council"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(result["data"]["pattern"]["level"], "default");
+    assert!(
+        result["data"]["parameters"]
+            .as_array()
+            .is_some_and(|parameters| parameters.iter().any(|p| p["name"] == "risk_tier"))
+    );
+    assert!(!state.exists());
+    Ok(())
+}
+
+fn scrub(text: &str, root: &std::path::Path) -> String {
+    let text = text.replace(&root.display().to_string(), "<root>");
+    let mut out = String::new();
+    for line in text.lines() {
+        let mut line = line.to_owned();
+        while let Some(start) = line.find("sha256:") {
+            let end = line[start..]
+                .find(|c: char| !(c.is_ascii_hexdigit() || "sha256:".contains(c)))
+                .map_or(line.len(), |n| start + n);
+            line.replace_range(start..end, "<digest>");
+        }
+        let mut hex = 0;
+        let mut start = None;
+        for (index, byte) in line.bytes().enumerate() {
+            if byte.is_ascii_hexdigit() {
+                hex += 1;
+                start.get_or_insert(index);
+            } else {
+                hex = 0;
+                start = None;
+            }
+            if hex == 40 {
+                let start = start.unwrap_or(0);
+                line.replace_range(start..=index, "<commit>");
+                break;
+            }
+        }
+        if line.starts_with("Graph ") {
+            line = "Graph <id>".into();
+        }
+        if line.starts_with("Limits:") || line.starts_with("Execution:") {
+            continue;
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+fn explain_text(preset: &str, extra: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        &["init", "-q"][..],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "base",
+        ],
+    ] {
+        assert!(
+            Command::new("git")
+                .current_dir(&project)
+                .args(args)
+                .status()?
+                .success()
+        );
+    }
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "the change")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+        .current_dir(&project)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(temp.path().join("state"))
+        .args(["run", "--preset", preset, "--prompt-file"])
+        .arg(&prompt)
+        .args(extra)
+        .arg("--explain")
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout)?
+        .replace(&project.canonicalize()?.display().to_string(), "<project>");
+    Ok(scrub(&text, &root))
+}
+
+fn golden(name: &str, actual: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&path, actual)?;
+    }
+    let expected = std::fs::read_to_string(&path).unwrap_or_default();
+    assert_eq!(
+        actual, expected,
+        "{name}: rerun with UPDATE_GOLDEN=1 to refresh"
+    );
+    Ok(())
+}
+
+#[test]
+fn review_council_explain_shows_lenses_tiers_families_and_the_verifier()
+-> Result<(), Box<dyn std::error::Error>> {
+    let text = explain_text(
+        "review-council",
+        &[
+            "--set",
+            "parameters.worktree=\".\"",
+            "--set",
+            "parameters.risk_tier=\"high\"",
+        ],
+    )?;
+    let verify = text
+        .find("verify  role=review.verify")
+        .ok_or("no verifier")?;
+    let lens = text.find("lens-correctness-spec").ok_or("no lens")?;
+    let synthesis = text
+        .find("synthesis  role=review.synthesis")
+        .ok_or("no synthesis")?;
+    assert!(lens < verify && verify < synthesis, "{text}");
+    assert!(text.contains("family=cross_preferred"), "{text}");
+    assert!(text.contains("family=distinct_from_writer"), "{text}");
+    golden("review-council.explain.txt", &text)?;
+    Ok(())
+}
+
+#[test]
+fn scout_swarm_and_generator_evaluator_explain_goldens() -> Result<(), Box<dyn std::error::Error>> {
+    golden(
+        "scout-swarm.explain.txt",
+        &explain_text("scout-swarm", &[])?,
+    )?;
+    golden(
+        "generator-evaluator.explain.txt",
+        &explain_text(
+            "generator-evaluator",
+            &["--set", "parameters.worktree=\".\""],
+        )?,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn preset_show_roles_lists_the_library_with_origins() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(".provenant");
+    std::fs::create_dir_all(&repo)?;
+    std::fs::write(
+        repo.join("roles.toml"),
+        "[roles.\"lens.house\"]\nextends = 'lens'\ncard = 'House rules.'\n",
+    )?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+        .current_dir(temp.path())
+        .env("PROVENANT_ROOT", root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(temp.path().join("state"))
+        .args(["preset", "show", "--roles"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let roles = result["data"]["roles"].as_array().ok_or("no roles")?;
+    let house = roles
+        .iter()
+        .find(|role| role["name"] == "lens.house")
+        .ok_or("no house")?;
+    assert!(
+        house["origin"]
+            .as_str()
+            .ok_or("origin")?
+            .ends_with("roles.toml")
+    );
+    assert_eq!(house["extends"], serde_json::json!(["lens"]));
+    let scope = roles
+        .iter()
+        .find(|role| role["name"] == "plan.scope")
+        .ok_or("no scope")?;
+    assert_eq!(scope["origin"], "bundled");
+    assert!(
+        scope["references"][0]["digest"]
+            .as_str()
+            .ok_or("digest")?
+            .starts_with("sha256:")
     );
     Ok(())
 }

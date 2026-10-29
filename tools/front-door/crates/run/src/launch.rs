@@ -372,7 +372,8 @@ enum HandOff {
 #[derive(Debug)]
 pub enum Started {
     Launched(AttemptId),
-    /// Held child custody is full; the attempt stays Queued for a later scan.
+    /// Held child custody is full, or a policy retry's launch time has not
+    /// come; the attempt stays Queued for a later scan.
     Deferred(AttemptId),
     Refused {
         attempt: AttemptId,
@@ -969,24 +970,38 @@ impl RunStore {
                         "policy retry requires a host-owned store",
                     ));
                 }
+                let prior = record
+                    .retry_of
+                    .map(|prior| self.record(prior, call))
+                    .transpose()?;
+                // Every launcher, the settling guardian or a later sweep, waits
+                // for the retry's sealed launch time.
+                let not_before = match &prior {
+                    Some(prior) => self
+                        .staged_policy_retry(prior)?
+                        .and_then(|retry| retry.not_before_unix_seconds),
+                    None => None,
+                };
+                if not_before.is_some_and(|not_before| {
+                    not_before > now().map_or(i64::MAX, |now| now.as_micros().div_euclid(1_000_000))
+                }) {
+                    started.push(Started::Deferred(id));
+                    continue;
+                }
+                if record.continuation.as_deref() == Some("policy_fallback")
+                    && !retry_keeps_account_pin(
+                        &record.requested_route,
+                        &task.route,
+                        prior
+                            .and_then(|prior| prior.applied_route)
+                            .and_then(|route| route.provider)
+                            .as_deref(),
+                    )
+                {
+                    effective_task.account = None;
+                }
                 effective_task.route = record.requested_route.clone();
                 effective_task.fallback.clear();
-                // An account pin belongs to its original provider. A fallback
-                // resolves a fresh account for the replacement provider.
-                if record.continuation.as_deref() == Some("policy_fallback") {
-                    let original_provider = record
-                        .retry_of
-                        .map(|prior| self.record(prior, call))
-                        .transpose()?
-                        .and_then(|prior| prior.applied_route.and_then(|route| route.provider));
-                    let replacement_provider = match &record.requested_route {
-                        RequestedRoute::Model { provider, .. } => Some(provider.as_str()),
-                        _ => None,
-                    };
-                    if original_provider.as_deref() != replacement_provider {
-                        effective_task.account = None;
-                    }
-                }
             }
             let policy_resume = if record.continuation.as_deref() == Some("policy_continuation") {
                 record
@@ -1493,6 +1508,21 @@ fn set_environment_value(environment: &mut Vec<(OsString, OsString)>, name: &str
     environment.push((name, OsString::from(value)));
 }
 
+/// An account pin belongs to the provider it was granted with. A redraw of the
+/// granted route keeps it, whatever that route resolves to; a fallback to
+/// another provider resolves a fresh account there.
+fn retry_keeps_account_pin(
+    retry: &RequestedRoute,
+    granted: &RequestedRoute,
+    original_provider: Option<&str>,
+) -> bool {
+    retry == granted
+        || match retry {
+            RequestedRoute::Model { provider, .. } => original_provider == Some(provider.as_str()),
+            _ => original_provider.is_none(),
+        }
+}
+
 #[cfg(test)]
 mod lane_environment_tests {
     use super::*;
@@ -1516,5 +1546,51 @@ mod lane_environment_tests {
                 ),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod retry_pin_tests {
+    use super::*;
+
+    #[test]
+    fn redraws_of_a_pinned_granted_route_keep_the_pin() {
+        let named = RequestedRoute::Named {
+            extra: Default::default(),
+            name: "implement".into(),
+            effort: None,
+        };
+        let pool = RequestedRoute::Review {
+            extra: Default::default(),
+            name: "review".into(),
+            effort: None,
+            excluded_families: Vec::new(),
+            distinct_families: false,
+        };
+        let model = |provider: &str| RequestedRoute::Model {
+            extra: Default::default(),
+            provider: provider.into(),
+            model: format!("{provider}/model"),
+            effort: None,
+        };
+        // A sessionless capacity redraw of a pinned named or pool route stays
+        // on the pinned account, even after the first draw named a provider.
+        for granted in [&named, &pool] {
+            assert!(retry_keeps_account_pin(granted, granted, Some("codex")));
+            assert!(retry_keeps_account_pin(granted, granted, None));
+        }
+        // The applied model on the same provider keeps it too.
+        assert!(retry_keeps_account_pin(
+            &model("codex"),
+            &named,
+            Some("codex")
+        ));
+        // A fallback to another provider resolves a fresh account there.
+        assert!(!retry_keeps_account_pin(
+            &model("claude"),
+            &named,
+            Some("codex")
+        ));
+        assert!(!retry_keeps_account_pin(&pool, &named, Some("codex")));
     }
 }

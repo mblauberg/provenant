@@ -254,8 +254,7 @@ pub fn plan_tick_with_settings(
     let selected = |id: &str| tick.adapter.as_ref().is_none_or(|s| s == id);
     let mut drops = Vec::new();
     for record in records {
-        // Keep past Google accounts so returning to a sign-in restores its cooldown,
-        // but drop duplicate legacy keys that share a fingerprint with a live account.
+        // Keep past Google accounts so returning to a sign-in restores its cooldown.
         let retaining = provenant_records::AdapterSpec::get(&record.account.adapter)
             .is_some_and(|spec| spec.retain_quota_accounts);
         let absent_from_detection = detections.iter().any(|d| {
@@ -269,37 +268,7 @@ pub fn plan_tick_with_settings(
                         })
                     })
         });
-        let duplicate_fingerprint = retaining
-            && record
-                .snapshot
-                .as_ref()
-                .and_then(|s| s.details.as_ref())
-                .and_then(|d| d.fingerprint.as_deref())
-                .is_some_and(|fp| {
-                    records.iter().any(|other| {
-                        other.account != record.account
-                            && other.account.adapter == record.account.adapter
-                            && detections.iter().any(|d| {
-                                d.adapter == other.account.adapter
-                                    && d.accounts.as_ref().is_some_and(|accounts| {
-                                        accounts.iter().any(|a| {
-                                            a.adapter == other.account.adapter
-                                                && a.account_key == other.account.account_key
-                                        })
-                                    })
-                            })
-                            && other
-                                .snapshot
-                                .as_ref()
-                                .and_then(|s| s.details.as_ref())
-                                .and_then(|d| d.fingerprint.as_deref())
-                                == Some(fp)
-                    })
-                });
-        if selected(&record.account.adapter)
-            && ((!retaining && absent_from_detection)
-                || (absent_from_detection && duplicate_fingerprint))
-        {
+        if selected(&record.account.adapter) && !retaining && absent_from_detection {
             drops.push(UpdateIntent {
                 account: record.account.clone(),
                 expected: Some(record.clone()),
@@ -1198,85 +1167,6 @@ mod transition_tests {
         assert_eq!(plan.drops.len(), 1);
         assert_eq!(plan.drops[0].account, opencode);
         assert!(plan.drops[0].replacement.is_none());
-    }
-    #[test]
-    fn legacy_keyed_agy_record_sharing_fingerprint_with_live_registered_account_is_not_rendered_as_second_row()
-     {
-        let live_account = AccountScope {
-            adapter: "agy".into(),
-            account_key: "agy-google-662390bb3131".into(),
-            label: "google-662390bb3131".into(),
-        };
-        let legacy_account = AccountScope {
-            adapter: "agy".into(),
-            account_key: "agy-agy".into(),
-            label: "agy".into(),
-        };
-        let mut live_record = AccountRecord::empty(live_account.clone());
-        live_record.revision = 62;
-        live_record.snapshot = Some(QuotaSnapshot {
-            schema_version: 1,
-            account: live_account.clone(),
-            revision: 62,
-            status: QuotaStatus::Available,
-            observed_unix_seconds: 100,
-            source_ref: "fixture".into(),
-            authority_ref: None,
-            details: Some(QuotaDetails {
-                fingerprint: Some("google-662390bb3131".into()),
-                ..Default::default()
-            }),
-            windows: vec![],
-        });
-        let mut legacy_record = AccountRecord::empty(legacy_account.clone());
-        legacy_record.revision = 14;
-        legacy_record.snapshot = Some(QuotaSnapshot {
-            schema_version: 1,
-            account: legacy_account,
-            revision: 14,
-            status: QuotaStatus::Stale,
-            observed_unix_seconds: 50,
-            source_ref: "fixture".into(),
-            authority_ref: None,
-            details: Some(QuotaDetails {
-                fingerprint: Some("google-662390bb3131".into()),
-                ..Default::default()
-            }),
-            windows: vec![],
-        });
-        let records = [live_record.clone(), legacy_record.clone()];
-        let detections = [Detection {
-            adapter: "agy".into(),
-            accounts: Some(vec![live_account.clone()]),
-            status: QuotaStatus::Available,
-        }];
-        let rep = report(
-            crate::source::TEST_POLICIES,
-            &records,
-            &detections,
-            &QuotaQuery { adapter: None },
-            100,
-            "report.json".into(),
-        )
-        .unwrap();
-        assert_eq!(rep.accounts.len(), 1);
-        assert_eq!(rep.accounts[0].account, live_account);
-
-        let tick = QuotaTick {
-            adapter: None,
-            trigger: Trigger::Manual,
-            power: Power::Ac,
-        };
-        let plan = plan_tick(
-            crate::source::TEST_POLICIES,
-            &records,
-            &detections,
-            &tick,
-            100,
-        )
-        .unwrap();
-        assert_eq!(plan.drops.len(), 1);
-        assert_eq!(plan.drops[0].account, legacy_record.account);
     }
     #[test]
     fn auth_required_adapter_with_registered_account_shows_stale_cached_reading() {

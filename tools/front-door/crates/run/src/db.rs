@@ -270,11 +270,11 @@ impl RunStore {
             launched_tasks: Default::default(),
             _owner: PhantomData,
         };
-        if schema_version < 4 {
+        if schema_version < 6 {
             // Read legacy paths once, outside the migration transaction. The
             // initialisation lock serialises migrations. Unreadable paths and
             // in-flight attempts keep the conservative retained default.
-            let absent_temporary = if schema_version > 0 {
+            let absent_temporary = if (1..4).contains(&schema_version) {
                 store.terminal_without_temporary(request)?
             } else {
                 Vec::new()
@@ -287,6 +287,8 @@ impl RunStore {
                     include_str!("schema_v2.sql"),
                     include_str!("schema_v3.sql"),
                     include_str!("schema_v4.sql"),
+                    include_str!("schema_v5.sql"),
+                    include_str!("schema_v6.sql"),
                 ];
                 provenant_sqlite::apply_migrations(tx, &steps, start, |index, db| {
                     if index == 3 {
@@ -415,7 +417,7 @@ pub(crate) fn open_database(
     Ok((root, db, initialisation))
 }
 fn version(db: &Connection) -> Result<i64> {
-    match provenant_sqlite::read_version(db, 4) {
+    match provenant_sqlite::read_version(db, 6) {
         Ok(version) => Ok(version as i64),
         Err(provenant_sqlite::VersionError::Unsupported(version)) => {
             Err(RunError::Version(version))

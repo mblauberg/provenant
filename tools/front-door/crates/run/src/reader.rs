@@ -340,6 +340,21 @@ impl RunStore {
         }
         Ok(run)
     }
+    /// Every settled attempt of a run, oldest first.
+    pub fn terminal_attempts(&self, run: RunId, call: &Request<'_>) -> Result<Vec<AttemptRecord>> {
+        let ids: Vec<String> = call.retry(|| {
+            let mut query = self.db.prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=1 ORDER BY sequence")?;
+            let rows = query.query_map(params![run.to_string(), self.context.project_id.to_string()], |row| row.get(0))?;
+            Ok(rows.collect::<std::result::Result<_, _>>()?)
+        })?;
+        ids.into_iter()
+            .map(|id| {
+                let id =
+                    AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
+                self.record(id, call)
+            })
+            .collect()
+    }
     /// Snapshot nonterminal refs before a host accepts a child's launch. The
     /// refs survive partial handoff errors and authorise only that child scope.
     pub fn pending_attempts(&self, run: RunId, call: &Request<'_>) -> Result<Vec<AttemptRecord>> {

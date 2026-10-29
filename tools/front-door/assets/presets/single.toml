@@ -1,0 +1,11 @@
+stages = [{ id = "task" }]
+
+[pattern]
+level = "default"
+summary = "One read-only task answers the brief."
+cost = "1 attempt"
+select_when = "The work is a single bounded question or change with no need for a second opinion."
+tags = ["primitive"]
+
+[parameters]
+route = { type = "string", default = "senior", doc = "Routing pool for the task." }

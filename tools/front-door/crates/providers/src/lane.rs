@@ -870,7 +870,7 @@ mod tests {
         // The lane gets no write to the slot directory, the state root,
         // `fabric/locks` or anything near a repository's `.git`: only a read
         // of the slot directory, which the host provisions beforehand.
-        let slots = state.join("fabric/locks/build-slots");
+        let slots = state.join(provenant_os::build_slots::DIRECTORY.join("/"));
         assert!(spec.profile.spec.state_writes.is_empty());
         assert!(spec.profile.spec.tool_writes.is_empty());
         assert!(spec.profile.spec.runtime_reads.contains(&subtree(&slots)));
@@ -924,13 +924,27 @@ mod tests {
     /// The finished writer profile, with the confinement's own list of every
     /// write allowance, must leave the slot directory out of reach: no grant
     /// equals it or contains it, so a lane cannot create, unlink or replace a
-    /// slot file.
+    /// slot file. The profile comes from the real writer preparation, with the
+    /// state grants `grant` adds for a real state root, so a grant covering the
+    /// state root itself is caught rather than hidden by a synthetic spec.
     #[test]
     fn no_write_grant_of_the_finished_lane_profile_reaches_the_slot_directory() {
+        use crate::{Access, Adapter, Prompt, codex::Codex};
         use provenant_confinement::permissions::{PathScope, write_grants};
-        let state = PathBuf::from("/fixture/hoststate");
-        let slots = state.join("fabric/locks/build-slots");
-        let mut spec = bare_spec("/usr/bin");
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let state = base.join("state");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let slots = state.join(provenant_os::build_slots::DIRECTORY.join("/"));
+        let plan = crate::tests::fixture_access_plan(Access::WorktreeWrite, Some("login"), true);
+        let prompt = Prompt::new("fixture prompt".into());
+        let mut route = crate::tests::route("codex", "fixture-model");
+        route.account_key = None;
+        let mut input = crate::tests::fixture_input(&route, &plan, &prompt, &base, None);
+        input.provenant.state = &state;
+        let mut spec = Codex.prepare(input).unwrap();
         let gate = BuildSlotGate {
             provenant: Path::new("/fixture/bin/provenant"),
             state: &state,
@@ -938,10 +952,10 @@ mod tests {
             wait_seconds: 60,
             cargo: Path::new("/home/.cargo/bin/cargo"),
         };
-        spec.configure_build_slots(Path::new("/fixture/scratch"), &gate)
+        spec.configure_build_slots(&base.join("scratch"), &gate)
             .unwrap();
-        let plan =
-            crate::tests::fixture_access_plan(crate::Access::WorktreeWrite, Some("fixture"), true);
+        // The lane reads the slot directory so it can lock a slot file.
+        assert!(spec.profile.spec.runtime_reads.contains(&subtree(&slots)));
         let grants = write_grants(plan.permissions(), &spec.profile);
         assert!(!grants.is_empty(), "the profile lists its write grants");
         for grant in &grants {

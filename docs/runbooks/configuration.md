@@ -104,11 +104,12 @@ that command only, not the lane or its admission. `lanes` does not report
 build waits; the message is in the lane's output.
 
 The slots are files `slot-0.lock` to `slot-N-1.lock` under
-`<state>/fabric/locks/build-slots/`, shared by every project on the same state
-directory. Provenant creates them outside the sandbox when it launches a lane.
-A lane has read access to that directory and its files and no write access, so
-it cannot create, unlink or replace a slot file; the shim opens a slot file
-read-only and takes `flock` on it. The descriptor is close-on-exec, so a
+`<state>/build-slots/`, shared by every project on the same state directory and
+outside `fabric/locks`, where a lane creates its landing locks. Provenant
+creates them outside the sandbox when it launches a lane and refuses a slot
+directory another user owns. A lane has read access to that directory and its
+files and no write access, so it cannot create, unlink or replace a slot file;
+the shim opens a slot file read-only and takes `flock` on it. The descriptor is close-on-exec, so a
 daemon or an orphaned grandchild (sccache, a backgrounded test process) never
 keeps a slot after the build exits. The kernel releases the slot when the shim
 exits, even after a crash or `kill -9`. The slot directory, count and wait

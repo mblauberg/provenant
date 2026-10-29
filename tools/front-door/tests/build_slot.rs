@@ -4,7 +4,7 @@
 //! sandbox. The slot directory, count and wait reach the shim through its
 //! environment, as the host's shim script supplies them.
 #![allow(clippy::disallowed_methods)]
-use provenant_os::build_slots::BuildSlots;
+use provenant_os::build_slots::{BuildSlots, DIRECTORY};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -34,7 +34,7 @@ impl Rig {
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
         fs::write(&log, "")?;
         let binary = env!("CARGO_BIN_EXE_provenant");
-        let slot_dir = state.join("fabric/locks/build-slots");
+        let slot_dir = state.join(DIRECTORY.join("/"));
         fs::write(
             &cargo,
             format!(
@@ -453,7 +453,7 @@ fn read_only_slot_files_cannot_be_unlinked_or_created_by_the_build() -> Result {
     let rig = Rig::new()?;
     rig.provision(1)?;
     // The lane's access: read the directory and its files, write neither.
-    let dir = rig.state.join("fabric/locks/build-slots");
+    let dir = rig.state.join(DIRECTORY.join("/"));
     fs::set_permissions(dir.join("slot-0.lock"), fs::Permissions::from_mode(0o400))?;
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o500))?;
     let mut build = rig.shim(1, &["tamper"])?;
@@ -495,17 +495,26 @@ fn an_unusable_slot_directory_does_not_stop_the_build() -> Result {
 #[test]
 fn missing_settings_run_the_build_ungated_with_one_warning() -> Result {
     let rig = Rig::new()?;
+    // Nothing from whoever ran the suite may reach the shim: a lane's own
+    // marker or slot settings would decide this test, and a held slot would
+    // turn the probe into a wait up to `build_wait_minutes`.
+    let began = Instant::now();
     let mut child = Command::new(env!("CARGO_BIN_EXE_provenant"))
         .args(["internal", "build-slot", "--"])
         .arg(&rig.cargo)
         .arg("build")
-        .env_remove("PROVENANT_BUILD_SLOT_STATE")
-        .env_remove("PROVENANT_BUILD_SLOT")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()?;
     assert!(finish(&mut child, Duration::from_secs(10))?);
     assert!(stderr_of(&mut child)?.contains("settings are missing or invalid"));
+    assert!(
+        began.elapsed() < Duration::from_secs(10),
+        "an ungated build took {:?}",
+        began.elapsed()
+    );
     Ok(())
 }
 

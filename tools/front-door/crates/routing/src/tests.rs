@@ -19,7 +19,7 @@ fn default_pools_do_not_include_free_routes() -> Result<(), Box<dyn std::error::
 fn model_policy_config_accepts_layered_rules() -> Result<(), Box<dyn std::error::Error>> {
     let config = serde_json::from_value::<RoutingConfig>(serde_json::json!({
         "model_policy": {"rules": [{"model": "codex/gpt-6.1-terra", "account": "work",
-            "expires_unix_seconds": 200, "policy": {"lane": {"stop_early_ok": false}}}]}
+            "schedule": {"expires": 200}, "policy": {"lane": {"stop_early_ok": false}}}]}
     }));
     assert!(
         config.is_ok(),
@@ -75,6 +75,78 @@ fn account_policy_filters_accounts_before_selecting_a_writer()
     let selected = resolve(&request, &context)?;
     assert_eq!(selected.account_key.as_deref(), Some("work"));
     assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
+    Ok(())
+}
+
+#[test]
+fn spent_account_is_skipped_for_an_available_one_even_when_its_reading_is_stale()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = [
+        AvailabilityRecord {
+            account_key: Some("work".into()),
+            ..availability()
+        },
+        AvailabilityRecord {
+            account_key: Some("review".into()),
+            ..availability()
+        },
+    ];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "fixture",
+        confinement_ref: "fixture",
+    }];
+    let spent = |expires: i64, reset: i64| -> Result<QuotaObservation, RoutingError> {
+        let mut reading = quota(
+            "codex/gpt-6-luna",
+            "review",
+            QuotaStatus::Exhausted,
+            1,
+            50,
+            expires,
+        )?;
+        reading.snapshot.windows = vec![QuotaWindow {
+            pool: "secondary".into(),
+            window_seconds: Some(604_800),
+            used_basis_points: 10_000,
+            resets_unix_seconds: Some(reset),
+        }];
+        Ok(reading)
+    };
+    let selected = |quota: &[QuotaObservation], availability: &[AvailabilityRecord]| {
+        let context = RoutingContext {
+            availability,
+            access: &access,
+            quota,
+            ..context(&catalogue, &config, now()?)
+        };
+        let route = resolve(&request("codex/gpt-6-luna")?, &context)?;
+        let ready = matches!(route.readiness, RouteReadiness::Ready { .. });
+        Ok::<_, Box<dyn std::error::Error>>((route.account_key, ready))
+    };
+    // With no evidence the tie goes to `review`, so each skip below is the rule.
+    assert_eq!(selected(&[], &records)?, (Some("review".into()), true));
+    // Fresh or stale, a spent reading loses to an account with no such evidence.
+    for reading in [spent(120, 10_000)?, spent(60, 10_000)?] {
+        assert_eq!(selected(&[reading], &records)?, (Some("work".into()), true));
+    }
+    // Once the spent window has reset, the reading no longer counts.
+    assert_eq!(
+        selected(&[spent(60, 90)?], &records)?,
+        (Some("review".into()), true)
+    );
+    // Stale evidence never refuses the only account; fresh evidence does.
+    assert_eq!(
+        selected(&[spent(60, 10_000)?], &records[1..])?,
+        (Some("review".into()), true)
+    );
+    assert_eq!(
+        selected(&[spent(120, 10_000)?], &records[1..])?,
+        (Some("review".into()), false)
+    );
     Ok(())
 }
 
@@ -238,6 +310,65 @@ fn effort_errors_report_recorded_controls_and_nearest_models()
             .map(String::as_str),
         Some("codex/gpt-6-luna")
     );
+    Ok(())
+}
+
+#[test]
+fn pacing_evaluator_applies_overnight_weekday_and_sunday_windows()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let model = ModelId::parse("codex/gpt-6.1-terra")?;
+    for (weekday, day) in [(vec![3_u8], 0_i64), (vec![6_u8], 3_i64)] {
+        for hour in [23_i64, 24 + 1] {
+            let now = day * 86_400 + hour * 3600;
+            let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+                "pacing_overrides": [{"provider":"codex", "policy":"spend", "schedule":{"windows":[{"weekdays":weekday,"start_hour":23,"end_hour":2}]}}]
+            }))?;
+            let context = context(
+                &catalogue,
+                &config,
+                provenant_core::WallTime::from_micros(now * 1_000_000)?,
+            );
+            assert_eq!(
+                pacing_preview(&model, &context)[0].policy,
+                PacingPolicy::Spend
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn legacy_pacing_override_loads_and_evaluates_like_schedule_form()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let now = jiff::Timestamp::now().as_second();
+    let expires = now + 3600;
+    let legacy: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pacing_overrides": [{"provider":"codex", "policy":"spend", "starts_unix_seconds":now-60, "expires_unix_seconds":expires, "windows":[]}]
+    }))?;
+    let canonical: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pacing_overrides": [{"provider":"codex", "policy":"spend", "schedule":{"starts":now-60,"expires":expires,"windows":[]}}]
+    }))?;
+    let time = provenant_core::WallTime::from_micros(now * 1_000_000)?;
+    let old_context = context(&catalogue, &legacy, time);
+    let new_context = context(&catalogue, &canonical, time);
+    let model = ModelId::parse("codex/gpt-6.1-terra")?;
+    assert_eq!(
+        pacing_preview(&model, &old_context)[0].policy,
+        PacingPolicy::Spend
+    );
+    assert_eq!(
+        pacing_preview(&model, &old_context)[0].policy,
+        pacing_preview(&model, &new_context)[0].policy
+    );
+    assert!(
+        serde_json::to_value(&legacy)?["pacing_overrides"][0]["schedule"]["expires"].is_number()
+    );
+    let expired: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pacing_overrides": [{"provider":"codex", "policy":"spend", "expires_unix_seconds":now-1}]
+    }))?;
+    assert!(expired.pacing_overrides.is_empty());
     Ok(())
 }
 #[test]
@@ -1396,7 +1527,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     let roots = inputs.resolve(&Resolver)?;
     let model_policy_config = provenant_config::load_with_domains(
         &roots,
-        Some("schema_version=1\n[domains.routing.model_policy.defaults.cache]\nread_share_target=0.95\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\nexpires_unix_seconds=200\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=40\n".as_bytes()),
+        Some("schema_version=1\n[domains.routing.model_policy.defaults.cache]\nread_share_target=0.95\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\n[domains.routing.model_policy.rules.schedule]\nexpires=200\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=40\n".as_bytes()),
         &sections,
     )?;
     assert_eq!(
@@ -1701,17 +1832,17 @@ fn account_spend_and_expiring_override_ignore_reserve() -> Result<(), Box<dyn st
         ("spend", serde_json::json!([]), false),
         (
             "pace",
-            serde_json::json!([{"account":"codex/opaque-account", "policy":"spend", "expires_unix_seconds":101}]),
+            serde_json::json!([{"account":"codex/opaque-account", "policy":"spend", "schedule":{"expires":101}}]),
             false,
         ),
         (
             "pace",
-            serde_json::json!([{"account":"claude/opaque-account", "policy":"spend", "expires_unix_seconds":101}]),
+            serde_json::json!([{"account":"claude/opaque-account", "policy":"spend", "schedule":{"expires":101}}]),
             true,
         ),
         (
             "pace",
-            serde_json::json!([{"account":"opaque-account", "policy":"spend", "expires_unix_seconds":100}]),
+            serde_json::json!([{"account":"opaque-account", "policy":"spend", "schedule":{"expires":100}}]),
             true,
         ),
     ] {
@@ -1726,7 +1857,8 @@ fn account_spend_and_expiring_override_ignore_reserve() -> Result<(), Box<dyn st
         let route = resolve(&request("codex/test")?, &ctx)?;
         assert_eq!(
             reason(&route) == Some(&RouteExclusionReason::PacingReserve),
-            excluded
+            excluded,
+            "profile={profile}, overrides={overrides}"
         );
     }
     Ok(())
@@ -2713,7 +2845,7 @@ fn fixed_deadlines_use_host_local_weekly_monthly_and_absolute_times()
         ),
         ("day 25", "monthly", 2_678_400, local(2, 1)?, local(1, 25)?),
         (
-            "1970-01-03T00:00",
+            "1970-01-03T00:00", // timebomb: allow fixed epoch fixture, not the live clock
             "seven_day",
             604_800,
             local(1, 7)?,
@@ -2823,7 +2955,7 @@ fn account_profile_and_overrides_govern_free_models() -> Result<(), Box<dyn std:
     assert!(!blocked(serde_json::json!({"pacing":{
         "accounts":{"zen":{"policy":"max"}}, "free":{"opencode":{"policy":"off"}}}}))?);
     // An active override outranks the account profile; an expired one does not.
-    let override_row = |expires| serde_json::json!([{"account":"zen", "policy":"spend", "expires_unix_seconds":expires}]);
+    let override_row = |expires| serde_json::json!([{"account":"zen", "policy":"spend", "schedule":{"expires":expires}}]);
     assert!(!blocked(serde_json::json!({
         "pacing":{"accounts":{"zen":{"policy":"off"}}}, "pacing_overrides": override_row(1_000_000)
     }))?);
@@ -3047,7 +3179,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
             five_hour: Some(43),
             seven_day: Some(17),
             thirty_day: Some(59),
-            expires: "1970-01-01T00:01:41Z".into(),
+            expires: "1970-01-01T00:01:41Z".into(), // timebomb: allow fixed epoch fixture, not the live clock
         },
     );
     let apply = |observation: &QuotaObservation| {
@@ -3077,7 +3209,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
                 five_hour,
                 seven_day,
                 thirty_day: Some(59),
-                expires: "1970-01-01T00:01:41Z".into(),
+                expires: "1970-01-01T00:01:41Z".into(), // timebomb: allow fixed epoch fixture, not the live clock
             },
         );
         let mut record = AccountRecord::empty(raw.snapshot.account.clone());
@@ -3572,5 +3704,72 @@ fn agy_exhaustion_follows_the_models_serving_windows() -> Result<(), Box<dyn std
     ];
     assert!(ready(claude, QuotaStatus::Exhausted, lapsed.clone())?);
     assert!(!ready(gemini, QuotaStatus::Exhausted, lapsed)?);
+    Ok(())
+}
+#[test]
+fn unsupported_pool_effort_is_dropped_with_a_warning() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pools": {"trial": [
+            {"model": "codex/gpt-6-luna", "effort": "retired", "efforts": ["low", "retired"]}
+        ]}
+    }))?;
+    assert!(config.validate().is_empty());
+    let context = context(&catalogue, &config, now()?);
+    let listed = list(
+        &RouteListQuery {
+            pool: Some("trial".into()),
+            ..RouteListQuery::default()
+        },
+        &context,
+    )?;
+    let member = &listed.pools["trial"][0];
+    assert_eq!(member.efforts, ["low"]);
+    assert_eq!(member.effort, None);
+    let warnings = config.pool_effort_warnings(&catalogue);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("domains.routing.pools.trial[0].efforts"));
+    assert!(warnings[0].contains("retired"));
+    Ok(())
+}
+#[test]
+fn supported_default_effort_survives_reconciliation() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pools": {"trial": [
+            {"model": "codex/gpt-6-luna", "effort": "low", "efforts": ["low", "retired"]}
+        ]}
+    }))?;
+    let context = context(&catalogue, &config, now()?);
+    let listed = list(&RouteListQuery::default(), &context)?;
+    let member = &listed.pools["trial"][0];
+    assert_eq!(member.effort.as_deref(), Some("low"));
+    assert_eq!(member.efforts, ["low"]);
+    Ok(())
+}
+#[test]
+fn malformed_duplicate_or_excess_pool_efforts_still_fail() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fails = |member: serde_json::Value| -> Result<bool, serde_json::Error> {
+        let config: RoutingConfig =
+            serde_json::from_value(serde_json::json!({"pools": {"trial": [member]}}))?;
+        Ok(config
+            .validate()
+            .iter()
+            .any(|error| error.code == "unsupported_effort"))
+    };
+    assert!(fails(
+        serde_json::json!({"model": "codex/gpt-6-luna", "efforts": ["bad effort"]})
+    )?);
+    assert!(fails(
+        serde_json::json!({"model": "codex/gpt-6-luna", "efforts": ["low", "low"]})
+    )?);
+    assert!(fails(
+        serde_json::json!({"model": "codex/gpt-6-luna", "effort": "bad effort"})
+    )?);
+    let many: Vec<String> = (0..17).map(|n| format!("e{n}")).collect();
+    assert!(fails(
+        serde_json::json!({"model": "codex/gpt-6-luna", "efforts": many})
+    )?);
     Ok(())
 }

@@ -1,69 +1,39 @@
 stages = [
-  { id = "subject", role = "review-subject" },
+  { id = "subject", role = "plan.review" },
   { id = "lenses", parallel = [
-    { id = "lens", for_each = "${lenses}", role = "lens" },
+    { id = "lens", for_each = "${lenses}", role = "lens.${item.name}" },
   ], source = { type = "node", node = "subject" } },
-  { id = "synthesis", role = "synthesiser" },
+  { id = "verify", role = "review.verify", count = "${verifiers}", source = { type = "node", node = "subject" } },
+  { id = "synthesis", role = "review.synthesis" },
 ]
 exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict", "commit"] }]
 
+[pattern]
+level = "default"
+summary = "Independent lenses review one immutable subject; a verifier, preferably from another model family through configured routing, tries to falsify the findings; a senior synthesis reconciles them with a disposition per finding."
+citations = ["Google engineering practices, code review", "Claude Code review and Bugbot vendor reports (vendor-reported)"]
+cost = "1 framing attempt + one attempt per selected lens + verifiers + 1 synthesis"
+select_when = "A change needs review before it lands; depth follows the routing review shape."
+tags = ["review"]
+
 [parameters]
-subject = { type = "commit", commit = "HEAD" }
-worktree = ""
-# The diff reference the change is measured from, for example origin/main.
-base = ""
-# The spec the change answers: an issue number such as #2187 or a file path.
-spec = ""
-# Selects review depth from routing review shapes (quick, standard, deep).
-review_shape = ""
-risk = ""
-# Tags that trigger conditional lenses: security, concurrency, terminal.
-risk_tags = []
+subject = { type = "table", default = { type = "commit", commit = "HEAD" }, doc = "Immutable review subject: a commit, a node or the integration head." }
+worktree = { type = "string", default = "", doc = "Worktree the reviewers may read." }
+base = { type = "string", default = "", doc = "Diff reference the change is measured from, for example origin/main." }
+spec = { type = "string", default = "", doc = "Issue number or file the change answers." }
+review_shape = { type = "string", default = "", doc = "Review depth override from routing review shapes (quick, standard, deep)." }
+risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
+verifiers = { type = "integer", default = 1, min = 0, max = 1, doc = "Verifier stages between the lenses and the synthesis, preferably from another model family; 0 skips verification." }
+verifier_tier = { type = "string", default = "verifier", doc = "Route for the verifier. Define a route named verifier in another model family; without one the senior route is used and the substitution is recorded." }
+risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses: security, concurrency, terminal." }
 # Lens tiers left empty come from the routing review shape. Set a tier to override.
 lenses = [
-  { name = "correctness-spec", tier = "", prompt_file = "code-review/lenses/correctness-spec", distinct_from = "writer", when = "" },
-  { name = "design-fit-reuse", tier = "", prompt_file = "code-review/lenses/design-fit-reuse", distinct_from = "", when = "" },
-  { name = "simplicity", tier = "", prompt_file = "code-review/lenses/simplicity", distinct_from = "", when = "" },
-  { name = "conventions-readability", tier = "", prompt_file = "code-review/lenses/conventions-readability", distinct_from = "", when = "" },
-  { name = "tests", tier = "", prompt_file = "code-review/lenses/tests", distinct_from = "", when = "" },
-  { name = "security-privacy", tier = "", prompt_file = "code-review/lenses/security-privacy", distinct_from = "", when = "security" },
-  { name = "concurrency-data-errors", tier = "", prompt_file = "code-review/lenses/concurrency-data-errors", distinct_from = "", when = "concurrency" },
-  { name = "adversarial", tier = "", prompt_file = "code-review/lenses/adversarial", distinct_from = "", when = "terminal" },
+  { name = "correctness-spec", tier = "", when = "" },
+  { name = "design-fit-reuse", tier = "", when = "" },
+  { name = "simplicity", tier = "", when = "" },
+  { name = "conventions-readability", tier = "", when = "" },
+  { name = "tests", tier = "", when = "" },
+  { name = "security-privacy", tier = "", when = "security" },
+  { name = "concurrency-data-errors", tier = "", when = "concurrency" },
+  { name = "adversarial", tier = "", when = "terminal" },
 ]
-
-[roles.review-subject]
-tier = "senior"
-worktree = "${worktree}"
-source = "${subject}"
-prompt = """
-Frame the immutable review subject for: ${prompt}
-Base (diff reference): ${base}
-Spec (acceptance criteria): ${spec}
-Identify acceptance criteria and risk areas from the pinned source commit,
-reading the spec where one is named. Do not edit files. Subsequent independent
-lenses review this exact commit against the base and the spec.
-"""
-
-[roles.lens]
-tier = "${item.tier}"
-worktree = "${worktree}"
-distinct_from = "${item.distinct_from}"
-prompt_file = ["code-review/reviewer-context", "${item.prompt_file}"]
-prompt = """
-Lens: ${item.name}. Subject: ${prompt}
-Base (diff reference): ${base}
-Spec (acceptance criteria): ${spec}
-"""
-
-[roles.synthesiser]
-tier = "senior"
-kind = "synthesise"
-worktree = "${worktree}"
-source = { type = "node", node = "subject" }
-prompt = """
-Reconcile independent review findings against evidence for: ${prompt}
-Do not take a majority vote. Preserve all actionable findings and unresolved
-uncertainty, and weigh each finding by its evidence. Emit one exact
-VERDICT: PASS only when acceptance evidence is satisfied, otherwise
-VERDICT: FAIL.
-"""

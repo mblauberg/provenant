@@ -199,7 +199,11 @@ fn pacing_override_persists_replaces_and_clears() -> Result {
         ],
         2,
     )?;
-    call(
+    let empty = call(&rig, &["route", "pacing", "override"], 0)?;
+    assert_eq!(empty["data"]["recorded"], Value::Null);
+    assert_eq!(empty["data"]["active_overrides"], serde_json::json!([]));
+    // Each change confirms what it recorded, and the listing shows it.
+    let recorded = call(
         &rig,
         &[
             "route",
@@ -214,6 +218,16 @@ fn pacing_override_persists_replaces_and_clears() -> Result {
         ],
         0,
     )?;
+    assert!(
+        recorded["data"]["recorded"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("override account claude/pro spend until ")),
+        "{recorded}"
+    );
+    assert_eq!(
+        recorded["data"]["active_overrides"][0]["account"],
+        "claude/pro"
+    );
     call(
         &rig,
         &[
@@ -229,6 +243,18 @@ fn pacing_override_persists_replaces_and_clears() -> Result {
         ],
         0,
     )?;
+    let compact = rig.command(&["route", "pacing", "override"])?;
+    assert_eq!(code(&compact), 0);
+    let compact = String::from_utf8(compact.stdout.bytes)?;
+    assert!(compact.contains("1 active pacing overrides"), "{compact}");
+    assert!(
+        compact.contains("override account claude/pro pace until "),
+        "{compact}"
+    );
+    assert!(
+        compact.contains("next: provenant route pacing override clear"),
+        "{compact}"
+    );
     call(
         &rig,
         &[
@@ -243,8 +269,10 @@ fn pacing_override_persists_replaces_and_clears() -> Result {
     assert_eq!(overrides.len(), 2);
     assert_eq!(overrides[0]["account"], "claude/pro");
     assert_eq!(overrides[0]["policy"], "pace");
-    assert!(overrides[0]["expires_unix_seconds"].as_i64().is_some());
-    call(&rig, &["route", "pacing", "override", "clear"], 0)?;
+    assert!(overrides[0]["schedule"]["expires"].as_i64().is_some());
+    let cleared = call(&rig, &["route", "pacing", "override", "clear"], 0)?;
+    assert_eq!(cleared["data"]["recorded"], "cleared every pacing override");
+    assert_eq!(cleared["data"]["active_overrides"], serde_json::json!([]));
     let config = call(&rig, &["config", "show"], 0)?;
     assert_eq!(
         config["data"]["domains"]["routing"]["pacing_overrides"],
@@ -303,6 +331,63 @@ fn pacing_override_resolves_labels_and_rejects_ambiguous_keys() -> Result {
         .ok_or("overrides")?;
     assert_eq!(overrides.len(), 1);
     assert_eq!(overrides[0]["account"], "claude/shared");
+    Ok(())
+}
+
+#[test]
+fn override_list_shows_active_future_and_expired_schedules() -> Result {
+    let rig = rig()?;
+    fs::create_dir_all(&rig.state)?;
+    let now = jiff::Timestamp::now().as_second();
+    let config = format!(
+        "schema_version=1\n[[domains.routing.pacing_overrides]]\nprovider='codex'\npolicy='pace'\n[domains.routing.pacing_overrides.schedule]\nstarts={}\nexpires={}\n[[domains.routing.pacing_overrides]]\nprovider='claude'\npolicy='spend'\n[domains.routing.pacing_overrides.schedule]\nstarts={}\nexpires={}\n[[domains.routing.pacing_overrides]]\nprovider='agy'\npolicy='off'\n[domains.routing.pacing_overrides.schedule]\nstarts={}\nexpires={}\n",
+        now - 30,
+        now + 300,
+        now + 300,
+        now + 600,
+        now - 600,
+        now - 300,
+    );
+    fs::write(rig.state.join("config.toml"), config)?;
+    let listed = call(&rig, &["route", "override", "list"], 0)?;
+    let rows = listed["data"]["overrides"].as_array().ok_or("overrides")?;
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["active"], true);
+    assert_eq!(rows[1]["active"], false);
+    assert_eq!(rows[2]["active"], false);
+    Ok(())
+}
+
+#[test]
+fn pacing_write_rewrites_legacy_override_rows() -> Result {
+    let rig = rig()?;
+    fs::create_dir_all(&rig.state)?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[[domains.routing.pacing_overrides]]\nprovider='codex'\npolicy='pace'\nexpires_unix_seconds=2000000000\nwindows=[]\n",
+    )?;
+    call(
+        &rig,
+        &[
+            "route",
+            "pacing",
+            "override",
+            "--provider",
+            "claude",
+            "--policy",
+            "spend",
+            "--until",
+            "2h",
+        ],
+        0,
+    )?;
+    let config = call(&rig, &["config", "show"], 0)?;
+    let rows = config["data"]["domains"]["routing"]["pacing_overrides"]
+        .as_array()
+        .ok_or("overrides")?;
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0]["schedule"]["expires"].is_number());
+    assert!(rows[0]["expires_unix_seconds"].is_null());
     Ok(())
 }
 #[test]
@@ -611,6 +696,7 @@ fn route_config_verbs_round_trip_atomic_config_and_refuse_invalid_weights() -> R
 
     let pacing = call(&rig, &["route", "pacing", "codex", "spend"], 0)?;
     assert_eq!(pacing["command"], "route pacing");
+    assert_eq!(pacing["data"]["recorded"], "provider codex pacing spend");
     let pacing_list = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
     assert_eq!(pacing_list["data"]["pacing"]["codex"], "spend");
 
