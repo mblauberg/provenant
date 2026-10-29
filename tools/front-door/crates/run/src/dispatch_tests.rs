@@ -6377,12 +6377,12 @@ fn reconcile_recovers_a_writer_from_a_previous_boot() -> TestResult {
 
 #[test]
 fn reconcile_recovers_writer_when_device_numbers_change_after_reboot() -> TestResult {
-    recover_rebooted_writer_inner(false, false, true, NEW_BOOT, false, true)
+    recover_rebooted_writer_inner(false, false, true, NEW_BOOT, false, true, false)
 }
 
 #[test]
 fn changed_device_numbers_on_same_boot_keep_writer_custody() -> TestResult {
-    recover_rebooted_writer_inner(false, false, true, OLD_BOOT, false, true)
+    recover_rebooted_writer_inner(false, false, true, OLD_BOOT, false, true, false)
 }
 
 #[test]
@@ -6808,7 +6808,8 @@ impl provenant_supervisor::census::ProcessObserver for RebootObserver {
         Ok(self.0.into())
     }
     fn observe(&self, _: i64) -> provenant_supervisor::census::ProcessObservation {
-        unreachable!("reboot proof needs only the boot identity")
+        // Every recorded process is gone, as after a reboot or a crash.
+        provenant_supervisor::census::ProcessObservation::Absent
     }
     fn census(
         &self,
@@ -6822,8 +6823,23 @@ impl provenant_supervisor::census::ProcessObserver for RebootObserver {
 }
 
 #[test]
-fn same_boot_with_free_locks_stays_uncertain() -> TestResult {
+fn same_boot_with_no_live_holder_settles_lost() -> TestResult {
     recover_rebooted_writer(false, false, true, OLD_BOOT)
+}
+
+#[test]
+fn same_boot_with_unresolved_custody_stays_uncertain() -> TestResult {
+    recover_rebooted_writer_inner(false, false, true, OLD_BOOT, false, false, true)
+}
+
+#[test]
+fn cancel_settles_an_attempt_with_no_live_holder() -> TestResult {
+    recover_rebooted_writer(true, false, true, OLD_BOOT)
+}
+
+#[test]
+fn reader_with_no_live_holder_settles_lost() -> TestResult {
+    recover_rebooted_writer(false, false, false, OLD_BOOT)
 }
 
 fn recover_rebooted_writer(
@@ -6832,11 +6848,11 @@ fn recover_rebooted_writer(
     writer: bool,
     boot: &'static str,
 ) -> TestResult {
-    recover_rebooted_writer_inner(cancel_run, interrupted, writer, boot, false, false)
+    recover_rebooted_writer_inner(cancel_run, interrupted, writer, boot, false, false, false)
 }
 
 fn recover_rebooted_writer_removed_worktree() -> TestResult {
-    recover_rebooted_writer_inner(false, false, true, NEW_BOOT, true, false)
+    recover_rebooted_writer_inner(false, false, true, NEW_BOOT, true, false, false)
 }
 
 fn recover_rebooted_writer_inner(
@@ -6846,6 +6862,7 @@ fn recover_rebooted_writer_inner(
     boot: &'static str,
     removed: bool,
     changed_device: bool,
+    unresolved: bool,
 ) -> TestResult {
     let observer = RebootObserver(boot);
     let temp = tempfile::tempdir()?;
@@ -6912,6 +6929,14 @@ fn recover_rebooted_writer_inner(
     });
     value["boot"] = guardian["boot"].clone();
     value["guardian"] = guardian.clone();
+    if boot == OLD_BOOT && !unresolved {
+        value["provider"] = serde_json::json!({
+            "boot": OLD_BOOT, "pid": 124, "native_start": 1,
+            "group_id": 124, "session_id": 123,
+        });
+        value["unresolved_cleanup"] = false.into();
+        value["census_incomplete"] = false.into();
+    }
     value["launch_state"] = "spawned".into();
     value["attempt_device"] = meta.device.into();
     value["attempt_inode"] = meta.inode.into();
@@ -6929,9 +6954,10 @@ fn recover_rebooted_writer_inner(
         &serde_json::to_vec(&summary)?,
         RECORD_LIMIT,
     )?;
-    let checkpoint = serde_json::to_vec(
-        &serde_json::json!({"schema_version":1, "scope":scope, "guardian":guardian}),
-    )?;
+    let checkpoint = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1, "scope": scope, "guardian": guardian,
+        "provider": value["provider"],
+    }))?;
     artifacts::seal(&attempt, "process.json", &checkpoint, RECORD_LIMIT)?;
     // Recovery preserves existing captures, results, scratch and provider history.
     let telemetry = [
@@ -6959,21 +6985,51 @@ fn recover_rebooted_writer_inner(
     }
 
     if boot == OLD_BOOT {
-        // Both exclusions are free. That alone cannot prove a reboot or exit.
-        drop(attempt.try_lock(
-            std::ffi::OsStr::new("custody.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        )?);
-        drop(Directory::open_anchor(&custody)?.try_lock(
+        // Held writer exclusion means a guardian may remain: stay uncertain.
+        let held = Directory::open_anchor(&custody)?.try_lock(
             std::ffi::OsStr::new("writer.lock"),
             provenant_os::fs::LockMode::Exclusive,
-        )?);
+        )?;
         assert!(
             matches!(store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?.as_slice(),
             [(attempt, Reconciled::Uncertain { .. })] if *attempt == id)
         );
         assert_eq!(store.record(id, &call)?, before);
         assert!(reservation.exists());
+        assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "scratch");
+        drop(held);
+        if changed_device {
+            return Ok(());
+        }
+        if unresolved {
+            assert!(matches!(
+                store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?.as_slice(),
+                [(attempt, Reconciled::Uncertain { .. })] if *attempt == id
+            ));
+            assert_eq!(store.record(id, &call)?, before);
+            assert!(reservation.exists());
+            return Ok(());
+        }
+        // Free exclusion and an absent guardian and provider leave no holder.
+        if cancel_run {
+            assert_eq!(
+                store.cancel_with_observer(id, "stop", &call, &observer)?,
+                CancelReceipt::Requested
+            );
+        }
+        assert_eq!(
+            store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?,
+            vec![(id, Reconciled::Finished)]
+        );
+        let AttemptState::Terminal {
+            outcome, reason, ..
+        } = store.record(id, &call)?.state
+        else {
+            return Err("holderless attempt stayed open".into());
+        };
+        assert_eq!(outcome, Outcome::Lost);
+        assert!(reason.is_some_and(|reason| reason.contains("no live holder")));
+        assert!(!reservation.exists());
         assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "scratch");
         return Ok(());
     }
