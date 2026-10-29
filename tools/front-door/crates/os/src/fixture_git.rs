@@ -23,16 +23,29 @@ pub fn git_command_at(program: impl AsRef<OsStr>) -> Command {
 
 /// Select native Git directly, bypassing the lane's PATH wrapper.
 pub fn git_command() -> Command {
-    let program = [
-        "/opt/homebrew/bin/git",
-        "/usr/local/bin/git",
-        "/opt/local/bin/git",
-        "/Library/Developer/CommandLineTools/usr/bin/git",
-        "/usr/bin/git",
-        "/bin/git",
-    ]
-    .into_iter()
-    .find(|path| Path::new(path).is_file())
-    .unwrap_or("/usr/bin/git");
+    let program = crate::git::git_executable().unwrap_or_else(|| {
+        [
+            "/opt/homebrew/bin/git",
+            "/usr/local/bin/git",
+            "/opt/local/bin/git",
+            "/Library/Developer/CommandLineTools/usr/bin/git",
+            "/usr/bin/git",
+            "/bin/git",
+        ]
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+        .unwrap_or("/usr/bin/git")
+        .into()
+    });
     git_command_at(program)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fixture_uses_resolved_git_when_available() {
+        if let Some(git) = crate::git::git_executable() {
+            assert_eq!(super::git_command().get_program(), git.as_os_str());
+        }
+    }
 }

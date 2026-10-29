@@ -310,18 +310,47 @@ fn check_fixture_git_sources(path: &Path, pattern: &regex::Regex) -> Result<(), 
         let source = fs::read_to_string(path)?;
         let name = path.to_string_lossy();
         let test_file = name.contains("/tests/") || name.ends_with("_tests.rs");
-        let test_source = if test_file {
-            source.as_str()
-        } else {
-            source
-                .rsplit_once("#[cfg(test)]\nmod tests")
-                .map_or("", |(_, tests)| tests)
-        };
-        if pattern.is_match(test_source) {
+        if fixture_git_violation(&source, test_file, pattern) {
             return Err(format!("{} spawns Git without the fixture helper", path.display()).into());
         }
     }
     Ok(())
+}
+
+// Source before the first test configuration is production. Scan the remainder
+// conservatively, including all test modules and attributes between them.
+fn fixture_git_violation(source: &str, test_file: bool, pattern: &regex::Regex) -> bool {
+    let test_source = if test_file {
+        source
+    } else {
+        source
+            .find("#[cfg(test)]")
+            .map_or("", |start| &source[start..])
+    };
+    pattern.is_match(test_source)
+}
+
+#[test]
+fn fixture_git_policy_rejects_named_and_multiple_test_modules() {
+    let pattern = regex::Regex::new(
+        r#"Command\s*::\s*new\s*\(\s*(?:"(?:/usr/bin/)?git"|&?(?:(?:self|fixture)\.)?git\b|executable\b)"#,
+    ).unwrap();
+    let source = concat!(
+        "#[cfg(test)]\n#[allow(dead_code)]\nmod git_tests { ",
+        "std::process::Command::new(",
+        "git); }\n#[cfg(test)]\nmod tests {} "
+    );
+    assert!(fixture_git_violation(source, false, &pattern));
+    assert!(fixture_git_violation(
+        concat!("Command::new(", "git)"),
+        true,
+        &pattern
+    ));
+    assert!(!fixture_git_violation(
+        concat!("Command::new(", "git)"),
+        false,
+        &pattern
+    ));
 }
 
 #[test]
