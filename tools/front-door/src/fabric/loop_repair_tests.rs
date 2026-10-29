@@ -75,6 +75,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
             lane_depth: 1,
             parent_attempt: None,
             tasks: vec![provenant_run::DispatchTask {
+                context: None,
                 build_heavy: false,
                 title: None,
                 task_id: TaskId::from_bytes([71; 16]),
