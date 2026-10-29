@@ -1274,13 +1274,8 @@ fn graph_publication_recovers_deleted_marked_ref_and_refuses_conflicts()
         other.to_string()
     );
 
-    let common = host.command(
-        &fixture.writer.project,
-        "git",
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        WriterDeliveryStage::Push,
-    )?;
-    let directory = provenant_os::fs::Directory::open_anchor(Path::new(&common))?;
+    let common = host.common_git_dir(&fixture.writer.project, WriterDeliveryStage::Push)?;
+    let directory = provenant_os::fs::Directory::open_anchor(&common)?;
     artifacts::seal(
         &directory,
         &format!("provenant-graph-publication-{other}.json"),
@@ -1313,13 +1308,8 @@ fn graph_publication_recovers_a_ref_created_before_its_marker()
     let publication = format!("provenant/graph/{head}");
     // Simulate a crash after update-ref but before the ownership marker.
     fixture.git(&["branch", &publication, &head.to_string()])?;
-    let common = host.command(
-        &fixture.writer.project,
-        "git",
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        WriterDeliveryStage::Push,
-    )?;
-    let directory = provenant_os::fs::Directory::open_anchor(Path::new(&common))?;
+    let common = host.common_git_dir(&fixture.writer.project, WriterDeliveryStage::Push)?;
+    let directory = provenant_os::fs::Directory::open_anchor(&common)?;
     let marker = format!("provenant-graph-publication-{head}.json");
     assert!(artifacts::read_sealed(&directory, &marker, RECORD_LIMIT)?.is_none());
     assert_eq!(
