@@ -265,7 +265,10 @@ fn check_push_policy(rig: &TestRig) -> Result {
         Some(input.as_bytes()),
     )?;
     assert_eq!(code(&output), 1);
-    assert!(String::from_utf8_lossy(&output.stderr.bytes).contains("remove the marker lines, then `git commit --amend --no-edit`"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr.bytes)
+            .contains("remove the marker lines, then `git commit --amend --no-edit`")
+    );
     git(rig, &["update-ref", "refs/remotes/origin/main", &conflict])?;
     let fixed = commit(rig, "resolved", "resolved\n")?;
     let input = format!("refs/heads/main {fixed} refs/heads/topic {zero}\n");

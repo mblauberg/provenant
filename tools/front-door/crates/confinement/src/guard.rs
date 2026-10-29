@@ -371,7 +371,10 @@ mod tests {
             let examples: Vec<_> = remedy.split('`').skip(1).step_by(2).collect();
             assert!(!examples.is_empty(), "{id} shows no example: {remedy}");
             for example in examples {
-                assert!(!denies(example, &root), "{id} example is refused: {example}");
+                assert!(
+                    !denies(example, &root),
+                    "{id} example is refused: {example}"
+                );
             }
         }
     }
