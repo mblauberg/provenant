@@ -11,6 +11,94 @@ use std::{
 };
 use support::{Result, TestRig, code};
 
+const HANDOFF_SECRET: &str = "sk-abcdefghijklmnopqrstuvwx";
+
+fn handoff_recovery_provider(prompt: &str, args: &[String], auth: &Value) -> Result {
+    let account = auth["tokens"]["account_id"]
+        .as_str()
+        .ok_or("fixture account")?;
+    let session = "01234567-89ab-cdef-0123-456789abcdef";
+    writeln!(
+        io::stdout(),
+        "{}",
+        json!({"type":"thread.started","thread_id":session})
+    )?;
+    if !prompt.contains("Previous attempt handoff") {
+        let path = prompt
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Progress handoff JSON: ")?
+                    .split_once(". Update this file atomically")
+                    .map(|(path, _)| PathBuf::from(path))
+            })
+            .ok_or("supplied progress path")?;
+        let progress = json!({
+            "schema_version":2,"status":"stopped_early",
+            "note":format!("Parser written.\n{HANDOFF_SECRET}\t{HANDOFF_SECRET}"),
+            "remaining":[format!("Finish renderer.\n{HANDOFF_SECRET}"),format!("Check output.\t{HANDOFF_SECRET}")],
+            "decisions":[format!("Keep parser API.\t{HANDOFF_SECRET}")],
+            "verify":[format!("Parser fixture passed.\n{HANDOFF_SECRET}")],
+            "future":{"nested":[format!("\n{HANDOFF_SECRET}"),{"token":format!("\t{HANDOFF_SECRET}")}]}
+        });
+        fs::write("partial-work.txt", "parser implementation survives")?;
+        fs::write("first-account.txt", account)?;
+        fs::write(
+            "first-worktree.txt",
+            std::env::current_dir()?.as_os_str().as_encoded_bytes(),
+        )?;
+        let staging = path.with_extension("next");
+        fs::write(&staging, serde_json::to_vec(&progress)?)?;
+        fs::rename(staging, path)?;
+        writeln!(
+            io::stdout(),
+            "{}",
+            json!({"type":"item.completed","item":{"type":"agent_message","text":"```handoff\n{\"schema_version\":2,"}})
+        )?;
+        writeln!(
+            io::stdout(),
+            "{}",
+            json!({"type":"turn.failed","error":{"message":"usage limit reached","codex_error_info":"usage_limit_exceeded"}})
+        )?;
+    } else {
+        assert!(!args.iter().any(|arg| arg == "resume"));
+        assert_ne!(fs::read_to_string("first-account.txt")?, account);
+        assert_eq!(
+            fs::read("first-worktree.txt")?,
+            std::env::current_dir()?.as_os_str().as_encoded_bytes()
+        );
+        assert_eq!(
+            fs::read_to_string("partial-work.txt")?,
+            "parser implementation survives"
+        );
+        assert!(!prompt.contains(HANDOFF_SECRET));
+        for text in [
+            "fixture handoff recovery",
+            "Finish renderer.",
+            "Keep parser API.",
+            "Parser fixture passed.",
+            "[REDACTED]",
+        ] {
+            assert!(
+                prompt.contains(text),
+                "missing continuation context: {text}"
+            );
+        }
+        fs::write("successor-context.txt", prompt)?;
+        fs::write("second-account.txt", account)?;
+        writeln!(
+            io::stdout(),
+            "{}",
+            json!({"type":"item.completed","item":{"type":"agent_message","text":"Recovered parser; renderer verified."}})
+        )?;
+        writeln!(
+            io::stdout(),
+            "{}",
+            json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}})
+        )?;
+    }
+    Ok(())
+}
+
 fn fixture() -> Result {
     let args: Vec<_> = std::env::args().collect();
     if args.get(1).is_some_and(|v| v == "--version") {
@@ -93,7 +181,9 @@ fn fixture() -> Result {
     }
     let home = PathBuf::from(std::env::var_os("CODEX_HOME").ok_or("CODEX_HOME")?);
     let auth: Value = serde_json::from_slice(&fs::read(home.join("auth.json"))?)?;
-    assert_eq!(auth["tokens"]["account_id"], "fixture-one");
+    if !prompt.contains("fixture handoff recovery") {
+        assert_eq!(auth["tokens"]["account_id"], "fixture-one");
+    }
     let session = "01234567-89ab-cdef-0123-456789abcdef";
     let sessions = home.join("sessions/2026/10/24");
     fs::create_dir_all(&sessions)?;
@@ -117,6 +207,9 @@ fn fixture() -> Result {
             ),
         )?;
     }
+    if prompt.contains("fixture handoff recovery") {
+        return handoff_recovery_provider(&prompt, &args, &auth);
+    }
     if prompt.contains("fixture capacity") {
         writeln!(
             io::stdout(),
@@ -131,11 +224,15 @@ fn fixture() -> Result {
         return Ok(());
     }
     let answer = if prompt.contains("fixture policy continuation") {
-        if args.iter().any(|arg| arg == "resume") {
-            "Completed.\nStatus: complete".into()
+        let status = if args.iter().any(|arg| arg == "resume") {
+            "done"
         } else {
-            "More work remains.\nStatus: incomplete".into()
-        }
+            "stopped_early"
+        };
+        format!(
+            "```handoff\n{}\n```",
+            json!({"schema_version":2,"status":status,"note":"Fixture continuation state.","remaining":[],"decisions":[],"verify":[]})
+        )
     } else if prompt.contains("fixture policy result") && policy_model == Some("gpt-6-luna") {
         String::new()
     } else if prompt.contains("Review commit ") {
@@ -183,7 +280,10 @@ fn policy_codex_fixture() -> Result<TestRig> {
 }
 /// `settled` is the exit `run` gives when the whole retry chain settles
 /// inside its own wait; otherwise it times out (124) and `lanes` waits on.
-/// Which one happens depends on host speed, so both are accepted.
+/// Which one happens depends on host speed, so both are accepted. A wait that
+/// starts while a successor is still pending counts only that successor, so
+/// once the chain has settled the run is read again: a wholly settled named
+/// selection returns every terminal row.
 fn settled_policy_lanes(
     rig: &TestRig,
     output: provenant_os::exec::ExecOutcome,
@@ -201,11 +301,154 @@ fn settled_policy_lanes(
         let lanes = rig.command(&["lanes", "--id", run_id, "--all", "--wait", "5s", "--json"])?;
         if code(&lanes) != 124 {
             assert_eq!(code(&lanes), 0, "{lanes:?}");
-            return Ok(serde_json::from_slice(&lanes.stdout.bytes)?);
+            let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+            if lanes["data"]["ignored_settled"].is_null() {
+                return Ok(lanes);
+            }
+            let all = rig.command(&["lanes", "--id", run_id, "--all", "--wait", "5s", "--json"])?;
+            assert_eq!(code(&all), 0, "{all:?}");
+            let all: Value = serde_json::from_slice(&all.stdout.bytes)?;
+            assert!(all["data"]["ignored_settled"].is_null(), "{all}");
+            return Ok(all);
         }
     }
     Err("policy successors did not settle within the fixture budget".into())
 }
+/// Confined synthetic accounts exercise real launch, holder settlement and
+/// fresh retry routing without contacting a live provider service.
+fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    for path in [
+        ".cargo/git",
+        "Library/pnpm",
+        "Library/Caches/pnpm",
+        ".cache/node",
+        ".codex",
+        ".claude/hooks",
+        ".kiro/settings",
+        ".gemini/config",
+        ".cursor/extensions",
+        ".npm",
+    ] {
+        fs::create_dir_all(rig.home.join(path))?;
+    }
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing]\nsettlement_retries=1\n",
+    )?;
+    for (label, directory, account) in [
+        ("one", rig.root.join("codex"), "fixture-one"),
+        ("two", rig.root.join("codex-two"), "fixture-two"),
+    ] {
+        fs::create_dir_all(&directory)?;
+        let auth = serde_json::to_vec(&json!({"tokens":{"account_id":account}}))?;
+        fs::write(directory.join("auth.json"), &auth)?;
+        let key = provenant_providers::identity::codex_account(&auth).ok_or("account key")?;
+        support::register_account(&rig, "codex", label, &key, &directory)?;
+    }
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    for args in [
+        vec!["config", "user.name", "Fixture"],
+        vec!["config", "user.email", "fixture@example.invalid"],
+        vec!["commit", "--allow-empty", "-qm", "base"],
+        vec!["branch", "-M", "main"],
+    ] {
+        assert_eq!(code(&rig.execute(&git, &args, None)?), 0);
+    }
+    let prompt = rig.root.join("prompt.txt");
+    fs::write(
+        &prompt,
+        "fixture handoff recovery: finish the parser and renderer",
+    )?;
+    let output = rig.command(&[
+        "run",
+        "--model",
+        "codex/gpt-6-luna",
+        "--effort",
+        "low",
+        "--operation-id",
+        "handoff-recovery",
+        "--mode",
+        "worktree-write",
+        "--worktree-branch",
+        "fixture/handoff-recovery",
+        "--base",
+        "main",
+        "--deliver",
+        "none",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt path")?,
+        "--wait",
+        "3s",
+        "--json",
+    ])?;
+    let launch: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let worktree = PathBuf::from(
+        launch["data"]["worktree"]["path"]
+            .as_str()
+            .ok_or("retained worktree path")?,
+    );
+    let lanes = settled_policy_lanes(&rig, output, 1)?;
+    let rows = lanes["data"]["lanes"].as_array().ok_or("lane rows")?;
+    assert_eq!(rows.len(), 2, "{lanes}");
+    let first = rows
+        .iter()
+        .find(|row| row["attempt_number"] == 1)
+        .ok_or("first attempt")?;
+    let second = rows
+        .iter()
+        .find(|row| row["attempt_number"] == 2)
+        .ok_or("successor")?;
+    assert_eq!(first["state"], "quota_limited", "{lanes}");
+    assert_eq!(second["state"], "uncommitted", "{lanes}");
+    assert_eq!(second["continuation"], "policy_fallback");
+    assert_ne!(
+        first["applied_route"]["account_key"],
+        second["applied_route"]["account_key"]
+    );
+    for row in [first, second] {
+        assert_eq!(row["applied_route"]["model"], "codex/gpt-6-luna");
+    }
+    let run_id = first["run_id"].as_str().ok_or("run ID")?;
+    let attempt = |row: &Value| -> Result<PathBuf> {
+        Ok(rig
+            .state
+            .join("runs")
+            .join(run_id)
+            .join("attempts")
+            .join(row["attempt_id"].as_str().ok_or("attempt ID")?))
+    };
+    let snapshot = fs::read_to_string(attempt(first)?.join("handoff.json"))?;
+    let handoff = provenant_records::handoff::Handoff::from_json(snapshot.as_bytes())?;
+    assert_eq!(handoff.note, "Parser written.\n[REDACTED]\t[REDACTED]");
+    assert_eq!(
+        handoff.extra["future"]["nested"][1]["token"],
+        "\t[REDACTED]"
+    );
+    let successor_prompt = fs::read_to_string(attempt(second)?.join("prompt.txt"))?;
+    assert!(successor_prompt.contains(&handoff.fenced()));
+    assert!(!snapshot.contains(HANDOFF_SECRET) && !successor_prompt.contains(HANDOFF_SECRET));
+    // The provider's evidence proves the checkout survived both launches and
+    // that the second process received the sanitised context under confinement.
+    assert_eq!(
+        fs::read_to_string(worktree.join("partial-work.txt"))?,
+        "parser implementation survives"
+    );
+    assert_ne!(
+        fs::read_to_string(worktree.join("first-account.txt"))?,
+        fs::read_to_string(worktree.join("second-account.txt"))?
+    );
+    assert!(
+        fs::read_to_string(worktree.join("successor-context.txt"))?.contains(&handoff.fenced())
+    );
+    cleanup.disarm();
+    Ok(())
+}
+
 fn policy_empty_result_falls_back_without_a_chair_turn() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -2717,6 +2960,7 @@ fn main() -> ExitCode {
                 "codex_dispatch_observes_rollout",
                 "policy_empty_result_falls_back_without_a_chair_turn",
                 "policy_incomplete_result_continues_the_retained_session",
+                "interrupted_progress_recovers_on_another_account_in_the_same_worktree",
                 "capacity_settlement_resumes_the_same_session",
                 "review_fans_out_and_collects_fake_provider",
                 "opencode_dispatch_observes_v2_wal_session",
@@ -2752,6 +2996,7 @@ fn main() -> ExitCode {
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
                     "policy_empty_result_falls_back_without_a_chair_turn" => policy_empty_result_falls_back_without_a_chair_turn(),
                     "policy_incomplete_result_continues_the_retained_session" => policy_incomplete_result_continues_the_retained_session(),
+                    "interrupted_progress_recovers_on_another_account_in_the_same_worktree" => interrupted_progress_recovers_on_another_account_in_the_same_worktree(),
                     "capacity_settlement_resumes_the_same_session" => capacity_settlement_resumes_the_same_session(),
                     "review_fans_out_and_collects_fake_provider" => review_fans_out_and_collects_fake_provider(),
                     "opencode_dispatch_observes_v2_wal_session" => {

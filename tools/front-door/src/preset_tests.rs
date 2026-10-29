@@ -303,7 +303,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
             attempt_ref: Some(format!("fixture/{}", key.node_id)),
             outcome: AttemptOutcome::Succeeded,
             launched: true,
-            result: Some(result.finish()),
+            result: Some(Box::new(result.finish())),
             result_warning: None,
             result_path: None,
             branch: (access == AccessMode::WorktreeWrite).then(|| format!("lane/{}", key.node_id)),

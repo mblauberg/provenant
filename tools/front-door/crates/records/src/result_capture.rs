@@ -5,8 +5,8 @@ const HEAD_BYTES: usize = 4096;
 const TAIL_BYTES: usize = 16384;
 const VERDICT_BYTES: usize = 1024;
 
-/// A streaming accumulator. Storage is bounded by the window sizes and the
-/// already validated required verdict, irrespective of artifact length.
+/// A streaming accumulator. Storage is bounded by the windows, handoff limits
+/// and already validated required verdict, irrespective of artifact length.
 pub struct ResultCapture {
     hash: Sha256,
     head: Vec<u8>,
@@ -19,10 +19,13 @@ pub struct ResultCapture {
     line_invalid: bool,
     utf8: Vec<u8>,
     verdict: VerdictCapture,
+    handoff: crate::handoff::HandoffCapture,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapturedResult {
+    /// Final declaration parsed with fence context from the complete stream.
+    pub handoff: Result<Option<crate::handoff::Handoff>, &'static str>,
     /// Exactly one well-formed verdict, on the final non-empty line of the
     /// complete stream. Independent of the legacy required-line contract.
     pub verdict: Option<Box<str>>,
@@ -52,11 +55,13 @@ impl ResultCapture {
             line_invalid: false,
             utf8: Vec::with_capacity(4),
             verdict: VerdictCapture::default(),
+            handoff: crate::handoff::HandoffCapture::default(),
         }
     }
 
     pub fn push(&mut self, chunk: &[u8]) {
         self.verdict.push(chunk);
+        self.handoff.push(chunk);
         self.hash.update(chunk);
         self.bytes = self.bytes.saturating_add(chunk.len() as u64);
         let take = HEAD_BYTES.saturating_sub(self.head.len()).min(chunk.len());
@@ -156,6 +161,7 @@ impl ResultCapture {
             || String::from_utf8_lossy(&self.head).len() > HEAD_BYTES;
         let (verdict, verdict_invalid) = self.verdict.finish();
         CapturedResult {
+            handoff: self.handoff.finish(),
             verdict,
             verdict_invalid,
             digest,
@@ -264,6 +270,37 @@ fn window(bytes: &[u8], cap: usize, tail: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handoff_fence_context_survives_chunks_and_clipped_windows() {
+        let handoff = serde_json::json!({"schema_version":2,"status":"stopped_early","note":"Continue","remaining":[],"decisions":[],"verify":[]});
+        let block = format!("```handoff\n{handoff}\n```");
+        for fence in ["````", "~~~"] {
+            let example = format!("{fence}markdown\n{}\n{block}\n{fence}", "x".repeat(28_000));
+            for (text, expected) in [
+                (example.clone(), false),
+                (format!("{example}\n{block}"), true),
+            ] {
+                for size in [1, 7, 8192] {
+                    let mut capture = ResultCapture::new(None);
+                    for chunk in text.as_bytes().chunks(size) {
+                        capture.push(chunk);
+                    }
+                    let result = capture.finish();
+                    assert!(result.tail_truncated);
+                    let parsed = result.handoff.unwrap();
+                    assert_eq!(parsed.is_some(), expected);
+                    if let Some(parsed) = parsed {
+                        assert_eq!(parsed.note, "Continue");
+                    }
+                }
+            }
+        }
+        // A previous declaration outside the tail still makes the final one ambiguous.
+        let mut capture = ResultCapture::new(None);
+        capture.push(format!("{block}\n{}\n{block}", "x".repeat(28_000)).as_bytes());
+        assert!(capture.finish().handoff.is_err());
+    }
 
     #[test]
     fn verdict_evidence_is_unique_final_and_independent_of_chunk_boundaries() {

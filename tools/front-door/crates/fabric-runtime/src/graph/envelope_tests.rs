@@ -163,7 +163,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 children: node.composite_members.clone(),
                 source_commit: node.source.as_ref().map(|_| "1".repeat(64)),
                 fragment: node.plan.as_ref().map(|_| "\"".repeat(plans::STORED_BLOCK_BYTES / 2 - 1)),
-                handoff: plans::writer(node).then(|| "\"".repeat(plans::STORED_NOTE_BYTES / 2 - 1)),
+                handoff: plans::writer(node).then(|| "\"".repeat(plans::STORED_HANDOFF_BYTES / 2 - 1)),
                 expansion_pause: (node.plan.is_some() || plans::writer(node))
                     .then(|| worst(MAX_ADVANCE_ERROR_BYTES)),
                 loop_pause: node.loop_body.as_ref().map(|_| {
