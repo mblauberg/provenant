@@ -501,7 +501,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     );
     let calls_after = fs::read_to_string(landing.rig.project.join("gh-calls"))?;
     for number in [1669, 1670] {
-        let expected = format!("pr view {number} --repo owner/repo --json state");
+        let expected = format!("pr view {number} --repo owner/repo --json state,mergedAt,closedAt");
         assert_eq!(
             calls_after[calls_before.len()..]
                 .lines()
@@ -723,6 +723,7 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
             (Some("pr"), Some("view" | "list")) => &[
                 "baseRefName",
                 "baseRefOid",
+                "closedAt",
                 "headRefName",
                 "headRefOid",
                 "headRepository",
@@ -731,6 +732,7 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
                 "isDraft",
                 "mergeStateStatus",
                 "mergeable",
+                "mergedAt",
                 "number",
                 "reviewDecision",
                 "state",
@@ -795,6 +797,17 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
             let number = args.get(2).ok_or("PR number")?;
             let state = fs::read_to_string(dir.join(format!("state-{number}")))?;
             io::stdout().write_all(&serde_json::to_vec(&serde_json::json!({"state":state}))?)?;
+        }
+        // The stale-binding sweep also reads the end time; the fixture has none.
+        value
+            if value.starts_with("pr view ")
+                && value.ends_with(" --json state,mergedAt,closedAt") =>
+        {
+            let number = args.get(2).ok_or("PR number")?;
+            let state = fs::read_to_string(dir.join(format!("state-{number}")))?;
+            io::stdout().write_all(&serde_json::to_vec(
+                &serde_json::json!({"state":state,"mergedAt":null,"closedAt":null}),
+            )?)?;
         }
         value if value.starts_with("pr view ") && value.ends_with(" --json headRefOid") => {
             io::stdout().write_all(&fs::read(dir.join("head.json"))?)?;
