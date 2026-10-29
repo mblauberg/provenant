@@ -289,6 +289,7 @@ fn read_attachments(paths: &[PathBuf]) -> Result<Vec<Attachment>, Refusal> {
             return Err(Refusal::invalid("attachments exceed 512 KiB in total"));
         }
         attachments.push(Attachment {
+            extra: Default::default(),
             name: name.to_owned(),
             base64: encode_base64(&bytes),
         });
@@ -509,6 +510,7 @@ fn execute(
         })
         .map_err(|error| Refusal::invalid(error.to_string()))?;
         let input = SessionHandoff {
+            extra: Default::default(),
             operation_id: operation_id.clone(),
             account: args.account.clone(),
             model: args.model.clone(),
@@ -684,6 +686,7 @@ fn execute(
         &clock,
         target,
         PeerAction::SessionHandoff {
+            extra: Default::default(),
             input: Box::new(input),
             budget_seconds: Some(context.config.limits.peer_seconds),
         },
@@ -691,7 +694,10 @@ fn execute(
         &cancel,
     );
     let receipt = match reply {
-        Ok(PeerResult::SessionHandoff(receipt)) => receipt,
+        Ok(PeerResult::SessionHandoff {
+            data: receipt,
+            extra: _,
+        }) => receipt,
         Ok(_) => {
             return Err(Refusal::new(
                 Outcome::Error,
@@ -733,6 +739,7 @@ fn execute(
             code,
             message,
             accounts,
+            ..
         } => {
             let listed = if accounts.is_empty() {
                 String::new()
@@ -937,6 +944,7 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
         .iter()
         .map(|branch| {
             let failed = |error: String| HandoffWorktree {
+                extra: Default::default(),
                 branch: branch.clone(),
                 path: None,
                 head: None,
@@ -990,6 +998,7 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
             );
             match made {
                 Ok((info, created)) => HandoffWorktree {
+                    extra: Default::default(),
                     branch: branch.clone(),
                     path: Some(info.path.to_string_lossy().into_owned()),
                     head: Some(info.head.to_string()),
@@ -1180,6 +1189,7 @@ mod tests {
     #[test]
     fn a_delivery_that_did_not_launch_fails_unless_no_launch_was_given() {
         let receipt = HandoffReceipt::Delivered {
+            extra: Default::default(),
             prompt_path: "/state/prompt.md".into(),
             project: "/repo".into(),
             worktrees: Vec::new(),

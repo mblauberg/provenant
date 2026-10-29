@@ -744,10 +744,12 @@ fn validate_removal(
 pub(crate) fn owned(value: &Value) -> Result<OwnedValue, InstallError> {
     match value {
         Value::File { bytes, mode } => Ok(OwnedValue::File {
+            extra: Default::default(),
             digest: CanonicalV1::file_digest(bytes),
             mode: *mode,
         }),
         Value::Link(target) => Ok(OwnedValue::Link {
+            extra: Default::default(),
             target: AbsolutePath::new(target)?,
         }),
         Value::Other => Err(InstallError::Manifest("unsupported ownership value")),
@@ -885,6 +887,7 @@ pub fn plan_install(
         }
         if want.selector != "release" && want.selector != "config" {
             entries.push(OwnedEntry {
+                extra: Default::default(),
                 path: AbsolutePath::new(path)?,
                 harness: want.harness,
                 selector: want.selector.clone(),
@@ -990,6 +993,7 @@ pub fn plan_install(
         resolved_targets.insert(
             target.id(),
             ResolvedHarnessTarget {
+                extra: Default::default(),
                 harness: target.harness,
                 skills_dir: AbsolutePath::new(&target.skills_dir)?,
                 mcp_file: AbsolutePath::new(&target.mcp_file)?,
@@ -1014,6 +1018,7 @@ pub fn plan_install(
         .into_iter()
         .collect();
     let receipt = InstallReceipt {
+        extra: Default::default(),
         schema_version: 1,
         source_digest: release.manifest.source_digest,
         manifest_digest: CanonicalV1::file_digest(&release.manifest_bytes),
@@ -1054,6 +1059,7 @@ pub fn plan_install(
                 .as_ref()
                 .and_then(|snapshot| owned(&snapshot.value).ok()),
             after: Some(OwnedValue::File {
+                extra: Default::default(),
                 digest: CanonicalV1::file_digest(&bytes),
                 mode: 0o600,
             }),
@@ -1723,7 +1729,7 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
         return Err(InstallError::Manifest("receipt requires one binary entry"));
     };
     let old_state = match &binary.expected {
-        OwnedValue::Link { target } => {
+        OwnedValue::Link { target, .. } => {
             let target = target.to_path_buf()?;
             let root = target
                 .ancestors()
@@ -1919,7 +1925,7 @@ fn permitted_entry(
             && path == binary
             && matches!(
                 &entry.expected,
-                OwnedValue::Link { target }
+                OwnedValue::Link { target, .. }
                     if target.to_path_buf()? == expected_target
             ));
     }
@@ -1953,7 +1959,7 @@ fn permitted_for(
         && path.file_name().is_some_and(|name| {
             matches!(
                 &entry.expected,
-                OwnedValue::Link { target }
+                OwnedValue::Link { target, .. }
                     if target.to_path_buf().is_ok_and(|link| {
                         asset_target(
                             &link,
@@ -1975,7 +1981,7 @@ fn permitted_for(
         if (agents || harness)
             && matches!(
                 &entry.expected,
-                OwnedValue::Link { target }
+                OwnedValue::Link { target, .. }
                     if target.to_path_buf().is_ok_and(|link| {
                         asset_target(
                             &link,
@@ -2077,6 +2083,7 @@ fn check_install_inspected(
                 && CanonicalV1::file_digest(&release.manifest_bytes) == receipt.manifest_digest
             {
                 let expected = OwnedValue::Link {
+                    extra: Default::default(),
                     target: AbsolutePath::new(&release_path.join("bin/provenant"))?,
                 };
                 if !stale_binary
@@ -2217,6 +2224,7 @@ pub fn uninstall(
             _ => 0o600,
         };
         receipt.entries.push(OwnedEntry {
+            extra: Default::default(),
             path: AbsolutePath::new(&path)?,
             harness: None,
             selector: "peer-agent".into(),
@@ -2346,6 +2354,7 @@ pub fn uninstall(
             .as_ref()
             .and_then(|snapshot| owned(&snapshot.value).ok()),
         after: Some(OwnedValue::File {
+            extra: Default::default(),
             digest: CanonicalV1::file_digest(&receipt_bytes),
             mode: 0o600,
         }),

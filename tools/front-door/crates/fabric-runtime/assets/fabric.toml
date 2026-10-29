@@ -43,8 +43,6 @@ expansion_depth = 4
 fan_out_width = 32
 concurrency = 0 # 0 uses host lane caps
 
-# Omitted ceiling fields inherit their configured graph.limits values.
-[graph.limit_ceiling]
 
 [graph.budget]
 unknown_usage = "warn"

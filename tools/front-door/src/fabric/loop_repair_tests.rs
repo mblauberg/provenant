@@ -82,7 +82,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
                 base: Some(head.to_string()),
                 head: None,
                 profile: Default::default(),
-                route: provenant_run::RequestedRoute::Model {
+                route: provenant_run::RequestedRoute::Model {extra: Default::default(),
                     provider: "fixture".into(),
                     model: "fixture/model".into(),
                     effort: None,
@@ -117,7 +117,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         &cancel,
         &factory.clock,
     )?;
-    journal.bind(graph::GraphExecution {
+    journal.bind(graph::GraphExecution {extra: Default::default(),
         integration_base: None,
         directory: fixture.rig.project.clone(),
         document: document.clone(),
@@ -143,7 +143,6 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
             &mut journal,
             &Default::default(),
             &Default::default(),
-            &Default::default(),
         )?;
         assert_eq!(run.status, graph::GraphStatus::Pending);
         settle_owned_worktree(holder, &fixture.roots, &FreeWorkers, None)?;
@@ -164,7 +163,6 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         &mut journal,
         &Default::default(),
         &Default::default(),
-        &Default::default(),
     )?;
     assert_eq!(exhausted.status, graph::GraphStatus::Paused);
     for round in 1..=2 {
@@ -180,7 +178,6 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         &document,
         &mut owner,
         &mut journal,
-        &Default::default(),
         &Default::default(),
         &Default::default(),
         &["loop.revise.decision=accept".into()],
@@ -273,7 +270,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         &cancel,
     )?;
     let InboxResult::Listed { items, .. } = service.execute(
-        InboxInput::List {
+        InboxInput::List {extra: Default::default(),
             id: None,
             session: Some(scope.session.into()),
             state: InboxFilter::All,
@@ -290,7 +287,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
     let ask = &items[0];
     assert_eq!(ask.chair_actor, original.inbox.actor);
     service.execute(
-        InboxInput::Answer {
+        InboxInput::Answer {extra: Default::default(),
             id: ask.id,
             action: AnswerAction::Choose,
             option_id: Some("accept".into()),
@@ -304,8 +301,8 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
     )?;
     assert_eq!(owner.loop_decision(scope)?, Some(LoopDecision::Accept));
     owner.close_loop_ask(scope)?;
-    let InboxResult::Item { item } = service.execute(
-        InboxInput::List {
+    let InboxResult::Item { item, .. } = service.execute(
+        InboxInput::List {extra: Default::default(),
             id: Some(ask.id),
             session: None,
             state: InboxFilter::All,

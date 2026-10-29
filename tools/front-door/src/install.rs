@@ -1036,6 +1036,7 @@ mod tests {
         })?;
         assert_eq!(stops, 2);
         action.before = Some(provenant_records::OwnedValue::File {
+            extra: Default::default(),
             digest: provenant_records::CanonicalV1::file_digest(b"rendered plist\n"),
             mode: 0o600,
         });

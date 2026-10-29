@@ -378,13 +378,21 @@ pub fn run_wait(
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;
-        let hook = || {
+        // SAFETY: getppid has no preconditions and cannot fail.
+        let parent = unsafe { libc::getppid() };
+        let hook = move || {
             // A child must not outlive a shim that was killed outright
             // (SIGKILL cannot be forwarded), or it would keep building
             // without the slot the shim held.
             // SAFETY: prctl is async-signal-safe and touches no shared state.
             if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) } != 0 {
                 return Err(io::Error::last_os_error());
+            }
+            // The parent may have died before prctl took effect, in which
+            // case no death signal will ever arrive: refuse to start.
+            // SAFETY: getppid has no preconditions and cannot fail.
+            if unsafe { libc::getppid() } != parent {
+                return Err(io::Error::other("parent exited before the child started"));
             }
             Ok(())
         };
@@ -395,6 +403,8 @@ pub fn run_wait(
     let mut child = command.spawn()?;
     forward.child(i32::try_from(child.id()).unwrap_or(0));
     let status = child.wait();
+    // The pid may be reused now: stop forwarding to it at once.
+    forward.clear();
     drop(forward);
     let status = status?;
     Ok(status
@@ -455,6 +465,11 @@ mod forward {
                 // SAFETY: kill with a pid this process just spawned.
                 unsafe { libc::kill(pid, early) };
             }
+        }
+    }
+    impl Forward {
+        pub(super) fn clear(&self) {
+            CHILD.store(0, Ordering::SeqCst);
         }
     }
     impl Drop for Forward {

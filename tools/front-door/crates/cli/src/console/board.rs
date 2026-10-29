@@ -253,6 +253,7 @@ mod tests {
             "fallback":[],"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],
             "concurrency":1,"parent":null,"lane_depth":1}))?;
         request.chair = Some(provenant_run::ChairBinding {
+            extra: Default::default(),
             host: provenant_core::HostId::from_bytes([4; 16]),
             actor: context.actor_id,
         });
@@ -459,7 +460,9 @@ mod tests {
         other.create(&prepared(102)?, &call)?;
         store.withdraw(
             AttemptId::from_bytes([1; 16]),
-            AttemptState::Queued,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
             Outcome::Cancelled,
             "test",
             clock.wall_now()?,
@@ -474,7 +477,9 @@ mod tests {
         assert_eq!(empty["coverage"]["observations"], "complete");
         other.withdraw(
             AttemptId::from_bytes([2; 16]),
-            AttemptState::Queued,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
             Outcome::Rejected,
             "review",
             clock.wall_now()?,

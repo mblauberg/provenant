@@ -631,6 +631,7 @@ pub(crate) fn disk_alert(
         .map_err(|_| Error::GcObservation("cannot open Fabric for disk alert"))?;
     for project in projects {
         let event = provenant_fabric_store::EventRecord {
+            extra: Default::default(),
             header: provenant_records::RecordHeader::V1,
             project: *project,
             actor: None,

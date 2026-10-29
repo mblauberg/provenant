@@ -152,6 +152,7 @@ fn note_update(
     service
         .mutate(
             Mutation::Events(EventsInput::Note {
+                extra: Default::default(),
                 note,
                 dedup_key: None,
             }),

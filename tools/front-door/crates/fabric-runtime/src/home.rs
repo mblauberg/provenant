@@ -67,19 +67,34 @@ impl<'a> CoordinationService<'a> {
             Self::Local(service) => service.mutate(input, id, budget, cancel),
             Self::Remote(remote) => {
                 let input = match input {
-                    Mutation::Mail(v) => CoordinationInput::Mail(v),
-                    Mutation::Task(v) => CoordinationInput::Task(v),
-                    Mutation::Events(v) => CoordinationInput::Events(v),
-                    Mutation::Claim(v) => CoordinationInput::Claim(v),
-                    Mutation::Landing(v) => CoordinationInput::Landing(v),
+                    Mutation::Mail(v) => CoordinationInput::Mail {
+                        input: v,
+                        extra: Default::default(),
+                    },
+                    Mutation::Task(v) => CoordinationInput::Task {
+                        input: v,
+                        extra: Default::default(),
+                    },
+                    Mutation::Events(v) => CoordinationInput::Events {
+                        input: v,
+                        extra: Default::default(),
+                    },
+                    Mutation::Claim(v) => CoordinationInput::Claim {
+                        input: v,
+                        extra: Default::default(),
+                    },
+                    Mutation::Landing(v) => CoordinationInput::Landing {
+                        input: v,
+                        extra: Default::default(),
+                    },
                 };
                 Ok(
                     match remote.call(input, Some(id.clone()), budget, cancel)? {
-                        CoordinationResult::Mail(v) => MutationResult::Mail(v),
-                        CoordinationResult::Task(v) => MutationResult::Task(v),
-                        CoordinationResult::Events(v) => MutationResult::Events(v),
-                        CoordinationResult::Claim(v) => MutationResult::Claim(v),
-                        CoordinationResult::Landing(v) => MutationResult::Landing(v),
+                        CoordinationResult::Mail { result: v, .. } => MutationResult::Mail(v),
+                        CoordinationResult::Task { result: v, .. } => MutationResult::Task(v),
+                        CoordinationResult::Events { result: v, .. } => MutationResult::Events(v),
+                        CoordinationResult::Claim { result: v, .. } => MutationResult::Claim(v),
+                        CoordinationResult::Landing { result: v, .. } => MutationResult::Landing(v),
                     },
                 )
             }
@@ -107,6 +122,7 @@ impl RemoteCoordination<'_> {
         };
         let mut request = self.request.clone();
         request.action = PeerAction::Coordination {
+            extra: Default::default(),
             input,
             operation_id,
         };
@@ -135,6 +151,7 @@ impl RemoteCoordination<'_> {
                     // Recover the owning home's receipt; never resend mutation.
                     let mut recovery = request.clone();
                     recovery.action = PeerAction::Receipt {
+                        extra: Default::default(),
                         operation_id: id.clone(),
                     };
                     let response = self
@@ -146,7 +163,7 @@ impl RemoteCoordination<'_> {
                                 operation_id: id.clone(),
                             },
                         })?;
-                    if !matches!(response.result, PeerResult::Coordination(_)) {
+                    if !matches!(response.result, PeerResult::Coordination { .. }) {
                         return Err(PeerError::Unknown { operation_id: id }.into());
                     }
                     self.journal.peer_phase(
@@ -175,10 +192,15 @@ impl RemoteCoordination<'_> {
                     {
                         Ok(response) => {
                             if let PeerResult::Error {
-                                error:
-                                    facade::FacadeError::LaunchUnknown {
-                                        operation_id: response_id,
+                                data:
+                                    crate::hosts::PeerResultError {
+                                        error:
+                                            facade::FacadeError::LaunchUnknown {
+                                                operation_id: response_id,
+                                            },
+                                        ..
                                     },
+                                ..
                             } = &response.result
                                 && response_id != &id
                             {
@@ -192,8 +214,11 @@ impl RemoteCoordination<'_> {
                                 return Err(PeerError::Frame.into());
                             }
                             let commit = match &response.result {
-                                PeerResult::Coordination(_) => true,
-                                PeerResult::Error { error } if is_retryable_refusal(error) => {
+                                PeerResult::Coordination { .. } => true,
+                                PeerResult::Error {
+                                    data: crate::hosts::PeerResultError { error, .. },
+                                    ..
+                                } if is_retryable_refusal(error) => {
                                     // Resending is safe here: the owner records a receipt per
                                     // operation id, so a late-applied mutation replays, not repeats.
                                     self.journal
@@ -203,7 +228,10 @@ impl RemoteCoordination<'_> {
                                         })?;
                                     false
                                 }
-                                PeerResult::Error { error } if is_definitive_refusal(error) => true,
+                                PeerResult::Error {
+                                    data: crate::hosts::PeerResultError { error, .. },
+                                    ..
+                                } if is_definitive_refusal(error) => true,
                                 _ => {
                                     let _ = self.journal.peer_phase(
                                         self.project,
@@ -261,15 +289,23 @@ impl RemoteCoordination<'_> {
                 .exchange(&self.peer, &request, budget, cancel)?
         };
         match response.result {
-            PeerResult::Coordination(value) => Ok(value),
+            PeerResult::Coordination { data: value, .. } => Ok(value),
             PeerResult::Error {
-                error: facade::FacadeError::LaunchUnknown { .. },
+                data:
+                    crate::hosts::PeerResultError {
+                        error: facade::FacadeError::LaunchUnknown { .. },
+                        ..
+                    },
+                ..
             } => {
                 // Uncertain mutations returned above with their locally frozen
                 // ID. A read cannot have an uncertain launch.
                 Err(PeerError::Frame.into())
             }
-            PeerResult::Error { error } => Err(PeerError::Refused { error }.into()),
+            PeerResult::Error {
+                data: crate::hosts::PeerResultError { error, .. },
+                ..
+            } => Err(PeerError::Refused { error }.into()),
             _ => Err(PeerError::Frame.into()),
         }
     }
@@ -295,6 +331,7 @@ fn is_definitive_refusal(error: &facade::FacadeError) -> bool {
             | FacadeError::PeerVersion
             | FacadeError::PeerProtocolMismatch { .. }
             | FacadeError::UpgradeRefused
+            | FacadeError::UpgradeRequired { .. }
             | FacadeError::HomeUnavailable
     )
 }
@@ -307,9 +344,12 @@ macro_rules! route {
             budget: WaitBudget,
             cancel: &CancelToken,
         ) -> Result<$result, CoordinationError> {
-            if CoordinationInput::$variant(input.clone())
-                .mutation()
-                .is_some()
+            if (CoordinationInput::$variant {
+                input: input.clone(),
+                extra: Default::default(),
+            })
+            .mutation()
+            .is_some()
             {
                 return Err(CoordinationError::InvalidInput(
                     "mutation requires an operation id",
@@ -318,8 +358,16 @@ macro_rules! route {
             match self {
                 Self::Local(service) => service.$method(input, budget, cancel),
                 Self::Remote(remote) => {
-                    match remote.call(CoordinationInput::$variant(input), None, budget, cancel)? {
-                        CoordinationResult::$variant(value) => Ok(value),
+                    match remote.call(
+                        CoordinationInput::$variant {
+                            input,
+                            extra: Default::default(),
+                        },
+                        None,
+                        budget,
+                        cancel,
+                    )? {
+                        CoordinationResult::$variant { result: value, .. } => Ok(value),
                         _ => Err(PeerError::Frame.into()),
                     }
                 }
@@ -385,7 +433,9 @@ impl<'a> CoordinationService<'a> {
                 identity.host,
                 identity.inbox.agent.clone(),
                 ProjectLocator::new(identity, home)?,
-                PeerAction::Health,
+                PeerAction::Health {
+                    extra: Default::default(),
+                },
             );
             let executable = discover_ssh_executable(config.ssh_executable.as_deref())?;
             let transport = SshTransport {
@@ -469,8 +519,12 @@ mod tests {
                 assert!(matches!(
                     &request.action,
                     PeerAction::Coordination {
-                        input: CoordinationInput::Events(EventsInput::Note { .. }),
+                        input: CoordinationInput::Events {
+                            input: EventsInput::Note { .. },
+                            extra: _
+                        },
                         operation_id: Some(_),
+                        ..
                     }
                 ));
                 // The owner may have committed the mutation, but this caller
@@ -479,13 +533,21 @@ mod tests {
             }
             assert!(matches!(&request.action, PeerAction::Receipt { .. }));
             Ok(PeerResponse {
+                extra: Default::default(),
                 version: request.version,
                 protocol: PROTOCOL,
                 host: request.target_host,
                 project: request.project.key.clone(),
-                result: PeerResult::Coordination(CoordinationResult::Events(EventsResult::Noted {
-                    seq: 73,
-                })),
+                result: PeerResult::Coordination {
+                    data: CoordinationResult::Events {
+                        result: EventsResult::Noted {
+                            extra: Default::default(),
+                            seq: 73,
+                        },
+                        extra: Default::default(),
+                    },
+                    extra: Default::default(),
+                },
             })
         }
     }
@@ -509,17 +571,26 @@ mod tests {
                 assert!(matches!(
                     &request.action,
                     PeerAction::Coordination {
-                        input: CoordinationInput::Events(EventsInput::Note { .. }),
+                        input: CoordinationInput::Events {
+                            input: EventsInput::Note { .. },
+                            extra: _
+                        },
                         operation_id: Some(_),
+                        ..
                     }
                 ));
                 return Ok(PeerResponse {
+                    extra: Default::default(),
                     version: request.version,
                     protocol: PROTOCOL,
                     host: request.target_host,
                     project: request.project.key.clone(),
                     result: PeerResult::Error {
-                        error: self.error.clone(),
+                        data: crate::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: self.error.clone(),
+                        },
+                        extra: Default::default(),
                     },
                 });
             }
@@ -527,18 +598,30 @@ mod tests {
             assert!(matches!(
                 &request.action,
                 PeerAction::Coordination {
-                    input: CoordinationInput::Events(EventsInput::Note { .. }),
+                    input: CoordinationInput::Events {
+                        input: EventsInput::Note { .. },
+                        extra: _
+                    },
                     operation_id: Some(_),
+                    ..
                 }
             ));
             Ok(PeerResponse {
+                extra: Default::default(),
                 version: request.version,
                 protocol: PROTOCOL,
                 host: request.target_host,
                 project: request.project.key.clone(),
-                result: PeerResult::Coordination(CoordinationResult::Events(EventsResult::Noted {
-                    seq: 73,
-                })),
+                result: PeerResult::Coordination {
+                    data: CoordinationResult::Events {
+                        result: EventsResult::Noted {
+                            extra: Default::default(),
+                            seq: 73,
+                        },
+                        extra: Default::default(),
+                    },
+                    extra: Default::default(),
+                },
             })
         }
     }
@@ -593,6 +676,7 @@ mod tests {
 
         fn remote<'a>(&'a self, transport: Box<dyn PeerTransport + 'a>) -> RemoteCoordination<'a> {
             let request = PeerRequest {
+                extra: Default::default(),
                 version: 1,
                 protocol: PROTOCOL,
                 target_host: self.remote_host,
@@ -600,10 +684,13 @@ mod tests {
                 trace: Default::default(),
                 agent: "chair".into(),
                 project: ProjectLocator {
+                    extra: Default::default(),
                     key: self.project_key.clone(),
                     common_dir: "project/.git".into(),
                 },
-                action: PeerAction::Health,
+                action: PeerAction::Health {
+                    extra: Default::default(),
+                },
             };
             let store_request = Request {
                 clock: &self.clock,
@@ -631,15 +718,22 @@ mod tests {
     }
 
     fn note(text: &str) -> CoordinationInput {
-        CoordinationInput::Events(EventsInput::Note {
-            note: text.to_owned(),
-            dedup_key: Some("handoff-note-1".into()),
-        })
+        CoordinationInput::Events {
+            input: EventsInput::Note {
+                extra: Default::default(),
+                note: text.to_owned(),
+                dedup_key: Some("handoff-note-1".into()),
+            },
+            extra: Default::default(),
+        }
     }
 
     fn noted(result: CoordinationResult) -> i64 {
         match result {
-            CoordinationResult::Events(EventsResult::Noted { seq }) => seq,
+            CoordinationResult::Events {
+                result: EventsResult::Noted { seq, .. },
+                ..
+            } => seq,
             _ => panic!("expected a noted event receipt"),
         }
     }
@@ -736,12 +830,17 @@ mod tests {
             ) -> Result<PeerResponse, PeerError> {
                 assert!(request.operation().is_none());
                 Ok(PeerResponse {
+                    extra: Default::default(),
                     version: request.version,
                     protocol: PROTOCOL,
                     host: request.target_host,
                     project: request.project.key.clone(),
                     result: PeerResult::Error {
-                        error: self.error.clone(),
+                        data: crate::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: self.error.clone(),
+                        },
+                        extra: Default::default(),
                     },
                 })
             }
@@ -754,11 +853,15 @@ mod tests {
             let remote = fixture.remote(Box::new(ErrorPeer { error }));
             let error = remote
                 .call(
-                    CoordinationInput::Events(EventsInput::Read {
-                        after: None,
-                        limit: 1,
-                        wait_seconds: None,
-                    }),
+                    CoordinationInput::Events {
+                        input: EventsInput::Read {
+                            extra: Default::default(),
+                            after: None,
+                            limit: 1,
+                            wait_seconds: None,
+                        },
+                        extra: Default::default(),
+                    },
                     None,
                     fixture.budget,
                     &fixture.cancel,
@@ -789,12 +892,17 @@ mod tests {
                 _cancel: &CancelToken,
             ) -> Result<PeerResponse, PeerError> {
                 Ok(PeerResponse {
+                    extra: Default::default(),
                     version: request.version,
                     protocol: PROTOCOL,
                     host: request.target_host,
                     project: request.project.key.clone(),
                     result: PeerResult::Error {
-                        error: self.0.clone(),
+                        data: crate::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: self.0.clone(),
+                        },
+                        extra: Default::default(),
                     },
                 })
             }
@@ -885,7 +993,7 @@ mod tests {
         assert_eq!(actions_after_receipt.len(), 2);
         assert!(matches!(
             &actions_after_receipt[1],
-            PeerAction::Receipt { operation_id } if operation_id == &operation
+            PeerAction::Receipt { operation_id, .. } if operation_id == &operation
         ));
         let committed = remote
             .journal

@@ -217,6 +217,7 @@ impl<'a> Service<'a> {
             .map_err(|error| input_error(ErrorKind::Io, error.to_string()))?;
 
             requests.push(TaskRequest {
+                extra: Default::default(),
                 build_heavy: task.build_heavy,
                 title: task.title,
                 profile: task.profile,
@@ -245,6 +246,7 @@ impl<'a> Service<'a> {
             run_id: fresh(RunId::from_bytes)?,
             operation_id: input.operation_id,
             request: CanonicalRequest {
+                extra: Default::default(),
                 child_attempt_id_version: previous
                     .as_ref()
                     .map_or(input.parent_attempt.map(|_| 1), |request| {
@@ -320,6 +322,7 @@ impl<'a> Service<'a> {
                 provider,
                 model,
                 effort,
+                ..
             } => {
                 if provider.is_empty() || model.is_empty() || provider.contains('/') {
                     return Err(input_error(ErrorKind::Invalid, "invalid model route"));
@@ -335,20 +338,27 @@ impl<'a> Service<'a> {
                     None => format!("{provider}/{model}"),
                 };
                 Ok(RequestedRoute::Model {
+                    extra: Default::default(),
                     provider,
                     model,
                     effort,
                 })
             }
-            RequestedRoute::Named { name, effort } if !name.is_empty() => {
-                Ok(RequestedRoute::Named { name, effort })
+            RequestedRoute::Named { name, effort, .. } if !name.is_empty() => {
+                Ok(RequestedRoute::Named {
+                    extra: Default::default(),
+                    name,
+                    effort,
+                })
             }
             RequestedRoute::Review {
                 name,
                 effort,
                 excluded_families,
                 distinct_families,
+                ..
             } if !name.is_empty() => Ok(RequestedRoute::Review {
+                extra: Default::default(),
                 name,
                 effort,
                 excluded_families,
@@ -385,6 +395,7 @@ impl<'a> Service<'a> {
         {
             record.state = AttemptState::Settling {
                 publication_pending: false,
+                extra: Default::default(),
             };
         }
         Ok(record)
@@ -509,6 +520,7 @@ pub enum ErrorKind {
     BranchExists,
     LaneCoordinationRefused,
     UpgradeRefused,
+    UpgradeRequired,
     Timeout,
     Peer,
 }
@@ -555,6 +567,7 @@ impl ErrorKind {
             Self::BranchExists => "BRANCH_EXISTS",
             Self::LaneCoordinationRefused => "lane_coordination_refused",
             Self::UpgradeRefused => "UPGRADE_REFUSED",
+            Self::UpgradeRequired => "upgrade_required",
             Self::Timeout => "TIMEOUT",
             Self::Peer => "PEER",
         }
@@ -586,6 +599,9 @@ impl From<&RunError> for ErrorKind {
             RunError::DepthExceeded { .. } | RunError::DepthOverflow => Self::LaneDepth,
             RunError::Capacity => Self::QueueFull,
             RunError::Contention => Self::Contention,
+            RunError::Decode(provenant_records::DecodeError::UnsupportedVersion {
+                found, ..
+            }) if *found > 1 => Self::UpgradeRequired,
             RunError::Decode(_) | RunError::ArtifactMismatch => Self::StateCorrupt,
             _ => Self::Io,
         }

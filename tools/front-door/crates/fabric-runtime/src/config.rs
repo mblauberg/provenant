@@ -20,52 +20,32 @@ pub struct FabricConfig {
     pub lanes: Lanes,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[allow(clippy::manual_non_exhaustive)] // Consumes a retired config key without retaining its value.
 pub struct GraphConfig {
     pub limits: GraphLimits,
-    pub limit_ceiling: GraphLimits,
     pub budget: GraphBudget,
+    #[serde(
+        rename = "limit_ceiling",
+        skip_serializing,
+        deserialize_with = "ignore_limit_ceiling"
+    )]
+    _limit_ceiling: (),
 }
 
-// Omitted ceiling fields inherit the corresponding resolved host limit. The
-// compiled asset leaves the ceiling absent so overrides precede this fallback.
-impl<'de> Deserialize<'de> for GraphConfig {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Default, Deserialize)]
-        #[serde(default, deny_unknown_fields)]
-        struct RawGraphConfig {
-            limits: GraphLimits,
-            limit_ceiling: crate::graph::GraphLimitOverrides,
-            budget: GraphBudget,
-        }
-        let raw = RawGraphConfig::deserialize(deserializer)?;
-        let mut ceiling = raw.limits.clone();
-        macro_rules! inherit {
-            ($($field:ident),+ $(,)?) => {$(
-                if let Some(value) = raw.limit_ceiling.$field {
-                    ceiling.$field = value;
-                }
-            )+};
-        }
-        inherit!(
-            continuations,
-            nodes,
-            edges,
-            routes_per_node,
-            node_prompt_bytes,
-            graph_prompt_bytes,
-            expansion_depth,
-            fan_out_width
-        );
-        if let Some(value) = raw.limit_ceiling.concurrency {
-            ceiling.concurrency = (value != 0).then_some(value);
-        }
-        Ok(Self {
-            limits: raw.limits,
-            limit_ceiling: ceiling,
-            budget: raw.budget,
-        })
-    }
+const LIMIT_CEILING_WARNING: &str = "warning: domains.fabric.graph.limit_ceiling is deprecated and ignored; host graph limits apply";
+
+#[allow(clippy::print_stderr)]
+fn ignore_limit_ceiling<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::de::IgnoredAny::deserialize(deserializer)?;
+    // Validation and loading can deserialize the same configuration section.
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| eprintln!("{LIMIT_CEILING_WARNING}"));
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,45 +310,18 @@ impl DomainConfig for FabricConfig {
             reject("limits.graph_timeout_seconds".into());
         }
         let limits = &self.graph.limits;
-        let ceiling = &self.graph.limit_ceiling;
-        if limits.continuations > ceiling.continuations {
-            reject("graph.limits.continuations".into());
-        }
-        for (name, value, maximum) in [
-            ("nodes", limits.nodes, ceiling.nodes),
-            ("edges", limits.edges, ceiling.edges),
-            (
-                "routes_per_node",
-                limits.routes_per_node,
-                ceiling.routes_per_node,
-            ),
-            (
-                "node_prompt_bytes",
-                limits.node_prompt_bytes,
-                ceiling.node_prompt_bytes,
-            ),
-            (
-                "graph_prompt_bytes",
-                limits.graph_prompt_bytes,
-                ceiling.graph_prompt_bytes,
-            ),
-            (
-                "expansion_depth",
-                limits.expansion_depth,
-                ceiling.expansion_depth,
-            ),
-            ("fan_out_width", limits.fan_out_width, ceiling.fan_out_width),
+        for (name, value) in [
+            ("nodes", limits.nodes),
+            ("edges", limits.edges),
+            ("routes_per_node", limits.routes_per_node),
+            ("node_prompt_bytes", limits.node_prompt_bytes),
+            ("graph_prompt_bytes", limits.graph_prompt_bytes),
+            ("expansion_depth", limits.expansion_depth),
+            ("fan_out_width", limits.fan_out_width),
         ] {
-            if maximum == 0 && value != 0 {
-                reject(format!("graph.limit_ceiling.{name}"));
-            }
-            if value == 0 || value > maximum {
+            if value == 0 {
                 reject(format!("graph.limits.{name}"));
             }
-        }
-        if matches!((limits.concurrency, ceiling.concurrency), (Some(value), Some(maximum)) if value > maximum)
-        {
-            reject("graph.limits.concurrency".into());
         }
         for (name, budget) in [
             ("per_node", &self.graph.budget.per_node),
@@ -620,6 +573,29 @@ mod tests {
     }
 
     #[test]
+    fn retired_graph_ceiling_is_ignored_but_other_config_keys_remain_strict() {
+        let mut value = serde_json::to_value(config()).unwrap();
+        value["graph"]["limit_ceiling"] = serde_json::json!({"nodes": 1, "future": true});
+        let loaded: FabricConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(loaded.graph, GraphConfig::default());
+        assert!(
+            serde_json::to_value(&loaded).unwrap()["graph"]
+                .get("limit_ceiling")
+                .is_none()
+        );
+        assert_eq!(LIMIT_CEILING_WARNING.lines().count(), 1);
+        assert!(LIMIT_CEILING_WARNING.contains("deprecated and ignored"));
+
+        for pointer in ["graph", "limits", "peers"] {
+            let mut unknown = value.clone();
+            unknown[pointer]["unexpected"] = serde_json::json!({"nodes": 1});
+            assert!(serde_json::from_value::<FabricConfig>(unknown).is_err());
+        }
+        value["graph"]["limits"]["unexpected"] = true.into();
+        assert!(serde_json::from_value::<FabricConfig>(value).is_err());
+    }
+
+    #[test]
     fn graph_policy_defaults_and_validation() {
         let mut config = config();
         assert_eq!(config.graph.limits.nodes, 512);
@@ -629,13 +605,6 @@ mod tests {
         assert_eq!(config.graph.limits.graph_prompt_bytes, 4 * 1024 * 1024);
         assert!(config.graph.budget.per_graph.tokens.is_none());
         config.graph.limits.nodes = 513;
-        assert!(
-            config
-                .validate()
-                .iter()
-                .any(|e| e.field == "graph.limits.nodes")
-        );
-        config.graph.limit_ceiling.nodes = 1024;
         assert!(config.validate().is_empty());
         config.graph.budget.per_node.cost_usd = Some(-1.0);
         assert!(
@@ -647,32 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_ceilings_inherit_each_configured_limit() {
-        let graph: GraphConfig = serde_json::from_value(serde_json::json!({
-            "limits": {"nodes": 10, "edges": 20, "concurrency": 3},
-            "limit_ceiling": {"edges": 30}
-        }))
-        .unwrap();
-        assert_eq!(graph.limit_ceiling.nodes, 10);
-        assert_eq!(graph.limit_ceiling.edges, 30);
-        assert_eq!(graph.limit_ceiling.concurrency, Some(3));
-        assert_eq!(graph.budget.unknown_usage, UnknownUsage::Warn);
-
-        let unlimited: GraphConfig = serde_json::from_value(serde_json::json!({
-            "limits": {"concurrency": 3},
-            "limit_ceiling": {"concurrency": 0},
-            "budget": {"unknown_usage": "pause"}
-        }))
-        .unwrap();
-        assert_eq!(unlimited.limit_ceiling.concurrency, None);
-        assert_eq!(unlimited.budget.unknown_usage, UnknownUsage::Pause);
-        let round_trip: GraphConfig =
-            serde_json::from_value(serde_json::to_value(&unlimited).unwrap()).unwrap();
-        assert_eq!(round_trip, unlimited);
-    }
-
-    #[test]
-    fn configured_graph_ceilings_and_diagnostics_survive_config_layering() {
+    fn configured_graph_limits_and_diagnostics_survive_config_layering() {
         #[derive(Serialize, Deserialize)]
         struct Domains {
             fabric: FabricConfig,
@@ -691,30 +635,11 @@ mod tests {
         inputs.state_dir = Some("/fixture/state".into());
         let roots = inputs.resolve(&Resolver).unwrap();
         let sections = provenant_config::DomainSections::<Domains>::new(&[SECTION]);
-        let text = b"schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 10\nedges = 20\n[domains.fabric.graph.limit_ceiling]\nedges = 30\n";
+        let text = b"schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 10\nedges = 20\n[domains.fabric.graph.limit_ceiling]\nnodes = 1\n";
         let config =
             provenant_config::load_with_domains(&roots, Some(&text[..]), &sections).unwrap();
-        assert_eq!(config.domains.fabric.graph.limit_ceiling.nodes, 10);
-        assert_eq!(config.domains.fabric.graph.limit_ceiling.edges, 30);
-        let overrides = crate::graph::GraphLimitOverrides {
-            continuations: Some(0),
-            ..Default::default()
-        };
-        assert_eq!(
-            overrides
-                .resolve(&config.domains.fabric.graph)
-                .unwrap()
-                .continuations,
-            0
-        );
-
-        let text = b"schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 11\n[domains.fabric.graph.limit_ceiling]\nnodes = 10\n";
-        let error = provenant_config::load_with_domains(&roots, Some(&text[..]), &sections)
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(error.contains("graph.limits.nodes"), "{error}");
-        assert!(error.contains("11"), "{error}");
+        assert_eq!(config.domains.fabric.graph.limits.nodes, 10);
+        assert_eq!(config.domains.fabric.graph.limits.edges, 20);
 
         for (text, key, rejected, should_echo, rule) in [
             (

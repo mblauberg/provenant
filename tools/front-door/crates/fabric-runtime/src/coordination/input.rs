@@ -47,18 +47,19 @@ macro_rules! bounded_input {
         }
     ) => {
         #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-        #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+        #[serde(tag = "op", rename_all = "snake_case")]
         $vis enum $name {
-            $( $(#[$variant_attr])* $variant { $( $(#[$field_attr])* $field: $field_type ),* } ),*
+            $( $(#[$variant_attr])* $variant { $( $(#[$field_attr])* $field: $field_type, )* #[serde(flatten)] extra: provenant_records::ExtraFields } ),*
         }
 
         #[derive(serde::Deserialize)]
-        #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+        #[serde(tag = "op", rename_all = "snake_case")]
         enum $wire {
             $(
                 $(#[$variant_attr])*
                 $variant {
-                    $( $(#[$field_attr])* $field: $field_type ),*
+                    $( $(#[$field_attr])* $field: $field_type, )*
+                    #[serde(flatten)] extra: provenant_records::ExtraFields,
                 }
             ),*
         }
@@ -67,7 +68,7 @@ macro_rules! bounded_input {
             fn from(value: $wire) -> Self {
                 match value {
                     $(
-                        $wire::$variant { $( $field ),* } => Self::$variant { $( $field ),* }
+                        $wire::$variant { $( $field, )* extra } => Self::$variant { $( $field, )* extra }
                     ),*
                 }
             }
@@ -161,8 +162,8 @@ fn path_text(path: &std::path::Path, field_path: &str) -> Result<(), InputError>
 
 fn scope(scope: &WorkScope) -> Result<(), InputError> {
     match scope {
-        WorkScope::Issue { key } => bounded_text(key, "scope.key", MAX_REFERENCE_BYTES),
-        WorkScope::Paths { paths } => {
+        WorkScope::Issue { key, .. } => bounded_text(key, "scope.key", MAX_REFERENCE_BYTES),
+        WorkScope::Paths { paths, .. } => {
             if paths.is_empty() || paths.len() > 100 {
                 return Err(field("scope.paths"));
             }
@@ -171,7 +172,7 @@ fn scope(scope: &WorkScope) -> Result<(), InputError> {
             }
             Ok(())
         }
-        WorkScope::Worktree { path } => path_text(path, "scope.path"),
+        WorkScope::Worktree { path, .. } => path_text(path, "scope.path"),
     }
 }
 
@@ -185,12 +186,14 @@ fn route(route: &RequestedRoute, path: &str) -> Result<(), InputError> {
             provider,
             model,
             effort,
+            ..
         } => {
             bounded_text(provider, &format!("{path}.provider"), MAX_ROUTE_BYTES)?;
             bounded_text(model, &format!("{path}.model"), MAX_ROUTE_BYTES)?;
             effort
         }
-        RequestedRoute::Named { name, effort } | RequestedRoute::Review { name, effort, .. } => {
+        RequestedRoute::Named { name, effort, .. }
+        | RequestedRoute::Review { name, effort, .. } => {
             bounded_text(name, &format!("{path}.name"), MAX_ROUTE_BYTES)?;
             effort
         }
@@ -228,13 +231,13 @@ impl ValidateInput for MailInput {
                 artifacts(values, "artifacts")?;
                 Ok(())
             }
-            Self::Read { after, limit } => {
+            Self::Read { after, limit, .. } => {
                 if after.is_some_and(|value| value < 0) {
                     return Err(field("after"));
                 }
                 page(*limit, "limit")
             }
-            Self::MarkRead { through } if *through < 0 => Err(field("through")),
+            Self::MarkRead { through, .. } if *through < 0 => Err(field("through")),
             Self::MarkRead { .. } => Ok(()),
         }
     }
@@ -243,7 +246,9 @@ impl ValidateInput for MailInput {
 impl ValidateInput for TaskInput {
     fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
-            Self::Create { objective, note }
+            Self::Create {
+                objective, note, ..
+            }
             | Self::Update {
                 objective, note, ..
             } => {
@@ -274,6 +279,7 @@ impl ValidateInput for EventsInput {
                 after,
                 limit,
                 wait_seconds,
+                ..
             } => {
                 if after.is_some_and(|value| value < 0) {
                     return Err(field("after"));
@@ -284,7 +290,9 @@ impl ValidateInput for EventsInput {
                 }
                 Ok(())
             }
-            Self::Note { note, dedup_key } => {
+            Self::Note {
+                note, dedup_key, ..
+            } => {
                 task_text(note, "note")?;
                 optional_text(dedup_key.as_deref(), "dedup_key", MAX_REFERENCE_BYTES)
             }
@@ -298,6 +306,7 @@ impl ValidateInput for ClaimInput {
             Self::Acquire {
                 scope: value,
                 lease_seconds,
+                ..
             } => {
                 scope(value)?;
                 lease(*lease_seconds)
@@ -323,11 +332,12 @@ impl ValidateInput for LandingInput {
             Self::Renew {
                 proof,
                 lease_seconds,
+                ..
             } => {
                 landing_reference(&proof.reference, "proof.reference")?;
                 lease(*lease_seconds)
             }
-            Self::Verify { proof } | Self::Release { proof } => {
+            Self::Verify { proof, .. } | Self::Release { proof, .. } => {
                 landing_reference(&proof.reference, "proof.reference")
             }
             Self::Wait {
@@ -345,7 +355,7 @@ impl ValidateInput for LandingInput {
 impl ValidateInput for IdentityInput {
     fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
-            Self::Inspect {} => Ok(()),
+            Self::Inspect { .. } => Ok(()),
         }
     }
 }
@@ -353,8 +363,10 @@ impl ValidateInput for IdentityInput {
 impl ValidateInput for GraphInput {
     fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
-            Self::Run { document } => path_text(document, "document"),
-            Self::Resume { document, extend } => {
+            Self::Run { document, .. } => path_text(document, "document"),
+            Self::Resume {
+                document, extend, ..
+            } => {
                 path_text(document, "document")?;
                 if extend.len() > 64 || extend.iter().any(|entry| {
                     entry.len() > 256 || !matches!(entry.split_once('='), Some((key, value)) if !key.is_empty() && !value.is_empty())
@@ -363,7 +375,7 @@ impl ValidateInput for GraphInput {
                 }
                 Ok(())
             }
-            Self::Status { id } | Self::Cancel { id } => {
+            Self::Status { id, .. } | Self::Cancel { id, .. } => {
                 if crate::graph::valid_identifier(id) {
                     Ok(())
                 } else {
@@ -556,11 +568,13 @@ mod tests {
     #[test]
     fn receipts_freeze_the_public_request() {
         let proof = super::super::ClaimProof {
+            extra: Default::default(),
             id: provenant_core::ClaimId::from_bytes([1; 16]),
             generation: 2,
             token: [0xab; 16],
         };
         let mutation = super::super::Mutation::Claim(ClaimInput::Renew {
+            extra: Default::default(),
             proof,
             lease_seconds: 3,
         });
@@ -732,6 +746,7 @@ mod tests {
         use crate::coordination::TaskProof;
         use crate::coordination::facade::OutputBytes;
         let proof = TaskProof {
+            extra: Default::default(),
             task: provenant_core::TaskId::from_bytes([1; 16]),
             generation: 2,
             token: [0xab; 16],
@@ -833,6 +848,7 @@ mod tests {
         let error = CoordinationApi::mutate(
             &service,
             crate::coordination::Mutation::Task(TaskInput::Claim {
+                extra: Default::default(),
                 id: provenant_core::TaskId::from_bytes([3; 16]),
                 lease_seconds: 0,
             }),

@@ -34,15 +34,30 @@ trap 'rm -f "$log"' EXIT HUP INT TERM
 status=0
 $budget cargo nextest run --profile ci --workspace --locked \
   --features provenant-providers/recording \
-  --stress-count "$count" --retries 0 --no-tests=pass -E "$filter" 2>&1 | tee "$log" || status=$?
+  --stress-count "$count" --retries 0 --failure-output immediate \
+  --no-tests=pass -E "$filter" 2>&1 | tee "$log" || status=$?
 
 if [ "$status" -eq 0 ]; then
+  tail -n 200 "$log"
   note "Changed tests passed $count stress iterations with no retries."
 elif [ -n "$budget" ] && [ "$status" -eq 124 ] && ! grep -q 'FAIL' "$log"; then
+  tail -n 200 "$log"
   note "Stopped at the $duration budget before $count iterations, with no failures."
 else
+  # A timeout can leave thousands of PASS rows after an earlier failure. Keep
+  # its name and immediate output even if neither appears in the final tail.
+  echo '::group::Complete failed stress run log'
+  cat "$log"
+  echo '::endgroup::'
   echo "::warning title=Stress run failed::Changed tests failed under --stress-count $count with no retries (exit $status); a build error also lands here."
-  note "**Stress run failed** (exit $status), \`--stress-count $count\`, no retries. Tail of the log:
+  failures=$(grep -E '(^|[[:space:]])(FAIL|TIMEOUT|ABORT|LEAK|XPASS)([[:space:]]|$)' "$log" || true)
+  note "**Stress run failed** (exit $status), \`--stress-count $count\`, no retries. Full diagnostics are in the **Complete failed stress run log** group. Failure status rows:
+
+\`\`\`
+${failures:-No test failure status was emitted; inspect the complete log for a build or runner error.}
+\`\`\`
+
+Tail of the log:
 
 \`\`\`
 $(tail -n 60 "$log")

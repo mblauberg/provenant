@@ -176,6 +176,7 @@ fn repositories() -> Repositories {
         .lock_landing(project, branch, &fixture.request())
         .unwrap();
     let claim = LandingRequest {
+        extra: Default::default(),
         id: ClaimId::from_bytes([32; 16]),
         project,
         actor: ActorId::from_bytes([33; 16]),
@@ -263,6 +264,7 @@ fn lost_push_reply_keeps_successor_fenced_until_remote_reconciliation() {
         .advance(DurationMicros::from_seconds(2).unwrap())
         .unwrap();
     let successor = LandingRequest {
+        extra: Default::default(),
         id: ClaimId::from_bytes([35; 16]),
         project,
         actor: ActorId::from_bytes([36; 16]),
