@@ -337,10 +337,10 @@ The graph is `write`, then `ci` (a CI gate and its repair loop), `review`
    head other than the one the passing verdict reviewed, including a council
    pinned to an earlier head, and needs the CI gate green.
 
-A repository `deliver.toml` cannot lower `land_tier` or turn on `land` beyond
-your user configuration: each land node takes the stricter tier, and a land
-your configuration turned off takes `terminal`. Set a lower tier explicitly
-with `--set parameters.land_tier=...` when you mean it.
+A repository `deliver.toml` or `roles.toml` cannot lower `land_tier` or turn
+on `land` beyond your user configuration: each land node takes the stricter
+tier, and a land your configuration turned off takes `terminal`. Set a lower
+tier explicitly with `--set parameters.land_tier=...` when you mean it.
 
 Knobs: `checks` names the required checks (empty uses the branch's required
 checks), `ci_timeout_seconds` bounds each gate, `repair_tier` routes the

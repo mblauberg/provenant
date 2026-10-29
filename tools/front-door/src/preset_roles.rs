@@ -5,7 +5,7 @@
 
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -94,6 +94,8 @@ pub struct Reference {
 
 pub struct RoleLibrary {
     entries: BTreeMap<String, Vec<(String, Value)>>,
+    /// Origins of repository role files, which the landing floor leaves out.
+    repo: BTreeSet<String>,
     /// The release root whose `skills/` directory `skill:` references resolve
     /// against. `None` uses the references compiled into the binary.
     pub skill_root: Option<PathBuf>,
@@ -135,6 +137,7 @@ impl RoleLibrary {
     pub fn bundled() -> Self {
         let mut library = Self {
             entries: BTreeMap::new(),
+            repo: BTreeSet::new(),
             skill_root: None,
         };
         library
@@ -174,8 +177,8 @@ impl RoleLibrary {
         Ok(())
     }
 
-    /// Add a roles file when it exists.
-    pub fn add_file(&mut self, path: &Path) -> Result<(), String> {
+    /// Add a roles file when it exists. `repo` marks a repository file.
+    pub fn add_file(&mut self, path: &Path, repo: bool) -> Result<(), String> {
         let mut file = match provenant_os::fs::FileHandle::open_source(path) {
             Ok(file) => file,
             Err(_) if !path.exists() => return Ok(()),
@@ -185,7 +188,17 @@ impl RoleLibrary {
             .read_bounded(1_048_576)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         let text = String::from_utf8(bytes).map_err(|error| error.to_string())?;
-        self.add(&path.display().to_string(), &text)
+        let origin = path.display().to_string();
+        self.add(&origin, &text)?;
+        if repo {
+            self.repo.insert(origin);
+        }
+        Ok(())
+    }
+
+    /// Whether a repository role file was loaded.
+    pub fn has_repo(&self) -> bool {
+        !self.repo.is_empty()
     }
 
     pub fn names(&self) -> Vec<String> {
@@ -197,15 +210,23 @@ impl RoleLibrary {
         name: &str,
         inline: Option<&Value>,
         use_inline: bool,
+        exclude_repo: bool,
     ) -> Option<(String, Value, String)> {
         let mut candidate = name;
         loop {
             if use_inline && let Some(role) = inline.and_then(|roles| roles.get(candidate)) {
                 return Some((candidate.to_owned(), role.clone(), "preset".into()));
             }
-            if let Some(layers) = self.entries.get(candidate) {
+            let layers: Vec<_> = self
+                .entries
+                .get(candidate)
+                .into_iter()
+                .flatten()
+                .filter(|(origin, _)| !exclude_repo || !self.repo.contains(origin))
+                .collect();
+            if !layers.is_empty() {
                 let mut merged = json!({});
-                for (_, layer) in layers {
+                for (_, layer) in &layers {
                     merged = overlay(&merged, layer);
                     // `extends` is per definition: the last layer to name one wins.
                     if let Some(parent) = layer.get("extends") {
@@ -222,8 +243,14 @@ impl RoleLibrary {
 
     /// Resolve `name`, applying `extends`. An inline preset role of the same
     /// name wins over the library; an inline `extends` may name a library role.
-    pub fn resolve(&self, name: &str, inline: Option<&Value>) -> Result<ResolvedRole, String> {
-        self.resolve_depth(name, inline, true, 0)
+    /// `exclude_repo` leaves out repository role files.
+    pub fn resolve(
+        &self,
+        name: &str,
+        inline: Option<&Value>,
+        exclude_repo: bool,
+    ) -> Result<ResolvedRole, String> {
+        self.resolve_depth(name, inline, true, exclude_repo, 0)
     }
 
     fn resolve_depth(
@@ -231,17 +258,20 @@ impl RoleLibrary {
         name: &str,
         inline: Option<&Value>,
         use_inline: bool,
+        exclude_repo: bool,
         depth: usize,
     ) -> Result<ResolvedRole, String> {
         if depth > 8 {
             return Err(format!("role {name}: extends chain is too deep or cyclic"));
         }
-        let (found, raw, origin) = self.lookup(name, inline, use_inline).ok_or_else(|| {
-            format!(
-                "unknown preset role: {name}; library roles: {}",
-                self.names().join(", ")
-            )
-        })?;
+        let (found, raw, origin) = self
+            .lookup(name, inline, use_inline, exclude_repo)
+            .ok_or_else(|| {
+                format!(
+                    "unknown preset role: {name}; library roles: {}",
+                    self.names().join(", ")
+                )
+            })?;
         if !raw.is_object() {
             return Err(format!("role {found} must be a table"));
         }
@@ -258,6 +288,7 @@ impl RoleLibrary {
                     parent,
                     inline,
                     use_inline && !(from_inline && parent == found),
+                    exclude_repo,
                     depth + 1,
                 )?;
                 chain.extend(parent.chain.clone());

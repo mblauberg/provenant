@@ -115,10 +115,10 @@ impl Layers {
 
     pub fn load(user: &Path, repo: &Path) -> Result<Self, String> {
         let mut layers = Self::empty();
-        for dir in [user, repo] {
+        for (is_repo, dir) in [(false, user), (true, repo)] {
             // `roles.toml` sits beside the `presets` directory.
             if let Some(parent) = dir.parent() {
-                layers.roles.add_file(&parent.join("roles.toml"))?;
+                layers.roles.add_file(&parent.join("roles.toml"), is_repo)?;
             }
         }
         for (is_repo, dir) in [(false, user), (true, repo)] {
@@ -201,7 +201,7 @@ impl Layers {
     /// The role library, or one role with its `extends` chain applied.
     pub fn roles_view(&self, name: Option<&str>) -> Result<Value, String> {
         let describe = |role: &str| -> Result<Value, String> {
-            let resolved = self.roles.resolve(role, None)?;
+            let resolved = self.roles.resolve(role, None, false)?;
             let profile = &resolved.profile;
             let mut references = Vec::new();
             for item in profile
@@ -781,17 +781,19 @@ pub fn expand_with(
     params: &[(String, Value)],
     overrides: &[String],
 ) -> Result<Expansion, String> {
-    // Landing floor: the same expansion without repository layers, so they
-    // never lower a land tier or add a land that user configuration and the
-    // command line did not set.
-    let trusted = (!layers.repo_files.is_empty() && !layers.exclude_repo.get()).then(|| {
-        layers.exclude_repo.set(true);
-        let trusted = expand_with(layers, name, prompt, params, overrides);
-        layers.exclude_repo.set(false);
-        trusted
-            .ok()
-            .map(|expansion| expansion.document["nodes"].clone())
-    });
+    // Landing floor: the same expansion without repository presets and
+    // roles, so they never lower a land tier or add a land that user
+    // configuration and the command line did not set.
+    let repo_roles = layers.roles.has_repo();
+    let trusted = ((!layers.repo_files.is_empty() || repo_roles) && !layers.exclude_repo.get())
+        .then(|| {
+            layers.exclude_repo.set(true);
+            let trusted = expand_with(layers, name, prompt, params, overrides);
+            layers.exclude_repo.set(false);
+            trusted
+                .ok()
+                .map(|expansion| expansion.document["nodes"].clone())
+        });
     layers.used_shapes.borrow_mut().clear();
     layers.used_roles.borrow_mut().clear();
     layers.substitutions.borrow_mut().clear();
@@ -842,7 +844,7 @@ pub fn expand_with(
         &mut repo_files,
     )?;
     if let Some(trusted) = trusted
-        && !repo_files.is_empty()
+        && (!repo_files.is_empty() || repo_roles)
     {
         floor_land_tiers(&mut nodes, trusted.as_ref());
     }
@@ -1112,7 +1114,9 @@ fn lower_leaf(
     let role = role.as_deref();
     let mut resolved_role = None;
     if let Some(role) = role {
-        let resolved = layers.roles.resolve(role, roles)?;
+        let resolved = layers
+            .roles
+            .resolve(role, roles, layers.exclude_repo.get())?;
         profile = resolved.profile.clone();
         resolved_role = Some(resolved);
     }

@@ -373,6 +373,27 @@ fn an_inbox_answer_of_land_never_approves_a_land() {
 }
 
 #[test]
+fn an_answer_after_a_pending_observation_clears_the_land_deadline() {
+    let document = document("crucial", Some("chair"));
+    let mut owner = owner();
+    let mut journal = Journal::default();
+    let pending = run(&document, &mut owner, &mut journal);
+    let land = node(&pending, "land");
+    assert_eq!(land.state, NodeState::Running);
+    assert!(land.land.as_ref().unwrap().wake_at.is_some());
+
+    owner.reply = Some("land".into());
+    let answered = advance(&document, &mut owner, &mut journal).unwrap();
+    let land = node(&answered.checkpoint, "land");
+    assert_eq!(land.state, NodeState::Failed);
+    assert!(land.land.as_ref().unwrap().wake_at.is_none());
+    // The failed checkpoint stays valid for the next advance.
+    let again = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(node(&again.checkpoint, "land").state, NodeState::Failed);
+    assert!(owner.lands.is_empty());
+}
+
+#[test]
 fn a_hold_answer_fails_the_land_without_merging() {
     let mut owner = owner();
     owner.reply = Some("hold".into());

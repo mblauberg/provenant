@@ -715,6 +715,10 @@ fn ask_chair<R: AttemptOwner, J: GraphJournal>(
     let progress = &mut checkpoint.nodes[index];
     progress.state = NodeState::Failed;
     progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+    // A failed land keeps no retry deadline from an earlier pending observation.
+    if let Some(land) = progress.land.as_mut() {
+        land.wake_at = None;
+    }
     let ask = &mut checkpoint.asks[position];
     ask.answer = Some(answer);
     ask.resolved = true;

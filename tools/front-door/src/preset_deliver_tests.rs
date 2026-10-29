@@ -711,3 +711,39 @@ fn repository_layers_never_lower_the_land_tier_or_add_a_land() {
     .unwrap();
     assert_eq!(tier(&[]).as_deref(), Some("crucial"));
 }
+
+#[test]
+fn repository_roles_never_lower_a_custom_land_role() {
+    let temp = tempfile::tempdir().unwrap();
+    let (user, repo) = (temp.path().join("user"), temp.path().join("repo"));
+    std::fs::create_dir_all(user.join("presets")).unwrap();
+    std::fs::create_dir_all(repo.join("presets")).unwrap();
+    std::fs::write(
+        user.join("presets/ship-flow.toml"),
+        "stages = [\n  { id = \"write\", tier = \"senior\", access = \"worktree_write\", worktree = \"/repo/lane\", delivery = \"pr\", prompt = \"${prompt}\" },\n  { id = \"ship\", role = \"ship\", depends_on = [\"write\"] },\n]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        user.join("roles.toml"),
+        "[roles.ship]\nkind = \"land\"\nland = { node = \"write\", tier = \"crucial\" }\n",
+    )
+    .unwrap();
+    let tier = || {
+        let layers = Layers::load(&user.join("presets"), &repo.join("presets")).unwrap();
+        let expanded = expand(&layers, "ship-flow", "approved brief", &[]).unwrap();
+        expanded.document["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == "ship")
+            .map(|node| node["land"]["tier"].as_str().unwrap().to_owned())
+    };
+    assert_eq!(tier().as_deref(), Some("crucial"));
+    // A repository role override, with no repository preset, cannot lower it.
+    std::fs::write(
+        repo.join("roles.toml"),
+        "[roles.ship]\nland = { node = \"write\", tier = \"routine\" }\n",
+    )
+    .unwrap();
+    assert_eq!(tier().as_deref(), Some("crucial"));
+}
