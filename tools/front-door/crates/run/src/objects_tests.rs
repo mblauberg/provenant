@@ -14,6 +14,44 @@ use std::{
 };
 type TestResult<T = ()> = std::result::Result<T, Box<dyn Error>>;
 
+#[test]
+fn foreign_alternates_are_refused_without_importing_foreign_objects() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let foreign = fixture.root.join("foreign-objects");
+    fs::rename(&fixture.source, &foreign)?;
+    fs::create_dir_all(fixture.source.join("info"))?;
+    fs::write(
+        fixture.source.join("info/alternates"),
+        format!("{}\n", foreign.display()),
+    )?;
+    assert!(matches!(
+        fixture.import(),
+        Err(crate::RunError::Validation(
+            "lane object alternates are untrusted"
+        ))
+    ));
+    fixture.assert_not_published();
+    Ok(())
+}
+
+#[test]
+fn symlinked_pack_directory_is_refused_without_importing_objects() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let pack = fixture.pack()?;
+    let packs = pack.parent().ok_or("pack parent")?;
+    let foreign = fixture.root.join("foreign-packs");
+    fs::rename(packs, &foreign)?;
+    symlink(&foreign, packs)?;
+    assert!(matches!(
+        fixture.import(),
+        Err(crate::RunError::Validation(
+            "lane object store contains a symlink or special file"
+        ))
+    ));
+    fixture.assert_not_published();
+    Ok(())
+}
+
 struct Fixture {
     _temp: tempfile::TempDir,
     root: PathBuf,
@@ -773,6 +811,7 @@ fn cancellation_kills_a_blocking_import_within_two_seconds() -> TestResult {
                         Some(&Directory::open_anchor(&fixture.source)?),
                         fixture.head,
                         Some(&cancel),
+                        None,
                     )
                 },
             )
@@ -959,7 +998,6 @@ fn wrong_content_duplicate_and_corrupt_non_first_pack_entry_never_enter_shared_s
 /// sender's exclusion of unused entries, this must fail in object quarantine.
 #[test]
 fn malformed_received_pack_is_quarantined_and_never_publishes_objects_or_refs() -> TestResult {
-    use std::{io::Write, process::Stdio};
     let fixture = Fixture::new("sha1")?;
     let entries = [
         (b"first entry".as_slice(), [0; 20]),
@@ -972,39 +1010,7 @@ fn malformed_received_pack_is_quarantined_and_never_publishes_objects_or_refs() 
     pack[end - 21] ^= 0xff;
     let digest = sha1_bytes(&pack[..end - 20])?;
     pack[end - 20..].copy_from_slice(&digest);
-    let command = format!(
-        "{} {} refs/provenant/import/attack\0report-status\n",
-        "0".repeat(40),
-        fixture.head
-    );
-    let mut request = format!("{:04x}", command.len() + 4).into_bytes();
-    request.extend_from_slice(command.as_bytes());
-    request.extend_from_slice(b"0000");
-    request.extend_from_slice(&pack);
-    let mut child = Command::new(&fixture.git)
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "receive.fsckObjects=true",
-            "receive-pack",
-            "--stateless-rpc",
-        ])
-        .arg(fixture.project.join(".git"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .ok_or("receive input")?
-        .write_all(&request)?;
-    let output = child.wait_with_output()?;
+    let output = receive_pack(&fixture, &pack, fixture.head, 1024 * 1024)?;
     let report = String::from_utf8_lossy(&output.stdout);
     assert!(
         report.contains("unpack ") && !report.contains("unpack ok"),
@@ -1017,5 +1023,259 @@ fn malformed_received_pack_is_quarantined_and_never_publishes_objects_or_refs() 
             .join(".git/refs/provenant/import/attack")
             .exists()
     );
+    Ok(())
+}
+
+fn receive_pack(fixture: &Fixture, pack: &[u8], tip: GitOid, cap: u64) -> TestResult<Output> {
+    use std::{io::Write, process::Stdio};
+    let command = format!(
+        "{} {} refs/provenant/import/attack\0report-status\n",
+        "0".repeat(40),
+        tip
+    );
+    let mut request = format!("{:04x}", command.len() + 4).into_bytes();
+    request.extend_from_slice(command.as_bytes());
+    request.extend_from_slice(b"0000");
+    request.extend_from_slice(pack);
+    let mut child = Command::new(&fixture.git)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", "")
+        .args(super::receiver_args(cap))
+        .arg("--stateless-rpc")
+        .arg(fixture.project.join(".git"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or("receive input")?
+        .write_all(&request)?;
+    Ok(child.wait_with_output()?)
+}
+
+#[test]
+fn duplicate_entry_pack_below_unpack_threshold_is_refused() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let bytes = b"duplicate blob\n";
+    let mut object = format!("blob {}\0", bytes.len()).into_bytes();
+    object.extend_from_slice(bytes);
+    let name = sha1_bytes(&object)?;
+    let tip = GitOid::parse(&name.iter().map(|b| format!("{b:02x}")).collect::<String>())?;
+    let (pack, _) = pack_pair(&[(bytes, name), (bytes, name)])?;
+    let output = receive_pack(&fixture, &pack, tip, 1024 * 1024)?;
+    let report = String::from_utf8_lossy(&output.stdout);
+    let reason = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        report.contains("unpack ") && !report.contains("unpack ok"),
+        "{report}: {reason}"
+    );
+    assert!(
+        reason.contains("duplicate") || report.contains("index-pack abnormal exit"),
+        "{report}: {reason}"
+    );
+    fixture.assert_not_published();
+    Ok(())
+}
+
+#[test]
+fn oversized_received_pack_is_refused_with_a_clear_reason() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let bytes = vec![b'x'; 4096];
+    let (pack, _) = pack_pair(&[(&bytes, [0; 20])])?;
+    let output = receive_pack(&fixture, &pack, fixture.head, 1024)?;
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        report.contains("pack exceeds maximum allowed size"),
+        "{report}"
+    );
+    fixture.assert_not_published();
+    Ok(())
+}
+
+#[test]
+fn restoring_private_index_clears_flags_that_hide_uncommitted_files() -> TestResult {
+    let mut fixture = Fixture::new("sha1")?;
+    let (attempt, scratch) = fixture.overlay()?;
+    fixture.git_overlay(
+        &scratch,
+        &[
+            "update-index",
+            "--skip-worktree",
+            "--assume-unchanged",
+            "file",
+        ],
+    )?;
+    let source = super::bound_source(&attempt)?.ok_or("private source")?;
+    fixture.import()?;
+    super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        "refs/heads/lane",
+        fixture.base,
+        fixture.head,
+    )?;
+    super::restore_index(&source, fixture.worktree.repo())?;
+    fs::write(fixture.lane.join("file"), "hidden uncommitted edit\n")?;
+    let flags = git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.lane,
+        None,
+        &["ls-files", "-v"],
+    )?;
+    assert_eq!(flags.stdout, b"H file\n");
+    let status = git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.lane,
+        None,
+        &["status", "--porcelain"],
+    )?;
+    assert_eq!(status.stdout, b" M file\n");
+    Ok(())
+}
+
+#[test]
+fn publication_refuses_orphan_history() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let tree = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["rev-parse", &format!("{}^{{tree}}", fixture.base)],
+    )?)?;
+    let orphan = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["commit-tree", &tree.to_string(), "-m", "orphan"],
+    )?)?;
+    assert!(matches!(
+        super::publish_branch(
+            &fixture.git,
+            fixture.worktree.repo(),
+            "refs/heads/lane",
+            fixture.base,
+            orphan
+        ),
+        Err(crate::RunError::Validation(
+            "lane tip must descend from its launch base or origin default branch"
+        ))
+    ));
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        fixture.base
+    );
+    Ok(())
+}
+
+#[test]
+fn publication_accepts_a_rebase_onto_the_current_origin_default() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let tree = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["rev-parse", &format!("{}^{{tree}}", fixture.base)],
+    )?)?;
+    let commit = |parent: GitOid, message: &str| -> TestResult<GitOid> {
+        oid(git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.project,
+            None,
+            &[
+                "commit-tree",
+                &tree.to_string(),
+                "-p",
+                &parent.to_string(),
+                "-m",
+                message,
+            ],
+        )?)
+    };
+    let lane_base = commit(fixture.base, "lane start")?;
+    let origin = commit(fixture.base, "origin update")?;
+    let rebased = commit(origin, "rebased lane")?;
+    for (reference, value) in [
+        ("refs/heads/lane", lane_base),
+        ("refs/remotes/origin/main", origin),
+    ] {
+        git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.project,
+            None,
+            &["update-ref", reference, &value.to_string()],
+        )?;
+    }
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    )?;
+    super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        "refs/heads/lane",
+        lane_base,
+        rebased,
+    )?;
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        rebased
+    );
+    Ok(())
+}
+
+#[test]
+fn import_sweeps_only_aged_quarantine_and_staging_directories() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let common = fixture.project.join(".git");
+    let old_quarantine = common.join("objects/incoming-stale");
+    let old_stage = common.join("tmp-provenant-import-stale");
+    let legacy_stage = common.join(".provenant-staging.old");
+    let fresh_quarantine = common.join("objects/incoming-active");
+    let fresh_stage = common.join("tmp-provenant-import-active");
+    let unrelated = common.join("tmp-unrelated");
+    let old = std::time::SystemTime::now() - Duration::from_secs(48 * 60 * 60);
+    for path in [
+        &old_quarantine,
+        &old_stage,
+        &legacy_stage,
+        &fresh_quarantine,
+        &fresh_stage,
+        &unrelated,
+    ] {
+        fs::create_dir(path)?;
+    }
+    for path in [&old_quarantine, &old_stage, &legacy_stage, &unrelated] {
+        fs::File::open(path)?.set_times(fs::FileTimes::new().set_modified(old))?;
+    }
+    fixture.import()?;
+    for path in [&old_quarantine, &old_stage, &legacy_stage] {
+        assert!(!path.exists(), "{}", path.display());
+    }
+    for path in [&fresh_quarantine, &fresh_stage, &unrelated] {
+        assert!(path.exists(), "{}", path.display());
+    }
     Ok(())
 }

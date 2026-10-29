@@ -7135,6 +7135,22 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
     );
     // A unit-test executable interprets "internal settle" as test filters.
     // Exercise the control's process boundary without starting hidden tests.
+    let run_directory = store.run_dir(run.run_id, false)?;
+    for lock_name in ["settlement-spawn.lock", "settlement-worker.lock"] {
+        let held =
+            run_directory.try_lock(OsStr::new(lock_name), provenant_os::fs::LockMode::Exclusive)?;
+        store.queue_reconcile_with(run.run_id, &call, |_, _| {
+            panic!("a concurrent settlement claim must exclude another spawn");
+        })?;
+        drop(held);
+    }
+    let driver =
+        crate::settlement::Guard::claim(&attempt, RunStore::scope(&store.record(id, &call)?))?
+            .ok_or("settlement owner")?;
+    store.queue_reconcile_with(run.run_id, &call, |_, _| {
+        panic!("a live settlement owner needs no detached worker");
+    })?;
+    drop(driver);
     let mut launched = false;
     let queued = store.queue_reconcile_with(run.run_id, &call, |argv, cwd| {
         assert_eq!(argv.len(), 4);
@@ -7147,6 +7163,9 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
         Ok(())
     })?;
     assert!(launched);
+    store.queue_reconcile_with(run.run_id, &call, |_, _| {
+        panic!("an already queued settlement must not spawn another worker");
+    })?;
     assert!(matches!(queued.as_slice(), [(found, Reconciled::Settling { .. })] if *found == id));
     assert!(started.elapsed() < Duration::from_secs(1));
     assert!(
@@ -7154,6 +7173,35 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
             .read_stable(OsStr::new("cancel.json"), RECORD_LIMIT)?
             .len()
             > 10
+    );
+    Ok(())
+}
+
+#[test]
+fn reconcile_does_not_spawn_for_queued_or_terminal_attempts() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    store.queue_reconcile_with(run.run_id, &call, |_, _| {
+        panic!("a queued attempt has no settlement work");
+    })?;
+    store.withdraw(
+        run.attempts[0].attempt_id,
+        AttemptState::Queued,
+        Outcome::Cancelled,
+        "cancelled before launch",
+        clock.wall_now()?,
+        &call,
+    )?;
+    assert!(
+        store
+            .queue_reconcile_with(run.run_id, &call, |_, _| {
+                panic!("a terminal run has no settlement work");
+            })?
+            .is_empty()
     );
     Ok(())
 }

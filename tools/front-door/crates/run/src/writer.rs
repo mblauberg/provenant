@@ -130,6 +130,63 @@ pub struct WriterLaunch {
     pub(crate) base: GitOid,
     pub(crate) custody: Option<(Directory, WriterBinding)>,
 }
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GitPins {
+    schema_version: u64,
+    scope: provenant_supervisor::custody::Scope,
+    base: GitOid,
+}
+
+/// Remove only this attempt's host-owned retention refs. This runs before the
+/// terminal record becomes visible, including cancellation and import refusal.
+pub(crate) fn cleanup_git_pins(
+    state: &Path,
+    writer: &WriterRequest,
+    attempt: &Directory,
+    scope: provenant_supervisor::custody::Scope,
+    head: Option<GitOid>,
+) -> Result<()> {
+    let pins = crate::artifacts::read_sealed(attempt, "writer-git-pins.json", crate::RECORD_LIMIT)?;
+    if let Some(raw) = &pins {
+        let pins: GitPins = crate::db::decode(raw)?;
+        if pins.schema_version != 1 || pins.scope != scope {
+            return Err(RunError::Validation("writer Git pins scope mismatch"));
+        }
+    } else if head.is_none() {
+        // A queued withdrawal has never opened the proposed writer repository.
+        return Ok(());
+    }
+    let utility = runtime(state)?;
+    let executor =
+        SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
+    let repo = utility
+        .open_repo(&executor, &writer.project, budget()?, &CancelToken::new())
+        .map_err(error(
+            "open writer repository for Git ref cleanup",
+            Some(&writer.project),
+        ))?;
+    let mut refs = vec![format!("refs/provenant/lane-base/{}", scope.attempt)];
+    if let Some(head) = head {
+        refs.push(format!("refs/provenant/import/{head}"));
+    }
+    for reference in refs {
+        crate::objects::command(
+            utility.git_program_path(),
+            repo.common_git_dir(),
+            repo.root_path(),
+            &[
+                "update-ref".into(),
+                "--no-deref".into(),
+                "-d".into(),
+                reference.into(),
+            ],
+            None,
+        )?;
+    }
+    Ok(())
+}
 /// Reopen the persisted scope and match its active Provenant registration.
 /// The subsequent supervisor reservation is the authoritative exclusion check.
 pub fn prepare_writer(
@@ -1161,7 +1218,41 @@ impl WriterLaunch {
         }
         snapshot
             .persist(&archive)
-            .map_err(error("persist writer instruction snapshot", None))
+            .map_err(error("persist writer instruction snapshot", None))?;
+        crate::artifacts::seal(
+            attempt,
+            "writer-git-pins.json",
+            &crate::db::bytes(&GitPins {
+                schema_version: 1,
+                scope,
+                base: self.base,
+            })?,
+            crate::RECORD_LIMIT,
+        )?;
+        let reference = format!("refs/provenant/lane-base/{}", scope.attempt);
+        match crate::objects::resolve_ref(
+            utility.git_program_path(),
+            self.worktree.repo(),
+            &reference,
+        ) {
+            Ok(current) if current == self.base => return Ok(()),
+            Ok(_) => return Err(RunError::Validation("writer Git base pin changed")),
+            Err(_) => {}
+        }
+        crate::objects::command(
+            utility.git_program_path(),
+            self.worktree.repo().common_git_dir(),
+            self.worktree.repo().root_path(),
+            &[
+                "update-ref".into(),
+                "--no-deref".into(),
+                reference.into(),
+                self.base.to_string().into(),
+                "0".repeat(self.base.to_string().len()).into(),
+            ],
+            None,
+        )?;
+        Ok(())
     }
     pub(crate) fn terminal(
         &self,
@@ -1222,12 +1313,14 @@ impl WriterLaunch {
         }
         let import_cancel = settlement.cancellation();
         if settlement.phase() == crate::settlement::Phase::Import {
+            settlement.begin_import()?;
             crate::objects::settle_cancel(
                 &git_executable,
                 self.worktree.repo(),
                 source.as_ref().map(|source| &source.objects),
                 verified_tip,
                 Some(&import_cancel),
+                Some(custody),
             )?;
             settlement.advance(crate::settlement::Phase::Publish)?;
         }

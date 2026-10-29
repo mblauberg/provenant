@@ -1123,6 +1123,7 @@ impl HostDeliveryContext {
             &common,
             &writer.project,
             head,
+            self.bound.as_ref().map(|bound| bound.base_head),
             self.cancellation.as_ref(),
         )
         .map_err(|_| RunError::Delivery(stage))

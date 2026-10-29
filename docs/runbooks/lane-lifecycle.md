@@ -168,13 +168,23 @@ recovery path.
 
 `provenant reconcile --id RUN` queues settlement in the background and returns
 without waiting for Git import. The supervisor resumes its durable phase after
-a crash, with at most three driver attempts. `provenant cancel ATTEMPT` records
+a crash, with at most three attempts that reach import and backoff between
+claims. Concurrent reconcile requests share one settlement worker;
+queued or terminal-only runs do not spawn one. `provenant cancel ATTEMPT` records
 a durable request that can stop an active import. Provider exit releases host
 build capacity and live custody before settlement completes; a settling
 reservation still prevents another writer from editing that worktree. A terminal
 import refusal releases the reservation and retains private Git for host
-recovery. See [publication order](../specs/run.md#publication-order) and
+recovery. A lane wait returns a terminal outcome only after custody is released,
+so host pickup does not need a second reconcile after a successful wait.
+See [publication order](../specs/run.md#publication-order) and
 [lane Git and import](../specs/run.md#lane-git-and-import).
+
+Writer rebases use the lane's private Git directory and pass through host object
+import, ancestry checks and instruction quarantine at settlement. If Git cannot
+write rebase state, stop with `needs_host_rebase`; do not create a clone or
+second checkout to bypass the permission failure. A host-authorised merge of
+`origin/main` is an alternative when rebasing is blocked.
 
 On macOS, existing hard-linked files in the writable worktree stay readable
 but are write-denied, including inside ignored directories. Excessive denials

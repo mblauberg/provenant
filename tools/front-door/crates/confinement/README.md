@@ -28,8 +28,12 @@ merge and rebase state. Its private object store reads the shared store through
 `objects/info/alternates`. Stash, rebase, merge and private garbage collection
 need no individual file grants. The linked admin directory and shared Git
 directory stay read-only throughout their subtrees, including refs, config,
-hooks and info. The host imports through Git receive quarantine before publishing
-the real branch. Existing cache and lane-parent directories
+hooks and info. The host refuses symlinked object stores and foreign alternates,
+then imports through Git receive quarantine before publishing the real branch.
+The published tip must descend from its launch base or the current origin
+default branch. Restored index flags cannot hide uncommitted edits. The
+[lane Git spec](../../../../docs/specs/run.md#lane-git-and-import) owns import
+limits and terminal ref cleanup. Existing cache and lane-parent directories
 must belong to the effective user with mode 0700; setup refuses mismatches
 without changing their metadata. Compilation rechecks the held cache.
 Shared config, tracking refs and packed refs stay host-owned. Hard links

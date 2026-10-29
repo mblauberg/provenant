@@ -501,9 +501,10 @@ never share a worktree.
 5. A run closes only when every task and registered child is terminal.
 
 `settlement-progress.json` binds the attempt scope, pinned branch base and head,
-current phase, native process owner and one attempt counter. A live owner
+current phase, native process owner, retry deadline and one import attempt counter. A live owner
 excludes a second driver. A dead owner can be replaced after checking its boot,
-PID and start identity. The replacement continues the recorded phase; it does
+PID and start identity. An unknown process observation protects its owner for
+at most ten minutes from the claim. The replacement continues the recorded phase; it does
 not restart the provider. Journal locks cover only short reads and durable
 updates. No settlement lock or writer lock spans an external command.
 
@@ -511,11 +512,14 @@ updates. No settlement lock or writer lock spans an external command.
 | --- | --- |
 | `import` | Import the pinned head through Git's quarantined receive path. Repeating the same staging ref is harmless. |
 | `publish` | Compare-and-swap the real branch from its pinned base; the same head already published counts as success. |
-| `record` | Seal result and exit evidence, then commit the terminal attempt, summary, operation state and event. Recover an interrupted terminal commit from its pending evidence. |
+| `record` | Seal result and exit evidence, remove the attempt's base and import refs, then commit the terminal attempt, summary, operation state and event. Recover an interrupted terminal commit from its pending evidence. |
 | `release` | Verify the committed outcome and release evidence, then remove the settling reservation. Repeated release accepts the same committed attempt. |
 | `complete` | Settlement is finished; ordinary terminal cleanup may reclaim disposable scratch. Import refusals retain private Git for host recovery. |
 
-Settlement permits three driver attempts in total. Exhaustion records a terminal
+Settlement permits three attempts that reach object import. Contention and
+pre-import checks do not consume this counter; resuming a later phase does not
+consume another import attempt. Import claims back off for 5 seconds, 30 seconds
+and 2 minutes instead of retrying immediately. Exhaustion records a terminal
 failure naming the limit and retained private Git. Rejected objects and failed
 publication never certify success. A pending terminal commit remains `settling`
 with `publication_pending: true` and keeps the worktree reservation, while its
@@ -526,7 +530,10 @@ for a writer lock. The settlement driver checks it between phases and polls it
 every 50 ms during import, instruction checks and optional automatic delivery,
 stopping the owned Git child before recording `cancelled`.
 Public `reconcile` starts the same binary's detached `internal settle` worker
-and promptly reports pending settlement. Neither CLI waits for object transfer
+only when a non-terminal attempt needs settlement. A run-scoped queued claim
+and worker exclusion deduplicate concurrent requests; a queued claim expires
+after ten minutes if no worker starts. Reconcile promptly reports pending
+settlement. Neither CLI waits for object transfer
 or an existing settlement owner; the supervisor owns this work after return.
 - Why: each phase records enough evidence to resume without holding a writer
   lock through Git, and cancellation must remain available during import.
@@ -604,7 +611,9 @@ copies the initial linked index and ref snapshot before launch. Plain
 the lane checkout, and `GIT_OBJECT_DIRECTORY` selects `scratch/git-objects`.
 That private object store reads the shared store through
 `objects/info/alternates`. Stash, rebase, merge and garbage collection operate
-on private Git state without individual metadata grants.
+on private Git state without individual metadata grants. Launch pins the base
+as `refs/provenant/lane-base/<attempt>` until terminal publication, so shared
+garbage collection cannot discard a base that a private rebase no longer names.
 
 The original worktree gitfile stays unchanged so the host retains its verified
 repository identity. Seatbelt denies writes throughout both the shared Git
@@ -619,17 +628,22 @@ Git commands or route their objects.
 The host seals the selected attempt candidate before launch. After provider
 exit and quiescence, it reads the selected private branch as raw metadata and
 pins its OID in the settlement journal. It never runs host commands with the
-lane's mutable Git config. A clean host-owned bare sender view selects the
-bound private objects and shared store as alternates and preserves only the
+lane's mutable Git config. Before import, a recursive census refuses symlinks
+anywhere in `git-objects`. A foreign `info/alternates` entry is refused; the
+host's original shared alternate is removed along with HTTP alternates,
+commit graphs and multi-pack indices. A clean host-owned bare sender view
+then selects only the bound private objects and shared store as alternates,
+with `GIT_ALTERNATE_OBJECT_DIRECTORIES` explicitly empty. It preserves only the
 host's trusted shallow boundary. Lane metadata cannot declare missing parents
-to be a valid shallow boundary.
+to be a valid shallow boundary. Custody must still be absent immediately before
+Git re-resolves the private object path.
 
 The host pushes the pinned head into the shared repository using its pinned
 Git executable for both processes. In shell notation the receive operation is:
 
 ```sh
 git push --no-verify \
-  --receive-pack='git -c core.hooksPath=/dev/null -c receive.fsckObjects=true -c transfer.fsckObjects=true receive-pack' \
+  --receive-pack='git -c core.hooksPath=/dev/null -c receive.fsckObjects=true -c transfer.fsckObjects=true -c receive.unpackLimit=1 -c transfer.unpackLimit=1 -c receive.maxInputSize=CAP receive-pack' \
   SHARED_GIT_DIR HEAD:refs/provenant/import/OID
 ```
 
@@ -637,6 +651,12 @@ The production sender selects the pinned OID rather than trusting lane HEAD.
 The receive path is preferred to fetch because `receive-pack` quarantines the
 incoming objects before promotion. Git checks new object contents and pack
 integrity with fsck enabled, then checks connectivity against existing refs.
+Both unpack limits force `index-pack` for a non-empty transfer, including a
+small duplicate-entry pack. The input cap is four times the sanitised private
+object bytes plus 16 MiB. The receive timeout is 120 seconds plus one second
+per MiB of that cap, rounded up. Oversized input receives an explicit size
+refusal. Before import, a sweep removes abandoned quarantine and Provenant
+staging directories only when their contents are all older than 24 hours.
 A refusal keeps incoming corrupt or disconnected objects out of the shared
 store. Import work follows the new transfer and its connectivity frontier;
 it does not hash or enumerate unrelated shared history. Shared objects are
@@ -653,10 +673,18 @@ Git owns hashing, parsing, pack checks and quarantine. There is no custom
 object verifier, full-store generation scan, verification cache or separate
 verification deadline/retry mechanism. SHA-1 and SHA-256 repositories use the
 same Git receive boundary. The host restores the private index for instruction
-quarantine only after import succeeds, and publishes the real branch with a
+quarantine only after import succeeds, clearing skip-worktree and
+assume-unchanged flags so an uncommitted edit remains visible. The host
+publishes the real branch with a
 compare-and-swap against the pinned launch base. Replaying the same head is
-idempotent; a competing shared ref change refuses publication. Host integration
-and delivery consume the imported graph without rescanning the shared store.
+idempotent; a competing shared ref change refuses publication. A published tip
+must descend from the lane base or the current `origin` default branch, which
+allows rebases while refusing unrelated and orphan histories. Success,
+cancellation and failure remove `refs/provenant/import/<head>` and the lane's
+base pin. Host integration and delivery check connectivity with
+`rev-list --objects --missing=error` excluding the lane base, then read those
+delta objects through `cat-file --batch` to refuse corrupt reachable payloads.
+They do not rescan unrelated shared history.
 
 [Drain writers before upgrading](../runbooks/install.md#bootstrap-and-upgrade).
 An older interrupted settlement with its bound private object directory can

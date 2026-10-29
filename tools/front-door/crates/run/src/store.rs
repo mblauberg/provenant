@@ -718,6 +718,25 @@ impl RunStore {
             return Err(RunError::Validation("terminal state missing"));
         };
         let id = old.attempt_id;
+        let request = self.request(old.run_id, call)?;
+        if let Some(writer) = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == old.task_id)
+            .and_then(|task| task.writer.as_ref())
+        {
+            let attempt = self.attempt_dir(old.run_id, id, false)?;
+            let head = next
+                .head
+                .or(crate::settlement::pinned_head(&attempt, Self::scope(old))?);
+            crate::writer::cleanup_git_pins(
+                self.context.state_root.as_path(),
+                writer,
+                &attempt,
+                Self::scope(old),
+                head,
+            )?;
+        }
         self.write(call, |tx| {
             let changed = tx.execute("UPDATE attempts SET revision=?1,terminal=1,tmp_retained=1,record=?2 WHERE id=?3 AND revision=?4 AND terminal=0", params![sql_int(next.revision)?, bytes(next)?, id.to_string(), sql_int(old.revision)?])?;
             if changed != 1 { return Err(RunError::Conflict); }

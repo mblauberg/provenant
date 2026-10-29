@@ -15,6 +15,56 @@ pub(super) struct PrepareFixture {
 }
 
 #[test]
+fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for outcome in [Outcome::Succeeded, Outcome::Cancelled, Outcome::Failed] {
+        let fixture = PrepareFixture::new()?;
+        let execution = registered_landed_writer_fixture(&fixture)?;
+        let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
+        let call = tests::call(&clock, &cancel);
+        let store = RunStore::open(&execution, &call)?;
+        let mut input = tests::input();
+        input.request.tasks[0].writer = Some(fixture.writer.clone());
+        store.create(&input, &call)?;
+        let id = input.attempts[0].attempt_id;
+        let exit = tests::exit();
+        let attempt = store.attempt_dir(input.run_id, id, false)?;
+        let launch = crate::prepare_writer(
+            &fixture.writer,
+            execution.state_root.as_path(),
+            execution.project_id,
+        )?;
+        launch.snapshot(execution.state_root.as_path(), &attempt, exit.scope)?;
+        let pin = format!("refs/provenant/lane-base/{id}");
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        assert_eq!(
+            crate::objects::resolve_ref(&git, launch.worktree.repo(), &pin)?,
+            launch.base
+        );
+        // A cancelled import may have pinned its head without publishing the
+        // writer-terminal record. Terminal cleanup must consult the journal.
+        let mut driver =
+            crate::settlement::Guard::claim(&attempt, exit.scope)?.ok_or("settlement owner")?;
+        driver.set_head(launch.base)?;
+        drop(driver);
+        let stage = format!("refs/provenant/import/{}", launch.base);
+        fixture.git(&["update-ref", &stage, &launch.base.to_string()])?;
+        tests::seal_observation(&store, &input, &exit)?;
+        let mut publication = tests::publication();
+        publication.outcome = outcome;
+        let terminal = store.publish_terminal(id, 1, &publication, &exit, &call)?;
+        assert!(matches!(terminal.state, AttemptState::Terminal { .. }));
+        for reference in [&pin, &stage] {
+            assert!(
+                crate::objects::resolve_ref(&git, launch.worktree.repo(), reference).is_err(),
+                "retained terminal ref {reference} after {outcome:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn terminal_imports_private_objects_before_quarantine_reads_the_lane()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     for corrupt in [false, true] {
@@ -139,6 +189,16 @@ fn terminal_archives_a_private_rewind_and_requires_review()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
     let previous = fixture.prepare()?.head(&fixture.writer)?;
+    fixture.git(&[
+        "update-ref",
+        "refs/remotes/origin/main",
+        &previous.to_string(),
+    ])?;
+    fixture.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+    ])?;
     fixture.commit(&fixture.writer.worktree, "new writer base")?;
     let review = fixture.terminal(|| {
         let attempt = fixture.root.join("attempt");
@@ -181,6 +241,49 @@ fn terminal_archives_a_private_rewind_and_requires_review()
     );
     assert!(fixture.root.join("attempt/writer-terminal.json").exists());
     assert_eq!(fixture.prepare()?.head(&fixture.writer)?, previous);
+    Ok(())
+}
+
+#[test]
+fn delivery_refuses_corrupt_reachable_content_before_log_or_integration()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let host = fixture.prepare()?;
+    std::fs::write(fixture.writer.worktree.join("blob"), "original content\n")?;
+    fixture.lane_git(&["add", "blob"])?;
+    fixture.commit(&fixture.writer.worktree, "lane blob")?;
+    let head = host.head(&fixture.writer)?;
+    let blob = host.command(
+        &fixture.writer.worktree,
+        "git",
+        &["rev-parse", "HEAD:blob"],
+        WriterDeliveryStage::Head,
+    )?;
+    let object = fixture
+        .writer
+        .project
+        .join(".git/objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&object, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::write(object, "corrupt object content")?;
+    assert!(matches!(
+        host.head(&fixture.writer),
+        Err(RunError::Delivery(WriterDeliveryStage::Head))
+    ));
+    assert!(matches!(
+        host.commit_body(&fixture.writer, head, "delivery"),
+        Err(RunError::Delivery(WriterDeliveryStage::Head))
+    ));
+    fixture.git(&["branch", "integration"])?;
+    let request =
+        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
+            .ok_or("destination")?;
+    assert!(matches!(
+        host.integrate(&fixture.writer, &request, head),
+        Err(RunError::Delivery(WriterDeliveryStage::Integrate))
+    ));
     Ok(())
 }
 
@@ -1658,8 +1761,9 @@ impl PrepareFixture {
             // Drop the process owner at the crash boundary before the phase
             // checkpoint. A fresh driver must safely replay publication.
             drop(settlement);
-            settlement =
-                crate::settlement::Guard::claim(&attempt, scope)?.ok_or("resumed owner")?;
+            let after_backoff = u64::try_from(clock.wall_now()?.as_micros() / 1000)? + 120_000;
+            settlement = crate::settlement::Guard::claim_at(&attempt, scope, after_backoff)?
+                .ok_or("resumed owner")?;
         }
         let review = launch.terminal(
             &state,

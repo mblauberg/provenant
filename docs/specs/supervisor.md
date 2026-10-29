@@ -133,11 +133,14 @@ once quiescence is proven, the live custody and writer locks are released
 before object import. The reservation remains as a settling fence, so another
 writer cannot edit the checkout during settlement. Run journals import,
 publication, terminal recording and release with one native process owner and
-a three-attempt counter. Short locks protect only journal updates; Git runs
+a counter capped at three attempts that reach import. Import claims use
+persisted backoff; an unknown process observation expires after ten minutes.
+Short locks protect only journal updates; Git runs
 without them. A dead owner resumes at the last durable phase, including after
 branch publication. Public cancel records its request without waiting for a
 writer lock; reconcile queues a detached driver rather than doing import in
-the caller. See [publication order](run.md#publication-order). A missing or
+the caller. Lane waits continue reporting settlement until custody is released.
+See [publication order](run.md#publication-order). A missing or
 malformed reservation refuses
 acquisition. `SettlementCommit`, needed for scratch deletion and fence
 clearing, is issued only after the attempt inode, custody lock and both

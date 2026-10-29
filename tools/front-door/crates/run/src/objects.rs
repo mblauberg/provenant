@@ -1,10 +1,10 @@
 //! Import lane objects through Git's quarantined receive path.
 use crate::{Result, RunError};
 use provenant_confinement::repo::VerifiedRepo;
-use provenant_core::{CancelToken, GitOid};
+use provenant_core::{CancelToken, Clock, GitOid};
 use provenant_os::{
     exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
-    fs::{Directory, PublishMode},
+    fs::{Directory, FileKind, PublishMode},
 };
 use std::{
     ffi::{OsStr, OsString},
@@ -19,7 +19,7 @@ fn args(values: &[&str]) -> Vec<OsString> {
     values.iter().map(Into::into).collect()
 }
 
-fn command(
+pub(crate) fn command(
     git: &Path,
     git_dir: &Path,
     cwd: &Path,
@@ -36,6 +36,35 @@ fn execute(
     arguments: &[OsString],
     cancel: Option<&CancelToken>,
 ) -> Result<Vec<u8>> {
+    execute_bounded(git, git_dir, cwd, arguments, cancel, Execution::default())
+}
+
+struct Execution<'a> {
+    timeout: Duration,
+    discard: bool,
+    input: Option<&'a [u8]>,
+    clean_stderr: bool,
+}
+
+impl Default for Execution<'_> {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(120),
+            discard: false,
+            input: None,
+            clean_stderr: false,
+        }
+    }
+}
+
+fn execute_bounded(
+    git: &Path,
+    git_dir: &Path,
+    cwd: &Path,
+    arguments: &[OsString],
+    cancel: Option<&CancelToken>,
+    settings: Execution<'_>,
+) -> Result<Vec<u8>> {
     let env: Vec<(OsString, OsString)> = [
         ("PATH", "/usr/bin:/bin"),
         ("GIT_CONFIG_NOSYSTEM", "1"),
@@ -44,6 +73,7 @@ fn execute(
         ("GIT_NO_REPLACE_OBJECTS", "1"),
         ("GIT_GRAFT_FILE", "/dev/null"),
         ("GIT_NO_LAZY_FETCH", "1"),
+        ("GIT_ALTERNATE_OBJECT_DIRECTORIES", ""),
         ("GIT_TERMINAL_PROMPT", "0"),
         ("LC_ALL", "C"),
     ]
@@ -66,11 +96,18 @@ fn execute(
         .chain(arguments.iter().cloned())
         .collect();
     let executor = SystemExecutor::new(1).map_err(|_| invalid())?;
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(120));
+    let mut options = ExecOptions::new(&argv, cwd, settings.timeout);
     options.env = Some(&env);
     options.cancel = cancel;
     options.process_group = true;
-    options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };
+    options.stdout = if settings.discard {
+        StreamPolicy::Discard
+    } else {
+        StreamPolicy::Capture {
+            limit: 64 * 1024 * 1024,
+        }
+    };
+    options.stdin = settings.input;
     options.stderr = StreamPolicy::Tail { limit: 4096 };
     let output = executor.execute(options).map_err(|_| invalid())?;
     if output.cancelled {
@@ -78,7 +115,7 @@ fn execute(
     }
     if output.timed_out {
         return Err(RunError::ObjectImportLimit(
-            "Git receive exceeded 120 seconds",
+            "Git operation exceeded its byte-scaled time budget",
         ));
     }
     if output.termination != Termination::Exit(0)
@@ -86,7 +123,15 @@ fn execute(
         || output.stdout.truncated
         || output.stdout.read_failed
         || output.stderr.read_failed
+        || settings.clean_stderr && !output.stderr.bytes.is_empty()
     {
+        if String::from_utf8_lossy(&output.stderr.bytes)
+            .contains("pack exceeds maximum allowed size")
+        {
+            return Err(RunError::ObjectImportLimit(
+                "incoming pack exceeds the lane object byte limit",
+            ));
+        }
         return Err(RunError::OperationIo {
             operation: "import lane Git objects",
             path: Some(git_dir.into()),
@@ -132,6 +177,7 @@ pub(crate) fn require_commit(
     common: &Path,
     cwd: &Path,
     head: GitOid,
+    base: Option<GitOid>,
     cancel: Option<&CancelToken>,
 ) -> Result<()> {
     execute(
@@ -140,13 +186,39 @@ pub(crate) fn require_commit(
         cwd,
         &args(&["cat-file", "-e", &format!("{head}^{{commit}}")]),
         cancel,
+    )?;
+    let mut arguments = args(&[
+        "rev-list",
+        "--objects",
+        "--missing=error",
+        "--no-object-names",
+        &head.to_string(),
+    ]);
+    if let Some(base) = base {
+        arguments.extend(args(&["--not", &base.to_string()]));
+    }
+    let objects = execute(git, common, cwd, &arguments, cancel)?;
+    // rev-list checks links but does not inflate blob payloads. Read only this
+    // delta so corrupt reachable shared blobs still fail before delivery.
+    execute_bounded(
+        git,
+        common,
+        cwd,
+        &args(&["cat-file", "--batch", "--buffer"]),
+        cancel,
+        Execution {
+            discard: true,
+            input: Some(&objects),
+            clean_stderr: true,
+            ..Execution::default()
+        },
     )
     .map(drop)
 }
 
 #[cfg(test)]
 pub(crate) fn verify_graph(git: &Path, common: &Path, cwd: &Path, head: GitOid) -> Result<()> {
-    require_commit(git, common, cwd, head, None)
+    require_commit(git, common, cwd, head, None, None)
 }
 
 pub(crate) fn prepare_refs(
@@ -277,6 +349,26 @@ pub(crate) fn publish_branch(
     if current != base && current != head {
         return Err(invalid());
     }
+    let descends = |ancestor: GitOid| {
+        execute(
+            git,
+            repo.common_git_dir(),
+            repo.root_path(),
+            &args(&[
+                "merge-base",
+                "--is-ancestor",
+                &ancestor.to_string(),
+                &head.to_string(),
+            ]),
+            None,
+        )
+        .is_ok()
+    };
+    if !descends(base) && !resolve_ref(git, repo, "refs/remotes/origin/HEAD").is_ok_and(descends) {
+        return Err(RunError::Validation(
+            "lane tip must descend from its launch base or origin default branch",
+        ));
+    }
     // receive-pack has checked the graph. Git's CAS protects concurrent host
     // updates, including when a lane rebases or merges its private branch.
     command(
@@ -313,6 +405,165 @@ fn directory(parent: &Directory, name: &OsStr) -> Result<Directory> {
     Ok(parent.open_verified_directory(name)?)
 }
 
+// Validate every entry before Git can traverse it. The provider is dead, but
+// descriptor-relative opens still protect against links in persisted input.
+fn object_bytes(directory: &Directory, depth: usize) -> Result<u64> {
+    if depth > 128 {
+        return Err(RunError::Validation(
+            "lane object store nesting exceeds limit",
+        ));
+    }
+    let mut bytes = 0_u64;
+    for entry in directory.entries()? {
+        let entry = entry?;
+        let metadata = directory.metadata_at(&entry, false)?;
+        let size = match metadata.kind {
+            FileKind::Regular => metadata.size,
+            FileKind::Directory => {
+                object_bytes(&directory.open_verified_directory(&entry)?, depth + 1)?
+            }
+            _ => {
+                return Err(RunError::Validation(
+                    "lane object store contains a symlink or special file",
+                ));
+            }
+        };
+        bytes = bytes.checked_add(size).ok_or(RunError::ObjectImportLimit(
+            "lane object byte count overflow",
+        ))?;
+    }
+    Ok(bytes)
+}
+
+fn sanitise_source(source: &Directory, repo: &VerifiedRepo) -> Result<u64> {
+    object_bytes(source, 0)?;
+    if let Ok(info) = source.open_verified_directory(OsStr::new("info")) {
+        match info.read_stable(OsStr::new("alternates"), 1024 * 1024) {
+            Ok(bytes) => {
+                let shared = repo.common_git_dir().join("objects");
+                // Older launches used an unquoted path. Only the host's own
+                // alternate is accepted; a lane-supplied foreign path fails.
+                if bytes != format!("{}\n", quote_alternate(&shared)).as_bytes()
+                    && bytes != format!("{}\n", shared.display()).as_bytes()
+                    && !bytes.is_empty()
+                {
+                    return Err(RunError::Validation("lane object alternates are untrusted"));
+                }
+            }
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+        for name in [
+            "alternates",
+            "http-alternates",
+            "commit-graph",
+            "commit-graphs",
+        ] {
+            crate::artifacts::remove_entry_tree(&info, OsStr::new(name))?;
+        }
+    }
+    for name in ["commit-graph", "multi-pack-index"] {
+        crate::artifacts::remove_entry_tree(source, OsStr::new(name))?;
+    }
+    if let Ok(pack) = source.open_verified_directory(OsStr::new("pack")) {
+        for entry in pack.entries()? {
+            let entry = entry?;
+            if entry.as_encoded_bytes().starts_with(b"multi-pack-index") {
+                crate::artifacts::remove_entry_tree(&pack, &entry)?;
+            }
+        }
+    }
+    object_bytes(source, 0)
+}
+
+fn import_limits(bytes: u64) -> Result<(u64, Duration)> {
+    // Repacking can expand a delta and protocol overhead is non-zero, even
+    // for an empty private store. Keep the cap tied to persisted lane bytes.
+    let cap = bytes
+        .checked_mul(4)
+        .and_then(|n| n.checked_add(16 * 1024 * 1024))
+        .ok_or(RunError::ObjectImportLimit(
+            "lane object byte limit overflow",
+        ))?;
+    let seconds = 120_u64.saturating_add(cap.div_ceil(1024 * 1024));
+    Ok((cap, Duration::from_secs(seconds)))
+}
+
+fn receiver_args(cap: u64) -> Vec<OsString> {
+    args(&[
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "receive.fsckObjects=true",
+        "-c",
+        "transfer.fsckObjects=true",
+        "-c",
+        "receive.unpackLimit=1",
+        "-c",
+        "transfer.unpackLimit=1",
+        "-c",
+        &format!("receive.maxInputSize={cap}"),
+        "-c",
+        "gc.auto=0",
+        "-c",
+        "maintenance.auto=false",
+        "receive-pack",
+    ])
+}
+
+const STALE_IMPORT_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+fn stale_tree(directory: &Directory, cutoff: i128, depth: usize) -> Result<bool> {
+    if depth > 128 || directory.metadata()?.modified_ns >= cutoff {
+        return Ok(false);
+    }
+    for entry in directory.entries()? {
+        let entry = entry?;
+        let metadata = directory.metadata_at(&entry, false)?;
+        if metadata.modified_ns >= cutoff {
+            return Ok(false);
+        }
+        if metadata.kind == FileKind::Directory
+            && !stale_tree(
+                &directory.open_verified_directory(&entry)?,
+                cutoff,
+                depth + 1,
+            )?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn sweep_stale(repo: &VerifiedRepo) -> Result<()> {
+    let now = provenant_os::clock::SystemClock::new()
+        .wall_now()
+        .map_err(|_| RunError::HostClock)?
+        .as_micros();
+    let cutoff = i128::from(now) * 1000
+        - i128::try_from(STALE_IMPORT_AGE.as_nanos()).map_err(|_| invalid())?;
+    let objects = repo
+        .common_dir()
+        .open_verified_directory(OsStr::new("objects"))?;
+    for (parent, prefix) in [
+        (repo.common_dir(), b"tmp-provenant-import-".as_slice()),
+        (repo.common_dir(), b".provenant-staging.".as_slice()),
+        (&objects, b"incoming-".as_slice()),
+    ] {
+        for entry in parent.entries()? {
+            let entry = entry?;
+            if entry.as_encoded_bytes().starts_with(prefix)
+                && parent.metadata_at(&entry, false)?.kind == FileKind::Directory
+                && stale_tree(&parent.open_verified_directory(&entry)?, cutoff, 0)?
+            {
+                crate::artifacts::remove_entry_tree(parent, &entry)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Use a clean host-owned sender view, never mutable lane configuration.
 /// receive-pack quarantines objects until integrity and connectivity pass.
 #[cfg(test)]
@@ -322,7 +573,7 @@ pub(crate) fn settle(
     source: Option<&Directory>,
     head: GitOid,
 ) -> Result<()> {
-    settle_cancel(git, repo, source, head, None)
+    settle_cancel(git, repo, source, head, None, None)
 }
 
 pub(crate) fn settle_cancel(
@@ -331,10 +582,17 @@ pub(crate) fn settle_cancel(
     source: Option<&Directory>,
     head: GitOid,
     cancel: Option<&CancelToken>,
+    custody: Option<&provenant_supervisor::custody::Recovery>,
 ) -> Result<()> {
     let source = source.ok_or(RunError::Validation("writer has no private object directory; recover its commits on the host and start a fresh run"))?;
     repo.revalidate().map_err(|_| invalid())?;
-    let name = provenant_os::fs::temporary_name()?;
+    let bytes = sanitise_source(source, repo)?;
+    let (cap, timeout) = import_limits(bytes)?;
+    sweep_stale(repo)?;
+    let name = OsString::from(format!(
+        "tmp-provenant-import-{}",
+        provenant_os::fs::temporary_name()?.to_string_lossy()
+    ));
     repo.common_dir().mkdir(&name, 0o700)?;
     let view = repo.common_dir().open_verified_directory(&name)?;
     let path = repo.common_git_dir().join(&name);
@@ -389,10 +647,11 @@ pub(crate) fn settle_cancel(
             Err(error) if error.is_not_found() => {}
             Err(error) => return Err(error.into()),
         }
-        let receiver = format!(
-            "'{}' -c core.hooksPath=/dev/null -c receive.fsckObjects=true -c transfer.fsckObjects=true -c gc.auto=0 -c maintenance.auto=false receive-pack",
-            git.to_str().ok_or_else(invalid)?.replace('\'', "'\\''")
-        );
+        let receiver = std::iter::once(git.as_os_str().to_owned())
+            .chain(receiver_args(cap))
+            .map(|arg| format!("'{}'", arg.to_string_lossy().replace('\'', "'\\''")))
+            .collect::<Vec<_>>()
+            .join(" ");
         let stage = format!("refs/provenant/import/{head}");
         let mut push = args(&[
             "-c",
@@ -404,7 +663,26 @@ pub(crate) fn settle_cancel(
         push.push(format!("--receive-pack={receiver}").into());
         push.push(repo.common_git_dir().into());
         push.push(format!("{head}:{stage}").into());
-        execute(git, &path, repo.root_path(), &push, cancel)?;
+        // Git resolves the alternate path again. Recheck custody immediately
+        // before letting the sender access any lane-controlled path.
+        if custody.is_some_and(|custody| {
+            custody.observe() != provenant_supervisor::custody::RecoveryState::Absent
+        }) {
+            return Err(RunError::Validation(
+                "writer object import requires absent custody",
+            ));
+        }
+        execute_bounded(
+            git,
+            &path,
+            repo.root_path(),
+            &push,
+            cancel,
+            Execution {
+                timeout,
+                ..Execution::default()
+            },
+        )?;
         Ok(())
     })();
     let cleanup = crate::artifacts::remove_entry_tree(repo.common_dir(), &name);
@@ -523,5 +801,30 @@ pub(crate) fn restore_index(source: &ObjectSource, repo: &VerifiedRepo) -> Resul
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
     }
+    let git = provenant_os::git::git_executable().ok_or_else(invalid)?;
+    let paths = execute(
+        &git,
+        repo.private_git_dir(),
+        repo.root_path(),
+        &args(&["ls-files", "-z"]),
+        None,
+    )?;
+    execute_bounded(
+        &git,
+        repo.private_git_dir(),
+        repo.root_path(),
+        &args(&[
+            "update-index",
+            "--no-skip-worktree",
+            "--no-assume-unchanged",
+            "-z",
+            "--stdin",
+        ]),
+        None,
+        Execution {
+            input: Some(&paths),
+            ..Execution::default()
+        },
+    )?;
     Ok(())
 }
