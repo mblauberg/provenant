@@ -1110,7 +1110,7 @@ pub struct Stats {
     /// Restrict usage and cost to one run.
     #[arg(long)]
     pub run_id: Option<Target>,
-    /// Group supervised attempts by work context or merged pull request
+    /// Group supervised attempts by work context or merged pull request; attempts with no value form an `unattributed` group
     #[arg(long, value_enum, conflicts_with = "usage")]
     pub by: Option<StatsBy>,
     /// Include per-attempt detail
