@@ -245,24 +245,47 @@ impl run::Providers for Registry<'_> {
                     .map_err(|error| error.to_string())
             })
             .transpose()?;
-        let policies = match context_roots.as_ref().or(self.roots) {
+        let (routing, accounts) = match context_roots.as_ref().or(self.roots) {
             Some(roots) => {
-                provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-                    .map_err(|error| error.to_string())?
-                    .domains
-                    .routing
-                    .model_policy
+                let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+                    .map_err(|error| error.to_string())?;
+                (
+                    config.domains.routing,
+                    config.domains.accounts.with_derived_accounts(),
+                )
             }
-            None => provenant_routing::ModelPolicies::default(),
+            None => Default::default(),
         };
-        let policy = policies
+        let policy = routing
+            .model_policy
             .effective(
                 &model,
                 route.account_key.as_deref(),
                 jiff::Timestamp::now().as_second(),
             )
             .policy;
-        assess_model_result(&policy, task, record, decoded, policy_attempt)
+        let assessment = assess_model_result(&policy, task, record, decoded, policy_attempt)?;
+        if assessment.refusal.is_some() || assessment.retry.is_some() {
+            return Ok(assessment);
+        }
+        // Another registered account that can serve this model.
+        let other_account = |adapter: &str, key: &str| {
+            let served = model.model();
+            accounts.entries.values().any(|entry| {
+                entry.adapter == adapter
+                    && entry.key != key
+                    && provenant_records::AdapterSpec::get(adapter)
+                        .is_none_or(|spec| spec.account_serves_model(&entry.key, served))
+            })
+        };
+        Ok(assess_settlement_retry(
+            &routing,
+            other_account,
+            task,
+            record,
+            decoded,
+            policy_attempt,
+        ))
     }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         let roots = self.roots.ok_or("routing context is unavailable")?;
@@ -323,11 +346,7 @@ impl run::Providers for Registry<'_> {
                 // registry's unrelated roots when recording capacity evidence.
                 let mut decoded =
                     Registry::default().decode(route, stdout, exit, provider_state)?;
-                if decoded
-                    .reason
-                    .as_deref()
-                    .is_some_and(|reason| reason.starts_with("provider capacity: "))
-                {
+                if decoded.reason.as_deref().is_some_and(capacity_reason) {
                     let reason = decoded.reason.get_or_insert_with(String::new);
                     let mut end = reason
                         .len()
@@ -419,6 +438,7 @@ fn assess_model_result(
                 route: run::RequestedRoute::Model { extra: Default::default(), provider: fallback.provider.unwrap_or_default(), model, effort: fallback.effort },
                 resume: false, max_attempts: 2,
                 instruction: "The previous read-only route failed its result check. Complete the original task and include concrete evidence in your final answer.".into(),
+                backoff_seconds: 0,
             }))
         } else {
             None
@@ -428,6 +448,7 @@ fn assess_model_result(
                 "model policy result check failed: empty answer or missing expected sections".into()
             }),
             retry,
+            note: None,
         });
     }
     if policy.lane.stop_early_ok == Some(false)
@@ -455,10 +476,136 @@ fn assess_model_result(
                 route: run::RequestedRoute::Model { extra: Default::default(), provider: route.provider.clone().unwrap_or_default(), model, effort: route.effort.clone() },
                 resume: true, max_attempts: u64::from(policy.lane.max_continuations.unwrap_or(0)) + 1,
                 instruction: "Continue the unfinished task in this session. Carry out the remaining work and verification. End with Status: complete only when done; otherwise Status: incomplete.".into(),
+                backoff_seconds: 0,
             }),
+            note: None,
         });
     }
     Ok(Default::default())
+}
+/// The reason prefix of a provider capacity settlement, shared by decode,
+/// retry and `lanes`.
+const CAPACITY: &str = "provider capacity";
+fn capacity_reason(reason: &str) -> bool {
+    reason
+        .strip_prefix(CAPACITY)
+        .is_some_and(|rest| rest.starts_with(": "))
+}
+/// A lane that settled for provider capacity or a spent account is typed, then
+/// retried within `domains.routing.settlement_retries`: a capacity stop resumes
+/// its session after a growing backoff, or redraws when it has none, and a
+/// quota stop redraws at once, where admission skips the spent account.
+fn assess_settlement_retry(
+    config: &provenant_routing::RoutingConfig,
+    other_account: impl Fn(&str, &str) -> bool,
+    task: &run::TaskRequest,
+    record: &run::AttemptRecord,
+    decoded: &run::Decoded,
+    policy_attempt: u64,
+) -> run::ResultAssessment {
+    let max_attempts = u64::from(config.settlement_retries) + 1;
+    let capacity = decoded.outcome == run::Outcome::ModelUnavailable
+        && decoded.reason.as_deref().is_some_and(capacity_reason);
+    let quota = decoded.outcome == run::Outcome::QuotaLimited;
+    let Some(route) = record.applied_route.as_ref() else {
+        return Default::default();
+    };
+    if !(capacity || quota) || config.settlement_retries == 0 || policy_attempt >= max_attempts {
+        return Default::default();
+    }
+    let writes = task.writer.is_some() || !task.access.write_roots.is_empty();
+    let applied = || {
+        Some(run::RequestedRoute::Model {
+            extra: Default::default(),
+            provider: route.provider.clone()?,
+            model: route.model.clone()?,
+            effort: route.effort.clone(),
+        })
+    };
+    let session = decoded.session.as_deref().is_some_and(|s| !s.is_empty());
+    let (route_choice, resume) = if capacity && session {
+        (applied(), true)
+    } else if quota {
+        // A pinned account is the caller's choice, and an exact model on its
+        // only account has nowhere else to go.
+        let elsewhere = match &task.route {
+            run::RequestedRoute::Model { .. } => {
+                task.account.is_none()
+                    && route
+                        .provider
+                        .as_deref()
+                        .zip(route.account_key.as_deref())
+                        .is_some_and(|(adapter, key)| other_account(adapter, key))
+            }
+            _ => task.account.is_none(),
+        };
+        (elsewhere.then(|| task.route.clone()), false)
+    } else if !writes && let Some(fallback) = task.fallback.first() {
+        let fallback = fallback
+            .model
+            .clone()
+            .map(|model| run::RequestedRoute::Model {
+                extra: Default::default(),
+                provider: fallback.provider.clone().unwrap_or_default(),
+                model,
+                effort: fallback.effort.clone(),
+            });
+        (fallback, false)
+    } else {
+        (Some(task.route.clone()), false)
+    };
+    let Some(route_choice) = route_choice else {
+        return Default::default();
+    };
+    let backoff_seconds = if capacity {
+        config
+            .capacity_retry_seconds
+            .saturating_mul(policy_attempt)
+            .min(600)
+    } else {
+        0
+    };
+    let cause = if capacity {
+        "the provider was at capacity"
+    } else {
+        "the account's usage limit was reached"
+    };
+    let instruction = if resume {
+        format!(
+            "This session stopped because {cause}. Continue the original task from where it stopped and complete its verification."
+        )
+    } else if writes {
+        format!(
+            "A previous attempt at this task stopped because {cause}. The worktree may hold its partial work: inspect `git status` and `git log` first, keep what is useful, then complete the original task."
+        )
+    } else {
+        format!(
+            "A previous attempt at this task stopped because {cause}. Complete the original task."
+        )
+    };
+    let next = policy_attempt + 1;
+    let action = match (resume, quota) {
+        (true, _) => "retrying this session",
+        (false, true) => "retrying on the next eligible account",
+        (false, false) => "redrawing the route",
+    };
+    let wait = if backoff_seconds == 0 {
+        String::new()
+    } else {
+        format!(" in {backoff_seconds} s")
+    };
+    run::ResultAssessment {
+        refusal: None,
+        note: Some(format!("{action}{wait} (attempt {next} of {max_attempts})")),
+        retry: Some(run::PolicyRetry {
+            schema_version: 1,
+            route: route_choice,
+            resume,
+            max_attempts,
+            instruction,
+            backoff_seconds,
+        }),
+    }
 }
 impl Registry<'_> {
     fn decode_inner(
@@ -733,13 +880,13 @@ impl Registry<'_> {
                     "provider model unavailable",
                 )),
                 ProviderEvent::ModelOverloaded { message } => {
-                    Some((run::Outcome::ModelUnavailable, message, "provider capacity"))
+                    Some((run::Outcome::ModelUnavailable, message, CAPACITY))
                 }
                 _ => None,
             })
         {
             let mut capacity_config_failed = false;
-            if description == "provider capacity"
+            if description == CAPACITY
                 && (host_settlement
                     || std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_none())
                 && let Some(roots) = self.roots
@@ -2970,18 +3117,52 @@ pub fn launch_policy_successor(context: &run::HolderContext) -> Result<(), Strin
             .map_err(|error| error.to_string())?;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let call = request(&clock, &cancel).map_err(|error| error.message)?;
+    let mut call = request(&clock, &cancel).map_err(|error| error.message)?;
     let pending = store
         .pending_attempts(context.run_id, &call)
         .map_err(|error| error.to_string())?;
-    if !pending.iter().any(|attempt| {
-        attempt.retry_of == Some(context.attempt_id)
-            && matches!(
-                attempt.continuation.as_deref(),
-                Some("policy_fallback" | "policy_continuation")
-            )
-    }) {
+    let successor_pending = |pending: &[run::AttemptRecord]| {
+        pending.iter().any(|attempt| {
+            attempt.retry_of == Some(context.attempt_id)
+                && matches!(
+                    attempt.continuation.as_deref(),
+                    Some("policy_fallback" | "policy_continuation")
+                )
+        })
+    };
+    if !successor_pending(&pending) {
         return Ok(());
+    }
+    // A capacity retry waits out its backoff here, in the settled attempt's
+    // guardian, and gives up the wait once the successor is no longer queued.
+    let backoff = store
+        .record(context.attempt_id, &call)
+        .ok()
+        .and_then(|record| store.staged_policy_retry(&record).ok().flatten())
+        .map_or(0, |retry| retry.backoff_seconds.min(3_600));
+    if backoff > 0 {
+        use provenant_core::Clock;
+        let start = clock.mono_now();
+        let deadline = provenant_core::DurationMicros::from_seconds(backoff)
+            .and_then(|wait| start.checked_add(wait))
+            .map_err(|error| error.to_string())?;
+        let mut checked = start;
+        while clock.mono_now() < deadline {
+            provenant_os::sys::wait_pause(std::time::Duration::from_millis(50));
+            let now = clock.mono_now();
+            if now.as_micros().saturating_sub(checked.as_micros()) >= 1_000_000 {
+                checked = now;
+                // Each check, and the launch after the wait, gets its own budget.
+                call = request(&clock, &cancel).map_err(|error| error.message)?;
+                let pending = store
+                    .pending_attempts(context.run_id, &call)
+                    .map_err(|error| error.to_string())?;
+                if !successor_pending(&pending) {
+                    return Ok(());
+                }
+            }
+        }
+        call = request(&clock, &cancel).map_err(|error| error.message)?;
     }
     let session = Session {
         context: run::ExecutionContext {
@@ -3518,7 +3699,7 @@ fn render_lanes(
             ) {
                 let capacity = reason
                     .as_deref()
-                    .is_some_and(|reason| reason.starts_with("provider capacity: "));
+                    .is_some_and(capacity_reason);
                 if capacity
                     && lane
                         .session
@@ -6643,6 +6824,144 @@ mod tests {
         decoded.result = "Done.\nStatus: complete".into();
         assert!(
             assess_model_result(&terra, task, &record, &decoded, record.attempt_number)?
+                .retry
+                .is_none()
+        );
+        Ok(())
+    }
+    #[test]
+    fn capacity_and_quota_settlements_retry_within_their_bounds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|error| error.message)?;
+        let store = trace_store(&temp, &call)?;
+        let input = trace_run(42, AttemptId::from_bytes([43; 16]), clock.wall_now()?)?;
+        store.create(&input, &call)?;
+        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+        record.applied_route = Some(run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6-luna".into()),
+            effort: Some("low".into()),
+            account_key: Some("work".into()),
+            ..Default::default()
+        });
+        let mut task = input.request.tasks[0].clone();
+        task.route = run::RequestedRoute::Named {
+            extra: Default::default(),
+            name: "implement".into(),
+            effort: None,
+        };
+        let config = provenant_routing::RoutingConfig::default();
+        let decoded = |outcome, session: Option<&str>, reason: &str| run::Decoded {
+            outcome,
+            result: String::new(),
+            complete: false,
+            observed_route: None,
+            usage: Default::default(),
+            session: session.map(str::to_owned),
+            reason: Some(reason.into()),
+            partial_signals: Vec::new(),
+        };
+        let capacity = decoded(
+            run::Outcome::ModelUnavailable,
+            Some("thread"),
+            "provider capacity: Selected model is at capacity",
+        );
+        let assess =
+            |task: &run::TaskRequest, decoded: &run::Decoded, attempt: u64, others: bool| {
+                assess_settlement_retry(&config, |_, _| others, task, &record, decoded, attempt)
+            };
+        // Capacity with a session resumes it on the applied model, waiting
+        // longer on each retry.
+        let first = assess(&task, &capacity, 1, false);
+        let retry = first.retry.ok_or("capacity retry")?;
+        assert!(retry.resume && first.refusal.is_none());
+        assert_eq!(retry.max_attempts, 3);
+        assert_eq!(retry.backoff_seconds, 30);
+        assert!(
+            matches!(&retry.route, run::RequestedRoute::Model { model, .. } if model == "codex/gpt-6-luna")
+        );
+        assert_eq!(
+            first.note.as_deref(),
+            Some("retrying this session in 30 s (attempt 2 of 3)")
+        );
+        assert_eq!(
+            assess(&task, &capacity, 2, false)
+                .retry
+                .ok_or("second")?
+                .backoff_seconds,
+            60
+        );
+        assert!(assess(&task, &capacity, 3, false).retry.is_none());
+        // Without a session a pool route is drawn again, fresh.
+        let sessionless = decoded(
+            run::Outcome::ModelUnavailable,
+            None,
+            "provider capacity: Selected model is at capacity",
+        );
+        let redraw = assess(&task, &sessionless, 1, false)
+            .retry
+            .ok_or("redraw")?;
+        assert!(!redraw.resume);
+        assert_eq!(redraw.route, task.route);
+        // A read-only lane takes its first fallback; a writer keeps its route.
+        let mut fallback = task.clone();
+        fallback.fallback = vec![run::RouteRecord {
+            provider: Some("claude".into()),
+            model: Some("claude/claude-sonnet-5-5".into()),
+            ..Default::default()
+        }];
+        let read_only = assess(&fallback, &sessionless, 1, false)
+            .retry
+            .ok_or("fallback")?;
+        assert!(
+            matches!(&read_only.route, run::RequestedRoute::Model { model, .. } if model == "claude/claude-sonnet-5-5")
+        );
+        fallback.access.write_roots.push(temp.path().to_owned());
+        let writer = assess(&fallback, &sessionless, 1, false)
+            .retry
+            .ok_or("writer")?;
+        assert_eq!(writer.route, fallback.route);
+        assert!(writer.instruction.contains("git status"));
+        // Other model failures are not capacity.
+        let unavailable = decoded(
+            run::Outcome::ModelUnavailable,
+            Some("thread"),
+            "provider model unavailable: no route",
+        );
+        assert!(assess(&task, &unavailable, 1, true).retry.is_none());
+        // A spent account redraws at once; an exact model needs another
+        // registered account, and a pinned account is never swapped.
+        let quota = decoded(
+            run::Outcome::QuotaLimited,
+            None,
+            "You've hit your weekly limit",
+        );
+        let spent = assess(&task, &quota, 1, false);
+        let retry = spent.retry.ok_or("quota retry")?;
+        assert!(!retry.resume && retry.backoff_seconds == 0);
+        assert_eq!(
+            spent.note.as_deref(),
+            Some("retrying on the next eligible account (attempt 2 of 3)")
+        );
+        let mut exact = task.clone();
+        exact.route = input.request.tasks[0].route.clone();
+        assert!(assess(&exact, &quota, 1, false).retry.is_none());
+        assert_eq!(
+            assess(&exact, &quota, 1, true).retry.ok_or("exact")?.route,
+            exact.route
+        );
+        exact.account = Some("work".into());
+        assert!(assess(&exact, &quota, 1, true).retry.is_none());
+        // Zero retries turns the behaviour off.
+        let off = provenant_routing::RoutingConfig {
+            settlement_retries: 0,
+            ..Default::default()
+        };
+        assert!(
+            assess_settlement_retry(&off, |_, _| true, &task, &record, &quota, 1)
                 .retry
                 .is_none()
         );

@@ -823,6 +823,57 @@ fn agy_individual_quota_is_quota_limited_until_its_stated_reset() -> Result<(), 
     Ok(())
 }
 #[test]
+fn agy_overload_is_typed_capacity_not_a_generic_failure() -> Result<(), ProviderError> {
+    let exit = ExitObservation {
+        code: Some(1),
+        ..EXIT
+    };
+    let result = |error: &str| {
+        serde_json::json!({"event":"result","result":{
+            "conversation_id":"c","status":"ERROR","response":"","error":error,
+            "usage":{"input_tokens":0,"output_tokens":0}}})
+        .to_string()
+            + "\n"
+    };
+    for message in [
+        "The model is overloaded. Please try again later.",
+        "503: The model is overloaded. Please try again later.",
+        "503 Service Unavailable: The model is overloaded.",
+        "UNAVAILABLE: model is overloaded",
+    ] {
+        let (events, outcome) = replay(&agy::Agy, &result(message), exit)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Refused, "{message}");
+        assert!(
+            events.contains(&ProviderEvent::ModelOverloaded {
+                message: message.into()
+            }),
+            "{message}"
+        );
+    }
+    for message in [
+        "503",
+        "upstream error",
+        r#"Invalid prompt: "The model is overloaded""#,
+    ] {
+        let (events, outcome) = replay(&agy::Agy, &result(message), exit)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Failed, "{message}");
+        assert!(events.contains(&ProviderEvent::Error), "{message}");
+    }
+    Ok(())
+}
+#[test]
+fn codex_usage_limit_is_quota_limited() -> Result<(), ProviderError> {
+    let raw = r#"{"type":"turn.failed","error":{"message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}}"#;
+    let (events, outcome) = replay(&codex::Codex, &format!("{raw}\n"), EXIT)?;
+    assert_eq!(outcome.status(), OutcomeStatus::Refused);
+    assert!(events.contains(&ProviderEvent::QuotaLimited {
+        message: "You've hit your usage limit.".into(),
+        pool: None,
+        resets_in_seconds: None,
+    }));
+    Ok(())
+}
+#[test]
 fn terminal_answer_and_nonzero_exit_remain_separate_facts() -> Result<(), Box<dyn std::error::Error>>
 {
     let exit = ExitObservation {

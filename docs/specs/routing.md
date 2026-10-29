@@ -43,13 +43,36 @@ setting `domains.routing.capacity_cooldown_seconds` defaults to 600 seconds; zer
   `crates/cli/src/run.rs::tests::lanes_show_only_live_capacity_cooldowns`;
   `tests/dispatch_provider.rs::capacity_holder_persists_and_explicit_and_resume_ignore_cooldown`
 
+### Settlement retry
+
+Every adapter types a provider capacity error as `model_unavailable` and a spent
+account as `quota_limited`; neither settles as a generic failure. Such a settlement
+retries up to `domains.routing.settlement_retries` times (default 2; zero
+disables). A capacity stop resumes the same session after
+`domains.routing.capacity_retry_seconds` multiplied by the retry's number (default 30,
+capped at 600). Without a session, a read-only lane takes its first fallback and a
+writer redraws its granted route. A quota stop retries its granted route at once
+when the account is not pinned; a single-model route retries only when another
+registered account serves the model. Admission then refuses the spent account and
+resolution falls through to the next eligible one. The lane's reason names the
+retry and its attempt number.
+- Why: a provider's capacity or one account's quota should cost a short wait, not a
+  chair turn.
+- Test: `crates/providers/src/tests.rs::agy_overload_is_typed_capacity_not_a_generic_failure`;
+  `::codex_usage_limit_is_quota_limited`;
+  `crates/providers/src/claude.rs::tests::usage_limit_is_a_typed_quota_refusal_not_a_generic_failure`;
+  `crates/cli/src/run.rs::tests::capacity_and_quota_settlements_retry_within_their_bounds`;
+  `crates/cli/src/route.rs::tests::refused_account_falls_through_to_another_for_the_same_model`;
+  `tests/dispatch_provider.rs::capacity_settlement_resumes_the_same_session`
+- Owner: `crates/cli/src/run.rs`
+
 ### One resolution, bounded alternatives
 
 Resolution runs once against immutable catalogue, availability and quota
 snapshots and returns one route with at most two ordered alternatives, each
-passing the same checks; Run never rebuilds candidates. Fallback is
-read-only and explicit, except for configurable result-policy fallback on
-restricted routes. Unsupported effort fails; where clamping is permitted, the requested,
+passing the same checks; Run never rebuilds candidates. Fallback to
+another route is read-only and explicit, except for configurable result-policy
+fallback on restricted routes; a writer may retry only its granted route. Unsupported effort fails; where clamping is permitted, the requested,
 applied and observed values are recorded. `route list` and `resolve` start no
 process and mutate nothing.
 - Why: the fallback plan is decided once and visible.
@@ -245,14 +268,17 @@ authority reference.
 Unknown or stale quota never causes a refusal. Refusals are model- and
 account-scoped unless wire evidence proves a wider pool, and independent
 pools never exhaust each other. A newer comparable observation or the reset
-clears only that refusal. Only a quota-limited outcome cools an account;
+clears only that refusal. An account whose latest reading is exhausted is
+skipped for an available account whatever its pacing policy: hard when the reading
+is fresh, by rank when it is stale. Only a quota-limited outcome cools an account;
 auth failures never switch accounts. Provider capacity errors settle as
 `model_unavailable` with the provider's reason visible in lanes and record a
 separate, advisory capacity cooldown on the host.
 - Why: one probe outage or model limit must not take a provider offline.
 - Test: `crates/quota/src/admission.rs::unknown_and_stale_do_not_manufacture_exhaustion`;
   `::independent_pool_reset_and_refusal_scope`;
-  `tests/dispatch_provider.rs::codex_capacity_settles_without_quota_refusal`
+  `tests/dispatch_provider.rs::codex_capacity_settles_without_quota_refusal`;
+  `crates/routing/src/tests.rs::spent_account_is_skipped_for_an_available_one_even_when_its_reading_is_stale`
 - Owner: `crates/quota/src/admission.rs`
 
 ### Revisioned, bounded refresh

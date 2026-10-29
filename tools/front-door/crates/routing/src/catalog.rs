@@ -188,6 +188,13 @@ pub struct RoutingConfig {
     /// Silence the advisory for Opus implementation lanes.
     pub suppress_opus_writer_warning: bool,
     pub capacity_cooldown_seconds: u64,
+    /// Further attempts after a capacity or quota settlement, on the same
+    /// session where it resumes or a fresh draw where it cannot. Zero retries
+    /// none; at most 8.
+    pub settlement_retries: u8,
+    /// Wait before a capacity retry, multiplied by the retry's number and
+    /// capped at 600 seconds.
+    pub capacity_retry_seconds: u64,
     pub review: crate::ReviewConfig,
     pub routes: BTreeMap<String, NamedRoute>,
     pub pools: BTreeMap<String, Vec<RoutePoolMember>>,
@@ -203,6 +210,8 @@ impl Default for RoutingConfig {
             model_policy: crate::ModelPolicies::default(),
             suppress_opus_writer_warning: false,
             capacity_cooldown_seconds: 600,
+            settlement_retries: 2,
+            capacity_retry_seconds: 30,
             review: crate::ReviewConfig::default(),
             routes: BTreeMap::new(),
             pools: BTreeMap::new(),
@@ -309,6 +318,18 @@ impl DomainConfig for RoutingConfig {
     fn validate(&self) -> Vec<SectionError> {
         let mut errors = Vec::new();
         self.model_policy.validate(&mut errors);
+        if self.settlement_retries > 8 {
+            errors.push(SectionError {
+                field: "settlement_retries".into(),
+                code: "limit",
+            });
+        }
+        if self.capacity_retry_seconds > 600 {
+            errors.push(SectionError {
+                field: "capacity_retry_seconds".into(),
+                code: "limit",
+            });
+        }
         if self.routes.len() > 128 {
             errors.push(SectionError {
                 field: "routes".into(),

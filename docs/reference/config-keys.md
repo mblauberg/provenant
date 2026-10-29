@@ -171,6 +171,32 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"Longer cooldowns reduce repeated capacity errors but keep affected models out of automatic draws for longer."` |
 | `type` | `"int"` |
 
+## `domains.routing.capacity_retry_seconds`
+
+| Field | Value |
+|---|---|
+| `default` | `30` |
+| `effect` | `"Wait this long before a capacity retry, multiplied by the retry's number and capped at 600 seconds. Quota retries do not wait."` |
+| `max` | `600` |
+| `min` | `0` |
+| `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"A longer wait gives the provider time to recover but delays the lane."` |
+| `type` | `"int"` |
+
+## `domains.routing.settlement_retries`
+
+| Field | Value |
+|---|---|
+| `default` | `2` |
+| `effect` | `"Retry a lane that settled for provider capacity or a spent account up to this many times. A capacity stop resumes its session, or redraws the route when it has none; a quota stop redraws at once, and admission skips the spent account. Zero disables these retries."` |
+| `max` | `8` |
+| `min` | `0` |
+| `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"More retries recover more lanes without a chair turn but spend more attempts when a provider stays at capacity."` |
+| `type` | `"int"` |
+
 ## `fabric.accept_handoff`
 
 | Field | Value |

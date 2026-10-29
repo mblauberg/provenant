@@ -24,7 +24,8 @@ pub enum Route {
     Remove(RouteRemove),
     /// Restore one bundled pool and clear its override.
     Reset(RouteReset),
-    /// Set a provider policy or manage a temporary pacing override.
+    /// Set a provider policy or manage a temporary pacing override. Without a
+    /// value, `override` lists the active overrides.
     Pacing(RoutePacing),
 }
 #[derive(Debug, Args)]
@@ -88,7 +89,8 @@ impl From<PacingChoice> for PacingPolicy {
 pub struct RoutePacing {
     /// Registered provider ID, or `override` to manage an override.
     pub target: String,
-    /// Provider policy, or `clear` after `override`.
+    /// Provider policy, or `clear` after `override`. `override` alone lists
+    /// the active overrides.
     pub value: Option<String>,
     /// Apply an override to this account key.
     #[arg(long, conflicts_with_all = ["provider", "all"])]
@@ -392,6 +394,38 @@ impl From<provenant_config::ConfigError> for EdgeError {
 pub enum Data {
     List(Box<provenant_routing::RouteList>),
     Resolved(Box<RoutePreview>),
+    Pacing(Box<PacingReport>),
+}
+/// What a `route pacing` command recorded, if anything, and the overrides now
+/// in force.
+#[derive(Serialize)]
+pub struct PacingReport {
+    pub recorded: Option<String>,
+    pub active_overrides: Vec<provenant_routing::PacingOverride>,
+}
+fn policy_name(policy: PacingPolicy) -> &'static str {
+    match policy {
+        PacingPolicy::Pace => "pace",
+        PacingPolicy::Spend => "spend",
+        PacingPolicy::Max => "max",
+        PacingPolicy::Off => "off",
+    }
+}
+fn expiry_text(expires_unix_seconds: i64) -> String {
+    jiff::Timestamp::from_second(expires_unix_seconds)
+        .map_or_else(|_| expires_unix_seconds.to_string(), |at| at.to_string())
+}
+fn override_line(row: &provenant_routing::PacingOverride) -> String {
+    let scope = match (&row.account, &row.provider) {
+        (Some(account), _) => format!("account {account}"),
+        (None, Some(provider)) => format!("provider {provider}"),
+        (None, None) => "all accounts".to_owned(),
+    };
+    format!(
+        "{scope} {} until {}",
+        policy_name(row.policy),
+        expiry_text(row.expires_unix_seconds)
+    )
 }
 #[derive(Serialize)]
 pub struct RoutePreview {
@@ -709,6 +743,7 @@ fn resolve_dispatch_excluding(
         |context, records| {
             let mut excluded_members = initial_exclusions.to_vec();
             let mut refusals = Vec::new();
+            let mut refused_accounts: Vec<(String, String)> = Vec::new();
             let mut resolved = provenant_routing::resolve_for_account_with_seed_excluding(
                 request,
                 context,
@@ -743,6 +778,47 @@ fn resolve_dispatch_excluding(
                 });
                 if let Err(error) = gate {
                     let is_go_refusal = matches!(&error, EdgeError::GoAllowance(_));
+                    // A spent account leaves the model servable by another
+                    // registered account. Unless the caller pinned one, try the
+                    // same model there before giving it up.
+                    if !is_go_refusal
+                        && account.is_none()
+                        && let Some(key) = resolved.account_key.clone()
+                    {
+                        refused_accounts.push((resolved.adapter.clone(), key));
+                        let remaining: Vec<_> = context
+                            .availability
+                            .iter()
+                            .filter(|record| {
+                                !refused_accounts.iter().any(|(adapter, key)| {
+                                    record.adapter == *adapter
+                                        && record.account_key.as_deref() == Some(key)
+                                })
+                            })
+                            .cloned()
+                            .collect();
+                        let narrowed = RoutingContext {
+                            availability: &remaining,
+                            ..*context
+                        };
+                        if let Ok(replacement) =
+                            provenant_routing::resolve_for_account_with_seed_excluding(
+                                request,
+                                &narrowed,
+                                None,
+                                seed.0,
+                                seed.1,
+                                &excluded_members,
+                            )
+                            && matches!(&replacement.readiness, RouteReadiness::Ready { .. })
+                            && replacement.adapter == resolved.adapter
+                            && replacement.model == resolved.model
+                            && replacement.account_key != resolved.account_key
+                        {
+                            resolved = replacement;
+                            continue;
+                        }
+                    }
                     let has_fallback = matches!(&request.fallback, Fallback::Models(_));
                     if !matches!(&request.choice, RouteChoice::NamedRoute(_))
                         || resolved.pool_selection.is_none()
@@ -1079,7 +1155,8 @@ fn reset_pool(roots: &Roots, request: &RouteReset) -> Result<(), EdgeError> {
     })
 }
 
-fn set_pacing(roots: &Roots, request: &RoutePacing) -> Result<(), EdgeError> {
+/// Record the request and describe what was recorded; `None` only lists.
+fn set_pacing(roots: &Roots, request: &RoutePacing) -> Result<Option<String>, EdgeError> {
     if request.target == "override" {
         return set_pacing_override(roots, request);
     }
@@ -1118,7 +1195,8 @@ fn set_pacing(roots: &Roots, request: &RoutePacing) -> Result<(), EdgeError> {
         let pacing = config_table(pacing).ok_or("domains.routing.pacing must be a table")?;
         pacing.insert(&request.target, toml_edit::value(policy));
         Ok(())
-    })
+    })?;
+    Ok(Some(format!("provider {} pacing {policy}", request.target)))
 }
 
 fn override_expiry(value: &str) -> Option<i64> {
@@ -1138,7 +1216,15 @@ fn override_expiry(value: &str) -> Option<i64> {
         .flatten()
 }
 
-fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<(), EdgeError> {
+fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<Option<String>, EdgeError> {
+    let options = request.account.is_some()
+        || request.provider.is_some()
+        || request.all
+        || request.policy.is_some()
+        || request.until.is_some();
+    if request.value.is_none() && !options {
+        return Ok(None);
+    }
     if request.value.as_deref() == Some("clear") {
         if request.account.is_some()
             || request.provider.is_some()
@@ -1148,10 +1234,11 @@ fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<(), EdgeE
         {
             return Err(EdgeError::Pacing("override clear takes no options"));
         }
-        return edit_config(roots, |document| {
+        edit_config(roots, |document| {
             routing_table(document)?.remove("pacing_overrides");
             Ok(())
-        });
+        })?;
+        return Ok(Some("cleared every pacing override".to_owned()));
     }
     if request.value.is_some()
         || usize::from(request.account.is_some())
@@ -1234,7 +1321,14 @@ fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<(), EdgeE
             toml_edit::Item::Value(toml_edit::Value::Array(values)),
         );
         Ok(())
-    })
+    })?;
+    let recorded = provenant_routing::PacingOverride {
+        account,
+        provider: request.provider.clone(),
+        policy: request.policy.map_or(PacingPolicy::Pace, Into::into),
+        expires_unix_seconds: expiry,
+    };
+    Ok(Some(format!("override {}", override_line(&recorded))))
 }
 
 fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
@@ -1328,15 +1422,19 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
             )?))
         }
         Route::Pacing(request) => {
-            set_pacing(roots, request)?;
-            Ok(Data::List(list_data(
+            let recorded = set_pacing(roots, request)?;
+            let list = list_data(
                 roots,
                 &RouteListRequest {
                     valid: false,
                     adapter: None,
                     pool: None,
                 },
-            )?))
+            )?;
+            Ok(Data::Pacing(Box::new(PacingReport {
+                recorded,
+                active_overrides: list.active_overrides,
+            })))
         }
     }
 }
@@ -1517,6 +1615,23 @@ pub fn run(
                 }
                 text
             }
+            Some(Data::Pacing(report)) => {
+                let mut lines = Vec::new();
+                if let Some(recorded) = &report.recorded {
+                    lines.push(format!("recorded: {recorded}"));
+                }
+                lines.push(format!(
+                    "active overrides: {}",
+                    report.active_overrides.len()
+                ));
+                lines.extend(
+                    report
+                        .active_overrides
+                        .iter()
+                        .map(|row| format!("override {}", override_line(row))),
+                );
+                format!("{}\n", lines.join("\n"))
+            }
             None => String::new(),
         }
     };
@@ -1545,11 +1660,38 @@ pub fn run(
                 Some("provenant route resolve MODEL".to_owned()),
             ))
         }
+        Some(Data::Pacing(report)) => {
+            let active = format!("{} active pacing overrides", report.active_overrides.len());
+            let headline = report.recorded.as_ref().map_or_else(
+                || active.clone(),
+                |recorded| format!("recorded {recorded}; {active}"),
+            );
+            let next = if report.recorded.is_some() {
+                "provenant route pacing override"
+            } else if report.active_overrides.is_empty() {
+                "provenant route pacing override --account ACCOUNT --policy POLICY --until 2h"
+            } else {
+                "provenant route pacing override clear"
+            };
+            Some(crate::Summary::new(
+                headline,
+                report
+                    .active_overrides
+                    .iter()
+                    .map(|row| format!("override {}", override_line(row)))
+                    .collect(),
+                Some(next.to_owned()),
+            ))
+        }
         _ => None,
     };
+    let listing = matches!(
+        &result.data,
+        Some(Data::Pacing(report)) if report.recorded.is_none()
+    );
     let mode = globals.render_mode(
         &human,
-        matches!(command, Route::List(_) | Route::Resolve(_)),
+        listing || matches!(command, Route::List(_) | Route::Resolve(_)),
         summary.as_ref(),
     );
     let outcome = crate::render_or_publish(
@@ -1978,6 +2120,99 @@ mod route_tests {
             fresh.alternatives.as_slice()[0].account_key.as_deref(),
             Some("fresh")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn refused_account_falls_through_to_another_for_the_same_model() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(
+                &self,
+                path: &std::path::Path,
+            ) -> std::io::Result<std::path::PathBuf> {
+                Ok(path.into())
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&Resolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        std::fs::set_permissions(
+            roots.state.as_path(),
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        let now = jiff::Timestamp::now().as_second();
+        let catalogue = super::Catalogue::bundled()?;
+        let availability: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|key| provenant_providers::AvailabilityRecord {
+                schema_version: 1,
+                adapter: "codex".into(),
+                executable: "/fixture/codex".into(),
+                version: "fixture".into(),
+                last_update: None,
+                fixture_ref: "fixture".into(),
+                catalogue_revision: catalogue.revision().into(),
+                account_key: Some(key.into()),
+                observed_models: vec!["gpt-6-luna".into()],
+                observed_unix_seconds: now,
+                expires_unix_seconds: now + 300,
+            })
+            .collect();
+        let access = [provenant_routing::AccessContext {
+            adapter: "codex",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        }];
+        let request = super::RouteRequest {
+            read_heavy: false,
+            model: Some(super::Model("codex/gpt-6-luna".into())),
+            route: None,
+            effort: None,
+            confidential: false,
+            allow_free: false,
+            fallback: vec![],
+        }
+        .to_domain()?;
+        let resolve = |account: Option<&str>| {
+            super::resolve_dispatch(
+                &request,
+                &roots,
+                account,
+                ("fixture", 0),
+                &availability,
+                &access,
+                "fixture",
+                None,
+            )
+        };
+        let drawn = resolve(None)?;
+        let spent = drawn.account_key.clone().ok_or("account")?;
+        // The provider refused the drawn account: the next dispatch keeps the
+        // model and takes the other account instead of failing.
+        crate::quota::persist_provider_refusal(
+            roots.state.as_path(),
+            &provenant_records::run::RouteRecord {
+                provider: Some("codex".into()),
+                model: Some("codex/gpt-6-luna".into()),
+                account_key: Some(spent.clone()),
+                account_label: Some(spent.clone()),
+                ..Default::default()
+            },
+            None,
+            now,
+            Some(now + 3_600),
+        )?;
+        let redrawn = resolve(None)?;
+        assert_eq!(redrawn.model, "gpt-6-luna");
+        assert!(matches!(redrawn.readiness, RouteReadiness::Ready { .. }));
+        assert_ne!(redrawn.account_key.as_deref(), Some(spent.as_str()));
+        // A pinned account is the caller's choice and is never swapped.
+        assert!(resolve(Some(&spent)).is_err());
         Ok(())
     }
 

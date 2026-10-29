@@ -290,6 +290,66 @@ fn policy_incomplete_result_continues_the_retained_session() -> Result {
     cleanup.disarm();
     Ok(())
 }
+fn capacity_settlement_resumes_the_same_session() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    fs::create_dir_all(&rig.state)?;
+    fs::set_permissions(&rig.state, fs::Permissions::from_mode(0o700))?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing]\nsettlement_retries=1\ncapacity_retry_seconds=0\n",
+    )?;
+    let prompt = rig.root.join("prompt.txt");
+    fs::write(&prompt, "fixture capacity")?;
+    let output = rig.command(&[
+        "run",
+        "--model",
+        "codex/gpt-6-luna",
+        "--effort",
+        "low",
+        "--operation-id",
+        "capacity-retry",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt path")?,
+        "--wait",
+        "3s",
+        "--json",
+    ])?;
+    let lanes = settled_policy_lanes(&rig, output)?;
+    let rows = lanes["data"]["lanes"].as_array().ok_or("lane rows")?;
+    assert_eq!(rows.len(), 2, "{lanes}");
+    let first = rows
+        .iter()
+        .find(|row| row["attempt_number"] == 1)
+        .ok_or("first attempt")?;
+    let second = rows
+        .iter()
+        .find(|row| row["attempt_number"] == 2)
+        .ok_or("retry attempt")?;
+    assert_eq!(first["state"], "model_unavailable", "{lanes}");
+    assert!(
+        first["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.ends_with("; retrying this session (attempt 2 of 2)")),
+        "{lanes}"
+    );
+    // The retry resumed the same session; its own capacity stop is the last.
+    assert_eq!(second["continuation"], "policy_continuation", "{lanes}");
+    assert_eq!(second["state"], "model_unavailable", "{lanes}");
+    assert_eq!(
+        first["transcript"]["session"]
+            .as_str()
+            .ok_or("first session")?,
+        second["transcript"]["session"]
+            .as_str()
+            .ok_or("resumed session")?
+    );
+    cleanup.disarm();
+    Ok(())
+}
 fn review_fans_out_and_collects_fake_provider() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -784,6 +844,13 @@ fn capacity_holder_persists_and_explicit_and_resume_ignore_cooldown() -> Result 
         "PATH".into(),
         format!("{}:/usr/bin:/bin", bin.display()).into(),
     ));
+    // This test pins the settled capacity state; the retry has its own test.
+    fs::create_dir_all(&rig.state)?;
+    fs::set_permissions(&rig.state, fs::Permissions::from_mode(0o700))?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing]\nsettlement_retries=0\n",
+    )?;
     let prompt = rig.root.join("prompt.txt");
     fs::write(&prompt, "fixture capacity")?;
     let out = rig.command(&[
@@ -1498,8 +1565,9 @@ fn codex_capacity_settles_without_quota_refusal() -> Result {
             ..
         }
     ));
+    // A staged settlement retry appends its note after the typed reason.
     assert!(
-        matches!(&terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason == &format!("provider capacity: {message}"))
+        matches!(&terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason.starts_with(&format!("provider capacity: {message}")))
     );
     let record = provenant_quota::AccountRecord::decode(&fs::read(
         rig.state.join("quota/codex-fixture/codex.json"),
@@ -2632,6 +2700,7 @@ fn main() -> ExitCode {
                 "codex_dispatch_observes_rollout",
                 "policy_empty_result_falls_back_without_a_chair_turn",
                 "policy_incomplete_result_continues_the_retained_session",
+                "capacity_settlement_resumes_the_same_session",
                 "review_fans_out_and_collects_fake_provider",
                 "opencode_dispatch_observes_v2_wal_session",
                 "opus_writer_dispatch_advises_a_cheaper_route",
@@ -2666,6 +2735,7 @@ fn main() -> ExitCode {
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
                     "policy_empty_result_falls_back_without_a_chair_turn" => policy_empty_result_falls_back_without_a_chair_turn(),
                     "policy_incomplete_result_continues_the_retained_session" => policy_incomplete_result_continues_the_retained_session(),
+                    "capacity_settlement_resumes_the_same_session" => capacity_settlement_resumes_the_same_session(),
                     "review_fans_out_and_collects_fake_provider" => review_fans_out_and_collects_fake_provider(),
                     "opencode_dispatch_observes_v2_wal_session" => {
                         opencode_dispatch_observes_v2_wal_session()

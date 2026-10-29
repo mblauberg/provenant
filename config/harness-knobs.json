@@ -113,6 +113,18 @@
       "effect": "Avoid a model and account in automatic draws for this many seconds after a provider capacity error. Zero disables new cooldowns.",
       "trade_off": "Longer cooldowns reduce repeated capacity errors but keep affected models out of automatic draws for longer."
     },
+    "domains.routing.settlement_retries": {
+      "type": "int", "min": 0, "max": 8, "default": 2, "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/run.rs",
+      "effect": "Retry a lane that settled for provider capacity or a spent account up to this many times. A capacity stop resumes its session, or redraws the route when it has none; a quota stop redraws at once, and admission skips the spent account. Zero disables these retries.",
+      "trade_off": "More retries recover more lanes without a chair turn but spend more attempts when a provider stays at capacity."
+    },
+    "domains.routing.capacity_retry_seconds": {
+      "type": "int", "min": 0, "max": 600, "default": 30, "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/run.rs",
+      "effect": "Wait this long before a capacity retry, multiplied by the retry's number and capped at 600 seconds. Quota retries do not wait.",
+      "trade_off": "A longer wait gives the provider time to recover but delays the lane."
+    },
     "usage.project_attribution": {
       "type": "bool", "default": false, "status": "wired",
       "reader": "tools/front-door/src/usage.rs",

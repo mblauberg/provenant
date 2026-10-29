@@ -1,5 +1,7 @@
 suppress_opus_writer_warning = false
 capacity_cooldown_seconds = 600
+settlement_retries = 2
+capacity_retry_seconds = 30
 pacing_overrides = []
 [opencode_go]
 min_monthly_allowance_usd = 60
