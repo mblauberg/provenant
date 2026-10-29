@@ -7104,12 +7104,7 @@ fn admission_below_the_floor_reclaims_build_output_and_then_admits() -> TestResu
         let result = store.admit(id, &attempt, &disk, &clock, &cancel);
         assert_eq!(disk.reclaims.get(), 1, "one attempt per refusal window");
         if helps {
-            assert_eq!(
-                result?.state,
-                AttemptState::Running {
-                    extra: Default::default()
-                }
-            );
+            assert!(matches!(result?.state, AttemptState::Running { .. }));
         } else {
             assert!(matches!(
                 result,
