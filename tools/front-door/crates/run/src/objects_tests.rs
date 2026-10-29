@@ -278,6 +278,59 @@ impl Fixture {
 }
 
 #[test]
+fn host_prepared_private_repository_reads_shared_base_and_imports_new_commit() -> TestResult {
+    for format in ["sha1", "sha256"] {
+        let mut fixture = Fixture::new(format)?;
+        let attempt = fixture.root.join("prepared-attempt");
+        let scratch = attempt.join("tmp/candidate-0");
+        fs::create_dir_all(&scratch)?;
+        let attempt = Directory::open_anchor(&attempt)?;
+        super::prepare_bound(
+            &fixture.git,
+            fixture.worktree.repo(),
+            &attempt,
+            &scratch,
+            "refs/heads/lane",
+            fixture.base,
+        )?;
+        fixture.source = scratch.join("git-objects");
+        fixture.git_overlay(&scratch, &["cat-file", "-e", &fixture.base.to_string()])?;
+        fs::write(fixture.lane.join("file"), "host-prepared private commit\n")?;
+        fixture.git_overlay(&scratch, &["add", "file"])?;
+        fixture.git_overlay(&scratch, &["commit", "-qm", "host-prepared private commit"])?;
+        let source = super::bound_source(&attempt)?.ok_or("bound private Git")?;
+        let head = super::private_tip(&source, "refs/heads/lane")?;
+        assert_ne!(head, fixture.base);
+        assert_eq!(
+            super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+            fixture.base
+        );
+        super::settle(
+            &fixture.git,
+            fixture.worktree.repo(),
+            Some(&source.objects),
+            head,
+        )?;
+        super::publish_branch(
+            &fixture.git,
+            fixture.worktree.repo(),
+            "refs/heads/lane",
+            fixture.base,
+            head,
+        )?;
+        let content = git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.project,
+            None,
+            &["show", "lane:file"],
+        )?;
+        assert_eq!(content.stdout, b"host-prepared private commit\n");
+    }
+    Ok(())
+}
+
+#[test]
 fn private_loose_objects_are_verified_and_imported_for_both_hash_formats() -> TestResult {
     for format in ["sha1", "sha256"] {
         let fixture = Fixture::new(format)?;

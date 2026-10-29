@@ -465,7 +465,7 @@ pub(crate) fn prepare_bound(
         OsStr::new("alternates"),
         ".objects-",
         format!(
-            "{}\\n",
+            "{}\n",
             quote_alternate(&repo.common_git_dir().join("objects"))
         )
         .as_bytes(),
