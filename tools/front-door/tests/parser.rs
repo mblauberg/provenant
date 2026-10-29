@@ -120,7 +120,7 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     assert_eq!(code(&stats), 0);
     assert_eq!(
         String::from_utf8(stats.stdout.bytes)?,
-        "25 attempts, cost unknown (25 attempts missing cost data)\n"
+        "25 attempts, cost unknown (25 attempts missing cost data)\ncache-read share: unknown (incomplete input categories)\n"
     );
     // Named status includes old terminal lanes by run, task or attempt ID.
     let oldest = &all["data"]["lanes"][24];

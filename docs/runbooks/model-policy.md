@@ -104,7 +104,8 @@ completion markers do not guess that more work is needed.
 
 Automatic read-only fallback and continuation preserve each attempt in the same
 run. The terminal transaction queues the successor before the run can appear
-closed. Cancellation, timeouts and unresolved custody do not trigger retries.
+closed. Quota limits, cancellation, timeouts and unresolved custody retain their
+existing recovery behaviour and do not trigger result-policy retries.
 Allowances reset for each run, including a manually resumed run. The first
 sealed retry decision survives interrupted settlement even if a scheduled or
 expiring rule changes before recovery.

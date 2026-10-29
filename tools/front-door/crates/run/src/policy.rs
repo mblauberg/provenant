@@ -290,16 +290,16 @@ impl RunStore {
         &self,
         tx: &rusqlite::Connection,
         next: &AttemptRecord,
+        request: &CanonicalRequest,
+        disk_floor_bytes: u64,
     ) -> Result<()> {
-        let raw: Vec<u8> = tx.query_row(
-            "SELECT record FROM admission WHERE attempt=?1",
-            [next
-                .retry_of
-                .ok_or(RunError::Validation("policy parent missing"))?
-                .to_string()],
-            |row| row.get(0),
-        )?;
-        let ticket: AdmissionTicket = decode(&raw)?;
+        // Provider exit releases the old admission ticket before settlement.
+        // Reconstruct scheduling from the canonical request and live host floor.
+        let task = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == next.task_id)
+            .ok_or(RunError::Validation("policy retry task missing"))?;
         tx.execute(
             "INSERT INTO continuations(target,run) VALUES (?1,?2)",
             params![
@@ -314,10 +314,14 @@ impl RunStore {
         self.queue_ticket(
             tx,
             next,
-            ticket.lane_class,
-            ticket.run_concurrency,
+            if task.writer.is_some() {
+                LaneClass::Writer
+            } else {
+                LaneClass::ReadOnly
+            },
+            request.concurrency,
             0,
-            ticket.disk_floor_bytes,
+            disk_floor_bytes,
         )
     }
 }
@@ -359,6 +363,10 @@ mod tests {
             effort: Some("high".into()),
         };
         store.stage_policy_retry(&old, &changed_policy, &call)?;
+        // Production holders release admission as soon as the provider exits.
+        store
+            .db
+            .execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
         let mut publication = publication();
         publication.outcome = Outcome::Failed;
         publication.reason = Some("empty restricted result".into());

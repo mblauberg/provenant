@@ -369,6 +369,10 @@ fn assess_model_result(
 ) -> Result<run::ResultAssessment, String> {
     let failed_check = !policy.result_valid(&decoded.result);
     if policy.result.check == Some(true)
+        && matches!(
+            decoded.outcome,
+            run::Outcome::Succeeded | run::Outcome::Failed | run::Outcome::Uncommitted
+        )
         && (failed_check || decoded.outcome == run::Outcome::Failed)
     {
         let retry = if task.writer.is_none()
@@ -6011,6 +6015,20 @@ mod tests {
         let decision =
             assess_model_result(&gemini, task, &record, &decoded, record.attempt_number)?;
         assert!(decision.refusal.is_none() && decision.retry.is_none());
+        // Typed quota and stop outcomes retain their own recovery semantics,
+        // even when their result is empty.
+        decoded.result.clear();
+        for outcome in [
+            run::Outcome::QuotaLimited,
+            run::Outcome::Cancelled,
+            run::Outcome::TimedOut,
+            run::Outcome::Lost,
+        ] {
+            decoded.outcome = outcome;
+            let decision = assess_model_result(&gemini, task, &record, &decoded, 1)?;
+            assert!(decision.refusal.is_none() && decision.retry.is_none());
+        }
+        decoded.outcome = run::Outcome::Succeeded;
         let terra = policies
             .effective(&ModelId::parse("codex/gpt-6.1-terra")?, None, 0)
             .policy;

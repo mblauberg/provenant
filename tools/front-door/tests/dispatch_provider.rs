@@ -35,13 +35,19 @@ fn fixture() -> Result {
     if args.get(1).is_some_and(|v| v == "run") {
         let mut prompt = String::new();
         io::stdin().read_to_string(&mut prompt)?;
-        io::stdout().write_all(if prompt.contains("free limit") {
-            include_bytes!("fixtures/providers/opencode/v2.2.0-free-limit.jsonl")
+        let frames = if prompt.contains("free limit") {
+            include_str!("fixtures/providers/opencode/v2.2.0-free-limit.jsonl")
         } else if prompt.contains("model unavailable") {
-            include_bytes!("fixtures/providers/opencode/model-unavailable.jsonl")
+            include_str!("fixtures/providers/opencode/model-unavailable.jsonl")
         } else {
-            include_bytes!("fixtures/providers/opencode/v2.2.0-success.jsonl")
-        })?;
+            include_str!("fixtures/providers/opencode/v2.2.0-success.jsonl")
+        };
+        // Restricted routes must supply the sections requested at launch.
+        let frames = frames.replace(
+            r#""text":"OK""#,
+            r###""text":"## Findings\nOK\n## Evidence\nFixture checked.""###,
+        );
+        io::stdout().write_all(frames.as_bytes())?;
         return Ok(());
     }
     if args.get(1).is_some_and(|v| v == "-p") {
@@ -1802,16 +1808,18 @@ fn persisted_attempt_with(
             &call,
         )?
     } else {
-        store.finish(
-            attempt_id,
-            &attempt,
-            &exit,
-            &provenant_cli::run::Registry {
-                roots: options.host_registry.then_some(&roots),
-                ..Default::default()
-            },
-            &call,
-        )?
+        store
+            .finish(
+                attempt_id,
+                &attempt,
+                &exit,
+                &provenant_cli::run::Registry {
+                    roots: options.host_registry.then_some(&roots),
+                    ..Default::default()
+                },
+                &call,
+            )
+            .map_err(|error| format!("finish persisted provider fixture: {error:?}"))?
     };
     Ok((rig, terminal))
 }
@@ -1999,7 +2007,13 @@ fn agy_denial_result_reaches_terminal_reason() -> Result {
             ..
         }
     ));
-    let lanes = rig.command(&["lanes", "--all", "--json"])?;
+    let lanes = rig.command(&[
+        "lanes",
+        "--id",
+        &terminal.attempt_id.to_string(),
+        "--all",
+        "--json",
+    ])?;
     assert_eq!(code(&lanes), 0, "{:?}", lanes.stderr.bytes);
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
     assert_eq!(
@@ -2034,7 +2048,13 @@ fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
                 ..
             }
         ));
-        let lanes = rig.command(&["lanes", "--all", "--json"])?;
+        let lanes = rig.command(&[
+            "lanes",
+            "--id",
+            &terminal.attempt_id.to_string(),
+            "--all",
+            "--json",
+        ])?;
         assert_eq!(code(&lanes), 0, "{:?}", lanes.stderr.bytes);
         let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
         let reason = lanes["data"]["lanes"][0]["reason"]
@@ -2055,9 +2075,9 @@ fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
             );
         }
     }
-    // A successful answer wins even when stderr contains a denial notice.
-    let success = br#"{"event":"init","conversation_id":"fixture-session","init":{"model":"gemini-3.8-flash"}}
-{"event":"result","result":{"conversation_id":"fixture-session","status":"SUCCESS","response":"Verified.","error":null,"usage":{"input_tokens":0,"output_tokens":0}}}"#;
+    // A valid successful answer wins even when stderr contains a denial notice.
+    let success = br###"{"event":"init","conversation_id":"fixture-session","init":{"model":"gemini-3.8-flash"}}
+{"event":"result","result":{"conversation_id":"fixture-session","status":"SUCCESS","response":"## Findings\nVerified.\n## Evidence\nChecked the claim.","error":null,"usage":{"input_tokens":0,"output_tokens":0}}}"###;
     let (rig, terminal) = persisted_attempt(
         "agy",
         "agy/gemini-3.8-flash",
@@ -2076,7 +2096,10 @@ fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
     let output = rig.command(&["output", &terminal.attempt_id.to_string(), "--json"])?;
     assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
     let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(output["data"]["bytes"]["data"], "Verified.");
+    assert_eq!(
+        output["data"]["bytes"]["data"],
+        "## Findings\nVerified.\n## Evidence\nChecked the claim."
+    );
     Ok(())
 }
 
