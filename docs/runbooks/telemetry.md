@@ -27,6 +27,35 @@ counts, usage, price-table billing and cost by model, with `cost_basis` set to
 null when its usage or price is incomplete. Model prices are matched exactly;
 dated aliases are not inferred.
 
+## Cache-read share
+
+`telemetry stats` prints each model's, account's and source's cache-read share:
+cache reads as a share of all input tokens. It is the figure to raise over
+time, since cache reads are the cheapest input. `--json` carries the same under
+`cache` (`by_model`, `by_account`, `by_provider`, `by_source`) and in every
+`totals.cache`, with `read_share_basis_points`, cache writes and the one-hour
+write part where the provider splits it. Records from a provider that reports
+no cache split are counted as not reported, not as a miss. Compact at task
+boundaries while the cache is warm, so the next task reads rather than rewrites.
+
+## Chair usage
+
+The chair's SessionStart hook records which account serves each session. Launch
+the chair with `CLAUDE_CONFIG_DIR` set to the registered account's directory,
+so attribution is unambiguous:
+
+```sh
+CLAUDE_CONFIG_DIR=~/.claude-work claude
+```
+
+A session on a config directory that is not a registered account, including the
+default `~/.claude`, is reported under the account `unattributed`. Tokens are
+read from the session's transcript when a report runs. `provenant quota usage`
+lists chair and lane tokens per account and project, and `telemetry stats`
+adds a `chair` section for the host's sessions, priced like lanes. Sessions
+whose transcript cannot be read are counted as unread. Chair rows need no
+extra setting; `usage.project_attribution` only adds the project.
+
 ## Offline timeline
 
 `provenant telemetry trace [--out FILE] [--since 604800] [--run ID] [--peers]`
