@@ -48,6 +48,22 @@ store lock until cloning finishes, so GC cannot remove the source mid-clone.
 - Test: `crates/run/src/cargo_seed.rs::tests`; `crates/run/src/target_seed.rs::lane_probe_tests`; `crates/run/src/writer.rs::cargo_setup_tests`; `crates/cli/src/run/provider.rs::configured_grants_cannot_expose_host_indexes`; `crates/run/src/target_seed_gc.rs::tests::active_clone_lock_prevents_collection`; `src/compose_tests.rs::writer_dispatch_uses_lane_cache_and_narrow_provider_state`
 - Owner: `crates/run/src/cargo_seed.rs`, `crates/run/src/target_seed.rs`
 
+## Lane build output
+
+A lane builds with `CARGO_INCREMENTAL=0` and `CARGO_PROFILE_DEV_DEBUG=line-tables-only`
+unless `domains.fabric.lanes` or the lane environment says otherwise. Idle Cargo
+profile directories in lane caches are collected least recently used first until
+their total is within `build_dir_max_bytes` and free space meets `gc.free_floor`.
+A directory is idle only when a non-blocking exclusive `flock` succeeds on all of
+`.cargo-lock`, `.cargo-build-lock` and `.cargo-artifact-lock`; a held lock, or a
+lock that cannot be probed, keeps the directory. Collection holds the host
+admission lock while it removes, so no lane is admitted mid-sweep, and runs when a
+lane settles, when admission finds the disk below the floor, and in `provenant gc`.
+- Why: a lane's shared target filled the workshop disk with incremental sessions
+  and debug objects that no existing collector owned.
+- Test: `crates/run/src/build_dir_gc.rs::tests::a_held_lock_prevents_deletion_whichever_of_the_three_is_held`; `crates/run/src/build_dir_gc.rs::tests::least_recently_used_goes_first_and_the_cap_stops_collection`; `crates/run/src/build_dir_gc.rs::tests::the_free_space_floor_is_honoured_and_no_more_is_removed`; `crates/run/src/build_dir_gc.rs::tests::collection_waits_for_the_admission_lock_and_blocks_claims`; `crates/run/src/dispatch_tests.rs::admission_below_the_floor_reclaims_build_output_and_then_admits`; `crates/cli/src/run/provider.rs::cargo_profile_tests`
+- Owner: `crates/run/src/build_dir_gc.rs`, `crates/cli/src/run/provider.rs`
+
 ## Operation IDs
 
 An operation ID is 1 to 128 ASCII letters, digits, `.`, `_` or `-`, starting

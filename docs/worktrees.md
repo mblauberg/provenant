@@ -188,6 +188,15 @@ It also reclaims abandoned build staging trees once no seed build is active,
 and removes incomplete generations. Only one host seed build runs at a time.
 Generations created before the completion marker was introduced are treated
 as incomplete; build a fresh generation after upgrading.
+
+Lane targets are collected separately. `provenant gc` also removes idle Cargo
+profile directories (those whose `.cargo-lock`, `.cargo-build-lock` and
+`.cargo-artifact-lock` can all be locked) from lane caches, least recently used
+first, until their total is within `build_dir_max_bytes` and free space meets the
+floor. It reports the bytes reclaimed and the lane build output that remains.
+A lane settling and an admission below the floor trigger the same collection.
+Lanes also build with `CARGO_INCREMENTAL=0` and `CARGO_PROFILE_DEV_DEBUG=line-tables-only`.
+See the [configuration runbook](runbooks/configuration.md#lane-build-output).
 GC skips the store while a lane is cloning. Zero for either limit removes all
 generations at the next GC.
 

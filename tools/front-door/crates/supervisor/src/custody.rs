@@ -44,7 +44,7 @@ pub enum CustodyError {
     #[error("startup spacing cannot be judged: host clock or boot identity unreadable")]
     AdmissionClock,
     #[error(
-        "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds and domains.fabric.lanes.cargo_build_jobs"
+        "invalid host build settings: check max_concurrent_builds, cargo_build_jobs and cargo_debug in domains.fabric.lanes"
     )]
     AdmissionBuildSettings,
     #[error("guardian process identity unavailable; retry when process observation is available")]

@@ -802,7 +802,10 @@ fn set_cargo_profile(
     settings: &provenant_config::LaneBuildSettings,
 ) {
     for (name, value) in [
-        ("CARGO_INCREMENTAL", if settings.incremental() { "1" } else { "0" }),
+        (
+            "CARGO_INCREMENTAL",
+            if settings.incremental() { "1" } else { "0" },
+        ),
         ("CARGO_PROFILE_DEV_DEBUG", settings.debug_level()),
     ] {
         if !env.iter().any(|(existing, _)| existing == name) {
@@ -842,7 +845,10 @@ mod cargo_profile_tests {
             },
         );
         assert_eq!(value(&env, "CARGO_INCREMENTAL").as_deref(), Some("1"));
-        assert_eq!(value(&env, "CARGO_PROFILE_DEV_DEBUG").as_deref(), Some("full"));
+        assert_eq!(
+            value(&env, "CARGO_PROFILE_DEV_DEBUG").as_deref(),
+            Some("full")
+        );
     }
     #[test]
     fn supplied_environment_takes_precedence() {

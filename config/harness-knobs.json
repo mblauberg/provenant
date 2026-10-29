@@ -25,7 +25,10 @@
     "path": "domains.fabric.lanes",
     "settings": {
       "max_concurrent_builds": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "1 at 16 GiB or less, otherwise 2", "effect": "Maximum active worktree-write lanes across the host."},
-      "cargo_build_jobs": {"type": "int", "min": 1, "max": 1024, "auto_value": -1, "default": "Half the available cores, at least 1", "effect": "Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence."}
+      "cargo_build_jobs": {"type": "int", "min": 1, "max": 1024, "auto_value": -1, "default": "Half the available cores, at least 1", "effect": "Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence."},
+      "cargo_incremental": {"type": "bool", "allowed": "true or false", "default": "false", "effect": "CARGO_INCREMENTAL for lanes. Incremental sessions grow a lane's target without bound and are rarely reused; a value already in the lane environment takes precedence."},
+      "cargo_debug": {"type": "string", "allowed": "none, line-directives-only, line-tables-only, limited, full, 0, 1, 2, true or false", "default": "line-tables-only", "effect": "CARGO_PROFILE_DEV_DEBUG for lanes. Line tables keep backtraces at a fraction of the size of full debug information; a value already in the lane environment takes precedence."},
+      "build_dir_max_bytes": {"type": "int", "allowed": "bytes, 0 or more", "default": "21474836480 (20 GiB)", "effect": "Cap on the total size of idle Cargo profile directories in lane caches. Collection removes the least recently used idle directory first, after a lane settles, when admission finds the disk below gc.free_floor, and in `provenant gc`; a directory whose Cargo locks are held is never removed."}
     }
   },
   "knobs": {

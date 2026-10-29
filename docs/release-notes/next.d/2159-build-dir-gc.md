@@ -1,0 +1,5 @@
+## Behaviour changes
+
+- Lanes now build with `CARGO_INCREMENTAL=0` and `CARGO_PROFILE_DEV_DEBUG=line-tables-only`. A lane's target no longer accumulates incremental sessions and carries line tables instead of full debug information. Set `cargo_incremental` and `cargo_debug` in `[domains.fabric.lanes]` to restore either; a value already in the lane environment still wins.
+- Fabric collects idle Cargo profile directories in lane caches, least recently used first, until their total is within `domains.fabric.lanes.build_dir_max_bytes` (20 GiB by default) and free space is at least `gc.free_floor`. A directory is idle only when it can take an exclusive `flock` on all of Cargo's `.cargo-lock`, `.cargo-build-lock` and `.cargo-artifact-lock`; a directory with any lock held is never removed. Collection runs when a lane settles, when admission finds free space below the floor, and in `provenant gc`, and holds the host admission lock while it removes.
+- `provenant gc` reports the lane build directories removed or reclaimable, the bytes reclaimed and the lane build output that remains.

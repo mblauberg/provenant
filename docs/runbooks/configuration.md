@@ -78,6 +78,56 @@ An existing `CARGO_BUILD_JOBS` in the submitting environment takes precedence;
 a brief can also set it inside the lane. Pressure and slots are checked before
 lane admission, not continuously during a build.
 
+### Lane build output
+
+Lane builds are set up to stay small. Every lane gets `CARGO_INCREMENTAL=0`
+and `CARGO_PROFILE_DEV_DEBUG=line-tables-only`, so a lane's target holds no
+incremental sessions and carries line tables instead of full debug information.
+On `provenant-core` this measured about 65 MB against 76 to 85 MB with
+incremental compilation on, and the size did not grow on rebuild. The repository's
+`Cargo.toml` is unchanged. Override either default in `[domains.fabric.lanes]`:
+
+```toml
+[domains.fabric.lanes]
+cargo_incremental = true       # CARGO_INCREMENTAL=1
+cargo_debug = "full"           # CARGO_PROFILE_DEV_DEBUG
+build_dir_max_bytes = 21474836480
+```
+
+`cargo_debug` takes any Cargo `debug` level: `none`, `line-directives-only`,
+`line-tables-only`, `limited`, `full`, `0`, `1`, `2`, `true` or `false`. A
+value already in the lane environment takes precedence over both settings.
+
+Fabric also collects idle build output. A Cargo profile directory in a lane
+cache (`target/debug`, `target/<triple>/release`, or the same under
+`target-lint/`) is idle when a non-blocking exclusive `flock` succeeds on all of
+its `.cargo-lock`, `.cargo-build-lock` and `.cargo-artifact-lock`. Cargo holds
+all three while it builds, so a directory with any of them held is never
+removed. Idle directories go least recently used first, judged by the newest
+modification time below each, until the total of all profile directories is
+within `build_dir_max_bytes` (20 GiB by default) and free space on the cache
+volume is at least `gc.free_floor`. The lock files are removed last. Space
+outside profile directories (`target/doc`, Cargo homes, other lane files) is
+not counted or collected here.
+
+Collection runs on three events, and holds the host admission lock while it
+removes, so no lane is admitted mid-sweep:
+
+- when a lane settles;
+- when lane admission finds free space below `gc.free_floor`, at most about
+  once a minute while the lane waits;
+- in `provenant gc`, including the scheduled sweep, `--pressure` and
+  `--dry-run`, which previews without taking the lock.
+
+`provenant gc` reports the directories removed or reclaimable, the bytes
+reclaimed, how many bytes of lane build output remain and how many directories
+were busy. The JSON form has the same fields under `build_dirs`
+(`removed`, `bytes`, `cache_bytes`, `busy`, `errors`); the summary form has
+`build_dirs_removed`, `build_dir_bytes_reclaimed` and `build_dir_bytes`.
+A directory that Cargo is building in is skipped and counted as busy; a later
+event collects it once Cargo has finished. A collection skipped because another
+sweep or an admission holds the host ledger is reported as an alert.
+
 ## Knob registry
 
 `config/harness-knobs.json` owns the workflow knob registry and presets.

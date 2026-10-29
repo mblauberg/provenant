@@ -12,6 +12,9 @@ Set these in `[domains.fabric.lanes]` in the host configuration. Omit a key for 
 |---|---|---|
 | `max_concurrent_builds` | 1 at 16 GiB or less, otherwise 2 | Maximum active worktree-write lanes across the host. (1 to 64 or -1 for auto). |
 | `cargo_build_jobs` | Half the available cores, at least 1 | Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence. (1 to 1024 or -1 for auto). |
+| `cargo_incremental` | false | CARGO_INCREMENTAL for lanes. Incremental sessions grow a lane's target without bound and are rarely reused; a value already in the lane environment takes precedence. (true or false). |
+| `cargo_debug` | line-tables-only | CARGO_PROFILE_DEV_DEBUG for lanes. Line tables keep backtraces at a fraction of the size of full debug information; a value already in the lane environment takes precedence. (none, line-directives-only, line-tables-only, limited, full, 0, 1, 2, true or false). |
+| `build_dir_max_bytes` | 21474836480 (20 GiB) | Cap on the total size of idle Cargo profile directories in lane caches. Collection removes the least recently used idle directory first, after a lane settles, when admission finds the disk below gc.free_floor, and in `provenant gc`; a directory whose Cargo locks are held is never removed. (bytes, 0 or more). |
 
 ## Provider updates
 

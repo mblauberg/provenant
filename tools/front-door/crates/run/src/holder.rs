@@ -204,6 +204,9 @@ impl Resources for LaneResources<'_> {
     fn disk(&self, attempt: &Directory) -> std::io::Result<u64> {
         self.resources.lane_disk(attempt, self.context)
     }
+    fn reclaim_disk(&self, attempt: &Directory) -> bool {
+        self.resources.reclaim_lane_disk(attempt, self.context)
+    }
 }
 fn custody_error(error: RunError) -> CustodyError {
     match error {
@@ -325,7 +328,12 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
         {
             crate::writer::settle_launch_staging(attempt).map_err(custody_error)?;
         }
-        release_and_reclaim(attempt, exit.scope, recovery)
+        release_and_reclaim(attempt, exit.scope, recovery)?;
+        // The lane's builds have ended: trim lane build output to its cap and
+        // the free-space floor. Best effort; settlement never waits on it.
+        let (state, _) = context.disk_roots();
+        crate::build_dir_gc::reclaim(state, &context.roots.home);
+        Ok(())
     }
 }
 

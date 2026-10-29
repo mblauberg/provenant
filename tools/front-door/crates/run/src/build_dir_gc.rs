@@ -610,6 +610,46 @@ mod tests {
     }
 
     #[test]
+    fn events_use_the_configured_cap_and_floor() {
+        let state = tempfile::tempdir().unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let fixture = Fixture::new();
+        let old = fixture.profile('a', "debug", 8192, 2000);
+        let new = fixture.profile('b', "debug", 8192, 1000);
+        let size =
+            sweep(fixture.home.path(), limits(u64::MAX, 0), true, &mut plenty).cache_bytes / 2;
+        let config = state.path().join("config.toml");
+        // Under the cap and with a floor any disk meets: nothing to do.
+        fs::write(
+            &config,
+            format!(
+                "[gc]\nfree_floor='1B'\n[domains.fabric.lanes]\nbuild_dir_max_bytes={}\n",
+                size * 2
+            ),
+        )
+        .unwrap();
+        let report = reclaim(state.path(), fixture.home.path()).unwrap();
+        assert!(report.removed.is_empty() && old.exists() && new.exists());
+        assert_eq!(report.cache_bytes, size * 2);
+        // Over the cap by one byte: the least recently used goes.
+        fs::write(
+            &config,
+            format!(
+                "[gc]\nfree_floor='1B'\n[domains.fabric.lanes]\nbuild_dir_max_bytes={}\n",
+                size * 2 - 1
+            ),
+        )
+        .unwrap();
+        let report = reclaim(state.path(), fixture.home.path()).unwrap();
+        assert_eq!(report.removed, vec![old.clone()]);
+        assert!(!old.exists() && new.exists());
+        // A floor no volume can meet empties every idle directory.
+        fs::write(&config, "[gc]\nfree_floor='900000000000000B'\n").unwrap();
+        let report = reclaim(state.path(), fixture.home.path()).unwrap();
+        assert_eq!(report.removed, vec![new.clone()]);
+    }
+
+    #[test]
     fn collection_waits_for_the_admission_lock_and_blocks_claims() {
         let state = tempfile::tempdir().unwrap();
         let fixture = Fixture::new();
