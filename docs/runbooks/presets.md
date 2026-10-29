@@ -3,20 +3,23 @@
 Owner: Fabric maintainers
 Anchor: [Fabric specification](../specs/fabric.md#pipeline-presets)
 
-Use `scout-swarm` to map a problem and `implement-with-lens` to implement a
-bounded slice with a review lens. Roles choose routing tiers, and the chair
+Use `scout-swarm` to map a problem and `generator-evaluator` to implement a
+bounded slice with evaluating lenses. Roles choose routing tiers, and the chair
 chooses assignments, scopes, worktrees and acceptance evidence. A junior scout
 swarm remains read-only; it can share read roots without Git writer contention.
 
-Four presets are bundled: `scout-swarm`, `implement-with-lens`,
-`review-council` and `big-batch`, alongside the four stage shapes `single`,
-`chain`, `fan-out` and `fan-out-synthesise`.
+Nine presets are bundled: `single`, `chain`, `fan-out`,
+`fan-out-synthesise`, `scout-swarm`, `generator-evaluator`, `review-council`,
+`big-batch` and `scope-then-run`. All lower through the same stage path.
+`preset list` shows each one's level, summary and cost, and
+`preset explain NAME` shows when to use it, its cost and its typed parameters.
 
 Inspect the resolved defaults and explain the exact graph before a run:
 
 ```sh
 provenant preset list
 provenant preset show scout-swarm
+provenant preset explain scout-swarm
 provenant run --preset scout-swarm --prompt-file brief.md --explain
 provenant run --preset scout-swarm --prompt-file brief.md \
   --read-root /absolute/path/to/another-worktree --concurrency 4 --wait 30m
@@ -32,7 +35,7 @@ you intend a separate run.
 Run one implementation slice in an existing registered worktree:
 
 ```sh
-provenant run --preset implement-with-lens --prompt-file slice.md \
+provenant run --preset generator-evaluator --prompt-file slice.md \
   --worktree /absolute/path/to/writer \
   --set 'parameters.scope=["src"]' --wait 30m
 ```
@@ -43,8 +46,9 @@ all role briefs and defaults.
 | Preset | Main parameters | Default work |
 | --- | --- | --- |
 | `scout-swarm` | `width = 4`, `read_roots = []` | Junior scouts, then senior synthesis |
-| `implement-with-lens` | `worktree`, `scope = ["."]`, `subject.commit = "HEAD"`, `base`, `spec`, `lenses`, `delivery = "none"` | Senior writer, then the lens list over the commit it wrote |
-| `review-council` | `subject.commit = "HEAD"`, `worktree`, `base`, `spec`, `lenses`, `risk`, `review_shape`, `risk_tags` | One lens role fanned out over `lenses`, then senior synthesis |
+| `generator-evaluator` | `worktree`, `scope = ["."]`, `subject.commit = "HEAD"`, `base`, `spec`, `lenses`, `delivery = "none"` | Senior writer, then the lens list over the commit it wrote |
+| `review-council` | `subject.commit = "HEAD"`, `worktree`, `base`, `spec`, `lenses`, `risk_tier`, `review_shape`, `risk_tags` | One lens role fanned out over `lenses`, then senior synthesis |
+| `scope-then-run` | `width = 3`, `worktree`, `write_scope = ["."]`, `base`, `spec`, `delivery = "none"` | Scouts, a senior scoping stage, a verdict gate (a blocked scope launches no writer), then `generator-evaluator` |
 | `big-batch` | `lanes`, `batch_worktree`, `base`, `spec`, `integration_branch = "batch/graph"`, `width = 4`, `read_roots = []` | Scout, one writer lane per `lanes` entry, council, principal refactor, two-round repair and review |
 
 Write list parameters in a TOML file and pass `--params-file lanes.toml`. The
@@ -125,10 +129,18 @@ provenant run --preset fan-out --prompt-file brief.md \
   --set 'parameters.width=3' --set 'parameters.route="junior"' --explain
 ```
 
+Address a stage by its id instead of a path into its internals: on a stage
+that runs a preset, `--set 'council.risk_tags=["security"]'` sets that
+preset's parameter; on a role stage, `--set 'task.tier="junior"'` sets the
+entry field. A stage without an `id` is `s1`, `s2` and so on by position.
+Parameters can be typed tables (`type`, `default`, `min`, `max`, `enum`,
+`doc`); `preset explain` prints them. A `[pattern]` table (`level`, `summary`,
+`citations`, `cost`, `select_when`, `tags`) says when a preset is worth using.
+
 Keep TOML string quotes inside shell quotes. Expansion refuses unknown fields,
 cycles, more than eight levels and more than 512 nodes including children.
-The original `single`, `chain`, `fan-out` and `fan-out-synthesise` structures
-remain available; every slot, including synthesis, can contain a preset.
+`single`, `chain`, `fan-out` and `fan-out-synthesise` are ordinary stage
+presets, so any stage of your own can run them.
 
 ## Review and source subjects
 
@@ -136,7 +148,7 @@ remain available; every slot, including synthesis, can contain a preset.
 against the spec, design fit and reuse, simplicity, conventions and
 readability, and tests. `security-privacy` and `concurrency-data-errors` join
 when `risk_tags` names `security` or `concurrency`, and `adversarial` joins
-when it names `terminal`. `implement-with-lens` takes the same list, with
+when it names `terminal`. `generator-evaluator` takes the same list, with
 correctness against the spec and simplicity by default. Every lens prompt
 carries the same context. The reviewer has read access to the whole
 repository, treats the diff stat and slices as navigation aids rather than the
@@ -147,7 +159,7 @@ subject node states both. Prompts live in
 
 The routing review shapes are canonical for who reviews. A lens whose `tier`
 is empty takes its pool from the shape that `routing.review.select_shape`
-picks for `risk` (or the `review_shape` override): `quick` runs one junior
+picks for `risk_tier` (or the `review_shape` override): `quick` runs one junior
 reviewer, `standard` two, and `deep` up to six with its named lenses. Conditional
 lenses add to that count. Set a lens `tier` to override the shape for that lens.
 `--explain` prints the selected shape. Synthesis reconciles the evidence and

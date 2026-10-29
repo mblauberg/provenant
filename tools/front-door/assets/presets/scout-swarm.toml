@@ -4,9 +4,17 @@ stages = [
 ]
 exports = [{ node = "synthesis", outputs = ["result", "findings"] }]
 
+[pattern]
+level = "recommended"
+summary = "Junior read-only scouts map the problem in parallel; a senior synthesis reconciles their evidence."
+citations = ["Anthropic, how we built our multi-agent research system"]
+cost = "width junior attempts + 1 senior synthesis"
+select_when = "The scope of a task is unclear and a wide read-only survey is cheaper than guessing."
+tags = ["research", "read-only"]
+
 [parameters]
-width = 4
-read_roots = []
+width = { type = "integer", default = 4, min = 1, max = 32, doc = "Number of parallel scouts." }
+read_roots = { type = "list", default = [], doc = "Extra read roots, for example another worktree." }
 
 [roles.scout]
 tier = "junior"

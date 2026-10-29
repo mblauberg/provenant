@@ -7,18 +7,22 @@ stages = [
 ]
 exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict", "commit"] }]
 
+[pattern]
+level = "default"
+summary = "Independent lenses review one immutable subject; a senior synthesis reconciles them without voting."
+citations = ["Google engineering practices, code review", "Claude Code review and Bugbot vendor reports (vendor-reported)"]
+cost = "1 framing attempt + one attempt per selected lens + 1 synthesis"
+select_when = "A change needs review before it lands; depth follows the routing review shape."
+tags = ["review"]
+
 [parameters]
-subject = { type = "commit", commit = "HEAD" }
-worktree = ""
-# The diff reference the change is measured from, for example origin/main.
-base = ""
-# The spec the change answers: an issue number such as #2187 or a file path.
-spec = ""
-# Selects review depth from routing review shapes (quick, standard, deep).
-review_shape = ""
-risk = ""
-# Tags that trigger conditional lenses: security, concurrency, terminal.
-risk_tags = []
+subject = { type = "table", default = { type = "commit", commit = "HEAD" }, doc = "Immutable review subject: a commit, a node or the integration head." }
+worktree = { type = "string", default = "", doc = "Worktree the reviewers may read." }
+base = { type = "string", default = "", doc = "Diff reference the change is measured from, for example origin/main." }
+spec = { type = "string", default = "", doc = "Issue number or file the change answers." }
+review_shape = { type = "string", default = "", doc = "Review depth override from routing review shapes (quick, standard, deep)." }
+risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
+risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses: security, concurrency, terminal." }
 # Lens tiers left empty come from the routing review shape. Set a tier to override.
 lenses = [
   { name = "correctness-spec", tier = "", prompt_file = "code-review/lenses/correctness-spec", distinct_from = "writer", when = "" },

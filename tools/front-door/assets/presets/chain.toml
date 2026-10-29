@@ -1,0 +1,11 @@
+stages = [{ id = "first" }, { id = "second" }]
+
+[pattern]
+level = "recommended"
+summary = "Two read-only tasks in sequence; the second receives the first result."
+cost = "2 attempts"
+select_when = "A second pass must build on the first."
+tags = ["primitive"]
+
+[parameters]
+route = { type = "string", default = "senior", doc = "Routing pool for both tasks." }
