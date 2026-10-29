@@ -30,6 +30,17 @@ pub enum RootError {
     #[error("invalid state root: {0}")]
     State(#[from] provenant_core::RootError),
 }
+impl RootError {
+    /// Stable machine-readable category for failures at the process boundary.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Checkout | Self::State(_) => "INVALID",
+            Self::Io(_) | Self::Uninstalled | Self::Home => "ROOT",
+            Self::SessionProjectMissing => "SESSION_PROJECT_MISSING",
+            Self::SessionProjectMismatch { .. } => "SESSION_PROJECT_MISMATCH",
+        }
+    }
+}
 pub fn product_root() -> Result<PathBuf, RootError> {
     let executable = fs::canonicalize(std::env::current_exe()?)?;
     let parent = executable.parent().ok_or(RootError::Uninstalled)?;
@@ -270,6 +281,27 @@ fn home() -> Result<PathBuf, RootError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn root_errors_have_stable_codes() {
+        use crate::roots::RootError;
+
+        assert_eq!(RootError::Uninstalled.code(), "ROOT");
+        assert_eq!(RootError::Home.code(), "ROOT");
+        assert_eq!(RootError::Checkout.code(), "INVALID");
+        assert_eq!(
+            RootError::SessionProjectMissing.code(),
+            "SESSION_PROJECT_MISSING"
+        );
+        assert_eq!(
+            RootError::SessionProjectMismatch {
+                cwd: "/cwd".into(),
+                selected: "/project".into(),
+            }
+            .code(),
+            "SESSION_PROJECT_MISMATCH"
+        );
+    }
+
     #[test]
     fn resolve_directory_workspace_uses_the_current_directory() {
         let globals = provenant_cli::Globals::default();
