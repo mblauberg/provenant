@@ -6779,6 +6779,71 @@ fn cache_kpi_rows(
     }).collect();
     json!({"scope": "project terminal attempts", "routes": routes, "lanes": lanes})
 }
+
+/// Attempts still queued or running in the project, or in one run. The window
+/// cannot count them: they have no finish time yet.
+fn unfinished_attempts(
+    store: Option<&run::RunStore>,
+    run_id: Option<RunId>,
+    call: &run::Request<'_>,
+) -> Result<u64, Fail> {
+    let Some(store) = store else {
+        return Ok(0);
+    };
+    let mut count = 0;
+    let mut after = 0;
+    loop {
+        let page = store.lanes(
+            &run::LaneQuery {
+                targets: run_id
+                    .map(|run| {
+                        vec![run::LaneTarget {
+                            run,
+                            task: None,
+                            attempt: None,
+                        }]
+                    })
+                    .unwrap_or_default(),
+                all: false,
+                limit: 100,
+                after,
+                newest_first: false,
+                owner: None,
+                unseen_after: None,
+            },
+            call,
+        )?;
+        // A run selection also returns its terminal lanes, so filter on state.
+        count += page
+            .lanes
+            .iter()
+            .filter(|lane| !matches!(lane.state, run::AttemptState::Terminal { .. }))
+            .count() as u64;
+        match page.next {
+            Some(next) => after = next,
+            None => return Ok(count),
+        }
+    }
+}
+
+/// Names the project the figures cover, and what the window leaves out.
+fn stats_scope_line(project: provenant_core::ProjectId, unfinished: u64) -> String {
+    format!(
+        "scope: project {project}, finished attempts only ({unfinished} queued or running not counted); other projects are excluded, so run stats from their checkout\n"
+    )
+}
+
+/// Reasoning tokens get a line only where a provider reported them.
+fn reasoning_line(totals: &provenant_telemetry::Totals) -> Option<String> {
+    let zero = provenant_telemetry::TokenTotal::default();
+    (totals.usage.reasoning.known > 0).then(|| {
+        format!(
+            "reasoning tokens: {}\n",
+            grouped_token_count(&totals.usage.reasoning, &zero, &zero)
+        )
+    })
+}
+
 fn stats_inner(
     command: Stats,
     edge: &Edge<'_>,
@@ -6875,6 +6940,7 @@ fn stats_inner(
         })
         .transpose()?
         .unwrap_or_default();
+    let unfinished = unfinished_attempts(store.as_ref(), selected_run, &call)?;
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
     let selected: Vec<_> = facts
@@ -7005,11 +7071,15 @@ fn stats_inner(
         provenant_telemetry::stats_with_chair(facts, chairs, &prices, window)
     }
     .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
-    let mut human = stats_summary(&report);
+    let mut human = stats_scope_line(context.project_id, unfinished);
+    human.push_str(&stats_summary(&report));
+    if let Some(line) = reasoning_line(&report.totals) {
+        human.push_str(&line);
+    }
     if let Some(groups) = &report.context_groups {
         human.push_str(&format!("by {by_name}: {} groups\n", groups.len()));
         for group in groups {
-            let label = group.value.as_deref().unwrap_or("unknown");
+            let label = group.value.as_deref().unwrap_or("unattributed");
             let input = grouped_token_count(
                 &group.totals.usage.uncached_input,
                 &group.totals.usage.cache_read,
@@ -7093,6 +7163,7 @@ fn stats_inner(
         ));
     }
     data["partial_signals"] = json!(partial);
+    data["unfinished_attempts_excluded"] = json!(unfinished);
     if let Some(pipeline) = pipeline {
         human.push_str(&format!(
             "post-merge outcomes: CI {}; {} unattributed rows; {} suggestions\n",
@@ -9187,6 +9258,44 @@ mod tests {
         );
         let text = report(usage(None));
         assert!(!text.contains("cache read"), "{text}");
+    }
+
+    #[test]
+    fn stats_text_names_its_scope_and_reports_reasoning_only_when_present() {
+        let project = provenant_core::ProjectId::from_bytes([1; 16]);
+        let scope = stats_scope_line(project, 2);
+        assert!(
+            scope.starts_with(&format!(
+                "scope: project {project}, finished attempts only (2 queued or running not counted)"
+            )),
+            "{scope}"
+        );
+        assert!(scope.contains("other projects are excluded"), "{scope}");
+        let mut totals = provenant_telemetry::Totals {
+            attempts: 1,
+            usage: Default::default(),
+            cache: Default::default(),
+            cost: provenant_telemetry::CostTotal {
+                cost_basis: "api_equivalent_estimate",
+                subscription_attempts: 0,
+                complete: None,
+                known_lower_bound: None,
+                priced_attempts: 0,
+                missing_attempts: 1,
+            },
+            outcomes: Default::default(),
+        };
+        assert_eq!(reasoning_line(&totals), None);
+        totals.usage.reasoning.known = 42;
+        assert_eq!(
+            reasoning_line(&totals).as_deref(),
+            Some("reasoning tokens: 42\n")
+        );
+        totals.usage.reasoning.missing = 3;
+        assert_eq!(
+            reasoning_line(&totals).as_deref(),
+            Some("reasoning tokens: >=42 (3 unknown)\n")
+        );
     }
 
     #[test]

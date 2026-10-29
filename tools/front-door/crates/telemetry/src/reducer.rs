@@ -1017,6 +1017,8 @@ pub struct ChairStats {
     pub sessions: u64,
     /// Sessions with no token counts, by reason.
     pub unread: BTreeMap<crate::Unread, u64>,
+    /// False while any session is unread: its tokens are missing from every total.
+    pub complete: bool,
     pub usage: Categories<TokenTotal>,
     pub cache: CacheSummary,
     pub cost: CostTotal,
@@ -1098,14 +1100,21 @@ fn chair_stats(
         });
     }
     let totals = total.finish()?;
+    // An unread session's cost is unknown, so the host total is only a lower bound.
+    let complete = unread.is_empty();
+    let mut cost = totals.cost;
+    if !complete {
+        cost.complete = None;
+    }
     Ok(Some(Chair {
         report: ChairStats {
             scope: "host_chair_sessions",
             sessions: sessions.len() as u64,
             unread,
+            complete,
             usage: totals.usage,
             cache: totals.cache,
-            cost: totals.cost,
+            cost,
             groups: out,
         },
         cache,
