@@ -624,13 +624,15 @@ fn pause_action(
     checkpoint: &GraphCheckpoint,
     plan: &PlannedGraph,
     budget: &crate::config::GraphBudget,
-) -> Result<PauseAction, String> {
+) -> Result<PauseAction, (&'static str, String)> {
     const HELP: &str = "pause answer must choose resume or cancel, or reply with {\"decision\":\"extend\",\"extensions\":[\"budget.KEY=VALUE\"]}";
     let reply = match (answer.option.as_deref(), answer.text.as_deref()) {
         (Some("resume"), None) => PauseReply::Resume {},
         (Some("cancel"), None) => PauseReply::Cancel {},
-        (None, Some(text)) => serde_json::from_str(text).map_err(|_| HELP.to_owned())?,
-        _ => return Err(HELP.into()),
+        (None, Some(text)) => {
+            serde_json::from_str(text).map_err(|_| ("invalid_pause_answer", HELP.to_owned()))?
+        }
+        _ => return Err(("invalid_pause_answer", HELP.into())),
     };
     let extensions = match reply {
         PauseReply::Cancel {} => return Ok(PauseAction::Cancel),
@@ -640,17 +642,21 @@ fn pause_action(
     let mut trial = budget.clone();
     for extension in &extensions {
         if !extension.starts_with("budget.") {
-            return Err(format!(
-                "{}: a pause answer extends budgets only; use graph resume for other extensions",
-                bounded(extension, 128)
+            return Err((
+                "invalid_pause_answer",
+                format!(
+                    "{}: a pause answer extends budgets only; use graph resume for other extensions",
+                    bounded(extension, 128)
+                ),
             ));
         }
-        apply_extension(&mut trial, extension, false)?;
+        apply_extension(&mut trial, extension, false)
+            .map_err(|error| (error.code(), error.to_string()))?;
     }
     let mut all = checkpoint.extensions.clone();
     all.extend(extensions.iter().cloned());
     if let Some(reason) = envelope::reason(document, &checkpoint.expansions, &all, plan) {
-        return Err(reason);
+        return Err(("checkpoint_too_large", reason));
     }
     Ok(PauseAction::Resume(extensions))
 }
@@ -706,7 +712,7 @@ pub(super) fn pause<R: AttemptOwner, J: GraphJournal>(
     };
     let mut answer = answered(reply);
     let action = match &answer.rejected {
-        Some(reason) => Err(reason.clone()),
+        Some(reason) => Err(("answer_too_large", reason.clone())),
         None => pause_action(&answer, document, checkpoint, plan, budget),
     };
     let applied = match action {
@@ -724,10 +730,8 @@ pub(super) fn pause<R: AttemptOwner, J: GraphJournal>(
             checkpoint.pause_code = None;
             true
         }
-        Err(reason) => {
-            answer
-                .rejection_code
-                .get_or_insert_with(|| "invalid_pause_answer".into());
+        Err((code, reason)) => {
+            answer.rejection_code = Some(code.into());
             answer.rejected = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
             false
         }
