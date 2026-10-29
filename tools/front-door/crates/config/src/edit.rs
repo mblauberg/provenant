@@ -176,6 +176,10 @@ where
                 PublishMode::Replace,
             )?
             .require_durable()?;
+        provenant_os::changes::hint(
+            roots.state.as_path(),
+            &[provenant_core::changes::Scope::Configuration],
+        );
         if !changes.is_empty() {
             let now = provenant_os::clock::SystemClock::new()
                 .wall_now()

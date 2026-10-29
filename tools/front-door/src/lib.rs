@@ -1331,6 +1331,7 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
             | "workflow session diff"
             | "chair summary show"
             | "chair summary diff"
+            | "console changes"
             | "console projects"
             | "console sessions"
             | "console overview"

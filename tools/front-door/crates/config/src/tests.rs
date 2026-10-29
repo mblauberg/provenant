@@ -1260,6 +1260,50 @@ fn knob_edit(roots: &Roots, edit: KnobEdit) -> Result<ResolvedConfig, ConfigErro
 }
 
 #[test]
+fn config_edit_bumps_change_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let roots = state_roots(temp.path());
+    knob_edit(
+        &roots,
+        KnobEdit::Set {
+            name: "lanes.max_concurrency",
+            value: "2",
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        provenant_os::changes::read(temp.path())
+            .unwrap()
+            .configuration,
+        Some(1)
+    );
+    knob_edit(&roots, KnobEdit::Unset("lanes.max_concurrency")).unwrap();
+    assert_eq!(
+        provenant_os::changes::read(temp.path())
+            .unwrap()
+            .configuration,
+        Some(2)
+    );
+}
+
+#[test]
+fn config_edit_commits_when_the_change_signal_cannot_publish() {
+    let temp = tempfile::tempdir().unwrap();
+    let roots = state_roots(temp.path());
+    // A directory at the signal name cannot be published. The write still succeeds.
+    std::fs::create_dir(temp.path().join(provenant_core::changes::FILE_NAME)).unwrap();
+    knob_edit(
+        &roots,
+        KnobEdit::Set {
+            name: "lanes.max_concurrency",
+            value: "2",
+        },
+    )
+    .unwrap();
+    assert!(temp.path().join("config.toml").exists());
+}
+
+#[test]
 fn host_lane_build_settings_read_and_validate() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(

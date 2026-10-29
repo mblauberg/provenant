@@ -508,6 +508,13 @@ impl SessionStore {
             let _ = dir.unlink(OsStr::new(&revision_file(old.revision)));
         }
         remove_orphans(dir, &manifest);
+        // Only a chair-bound store writes the chair summary; other sessions do not signal Chair.
+        if self.chair.is_some() {
+            provenant_os::changes::hint(
+                self.root.as_path(),
+                &[provenant_core::changes::Scope::Chair],
+            );
+        }
         Ok(Saved {
             revision: current.revision,
             parent: current.parent,
@@ -1624,6 +1631,25 @@ mod tests {
         assert_eq!(selected.discovery().unwrap().unwrap(), discovery);
     }
     const CHAIR_TEXT: &str = "---\nprovenant_summary:\n  schema_version: 1\n  revision: 1\n  updated_at: \"2026-10-28T03:00:00Z\"\n  now: \"First\"\n  next: \"Next\"\n  needs_you: []\n  risk: \"None\"\n---\nBody\n";
+    #[test]
+    fn summary_commit_signals_chair() {
+        let (_tmp, root, project) = setup();
+        let chair = chair_store(&root, project);
+        save(&chair, CHAIR_TEXT.as_bytes()).unwrap();
+        let before = provenant_os::changes::read(root.as_path()).unwrap();
+        update_at(&chair, change("Next"), 1, "signal", 1).unwrap();
+        let after = provenant_os::changes::read(root.as_path()).unwrap();
+        assert!(after.chair > before.chair);
+    }
+    #[test]
+    fn session_save_without_chair_identity_does_not_signal_chair() {
+        let (_tmp, root, project) = setup();
+        let worker = store(&root, project, "worker");
+        saved(&worker, "notes\n");
+        saved(&worker, "more notes\n");
+        let after = provenant_os::changes::read(root.as_path()).unwrap();
+        assert_eq!(after.chair, None);
+    }
     fn chair_store(root: &StateRoot, project: ProjectId) -> SessionStore {
         use provenant_core::{ActorId, HostId};
         store(root, project, "chair")

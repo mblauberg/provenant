@@ -88,6 +88,7 @@ impl Store {
         }
         before(deadline)?;
         tx.commit()?;
+        store.signal_changes();
         Ok(marked)
     }
 
@@ -161,6 +162,7 @@ impl Store {
         }
         before(deadline)?;
         tx.commit()?;
+        store.signal_changes();
         Ok(offered)
     }
 
