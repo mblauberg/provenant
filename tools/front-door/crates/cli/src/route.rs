@@ -1441,7 +1441,10 @@ fn instant(value: &str, now: i64) -> Option<i64> {
     if let Ok(timestamp) = value.parse::<jiff::Timestamp>() {
         return Some(timestamp.as_second());
     }
-    let seconds = i64::try_from(provenant_providers::duration::suffix_seconds(value)?).ok()?;
+    let seconds = i64::try_from(provenant_providers::duration::suffix_seconds(
+        value.strip_prefix('+').unwrap_or(value),
+    )?)
+    .ok()?;
     (seconds > 0).then(|| now.checked_add(seconds)).flatten()
 }
 
@@ -2123,6 +2126,9 @@ mod route_tests {
         use super::{instant, parse_window};
 
         assert_eq!(instant("1s", 99), Some(100));
+        assert_eq!(instant("+5m", 99), Some(399));
+        assert_eq!(instant("+0m", 99), None);
+        assert_eq!(instant("++5m", 99), None);
         assert_eq!(instant("2h", 0), Some(7200));
         assert_eq!(instant("1w", 0), Some(604_800));
         assert_eq!(instant("1h30m", 0), Some(5_400));

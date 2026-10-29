@@ -51,7 +51,9 @@ pub enum CustodyError {
 pub enum AdmissionError {
     /// Admission could not judge startup spacing. The reason is fixed text, so
     /// it can reach the user without any path.
-    #[error("startup spacing cannot be judged: host clock or boot identity unreadable")]
+    #[error(
+        "startup spacing cannot be judged: the host monotonic clock or boot identity cannot be read"
+    )]
     Clock,
     #[error(
         "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds, cargo_build_jobs and cargo_debug"
