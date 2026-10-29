@@ -4,7 +4,7 @@ use provenant_os::{
     exec::{CapturedStream, ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
     fs::Directory,
 };
-use std::{ffi::OsString, path::Path, time::Duration};
+use std::{collections::BTreeSet, ffi::OsString, path::Path, time::Duration};
 
 const CONTEXT_LIMIT: usize = 1024 * 1024;
 /// Per-file slices written beside the whole patch. A larger change keeps the
@@ -373,12 +373,20 @@ impl GitContext {
         .map_err(execution_error)?;
         seal(directory, "git-context.json", &metadata, 4096)?;
         let slice_directory = scratch.join(SLICE_DIRECTORY);
+        let incomplete = if diff_cut || slices.omitted > 0 {
+            self.incomplete_note(&slices.paths)
+        } else {
+            String::new()
+        };
         Ok(format!(
             "Host-written Git context for {}..{}: log at {}; per-file diff stat at {}; \
              one patch slice per changed file in {} (index at {}); whole diff at {}; \
-             bounds, truncation and timeouts at {}. Read the stat first, then only the slices \
-             for the files you review; open the whole diff only for a question that spans \
-             files. They cover committed changes only.\n",
+             bounds, truncation and timeouts at {}. The stat and slices are navigation aids, \
+             not the scope of the review. Start from the stat and read the slice for each file \
+             you examine, then read the surrounding code in the repository: callers and \
+             callees, existing utilities the change should reuse, and whether it fits the \
+             architecture. Open the whole diff only when a question spans files. These files \
+             cover committed changes only.{}\n",
             self.base,
             self.head,
             scratch.join("git-log.txt").display(),
@@ -387,7 +395,53 @@ impl GitContext {
             slice_directory.join(SLICE_INDEX).display(),
             scratch.join("git-diff.patch").display(),
             scratch.join("git-context.json").display(),
+            incomplete,
         ))
+    }
+
+    /// Say the slices are incomplete and name the changed files from the stat
+    /// that have no slice, so a reviewer reads those from the whole patch or
+    /// the checkout.
+    fn incomplete_note(&self, sliced: &BTreeSet<Vec<u8>>) -> String {
+        const LISTED: usize = 50;
+        let missing: Vec<String> = stat_paths(&self.stat.bytes)
+            .into_iter()
+            .filter(|path| !sliced.contains(path))
+            .map(|path| String::from_utf8_lossy(&path).into_owned())
+            .collect();
+        let mut note = String::from(
+            " The slices are incomplete: the whole patch was cut by its bounds or the slice \
+             limit.",
+        );
+        if missing.is_empty() {
+            note.push_str(
+                " Read any file you cannot find a slice for from the whole patch or the checkout.",
+            );
+        } else {
+            note.push_str(
+                " These changed files have no slice; read them from the whole patch or the \
+                 checkout: ",
+            );
+            note.push_str(
+                &missing
+                    .iter()
+                    .take(LISTED)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            if missing.len() > LISTED {
+                note.push_str(&format!(
+                    ", and {} more in the stat",
+                    missing.len() - LISTED
+                ));
+            }
+            note.push('.');
+        }
+        if self.stat.truncated || self.stat_timed_out {
+            note.push_str(" The stat is itself incomplete, so other files may be missing from it.");
+        }
+        note
     }
 
     /// Split the whole patch into one file per changed path, with an index
@@ -411,6 +465,7 @@ impl GitContext {
             index.push_str("# The whole patch is incomplete: the last slice may be partial.\n");
         }
         let mut written = 0;
+        let mut paths = BTreeSet::new();
         for (number, file) in files.iter().take(SLICE_LIMIT).enumerate() {
             let name = format!("{:04}-{}.patch", number + 1, slice_label(&file.path));
             seal(&slices, &name, file.bytes, CONTEXT_LIMIT as u64)?;
@@ -419,6 +474,7 @@ impl GitContext {
                 file.bytes.len(),
                 String::from_utf8_lossy(&file.path)
             ));
+            paths.insert(file.path.clone());
             written += 1;
         }
         let omitted = files.len() - written;
@@ -428,13 +484,30 @@ impl GitContext {
             ));
         }
         seal(&slices, SLICE_INDEX, index.as_bytes(), SLICE_INDEX_LIMIT)?;
-        Ok(SliceCounts { written, omitted })
+        Ok(SliceCounts {
+            written,
+            omitted,
+            paths,
+        })
     }
 }
 
 struct SliceCounts {
     written: usize,
     omitted: usize,
+    /// The path of each written slice, as the patch header printed it.
+    paths: BTreeSet<Vec<u8>>,
+}
+
+/// The changed paths a `git diff --stat` lists: each line up to its ` | `.
+fn stat_paths(stat: &[u8]) -> Vec<Vec<u8>> {
+    stat.split(|byte| *byte == b'\n')
+        .filter_map(|line| {
+            let at = line.windows(3).rposition(|window| window == b" | ")?;
+            let path = line[..at].trim_ascii();
+            (!path.is_empty()).then(|| path.to_vec())
+        })
+        .collect()
 }
 
 struct FileSlice<'a> {
@@ -1106,7 +1179,9 @@ mod tests {
         ] {
             assert!(prompt.contains(&needle.display().to_string()), "{prompt}");
         }
-        assert!(prompt.contains("Read the stat first"));
+        assert!(prompt.contains("navigation aids"), "{prompt}");
+        assert!(prompt.contains("surrounding code"), "{prompt}");
+        assert!(!prompt.contains("incomplete"), "{prompt}");
         let metadata: serde_json::Value =
             serde_json::from_slice(&std::fs::read(scratch.path().join("git-context.json"))?)?;
         assert_eq!(metadata["slices"], 3);
@@ -1137,6 +1212,29 @@ mod tests {
         assert_eq!(metadata["slices"], SLICE_LIMIT);
         assert_eq!(metadata["slices_omitted"], 5);
         assert_eq!(metadata["slices_complete"], false);
+        Ok(())
+    }
+
+    #[test]
+    fn an_incomplete_prompt_names_the_changed_files_without_a_slice() -> TestResult {
+        let patch: String = (0..SLICE_LIMIT + 2)
+            .map(|n| patch_for(&format!("f{n}.txt"), "x"))
+            .collect();
+        let mut context = context_with_diff(patch.as_bytes(), false);
+        let stat: String = (0..SLICE_LIMIT + 2)
+            .map(|n| format!(" f{n}.txt | 2 +-\n"))
+            .chain([" 402 files changed, 402 insertions(+)\n".to_owned()])
+            .collect();
+        context.stat.bytes = stat.into_bytes();
+        let scratch = tempfile::tempdir()?;
+        let prompt = context.write_to(&Directory::open_anchor(scratch.path())?, scratch.path())?;
+        assert!(prompt.contains("The slices are incomplete"), "{prompt}");
+        let last = SLICE_LIMIT + 1;
+        assert!(
+            prompt.contains(&format!("f{}.txt, f{last}.txt.", SLICE_LIMIT)),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("f0.txt,"), "{prompt}");
         Ok(())
     }
 

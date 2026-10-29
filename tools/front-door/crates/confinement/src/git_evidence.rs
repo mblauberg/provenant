@@ -270,6 +270,10 @@ impl<'a> Git<'a> {
         if self.head()? != base {
             return Ok(Vec::new());
         }
+        let exempt = &exempt.with_symlinks(
+            self.symlink_paths()
+                .map_err(|_| GitEvidenceError::UntrackedOrUnsupportedPath)?,
+        );
         // Lists each untracked file, not its directory, whatever
         // `status.showUntrackedFiles` says.
         let status = self.read(GitRead::StatusIncludingIgnored)?;

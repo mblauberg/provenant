@@ -16,6 +16,7 @@ use provenant_os::fs::{Directory, FileKind, FsError, Metadata, PublishMode};
 use provenant_records::{CanonicalV1, FileDigest, PathWire};
 use provenant_supervisor::custody::{Recovery, RecoveryState, Scope};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
@@ -64,6 +65,22 @@ impl ProtectedPath {
 }
 
 impl Git<'_> {
+    /// Tracked symlinks, which no review-exempt listing may cover.
+    pub(crate) fn symlink_paths(&self) -> Result<BTreeSet<Vec<u8>>, QuarantineError> {
+        let raw = self
+            .read(GitRead::IndexEntries { paths: Vec::new() })?
+            .stdout
+            .bytes;
+        let mut paths = BTreeSet::new();
+        for entry in parse_index_entries(&raw)? {
+            let entry = entry?;
+            if entry.mode == 0o120000 {
+                paths.insert(entry.path.to_vec());
+            }
+        }
+        Ok(paths)
+    }
+
     /// Discover the complete tracked instruction/control scope. New protected
     /// paths are also checked by quarantine, including committed additions.
     /// Paths the project lists as review-exempt are not part of the scope.
@@ -71,6 +88,7 @@ impl Git<'_> {
         &self,
         exempt: &ReviewExempt,
     ) -> Result<Vec<ProtectedPath>, QuarantineError> {
+        let exempt = &exempt.with_symlinks(self.symlink_paths()?);
         let raw = self
             .read(GitRead::IndexEntries { paths: Vec::new() })?
             .stdout
@@ -560,6 +578,7 @@ fn quarantine_instruction_changes(
     exempt: &ReviewExempt,
 ) -> Result<QuarantineOutcome, QuarantineError> {
     let repo = git.repo;
+    let exempt = &exempt.with_symlinks(git.symlink_paths()?);
     let archive_identity = quarantine_dir.metadata()?;
     validate_archive(repo.root_identity().device, &archive_identity)?;
     if !snapshot.archive_identity.same_identity(&archive_identity) {
@@ -1409,6 +1428,9 @@ fn under_agents_bytes(path: &[u8]) -> bool {
     path.starts_with(b".agents/")
 }
 fn is_protected_evidence_path(path: &[u8], exempt: &ReviewExempt) -> bool {
+    if exempt.refuses_symlink(path) {
+        return true;
+    }
     if exempt.covers(path) {
         return false;
     }
@@ -1425,6 +1447,12 @@ fn wire_path(path: &RepoPath) -> Result<PathWire, QuarantineError> {
 /// Instruction documents are control files at any depth, but a project may
 /// list them in its review-exempt paths; nothing in `is_hard_control` can be.
 const INSTRUCTION_DOCS: [&[u8]; 4] = [b"AGENTS.md", b"HARNESS.md", b"CLAUDE.md", b"GEMINI.md"];
+
+/// Instruction documents at any depth and the `.agents/` tree: a directory or
+/// bare-name exemption never covers them, only an exact path listing does.
+pub(crate) fn is_instruction_path(path: &[u8]) -> bool {
+    under_agents_bytes(path) || is_known_control(Path::new(OsStr::from_bytes(path)))
+}
 
 fn is_known_control(path: &Path) -> bool {
     is_hard_control(path)
@@ -1839,7 +1867,10 @@ mod custody_integration_tests {
                 .collect::<Vec<_>>(),
             [".agents/specs/new.md"]
         );
-        let listed = ReviewExempt::new(&[".agents/specs/"]);
+        // A directory listing never exempts the instruction tree.
+        let outcome = settle_writer_commit(commit_spec, &ReviewExempt::new(&[".agents/specs/"]))?;
+        assert!(matches!(outcome, QuarantineOutcome::ReviewRequired { .. }));
+        let listed = ReviewExempt::new(&[".agents/specs/new.md"]);
         let outcome = settle_writer_commit(commit_spec, &listed)?;
         assert!(
             matches!(outcome, QuarantineOutcome::Restored { .. }),
@@ -1911,6 +1942,54 @@ mod custody_integration_tests {
             settle_writer_commit(out, &listed)?,
             QuarantineOutcome::ReviewRequired { .. }
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn instruction_documents_and_symlinks_in_exempt_directories_need_review()
+    -> Result<(), Box<dyn Error>> {
+        let defaults =
+            ReviewExempt::new(&["docs/release-notes/next.d/", "docs/specs/", "Cargo.lock"]);
+        for path in [
+            "docs/specs/AGENTS.md",
+            "docs/release-notes/next.d/CLAUDE.md",
+            ".agents/x/Cargo.lock",
+            "docs/specs/link",
+        ] {
+            let outcome = settle_writer_commit(
+                |fixture| {
+                    let target = fixture.root.join(path);
+                    fs::create_dir_all(target.parent().ok_or("parent")?)?;
+                    if path.ends_with("/link") {
+                        std::os::unix::fs::symlink("../../AGENTS.md", &target)?;
+                    } else {
+                        fs::write(&target, b"x\n")?;
+                    }
+                    fixture.run(&["add", "-f", path])?;
+                    fixture.run(&["commit", "-m", "alias"])?;
+                    Ok(())
+                },
+                &defaults,
+            )?;
+            assert!(
+                matches!(outcome, QuarantineOutcome::ReviewRequired { .. }),
+                "{path}: {outcome:?}"
+            );
+        }
+        let exact = ReviewExempt::new(&["docs/AGENTS.md"]);
+        let outcome = settle_writer_commit(
+            |fixture| {
+                fs::write(fixture.root.join("docs/AGENTS.md"), b"x\n")?;
+                fixture.run(&["add", "-f", "docs/AGENTS.md"])?;
+                fixture.run(&["commit", "-m", "doc"])?;
+                Ok(())
+            },
+            &exact,
+        );
+        assert!(
+            matches!(outcome, Ok(QuarantineOutcome::Restored { .. })),
+            "{outcome:?}"
+        );
         Ok(())
     }
 

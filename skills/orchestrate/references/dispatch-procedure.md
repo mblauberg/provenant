@@ -196,8 +196,9 @@ push|reconcile`. A terminal without MCP cancels with `provenant cancel ATTEMPT`.
   `git-context.json` first for the resolved base, captured HEAD and truncation
   flags, then `git-log.txt` and `git-diff.stat`, then only the slices they need
   from `git-diff-slices/` (`index.txt` maps each slice to its path). They open
-  the whole `git-diff.patch` only for a question that spans files, because
-  re-reading it whole is the largest avoidable context cost of a review. Report
+  the whole `git-diff.patch` only for a question that spans files. Slices are
+  navigation aids; reviewers still read the surrounding code in the checkout.
+  When slices are incomplete the prompt lists the changed files that have none. Report
   incomplete coverage when a file is truncated, `timed_out` is set or
   `slices_complete` is false. These files describe committed changes; inspect
   the checkout separately for uncommitted edits. They are removed at settlement, so

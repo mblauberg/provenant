@@ -30,7 +30,7 @@ pub enum PushRefusal {
     )]
     NonFastForward,
     #[error(
-        "conflict markers in pushed commits; remove the marker lines, then `git commit --amend --no-edit` and push again"
+        "conflict markers in pushed commits; remove the marker lines, then `git commit --amend --no-edit` and push again; if the bad commit was already pushed to the topic branch, the amended history is refused as non-fast-forward, so commit the fix as a new commit (`git commit -am fix-markers`) and push the topic branch normally"
     )]
     ConflictMarkers,
 }

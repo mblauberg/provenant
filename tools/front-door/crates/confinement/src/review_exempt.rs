@@ -5,8 +5,8 @@
 //! path never makes a lane `review_required`, and a listed path left uncommitted
 //! never makes it `uncommitted`. Paths that change what the host or an agent
 //! executes (Git metadata, hooks, provider control roots) can never be listed.
-use crate::quarantine::is_hard_control;
-use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
+use crate::quarantine::{is_hard_control, is_instruction_path};
+use std::{collections::BTreeSet, ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
 
 /// Longest accepted pattern, in bytes.
 pub const MAX_PATTERN_BYTES: usize = 256;
@@ -33,6 +33,9 @@ struct Pattern {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReviewExempt {
     patterns: Vec<Pattern>,
+    /// Tracked symlinks (git mode 120000). An alias can reach a path the list
+    /// never named, so a symlink is never exempt.
+    symlinks: BTreeSet<Vec<u8>>,
 }
 
 /// Whether `text` is an acceptable pattern: relative, `/`-separated, without
@@ -72,7 +75,24 @@ impl ReviewExempt {
                 },
             })
             .collect();
-        Self { patterns }
+        Self {
+            patterns,
+            symlinks: BTreeSet::new(),
+        }
+    }
+
+    /// This list with `symlinks` (repository-relative) recorded as never exempt.
+    pub fn with_symlinks(&self, symlinks: BTreeSet<Vec<u8>>) -> Self {
+        Self {
+            patterns: self.patterns.clone(),
+            symlinks,
+        }
+    }
+
+    /// Whether `path` is a known symlink that a listed pattern would otherwise
+    /// have exempted. Such a path needs review.
+    pub fn refuses_symlink(&self, path: &[u8]) -> bool {
+        self.symlinks.contains(path) && self.lists(path)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -86,17 +106,26 @@ impl ReviewExempt {
 
     /// Whether `path` (repository-relative bytes) is listed and may be listed.
     /// Names compare without ASCII case, as the platform's file systems do.
+    /// Instruction documents and the `.agents/` tree are exempt only by an
+    /// exact path listing, never through a directory or a bare name, and a
+    /// symlink is never exempt.
     pub fn covers(&self, path: &[u8]) -> bool {
+        !self.symlinks.contains(path) && self.lists(path)
+    }
+
+    fn lists(&self, path: &[u8]) -> bool {
         if self.patterns.is_empty() || is_hard_control(Path::new(OsStr::from_bytes(path))) {
             return false;
         }
+        let instruction = is_instruction_path(path);
         self.patterns.iter().any(|pattern| {
             let text = pattern.text.as_bytes();
             match pattern.shape {
+                Shape::Path => path.eq_ignore_ascii_case(text),
+                Shape::Directory | Shape::Name if instruction => false,
                 Shape::Directory => {
                     path.len() > text.len() && path[..text.len()].eq_ignore_ascii_case(text)
                 }
-                Shape::Path => path.eq_ignore_ascii_case(text),
                 Shape::Name => path
                     .rsplit(|byte| *byte == b'/')
                     .next()
@@ -176,9 +205,50 @@ mod tests {
         ] {
             assert!(!exempt.covers(hard.as_bytes()), "{hard}");
         }
-        // An instruction document or the instruction tree can be listed.
-        assert!(exempt.covers(b"docs/AGENTS.md"));
-        assert!(exempt.covers(b".agents/notes/a.md"));
+    }
+
+    #[test]
+    fn instruction_documents_need_an_exact_path_listing() {
+        let exempt = defaults();
+        for path in [
+            "docs/specs/AGENTS.md",
+            "docs/specs/sub/claude.md",
+            "docs/release-notes/next.d/CLAUDE.md",
+            ".agents/x/Cargo.lock",
+            "docs/specs/HARNESS.md",
+            "docs/specs/GEMINI.md",
+        ] {
+            assert!(!exempt.covers(path.as_bytes()), "{path}");
+        }
+        let bare = ReviewExempt::new(&["AGENTS.md", ".agents/", "docs/"]);
+        assert!(!bare.covers(b"docs/AGENTS.md"));
+        assert!(!bare.covers(b".agents/notes/a.md"));
+        let exact = ReviewExempt::new(&["docs/AGENTS.md", ".agents/notes/a.md"]);
+        assert!(exact.covers(b"docs/AGENTS.md"));
+        assert!(exact.covers(b".agents/notes/a.md"));
+        assert!(!exact.covers(b"docs/other/AGENTS.md"));
+    }
+
+    #[test]
+    fn symlinks_are_never_exempt() {
+        let exempt = defaults().with_symlinks(BTreeSet::from([b"docs/specs/link".to_vec()]));
+        assert!(!exempt.covers(b"docs/specs/link"));
+        assert!(exempt.refuses_symlink(b"docs/specs/link"));
+        assert!(exempt.covers(b"docs/specs/run.md"));
+        assert!(!exempt.refuses_symlink(b"docs/specs/run.md"));
+        assert!(!exempt.refuses_symlink(b"src/link"));
+    }
+
+    #[test]
+    fn github_and_config_trees_are_hard_controls() {
+        let exempt = ReviewExempt::new(&[".github/", ".config/", "ci.yml", "config.toml"]);
+        for path in [
+            ".github/workflows/ci.yml",
+            ".config/x/config.toml",
+            ".GitHub/a",
+        ] {
+            assert!(!exempt.covers(path.as_bytes()), "{path}");
+        }
     }
 
     #[test]

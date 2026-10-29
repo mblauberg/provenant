@@ -575,15 +575,17 @@ mailmap and fetching disabled, limited to 10 s per read and 1 MiB per file; a ti
 partial output and is recorded. The capture holds the log, the whole patch,
 a `--stat` summary and one patch slice per changed file (at most 400, in
 `git-diff-slices/` with an `index.txt`), and the prompt points a reviewer at the
-stat and the slices before the whole patch. Reviewers must report inputs they
+stat and the slices before the whole patch. When `slices_complete` is false the
+prompt says so and lists the changed files with no slice. Reviewers must report inputs they
 could not read, truncated captures and `slices_complete: false`.
 - Why: repository config is hostile input, and a lane must not run on input
-  the host could not verify; scoped slices spare a reviewer re-reading a
-  whole patch.
+  the host could not verify; slices are navigation aids into the patch, and a
+  reviewer still reads the surrounding code in the checkout.
 - Test: `crates/run/src/dispatch_tests.rs::missing_stored_prompt_ends_the_attempt_rejected_with_the_cause`;
   `crates/run/src/git_context.rs::git_context_pins_hardening_flags_and_writes_prompt_paths`;
   `::slices_cover_every_file_and_the_index_names_them`;
   `::slices_stop_at_their_limit_and_say_so`;
+  `::an_incomplete_prompt_names_the_changed_files_without_a_slice`;
   `::real_git_stat_and_slices_match_the_whole_patch`
 - Owner: `crates/run/src/git_context.rs`
 
@@ -746,6 +748,13 @@ missing and a scratch directory that is not private each name their path and
 check. A grant on a file in a directory that does not exist grants nothing and
 needs no anchor. The compiled profile may be up to 512 KiB and the error names
 its size.
+
+Accepted risk: a hard link the host itself created inside a lane-writable tree
+is writable through its alias, and launch does not look for it. Host code that
+seeds a lane tree must therefore copy or clone (`clonefile`), never hard-link,
+from a shared store. The Cargo target and registry seeds clone, retained
+provider state is copied with hard-link refusal, and the pnpm store is
+read-only to the lane, so no host path creates such a link today.
 - Why: a writable hard link could modify data outside the granted tree, but
   only a link made by something other than the lane can exist, and only the
   Git control files make such a link dangerous; refusing whole build trees cost
